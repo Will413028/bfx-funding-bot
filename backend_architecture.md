@@ -8,12 +8,14 @@
 | :--- | :--- | :--- |
 | 語言 | Go 1.24+ | 單一二進位部署，goroutine 驅動 |
 | HTTP 框架 | Gin / Echo | handler + middleware |
-| 資料庫 | PostgreSQL 18 | 多租戶持久化，Row-Level Security |
-| 快取 | Redis 8 | Session、MarketSnapshot 快取、Pub/Sub |
+| 資料庫 | PostgreSQL (Neon) | 多租戶持久化，Row-Level Security |
+| 快取 | Redis (Upstash) | Session、MarketSnapshot 快取、Pub/Sub |
 | Bitfinex API | bitfinex-api-go/v2 | 官方 Go SDK，REST + WebSocket |
 | 加密 | AES-256-GCM | API Key 加密儲存 |
 | 認證 | JWT (RS256) | Stateless Token |
-| 部署 | Docker + Docker Compose | 初期單機，後期可拆分 |
+| 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
+| 資料庫託管 | Neon | Serverless PostgreSQL，自動擴縮 |
+| 快取託管 | Upstash | Serverless Redis，按用量計費 |
 | 監控 | Prometheus + Grafana | 指標收集 + 儀表板 |
 | DB Migration | Atlas | 宣告式 Schema + 版本化 Migration |
 | DB Query | sqlc | SQL → Type-Safe Go Code 生成 |
@@ -813,3 +815,77 @@ Go 慣例是在「使用方」定義 interface（consumer-side interface）。�
 | Notification Service | `notification/` | 告警 |
 
 package 間目前透過 Go interface 呼叫的地方，改為 gRPC 即可。`domain/` 的 struct 直接映射為 protobuf message。
+
+---
+
+## 11. 部署架構
+
+### 部署平台
+
+| 元件 | 平台 | 說明 |
+| :--- | :--- | :--- |
+| Frontend | Vercel | Next.js 官方平台，自動部署 |
+| Backend | Koyeb | Docker 部署，支援 WebSocket 長連線 |
+| Database | Neon | Serverless PostgreSQL，自動擴縮 |
+| Cache | Upstash | Serverless Redis，按用量計費 |
+
+### Koyeb 部署
+
+透過 Git 整合自動部署：連結 GitHub repo，push 到 `main` 時自動 build Docker image + deploy。
+
+```dockerfile
+# backend/Dockerfile
+FROM golang:1.24-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server ./cmd/server/
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+COPY --from=builder /app/server .
+EXPOSE 8080
+CMD ["./server"]
+```
+
+### Graceful Shutdown
+
+Koyeb 透過 SIGTERM 終止應用。後端必須正確處理，確保 WebSocket 連線和 Worker goroutine 安全關閉：
+
+```go
+// cmd/server/main.go 中由 fx 統一管理生命週期
+// fx.Lifecycle 會在收到 SIGTERM 時按 LIFO 順序執行 OnStop：
+// 1. 停止 HTTP server（停止接收新請求）
+// 2. 關閉所有 Worker goroutine（停止放貸操作）
+// 3. 關閉 WebSocket 連線（通知前端重連）
+// 4. 關閉 DB / Redis 連線
+```
+
+### 環境變數
+
+在 Koyeb Dashboard > Service > Environment Variables 設定：
+
+```bash
+# Server
+PORT=8080
+
+# Database (Neon)
+DATABASE_URL=postgresql://user:pass@ep-xxx.region.aws.neon.tech/dbname?sslmode=require
+
+# Cache (Upstash)
+REDIS_URL=rediss://default:xxx@xxx.upstash.io:6379
+
+# Auth
+JWT_PRIVATE_KEY=...    # RS256 private key (PEM)
+JWT_PUBLIC_KEY=...     # RS256 public key (PEM)
+AES_KEY=...            # API Key 加密用 256-bit key
+
+# Frontend
+FRONTEND_URL=https://app.example.com   # CORS 白名單 + cookie domain
+```
+
+> **Neon 連線注意**：Neon 要求 `sslmode=require`。放貸引擎 24/7 常駐會持續查詢 DB，Neon compute 基本不會 auto-suspend，需注意持續計費。
+
+> **Upstash Redis 注意**：Upstash 使用 TLS 連線，URL scheme 為 `rediss://`（雙 s）。Go 的 `go-redis` v9+ 原生支援。
