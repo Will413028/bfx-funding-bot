@@ -26,8 +26,8 @@
 ```
 ┌──────────────────────────────────────────────────────┐
 │                    Transport 層                       │
-│  api/handler/   → HTTP 請求處理、參數驗證、回應格式  │
-│  api/middleware/ → JWT、Rate Limit                     │
+│  handler/    → HTTP 請求處理、參數驗證、回應格式     │
+│  middleware/ → JWT、Rate Limit                        │
 ├──────────────────────────────────────────────────────┤
 │                   Application 層                      │
 │  service/  → CRUD 業務編排（用戶、API Key、計費）    │
@@ -37,8 +37,7 @@
 │  domain/  → 純型別定義 + 業務規則（零外部依賴）      │
 ├──────────────────────────────────────────────────────┤
 │                 Infrastructure 層                     │
-│  repository/ → PostgreSQL 資料存取                    │
-│  cache/      → Redis 快取 + Pub/Sub                  │
+│  repository/ → PostgreSQL + Redis 資料存取             │
 │  bitfinex/   → 交易所 API 封裝                       │
 │  notification/ → Email 通知                          │
 │  crypto/     → 加解密                                │
@@ -60,23 +59,21 @@ backend/
 ├── internal/
 │   │
 │   │   # ── Transport 層 ──
+│   ├── handler/
+│   │   ├── router.go                    # 路由註冊
+│   │   ├── auth.go                      # 註冊 / 登入 / JWT 簽發
+│   │   ├── user.go                      # 用戶 CRUD
+│   │   ├── apikey.go                    # API Key 管理
+│   │   ├── config.go                    # 策略參數 CRUD
+│   │   ├── billing.go                   # 帳單查詢
+│   │   ├── dashboard.go                 # WebSocket 即時推送
+│   │   └── health.go                    # 健康檢查 + Readiness
 │   │
-│   ├── api/
-│   │   ├── handler/
-│   │   │   ├── auth.go                  # 註冊 / 登入 / JWT 簽發
-│   │   │   ├── user.go                  # 用戶 CRUD
-│   │   │   ├── apikey.go                # API Key 管理
-│   │   │   ├── config.go                # 策略參數 CRUD
-│   │   │   ├── billing.go               # 帳單查詢
-│   │   │   ├── dashboard.go             # WebSocket 即時推送
-│   │   │   └── health.go                # 健康檢查 + Readiness
-│   │   ├── middleware/
-│   │   │   ├── jwt.go                   # JWT 驗證
-│   │   │   └── ratelimit.go             # 請求頻率限制
-│   │   └── router.go                    # 路由註冊
+│   ├── middleware/
+│   │   ├── jwt.go                       # JWT 驗證
+│   │   └── ratelimit.go                 # 請求頻率限制
 │   │
 │   │   # ── Application 層：CRUD 業務 ──
-│   │
 │   ├── service/
 │   │   ├── user.go                      # 用戶註冊 / 登入 / 管理
 │   │   ├── apikey.go                    # API Key CRUD + 加密 + 權限驗證
@@ -84,7 +81,6 @@ backend/
 │   │   └── billing.go                   # 計費計算 + 帳單生成
 │   │
 │   │   # ── Application 層：放貸引擎 ──
-│   │
 │   ├── lending/
 │   │   ├── service.go                   # 引擎入口：啟動共享層 + Worker Pool
 │   │   │
@@ -139,7 +135,6 @@ backend/
 │   │       └── allocator.go
 │   │
 │   │   # ── Domain 層 ──
-│   │
 │   ├── domain/
 │   │   ├── user.go                      # User, UserStatus
 │   │   ├── apikey.go                    # APIKey, KeyPermissions
@@ -154,32 +149,43 @@ backend/
 │   │
 │   │   # ── Infrastructure 層 ──
 │   │
-│   ├── repository/
-│   │   ├── interfaces.go                # 所有 Repository interface 集中定義
-│   │   └── postgres/
-│   │       ├── query/                   #   手寫 SQL 查詢（sqlc 輸入）
-│   │       │   ├── user.sql
-│   │       │   ├── apikey.sql
-│   │       │   ├── execution.sql
-│   │       │   ├── config.sql
-│   │       │   └── billing.sql
-│   │       ├── sqlc/                    #   sqlc 自動產生（勿手動修改）
-│   │       │   ├── db.go                #     DBTX interface
-│   │       │   ├── models.go            #     DB row struct
-│   │       │   ├── querier.go           #     Querier interface
-│   │       │   ├── user.sql.go          #     user query 實作
-│   │       │   ├── apikey.sql.go
-│   │       │   ├── execution.sql.go
-│   │       │   ├── config.sql.go
-│   │       │   └── billing.sql.go
-│   │       ├── user.go                  #   手寫：包裝 sqlc → 實作 Repository interface
-│   │       ├── apikey.go                #     sqlc model ↔ domain 型別轉換
-│   │       ├── execution.go
-│   │       ├── config.go
-│   │       └── billing.go
+│   ├── infra/                  # 外部服務連線初始化
+│   │   ├── di.go                        #   fx Module 聚合
+│   │   ├── postgres.go                  #   *pgxpool.Pool 建立 + 健康檢查
+│   │   └── redis.go                     #   Redis client 建立 + 健康檢查
 │   │
-│   ├── cache/
-│   │   └── redis.go                     # Session、快取、Pub/Sub
+│   ├── repository/
+│   │   ├── di.go                        # fx Module 聚合（類似 SosReaderServer）
+│   │   ├── interfaces.go                # 所有 Repository interface 集中定義
+│   │   │
+│   │   ├── postgres/                    # ── PostgreSQL DAO ──
+│   │   │   ├── di.go                    #   fx Module：註冊所有 postgres repo
+│   │   │   ├── query/                   #   手寫 SQL 查詢（sqlc 輸入）
+│   │   │   │   ├── user.sql
+│   │   │   │   ├── apikey.sql
+│   │   │   │   ├── execution.sql
+│   │   │   │   ├── config.sql
+│   │   │   │   └── billing.sql
+│   │   │   ├── sqlc/                    #   sqlc 自動產生（勿手動修改）
+│   │   │   │   ├── db.go                #     DBTX interface
+│   │   │   │   ├── models.go            #     DB row struct
+│   │   │   │   ├── querier.go           #     Querier interface
+│   │   │   │   ├── user.sql.go
+│   │   │   │   ├── apikey.sql.go
+│   │   │   │   ├── execution.sql.go
+│   │   │   │   ├── config.sql.go
+│   │   │   │   └── billing.sql.go
+│   │   │   ├── user.go                  #   手寫：包裝 sqlc → 實作 Repository interface
+│   │   │   ├── apikey.go                #     sqlc model ↔ domain 型別轉換
+│   │   │   ├── execution.go
+│   │   │   ├── config.go
+│   │   │   └── billing.go
+│   │   │
+│   │   └── redis/                       # ── Redis DAO ──
+│   │       ├── di.go                    #   fx Module：註冊所有 redis repo
+│   │       ├── session.go               #   Session 儲存（JWT refresh token）
+│   │       ├── snapshot.go              #   MarketSnapshot 快取（Dashboard 讀取用）
+│   │       └── pubsub.go               #   Pub/Sub（多機 MarketSnapshot 廣播）
 │   │
 │   ├── bitfinex/
 │   │   ├── client.go                    # REST API 封裝
@@ -222,7 +228,7 @@ backend/
 
 ## 4. 各層職責與規範
 
-### 4.1 Transport 層 (`api/`)
+### 4.1 Transport 層 (`handler/`, `middleware/`)
 
 **職責**：HTTP 請求的進出口。只做參數解析、驗證、回應格式化。不包含業務邏輯。
 
@@ -364,7 +370,7 @@ type Executor interface {
 - `signal/`、`orderbook/`、`strategy/` 是純計算模組，**只依賴 `domain/`**，不依賴 I/O，不 import 任何 sibling 或 parent package。
 - `marketfeed/` 依賴 `bitfinex/`（拉取數據）和 `signal/`、`orderbook/`（計算），自行定義 `SignalSource` interface。
 - `execution/` 依賴 `bitfinex/`（操作掛單）和 `repository/`（寫紀錄）。
-- `worker/` 依賴 `strategy/` 和 `execution/` 做決策與執行，自行定義 `Strategy`、`Executor` interface。
+- `worker/` 透過自行定義的 `Strategy`、`Executor` interface 做決策與執行，不直接 import `strategy/` 或 `execution/`。具體實作由 `lending/service.go` 注入。
 - **禁止循環依賴**：子 package 絕不 import parent `lending/`，子 package 之間不互相 import。所有組裝由 `lending/service.go` 完成。
 
 ### 4.4 Domain 層 (`domain/`)
@@ -404,16 +410,74 @@ type StrategyConfig struct {
 
 ### 4.5 Infrastructure 層
 
-#### `repository/`
+#### `infra/`
+
+**職責**：外部服務的**連線建立與生命週期管理**。只負責「連上去」，不負責「怎麼用」。
+
+```go
+// infra/di.go
+package infra
+
+func Module() fx.Option {
+    return fx.Options(
+        fx.Provide(NewPostgresPool),  // → *pgxpool.Pool
+        fx.Provide(NewRedisClient),   // → *redis.Client
+    )
+}
+```
+
+```go
+// infra/postgres.go
+package infra
+
+func NewPostgresPool(lc fx.Lifecycle, cfg *appconfig.Config) (*pgxpool.Pool, error) {
+    pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+    if err != nil {
+        return nil, err
+    }
+    lc.Append(fx.Hook{
+        OnStop: func(ctx context.Context) error {
+            pool.Close()
+            return nil
+        },
+    })
+    return pool, nil
+}
+```
 
 **規範**：
-- `interfaces.go` 集中定義所有 Repository interface，放在 `repository` package 頂層。
+- 每個檔案只做一件事：建立連線 + 註冊 `fx.Lifecycle` 的關閉 hook。
+- 暴露的是**具體型別**（`*pgxpool.Pool`、`*redis.Client`），不需要額外包 interface — 這些都是第三方庫的標準型別，DAO 層直接依賴即可。
+- `handler/health.go` 可以直接注入 `*pgxpool.Pool` 做健康檢查，不需要繞道 repository。
+- `bitfinex/`、`notification/`、`crypto/` **不放進 `infra/`** — 它們不是純連線初始化，各自有業務邏輯，作為獨立 package 更清晰。
+
+#### `repository/`
+
+**結構**：參考 SosReaderServer 的 `repositories/` 模式，所有資料存取（PostgreSQL + Redis）集中在 `repository/` 下，各子目錄用 `di.go` 提供 `fx.Module`，頂層 `di.go` 聚合。DAO 透過 fx 注入 `infra/` 提供的連線實例。
+
+```go
+// repository/di.go — 聚合所有資料存取的 fx Module
+package repository
+
+func Module() fx.Option {
+    return fx.Options(
+        postgres.Module(),
+        redis.Module(),
+    )
+}
+```
+
+**規範**：
+- `di.go` 聚合子 module，`interfaces.go` 集中定義所有 Repository interface。
+- `postgres/di.go` 註冊所有 PostgreSQL repo 的 fx provider。
 - `postgres/query/` 放手寫的 SQL 查詢檔（sqlc 輸入）。
 - `postgres/sqlc/` 放 sqlc 自動產生的 Go 檔案（**勿手動修改**，由 `sqlc generate` 產生）。
 - `postgres/*.go` 是手寫的薄包裝層，負責：
   - 持有 `sqlc.Queries` 實例
   - 實作 `repository.XxxRepository` interface
   - 將 `sqlc/models.go` 的 DB row struct 轉換為 `domain/` 的業務型別
+- `redis/di.go` 註冊所有 Redis DAO 的 fx provider。
+- `redis/*.go` 各自封裝不同用途的 Redis 操作（Session、快取、Pub/Sub）。
 - 未來如需更換資料庫，新增子目錄（如 `mysql/`）即可，不影響上層。
 
 ```go
@@ -481,15 +545,6 @@ sql:
 - `ws.go` 管理 WebSocket 連接（公開頻道 + 每用戶認證頻道），含自動重連邏輯。
 - `types.go` 將 SDK 的型別轉換為 `domain/` 的型別。
 
-#### `cache/`
-
-**職責**：Redis 操作封裝。
-
-**使用場景**：
-- Session 儲存（JWT refresh token）。
-- `MarketSnapshot` 快取（Dashboard 讀取用，避免直接讀 lending 內部狀態）。
-- 未來多機部署時作為 MarketSnapshot 廣播的 Pub/Sub 通道。
-
 ---
 
 ## 5. 兩條呼叫鏈
@@ -502,8 +557,8 @@ sql:
 [Frontend] POST /api/v1/configs
     │
     ▼
-router.go → middleware/jwt.go → handler/config.go
-    │         解析 + 驗證 request body
+handler/router.go → middleware/jwt.go → handler/config.go
+    │                    解析 + 驗證 request body
     ▼
 service/config.go
     │  1. 呼叫 domain.StrategyConfig.Validate() 驗證參數合理性
@@ -557,22 +612,15 @@ lending/service.go 啟動
 // cmd/server/main.go
 func main() {
     fx.New(
-        // ── Infrastructure ──
+        // ── Infrastructure（連線初始化）──
         fx.Provide(appconfig.Load),
-        fx.Provide(postgres.Connect),
-        fx.Provide(cache.NewRedis),
+        infra.Module(),          // *pgxpool.Pool + *redis.Client
         fx.Provide(bitfinex.NewClient),
         fx.Provide(crypto.NewAES),
         fx.Provide(notification.NewService),
 
-        // ── Repository ──
-        fx.Provide(
-            sqlcpg.NewUserRepo,
-            sqlcpg.NewAPIKeyRepo,
-            sqlcpg.NewConfigRepo,
-            sqlcpg.NewExecutionRepo,
-            sqlcpg.NewBillingRepo,
-        ),
+        // ── Repository（聚合 postgres + redis 所有 DAO）──
+        repository.Module(),
 
         // ── Lending Engine ──
         // fx 自動將 *lending.Service 注入為 service.WorkerManager / service.ConfigReloader
@@ -596,7 +644,7 @@ func main() {
             handler.NewDashboardHandler,
             handler.NewHealthHandler,
         ),
-        fx.Provide(api.NewRouter),
+        fx.Provide(handler.NewRouter),
 
         // ── 生命週期管理 ──
         fx.Invoke(registerHooks),
@@ -635,34 +683,37 @@ func registerHooks(lc fx.Lifecycle, cfg *appconfig.Config, router http.Handler, 
 ## 7. 依賴關係圖
 
 ```
-                         cmd/server/main.go
-                                │
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
-               api/handler   service/    lending/
-                    │           │           │
-                    │           │     ┌─────┼─────────────────┐
-                    │           │     ▼     ▼     ▼     ▼     ▼
-                    │           │  market  signal order  strat  worker
-                    │           │  feed/   /     book/  egy/   /
-                    │           │     │                  │     │
-                    │           │     │   (純計算，只依賴 domain/)
-                    │           │     │                  │     │
-                    ├───────────┤     │                  │     │
-                    │           │     │                  │     │
-                    ▼           ▼     ▼                  ▼     ▼
-              ┌─────────────────────────────────────────────────┐
-              │  repository/    bitfinex/    cache/             │
-              │  (postgres)                                     │
-              └────────────────────┬────────────────────────────┘
-                                   │
-                                   ▼
-                              domain/
-                         （零外部依賴）
+                          cmd/server/main.go
+                                 │
+                     ┌───────────┼───────────┐
+                     ▼           ▼           ▼
+                handler/      service/    lending/
+                     │           │           │
+                     │           │     ┌─────┼──────────────────────┐
+                     │           │     │     │                      │
+                     │           │     ▼     ▼                      ▼
+                     │           │  market  worker/    signal/  orderbook/  strategy/
+                     │           │  feed/   execution/    │        │          │
+                     │           │     │       │       (純計算，只依賴 domain/)
+                     │           │     │       │          │        │          │
+                     │           ▼     ▼       ▼          │        │          │
+                     │     ┌───────────────────────┐      │        │          │
+                     │     │ repository/  bitfinex/ │      │        │          │
+                     │     └─────┬─────────────────┘      │        │          │
+                     │           │          │              │        │          │
+                     │           │          └──────────────┴────────┴──────────┘
+                     │           │                         │
+                     ▼           ▼                         ▼
+                infra/       domain/
+          (pgxpool.Pool,  （零外部依賴）
+           redis.Client)
+                     │
+                     ▼
+               appconfig/
 ```
 
 **箭頭方向 = import 方向。所有層最終依賴 `domain/`，`domain/` 不依賴任何人。**
-**Infrastructure 層（repository/, bitfinex/, cache/）依賴 `domain/` 做型別轉換，但不被 `domain/` 反向依賴。**
+**Infrastructure 層（repository/, bitfinex/）依賴 `domain/` 做型別轉換，但不被 `domain/` 反向依賴。**
 
 **禁止的依賴**：
 - `domain/` → 任何其他 package ❌
@@ -677,8 +728,8 @@ func registerHooks(lc fx.Lifecycle, cfg *appconfig.Config, router http.Handler, 
 
 | Package | import path | 用途 | 對應 V10 章節 |
 | :--- | :--- | :--- | :--- |
-| `handler` | `internal/api/handler` | HTTP 請求處理 | §10.8 |
-| `middleware` | `internal/api/middleware` | JWT, Rate Limit | §10.8 |
+| `handler` | `internal/handler` | HTTP 請求處理 + 路由註冊 | §10.8 |
+| `middleware` | `internal/middleware` | JWT, Rate Limit | §10.8 |
 | `service` | `internal/service` | CRUD 業務編排 | §10.4, 10.6, 10.7 |
 | `lending` | `internal/lending` | 放貸引擎入口 | §10.1 |
 | `marketfeed` | `internal/lending/marketfeed` | 共享市場數據 | §10.2 |
@@ -689,10 +740,11 @@ func registerHooks(lc fx.Lifecycle, cfg *appconfig.Config, router http.Handler, 
 | `worker` | `internal/lending/worker` | Worker 管理 | §10.3 |
 | `quota` | `internal/lending/quota` | API 配額 | §10.5 |
 | `domain` | `internal/domain` | 領域模型 | 附錄 B |
-| `repository` | `internal/repository` | 資料存取介面 | §10.10 |
-| `postgres` | `internal/repository/postgres` | Repository interface 實作（手寫包裝層） | §10.10 |
+| `infra` | `internal/infra` | DB/Redis 連線初始化 + fx Lifecycle | — |
+| `repository` | `internal/repository` | 資料存取介面 + fx Module 聚合 | §10.10 |
+| `postgres` | `internal/repository/postgres` | PostgreSQL DAO（手寫包裝層 + fx Module） | §10.10 |
 | `sqlc` | `internal/repository/postgres/sqlc` | sqlc 自動產生的 query 程式碼（勿手改） | §10.10 |
-| `cache` | `internal/cache` | Redis | §10.2 (Pub/Sub) |
+| `redis` | `internal/repository/redis` | Redis DAO（Session、快取、Pub/Sub） | §10.2 |
 | `bitfinex` | `internal/bitfinex` | 交易所 API | §6.1-6.2 |
 | `notification` | `internal/notification` | 告警通知 | §10.9 |
 | `crypto` | `internal/crypto` | 加解密 | §10.4 |
@@ -747,7 +799,7 @@ Go 慣例是在「使用方」定義 interface（consumer-side interface）。�
 - `lending/marketfeed/` 的 MarketSnapshot 廣播從 Go channel 切換到 Redis Pub/Sub。
 - Strategy Engine 可以部署多台，每台承載一批 Worker。
 - `quota/allocator.go` 改為從 Redis 讀取全局配額狀態（分散式配額）。
-- `repository/` 和 `cache/` 不需要改動（已經是外部服務）。
+- `repository/` 不需要改動（已經是外部服務）。
 
 ### 10.2 單體 → 微服務（> 2,000 用戶）
 
@@ -755,7 +807,7 @@ Go 慣例是在「使用方」定義 interface（consumer-side interface）。�
 
 | 微服務 | 包含的 package | 說明 |
 | :--- | :--- | :--- |
-| API Service | `api/`, `service/`, `domain/`, `repository/` | HTTP + CRUD |
+| API Service | `handler/`, `middleware/`, `service/`, `domain/`, `repository/` | HTTP + CRUD |
 | Lending Engine | `lending/`, `domain/`, `repository/`, `bitfinex/` | 策略 + 執行 |
 | Billing Service | `billing/`, `domain/`, `repository/` | 計費 |
 | Notification Service | `notification/` | 告警 |
