@@ -11,6 +11,7 @@ type Config struct {
 	Port        string
 	FrontendURL string
 	Environment string
+	DatabaseURL string
 }
 
 func Load() (Config, error) {
@@ -18,10 +19,14 @@ func Load() (Config, error) {
 		Port:        getEnvOrDefault("PORT", "8080"),
 		FrontendURL: os.Getenv("FRONTEND_URL"),
 		Environment: getEnvOrDefault("ENVIRONMENT", "development"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
 	}
 
 	if cfg.FrontendURL == "" {
 		return Config{}, fmt.Errorf("required environment variable FRONTEND_URL is not set")
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, fmt.Errorf("required environment variable DATABASE_URL is not set")
 	}
 
 	return cfg, nil

@@ -4,14 +4,24 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type HealthHandler struct{}
+type HealthHandler struct {
+	pool *pgxpool.Pool
+}
 
-func NewHealthHandler() *HealthHandler {
-	return &HealthHandler{}
+func NewHealthHandler(pool *pgxpool.Pool) *HealthHandler {
+	return &HealthHandler{pool: pool}
 }
 
 func (h *HealthHandler) Status(c *gin.Context) {
+	if err := h.pool.Ping(c.Request.Context()); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status": "unhealthy",
+			"error":  "database unreachable",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
