@@ -10,7 +10,7 @@ sqlc:
 	sqlc generate
 
 migrate-diff:
-	cd schema && atlas migrate diff $(name) --env local --dir "file://../migrations"
+	cd schema && atlas migrate diff $(name) --env neon --dir "file://../migrations"
 
 migrate-apply:
 	cd schema && atlas migrate apply --env neon --dir "file://../migrations"
