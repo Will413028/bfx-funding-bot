@@ -12,9 +12,11 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
+	"github.com/will/bfx-funding-bot/backend/internal/auth"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
+	"github.com/will/bfx-funding-bot/backend/internal/service"
 )
 
 func main() {
@@ -23,6 +25,11 @@ func main() {
 		infra.Module,
 		repository.Module,
 		fx.Provide(newLogger),
+		fx.Provide(func(cfg appconfig.Config) *auth.JWTManager {
+			return auth.NewJWTManager(cfg.JWTPrivateKey, cfg.JWTPublicKey)
+		}),
+		fx.Provide(service.NewUserService),
+		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {
