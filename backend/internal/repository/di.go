@@ -1,0 +1,15 @@
+package repository
+
+import (
+	"go.uber.org/fx"
+
+	"github.com/will/bfx-funding-bot/backend/internal/repository/postgres"
+)
+
+var Module = fx.Module("repository",
+	fx.Options(postgres.Module),
+	fx.Provide(fx.Annotate(
+		func(r *postgres.UserRepo) UserRepository { return r },
+		fx.As(new(UserRepository)),
+	)),
+)

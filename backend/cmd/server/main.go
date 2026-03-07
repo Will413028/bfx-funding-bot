@@ -13,11 +13,15 @@ import (
 
 	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
+	"github.com/will/bfx-funding-bot/backend/internal/infra"
+	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
 func main() {
 	fx.New(
 		appconfig.Module,
+		infra.Module,
+		repository.Module,
 		fx.Provide(newLogger),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
