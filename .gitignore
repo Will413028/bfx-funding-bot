@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build outputs
+.next/
+out/
+dist/
+bin/
+tmp/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Next.js
+next-env.d.ts
+
+# Sentry
+.sentryclirc
+
+# Debug
+npm-debug.log*
+pnpm-debug.log*
+
+# Vercel
+.vercel
