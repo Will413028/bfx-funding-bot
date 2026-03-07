@@ -1,15 +1,61 @@
 package main
 
 import (
-	"log"
-	"os"
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
+	"go.uber.org/zap"
+
+	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
+	"github.com/will/bfx-funding-bot/backend/internal/handler"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	fx.New(
+		appconfig.Module,
+		fx.Provide(newLogger),
+		fx.Provide(handler.NewHealthHandler),
+		fx.Provide(handler.NewRouter),
+		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {
+			return &fxevent.ZapLogger{Logger: log}
+		}),
+		fx.Invoke(startServer),
+	).Run()
+}
+
+func newLogger(cfg appconfig.Config) (*zap.Logger, error) {
+	if cfg.Environment == "production" {
+		return zap.NewProduction()
+	}
+	return zap.NewDevelopment()
+}
+
+func startServer(lc fx.Lifecycle, cfg appconfig.Config, router *gin.Engine, log *zap.Logger) {
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%s", cfg.Port),
+		Handler: router,
 	}
 
-	log.Printf("Starting server on :%s", port)
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			go func() {
+				log.Info("server starting", zap.String("addr", srv.Addr))
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Fatal("server failed", zap.Error(err))
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			log.Info("server shutting down")
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return srv.Shutdown(ctx)
+		},
+	})
 }
