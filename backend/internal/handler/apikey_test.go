@@ -91,6 +91,17 @@ func (m *testAPIKeyRepo) ListVerified(_ context.Context) ([]domain.APIKey, [][]b
 	return nil, nil, nil
 }
 
+// noopConfigRepo is a no-op config repo for API key handler tests.
+type noopConfigRepo struct{}
+
+func (n *noopConfigRepo) Upsert(_ context.Context, _ string, _ []byte) (*domain.UserConfig, error) {
+	return nil, nil
+}
+func (n *noopConfigRepo) GetByUserID(_ context.Context, _ string) (*domain.UserConfig, error) {
+	return nil, nil
+}
+func (n *noopConfigRepo) DeleteByUserID(_ context.Context, _ string) error { return nil }
+
 func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 	t.Helper()
 
@@ -106,7 +117,7 @@ func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 	bfx := bitfinex.NewClientWithBaseURL(bfxServer.Client(), bfxServer.URL)
 
 	repo := &testAPIKeyRepo{keys: make(map[string]*testStoredKey)}
-	svc := service.NewAPIKeyService(repo, aes, bfx)
+	svc := service.NewAPIKeyService(repo, &noopConfigRepo{}, aes, bfx, nil)
 	h := NewAPIKeyHandler(svc)
 
 	r := gin.New()

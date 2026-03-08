@@ -8,12 +8,19 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
-type ConfigService struct {
-	repo repository.ConfigRepository
+// ConfigReloader notifies a Worker to hot-reload new strategy config.
+// Satisfied by *lending.Service via implicit interface (fx auto-inject).
+type ConfigReloader interface {
+	ReloadConfig(userID string, cfg domain.StrategyConfig) error
 }
 
-func NewConfigService(repo repository.ConfigRepository) *ConfigService {
-	return &ConfigService{repo: repo}
+type ConfigService struct {
+	repo     repository.ConfigRepository
+	reloader ConfigReloader
+}
+
+func NewConfigService(repo repository.ConfigRepository, reloader ConfigReloader) *ConfigService {
+	return &ConfigService{repo: repo, reloader: reloader}
 }
 
 func (s *ConfigService) Save(ctx context.Context, userID string, cfg domain.StrategyConfig) (*domain.UserConfig, error) {
@@ -29,6 +36,11 @@ func (s *ConfigService) Save(ctx context.Context, userID string, cfg domain.Stra
 	uc, err := s.repo.Upsert(ctx, userID, configJSON)
 	if err != nil {
 		return nil, domain.ErrInternal("failed to save config")
+	}
+
+	// Best-effort: notify Worker to hot-reload
+	if s.reloader != nil {
+		_ = s.reloader.ReloadConfig(userID, cfg)
 	}
 
 	return uc, nil
