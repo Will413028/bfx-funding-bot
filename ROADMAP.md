@@ -25,7 +25,15 @@
 | A3 | Redis Integration | `infra/redis.go` — Upstash go-redis/v9 + health check degraded mode | `c324fb6` |
 | A4 | Notification Service | `notification/notifier.go` + `resend.go` — Resend email (welcome, API key alert, generic) | `6add1b8` |
 | A5 | Execution Records | `domain/execution.go` + `executions` table + repo/service/handler 全套 — GET /executions | `30a3315` |
-| A6 | Billing API | `domain/billing.go` + `billing_records` table + `users.plan` 欄位 + 月費方案 (free/starter/pro/enterprise) — GET /billing, GET /billing/plan | `915443b` |
+| A6 | Billing API | `domain/billing.go` + `billing_records` table + `users.plan` 欄位 + 月費方案 — GET /billing, GET /billing/plan | `915443b` |
+| B1 | Bitfinex WebSocket Client | `bitfinex/ws.go` + `ws_types.go` — 公開+認證頻道, 自動重連, heartbeat, DMS | `423c6ec` |
+| B2 | Domain: Market Types | `domain/snapshot.go`, `signal.go`, `regime.go` — 市場快照、信號、體制型別 | `9d078ee` |
+| B3 | MarketSnapshot Cache | `repository/redis/snapshot.go` + `pubsub.go` — Redis 快取 + Pub/Sub 廣播 | `b4877e4` |
+| C1 | Market Feed Service | `lending/marketfeed/service.go` + `snapshot.go` — WS 數據→信號→快照主循環 | `0f58a40` |
+| C2 | Flash Crash Detection | `lending/marketfeed/flashcrash.go` — 閃崩偵測 + cooldown 凍結機制 | `0f58a40` |
+| C3 | Signal Modules | `lending/signal/` — 5 信號源 (book, liquidation, momentum, margin, crossccy) + MDC 加權聚合器 | `30276ac` |
+| C4 | Order Book Analysis | `lending/orderbook/` — dust filter, wall detection (single+distributed), hidden ratio, competitor | `2052afd` |
+| C5 | Regime Detection | `lending/signal/regime.go` — 體制識別 (contango/backwardation/neutral/crisis) + hysteresis | `f429899` |
 
 ### 目前 DB Schema (5 tables)
 
@@ -76,31 +84,25 @@ GET    /api/v1/billing/plan        (JWT)
 - `domain/credit.go` — FundingCredit
 - `domain/earning.go` — FundingEarning
 
+### 放貸引擎市場分析 Pipeline (Phase B+C)
+
+```
+bitfinex/ws.go (B1)
+    │ ticker, book, trades
+    ▼
+marketfeed/service.go (C1)
+    ├── Phase 1.5: flashcrash.go (C2) → FlashFreeze bool
+    ├── Phase 2: signal/*.go (C3) → []SignalValue
+    │       book, liquidation, momentum, margin, crossccy
+    ├── Phase 2.5: signal/mdc.go (C3) → MDCResult
+    ├── Phase 3: signal/regime.go (C5) → RegimeType + RegimeParams
+    ├── orderbook/*.go (C4) → dust filter, walls, hidden ratio, competitor
+    └── snapshot.go → MarketSnapshot → Redis cache (B3) + Go channel
+```
+
 ---
 
 ## 待開發功能
-
-### Phase B — Bitfinex WebSocket & 市場數據基礎
-
-為放貸引擎進階版提供即時市場數據。
-
-| # | 功能 | 說明 | 涵蓋項目 | 複雜度 |
-|---|------|------|---------|--------|
-| B1 | Bitfinex WebSocket Client | 公開頻道 + 認證頻道 + 自動重連 | `bitfinex/ws.go` + `types.go` | 高 |
-| B2 | Domain: Market Types | 市場快照、信號、市場體制型別定義 | `domain/snapshot.go`, `signal.go`, `regime.go` | 中 |
-| B3 | MarketSnapshot Cache | Redis 快取 + Pub/Sub 多機廣播 | `repository/redis/snapshot.go` + `pubsub.go` | 中 |
-
-### Phase C — 放貸引擎：市場分析層
-
-共享市場數據服務（Phase 0-3），為所有用戶提供統一市場視角。
-
-| # | 功能 | 說明 | 架構文件對應 | 複雜度 |
-|---|------|------|-------------|--------|
-| C1 | Market Feed Service | 共享市場數據主循環：數據拉取 → 信號計算 → 廣播 | `lending/marketfeed/service.go` + `snapshot.go` | 高 |
-| C2 | Flash Crash Detection | 閃崩偵測 + 凍結機制 | `lending/marketfeed/flashcrash.go` | 中 |
-| C3 | Signal Modules | 6 個信號源：MDC、Order Book 消耗、清算瀑布、雙速 VWAP、保證金、跨幣種 | `lending/signal/` (mdc, book, liquidation, momentum, margin, crossccy, intraday) | 極高 |
-| C4 | Order Book Analysis | Dust Filter、巨單牆、Hidden Ratio、競爭者偵測 | `lending/orderbook/` (dust, wall, hidden, competitor) | 高 |
-| C5 | Regime Detection | 市場體制識別 | `lending/signal/regime.go` | 中 |
 
 ### Phase D — 放貸引擎：策略決策層
 
@@ -151,27 +153,27 @@ GET    /api/v1/billing/plan        (JWT)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 17 項 |
+| 已完成 | 25 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
-| Phase B（WebSocket + 市場數據） | 3 項 |
-| Phase C（市場分析層） | 5 項 |
+| ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
+| ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | Phase D（策略決策層） | 13 項 |
 | Phase E（執行層 + Worker） | 8 項 |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **32 項** |
+| **待開發合計** | **24 項** |
 
 ## 依賴關係
 
 ```
 Phase A ✅ 全部完成
     │
-    ├── A3 (Redis) ✅ ──→ Phase B (B3 需要 Redis)
+    ├── A3 (Redis) ✅ ──→ Phase B ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase C (市場分析，依賴 B1 WebSocket + B2 Domain Types)
+    │                  Phase C ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal)
+    │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal) ← **下一步**
     │                      │
     │                      ▼
     ├── A5 (Execution) ✅ → Phase E (執行層，依賴 A5 Execution Records + D 策略)
@@ -186,8 +188,8 @@ Phase A ✅ 全部完成
 2. ~~**A3** — Redis 整合~~ ✅
 3. ~~**A4** — Notification~~ ✅
 4. ~~**A5 → A6** — Execution + Billing 完善資料層~~ ✅
-5. **B1 → B2 → B3** — WebSocket + 市場數據基礎 ← **下一步**
-6. **C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）
-7. **D1-D13** — 策略決策模組（可分批實作，優先 D1-D6）
+5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
+6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
+7. **D1-D13** — 策略決策模組（可分批實作，優先 D1-D6）← **下一步**
 8. **E1-E8** — 執行層 + Worker Pool（完成後取代 `engine/` MVP）
 9. **F1 → F2 → F3** — 前端 + 監控
