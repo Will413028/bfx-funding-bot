@@ -10,7 +10,7 @@
 | HTTP 框架 | Gin | handler + middleware |
 | 資料庫 | PostgreSQL (Neon) | 多租戶持久化，WHERE user_id 隔離 |
 | 快取 | Redis (Upstash) | Session、MarketSnapshot 快取、Pub/Sub |
-| Bitfinex API | 自製 `bitfinex/` | HMAC-SHA384 REST client + WebSocket（公開+認證頻道） |
+| Bitfinex API | 自製 `bitfinex/` | HMAC-SHA384 REST client + WebSocket（公開+認證頻道）、Circuit Breaker (gobreaker) + Rate Limiter (token bucket) |
 | 加密 | AES-256-GCM | API Key 加密儲存 |
 | 認證 | JWT (RS256) | Stateless Token |
 | 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
@@ -71,7 +71,8 @@ backend/
 │   │   ├── earnings.go                  # 收益統計
 │   │   ├── execution.go                 # 放貸執行紀錄查詢
 │   │   ├── billing.go                   # 帳單查詢 + 訂閱方案
-│   │   └── health.go                    # 健康檢查 (Postgres + Redis)
+│   │   ├── health.go                    # 健康檢查 (Postgres + Redis + Engine Status)
+│   │   └── pagination.go               # 游標分頁 (cursor-based pagination)
 │   │
 │   ├── middleware/
 │   │   ├── jwt.go                       # JWT 驗證
@@ -274,8 +275,8 @@ package service
 
 // WorkerManager 管理用戶 Worker 的生命週期（由 lending.Service 隱式實作）
 type WorkerManager interface {
-    StartWorker(userID string, cfg domain.StrategyConfig) error
-    StopWorker(userID string) error
+    StartWorker(ctx context.Context, userID string, cfg domain.StrategyConfig) error
+    StopWorker(ctx context.Context, userID string) error
 }
 
 type APIKeyService struct {
@@ -339,14 +340,20 @@ func (s *Service) Start(ctx context.Context) error { ... }
 // Stop 優雅關閉：停止所有 Worker → 關閉 snapshot channels → 停止 quota refill
 func (s *Service) Stop(ctx context.Context) error { ... }
 
+// Ready 回傳一個在初始化完成後 close 的 channel（用於啟動同步）
+func (s *Service) Ready() <-chan struct{} { ... }
+
 // StartWorker 新增一個用戶的 Worker（由 service/apikey.go 透過 WorkerManager 呼叫）
-func (s *Service) StartWorker(userID string, cfg domain.StrategyConfig) error { ... }
+func (s *Service) StartWorker(ctx context.Context, userID string, cfg domain.StrategyConfig) error { ... }
 
 // StopWorker 停止一個用戶的 Worker
-func (s *Service) StopWorker(userID string) error { ... }
+func (s *Service) StopWorker(ctx context.Context, userID string) error { ... }
 
 // ReloadConfig 通知 Worker 熱載入新參數（由 service/config.go 透過 ConfigReloader 呼叫）
-func (s *Service) ReloadConfig(userID string, cfg domain.StrategyConfig) error { ... }
+func (s *Service) ReloadConfig(ctx context.Context, userID string, cfg domain.StrategyConfig) error { ... }
+
+// Status 回傳引擎運行狀態（用於健康檢查）
+func (s *Service) Status() EngineStatus { ... }
 
 // BroadcastSnapshot 廣播 MarketSnapshot 到所有 Worker（由 main.go 的 snapshot 轉發 goroutine 呼叫）
 func (s *Service) BroadcastSnapshot(snapshot *domain.MarketSnapshot) { ... }
@@ -519,7 +526,7 @@ func NewPostgresPool(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*p
 **規範**：
 - 每個檔案只做一件事：建立連線 + 註冊 `fx.Lifecycle` 的關閉 hook。
 - 暴露的是**具體型別**（`*pgxpool.Pool`、`*redis.Client`），不需要額外包 interface — 這些都是第三方庫的標準型別，DAO 層直接依賴即可。
-- `handler/health.go` 可以直接注入 `*pgxpool.Pool` 做健康檢查，不需要繞道 repository。
+- `handler/health.go` 直接注入 `*pgxpool.Pool`、`*redis.Client`、`EngineHealthProvider` 做健康檢查，回應包含 Postgres、Redis 和 Lending Engine 狀態。
 - `bitfinex/`、`notification/`、`crypto/` **不放進 `infra/`** — 它們不是純連線初始化，各自有業務邏輯，作為獨立 package 更清晰。
 
 #### `repository/`

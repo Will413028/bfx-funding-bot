@@ -17,6 +17,10 @@ func (m *mockBillingRepo) Create(ctx context.Context, record *domain.BillingReco
 	return record, nil
 }
 
+func (m *mockBillingRepo) ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
+	return m.ListByUser(ctx, userID, time.Time{}, limit)
+}
+
 func (m *mockBillingRepo) ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error) {
 	var result []domain.BillingRecord
 	for _, r := range m.records {

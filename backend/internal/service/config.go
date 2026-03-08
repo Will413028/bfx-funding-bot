@@ -11,7 +11,7 @@ import (
 // ConfigReloader notifies a Worker to hot-reload new strategy config.
 // Satisfied by *lending.Service via implicit interface (fx auto-inject).
 type ConfigReloader interface {
-	ReloadConfig(userID string, cfg domain.StrategyConfig) error
+	ReloadConfig(ctx context.Context, userID string, cfg domain.StrategyConfig) error
 }
 
 type ConfigService struct {
@@ -40,7 +40,7 @@ func (s *ConfigService) Save(ctx context.Context, userID string, cfg domain.Stra
 
 	// Best-effort: notify Worker to hot-reload
 	if s.reloader != nil {
-		_ = s.reloader.ReloadConfig(userID, cfg)
+		_ = s.reloader.ReloadConfig(ctx, userID, cfg)
 	}
 
 	return uc, nil

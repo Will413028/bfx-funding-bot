@@ -53,6 +53,10 @@ func (s *BillingService) GetBilling(ctx context.Context, userID string, since ti
 	return summary, nil
 }
 
+func (s *BillingService) ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
+	return s.repo.ListByUserPaginated(ctx, userID, cursorTime, cursorID, limit)
+}
+
 func (s *BillingService) GetPlan(ctx context.Context, userID string) (*domain.PlanFeatures, error) {
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {

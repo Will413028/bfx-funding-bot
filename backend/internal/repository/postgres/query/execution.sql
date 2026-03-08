@@ -9,3 +9,18 @@ FROM executions
 WHERE user_id = $1 AND created_at >= $2
 ORDER BY created_at DESC
 LIMIT $3;
+
+-- name: ListExecutionsByUserCursor :many
+SELECT id, user_id, action, currency, amount, rate, period, offer_id, status, error_message, created_at
+FROM executions
+WHERE user_id = $1
+  AND (created_at < $2 OR (created_at = $2 AND id < $3))
+ORDER BY created_at DESC, id DESC
+LIMIT $4;
+
+-- name: ListExecutionsByUserFirst :many
+SELECT id, user_id, action, currency, amount, rate, period, offer_id, status, error_message, created_at
+FROM executions
+WHERE user_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT $2;

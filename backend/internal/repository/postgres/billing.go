@@ -61,6 +61,44 @@ func (r *BillingRepo) ListByUser(ctx context.Context, userID string, since time.
 	return records, nil
 }
 
+func (r *BillingRepo) ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var rows []sqlc.BillingRecord
+	if cursorTime != nil {
+		cursorUUID, err := parseUUID(cursorID)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = r.q.ListBillingByUserCursor(ctx, sqlc.ListBillingByUserCursorParams{
+			UserID:    uid,
+			CreatedAt: pgtype.Timestamptz{Time: *cursorTime, Valid: true},
+			ID:        cursorUUID,
+			Limit:     int32(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		rows, err = r.q.ListBillingByUserFirst(ctx, sqlc.ListBillingByUserFirstParams{
+			UserID: uid,
+			Limit:  int32(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	records := make([]domain.BillingRecord, len(rows))
+	for i, row := range rows {
+		records[i] = *toDomainBilling(row)
+	}
+	return records, nil
+}
+
 func toDomainBilling(row sqlc.BillingRecord) *domain.BillingRecord {
 	rec := &domain.BillingRecord{
 		ID:          uuidToString(row.ID),

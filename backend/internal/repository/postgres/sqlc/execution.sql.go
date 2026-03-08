@@ -103,3 +103,101 @@ func (q *Queries) ListExecutionsByUser(ctx context.Context, arg ListExecutionsBy
 	}
 	return items, nil
 }
+
+const listExecutionsByUserCursor = `-- name: ListExecutionsByUserCursor :many
+SELECT id, user_id, action, currency, amount, rate, period, offer_id, status, error_message, created_at
+FROM executions
+WHERE user_id = $1
+  AND (created_at < $2 OR (created_at = $2 AND id < $3))
+ORDER BY created_at DESC, id DESC
+LIMIT $4
+`
+
+type ListExecutionsByUserCursorParams struct {
+	UserID    pgtype.UUID
+	CreatedAt pgtype.Timestamptz
+	ID        pgtype.UUID
+	Limit     int32
+}
+
+func (q *Queries) ListExecutionsByUserCursor(ctx context.Context, arg ListExecutionsByUserCursorParams) ([]Execution, error) {
+	rows, err := q.db.Query(ctx, listExecutionsByUserCursor,
+		arg.UserID,
+		arg.CreatedAt,
+		arg.ID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Execution
+	for rows.Next() {
+		var i Execution
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Action,
+			&i.Currency,
+			&i.Amount,
+			&i.Rate,
+			&i.Period,
+			&i.OfferID,
+			&i.Status,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExecutionsByUserFirst = `-- name: ListExecutionsByUserFirst :many
+SELECT id, user_id, action, currency, amount, rate, period, offer_id, status, error_message, created_at
+FROM executions
+WHERE user_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT $2
+`
+
+type ListExecutionsByUserFirstParams struct {
+	UserID pgtype.UUID
+	Limit  int32
+}
+
+func (q *Queries) ListExecutionsByUserFirst(ctx context.Context, arg ListExecutionsByUserFirstParams) ([]Execution, error) {
+	rows, err := q.db.Query(ctx, listExecutionsByUserFirst, arg.UserID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Execution
+	for rows.Next() {
+		var i Execution
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Action,
+			&i.Currency,
+			&i.Amount,
+			&i.Rate,
+			&i.Period,
+			&i.OfferID,
+			&i.Status,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

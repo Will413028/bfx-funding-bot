@@ -23,7 +23,11 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	ListBillingByUser(ctx context.Context, arg ListBillingByUserParams) ([]BillingRecord, error)
+	ListBillingByUserCursor(ctx context.Context, arg ListBillingByUserCursorParams) ([]BillingRecord, error)
+	ListBillingByUserFirst(ctx context.Context, arg ListBillingByUserFirstParams) ([]BillingRecord, error)
 	ListExecutionsByUser(ctx context.Context, arg ListExecutionsByUserParams) ([]Execution, error)
+	ListExecutionsByUserCursor(ctx context.Context, arg ListExecutionsByUserCursorParams) ([]Execution, error)
+	ListExecutionsByUserFirst(ctx context.Context, arg ListExecutionsByUserFirstParams) ([]Execution, error)
 	ListVerifiedAPIKeys(ctx context.Context) ([]ApiKey, error)
 	UpdateExchangeStatus(ctx context.Context, arg UpdateExchangeStatusParams) error
 	UpdatePassword(ctx context.Context, arg UpdatePasswordParams) error

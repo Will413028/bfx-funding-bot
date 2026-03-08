@@ -67,7 +67,8 @@ func main() {
 		fx.Provide(handler.NewEarningsHandler),
 		fx.Provide(handler.NewExecutionHandler),
 		fx.Provide(handler.NewBillingHandler),
-		fx.Provide(handler.NewHealthHandler),
+		fx.Provide(func(svc *lending.Service) handler.EngineHealthProvider { return svc }),
+	fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: log}
@@ -130,8 +131,13 @@ func startLendingEngine(
 			// Start lending service (pool + quota refill)
 			go lendingSvc.Start(ctx)
 
-			// Wait for service to initialize
-			time.Sleep(50 * time.Millisecond)
+			// Wait for service to initialize (deterministic)
+			select {
+			case <-lendingSvc.Ready():
+				log.Info("lending service ready")
+			case <-time.After(5 * time.Second):
+				log.Warn("lending service readiness timeout, proceeding anyway")
+			}
 
 			// Resume workers for existing users with verified keys + configs
 			go resumeWorkers(ctx, lendingSvc, apiKeyRepo, configRepo, cipher, log)
@@ -176,7 +182,7 @@ func resumeWorkers(
 			continue
 		}
 
-		if err := svc.StartWorker(key.UserID, uc.Config); err != nil {
+		if err := svc.StartWorker(ctx, key.UserID, uc.Config); err != nil {
 			log.Warn("failed to resume worker",
 				zap.String("userID", key.UserID),
 				zap.Error(err),
