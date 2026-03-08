@@ -22,6 +22,9 @@ type Config struct {
 	JWTPublicKey  *rsa.PublicKey
 
 	AESKey []byte
+
+	ResendAPIKey          string
+	NotificationFromEmail string
 }
 
 func Load() (Config, error) {
@@ -73,6 +76,12 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parsing AES_KEY: expected 32 bytes, got %d", len(aesKey))
 	}
 	cfg.AESKey = aesKey
+
+	cfg.ResendAPIKey = os.Getenv("RESEND_API_KEY")
+	if cfg.ResendAPIKey == "" {
+		return Config{}, fmt.Errorf("required environment variable RESEND_API_KEY is not set")
+	}
+	cfg.NotificationFromEmail = getEnvOrDefault("NOTIFICATION_FROM_EMAIL", "noreply@bfx-funding.bot")
 
 	return cfg, nil
 }
