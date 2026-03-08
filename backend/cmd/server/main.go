@@ -18,6 +18,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/engine"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
+	"github.com/will/bfx-funding-bot/backend/internal/notification"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
 )
@@ -42,6 +43,9 @@ func main() {
 		fx.Provide(service.NewConfigService),
 		fx.Provide(service.NewDashboardService),
 		fx.Provide(service.NewEarningsService),
+		fx.Provide(func(cfg appconfig.Config) notification.Notifier {
+			return notification.NewResendNotifier(cfg.ResendAPIKey, cfg.NotificationFromEmail)
+		}),
 		fx.Provide(engine.NewEngine),
 		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewUserHandler),
