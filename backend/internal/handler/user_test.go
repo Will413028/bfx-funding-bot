@@ -121,8 +121,9 @@ func TestUserHandler_GetProfile(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var body map[string]any
-	json.Unmarshal(w.Body.Bytes(), &body)
+	var envelope map[string]any
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	body := envelope["data"].(map[string]any)
 
 	if body["email"] != "test@example.com" {
 		t.Errorf("expected email test@example.com, got %v", body["email"])
@@ -130,8 +131,8 @@ func TestUserHandler_GetProfile(t *testing.T) {
 	if body["id"] != "user-123" {
 		t.Errorf("expected id user-123, got %v", body["id"])
 	}
-	if _, exists := body["password_hash"]; exists {
-		t.Error("password_hash should not be in response")
+	if _, exists := body["passwordHash"]; exists {
+		t.Error("passwordHash should not be in response")
 	}
 }
 
@@ -139,8 +140,8 @@ func TestUserHandler_ChangePassword_Success(t *testing.T) {
 	r, repo := setupUserTest(t)
 
 	body, _ := json.Marshal(map[string]string{
-		"current_password": "password123",
-		"new_password":     "newpassword456",
+		"currentPassword": "password123",
+		"newPassword":     "newpassword456",
 	})
 	req := httptest.NewRequest(http.MethodPut, "/me/password", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -162,8 +163,8 @@ func TestUserHandler_ChangePassword_WrongCurrent(t *testing.T) {
 	r, _ := setupUserTest(t)
 
 	body, _ := json.Marshal(map[string]string{
-		"current_password": "wrongpassword",
-		"new_password":     "newpassword456",
+		"currentPassword": "wrongpassword",
+		"newPassword":     "newpassword456",
 	})
 	req := httptest.NewRequest(http.MethodPut, "/me/password", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -179,8 +180,8 @@ func TestUserHandler_ChangePassword_TooShort(t *testing.T) {
 	r, _ := setupUserTest(t)
 
 	body, _ := json.Marshal(map[string]string{
-		"current_password": "password123",
-		"new_password":     "short",
+		"currentPassword": "password123",
+		"newPassword":     "short",
 	})
 	req := httptest.NewRequest(http.MethodPut, "/me/password", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

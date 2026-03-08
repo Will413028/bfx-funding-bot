@@ -27,24 +27,27 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":         user.ID,
-		"email":      user.Email,
-		"status":     user.Status,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
+		"data": gin.H{
+			"id":        user.ID,
+			"email":     user.Email,
+			"status":    user.Status,
+			"plan":      user.Plan,
+			"createdAt": user.CreatedAt,
+			"updatedAt": user.UpdatedAt,
+		},
 	})
 }
 
 type changePasswordRequest struct {
-	CurrentPassword string `json:"current_password" binding:"required"`
-	NewPassword     string `json:"new_password" binding:"required"`
+	CurrentPassword string `json:"currentPassword" binding:"required"`
+	NewPassword     string `json:"newPassword" binding:"required"`
 }
 
 func (h *UserHandler) ChangePassword(c *gin.Context) {
 	var req changePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{"code": "VALIDATION_ERROR", "message": "current_password and new_password are required"},
+			"error": gin.H{"code": "VALIDATION_ERROR", "message": "currentPassword and newPassword are required"},
 		})
 		return
 	}
@@ -56,5 +59,5 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "password updated"})
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"message": "password updated"}})
 }

@@ -10,8 +10,8 @@ import (
 
 type BillingSummary struct {
 	Records      []domain.BillingRecord `json:"records"`
-	TotalPaid    float64                `json:"total_paid"`
-	TotalPending float64                `json:"total_pending"`
+	TotalPaid    float64                `json:"totalPaid"`
+	TotalPending float64                `json:"totalPending"`
 }
 
 type BillingService struct {

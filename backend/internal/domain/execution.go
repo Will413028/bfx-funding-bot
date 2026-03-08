@@ -10,15 +10,15 @@ const (
 )
 
 type ExecutionRecord struct {
-	ID           string
-	UserID       string
-	Action       string
-	Currency     string
-	Amount       float64
-	Rate         float64
-	Period       int
-	OfferID      *int64
-	Status       string
-	ErrorMessage *string
-	CreatedAt    time.Time
+	ID           string    `json:"id"`
+	UserID       string    `json:"userId"`
+	Action       string    `json:"action"`
+	Currency     string    `json:"currency"`
+	Amount       float64   `json:"amount"`
+	Rate         float64   `json:"rate"`
+	Period       int       `json:"period"`
+	OfferID      *int64    `json:"offerId,omitempty"`
+	Status       string    `json:"status"`
+	ErrorMessage *string   `json:"errorMessage,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
 }

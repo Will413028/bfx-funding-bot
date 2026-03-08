@@ -25,5 +25,5 @@ func (h *DashboardHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, summary)
+	c.JSON(http.StatusOK, gin.H{"data": summary})
 }

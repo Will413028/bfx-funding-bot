@@ -125,8 +125,8 @@ func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 		c.Set(middleware.ContextUserID, "test-user-id")
 		c.Next()
 	})
-	r.POST("/apikeys", h.Create)
-	r.GET("/apikeys", h.List)
+	r.POST("/api-keys", h.Create)
+	r.GET("/api-keys", h.List)
 	r.GET("/apikeys/:id", h.GetByID)
 	r.DELETE("/apikeys/:id", h.Delete)
 	r.POST("/apikeys/:id/verify", h.Verify)
@@ -138,12 +138,12 @@ func TestHandler_CreateAPIKey(t *testing.T) {
 	r, _ := setupAPIKeyRouter(t)
 
 	body, _ := json.Marshal(map[string]string{
-		"api_key":    "bfx-key-123",
-		"api_secret": "bfx-secret-456",
-		"label":      "test",
+		"apiKey":    "bfx-key-123",
+		"apiSecret": "bfx-secret-456",
+		"label":     "test",
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -152,16 +152,17 @@ func TestHandler_CreateAPIKey(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["api_secret"] != "****" {
-		t.Errorf("expected masked secret, got %v", resp["api_secret"])
+	var envelope map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].(map[string]interface{})
+	if resp["apiSecret"] != "****" {
+		t.Errorf("expected masked secret, got %v", resp["apiSecret"])
 	}
-	if resp["api_key"] != "bfx-key-123" {
-		t.Errorf("expected api_key bfx-key-123, got %v", resp["api_key"])
+	if resp["apiKey"] != "bfx-key-123" {
+		t.Errorf("expected apiKey bfx-key-123, got %v", resp["apiKey"])
 	}
-	if resp["exchange_status"] != "verified" {
-		t.Errorf("expected exchange_status verified, got %v", resp["exchange_status"])
+	if resp["exchangeStatus"] != "verified" {
+		t.Errorf("expected exchangeStatus verified, got %v", resp["exchangeStatus"])
 	}
 }
 
@@ -169,7 +170,7 @@ func TestHandler_CreateAPIKey_MissingFields(t *testing.T) {
 	r, _ := setupAPIKeyRouter(t)
 
 	body, _ := json.Marshal(map[string]string{"label": "test"})
-	req := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -183,17 +184,17 @@ func TestHandler_CreateAPIKey_Duplicate(t *testing.T) {
 	r, _ := setupAPIKeyRouter(t)
 
 	body, _ := json.Marshal(map[string]string{
-		"api_key": "k1", "api_secret": "s1",
+		"apiKey": "k1", "apiSecret": "s1",
 	})
-	req1 := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body))
+	req1 := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body))
 	req1.Header.Set("Content-Type", "application/json")
 	w1 := httptest.NewRecorder()
 	r.ServeHTTP(w1, req1)
 
 	body2, _ := json.Marshal(map[string]string{
-		"api_key": "k2", "api_secret": "s2",
+		"apiKey": "k2", "apiSecret": "s2",
 	})
-	req2 := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body2))
+	req2 := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body2))
 	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
 	r.ServeHTTP(w2, req2)
@@ -206,15 +207,16 @@ func TestHandler_CreateAPIKey_Duplicate(t *testing.T) {
 func TestHandler_ListAPIKeys_Empty(t *testing.T) {
 	r, _ := setupAPIKeyRouter(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/apikeys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api-keys", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp []interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	var envelope map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].([]interface{})
 	if len(resp) != 0 {
 		t.Fatalf("expected empty array, got %d items", len(resp))
 	}
@@ -225,25 +227,27 @@ func TestHandler_ListAPIKeys_IncludesExchangeStatus(t *testing.T) {
 
 	// Create a key first
 	body, _ := json.Marshal(map[string]string{
-		"api_key": "k1", "api_secret": "s1",
+		"apiKey": "k1", "apiSecret": "s1",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	// List keys
-	req2 := httptest.NewRequest(http.MethodGet, "/apikeys", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/api-keys", nil)
 	w2 := httptest.NewRecorder()
 	r.ServeHTTP(w2, req2)
 
-	var resp []map[string]interface{}
-	json.Unmarshal(w2.Body.Bytes(), &resp)
-	if len(resp) != 1 {
-		t.Fatalf("expected 1 key, got %d", len(resp))
+	var envelope map[string]interface{}
+	json.Unmarshal(w2.Body.Bytes(), &envelope)
+	data := envelope["data"].([]interface{})
+	if len(data) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(data))
 	}
-	if resp[0]["exchange_status"] == nil {
-		t.Error("expected exchange_status in list response")
+	first := data[0].(map[string]interface{})
+	if first["exchangeStatus"] == nil {
+		t.Error("expected exchangeStatus in list response")
 	}
 }
 
@@ -252,15 +256,16 @@ func TestHandler_VerifyAPIKey(t *testing.T) {
 
 	// Create a key
 	body, _ := json.Marshal(map[string]string{
-		"api_key": "k1", "api_secret": "s1",
+		"apiKey": "k1", "apiSecret": "s1",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/apikeys", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	var createResp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &createResp)
+	var createEnvelope map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &createEnvelope)
+	createResp := createEnvelope["data"].(map[string]interface{})
 	keyID := createResp["id"].(string)
 
 	// Verify the key
@@ -272,8 +277,9 @@ func TestHandler_VerifyAPIKey(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w2.Code, w2.Body.String())
 	}
 
-	var verifyResp map[string]interface{}
-	json.Unmarshal(w2.Body.Bytes(), &verifyResp)
+	var verifyEnvelope map[string]interface{}
+	json.Unmarshal(w2.Body.Bytes(), &verifyEnvelope)
+	verifyResp := verifyEnvelope["data"].(map[string]interface{})
 	if verifyResp["status"] != "verified" {
 		t.Errorf("expected status verified, got %v", verifyResp["status"])
 	}

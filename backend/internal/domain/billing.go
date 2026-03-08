@@ -29,11 +29,11 @@ var PlanPrices = map[string]float64{
 type PlanFeatures struct {
 	Plan            string `json:"plan"`
 	Price           float64 `json:"price"`
-	AutoLending     bool   `json:"auto_lending"`
-	AdvancedStrategy bool  `json:"advanced_strategy"`
-	EmailNotify     bool   `json:"email_notify"`
-	PriorityQuota   bool   `json:"priority_quota"`
-	CustomParams    bool   `json:"custom_params"`
+	AutoLending      bool    `json:"autoLending"`
+	AdvancedStrategy bool    `json:"advancedStrategy"`
+	EmailNotify      bool    `json:"emailNotify"`
+	PriorityQuota    bool    `json:"priorityQuota"`
+	CustomParams     bool    `json:"customParams"`
 }
 
 // GetPlanFeatures returns the feature set for a given plan.
@@ -51,14 +51,14 @@ func GetPlanFeatures(plan string) PlanFeatures {
 }
 
 type BillingRecord struct {
-	ID          string
-	UserID      string
-	PeriodStart time.Time
-	PeriodEnd   time.Time
-	Plan        string
-	Amount      float64
-	Currency    string
-	Status      string
-	PaidAt      *time.Time
-	CreatedAt   time.Time
+	ID          string     `json:"id"`
+	UserID      string     `json:"userId"`
+	PeriodStart time.Time  `json:"periodStart"`
+	PeriodEnd   time.Time  `json:"periodEnd"`
+	Plan        string     `json:"plan"`
+	Amount      float64    `json:"amount"`
+	Currency    string     `json:"currency"`
+	Status      string     `json:"status"`
+	PaidAt      *time.Time `json:"paidAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
 }

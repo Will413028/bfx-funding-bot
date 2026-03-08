@@ -14,7 +14,7 @@ import (
 type WalletSummary struct {
 	Currency         string  `json:"currency"`
 	Balance          float64 `json:"balance"`
-	BalanceAvailable float64 `json:"balance_available"`
+	BalanceAvailable float64 `json:"balanceAvailable"`
 }
 
 type OfferSummary struct {
@@ -24,7 +24,7 @@ type OfferSummary struct {
 	Rate      float64   `json:"rate"`
 	Period    int       `json:"period"`
 	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type CreditSummary struct {
@@ -34,15 +34,15 @@ type CreditSummary struct {
 	Rate      float64   `json:"rate"`
 	Period    int       `json:"period"`
 	Status    string    `json:"status"`
-	AutoRenew bool      `json:"auto_renew"`
-	OpenedAt  time.Time `json:"opened_at"`
+	AutoRenew bool      `json:"autoRenew"`
+	OpenedAt  time.Time `json:"openedAt"`
 }
 
 type MarketSummary struct {
 	FRR         float64          `json:"frr"`
 	Regime      domain.RegimeType `json:"regime"`
-	MDCScore    float64          `json:"mdc_score"`
-	FlashFreeze bool             `json:"flash_freeze"`
+	MDCScore    float64          `json:"mdcScore"`
+	FlashFreeze bool             `json:"flashFreeze"`
 	Timestamp   time.Time        `json:"timestamp"`
 }
 
@@ -51,7 +51,7 @@ type DashboardSummary struct {
 	Offers      []OfferSummary  `json:"offers"`
 	Credits     []CreditSummary `json:"credits"`
 	Market      *MarketSummary  `json:"market"`
-	EngineReady bool            `json:"engine_ready"`
+	EngineReady bool            `json:"engineReady"`
 }
 
 type DashboardService struct {

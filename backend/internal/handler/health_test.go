@@ -39,8 +39,9 @@ func TestHealthHandler_EngineRunning(t *testing.T) {
 
 	// Should not fail on DB/Redis ping — those are nil in this test,
 	// so we only check the engine portion of the response
-	var resp map[string]any
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	var envelope map[string]any
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].(map[string]any)
 
 	engineData, ok := resp["engine"].(map[string]any)
 	if !ok {
@@ -49,8 +50,8 @@ func TestHealthHandler_EngineRunning(t *testing.T) {
 	if engineData["running"] != true {
 		t.Errorf("expected running=true, got %v", engineData["running"])
 	}
-	if engineData["worker_count"] != float64(3) {
-		t.Errorf("expected worker_count=3, got %v", engineData["worker_count"])
+	if engineData["workerCount"] != float64(3) {
+		t.Errorf("expected workerCount=3, got %v", engineData["workerCount"])
 	}
 }
 
@@ -72,8 +73,9 @@ func TestHealthHandler_EngineStopped(t *testing.T) {
 
 	h.Status(c)
 
-	var resp map[string]any
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	var envelope map[string]any
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].(map[string]any)
 
 	engineData, ok := resp["engine"].(map[string]any)
 	if !ok {
@@ -95,8 +97,9 @@ func TestHealthHandler_NilEngine(t *testing.T) {
 
 	h.Status(c)
 
-	var resp map[string]any
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	var envelope map[string]any
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].(map[string]any)
 
 	if _, ok := resp["engine"]; ok {
 		t.Error("expected no engine field when engine is nil")

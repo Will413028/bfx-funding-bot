@@ -60,5 +60,5 @@ func (h *HealthHandler) Status(c *gin.Context) {
 		resp["engine"] = h.engine.Status()
 	}
 
-	c.JSON(code, resp)
+	c.JSON(code, gin.H{"data": resp})
 }

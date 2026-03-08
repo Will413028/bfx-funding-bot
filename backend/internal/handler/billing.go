@@ -52,7 +52,7 @@ func (h *BillingHandler) Get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"records":    records,
+		"data":       records,
 		"pagination": pagination,
 	})
 }
@@ -77,5 +77,5 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, features)
+	c.JSON(http.StatusOK, gin.H{"data": features})
 }

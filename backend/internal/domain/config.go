@@ -33,7 +33,7 @@ type StrategyConfig struct {
 	Amount    AmountConfig `json:"amount"`
 	Rate      RateConfig   `json:"rate"`
 	Period    PeriodConfig `json:"period"`
-	AutoRenew bool         `json:"auto_renew"`
+	AutoRenew bool         `json:"autoRenew"`
 }
 
 func (c StrategyConfig) Validate() error {

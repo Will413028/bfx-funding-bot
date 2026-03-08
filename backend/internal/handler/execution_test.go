@@ -87,12 +87,12 @@ func TestExecutionHandler_List_FirstPage(t *testing.T) {
 	}
 
 	var body struct {
-		Executions []domain.ExecutionRecord `json:"executions"`
+		Data       []domain.ExecutionRecord `json:"data"`
 		Pagination PaginationResponse       `json:"pagination"`
 	}
 	json.NewDecoder(w.Body).Decode(&body)
-	if len(body.Executions) != 1 {
-		t.Errorf("expected 1 execution, got %d", len(body.Executions))
+	if len(body.Data) != 1 {
+		t.Errorf("expected 1 execution, got %d", len(body.Data))
 	}
 	if body.Pagination.HasMore {
 		t.Error("expected has_more=false for single record")

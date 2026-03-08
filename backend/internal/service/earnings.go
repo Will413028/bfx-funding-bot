@@ -12,12 +12,12 @@ import (
 )
 
 type EarningsSummary struct {
-	EstimatedDailyEarning float64 `json:"estimated_daily_earning"`
-	WeightedAPY           float64 `json:"weighted_apy"`
-	Earnings7d            float64 `json:"earnings_7d"`
-	Earnings30d           float64 `json:"earnings_30d"`
-	TotalLent             float64 `json:"total_lent"`
-	ActiveCredits         int     `json:"active_credits"`
+	EstimatedDailyEarning float64 `json:"estimatedDailyEarning"`
+	WeightedAPY           float64 `json:"weightedAPY"`
+	Earnings7d            float64 `json:"earnings7d"`
+	Earnings30d           float64 `json:"earnings30d"`
+	TotalLent             float64 `json:"totalLent"`
+	ActiveCredits         int     `json:"activeCredits"`
 	Currency              string  `json:"currency"`
 }
 
