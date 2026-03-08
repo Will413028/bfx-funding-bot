@@ -156,9 +156,9 @@ backend/
 │   │   ├── billing.go                   # BillingRecord, PlanFeatures, 訂閱方案常數
 │   │   ├── errors.go                    # AppError 統一錯誤型別
 │   │   ├── config.go                    # StrategyConfig（附錄 B 全參數型別定義）
-│   │   ├── snapshot.go                  # MarketSnapshot, RawMarketData (待實作)
-│   │   ├── signal.go                    # SignalValue, MDCResult (待實作)
-│   │   └── regime.go                    # RegimeType, RegimeParams (待實作)
+│   │   ├── snapshot.go                  # MarketSnapshot, RawMarketData, OrderBookAnalysis
+│   │   ├── signal.go                    # SignalValue, MDCResult
+│   │   └── regime.go                    # RegimeType, RegimeParams
 │   │
 │   │   # ── Infrastructure 層 ──
 │   │
