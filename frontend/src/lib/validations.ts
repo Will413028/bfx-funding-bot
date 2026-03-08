@@ -42,3 +42,16 @@ export const strategyConfigSchema = z.object({
 });
 
 export type StrategyConfigInput = z.infer<typeof strategyConfigSchema>;
+
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, "required"),
+    newPassword: z.string().min(1, "required").min(8, "minLength"),
+    confirmPassword: z.string().min(1, "required"),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    message: "passwordMismatch",
+    path: ["confirmPassword"],
+  });
+
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
