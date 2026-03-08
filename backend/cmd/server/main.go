@@ -44,6 +44,7 @@ func main() {
 		fx.Provide(service.NewEarningsService),
 		fx.Provide(engine.NewEngine),
 		fx.Provide(handler.NewAuthHandler),
+		fx.Provide(handler.NewUserHandler),
 		fx.Provide(handler.NewAPIKeyHandler),
 		fx.Provide(handler.NewConfigHandler),
 		fx.Provide(handler.NewDashboardHandler),

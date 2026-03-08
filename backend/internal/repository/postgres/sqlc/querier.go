@@ -22,6 +22,7 @@ type Querier interface {
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	ListVerifiedAPIKeys(ctx context.Context) ([]ApiKey, error)
 	UpdateExchangeStatus(ctx context.Context, arg UpdateExchangeStatusParams) error
+	UpdatePassword(ctx context.Context, arg UpdatePasswordParams) error
 	UpsertConfig(ctx context.Context, arg UpsertConfigParams) (UserConfig, error)
 }
 

@@ -49,6 +49,17 @@ func (r *UserRepo) GetByEmail(ctx context.Context, email string) (*domain.User, 
 	return toDomainUser(row), nil
 }
 
+func (r *UserRepo) UpdatePassword(ctx context.Context, id, passwordHash string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	return r.q.UpdatePassword(ctx, sqlc.UpdatePasswordParams{
+		ID:           uid,
+		PasswordHash: passwordHash,
+	})
+}
+
 func toDomainUser(row sqlc.User) *domain.User {
 	return &domain.User{
 		ID:           uuidToString(row.ID),
