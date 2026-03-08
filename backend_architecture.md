@@ -867,7 +867,34 @@ Go 不允許 parent package 與 child package 互相 import。如果在 `lending
 
 代價是引入了一個第三方依賴，但 fx 是 Uber 開源的成熟專案，Go 社區廣泛使用。
 
-### 9.7 為什麼 Repository interface 放在 `repository/` 而不是 `domain/`
+### 9.7 Context.Context 使用原則
+
+嚴格遵守 **「I/O 與阻塞才需要 Context，純計算絕不使用」** 的原則：
+
+| 層級 | context.Context | 原因 |
+| :--- | :--- | :--- |
+| `handler/`, `middleware/` | ✅ 使用 | 產生並往下傳遞 Request Context |
+| `service/` | ✅ 使用 | 編排 I/O 操作，傳遞 Context |
+| `repository/`, `bitfinex/` | ✅ 使用 | DB、Redis、HTTP 等 I/O 需要超時控制 |
+| `lending/worker/`, `lending/service.go` | ✅ 使用 | Worker 主迴圈是長駐阻塞操作，需要 cancel 機制 |
+| `domain/` | ❌ 禁用 | 純型別定義，零 I/O |
+| `lending/signal/` | ❌ 禁用 | 純數學計算（均線、動量、閃崩偵測），微秒內完成 |
+| `lending/strategy/` | ❌ 禁用 | 純決策邏輯，給定輸入直接算出結果 |
+| `lending/orderbook/` | ❌ 禁用 | 純資料結構操作（Order Book 解析） |
+
+禁用 Context 的好處：極致效能（無指標傳遞開銷）、極致可測試性（直接傳假資料秒測，不需 mock I/O）。
+
+### 9.8 為什麼 Bitfinex Client 不做重試（Retry）
+
+Circuit breaker + rate limiter 已經提供足夠的 resilience，**刻意不加 retry 機制**。原因：
+
+1. **金融 API 重試很危險**：`SubmitFundingOffer` 如果因 5xx/timeout 重試，可能造成**重複掛單**。Bitfinex 沒有提供 idempotency key，無法安全重試寫入操作。
+2. **Circuit breaker 已防級聯失敗**：5 次連續失敗 → 熔斷 15 秒，不需要 retry 來「再試一次」。
+3. **Bitfinex 回傳格式特殊**：API 錯誤以 HTTP 200 + `["error", code, msg]` 回傳，HTTP status code 檢查（429/5xx）對 Bitfinex API 意義有限。
+
+如果未來需要對**讀取操作**（`GetFundingBalance`、`GetActiveFundingOffers`）加 retry，應只對讀取方法做，寫入操作（`SubmitFundingOffer`、`CancelFundingOffer`）永遠不重試。
+
+### 9.9 為什麼 Repository interface 放在 `repository/` 而不是 `domain/`
 
 Go 慣例是在「使用方」定義 interface（consumer-side interface）。但 Repository interface 被多個使用方（`service/`、`lending/execution/`）共用，放在 `domain/` 會讓 domain 對 `context`、`time` 以外的標準庫產生隱式依賴。放在 `repository/` package 頂層是務實的折衷——它是 interface 的「家」，`postgres/` 子目錄是實作。
 
