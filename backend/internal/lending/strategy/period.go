@@ -1,0 +1,130 @@
+package strategy
+
+import (
+	"math"
+
+	"github.com/will/bfx-funding-bot/backend/internal/domain"
+)
+
+const (
+	// Regime → base period ratio within [Period.Min, Period.Max]
+	regimeContangoPeriodRatio       = 0.75
+	regimeNeutralPeriodRatio        = 0.50
+	regimeBackwardationPeriodRatio  = 0.25
+	// crisis → 0.0 (use Period.Min)
+
+	// Rate scaling: ±30% adjustment based on rate/FRR ratio
+	rateScaleWeight = 0.3
+	rateRatioCap    = 2.0
+
+	// Volatility discount: kicks in above this threshold
+	volThreshold   = 0.10
+	volMaxDiscount = 0.20 // max volatility above threshold considered
+	volMultiplier  = 2.0  // discount = (vol - threshold) × multiplier
+)
+
+// PeriodStrategy computes the recommended offer period (days) based on
+// market regime, rate attractiveness, and volatility.
+type PeriodStrategy struct{}
+
+// NewPeriodStrategy creates a new PeriodStrategy.
+func NewPeriodStrategy() *PeriodStrategy {
+	return &PeriodStrategy{}
+}
+
+// Apply computes the optimal period and returns a DecisionResult.
+func (p *PeriodStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResult {
+	// Guard: flash freeze
+	if ctx.Snapshot != nil && ctx.Snapshot.FlashFreeze {
+		return &domain.DecisionResult{Reason: "flash_freeze"}
+	}
+
+	// Guard: insufficient balance
+	if ctx.Available < minBalance {
+		return &domain.DecisionResult{Reason: "insufficient_balance"}
+	}
+
+	cfg := ctx.Config
+	snap := ctx.Snapshot
+
+	// Step 1: Regime-driven base period
+	periodRange := float64(cfg.Period.Max - cfg.Period.Min)
+	ratio := p.regimeRatio(snap.Regime)
+	basePeriod := float64(cfg.Period.Min) + ratio*periodRange
+
+	// Step 2: Rate-based scaling
+	basePeriod = p.applyRateScaling(basePeriod, ctx, snap)
+
+	// Step 3: Volatility discount
+	basePeriod = p.applyVolatilityDiscount(basePeriod, snap.RegimeParams.Volatility)
+
+	// Step 4: Round and clamp
+	period := int(math.Round(basePeriod))
+	period = clampInt(period, cfg.Period.Min, cfg.Period.Max)
+
+	return &domain.DecisionResult{
+		Offers: []domain.OfferDecision{
+			{
+				Amount: math.Min(ctx.Available, cfg.Amount.Max),
+				Rate:   cfg.Rate.Min, // placeholder; pricing sets the actual rate
+				Period: period,
+			},
+		},
+		Reason: "period",
+	}
+}
+
+// regimeRatio returns the base period ratio for the given regime.
+func (p *PeriodStrategy) regimeRatio(regime domain.RegimeType) float64 {
+	switch regime {
+	case domain.RegimeContango:
+		return regimeContangoPeriodRatio
+	case domain.RegimeNeutral:
+		return regimeNeutralPeriodRatio
+	case domain.RegimeBackwardation:
+		return regimeBackwardationPeriodRatio
+	case domain.RegimeCrisis:
+		return 0.0
+	default:
+		return regimeNeutralPeriodRatio
+	}
+}
+
+// applyRateScaling adjusts period based on offered rate vs FRR.
+func (p *PeriodStrategy) applyRateScaling(period float64, ctx *domain.DecisionContext, snap *domain.MarketSnapshot) float64 {
+	if snap.FRR <= 0 {
+		return period
+	}
+	// Use the first offer's rate if available, otherwise config mid-rate
+	offeredRate := ctx.Config.Rate.Min
+	if len(ctx.ActiveOffers) > 0 {
+		offeredRate = ctx.ActiveOffers[0].Rate
+	}
+	if offeredRate <= 0 {
+		return period
+	}
+
+	rateRatio := math.Min(offeredRate/snap.FRR, rateRatioCap)
+	scaleFactor := 1.0 + (rateRatio-1.0)*rateScaleWeight
+	return period * scaleFactor
+}
+
+// applyVolatilityDiscount reduces period during high volatility.
+func (p *PeriodStrategy) applyVolatilityDiscount(period float64, volatility float64) float64 {
+	if volatility <= volThreshold {
+		return period
+	}
+	excess := math.Min(volatility-volThreshold, volMaxDiscount)
+	discount := 1.0 - excess*volMultiplier
+	return period * discount
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
