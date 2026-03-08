@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
@@ -270,6 +271,58 @@ func TestParseError_NonError(t *testing.T) {
 	err := parseError([]byte(`[["funding","USD",1000,0,1000]]`))
 	if err != nil {
 		t.Errorf("expected no error, got: %v", err)
+	}
+}
+
+func TestGetFundingEarnings_Success(t *testing.T) {
+	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
+		// Ledger response: [ID, CURRENCY, null, MTS, null, AMOUNT, BALANCE, null, DESCRIPTION]
+		w.Write([]byte(`[
+			[100001,"fUSD",null,1709856000000,null,0.52,10000.52,null,"Margin Funding Payment on wallet funding"],
+			[100002,"fUSD",null,1709769600000,null,0.48,10000.00,null,"Margin Funding Payment on wallet funding"]
+		]`))
+	})
+	defer ts.Close()
+
+	origDoAuth := overrideBaseURL(client, ts.URL)
+	defer origDoAuth()
+
+	start := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 3, 8, 0, 0, 0, 0, time.UTC)
+
+	earnings, err := client.GetFundingEarnings(context.Background(), "key", "secret", "USD", start, end)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(earnings) != 2 {
+		t.Fatalf("expected 2 earnings, got %d", len(earnings))
+	}
+	if earnings[0].Amount != 0.52 {
+		t.Errorf("expected amount 0.52, got %f", earnings[0].Amount)
+	}
+	if earnings[1].Amount != 0.48 {
+		t.Errorf("expected amount 0.48, got %f", earnings[1].Amount)
+	}
+}
+
+func TestGetFundingEarnings_Empty(t *testing.T) {
+	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[]`))
+	})
+	defer ts.Close()
+
+	origDoAuth := overrideBaseURL(client, ts.URL)
+	defer origDoAuth()
+
+	start := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2024, 3, 8, 0, 0, 0, 0, time.UTC)
+
+	earnings, err := client.GetFundingEarnings(context.Background(), "key", "secret", "USD", start, end)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(earnings) != 0 {
+		t.Errorf("expected 0 earnings, got %d", len(earnings))
 	}
 }
 

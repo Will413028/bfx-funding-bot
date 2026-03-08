@@ -342,3 +342,61 @@ func parseCreditItem(item []json.RawMessage, currency string) (*domain.FundingCr
 		OpenedAt:  time.UnixMilli(openingMs),
 	}, nil
 }
+
+func (c *Client) GetFundingEarnings(ctx context.Context, apiKey, apiSecret, currency string, start, end time.Time) ([]domain.FundingEarning, error) {
+	apiPath := fmt.Sprintf("v2/auth/r/ledgers/f%s/hist", currency)
+	body := map[string]any{
+		"category": 28,
+		"start":    start.UnixMilli(),
+		"end":      end.UnixMilli(),
+		"limit":    2500,
+	}
+
+	data, err := c.doAuth(ctx, apiPath, apiKey, apiSecret, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw [][]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return []domain.FundingEarning{}, nil
+	}
+
+	earnings := make([]domain.FundingEarning, 0, len(raw))
+	for _, item := range raw {
+		e, err := parseLedgerItem(item, currency)
+		if err != nil {
+			continue
+		}
+		earnings = append(earnings, *e)
+	}
+
+	return earnings, nil
+}
+
+func parseLedgerItem(item []json.RawMessage, currency string) (*domain.FundingEarning, error) {
+	// Response: [ID, CURRENCY, null, MTS, null, AMOUNT, BALANCE, null, DESCRIPTION]
+	if len(item) < 9 {
+		return nil, fmt.Errorf("ledger item too short")
+	}
+
+	var id int64
+	var amount, balance float64
+	var mts int64
+	var description string
+
+	json.Unmarshal(item[0], &id)
+	json.Unmarshal(item[3], &mts)
+	json.Unmarshal(item[5], &amount)
+	json.Unmarshal(item[6], &balance)
+	json.Unmarshal(item[8], &description)
+
+	return &domain.FundingEarning{
+		ID:          id,
+		Currency:    currency,
+		Amount:      amount,
+		Balance:     balance,
+		Description: description,
+		Timestamp:   time.UnixMilli(mts),
+	}, nil
+}
