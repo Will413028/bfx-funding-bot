@@ -399,6 +399,7 @@ type Executor interface {
 ```go
 // domain/snapshot.go
 type MarketSnapshot struct {
+    FRR          float64       // Flash Return Rate (daily) from ticker
     MDC          MDCResult
     Regime       RegimeType
     RegimeParams RegimeParams
