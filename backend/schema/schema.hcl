@@ -20,6 +20,11 @@ table "users" {
     null    = false
     default = "active"
   }
+  column "plan" {
+    type    = text
+    null    = false
+    default = "free"
+  }
   column "created_at" {
     type    = timestamptz
     null    = false
@@ -198,6 +203,69 @@ table "executions" {
   }
 
   foreign_key "fk_executions_user" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+}
+
+table "billing_records" {
+  schema = schema.public
+
+  column "id" {
+    type    = uuid
+    default = sql("gen_random_uuid()")
+  }
+  column "user_id" {
+    type = uuid
+    null = false
+  }
+  column "period_start" {
+    type = timestamptz
+    null = false
+  }
+  column "period_end" {
+    type = timestamptz
+    null = false
+  }
+  column "plan" {
+    type    = text
+    null    = false
+    default = "free"
+  }
+  column "amount" {
+    type = double_precision
+    null = false
+  }
+  column "currency" {
+    type    = text
+    null    = false
+    default = "USD"
+  }
+  column "status" {
+    type    = text
+    null    = false
+    default = "pending"
+  }
+  column "paid_at" {
+    type = timestamptz
+    null = true
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  index "idx_billing_user_period" {
+    columns = [column.user_id, column.period_start]
+  }
+
+  foreign_key "fk_billing_user" {
     columns     = [column.user_id]
     ref_columns = [table.users.column.id]
     on_delete   = CASCADE

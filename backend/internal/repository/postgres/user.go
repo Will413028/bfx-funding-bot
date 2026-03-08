@@ -66,6 +66,7 @@ func toDomainUser(row sqlc.User) *domain.User {
 		Email:        row.Email,
 		PasswordHash: row.PasswordHash,
 		Status:       domain.UserStatus(row.Status),
+		Plan:         row.Plan,
 		CreatedAt:    row.CreatedAt.Time,
 		UpdatedAt:    row.UpdatedAt.Time,
 	}

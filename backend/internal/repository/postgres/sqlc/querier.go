@@ -12,6 +12,7 @@ import (
 
 type Querier interface {
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
+	CreateBillingRecord(ctx context.Context, arg CreateBillingRecordParams) (BillingRecord, error)
 	CreateExecution(ctx context.Context, arg CreateExecutionParams) (Execution, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAPIKey(ctx context.Context, arg DeleteAPIKeyParams) (int64, error)
@@ -21,6 +22,7 @@ type Querier interface {
 	GetConfigByUserID(ctx context.Context, userID pgtype.UUID) (UserConfig, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
+	ListBillingByUser(ctx context.Context, arg ListBillingByUserParams) ([]BillingRecord, error)
 	ListExecutionsByUser(ctx context.Context, arg ListExecutionsByUserParams) ([]Execution, error)
 	ListVerifiedAPIKeys(ctx context.Context) ([]ApiKey, error)
 	UpdateExchangeStatus(ctx context.Context, arg UpdateExchangeStatusParams) error

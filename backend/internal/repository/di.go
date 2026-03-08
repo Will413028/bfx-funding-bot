@@ -24,4 +24,8 @@ var Module = fx.Module("repository",
 		func(r *postgres.ExecutionRepo) ExecutionRepository { return r },
 		fx.As(new(ExecutionRepository)),
 	)),
+	fx.Provide(fx.Annotate(
+		func(r *postgres.BillingRepo) BillingRepository { return r },
+		fx.As(new(BillingRepository)),
+	)),
 )
