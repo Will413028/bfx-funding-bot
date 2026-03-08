@@ -52,6 +52,7 @@
 | E3 | Batch Expiry | `lending/execution/batch.go` — 批次到期優化 (按日分組 + 加權平均 rate + 超限拆分) | |
 | E4 | Interest Reinvest | `lending/execution/interest.go` — 利息再投資 (閒置偵測 + 保守參數 + 門檻控制) | |
 | E5 | Worker Pool | `lending/worker/pool.go` — Per-User Worker 池 (Start/Stop/StopAll/Reload + auto-cleanup + thread-safe) | |
+| E6 | Worker Lifecycle | `lending/worker/worker.go` + `lifecycle.go` — 主循環 (snapshot-driven tick + panic recovery + config 熱載入 + 狀態機) | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -132,7 +133,7 @@ marketfeed/service.go (C1)
 | ~~E3~~ | ~~Batch Expiry~~ | ~~批次到期優化~~ | ~~`lending/execution/batch.go`~~ | ~~中~~ |
 | ~~E4~~ | ~~Interest Reinvest~~ | ~~利息即時再投資~~ | ~~`lending/execution/interest.go`~~ | ~~中~~ |
 | ~~E5~~ | ~~Worker Pool~~ | ~~Per-User Worker 池管理~~ | ~~`lending/worker/pool.go`~~ | ~~高~~ |
-| E6 | Worker Lifecycle | 單一 Worker 主循環 + 啟動/暫停/崩潰/重啟 | `lending/worker/worker.go` + `lifecycle.go` | 高 |
+| ~~E6~~ | ~~Worker Lifecycle~~ | ~~單一 Worker 主循環 + 啟動/暫停/崩潰/重啟~~ | ~~`lending/worker/worker.go` + `lifecycle.go`~~ | ~~高~~ |
 | E7 | API Quota Allocator | 全局 API 配額分配 | `lending/quota/allocator.go` | 中 |
 | E8 | Engine Orchestrator | 引擎頂層編排，整合所有子模組 | `lending/service.go`（取代 `engine/`） | 高 |
 
@@ -150,14 +151,14 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 43 項 |
+| 已完成 | 44 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
-| Phase E（執行層 + Worker） | 8 項 (E1-E5 ✅, E6-E8 待開發) |
+| Phase E（執行層 + Worker） | 8 項 (E1-E6 ✅, E7-E8 待開發) |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **6 項** |
+| **待開發合計** | **5 項** |
 
 ## 依賴關係
 
@@ -188,5 +189,5 @@ Phase A ✅ 全部完成
 5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
 7. ~~**D1-D13** — 策略決策模組~~ ✅
-8. **E6-E8** — Worker Lifecycle + Quota + Orchestrator（E1-E5 ✅，繼續 E6）← **下一步**
+8. **E7-E8** — Quota Allocator + Orchestrator（E1-E6 ✅，繼續 E7）← **下一步**
 9. **F1 → F2 → F3** — 前端 + 監控
