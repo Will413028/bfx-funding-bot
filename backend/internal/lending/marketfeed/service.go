@@ -10,6 +10,7 @@ import (
 
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/orderbook"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
@@ -46,9 +47,11 @@ type Service struct {
 	signalSources []SignalSource
 	flashCrash    *FlashCrashDetector
 
-	states  map[string]*symbolState // symbol → state
-	outCh   chan *domain.MarketSnapshot
-	stopFn  context.CancelFunc
+	states     map[string]*symbolState // symbol → state
+	hiddenEst  map[string]*orderbook.HiddenRatioEstimator
+	compDet    map[string]*orderbook.CompetitorDetector
+	outCh      chan *domain.MarketSnapshot
+	stopFn     context.CancelFunc
 }
 
 // NewService creates a new Market Feed Service.
@@ -70,10 +73,14 @@ func NewService(
 	}
 
 	states := make(map[string]*symbolState, len(cfg.Symbols))
+	hiddenEst := make(map[string]*orderbook.HiddenRatioEstimator, len(cfg.Symbols))
+	compDet := make(map[string]*orderbook.CompetitorDetector, len(cfg.Symbols))
 	for _, sym := range cfg.Symbols {
 		states[sym] = &symbolState{
 			book: make(map[string]domain.BookEntry),
 		}
+		hiddenEst[sym] = orderbook.NewHiddenRatioEstimator()
+		compDet[sym] = orderbook.NewCompetitorDetector()
 	}
 
 	return &Service{
@@ -83,6 +90,8 @@ func NewService(
 		signalSources: signalSources,
 		flashCrash:    NewFlashCrashDetector(flashCrashCfg),
 		states:        states,
+		hiddenEst:     hiddenEst,
+		compDet:       compDet,
 		outCh:         make(chan *domain.MarketSnapshot, snapshotChannelBuffer),
 	}
 }
@@ -312,10 +321,13 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 	st.recentTrades = trades
 	st.mu.Unlock()
 
+	// Dust filter
+	filtered := orderbook.FilterDust(bookEntries, nil)
+
 	raw := &domain.RawMarketData{
 		Symbol:       symbol,
 		Ticker:       &tickerCopy,
-		Book:         bookEntries,
+		Book:         filtered,
 		RecentTrades: trades,
 		Timestamp:    now,
 	}
@@ -334,7 +346,11 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 	regime := domain.RegimeNeutral
 	regimeParams := domain.RegimeParams{}
 
-	return assembleSnapshot(symbol, raw, signals, regime, regimeParams, flashFreeze, now)
+	// Order book analysis
+	hiddenRatio := s.hiddenEst[symbol].Estimate(filtered, trades, now)
+	competitorActivity := s.compDet[symbol].Analyze(filtered)
+
+	return assembleSnapshot(symbol, raw, signals, regime, regimeParams, flashFreeze, hiddenRatio, competitorActivity, now)
 }
 
 func bookEntryKey(rate float64, period int) string {

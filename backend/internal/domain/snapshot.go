@@ -59,12 +59,30 @@ type OrderBookSummary struct {
 	EntryCount int     // number of book entries
 }
 
+// WallType identifies the kind of detected wall.
+type WallType string
+
+const (
+	WallSingle      WallType = "single"
+	WallDistributed WallType = "distributed"
+)
+
 // WallPosition represents a detected large order wall in the book.
 type WallPosition struct {
 	Rate       float64
 	Amount     float64
-	Side       string // "offer" or "bid"
-	EntryCount int    // number of orders at this price level
+	Side       string   // "offer" or "bid"
+	EntryCount int      // number of orders at this price level
+	Type       WallType // "single" or "distributed"
+}
+
+// OrderBookAnalysis aggregates all order book analysis results.
+type OrderBookAnalysis struct {
+	Summary             OrderBookSummary
+	Walls               []WallPosition
+	HiddenRatio         float64
+	CompetitorActivity  float64 // 0-1 composite score
+	DustFilteredEntries int     // number of entries removed by dust filter
 }
 
 // MarketSnapshot represents the fully aggregated market state at a point in time.
@@ -77,8 +95,9 @@ type MarketSnapshot struct {
 	RegimeParams  RegimeParams
 	Signals       []SignalValue
 	OrderBook     OrderBookSummary
-	WallPositions []WallPosition
-	HiddenRatio   float64 // estimated hidden order ratio
-	FlashFreeze   bool    // true if flash crash detected, trading paused
+	WallPositions      []WallPosition
+	HiddenRatio        float64 // estimated hidden order ratio
+	CompetitorActivity float64 // 0-1 composite competitor activity score
+	FlashFreeze        bool    // true if flash crash detected, trading paused
 	Timestamp     time.Time
 }
