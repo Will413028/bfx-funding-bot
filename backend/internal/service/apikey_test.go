@@ -111,7 +111,7 @@ func TestAPIKey_Create_WithVerification_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	key, vr, err := svc.Create(context.Background(), "user-1", "bfx-key", "bfx-secret", "my key")
 	if err != nil {
@@ -132,7 +132,7 @@ func TestAPIKey_Create_WithVerification_InvalidKey(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`["error",10100,"apikey: invalid"]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	key, vr, err := svc.Create(context.Background(), "user-1", "bad-key", "bad-secret", "my key")
 	if err != nil {
@@ -153,7 +153,7 @@ func TestAPIKey_Create_Duplicate(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	_, _, _ = svc.Create(context.Background(), "user-1", "key1", "secret1", "")
 	_, _, err := svc.Create(context.Background(), "user-1", "key2", "secret2", "")
@@ -165,7 +165,7 @@ func TestAPIKey_Verify_Success(t *testing.T) {
 		w.Write([]byte(`[["funding","USD",500,0,400,null,null]]`))
 	})
 	repo := newMockAPIKeyRepo()
-	svc := NewAPIKeyService(repo, testAES(t), bfx)
+	svc := NewAPIKeyService(repo, newMockConfigRepo(), testAES(t), bfx, nil)
 
 	key, _, _ := svc.Create(context.Background(), "user-1", "bfx-key", "bfx-secret", "")
 
@@ -182,7 +182,7 @@ func TestAPIKey_Verify_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	key, _, _ := svc.Create(context.Background(), "user-1", "bfx-key", "bfx-secret", "")
 
@@ -194,7 +194,7 @@ func TestAPIKey_List_WithKey(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	_, _, _ = svc.Create(context.Background(), "user-1", "key1", "secret1", "label1")
 
@@ -212,7 +212,7 @@ func TestAPIKey_List_WithKey(t *testing.T) {
 
 func TestAPIKey_List_Empty(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	keys, err := svc.List(context.Background(), "user-1")
 	if err != nil {
@@ -228,7 +228,7 @@ func TestAPIKey_GetByID_Success(t *testing.T) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	repo := newMockAPIKeyRepo()
-	svc := NewAPIKeyService(repo, testAES(t), bfx)
+	svc := NewAPIKeyService(repo, newMockConfigRepo(), testAES(t), bfx, nil)
 
 	created, _, _ := svc.Create(context.Background(), "user-1", "key1", "secret1", "")
 
@@ -245,7 +245,7 @@ func TestAPIKey_GetByID_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	created, _, _ := svc.Create(context.Background(), "user-1", "key1", "secret1", "")
 
@@ -257,7 +257,7 @@ func TestAPIKey_Delete_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	created, _, _ := svc.Create(context.Background(), "user-1", "key1", "secret1", "")
 
@@ -276,7 +276,7 @@ func TestAPIKey_Delete_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
-	svc := NewAPIKeyService(newMockAPIKeyRepo(), testAES(t), bfx)
+	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
 	created, _, _ := svc.Create(context.Background(), "user-1", "key1", "secret1", "")
 

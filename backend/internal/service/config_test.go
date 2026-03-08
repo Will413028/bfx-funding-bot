@@ -73,7 +73,7 @@ func validConfig() domain.StrategyConfig {
 }
 
 func TestConfig_Save_Success(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	uc, err := svc.Save(context.Background(), "user-1", validConfig())
 	if err != nil {
@@ -88,7 +88,7 @@ func TestConfig_Save_Success(t *testing.T) {
 }
 
 func TestConfig_Save_ValidationError(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	bad := validConfig()
 	bad.Currency = ""
@@ -99,7 +99,7 @@ func TestConfig_Save_ValidationError(t *testing.T) {
 }
 
 func TestConfig_Save_Upsert(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	cfg1 := validConfig()
 	cfg1.Amount.Max = 500
@@ -117,7 +117,7 @@ func TestConfig_Save_Upsert(t *testing.T) {
 }
 
 func TestConfig_Get_Exists(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	_, _ = svc.Save(context.Background(), "user-1", validConfig())
 
@@ -131,14 +131,14 @@ func TestConfig_Get_Exists(t *testing.T) {
 }
 
 func TestConfig_Get_NotFound(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	_, err := svc.Get(context.Background(), "user-1")
 	assertAppErrorCode(t, err, "NOT_FOUND")
 }
 
 func TestConfig_Delete_Success(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	_, _ = svc.Save(context.Background(), "user-1", validConfig())
 	err := svc.Delete(context.Background(), "user-1")
@@ -151,7 +151,7 @@ func TestConfig_Delete_Success(t *testing.T) {
 }
 
 func TestConfig_Delete_NotFound(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo())
+	svc := NewConfigService(newMockConfigRepo(), nil)
 
 	err := svc.Delete(context.Background(), "user-1")
 	assertAppErrorCode(t, err, "NOT_FOUND")

@@ -18,14 +18,35 @@ type VerifyResult struct {
 	Error          string
 }
 
-type APIKeyService struct {
-	repo   repository.APIKeyRepository
-	cipher *crypto.AES
-	bfx    *bitfinex.Client
+// WorkerManager manages per-user Worker lifecycle.
+// Satisfied by *lending.Service via implicit interface (fx auto-inject).
+type WorkerManager interface {
+	StartWorker(userID string, cfg domain.StrategyConfig) error
+	StopWorker(userID string) error
 }
 
-func NewAPIKeyService(repo repository.APIKeyRepository, cipher *crypto.AES, bfx *bitfinex.Client) *APIKeyService {
-	return &APIKeyService{repo: repo, cipher: cipher, bfx: bfx}
+type APIKeyService struct {
+	repo       repository.APIKeyRepository
+	configRepo repository.ConfigRepository
+	cipher     *crypto.AES
+	bfx        *bitfinex.Client
+	workers    WorkerManager
+}
+
+func NewAPIKeyService(
+	repo repository.APIKeyRepository,
+	configRepo repository.ConfigRepository,
+	cipher *crypto.AES,
+	bfx *bitfinex.Client,
+	workers WorkerManager,
+) *APIKeyService {
+	return &APIKeyService{
+		repo:       repo,
+		configRepo: configRepo,
+		cipher:     cipher,
+		bfx:        bfx,
+		workers:    workers,
+	}
 }
 
 func (s *APIKeyService) Create(ctx context.Context, userID, apiKey, apiSecret, label string) (*domain.APIKey, *VerifyResult, error) {
@@ -44,6 +65,11 @@ func (s *APIKeyService) Create(ctx context.Context, userID, apiKey, apiSecret, l
 			return nil, nil, domain.ErrAPIKeyAlreadyExists()
 		}
 		return nil, nil, domain.ErrInternal("failed to create API key")
+	}
+
+	// Best-effort: start Worker if key is verified and user has a strategy config
+	if vr.Status == "verified" && s.workers != nil {
+		s.tryStartWorker(ctx, userID)
 	}
 
 	return key, vr, nil
@@ -117,5 +143,26 @@ func (s *APIKeyService) GetByID(ctx context.Context, userID, keyID string) (*dom
 }
 
 func (s *APIKeyService) Delete(ctx context.Context, userID, keyID string) error {
-	return s.repo.Delete(ctx, keyID, userID)
+	err := s.repo.Delete(ctx, keyID, userID)
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: stop Worker
+	if s.workers != nil {
+		_ = s.workers.StopWorker(userID)
+	}
+
+	return nil
+}
+
+// tryStartWorker looks up the user's strategy config and starts a Worker.
+// Errors are silently ignored (best-effort).
+func (s *APIKeyService) tryStartWorker(ctx context.Context, userID string) {
+	uc, err := s.configRepo.GetByUserID(ctx, userID)
+	if err != nil || uc == nil {
+		return
+	}
+
+	_ = s.workers.StartWorker(userID, uc.Config)
 }

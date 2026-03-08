@@ -62,7 +62,7 @@ func setupConfigRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 
 	repo := &testConfigRepo{configs: make(map[string]*domain.UserConfig)}
-	svc := service.NewConfigService(repo)
+	svc := service.NewConfigService(repo, nil)
 	h := NewConfigHandler(svc)
 
 	r := gin.New()
