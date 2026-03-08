@@ -12,3 +12,8 @@ WHERE id = $1;
 SELECT id, email, password_hash, status, created_at, updated_at
 FROM users
 WHERE email = $1;
+
+-- name: UpdatePassword :exec
+UPDATE users
+SET password_hash = $2, updated_at = now()
+WHERE id = $1;

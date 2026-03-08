@@ -65,6 +65,15 @@ func (m *mockUserRepo) GetByEmail(_ context.Context, email string) (*domain.User
 	return u, nil
 }
 
+func (m *mockUserRepo) UpdatePassword(_ context.Context, id, passwordHash string) error {
+	u, ok := m.users[id]
+	if !ok {
+		return pgx.ErrNoRows
+	}
+	u.PasswordHash = passwordHash
+	return nil
+}
+
 func testJWTManager(t *testing.T) *auth.JWTManager {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -159,6 +168,62 @@ func TestLogin_SuspendedUser(t *testing.T) {
 
 	_, _, err := svc.Login(context.Background(), "suspended@example.com", "password123")
 	assertAppErrorCode(t, err, "USER_SUSPENDED")
+}
+
+func TestGetProfile_Success(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo, testJWTManager(t))
+
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	user, err := svc.GetProfile(context.Background(), "test-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user.Email != "test@example.com" {
+		t.Errorf("expected email test@example.com, got %s", user.Email)
+	}
+	if user.PasswordHash != "" {
+		t.Error("expected password_hash to be empty in profile response")
+	}
+}
+
+func TestChangePassword_Success(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo, testJWTManager(t))
+
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	err := svc.ChangePassword(context.Background(), "test-uuid", "password123", "newpassword456")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify new password works
+	newUser := repo.users["test-uuid"]
+	if bcrypt.CompareHashAndPassword([]byte(newUser.PasswordHash), []byte("newpassword456")) != nil {
+		t.Error("new password hash does not match")
+	}
+}
+
+func TestChangePassword_WrongCurrentPassword(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo, testJWTManager(t))
+
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	err := svc.ChangePassword(context.Background(), "test-uuid", "wrongpassword", "newpassword456")
+	assertAppErrorCode(t, err, "INVALID_CREDENTIALS")
+}
+
+func TestChangePassword_NewPasswordTooShort(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo, testJWTManager(t))
+
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	err := svc.ChangePassword(context.Background(), "test-uuid", "password123", "short")
+	assertAppErrorCode(t, err, "PASSWORD_TOO_SHORT")
 }
 
 func assertAppErrorCode(t *testing.T, err error, code string) {

@@ -75,3 +75,38 @@ func (s *UserService) Login(ctx context.Context, email, password string) (string
 
 	return token, expiresAt, nil
 }
+
+func (s *UserService) GetProfile(ctx context.Context, userID string) (*domain.User, error) {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, domain.ErrInternal("failed to get user profile")
+	}
+	user.PasswordHash = ""
+	return user, nil
+}
+
+func (s *UserService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	if len(newPassword) < 8 {
+		return domain.ErrPasswordTooShort()
+	}
+
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return domain.ErrInternal("failed to get user")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return domain.ErrInvalidCredentials()
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
+	if err != nil {
+		return domain.ErrInternal("failed to hash password")
+	}
+
+	if err := s.repo.UpdatePassword(ctx, userID, string(hash)); err != nil {
+		return domain.ErrInternal("failed to update password")
+	}
+
+	return nil
+}
