@@ -90,6 +90,7 @@ type OrderBookAnalysis struct {
 // strategy decision modules (Phase D).
 type MarketSnapshot struct {
 	Symbol        string
+	FRR           float64 // Flash Return Rate (daily) from ticker
 	MDC           MDCResult
 	Regime        RegimeType
 	RegimeParams  RegimeParams

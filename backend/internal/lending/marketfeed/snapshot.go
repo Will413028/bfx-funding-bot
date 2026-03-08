@@ -22,8 +22,14 @@ func assembleSnapshot(
 	summary := orderbook.ComputeSummary(raw.Book)
 	walls := orderbook.DetectWalls(raw.Book, summary.Spread, nil)
 
+	var frr float64
+	if raw.Ticker != nil {
+		frr = raw.Ticker.FRR
+	}
+
 	return &domain.MarketSnapshot{
 		Symbol:             symbol,
+		FRR:                frr,
 		MDC:                mdc,
 		Regime:             regime,
 		RegimeParams:       regimeParams,

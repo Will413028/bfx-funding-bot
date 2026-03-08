@@ -1,0 +1,27 @@
+package domain
+
+// DecisionContext aggregates all inputs needed for strategy decision-making.
+// Assembled by the worker before calling strategy modules.
+type DecisionContext struct {
+	Snapshot      *MarketSnapshot
+	Config        *StrategyConfig
+	ActiveOffers  []FundingOffer
+	ActiveCredits []FundingCredit
+	Available     float64 // available balance in funding wallet
+	Currency      string  // e.g. "fUSD"
+}
+
+// DecisionResult represents the output of strategy decision-making.
+type DecisionResult struct {
+	Offers       []OfferDecision // recommended offers to place
+	Cancels      []int64         // offer IDs to cancel
+	RenewCredits []int64         // credit IDs to renew
+	Reason       string          // human-readable decision reason
+}
+
+// OfferDecision represents a single recommended offer.
+type OfferDecision struct {
+	Amount float64
+	Rate   float64
+	Period int
+}
