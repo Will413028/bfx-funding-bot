@@ -9,6 +9,15 @@ Bitfinex 自動放貸 SaaS 平台。
 - `openspec/` — OpenSpec 變更管理
 - `backend_architecture.md` — **架構設計 source of truth**（功能規劃、分層架構、DB schema、API endpoints）
 
+## 部署架構
+
+| 服務 | 平台 |
+|------|------|
+| Frontend | Vercel |
+| Backend | Koyeb (Docker) |
+| Database | Neon (Serverless PostgreSQL) |
+| Cache | Upstash (Serverless Redis) |
+
 ## 指令執行目錄
 
 不同工具必須在正確的目錄下執行：
