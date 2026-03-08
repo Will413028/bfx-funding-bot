@@ -138,3 +138,68 @@ table "user_configs" {
     on_delete   = CASCADE
   }
 }
+
+table "executions" {
+  schema = schema.public
+
+  column "id" {
+    type    = uuid
+    default = sql("gen_random_uuid()")
+  }
+  column "user_id" {
+    type = uuid
+    null = false
+  }
+  column "action" {
+    type = text
+    null = false
+  }
+  column "currency" {
+    type = text
+    null = false
+  }
+  column "amount" {
+    type = double_precision
+    null = false
+  }
+  column "rate" {
+    type = double_precision
+    null = false
+  }
+  column "period" {
+    type = integer
+    null = false
+  }
+  column "offer_id" {
+    type = bigint
+    null = true
+  }
+  column "status" {
+    type    = text
+    null    = false
+    default = "success"
+  }
+  column "error_message" {
+    type = text
+    null = true
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  index "idx_executions_user_created" {
+    columns = [column.user_id, column.created_at]
+  }
+
+  foreign_key "fk_executions_user" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+}

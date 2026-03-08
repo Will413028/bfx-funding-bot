@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
@@ -26,4 +27,9 @@ type ConfigRepository interface {
 	Upsert(ctx context.Context, userID string, configJSON []byte) (*domain.UserConfig, error)
 	GetByUserID(ctx context.Context, userID string) (*domain.UserConfig, error)
 	DeleteByUserID(ctx context.Context, userID string) error
+}
+
+type ExecutionRepository interface {
+	Create(ctx context.Context, record *domain.ExecutionRecord) (*domain.ExecutionRecord, error)
+	ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error)
 }

@@ -19,6 +19,20 @@ type ApiKey struct {
 	ExchangeStatus string
 }
 
+type Execution struct {
+	ID           pgtype.UUID
+	UserID       pgtype.UUID
+	Action       string
+	Currency     string
+	Amount       float64
+	Rate         float64
+	Period       int32
+	OfferID      pgtype.Int8
+	Status       string
+	ErrorMessage pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+}
+
 type User struct {
 	ID           pgtype.UUID
 	Email        string

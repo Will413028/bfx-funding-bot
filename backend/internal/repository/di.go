@@ -20,4 +20,8 @@ var Module = fx.Module("repository",
 		func(r *postgres.ConfigRepo) ConfigRepository { return r },
 		fx.As(new(ConfigRepository)),
 	)),
+	fx.Provide(fx.Annotate(
+		func(r *postgres.ExecutionRepo) ExecutionRepository { return r },
+		fx.As(new(ExecutionRepository)),
+	)),
 )
