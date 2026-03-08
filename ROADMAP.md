@@ -54,6 +54,7 @@
 | E5 | Worker Pool | `lending/worker/pool.go` — Per-User Worker 池 (Start/Stop/StopAll/Reload + auto-cleanup + thread-safe) | |
 | E6 | Worker Lifecycle | `lending/worker/worker.go` + `lifecycle.go` — 主循環 (snapshot-driven tick + panic recovery + config 熱載入 + 狀態機) | |
 | E7 | API Quota Allocator | `lending/quota/allocator.go` — 雙層配額 (全局 + per-user) + 固定 window refill + thread-safe | |
+| E8 | Engine Orchestrator | `lending/service.go` — 引擎頂層編排 (worker.Pool + quota.Allocator + snapshot 廣播 + plan-based quota) | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -136,7 +137,7 @@ marketfeed/service.go (C1)
 | ~~E5~~ | ~~Worker Pool~~ | ~~Per-User Worker 池管理~~ | ~~`lending/worker/pool.go`~~ | ~~高~~ |
 | ~~E6~~ | ~~Worker Lifecycle~~ | ~~單一 Worker 主循環 + 啟動/暫停/崩潰/重啟~~ | ~~`lending/worker/worker.go` + `lifecycle.go`~~ | ~~高~~ |
 | ~~E7~~ | ~~API Quota Allocator~~ | ~~全局 API 配額分配~~ | ~~`lending/quota/allocator.go`~~ | ~~中~~ |
-| E8 | Engine Orchestrator | 引擎頂層編排，整合所有子模組 | `lending/service.go`（取代 `engine/`） | 高 |
+| ~~E8~~ | ~~Engine Orchestrator~~ | ~~引擎頂層編排，整合所有子模組~~ | ~~`lending/service.go`（取代 `engine/`）~~ | ~~高~~ |
 
 ### Phase F — 前端 & 運維
 
@@ -152,14 +153,14 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 45 項 |
+| 已完成 | 46 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
-| Phase E（執行層 + Worker） | 8 項 (E1-E7 ✅, E8 待開發) |
+| ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ 全部完成 |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **4 項** |
+| **待開發合計** | **3 項** |
 
 ## 依賴關係
 
@@ -190,5 +191,5 @@ Phase A ✅ 全部完成
 5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
 7. ~~**D1-D13** — 策略決策模組~~ ✅
-8. **E8** — Engine Orchestrator（E1-E7 ✅，繼續 E8）← **下一步**
-9. **F1 → F2 → F3** — 前端 + 監控
+8. ~~**E8** — Engine Orchestrator~~ ✅
+9. **F1 → F2 → F3** — 前端 + 監控 ← **下一步**
