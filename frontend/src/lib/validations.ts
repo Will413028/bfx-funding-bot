@@ -13,3 +13,32 @@ export const registerSchema = z.object({
 });
 
 export type RegisterFormInput = z.infer<typeof registerSchema>;
+
+export const createApiKeySchema = z.object({
+  label: z.string().min(1, "required").max(50, "maxLength"),
+  apiKey: z.string().min(1, "required"),
+  apiSecret: z.string().min(1, "required"),
+});
+
+export type CreateApiKeyInput = z.infer<typeof createApiKeySchema>;
+
+const rangeSchema = (label: string) =>
+  z
+    .object({
+      min: z.number({ error: "required" }),
+      max: z.number({ error: "required" }),
+    })
+    .refine((d) => d.min <= d.max, {
+      message: `${label} min must be ≤ max`,
+      path: ["min"],
+    });
+
+export const strategyConfigSchema = z.object({
+  currency: z.string().min(1, "required"),
+  amount: rangeSchema("Amount"),
+  rate: rangeSchema("Rate"),
+  period: rangeSchema("Period"),
+  autoRenew: z.boolean(),
+});
+
+export type StrategyConfigInput = z.infer<typeof strategyConfigSchema>;
