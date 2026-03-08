@@ -40,3 +40,54 @@ table "users" {
     unique  = true
   }
 }
+
+table "api_keys" {
+  schema = schema.public
+
+  column "id" {
+    type    = uuid
+    default = sql("gen_random_uuid()")
+  }
+  column "user_id" {
+    type = uuid
+    null = false
+  }
+  column "label" {
+    type    = text
+    null    = false
+    default = ""
+  }
+  column "api_key" {
+    type = text
+    null = false
+  }
+  column "api_secret" {
+    type = bytea
+    null = false
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+  column "updated_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  index "idx_api_keys_user_id" {
+    columns = [column.user_id]
+    unique  = true
+  }
+
+  foreign_key "fk_api_keys_user" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+}

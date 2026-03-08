@@ -12,4 +12,8 @@ var Module = fx.Module("repository",
 		func(r *postgres.UserRepo) UserRepository { return r },
 		fx.As(new(UserRepository)),
 	)),
+	fx.Provide(fx.Annotate(
+		func(r *postgres.APIKeyRepo) APIKeyRepository { return r },
+		fx.As(new(APIKeyRepository)),
+	)),
 )

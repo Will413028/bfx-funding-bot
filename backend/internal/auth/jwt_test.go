@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"testing"
@@ -51,8 +52,11 @@ func TestValidateToken_Tampered(t *testing.T) {
 
 	token, _, _ := mgr.GenerateToken("user-123", "test@example.com")
 
-	// Tamper with token by changing last character
-	tampered := token[:len(token)-1] + "X"
+	// Tamper with signature by flipping a byte in the middle of the signature
+	parts := bytes.Split([]byte(token), []byte("."))
+	sig := parts[2]
+	sig[len(sig)/2] ^= 0xff
+	tampered := string(parts[0]) + "." + string(parts[1]) + "." + string(sig)
 	_, err := mgr.ValidateToken(tampered)
 	if err == nil {
 		t.Fatal("expected error for tampered token")

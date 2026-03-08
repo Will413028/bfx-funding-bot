@@ -12,7 +12,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 )
 
-func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler) *gin.Engine {
+func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler, apiKeyH *APIKeyHandler) *gin.Engine {
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -53,7 +53,13 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 		}
 
 		// Protected routes (JWT required)
-		_ = v1.Group("", middleware.JWTAuth(jwtMgr))
+		protected := v1.Group("", middleware.JWTAuth(jwtMgr))
+		{
+			protected.POST("/apikeys", apiKeyH.Create)
+			protected.GET("/apikeys", apiKeyH.List)
+			protected.GET("/apikeys/:id", apiKeyH.GetByID)
+			protected.DELETE("/apikeys/:id", apiKeyH.Delete)
+		}
 	}
 
 	return r

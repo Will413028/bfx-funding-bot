@@ -11,3 +11,10 @@ type UserRepository interface {
 	GetByID(ctx context.Context, id string) (*domain.User, error)
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
 }
+
+type APIKeyRepository interface {
+	Create(ctx context.Context, userID, label, apiKey string, encryptedSecret []byte) (*domain.APIKey, error)
+	GetByID(ctx context.Context, id string) (*domain.APIKey, []byte, error)
+	GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error)
+	Delete(ctx context.Context, id, userID string) error
+}
