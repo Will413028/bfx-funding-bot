@@ -26,3 +26,11 @@ type User struct {
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
 }
+
+type UserConfig struct {
+	ID        pgtype.UUID
+	UserID    pgtype.UUID
+	Config    []byte
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}

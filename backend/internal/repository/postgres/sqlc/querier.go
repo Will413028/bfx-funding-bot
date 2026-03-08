@@ -14,10 +14,13 @@ type Querier interface {
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteAPIKey(ctx context.Context, arg DeleteAPIKeyParams) (int64, error)
+	DeleteConfigByUserID(ctx context.Context, userID pgtype.UUID) (int64, error)
 	GetAPIKeyByID(ctx context.Context, id pgtype.UUID) (ApiKey, error)
 	GetAPIKeyByUserID(ctx context.Context, userID pgtype.UUID) (ApiKey, error)
+	GetConfigByUserID(ctx context.Context, userID pgtype.UUID) (UserConfig, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
+	UpsertConfig(ctx context.Context, arg UpsertConfigParams) (UserConfig, error)
 }
 
 var _ Querier = (*Queries)(nil)
