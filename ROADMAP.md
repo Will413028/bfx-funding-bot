@@ -48,6 +48,7 @@
 | D12 | Event Calendar | `lending/strategy/calendar.go` — 月末/季度交割事件溢價 + period 縮短 | `14136bf` |
 | D13 | Noise | `lending/strategy/noise.go` — 隨機擾動 (rate ±1%, amount ±2%) + 心理價位避讓 | `2dffc8e` |
 | E1 | Offer Execution | `lending/execution/offer.go` — 掛單/撤單執行 + ExecutionRecord 記錄 + 部分失敗容忍 | |
+| E2 | Credit Management | `lending/execution/credit.go` — 債權管理 + Auto-Renew (到期偵測 + 續約 + RenewSummary) | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -124,7 +125,7 @@ marketfeed/service.go (C1)
 
 | # | 功能 | 說明 | 架構文件對應 | 複雜度 |
 |---|------|------|-------------|--------|
-| E2 | Credit Management | 債權管理 + Auto-Renew | `lending/execution/credit.go` | 中 |
+| ~~E2~~ | ~~Credit Management~~ | ~~債權管理 + Auto-Renew~~ | ~~`lending/execution/credit.go`~~ | ~~中~~ |
 | E3 | Batch Expiry | 批次到期優化 | `lending/execution/batch.go` | 中 |
 | E4 | Interest Reinvest | 利息即時再投資 | `lending/execution/interest.go` | 中 |
 | E5 | Worker Pool | Per-User Worker 池管理 | `lending/worker/pool.go` | 高 |
@@ -146,14 +147,14 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 39 項 |
+| 已完成 | 40 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
-| Phase E（執行層 + Worker） | 8 項 |
+| Phase E（執行層 + Worker） | 7 項 (E1-E2 ✅, E3-E8 待開發) |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **10 項** |
+| **待開發合計** | **9 項** |
 
 ## 依賴關係
 
@@ -184,5 +185,5 @@ Phase A ✅ 全部完成
 5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
 7. ~~**D1-D13** — 策略決策模組~~ ✅
-8. **E2-E8** — 執行層 + Worker Pool（E1 ✅，繼續 E2）← **下一步**
+8. **E3-E8** — 執行層 + Worker Pool（E1-E2 ✅，繼續 E3）← **下一步**
 9. **F1 → F2 → F3** — 前端 + 監控
