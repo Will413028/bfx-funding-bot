@@ -2,7 +2,6 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,61 +19,16 @@ func NewBillingHandler(svc *service.BillingService) *BillingHandler {
 	return &BillingHandler{svc: svc}
 }
 
+// Get handles cursor-based pagination for billing records.
+// First page: GET /billing (or GET /billing?limit=20)
+// Next pages: GET /billing?after=<cursor>&limit=20
 func (h *BillingHandler) Get(c *gin.Context) {
 	userID := c.GetString(middleware.ContextUserID)
-
-	// Cursor-based pagination mode
-	if after := c.Query("after"); after != "" {
-		h.listCursor(c, userID, after)
-		return
-	}
-
-	// Legacy mode (since + limit)
-	var since time.Time
-	if s := c.Query("since"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "INVALID_PARAM", "message": "since must be RFC3339 format"},
-			})
-			return
-		}
-		since = t
-	}
-
-	limit := 12
-	if l := c.Query("limit"); l != "" {
-		n, err := strconv.Atoi(l)
-		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "INVALID_PARAM", "message": "limit must be a positive integer"},
-			})
-			return
-		}
-		limit = n
-	}
-
-	summary, err := h.svc.GetBilling(c.Request.Context(), userID, since, limit)
-	if err != nil {
-		handleError(c, err)
-		return
-	}
-
-	c.JSON(http.StatusOK, summary)
-}
-
-// ListPaginated handles cursor-based pagination for billing records.
-func (h *BillingHandler) ListPaginated(c *gin.Context) {
-	userID := c.GetString(middleware.ContextUserID)
-	h.listCursor(c, userID, c.Query("after"))
-}
-
-func (h *BillingHandler) listCursor(c *gin.Context, userID, after string) {
 	limit := ClampLimit(parseIntQuery(c, "limit"), 20, 100)
 
 	var cursorTime *time.Time
 	var cursorID string
-	if after != "" {
+	if after := c.Query("after"); after != "" {
 		cursor, err := DecodeCursor(after)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{

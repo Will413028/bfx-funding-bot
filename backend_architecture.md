@@ -16,7 +16,7 @@
 | 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
 | 資料庫託管 | Neon | Serverless PostgreSQL，自動擴縮 |
 | 快取託管 | Upstash | Serverless Redis，按用量計費 |
-| 監控 | Prometheus + Grafana | 指標收集 + 儀表板 |
+| 監控 | Prometheus + Grafana（規劃中） | 指標收集 + 儀表板（Phase F） |
 | DB Migration | Atlas | 宣告式 Schema + 版本化 Migration |
 | DB Query | sqlc | SQL → Type-Safe Go Code 生成 |
 | DI 框架 | go.uber.org/fx | 建構式依賴注入 + 生命週期管理 |
@@ -69,8 +69,8 @@ backend/
 │   │   ├── config.go                    # 策略參數 CRUD
 │   │   ├── dashboard.go                 # Dashboard 摘要 (REST，未來改 WebSocket)
 │   │   ├── earnings.go                  # 收益統計
-│   │   ├── execution.go                 # 放貸執行紀錄查詢
-│   │   ├── billing.go                   # 帳單查詢 + 訂閱方案
+│   │   ├── execution.go                 # 放貸執行紀錄查詢（cursor-based pagination）
+│   │   ├── billing.go                   # 帳單查詢（cursor-based pagination）+ 訂閱方案
 │   │   ├── health.go                    # 健康檢查 (Postgres + Redis + Engine Status)
 │   │   └── pagination.go               # 游標分頁 (cursor-based pagination)
 │   │
@@ -162,7 +162,8 @@ backend/
 │   │   ├── config.go                    # StrategyConfig（附錄 B 全參數型別定義）
 │   │   ├── snapshot.go                  # MarketSnapshot, RawMarketData, OrderBookAnalysis
 │   │   ├── signal.go                    # SignalValue, MDCResult
-│   │   └── regime.go                    # RegimeType, RegimeParams
+│   │   ├── regime.go                    # RegimeType, RegimeParams
+│   │   └── engine.go                    # EngineStatus（引擎運行狀態）
 │   │
 │   │   # ── Infrastructure 層 ──
 │   │
@@ -248,7 +249,8 @@ backend/
 **職責**：HTTP 請求的進出口。只做參數解析、驗證、回應格式化。不包含業務邏輯。
 
 **規範**：
-- handler 只呼叫 `service/` 或讀取 `lending/` 的狀態，不直接操作 `repository/`。
+- handler 只呼叫 `service/`，不直接操作 `repository/` 或 import `lending/`。
+- 引擎狀態透過 `EngineHealthProvider` interface + `domain.EngineStatus` 讀取，handler 不感知 `lending/` 的存在。
 - 每個 handler 方法不超過 30 行，邏輯複雜時委派給 service。
 - 錯誤回應使用統一格式：`{ "error": { "code": "...", "message": "..." } }`。
 
@@ -257,7 +259,8 @@ backend/
 handler/auth.go      → service/user.go
 handler/apikey.go    → service/apikey.go
 handler/config.go    → service/config.go → 通知 lending/worker 熱載入
-handler/dashboard.go → 讀取 lending/ 的即時狀態（透過 channel / Redis）
+handler/dashboard.go → service/dashboard.go（透過 Redis 讀取 MarketSnapshot）
+handler/health.go    → infra (pgxpool, redis) + EngineHealthProvider (domain.EngineStatus)
 ```
 
 ### 4.2 Application 層 — CRUD 業務 (`service/`)
@@ -297,7 +300,7 @@ package service
 
 // ConfigReloader 通知 Worker 熱載入新參數（由 lending.Service 隱式實作）
 type ConfigReloader interface {
-    ReloadConfig(userID string, cfg domain.StrategyConfig) error
+    ReloadConfig(ctx context.Context, userID string, cfg domain.StrategyConfig) error
 }
 
 type ConfigService struct {
@@ -353,7 +356,7 @@ func (s *Service) StopWorker(ctx context.Context, userID string) error { ... }
 func (s *Service) ReloadConfig(ctx context.Context, userID string, cfg domain.StrategyConfig) error { ... }
 
 // Status 回傳引擎運行狀態（用於健康檢查）
-func (s *Service) Status() EngineStatus { ... }
+func (s *Service) Status() domain.EngineStatus { ... }
 
 // BroadcastSnapshot 廣播 MarketSnapshot 到所有 Worker（由 main.go 的 snapshot 轉發 goroutine 呼叫）
 func (s *Service) BroadcastSnapshot(snapshot *domain.MarketSnapshot) { ... }
@@ -526,7 +529,7 @@ func NewPostgresPool(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*p
 **規範**：
 - 每個檔案只做一件事：建立連線 + 註冊 `fx.Lifecycle` 的關閉 hook。
 - 暴露的是**具體型別**（`*pgxpool.Pool`、`*redis.Client`），不需要額外包 interface — 這些都是第三方庫的標準型別，DAO 層直接依賴即可。
-- `handler/health.go` 直接注入 `*pgxpool.Pool`、`*redis.Client`、`EngineHealthProvider` 做健康檢查，回應包含 Postgres、Redis 和 Lending Engine 狀態。
+- `handler/health.go` 直接注入 `*pgxpool.Pool`、`*redis.Client`、`EngineHealthProvider` 做健康檢查，回應包含 Postgres、Redis 和 Lending Engine 狀態。`EngineHealthProvider` 回傳 `domain.EngineStatus`，handler 不 import `lending/`。
 - `bitfinex/`、`notification/`、`crypto/` **不放進 `infra/`** — 它們不是純連線初始化，各自有業務邏輯，作為獨立 package 更清晰。
 
 #### `repository/`
@@ -585,11 +588,25 @@ type ConfigRepository interface {
 type ExecutionRepository interface {
     Create(ctx context.Context, record *domain.ExecutionRecord) (*domain.ExecutionRecord, error)
     ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error)
+    ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.ExecutionRecord, error)
 }
 
 type BillingRepository interface {
     Create(ctx context.Context, record *domain.BillingRecord) (*domain.BillingRecord, error)
     ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error)
+    ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error)
+}
+
+type SnapshotCache interface {
+    Set(ctx context.Context, symbol string, snapshot *domain.MarketSnapshot, ttl time.Duration) error
+    Get(ctx context.Context, symbol string) (*domain.MarketSnapshot, error)
+    Delete(ctx context.Context, symbol string) error
+}
+
+type SnapshotPubSub interface {
+    Publish(ctx context.Context, snapshot *domain.MarketSnapshot) error
+    Subscribe(ctx context.Context) (<-chan *domain.MarketSnapshot, error)
+    Close() error
 }
 ```
 
@@ -657,7 +674,7 @@ handler/router.go → middleware/jwt.go → handler/config.go
 service/config.go
     │  1. 呼叫 domain.StrategyConfig.Validate() 驗證參數合理性
     │  2. 呼叫 repository.ConfigRepository.Upsert() 持久化
-    │  3. 呼叫 ConfigReloader.ReloadConfig(userID, newConfig) 通知 Worker
+    │  3. 呼叫 ConfigReloader.ReloadConfig(ctx, userID, newConfig) 通知 Worker
     │     （ConfigReloader 由 fx 注入，實際為 *lending.Service）
     ▼
 lending/worker/worker.go
@@ -736,6 +753,8 @@ func main() {
         // ── Transport 層 ──
         fx.Provide(handler.NewAuthHandler),
         // ... (all handlers)
+        fx.Provide(func(svc *lending.Service) handler.EngineHealthProvider { return svc }),
+        fx.Provide(handler.NewHealthHandler),
         fx.Provide(handler.NewRouter),
 
         // ── 生命週期管理 ──
@@ -767,7 +786,7 @@ func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.
                                  │
                      ┌───────────┼───────────┐
                      ▼           ▼           ▼
-                handler/      service/    lending/
+                handler/ ───→ service/    lending/
                      │           │           │
                      │           │     ┌─────┼──────────────────────┐
                      │           │     │     │                      │
@@ -800,6 +819,7 @@ func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.
 - `repository/` → `service/` 或 `lending/` ❌（上層依賴下層，不可反向）
 - `signal/` → `bitfinex/` ❌（信號計算是純邏輯，不做 I/O）
 - `strategy/` → `bitfinex/` ❌（同上）
+- `handler/` → `lending/` ❌（`handler/` 透過 `EngineHealthProvider` interface 取得引擎狀態，fx 自動注入 `*lending.Service`，無需 import）
 - `service/` → `lending/` ❌（`service/` 定義自己的小 interface 如 `WorkerManager`，fx 自動注入 `*lending.Service`，無需 import）
 
 ---

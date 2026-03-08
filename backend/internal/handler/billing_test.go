@@ -25,10 +25,6 @@ func (m *testBillingRepo) Create(_ context.Context, record *domain.BillingRecord
 	return record, nil
 }
 
-func (m *testBillingRepo) ListByUserPaginated(_ context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
-	return m.ListByUser(context.Background(), userID, time.Time{}, limit)
-}
-
 func (m *testBillingRepo) ListByUser(_ context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error) {
 	var result []domain.BillingRecord
 	for _, r := range m.records {
@@ -37,6 +33,25 @@ func (m *testBillingRepo) ListByUser(_ context.Context, userID string, since tim
 			if len(result) >= limit {
 				break
 			}
+		}
+	}
+	return result, nil
+}
+
+func (m *testBillingRepo) ListByUserPaginated(_ context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
+	var result []domain.BillingRecord
+	for _, r := range m.records {
+		if r.UserID != userID {
+			continue
+		}
+		if cursorTime != nil {
+			if r.CreatedAt.After(*cursorTime) || (r.CreatedAt.Equal(*cursorTime) && r.ID >= cursorID) {
+				continue
+			}
+		}
+		result = append(result, r)
+		if len(result) >= limit {
+			break
 		}
 	}
 	return result, nil
@@ -84,7 +99,7 @@ func TestBillingHandler_Get(t *testing.T) {
 	now := time.Now()
 	billingRepo := &testBillingRepo{
 		records: []domain.BillingRecord{
-			{ID: "1", UserID: "user-123", Plan: domain.PlanStarter, Amount: 9.99, Status: domain.BillingStatusPaid, PeriodStart: now.AddDate(0, -1, 0)},
+			{ID: "1", UserID: "user-123", Plan: domain.PlanStarter, Amount: 9.99, Status: domain.BillingStatusPaid, PeriodStart: now.AddDate(0, -1, 0), CreatedAt: now},
 		},
 	}
 	userRepo := &testBillingUserRepo{users: map[string]*domain.User{
@@ -100,13 +115,16 @@ func TestBillingHandler_Get(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var body service.BillingSummary
+	var body struct {
+		Records    []domain.BillingRecord `json:"records"`
+		Pagination PaginationResponse     `json:"pagination"`
+	}
 	json.NewDecoder(w.Body).Decode(&body)
 	if len(body.Records) != 1 {
 		t.Errorf("expected 1 record, got %d", len(body.Records))
 	}
-	if body.TotalPaid != 9.99 {
-		t.Errorf("expected total_paid=9.99, got %f", body.TotalPaid)
+	if body.Pagination.HasMore {
+		t.Error("expected has_more=false for single record")
 	}
 }
 
@@ -135,13 +153,13 @@ func TestBillingHandler_GetPlan(t *testing.T) {
 	}
 }
 
-func TestBillingHandler_Get_InvalidSince(t *testing.T) {
+func TestBillingHandler_Get_InvalidCursor(t *testing.T) {
 	billingRepo := &testBillingRepo{}
 	userRepo := &testBillingUserRepo{users: map[string]*domain.User{}}
 	r := setupBillingRouter(billingRepo, userRepo)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/billing?since=bad", nil)
+	req, _ := http.NewRequest("GET", "/billing?after=!!!bad!!!", nil)
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {

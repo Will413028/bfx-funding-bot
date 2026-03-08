@@ -56,6 +56,7 @@
 | E7 | API Quota Allocator | `lending/quota/allocator.go` — 雙層配額 (全局 + per-user) + 固定 window refill + thread-safe | |
 | E8 | Engine Orchestrator | `lending/service.go` — 引擎頂層編排 (worker.Pool + quota.Allocator + snapshot 廣播 + plan-based quota) | |
 | INT | Engine Integration | `lending/factory.go` + `fetcher.go` + `adapter.go` + `main.go` 改寫 — WorkerDepsFactory + service↔lending 橋接 + fx lifecycle + 刪除 engine/ | |
+| PH | Production Hardening | Circuit Breaker (gobreaker) + Rate Limiter (token bucket) on Bitfinex client, cursor-based pagination (execution + billing), engine health check, context propagation, deterministic startup (ready channel) | `6894ae4` |
 
 ### 目前 DB Schema (5 tables)
 
@@ -83,8 +84,8 @@ GET    /api/v1/configs             (JWT)
 DELETE /api/v1/configs             (JWT)
 GET    /api/v1/dashboard           (JWT)
 GET    /api/v1/earnings            (JWT)
-GET    /api/v1/executions          (JWT)
-GET    /api/v1/billing             (JWT)
+GET    /api/v1/executions          (JWT, cursor pagination: ?after=&limit=)
+GET    /api/v1/billing             (JWT, cursor pagination: ?after=&limit=)
 GET    /api/v1/billing/plan        (JWT)
 ```
 
@@ -140,7 +141,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 47 項 |
+| 已完成 | 48 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
