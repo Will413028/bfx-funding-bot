@@ -7,12 +7,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/will/bfx-funding-bot/backend/internal/lending"
+	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
 // EngineHealthProvider exposes engine status for health checks.
 type EngineHealthProvider interface {
-	Status() lending.EngineStatus
+	Status() domain.EngineStatus
 }
 
 type HealthHandler struct {

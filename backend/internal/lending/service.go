@@ -227,19 +227,13 @@ func (s *Service) SetUserPlan(userID string, plan string) {
 	s.quota.SetUserQuota(userID, q)
 }
 
-// EngineStatus represents the current operational state of the lending engine.
-type EngineStatus struct {
-	Running     bool   `json:"running"`
-	WorkerCount int    `json:"worker_count"`
-}
-
 // Status returns the current operational status of the lending engine.
-func (s *Service) Status() EngineStatus {
+func (s *Service) Status() domain.EngineStatus {
 	s.mu.RLock()
 	running := s.pool != nil
 	s.mu.RUnlock()
 
-	return EngineStatus{
+	return domain.EngineStatus{
 		Running:     running,
 		WorkerCount: s.WorkerCount(),
 	}

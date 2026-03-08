@@ -20,62 +20,16 @@ func NewExecutionHandler(svc *service.ExecutionService) *ExecutionHandler {
 	return &ExecutionHandler{svc: svc}
 }
 
+// List handles cursor-based pagination for executions.
+// First page: GET /executions (or GET /executions?limit=50)
+// Next pages: GET /executions?after=<cursor>&limit=50
 func (h *ExecutionHandler) List(c *gin.Context) {
 	userID := c.GetString(middleware.ContextUserID)
-
-	// Cursor-based pagination mode (when "after" param is present)
-	if after := c.Query("after"); after != "" {
-		h.listCursor(c, userID, after)
-		return
-	}
-
-	// Legacy mode (since + limit)
-	var since time.Time
-	if s := c.Query("since"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "INVALID_PARAM", "message": "since must be RFC3339 format"},
-			})
-			return
-		}
-		since = t
-	}
-
-	limit := 50
-	if l := c.Query("limit"); l != "" {
-		n, err := strconv.Atoi(l)
-		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": gin.H{"code": "INVALID_PARAM", "message": "limit must be a positive integer"},
-			})
-			return
-		}
-		limit = n
-	}
-
-	records, err := h.svc.ListByUser(c.Request.Context(), userID, since, limit)
-	if err != nil {
-		handleError(c, err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"executions": records})
-}
-
-// ListPaginated handles cursor-based pagination for executions.
-// Use this for the first page (no cursor) or subsequent pages (with cursor).
-func (h *ExecutionHandler) ListPaginated(c *gin.Context) {
-	userID := c.GetString(middleware.ContextUserID)
-	h.listCursor(c, userID, c.Query("after"))
-}
-
-func (h *ExecutionHandler) listCursor(c *gin.Context, userID, after string) {
 	limit := ClampLimit(parseIntQuery(c, "limit"), 20, 100)
 
 	var cursorTime *time.Time
 	var cursorID string
-	if after != "" {
+	if after := c.Query("after"); after != "" {
 		cursor, err := DecodeCursor(after)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{

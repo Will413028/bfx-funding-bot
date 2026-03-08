@@ -24,10 +24,6 @@ func (m *testExecutionRepo) Create(_ context.Context, record *domain.ExecutionRe
 	return record, nil
 }
 
-func (m *testExecutionRepo) ListByUserPaginated(_ context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.ExecutionRecord, error) {
-	return m.ListByUser(context.Background(), userID, time.Time{}, limit)
-}
-
 func (m *testExecutionRepo) ListByUser(_ context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error) {
 	var result []domain.ExecutionRecord
 	for _, r := range m.records {
@@ -36,6 +32,25 @@ func (m *testExecutionRepo) ListByUser(_ context.Context, userID string, since t
 			if len(result) >= limit {
 				break
 			}
+		}
+	}
+	return result, nil
+}
+
+func (m *testExecutionRepo) ListByUserPaginated(_ context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.ExecutionRecord, error) {
+	var result []domain.ExecutionRecord
+	for _, r := range m.records {
+		if r.UserID != userID {
+			continue
+		}
+		if cursorTime != nil {
+			if r.CreatedAt.After(*cursorTime) || (r.CreatedAt.Equal(*cursorTime) && r.ID >= cursorID) {
+				continue
+			}
+		}
+		result = append(result, r)
+		if len(result) >= limit {
+			break
 		}
 	}
 	return result, nil
@@ -54,7 +69,7 @@ func setupExecutionRouter(repo *testExecutionRepo) *gin.Engine {
 	return r
 }
 
-func TestExecutionHandler_List_Default(t *testing.T) {
+func TestExecutionHandler_List_FirstPage(t *testing.T) {
 	now := time.Now()
 	repo := &testExecutionRepo{
 		records: []domain.ExecutionRecord{
@@ -71,46 +86,44 @@ func TestExecutionHandler_List_Default(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var body map[string][]domain.ExecutionRecord
+	var body struct {
+		Executions []domain.ExecutionRecord `json:"executions"`
+		Pagination PaginationResponse       `json:"pagination"`
+	}
 	json.NewDecoder(w.Body).Decode(&body)
-	if len(body["executions"]) != 1 {
-		t.Errorf("expected 1 execution, got %d", len(body["executions"]))
+	if len(body.Executions) != 1 {
+		t.Errorf("expected 1 execution, got %d", len(body.Executions))
+	}
+	if body.Pagination.HasMore {
+		t.Error("expected has_more=false for single record")
 	}
 }
 
-func TestExecutionHandler_List_WithSince(t *testing.T) {
+func TestExecutionHandler_List_WithCursor(t *testing.T) {
 	now := time.Now()
-	old := now.AddDate(0, 0, -10)
 	repo := &testExecutionRepo{
 		records: []domain.ExecutionRecord{
-			{ID: "1", UserID: "user-123", Action: domain.ActionPlace, Currency: "fUSD", Amount: 100, Rate: 0.001, Period: 2, Status: "success", CreatedAt: old},
-			{ID: "2", UserID: "user-123", Action: domain.ActionFilled, Currency: "fUSD", Amount: 100, Rate: 0.001, Period: 2, Status: "success", CreatedAt: now},
+			{ID: "1", UserID: "user-123", Action: domain.ActionPlace, Currency: "fUSD", Amount: 100, Rate: 0.001, Period: 2, Status: "success", CreatedAt: now.Add(-time.Hour)},
 		},
 	}
 	r := setupExecutionRouter(repo)
 
-	since := now.AddDate(0, 0, -3).UTC().Format(time.RFC3339)
+	cursor := EncodeCursor(now, "cursor-id")
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/executions?since="+since, nil)
+	req, _ := http.NewRequest("GET", "/executions?after="+cursor, nil)
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-
-	var body map[string][]domain.ExecutionRecord
-	json.NewDecoder(w.Body).Decode(&body)
-	if len(body["executions"]) != 1 {
-		t.Errorf("expected 1 recent execution, got %d", len(body["executions"]))
-	}
 }
 
-func TestExecutionHandler_List_InvalidSince(t *testing.T) {
+func TestExecutionHandler_List_InvalidCursor(t *testing.T) {
 	repo := &testExecutionRepo{}
 	r := setupExecutionRouter(repo)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/executions?since=not-a-date", nil)
+	req, _ := http.NewRequest("GET", "/executions?after=!!!invalid!!!", nil)
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
@@ -118,15 +131,16 @@ func TestExecutionHandler_List_InvalidSince(t *testing.T) {
 	}
 }
 
-func TestExecutionHandler_List_InvalidLimit(t *testing.T) {
+func TestExecutionHandler_List_InvalidLimitDefaultsGracefully(t *testing.T) {
 	repo := &testExecutionRepo{}
 	r := setupExecutionRouter(repo)
 
+	// Invalid limit is clamped to default (20), not rejected
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/executions?limit=abc", nil)
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (graceful default), got %d", w.Code)
 	}
 }

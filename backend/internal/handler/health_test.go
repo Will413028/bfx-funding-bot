@@ -8,14 +8,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/will/bfx-funding-bot/backend/internal/lending"
+	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
 type mockEngineHealth struct {
-	status lending.EngineStatus
+	status domain.EngineStatus
 }
 
-func (m *mockEngineHealth) Status() lending.EngineStatus {
+func (m *mockEngineHealth) Status() domain.EngineStatus {
 	return m.status
 }
 
@@ -23,7 +23,7 @@ func TestHealthHandler_EngineRunning(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := &mockEngineHealth{
-		status: lending.EngineStatus{
+		status: domain.EngineStatus{
 			Running:     true,
 			WorkerCount: 3,
 		},
@@ -58,7 +58,7 @@ func TestHealthHandler_EngineStopped(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := &mockEngineHealth{
-		status: lending.EngineStatus{
+		status: domain.EngineStatus{
 			Running:     false,
 			WorkerCount: 0,
 		},
