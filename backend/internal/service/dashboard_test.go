@@ -14,6 +14,28 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
+type mockSnapshotCache struct {
+	snapshots map[string]*domain.MarketSnapshot
+}
+
+func newMockSnapshotCache() *mockSnapshotCache {
+	return &mockSnapshotCache{snapshots: make(map[string]*domain.MarketSnapshot)}
+}
+
+func (m *mockSnapshotCache) Set(_ context.Context, symbol string, snapshot *domain.MarketSnapshot, _ time.Duration) error {
+	m.snapshots[symbol] = snapshot
+	return nil
+}
+
+func (m *mockSnapshotCache) Get(_ context.Context, symbol string) (*domain.MarketSnapshot, error) {
+	return m.snapshots[symbol], nil
+}
+
+func (m *mockSnapshotCache) Delete(_ context.Context, symbol string) error {
+	delete(m.snapshots, symbol)
+	return nil
+}
+
 func testDashboardCipher(t *testing.T) *crypto.AES {
 	t.Helper()
 	key := make([]byte, 32)
@@ -61,7 +83,17 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedConfig(configRepo, "user1", domain.StrategyConfig{Currency: "USD"})
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cipher)
+	cache := newMockSnapshotCache()
+	cache.snapshots["fUSD"] = &domain.MarketSnapshot{
+		Symbol:      "fUSD",
+		FRR:         0.00045,
+		Regime:      domain.RegimeContango,
+		MDC:         domain.MDCResult{Score: 0.72},
+		FlashFreeze: false,
+		Timestamp:   time.Now(),
+	}
+
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cache, cipher)
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +114,18 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 	if len(summary.Credits) != 1 {
 		t.Errorf("expected 1 credit, got %d", len(summary.Credits))
 	}
+	if summary.Market == nil {
+		t.Fatal("expected market to be non-nil")
+	}
+	if summary.Market.FRR != 0.00045 {
+		t.Errorf("expected FRR 0.00045, got %f", summary.Market.FRR)
+	}
+	if summary.Market.Regime != domain.RegimeContango {
+		t.Errorf("expected regime contango, got %s", summary.Market.Regime)
+	}
+	if summary.Market.MDCScore != 0.72 {
+		t.Errorf("expected MDC score 0.72, got %f", summary.Market.MDCScore)
+	}
 }
 
 func TestDashboard_NoAPIKey(t *testing.T) {
@@ -91,7 +135,7 @@ func TestDashboard_NoAPIKey(t *testing.T) {
 	apiKeyRepo := newMockAPIKeyRepo()
 	configRepo := newMockConfigRepo()
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
 	summary, err := svc.GetSummary(context.Background(), "no-user")
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +167,7 @@ func TestDashboard_UnverifiedKey(t *testing.T) {
 	}
 	configRepo := newMockConfigRepo()
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +210,7 @@ func TestDashboard_PartialBitfinexFailure(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedConfig(configRepo, "user1", domain.StrategyConfig{Currency: "USD"})
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
