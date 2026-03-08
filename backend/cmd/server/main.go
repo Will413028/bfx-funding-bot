@@ -13,6 +13,7 @@ import (
 
 	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
 	"github.com/will/bfx-funding-bot/backend/internal/auth"
+	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
@@ -31,6 +32,9 @@ func main() {
 		}),
 		fx.Provide(func(cfg appconfig.Config) (*crypto.AES, error) {
 			return crypto.NewAES(cfg.AESKey)
+		}),
+		fx.Provide(func() *bitfinex.Client {
+			return bitfinex.NewClient(&http.Client{Timeout: 30 * time.Second})
 		}),
 		fx.Provide(service.NewUserService),
 		fx.Provide(service.NewAPIKeyService),

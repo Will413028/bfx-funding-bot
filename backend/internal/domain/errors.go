@@ -79,3 +79,15 @@ func ErrConfigNotFound() *AppError {
 func ErrConfigValidation(details string) *AppError {
 	return NewAppError(400, "VALIDATION_ERROR", details)
 }
+
+func ErrBitfinexAPI(code int, message string) *AppError {
+	return NewAppError(502, "BITFINEX_API_ERROR", fmt.Sprintf("Bitfinex API error %d: %s", code, message))
+}
+
+func ErrInsufficientFunds() *AppError {
+	return NewAppError(422, "INSUFFICIENT_FUNDS", "Insufficient funding balance")
+}
+
+func ErrInvalidAPIKey() *AppError {
+	return NewAppError(401, "INVALID_API_KEY", "Invalid or expired Bitfinex API key")
+}
