@@ -73,6 +73,7 @@
   "validation": {
     "required": "This field is required",
     "maxLength": "Exceeds maximum length",
+    "minLength": "Must be at least 8 characters",
     "invalidEmail": "Please enter a valid email"
   },
   "status": {
