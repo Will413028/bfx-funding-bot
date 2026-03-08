@@ -87,6 +87,10 @@ func (m *testAPIKeyRepo) Delete(_ context.Context, id, userID string) error {
 	return nil
 }
 
+func (m *testAPIKeyRepo) ListVerified(_ context.Context) ([]domain.APIKey, [][]byte, error) {
+	return nil, nil, nil
+}
+
 func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 	t.Helper()
 

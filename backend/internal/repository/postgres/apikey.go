@@ -85,6 +85,20 @@ func (r *APIKeyRepo) Delete(ctx context.Context, id, userID string) error {
 	return nil
 }
 
+func (r *APIKeyRepo) ListVerified(ctx context.Context) ([]domain.APIKey, [][]byte, error) {
+	rows, err := r.q.ListVerifiedAPIKeys(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys := make([]domain.APIKey, len(rows))
+	secrets := make([][]byte, len(rows))
+	for i, row := range rows {
+		keys[i] = *toDomainAPIKey(row)
+		secrets[i] = row.ApiSecret
+	}
+	return keys, secrets, nil
+}
+
 func (r *APIKeyRepo) UpdateExchangeStatus(ctx context.Context, id, status string) error {
 	uid, err := parseUUID(id)
 	if err != nil {

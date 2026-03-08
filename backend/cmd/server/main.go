@@ -15,6 +15,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/auth"
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
+	"github.com/will/bfx-funding-bot/backend/internal/engine"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
@@ -39,6 +40,7 @@ func main() {
 		fx.Provide(service.NewUserService),
 		fx.Provide(service.NewAPIKeyService),
 		fx.Provide(service.NewConfigService),
+		fx.Provide(engine.NewEngine),
 		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewAPIKeyHandler),
 		fx.Provide(handler.NewConfigHandler),
@@ -48,6 +50,7 @@ func main() {
 			return &fxevent.ZapLogger{Logger: log}
 		}),
 		fx.Invoke(startServer),
+		fx.Invoke(startEngine),
 	).Run()
 }
 
@@ -56,6 +59,19 @@ func newLogger(cfg appconfig.Config) (*zap.Logger, error) {
 		return zap.NewProduction()
 	}
 	return zap.NewDevelopment()
+}
+
+func startEngine(lc fx.Lifecycle, e *engine.Engine, log *zap.Logger) {
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			e.Start(ctx)
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			e.Stop()
+			return nil
+		},
+	})
 }
 
 func startServer(lc fx.Lifecycle, cfg appconfig.Config, router *gin.Engine, log *zap.Logger) {

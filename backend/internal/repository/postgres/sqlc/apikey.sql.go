@@ -109,6 +109,41 @@ func (q *Queries) GetAPIKeyByUserID(ctx context.Context, userID pgtype.UUID) (Ap
 	return i, err
 }
 
+const listVerifiedAPIKeys = `-- name: ListVerifiedAPIKeys :many
+SELECT id, user_id, label, api_key, api_secret, created_at, updated_at, exchange_status
+FROM api_keys
+WHERE exchange_status = 'verified'
+`
+
+func (q *Queries) ListVerifiedAPIKeys(ctx context.Context) ([]ApiKey, error) {
+	rows, err := q.db.Query(ctx, listVerifiedAPIKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ApiKey
+	for rows.Next() {
+		var i ApiKey
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Label,
+			&i.ApiKey,
+			&i.ApiSecret,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ExchangeStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateExchangeStatus = `-- name: UpdateExchangeStatus :exec
 UPDATE api_keys
 SET exchange_status = $2, updated_at = now()
