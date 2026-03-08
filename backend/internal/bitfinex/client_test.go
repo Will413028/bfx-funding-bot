@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	gobreaker "github.com/sony/gobreaker/v2"
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -332,5 +335,171 @@ func overrideBaseURL(c *Client, testURL string) func() {
 	c.baseURLOverride = testURL
 	return func() {
 		c.baseURLOverride = ""
+	}
+}
+
+// --- Circuit Breaker Tests ---
+
+func TestCircuitBreaker_OpensAfterConsecutiveFailures(t *testing.T) {
+	callCount := 0
+	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// Always return a server error (connection reset simulated)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`["error",10001,"internal error"]`))
+	})
+	defer ts.Close()
+	overrideBaseURL(client, ts.URL)
+
+	ctx := context.Background()
+
+	// Make 5 consecutive failing calls to trip the circuit breaker
+	for i := 0; i < 5; i++ {
+		_ = client.VerifyCredentials(ctx, "key", "secret")
+	}
+
+	if client.CircuitBreakerState().String() != "open" {
+		t.Errorf("expected circuit breaker to be open, got %s", client.CircuitBreakerState().String())
+	}
+
+	// 6th call should fail immediately without hitting the server
+	countBefore := callCount
+	err := client.VerifyCredentials(ctx, "key", "secret")
+	if err == nil {
+		t.Error("expected error when circuit breaker is open")
+	}
+	if callCount != countBefore {
+		t.Error("expected no HTTP call when circuit breaker is open")
+	}
+}
+
+func TestCircuitBreaker_ClosedOnSuccess(t *testing.T) {
+	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+	})
+	defer ts.Close()
+	overrideBaseURL(client, ts.URL)
+
+	err := client.VerifyCredentials(context.Background(), "key", "secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.CircuitBreakerState().String() != "closed" {
+		t.Errorf("expected circuit breaker to be closed, got %s", client.CircuitBreakerState().String())
+	}
+}
+
+func TestCircuitBreaker_HalfOpenAfterTimeout(t *testing.T) {
+	// Create a client with very short timeout for testing
+	client := &Client{
+		httpClient: http.DefaultClient,
+		cb: func() *gobreaker.CircuitBreaker[[]byte] {
+			return gobreaker.NewCircuitBreaker[[]byte](gobreaker.Settings{
+				Name:        "test-cb",
+				MaxRequests: 1,
+				Interval:    60 * time.Second,
+				Timeout:     100 * time.Millisecond, // very short for test
+				ReadyToTrip: func(counts gobreaker.Counts) bool {
+					return counts.ConsecutiveFailures >= 2
+				},
+			})
+		}(),
+		limiter: rate.NewLimiter(rate.Limit(100), 100), // high limit for test
+	}
+
+	// Create a server that fails first, then succeeds
+	failCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		failCount++
+		if failCount <= 2 {
+			w.Write([]byte(`["error",10001,"fail"]`))
+		} else {
+			w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+		}
+	}))
+	defer ts.Close()
+	client.baseURLOverride = ts.URL
+
+	ctx := context.Background()
+
+	// Trip the breaker with 2 failures
+	for i := 0; i < 2; i++ {
+		_ = client.VerifyCredentials(ctx, "key", "secret")
+	}
+	if client.CircuitBreakerState().String() != "open" {
+		t.Fatalf("expected open, got %s", client.CircuitBreakerState().String())
+	}
+
+	// Wait for timeout to expire → half-open
+	time.Sleep(150 * time.Millisecond)
+
+	if client.CircuitBreakerState().String() != "half-open" {
+		t.Fatalf("expected half-open, got %s", client.CircuitBreakerState().String())
+	}
+
+	// Successful probe → should close the breaker
+	err := client.VerifyCredentials(ctx, "key", "secret")
+	if err != nil {
+		t.Fatalf("expected success on probe, got: %v", err)
+	}
+
+	if client.CircuitBreakerState().String() != "closed" {
+		t.Errorf("expected closed after successful probe, got %s", client.CircuitBreakerState().String())
+	}
+}
+
+// --- Rate Limiter Tests ---
+
+func TestRateLimiter_ContextCancellation(t *testing.T) {
+	// Create a client with very low rate limit
+	client := &Client{
+		httpClient: http.DefaultClient,
+		cb: gobreaker.NewCircuitBreaker[[]byte](gobreaker.Settings{
+			Name: "test-rl",
+			ReadyToTrip: func(counts gobreaker.Counts) bool {
+				return counts.ConsecutiveFailures >= 100
+			},
+		}),
+		limiter: rate.NewLimiter(rate.Limit(0.1), 1), // very slow: 1 req per 10s, burst 1
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+	}))
+	defer ts.Close()
+	client.baseURLOverride = ts.URL
+
+	// First call consumes the burst token
+	err := client.VerifyCredentials(context.Background(), "key", "secret")
+	if err != nil {
+		t.Fatalf("first call should succeed: %v", err)
+	}
+
+	// Second call with short timeout should fail due to rate limiter
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err = client.VerifyCredentials(ctx, "key", "secret")
+	if err == nil {
+		t.Error("expected error due to rate limiter + context timeout")
+	}
+}
+
+func TestRateLimiter_BurstAllowed(t *testing.T) {
+	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+	})
+	defer ts.Close()
+	overrideBaseURL(client, ts.URL)
+
+	ctx := context.Background()
+
+	// Burst of 5 should succeed (burst=5 in default config)
+	for i := 0; i < 5; i++ {
+		err := client.VerifyCredentials(ctx, "key", "secret")
+		if err != nil {
+			t.Fatalf("burst call %d should succeed: %v", i+1, err)
+		}
 	}
 }

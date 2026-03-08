@@ -25,3 +25,7 @@ func (s *ExecutionService) ListByUser(ctx context.Context, userID string, since 
 	}
 	return s.repo.ListByUser(ctx, userID, since, limit)
 }
+
+func (s *ExecutionService) ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.ExecutionRecord, error) {
+	return s.repo.ListByUserPaginated(ctx, userID, cursorTime, cursorID, limit)
+}

@@ -25,6 +25,10 @@ func (m *testBillingRepo) Create(_ context.Context, record *domain.BillingRecord
 	return record, nil
 }
 
+func (m *testBillingRepo) ListByUserPaginated(_ context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.BillingRecord, error) {
+	return m.ListByUser(context.Background(), userID, time.Time{}, limit)
+}
+
 func (m *testBillingRepo) ListByUser(_ context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error) {
 	var result []domain.BillingRecord
 	for _, r := range m.records {

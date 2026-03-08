@@ -50,9 +50,10 @@ type Service struct {
 	depsFactory WorkerDepsFactory
 	config      Config
 
-	mu          sync.RWMutex
-	snapshotChs map[string]chan *domain.MarketSnapshot
+	mu           sync.RWMutex
+	snapshotChs  map[string]chan *domain.MarketSnapshot
 	cancelRefill context.CancelFunc
+	ready        chan struct{}
 }
 
 // NewService creates a new lending engine Service.
@@ -62,6 +63,7 @@ func NewService(depsFactory WorkerDepsFactory, cfg Config) *Service {
 		depsFactory: depsFactory,
 		config:      cfg,
 		snapshotChs: make(map[string]chan *domain.MarketSnapshot),
+		ready:       make(chan struct{}),
 	}
 	return svc
 }
@@ -78,12 +80,20 @@ func (s *Service) Start(ctx context.Context) error {
 	// Start quota refill
 	s.quota.StartRefill(refillCtx, s.config.RefillInterval)
 
+	// Signal readiness
+	close(s.ready)
+
 	// Block until context is cancelled
 	<-ctx.Done()
 
 	// Cleanup
 	cancelRefill()
 	return nil
+}
+
+// Ready returns a channel that is closed when the service has completed initialization.
+func (s *Service) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // Stop gracefully shuts down: stop all workers, then clean up.
@@ -116,7 +126,7 @@ func (s *Service) Stop(ctx context.Context) error {
 
 // StartWorker creates and starts a Worker for the given user.
 // Sets quota based on plan and adds to pool.
-func (s *Service) StartWorker(userID string, cfg domain.StrategyConfig) error {
+func (s *Service) StartWorker(_ context.Context, userID string, cfg domain.StrategyConfig) error {
 	s.mu.Lock()
 	pool := s.pool
 	if pool == nil {
@@ -152,7 +162,7 @@ func (s *Service) StartWorker(userID string, cfg domain.StrategyConfig) error {
 }
 
 // StopWorker stops the Worker for the given user and cleans up resources.
-func (s *Service) StopWorker(userID string) error {
+func (s *Service) StopWorker(_ context.Context, userID string) error {
 	s.mu.RLock()
 	pool := s.pool
 	s.mu.RUnlock()
@@ -180,7 +190,7 @@ func (s *Service) StopWorker(userID string) error {
 }
 
 // ReloadConfig forwards a new StrategyConfig to the Worker.
-func (s *Service) ReloadConfig(userID string, cfg domain.StrategyConfig) error {
+func (s *Service) ReloadConfig(_ context.Context, userID string, cfg domain.StrategyConfig) error {
 	s.mu.RLock()
 	pool := s.pool
 	s.mu.RUnlock()
@@ -215,6 +225,24 @@ func (s *Service) BroadcastSnapshot(snapshot *domain.MarketSnapshot) {
 func (s *Service) SetUserPlan(userID string, plan string) {
 	q := planQuota(plan)
 	s.quota.SetUserQuota(userID, q)
+}
+
+// EngineStatus represents the current operational state of the lending engine.
+type EngineStatus struct {
+	Running     bool   `json:"running"`
+	WorkerCount int    `json:"worker_count"`
+}
+
+// Status returns the current operational status of the lending engine.
+func (s *Service) Status() EngineStatus {
+	s.mu.RLock()
+	running := s.pool != nil
+	s.mu.RUnlock()
+
+	return EngineStatus{
+		Running:     running,
+		WorkerCount: s.WorkerCount(),
+	}
 }
 
 // WorkerCount returns the number of active workers.

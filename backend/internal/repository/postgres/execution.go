@@ -70,6 +70,44 @@ func (r *ExecutionRepo) ListByUser(ctx context.Context, userID string, since tim
 	return records, nil
 }
 
+func (r *ExecutionRepo) ListByUserPaginated(ctx context.Context, userID string, cursorTime *time.Time, cursorID string, limit int) ([]domain.ExecutionRecord, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var rows []sqlc.Execution
+	if cursorTime != nil {
+		cursorUUID, err := parseUUID(cursorID)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = r.q.ListExecutionsByUserCursor(ctx, sqlc.ListExecutionsByUserCursorParams{
+			UserID:    uid,
+			CreatedAt: pgtype.Timestamptz{Time: *cursorTime, Valid: true},
+			ID:        cursorUUID,
+			Limit:     int32(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		rows, err = r.q.ListExecutionsByUserFirst(ctx, sqlc.ListExecutionsByUserFirstParams{
+			UserID: uid,
+			Limit:  int32(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	records := make([]domain.ExecutionRecord, len(rows))
+	for i, row := range rows {
+		records[i] = *toDomainExecution(row)
+	}
+	return records, nil
+}
+
 func toDomainExecution(row sqlc.Execution) *domain.ExecutionRecord {
 	rec := &domain.ExecutionRecord{
 		ID:        uuidToString(row.ID),

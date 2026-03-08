@@ -21,8 +21,8 @@ type VerifyResult struct {
 // WorkerManager manages per-user Worker lifecycle.
 // Satisfied by *lending.Service via implicit interface (fx auto-inject).
 type WorkerManager interface {
-	StartWorker(userID string, cfg domain.StrategyConfig) error
-	StopWorker(userID string) error
+	StartWorker(ctx context.Context, userID string, cfg domain.StrategyConfig) error
+	StopWorker(ctx context.Context, userID string) error
 }
 
 type APIKeyService struct {
@@ -150,7 +150,7 @@ func (s *APIKeyService) Delete(ctx context.Context, userID, keyID string) error 
 
 	// Best-effort: stop Worker
 	if s.workers != nil {
-		_ = s.workers.StopWorker(userID)
+		_ = s.workers.StopWorker(ctx, userID)
 	}
 
 	return nil
@@ -164,5 +164,5 @@ func (s *APIKeyService) tryStartWorker(ctx context.Context, userID string) {
 		return
 	}
 
-	_ = s.workers.StartWorker(userID, uc.Config)
+	_ = s.workers.StartWorker(ctx, userID, uc.Config)
 }

@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"time"
 
+	gobreaker "github.com/sony/gobreaker/v2"
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -17,17 +20,55 @@ const baseURL = "https://api.bitfinex.com"
 type Client struct {
 	httpClient      *http.Client
 	baseURLOverride string // for testing only
+	cb              *gobreaker.CircuitBreaker[[]byte]
+	limiter         *rate.Limiter
 }
 
 func NewClient(httpClient *http.Client) *Client {
-	return &Client{httpClient: httpClient}
+	return newClientInternal(httpClient, "")
 }
 
 func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
-	return &Client{httpClient: httpClient, baseURLOverride: baseURL}
+	return newClientInternal(httpClient, baseURL)
+}
+
+func newClientInternal(httpClient *http.Client, baseOverride string) *Client {
+	cb := gobreaker.NewCircuitBreaker[[]byte](gobreaker.Settings{
+		Name:        "bitfinex-rest",
+		MaxRequests: 3,
+		Interval:    60 * time.Second,
+		Timeout:     15 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures >= 5
+		},
+	})
+
+	return &Client{
+		httpClient:      httpClient,
+		baseURLOverride: baseOverride,
+		cb:              cb,
+		limiter:         rate.NewLimiter(rate.Limit(1.0), 5), // 1 req/s, burst 5
+	}
+}
+
+// CircuitBreakerState returns the current state of the circuit breaker.
+func (c *Client) CircuitBreakerState() gobreaker.State {
+	return c.cb.State()
 }
 
 func (c *Client) doAuth(ctx context.Context, apiPath, apiKey, apiSecret string, body any) ([]byte, error) {
+	// Rate limiter: wait for token (respects context cancellation)
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter: %w", err)
+	}
+
+	// Circuit breaker: wrap the actual HTTP call
+	return c.cb.Execute(func() ([]byte, error) {
+		return c.doHTTP(ctx, apiPath, apiKey, apiSecret, body)
+	})
+}
+
+func (c *Client) doHTTP(ctx context.Context, apiPath, apiKey, apiSecret string, body any) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request body: %w", err)
