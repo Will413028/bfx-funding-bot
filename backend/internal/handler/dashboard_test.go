@@ -102,19 +102,22 @@ func TestDashboardHandler_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp service.DashboardSummary
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var envelope struct {
+		Data service.DashboardSummary `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
+	resp := envelope.Data
 
 	if !resp.EngineReady {
-		t.Error("expected engine_ready to be true")
+		t.Error("expected engineReady to be true")
 	}
 	if resp.Wallet == nil {
 		t.Fatal("expected wallet to be non-nil")
 	}
 	if resp.Wallet.BalanceAvailable != 800 {
-		t.Errorf("expected balance_available 800, got %f", resp.Wallet.BalanceAvailable)
+		t.Errorf("expected balanceAvailable 800, got %f", resp.Wallet.BalanceAvailable)
 	}
 	if len(resp.Offers) != 1 {
 		t.Errorf("expected 1 offer, got %d", len(resp.Offers))
@@ -132,13 +135,15 @@ func TestDashboardHandler_NoUserID(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp service.DashboardSummary
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var envelope struct {
+		Data service.DashboardSummary `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
 
-	if resp.EngineReady {
-		t.Error("expected engine_ready to be false for empty userID")
+	if envelope.Data.EngineReady {
+		t.Error("expected engineReady to be false for empty userID")
 	}
 }
 

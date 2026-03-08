@@ -44,8 +44,8 @@ func DecodeCursor(cursor string) (*Cursor, error) {
 
 // PaginationResponse is the pagination metadata included in list responses.
 type PaginationResponse struct {
-	NextCursor string `json:"next_cursor,omitempty"`
-	HasMore    bool   `json:"has_more"`
+	NextCursor string `json:"nextCursor,omitempty"`
+	HasMore    bool   `json:"hasMore"`
 }
 
 // ClampLimit clamps a limit value to the valid range [1, max].

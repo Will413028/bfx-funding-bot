@@ -18,8 +18,8 @@ func NewAPIKeyHandler(svc *service.APIKeyService) *APIKeyHandler {
 }
 
 type createAPIKeyRequest struct {
-	APIKey    string `json:"api_key" binding:"required"`
-	APISecret string `json:"api_secret" binding:"required"`
+	APIKey    string `json:"apiKey" binding:"required"`
+	APISecret string `json:"apiSecret" binding:"required"`
 	Label     string `json:"label"`
 }
 
@@ -27,7 +27,7 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 	var req createAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": gin.H{"code": "VALIDATION_ERROR", "message": "api_key and api_secret are required"},
+			"error": gin.H{"code": "VALIDATION_ERROR", "message": "apiKey and apiSecret are required"},
 		})
 		return
 	}
@@ -40,22 +40,22 @@ func (h *APIKeyHandler) Create(c *gin.Context) {
 	}
 
 	resp := gin.H{
-		"id":              key.ID,
-		"label":           key.Label,
-		"api_key":         key.APIKey,
-		"api_secret":      "****",
-		"exchange_status": key.ExchangeStatus,
-		"created_at":      key.CreatedAt,
+		"id":             key.ID,
+		"label":          key.Label,
+		"apiKey":         key.APIKey,
+		"apiSecret":      "****",
+		"exchangeStatus": key.ExchangeStatus,
+		"createdAt":      key.CreatedAt,
 	}
 	if vr != nil && vr.FundingBalance != nil {
-		resp["funding_balance"] = gin.H{
+		resp["fundingBalance"] = gin.H{
 			"currency":  vr.FundingBalance.Currency,
 			"balance":   vr.FundingBalance.Balance,
 			"available": vr.FundingBalance.BalanceAvailable,
 		}
 	}
 
-	c.JSON(http.StatusCreated, resp)
+	c.JSON(http.StatusCreated, gin.H{"data": resp})
 }
 
 func (h *APIKeyHandler) List(c *gin.Context) {
@@ -69,15 +69,15 @@ func (h *APIKeyHandler) List(c *gin.Context) {
 	result := make([]gin.H, len(keys))
 	for i, k := range keys {
 		result[i] = gin.H{
-			"id":              k.ID,
-			"label":           k.Label,
-			"api_key":         k.APIKey,
-			"api_secret":      "****",
-			"exchange_status": k.ExchangeStatus,
-			"created_at":      k.CreatedAt,
+			"id":             k.ID,
+			"label":          k.Label,
+			"apiKey":         k.APIKey,
+			"apiSecret":      "****",
+			"exchangeStatus": k.ExchangeStatus,
+			"createdAt":      k.CreatedAt,
 		}
 	}
-	c.JSON(http.StatusOK, result)
+	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
 func (h *APIKeyHandler) GetByID(c *gin.Context) {
@@ -91,12 +91,14 @@ func (h *APIKeyHandler) GetByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":              key.ID,
-		"label":           key.Label,
-		"api_key":         key.APIKey,
-		"api_secret":      "****",
-		"exchange_status": key.ExchangeStatus,
-		"created_at":      key.CreatedAt,
+		"data": gin.H{
+			"id":             key.ID,
+			"label":          key.Label,
+			"apiKey":         key.APIKey,
+			"apiSecret":      "****",
+			"exchangeStatus": key.ExchangeStatus,
+			"createdAt":      key.CreatedAt,
+		},
 	})
 }
 
@@ -117,14 +119,14 @@ func (h *APIKeyHandler) Verify(c *gin.Context) {
 		resp["error"] = vr.Error
 	}
 	if vr.FundingBalance != nil {
-		resp["funding_balance"] = gin.H{
+		resp["fundingBalance"] = gin.H{
 			"currency":  vr.FundingBalance.Currency,
 			"balance":   vr.FundingBalance.Balance,
 			"available": vr.FundingBalance.BalanceAvailable,
 		}
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 func (h *APIKeyHandler) Delete(c *gin.Context) {

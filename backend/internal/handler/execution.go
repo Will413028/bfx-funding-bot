@@ -53,7 +53,7 @@ func (h *ExecutionHandler) List(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"executions": records,
+		"data":       records,
 		"pagination": pagination,
 	})
 }

@@ -6,18 +6,34 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignoreUnknown": true,
-    "includes": ["**", "!node_modules", "!.next", "!dist", "!build"]
+    "includes": [
+      "**/src/**/*.ts",
+      "**/src/**/*.tsx",
+      "!**/dist",
+      "!**/.next",
+      "!**/node_modules"
+    ]
   },
   "formatter": {
     "enabled": true,
-    "indentStyle": "space",
-    "indentWidth": 2
+    "indentStyle": "space"
   },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": true,
     "rules": {
       "recommended": true,
+      "correctness": {
+        "noUnusedVariables": "off"
+      },
+      "a11y": {
+        "useAltText": "off",
+        "useKeyWithClickEvents": "off",
+        "useButtonType": "off"
+      },
+      "performance": {
+        "noImgElement": "warn"
+      },
       "suspicious": {
         "noUnknownAtRules": "off"
       }
@@ -27,11 +43,9 @@
       "react": "recommended"
     }
   },
-  "assist": {
-    "actions": {
-      "source": {
-        "organizeImports": "on"
-      }
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double"
     }
   }
 }

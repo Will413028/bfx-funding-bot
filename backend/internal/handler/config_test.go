@@ -83,7 +83,7 @@ func validConfigJSON() []byte {
 		"amount":     map[string]float64{"min": 50, "max": 1000},
 		"rate":       map[string]float64{"min": 0.0001, "max": 0.001},
 		"period":     map[string]int{"min": 2, "max": 30},
-		"auto_renew": true,
+		"autoRenew": true,
 	})
 	return body
 }
@@ -100,8 +100,9 @@ func TestHandler_SaveConfig_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
+	var envelope map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &envelope)
+	resp := envelope["data"].(map[string]interface{})
 	if resp["id"] == nil {
 		t.Error("expected id in response")
 	}

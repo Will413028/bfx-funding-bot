@@ -44,8 +44,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"id":    user.ID,
-		"email": user.Email,
+		"data": gin.H{
+			"id":    user.ID,
+			"email": user.Email,
+		},
 	})
 }
 
@@ -65,8 +67,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"token":      token,
-		"expires_at": expiresAt,
+		"data": gin.H{
+			"token":     token,
+			"expiresAt": expiresAt,
+		},
 	})
 }
 

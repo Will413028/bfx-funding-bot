@@ -1,0 +1,85 @@
+{
+  "nav": {
+    "overview": "Overview",
+    "apiKeys": "API Keys",
+    "strategy": "Strategy",
+    "history": "History",
+    "settings": "Settings",
+    "logout": "Logout"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "Something went wrong",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "confirm": "Confirm",
+    "back": "Back"
+  },
+  "auth": {
+    "login": "Login",
+    "register": "Register",
+    "email": "Email",
+    "password": "Password",
+    "forgotPassword": "Forgot password?",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?"
+  },
+  "overview": {
+    "title": "Dashboard",
+    "totalLent": "Total Lent",
+    "availableBalance": "Available Balance",
+    "activeOffers": "Active Offers",
+    "activeCredits": "Active Credits",
+    "estimatedDailyEarning": "Est. Daily Earning",
+    "workerStatus": "Worker Status",
+    "marketSnapshot": "Market Snapshot",
+    "regime": "Market Regime",
+    "mdc": "Market Demand Curve"
+  },
+  "apiKeys": {
+    "title": "API Key Management",
+    "addKey": "Add API Key",
+    "label": "Label",
+    "apiKey": "API Key",
+    "apiSecret": "API Secret",
+    "permissions": "Permissions",
+    "deleteConfirm": "This will stop the lending worker and remove the API key. Are you sure?",
+    "verifying": "Verifying permissions..."
+  },
+  "strategy": {
+    "title": "Strategy Configuration",
+    "signalParams": "Signal Parameters",
+    "executionParams": "Execution Parameters",
+    "periodParams": "Period Parameters",
+    "safetyParams": "Safety Parameters",
+    "saveSuccess": "Strategy updated. Worker will reload on next heartbeat.",
+    "resetDefault": "Reset to Default"
+  },
+  "history": {
+    "title": "History",
+    "executions": "Execution Records",
+    "billing": "Billing",
+    "action": "Action",
+    "amount": "Amount",
+    "rate": "Rate",
+    "period": "Period",
+    "status": "Status",
+    "time": "Time",
+    "totalEarnings": "Total Earnings",
+    "platformFee": "Platform Fee",
+    "netEarnings": "Net Earnings"
+  },
+  "validation": {
+    "required": "This field is required",
+    "maxLength": "Exceeds maximum length",
+    "invalidEmail": "Please enter a valid email"
+  },
+  "status": {
+    "running": "Running",
+    "paused": "Paused",
+    "stopped": "Stopped",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
+  }
+}

@@ -77,10 +77,13 @@ func TestEarningsHandler_Success(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp service.EarningsSummary
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var envelope struct {
+		Data service.EarningsSummary `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
+	resp := envelope.Data
 
 	if resp.ActiveCredits != 1 {
 		t.Errorf("expected 1 active credit, got %d", resp.ActiveCredits)

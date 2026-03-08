@@ -116,12 +116,12 @@ func TestBillingHandler_Get(t *testing.T) {
 	}
 
 	var body struct {
-		Records    []domain.BillingRecord `json:"records"`
+		Data       []domain.BillingRecord `json:"data"`
 		Pagination PaginationResponse     `json:"pagination"`
 	}
 	json.NewDecoder(w.Body).Decode(&body)
-	if len(body.Records) != 1 {
-		t.Errorf("expected 1 record, got %d", len(body.Records))
+	if len(body.Data) != 1 {
+		t.Errorf("expected 1 record, got %d", len(body.Data))
 	}
 	if body.Pagination.HasMore {
 		t.Error("expected has_more=false for single record")
@@ -143,13 +143,15 @@ func TestBillingHandler_GetPlan(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var features domain.PlanFeatures
-	json.NewDecoder(w.Body).Decode(&features)
-	if features.Plan != domain.PlanPro {
-		t.Errorf("expected pro, got %s", features.Plan)
+	var envelope struct {
+		Data domain.PlanFeatures `json:"data"`
 	}
-	if !features.AdvancedStrategy {
-		t.Error("expected advanced_strategy=true for pro")
+	json.NewDecoder(w.Body).Decode(&envelope)
+	if envelope.Data.Plan != domain.PlanPro {
+		t.Errorf("expected pro, got %s", envelope.Data.Plan)
+	}
+	if !envelope.Data.AdvancedStrategy {
+		t.Error("expected advancedStrategy=true for pro")
 	}
 }
 

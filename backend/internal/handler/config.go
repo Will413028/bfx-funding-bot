@@ -35,11 +35,13 @@ func (h *ConfigHandler) Save(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":         uc.ID,
-		"user_id":    uc.UserID,
-		"config":     uc.Config,
-		"created_at": uc.CreatedAt,
-		"updated_at": uc.UpdatedAt,
+		"data": gin.H{
+			"id":        uc.ID,
+			"userId":    uc.UserID,
+			"config":    uc.Config,
+			"createdAt": uc.CreatedAt,
+			"updatedAt": uc.UpdatedAt,
+		},
 	})
 }
 
@@ -52,11 +54,13 @@ func (h *ConfigHandler) Get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":         uc.ID,
-		"user_id":    uc.UserID,
-		"config":     uc.Config,
-		"created_at": uc.CreatedAt,
-		"updated_at": uc.UpdatedAt,
+		"data": gin.H{
+			"id":        uc.ID,
+			"userId":    uc.UserID,
+			"config":    uc.Config,
+			"createdAt": uc.CreatedAt,
+			"updatedAt": uc.UpdatedAt,
+		},
 	})
 }
 

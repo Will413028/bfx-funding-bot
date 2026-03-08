@@ -1,7 +1,7 @@
 # 開發路線圖
 
 > 最後更新：2026-03-09
-> 參考文件：`backend_architecture.md`
+> 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
 
@@ -74,11 +74,11 @@ POST   /api/v1/auth/register       (rate limit: 5r/s)
 POST   /api/v1/auth/login          (rate limit: 5r/s)
 GET    /api/v1/me                  (JWT, 20r/s)
 PUT    /api/v1/me/password         (JWT, 20r/s)
-POST   /api/v1/apikeys             (JWT)
-GET    /api/v1/apikeys             (JWT)
-GET    /api/v1/apikeys/:id         (JWT)
-DELETE /api/v1/apikeys/:id         (JWT)
-POST   /api/v1/apikeys/:id/verify  (JWT)
+POST   /api/v1/api-keys             (JWT)
+GET    /api/v1/api-keys             (JWT)
+GET    /api/v1/api-keys/:id         (JWT)
+DELETE /api/v1/api-keys/:id         (JWT)
+POST   /api/v1/api-keys/:id/verify  (JWT)
 PUT    /api/v1/configs             (JWT)
 GET    /api/v1/configs             (JWT)
 DELETE /api/v1/configs             (JWT)
@@ -127,13 +127,54 @@ marketfeed/service.go (C1)
 
 ## 待開發功能
 
-### Phase F — 前端 & 運維
+### Phase F — 前端
+
+> 參考文件：`frontend_architecture.md`
+> 技術棧：Next.js 16 (App Router) + Tailwind v4 + shadcn/ui + next-intl + Zustand + TanStack Query
 
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
-| F1 | WebSocket Dashboard | `handler/dashboard.go` 改為 WebSocket 即時推送（目前是 REST） | 中 |
-| F2 | Frontend Dashboard | Next.js 16 完整儀表板 | 極高 |
-| F3 | Prometheus Metrics | 監控指標收集 + Grafana 儀表板 | 中 |
+| F1 | Project Scaffold | Next.js 16 + Tailwind v4 + shadcn/ui + Zustand + TanStack Query + React Hook Form + nuqs + Biome + Knip + next-intl (en/zh-TW) 基礎建置 | 中 |
+| F2 | Core Lib & Types | `api-client.ts` (同源代理封裝), `format.ts` (利率/貨幣), `env.ts` (Zod 驗證), `utils.ts` (cn), `types/index.ts` | 低 |
+| F3 | API Proxy & Cookie Auth | `/api/proxy/[...path]` 同源代理 + login Server Action 設定 HttpOnly cookie + middleware 權限檢查 | 中 |
+| F4 | Auth Pages | `(auth)/login` + `(auth)/register` 頁面 + 極簡置中 layout + Zod 表單驗證 | 低 |
+| F5 | Dashboard Layout | `(dashboard)/layout.tsx` — 側邊欄 + 頂部列 + loading skeleton + error boundary | 中 |
+| F6 | Overview Page | 統計卡片 (wallet, offers, credits, daily earning) + market snapshot 面板 (REST 版) | 中 |
+| F7 | API Key Management | API Key CRUD 頁面 + Bitfinex 權限狀態顯示 + 刪除確認 dialog | 中 |
+| F8 | Strategy Config | 三層參數表單 (基礎滑桿/進階數值/專家 JSON) + save + reset to default | 高 |
+| F9 | History Page | execution table + billing table + cursor pagination (nuqs URL 同步) | 中 |
+| F10 | Settings Page | 帳戶資訊顯示 + 密碼修改表單 | 低 |
+| F11 | Marketing Pages | `(marketing)/` Landing page (產品介紹、功能特色) + Pricing page (方案比較表) | 中 |
+| F12 | WebSocket Backend | Go `handler/ws.go` — WS 升級 + `/api/v1/auth/ws-token` 短期 token + per-user snapshot 推送 | 中 |
+| F13 | WebSocket Frontend | `ws-client.ts` (自動重連+心跳) + Zustand `use-ws-store` + `useDashboardWS` hook → overview 即時更新 | 中 |
+| F14 | Charts | Recharts — 收益走勢圖 (24h/7d/30d) + 利率走勢圖 + APY 歷史曲線 | 中 |
+| F15 | Production Hardening | Sentry 錯誤監控 + CSP 安全標頭 + env 驗證 fail-fast + Vercel 部署設定 | 低 |
+
+### Phase H — 運維
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| H1 | Prometheus Metrics | Go `/metrics` endpoint — engine/worker/API/WS 連線指標收集 (prometheus/client_golang) | 中 |
+| H2 | Grafana Dashboard | 監控面板 template — Worker 數/API 配額使用率/心跳延遲/WS 連線健康度 | 中 |
+| H3 | Alerting Rules | 告警規則 — Worker 崩潰率 >3 次/hr, API 配額 >85%, WS 斷線 >2min | 低 |
+
+### Phase G — 策略行為增強
+
+> 對照 `strategy_specification.md`，以下功能在規範中定義但尚未實作。
+> 多數屬於現有模組的行為增強，非獨立策略模組。
+
+| # | 規範章節 | 功能 | 說明 | 涉及檔案 | 複雜度 |
+|---|----------|------|------|---------|--------|
+| G1 | §8.1 | Adaptive Deviation Guard | 掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%） | `strategy/pricing.go` | 低 |
+| G2 | §2.4 | Signal Recovery Smoothing | 信號恢復時 3 步線性遞增權重（33%→66%→100%），防止 MDC 從衰減突然跳回滿額 | `signal/mdc.go` | 中 |
+| G3 | §4.3 | Smart Hidden Offers | 根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單 | 新增 `strategy/hidden.go` | 中 |
+| G4 | §5.1 | Term Structure Analysis | 利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器 | 新增 `strategy/termstructure.go` | 中 |
+| G5 | §5.6 | Early Return Adjustment | `有效回報 = Rate × 歷史持有率`，持有率 < 60% 時降低天數偏好 | `strategy/period.go` | 中 |
+| G6 | §6.4 | Cold Start Protocol | Worker 啟動前 30 分鐘分 3 階段逐步啟用信號（目前直接全量運行） | `worker/worker.go` | 中 |
+| G7 | §7.1 | Maintenance Behaviors | 隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊） | `worker/worker.go` + `execution/offer.go` | 中 |
+| G8 | §4.8 | Opportunity Cost Framework | 完整 EV_deploy vs EV_wait 比較模型（目前 floor.go 僅有靜態地板） | `strategy/floor.go` 或新增 | 高 |
+| G9 | §6.3 | Graceful Degradation | 信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認 | `signal/mdc.go` + `marketfeed/service.go` | 高 |
+| G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
 
 ---
 
@@ -147,8 +188,10 @@ marketfeed/service.go (C1)
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ 全部完成 |
-| Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **3 項** |
+| Phase F（前端） | 15 項 |
+| Phase G（策略行為增強） | 10 項 |
+| Phase H（運維） | 3 項 |
+| **待開發合計** | **28 項** |
 
 ## 依賴關係
 
@@ -164,10 +207,22 @@ Phase A ✅ 全部完成
     │                  Phase D ✅ 全部完成 (13 策略模組)
     │                      │
     │                      ▼
-    ├── A5 (Execution) ✅ → Phase E (執行層，依賴 A5 Execution Records + D 策略)
+    ├── A5 (Execution) ✅ → Phase E ✅ 全部完成
     │                      │
     │                      ▼
-    └── A6 (Billing) ✅ ─→ Phase F (前端需要所有 API ready)
+    │                  Phase G (策略增強，依賴 C+D+E 既有模組)
+    │
+    └── All backend APIs ready
+         │
+         ├── Phase F (前端)
+         │   F1→F2→F3→F4 (基礎建置)
+         │        └→ F5→F6,F7,F8,F9,F10 (Dashboard 各頁面，F5 之後可平行)
+         │        └→ F11 (Marketing，可獨立開發)
+         │        └→ F12→F13→F14 (WebSocket + Charts)
+         │        └→ F15 (Production hardening，最後)
+         │
+         └── Phase H (運維)
+             H1→H2→H3 (Metrics → Dashboard → Alerting)
 ```
 
 ## 建議開發順序
@@ -180,4 +235,13 @@ Phase A ✅ 全部完成
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
 7. ~~**D1-D13** — 策略決策模組~~ ✅
 8. ~~**E8** — Engine Orchestrator~~ ✅
-9. **F1 → F2 → F3** — 前端 + 監控 ← **下一步**
+9. **F1 → F2 → F3 → F4** — 前端基礎建置（scaffold + lib + proxy + auth pages）
+10. **F5 → F6** — Dashboard layout + Overview 頁面
+11. **F7 → F8 → F9 → F10** — Dashboard 各功能頁面（可平行開發）
+12. **F11** — Marketing pages（可獨立開發）
+13. **F12 → F13 → F14** — WebSocket 即時推送 + Charts
+14. **F15** — 前端 Production hardening（Sentry + CSP）
+15. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
+16. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
+17. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
+18. **H1 → H2 → H3** — 運維監控（Prometheus + Grafana + Alerting）

@@ -48,6 +48,54 @@
 
 **核心設計原則**：依賴方向嚴格由上往下。Domain 層不依賴任何其他層。上層透過 interface 依賴下層，不直接依賴具體實作。
 
+### JSON 慣例
+
+#### 命名：camelCase
+
+所有 API 回應的 JSON key 一律使用 **camelCase**：
+
+```go
+// ✅ 正確
+type WalletSummary struct {
+    BalanceAvailable float64 `json:"balanceAvailable"`
+    CreatedAt        time.Time `json:"createdAt"`
+}
+
+// ❌ 錯誤（snake_case）
+type WalletSummary struct {
+    BalanceAvailable float64 `json:"balance_available"`
+    CreatedAt        time.Time `json:"created_at"`
+}
+```
+
+**適用範圍**：
+- struct 的 `json:"..."` tag
+- `gin.H{}` 的 key
+- 前端接收的 JSON 請求/回應 body
+
+#### 回應格式：統一 `data` 包裝
+
+所有成功回應一律用 `{ "data": ... }` 包裝，錯誤回應用 `{ "error": ... }` 包裝。前端可透過有無 `data` key 區分成功/失敗。
+
+```go
+// ✅ 成功回應（單一物件）
+c.JSON(http.StatusOK, gin.H{"data": gin.H{"id": "...", "email": "..."}})
+
+// ✅ 成功回應（分頁列表）— pagination 與 data 同層
+c.JSON(http.StatusOK, gin.H{
+    "data":       records,
+    "pagination": PaginationResponse{...},
+})
+
+// ✅ 錯誤回應
+c.JSON(statusCode, gin.H{"error": gin.H{"code": "...", "message": "..."}})
+
+// ✅ 204 No Content — 無 body
+c.Status(http.StatusNoContent)
+```
+
+**無例外**：所有 endpoint（含 `GET /health`）皆使用 `data` 包裝。
+
 ---
 
 ## 3. 目錄結構

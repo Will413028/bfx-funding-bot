@@ -27,8 +27,8 @@
 
 ### 漸進式採用策略
 
-- **Phase 1（必選）**：目錄結構、Tailwind + shadcn/ui、Zustand、Zod、原生 fetch 封裝、Biome、Knip、next-intl
-- **Phase 2（規模成長時）**：TanStack Query、React Hook Form、nuqs、Recharts
+- **Phase 1（必選）**：目錄結構、Tailwind + shadcn/ui、Zustand、Zod、原生 fetch 封裝、Biome、Knip、next-intl、TanStack Query、React Hook Form、nuqs
+- **Phase 2（規模成長時）**：Recharts
 - **Phase 3（正式上線時）**：Sentry、CSP 安全標頭
 
 > **關於 `next-intl`**：本專案從 Phase 1 就導入多語系（en + zh-TW）。事後遷移需要把所有路由搬進 `[locale]/`，成本很高。
@@ -127,7 +127,7 @@ frontend/
 │   │   └── use-ws-store.ts         #    WebSocket 連線狀態、最新 MarketSnapshot
 │   │
 │   ├── types/                       # 8. 型別定義層
-│   │   └── index.ts                #    User、ApiResponse、MarketSnapshot、StrategyConfig 等
+│   │   └── index.ts                #    User、ApiError、MarketSnapshot、StrategyConfig 等
 │   │
 │   └── providers/                   # 9. 狀態提供者層
 │       └── query-provider.tsx      #    TanStack Query Provider + Devtools
@@ -330,23 +330,40 @@ export const DELETE = proxyRequest;
 // 使用方式（Client Component 中）
 import { apiClient } from "@/lib/api-client";
 
-// 取得策略參數（實際打 /api/proxy/configs → Go 後端 /api/v1/configs）
-const config = await apiClient.get<StrategyConfig>("/configs");
+// 取得策略參數 — get() 自動解包 data
+const config = await apiClient.get<UserConfig>("/configs");
 
 // 更新策略參數
-const result = await apiClient.put<StrategyConfig>("/configs", newConfig);
+const result = await apiClient.put<UserConfig>("/configs", newConfig);
 
-// 取得帳單記錄
-const bills = await apiClient.get<PaginatedResponse<BillingRecord>>("/billing", {
-  params: { page: "1", since: "2026-01-01" },
+// 取得帳單記錄 — getList() 保留 pagination
+const bills = await apiClient.getList<BillingListResponse>("/billing", {
+  params: { limit: "20" },
 });
+// 下一頁：apiClient.getList<BillingListResponse>("/billing", { params: { after: bills.pagination.nextCursor } })
 ```
 
 **內建功能**：
 - Client Component：所有請求自動加上 `/api/proxy` 前綴，cookie 同源自動帶上
 - Server Component / Server Action：直接打 `API_URL`，手動附加 `Authorization` header
-- JSON 自動解析
+- JSON 自動解析 + 智慧解包（見下方說明）
 - 統一的 `ApiError` 錯誤類別，對應後端格式 `{ "error": { "code": "...", "message": "..." } }`
+
+**`data` 解包策略**：提供兩個方法區分單筆與分頁回應：
+- **`get<T>(path)`** — 自動解包 `data`：後端回傳 `{ "data": T }`，呼叫端拿到 `T`
+- **`getList<T>(path)`** — 不解包：後端回傳 `{ "data": T[], "pagination": {...} }`，呼叫端拿到完整結構
+
+```typescript
+// 單筆資源 — 用 get()，自動解包 data
+const config = await apiClient.get<UserConfig>("/configs");
+// config 的型別是 UserConfig
+
+// 分頁列表 — 用 getList()，保留 pagination
+const bills = await apiClient.getList<BillingListResponse>("/billing", {
+  params: { limit: "20" },
+});
+// bills 的型別是 BillingListResponse { data: BillingRecord[], pagination: CursorPagination }
+```
 
 ```typescript
 // lib/api-client.ts 核心實作概念
@@ -406,8 +423,8 @@ export async function GET() {
     return NextResponse.json({ error: "Failed to get WS token" }, { status: res.status });
   }
 
-  const data = await res.json();
-  return NextResponse.json(data); // { token: "short-lived-token" }
+  const body = await res.json();
+  return NextResponse.json(body.data); // { token: "short-lived-token" }
 }
 ```
 
@@ -465,18 +482,26 @@ export function useDashboardWS() {
 
 | 前端呼叫路徑 | 代理轉發至 | Method | 說明 |
 |-------------|-----------|--------|------|
+| `/api/proxy/health` | `/api/v1/health` | GET | 偵測後端是否存活 |
 | `/api/proxy/auth/register` | `/api/v1/auth/register` | POST | 建立帳號 |
 | `/api/proxy/auth/login` | `/api/v1/auth/login` | POST | JWT 簽發 → proxy 設定 HttpOnly cookie |
+| `/api/proxy/me` | `/api/v1/me` | GET | 當前使用者資訊 |
+| `/api/proxy/me/password` | `/api/v1/me/password` | PUT | 修改密碼 |
 | `/api/proxy/api-keys` | `/api/v1/api-keys` | GET | 列出已綁定的 Bitfinex API Key |
 | `/api/proxy/api-keys` | `/api/v1/api-keys` | POST | 加密儲存 + 驗證權限 |
+| `/api/proxy/api-keys/:id` | `/api/v1/api-keys/:id` | GET | 查看單筆 API Key |
 | `/api/proxy/api-keys/:id` | `/api/v1/api-keys/:id` | DELETE | 同時停止對應 Worker |
+| `/api/proxy/api-keys/:id/verify` | `/api/v1/api-keys/:id/verify` | POST | 重新驗證 Bitfinex 權限 |
 | `/api/proxy/configs` | `/api/v1/configs` | GET | 當前放貸策略設定 |
 | `/api/proxy/configs` | `/api/v1/configs` | PUT | 熱載入至 Worker |
-| `/api/proxy/billing` | `/api/v1/billing` | GET | 分頁 + 日期篩選 |
-| `/api/proxy/executions` | `/api/v1/executions` | GET | 放貸執行歷史 |
+| `/api/proxy/configs` | `/api/v1/configs` | DELETE | 刪除策略設定 |
+| `/api/proxy/dashboard` | `/api/v1/dashboard` | GET | 儀表板總覽（wallet + offers + credits + market） |
+| `/api/proxy/earnings` | `/api/v1/earnings` | GET | 收益摘要 |
+| `/api/proxy/executions` | `/api/v1/executions` | GET | 放貸執行歷史（cursor pagination） |
+| `/api/proxy/billing` | `/api/v1/billing` | GET | 帳單記錄（cursor pagination） |
+| `/api/proxy/billing/plan` | `/api/v1/billing/plan` | GET | 當前訂閱方案功能 |
 | `/api/ws-token` | `/api/v1/auth/ws-token` | GET | 簽發短期 WS token |
 | *直連* `WS_URL` | `/api/v1/ws/dashboard?token=xxx` | WebSocket | 即時推送 |
-| `/api/proxy/health` | `/api/v1/health` | GET | 偵測後端是否存活 |
 
 > **登入流程注意**：proxy 收到 Go 後端回傳的 JWT 後，需要在 proxy 層將 token 設定為 HttpOnly cookie 再回傳給前端，而非直接把 token 暴露給 Client。也可以改用 Server Action 處理登入流程。
 
@@ -632,14 +657,17 @@ export type ApiKeyFormInput = z.infer<typeof apiKeySchema>;
 
 ## 型別定義 (`types/index.ts`)
 
-對應 Go 後端 `domain/` 的型別：
+對應 Go 後端 `domain/` 的型別。後端 JSON 一律使用 camelCase，前端型別直接對應，無需轉換。
+
+後端所有成功回應統一用 `{ "data": ... }` 包裝，錯誤回應用 `{ "error": ... }` 包裝。`api-client.ts` 自動解包 `data`，呼叫端拿到的就是業務資料。
 
 ```typescript
-// 通用 API 回應
+// 通用回應包裝（後端統一格式）
 export interface ApiResponse<T> {
   data: T;
 }
 
+// 錯誤回應（後端統一格式）
 export interface ApiError {
   error: {
     code: string;
@@ -647,11 +675,10 @@ export interface ApiError {
   };
 }
 
-export interface PaginatedResponse<T> {
-  data: T[];
-  total: number;
-  page: number;
-  pageSize: number;
+// Cursor-based 分頁（後端使用 cursor-based pagination）
+export interface CursorPagination {
+  nextCursor?: string;
+  hasMore: boolean;
 }
 
 // 使用者
@@ -659,73 +686,142 @@ export interface User {
   id: string;
   email: string;
   status: "active" | "suspended";
+  plan: "free" | "starter" | "pro" | "enterprise";
   createdAt: string;
+  updatedAt: string;
 }
 
-// API Key（不含 secret，後端不回傳）
+// API Key（對應後端 handler/apikey.go Create/List/GetByID 回傳格式）
 export interface ApiKey {
   id: string;
   label: string;
-  maskedKey: string; // 只顯示前後幾碼
-  permissions: string[];
-  isActive: boolean;
+  apiKey: string;          // 完整 API Key
+  apiSecret: string;       // 永遠是 "****"（後端 mask 處理）
+  exchangeStatus: string;  // "verified" | "unverified" | "failed"
   createdAt: string;
+  fundingBalance?: {       // 可選，僅 Create 時回傳
+    currency: string;
+    balance: number;
+    available: number;
+  };
+}
+
+// API Key 驗證結果（對應後端 handler/apikey.go Verify 回傳格式）
+export interface VerifyResult {
+  status: string;          // "verified" | "failed"
+  error?: string;
+  fundingBalance?: {
+    currency: string;
+    balance: number;
+    available: number;
+  };
 }
 
 // 策略參數（對應後端 domain.StrategyConfig）
-export interface SignalConfig {
-  mdcDecay: number;
-  mdcRecoverySmooth: number;
-  bookSpeedWindow: number;
-  // ... 對應 V10 附錄 B 信號參數
+export interface AmountConfig {
+  min: number;
+  max: number;
 }
 
-export interface ExecutionConfig {
-  minAmount: number;
-  maxSplits: number;
-  dustThreshold: number;
-  // ... 對應 V10 附錄 B 執行參數
+export interface RateConfig {
+  min: number;
+  max: number;
 }
 
 export interface PeriodConfig {
-  minDays: number;
-  maxDays: number;
-  curveShape: string;
-  // ... 對應 V10 附錄 B 天數參數
-}
-
-export interface SafetyConfig {
-  flashCrashThreshold: number;
-  maxExposureRatio: number;
-  rateFloor: number;
-  // ... 對應 V10 附錄 B 安全參數
+  min: number;
+  max: number;
 }
 
 export interface StrategyConfig {
-  signal: SignalConfig;
-  execution: ExecutionConfig;
+  currency: string;
+  amount: AmountConfig;
+  rate: RateConfig;
   period: PeriodConfig;
-  safety: SafetyConfig;
+  autoRenew: boolean;
 }
 
-// 信號值（共用於 MarketSnapshot）
-export interface SignalValue {
-  name: string;
-  value: number;
-  weight: number;
-  freshness: "fresh" | "stale" | "expired";
+// UserConfig（對應後端 handler/config.go 回傳格式）
+export interface UserConfig {
+  id: string;
+  userId: string;
+  config: StrategyConfig;
+  createdAt: string;
+  updatedAt: string;
 }
 
-// MarketSnapshot（WebSocket 推送）
-export interface MarketSnapshot {
-  mdc: { value: number; trend: string };
+// ── Dashboard 相關（REST GET /dashboard）──
+
+// 錢包摘要
+export interface WalletSummary {
+  currency: string;
+  balance: number;
+  balanceAvailable: number;
+}
+
+// 掛單摘要
+export interface OfferSummary {
+  id: number;
+  currency: string;
+  amount: number;
+  rate: number;
+  period: number;
+  status: string;
+  createdAt: string;
+}
+
+// 債權摘要
+export interface CreditSummary {
+  id: number;
+  currency: string;
+  amount: number;
+  rate: number;
+  period: number;
+  status: string;
+  autoRenew: boolean;
+  openedAt: string;
+}
+
+// 市場摘要
+export interface MarketSummary {
+  frr: number;
   regime: string;
-  signals: SignalValue[];
+  mdcScore: number;
   flashFreeze: boolean;
   timestamp: string;
 }
 
-// 放貸狀態（WebSocket 推送）
+// Dashboard 總覽（對應後端 service.DashboardSummary）
+export interface DashboardSummary {
+  wallet: WalletSummary | null;
+  offers: OfferSummary[];
+  credits: CreditSummary[];
+  market: MarketSummary | null;
+  engineReady: boolean;
+}
+
+// ── Earnings（REST GET /earnings）──
+
+export interface EarningsSummary {
+  estimatedDailyEarning: number;
+  weightedAPY: number;
+  earnings7d: number;
+  earnings30d: number;
+  totalLent: number;
+  activeCredits: number;
+  currency: string;
+}
+
+// ── WebSocket 推送型別（Phase F12-F13，尚未實作）──
+
+export interface MarketSnapshot {
+  frr: number;
+  regime: string;
+  mdcScore: number;
+  flashFreeze: boolean;
+  timestamp: string;
+}
+
 export interface LendingStatus {
   activeOffers: number;
   activeCredits: number;
@@ -735,26 +831,64 @@ export interface LendingStatus {
   workerStatus: "running" | "paused" | "stopped";
 }
 
-// 帳單記錄
+// ── 帳單記錄（對應後端 domain.BillingRecord）──
+
 export interface BillingRecord {
   id: string;
-  period: string;
-  totalEarnings: number;
-  platformFee: number;
-  netEarnings: number;
-  status: "pending" | "paid";
+  userId: string;
+  periodStart: string;
+  periodEnd: string;
+  plan: string;
+  amount: number;
+  currency: string;
+  status: "pending" | "paid" | "overdue" | "waived";
+  paidAt?: string;
   createdAt: string;
 }
 
-// 執行記錄
+// 帳單分頁回應（後端回傳 { data: [...], pagination: {...} }）
+export interface BillingListResponse {
+  data: BillingRecord[];
+  pagination: CursorPagination;
+}
+
+// 訂閱方案功能（GET /billing/plan）
+export interface PlanFeatures {
+  plan: string;
+  price: number;
+  autoLending: boolean;
+  advancedStrategy: boolean;
+  emailNotify: boolean;
+  priorityQuota: boolean;
+  customParams: boolean;
+}
+
+// ── 執行記錄（對應後端 domain.ExecutionRecord）──
+
 export interface ExecutionRecord {
   id: string;
-  action: "place" | "cancel" | "renew";
+  userId: string;
+  action: "place" | "cancel" | "filled" | "renew";
+  currency: string;
   amount: number;
   rate: number;
   period: number;
-  status: "success" | "failed";
-  timestamp: string;
+  offerId?: number;
+  status: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+// 執行記錄分頁回應（後端回傳 { data: [...], pagination: {...} }）
+export interface ExecutionListResponse {
+  data: ExecutionRecord[];
+  pagination: CursorPagination;
+}
+
+// 引擎狀態（GET /health 回傳的 engine 欄位）
+export interface EngineStatus {
+  running: boolean;
+  workerCount: number;
 }
 ```
 
@@ -905,7 +1039,6 @@ export const config = {
 ```typescript
 import type { NextConfig } from "next";
 import createNextIntlPlugin from "next-intl/plugin";
-import { withSentryConfig } from "@sentry/nextjs";
 
 const nextConfig: NextConfig = {
   // 圖片白名單（如需要）
@@ -914,15 +1047,18 @@ const nextConfig: NextConfig = {
 
 const withNextIntl = createNextIntlPlugin();
 
-// Phase 3: Sentry 錯誤監控（未使用時可直接 export default withNextIntl(nextConfig)）
-export default withSentryConfig(withNextIntl(nextConfig), {
-  org: process.env.SENTRY_ORG,
-  project: process.env.SENTRY_PROJECT,
-  silent: !process.env.CI,
-  widenClientFileUpload: true,
-  disableLogger: true,
-  automaticVercelMonitors: true,
-});
+export default withNextIntl(nextConfig);
+
+// Phase 3: Sentry 錯誤監控
+// import { withSentryConfig } from "@sentry/nextjs";
+// export default withSentryConfig(withNextIntl(nextConfig), {
+//   org: process.env.SENTRY_ORG,
+//   project: process.env.SENTRY_PROJECT,
+//   silent: !process.env.CI,
+//   widenClientFileUpload: true,
+//   disableLogger: true,
+//   automaticVercelMonitors: true,
+// });
 ```
 
 ### `src/app/layout.tsx` — Root Layout（pass-through）
