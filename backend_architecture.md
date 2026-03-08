@@ -399,25 +399,50 @@ type Executor interface {
 ```go
 // domain/snapshot.go
 type MarketSnapshot struct {
-    FRR          float64       // Flash Return Rate (daily) from ticker
-    MDC          MDCResult
-    Regime       RegimeType
-    RegimeParams RegimeParams
-    Signals      []SignalValue
-    OrderBook    OrderBookSummary
-    WallPositions []WallPosition
-    HiddenRatio  float64
-    FlashFreeze  bool
-    Timestamp    time.Time
+    Symbol             string
+    FRR                float64       // Flash Return Rate (daily) from ticker
+    MDC                MDCResult
+    Regime             RegimeType
+    RegimeParams       RegimeParams
+    Signals            []SignalValue
+    OrderBook          OrderBookSummary
+    WallPositions      []WallPosition
+    HiddenRatio        float64 // estimated hidden order ratio
+    CompetitorActivity float64 // 0-1 composite competitor activity score
+    FlashFreeze        bool    // true if flash crash detected, trading paused
+    Timestamp          time.Time
 }
 
-// domain/config.go — 對應 V10 附錄 B 全部參數
+// domain/config.go
 type StrategyConfig struct {
-    Signal    SignalConfig    `json:"signal"`
-    Execution ExecutionConfig `json:"execution"`
-    Period    PeriodConfig    `json:"period"`
-    Safety    SafetyConfig    `json:"safety"`
-    // ...附錄 B 的所有參數群組
+    Currency  string       `json:"currency"`
+    Amount    AmountConfig `json:"amount"`  // Min/Max 掛單金額
+    Rate      RateConfig   `json:"rate"`    // Min/Max 利率
+    Period    PeriodConfig `json:"period"`  // Min/Max 天數
+    AutoRenew bool         `json:"auto_renew"`
+}
+
+// domain/decision.go — 策略決策層 I/O
+type DecisionContext struct {
+    Snapshot      *MarketSnapshot
+    Config        *StrategyConfig
+    ActiveOffers  []FundingOffer
+    ActiveCredits []FundingCredit
+    Available     float64 // available balance in funding wallet
+    Currency      string  // e.g. "fUSD"
+}
+
+type DecisionResult struct {
+    Offers       []OfferDecision // recommended offers to place
+    Cancels      []int64         // offer IDs to cancel
+    RenewCredits []int64         // credit IDs to renew
+    Reason       string          // human-readable decision reason
+}
+
+type OfferDecision struct {
+    Amount float64
+    Rate   float64
+    Period int
 }
 ```
 
