@@ -41,11 +41,13 @@ func main() {
 		fx.Provide(service.NewAPIKeyService),
 		fx.Provide(service.NewConfigService),
 		fx.Provide(service.NewDashboardService),
+		fx.Provide(service.NewEarningsService),
 		fx.Provide(engine.NewEngine),
 		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewAPIKeyHandler),
 		fx.Provide(handler.NewConfigHandler),
 		fx.Provide(handler.NewDashboardHandler),
+		fx.Provide(handler.NewEarningsHandler),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {

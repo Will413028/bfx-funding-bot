@@ -127,6 +127,32 @@ fetch(`https://api.bitfinex.com/${apiPath}`, {
   ```
   - Index mapping: 0=ID, 1=SYMBOL, 2=SIDE, 3=MTS_CREATE, 4=MTS_UPDATE, 5=AMOUNT, 7=STATUS, 11=RATE, 12=PERIOD, 13=MTS_OPENING, 18=RENEW
 
+### Ledger History (Funding Earnings)
+- **POST** `/v2/auth/r/ledgers/{Currency}/hist`
+- Currency: "fUSD", "fETH", etc.
+- Request body:
+  ```json
+  {
+    "category": 28,
+    "start": 1709251200000,
+    "end": 1709856000000,
+    "limit": 2500
+  }
+  ```
+  - `category`: 28 = Margin Funding Payment
+  - `start`/`end`: millisecond timestamps
+  - `limit`: max 2500 (default 25)
+- Response: array of ledger entries
+  ```
+  [
+    [ID, CURRENCY, null, MTS, null, AMOUNT, BALANCE, null, DESCRIPTION],
+    ...
+  ]
+  ```
+  - Index mapping: 0=ID, 1=CURRENCY, 3=MTS, 5=AMOUNT, 6=BALANCE, 8=DESCRIPTION
+  - AMOUNT: positive = interest received
+  - DESCRIPTION: "Margin Funding Payment on wallet funding"
+
 ## Error Response Format
 ```json
 ["error", 10114, "nonce: small"]

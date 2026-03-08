@@ -12,7 +12,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 )
 
-func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler, apiKeyH *APIKeyHandler, configH *ConfigHandler, dashH *DashboardHandler) *gin.Engine {
+func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler, apiKeyH *APIKeyHandler, configH *ConfigHandler, dashH *DashboardHandler, earnH *EarningsHandler) *gin.Engine {
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -66,6 +66,7 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 			protected.DELETE("/configs", configH.Delete)
 
 			protected.GET("/dashboard", dashH.Get)
+			protected.GET("/earnings", earnH.Get)
 		}
 	}
 
