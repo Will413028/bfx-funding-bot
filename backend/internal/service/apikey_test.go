@@ -82,6 +82,10 @@ func (m *mockAPIKeyRepo) Delete(_ context.Context, id, userID string) error {
 	return nil
 }
 
+func (m *mockAPIKeyRepo) ListVerified(_ context.Context) ([]domain.APIKey, [][]byte, error) {
+	return nil, nil, nil
+}
+
 func testAES(t *testing.T) *crypto.AES {
 	t.Helper()
 	key := make([]byte, 32)

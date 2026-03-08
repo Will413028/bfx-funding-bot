@@ -13,6 +13,11 @@ SELECT id, user_id, label, api_key, api_secret, created_at, updated_at, exchange
 FROM api_keys
 WHERE user_id = $1;
 
+-- name: ListVerifiedAPIKeys :many
+SELECT id, user_id, label, api_key, api_secret, created_at, updated_at, exchange_status
+FROM api_keys
+WHERE exchange_status = 'verified';
+
 -- name: UpdateExchangeStatus :exec
 UPDATE api_keys
 SET exchange_status = $2, updated_at = now()
