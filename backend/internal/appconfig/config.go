@@ -16,6 +16,7 @@ type Config struct {
 	FrontendURL string
 	Environment string
 	DatabaseURL string
+	RedisURL    string
 
 	JWTPrivateKey *rsa.PrivateKey
 	JWTPublicKey  *rsa.PublicKey
@@ -29,6 +30,7 @@ func Load() (Config, error) {
 		FrontendURL: os.Getenv("FRONTEND_URL"),
 		Environment: getEnvOrDefault("ENVIRONMENT", "development"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
+		RedisURL:    os.Getenv("REDIS_URL"),
 	}
 
 	if cfg.FrontendURL == "" {
@@ -36,6 +38,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("required environment variable DATABASE_URL is not set")
+	}
+	if cfg.RedisURL == "" {
+		return Config{}, fmt.Errorf("required environment variable REDIS_URL is not set")
 	}
 
 	privPEM := os.Getenv("JWT_PRIVATE_KEY")
