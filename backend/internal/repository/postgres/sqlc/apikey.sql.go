@@ -12,16 +12,17 @@ import (
 )
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (user_id, label, api_key, api_secret)
-VALUES ($1, $2, $3, $4)
-RETURNING id, user_id, label, api_key, api_secret, created_at, updated_at
+INSERT INTO api_keys (user_id, label, api_key, api_secret, exchange_status)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, label, api_key, api_secret, created_at, updated_at, exchange_status
 `
 
 type CreateAPIKeyParams struct {
-	UserID    pgtype.UUID
-	Label     string
-	ApiKey    string
-	ApiSecret []byte
+	UserID         pgtype.UUID
+	Label          string
+	ApiKey         string
+	ApiSecret      []byte
+	ExchangeStatus string
 }
 
 func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error) {
@@ -30,6 +31,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		arg.Label,
 		arg.ApiKey,
 		arg.ApiSecret,
+		arg.ExchangeStatus,
 	)
 	var i ApiKey
 	err := row.Scan(
@@ -40,6 +42,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		&i.ApiSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ExchangeStatus,
 	)
 	return i, err
 }
@@ -63,7 +66,7 @@ func (q *Queries) DeleteAPIKey(ctx context.Context, arg DeleteAPIKeyParams) (int
 }
 
 const getAPIKeyByID = `-- name: GetAPIKeyByID :one
-SELECT id, user_id, label, api_key, api_secret, created_at, updated_at
+SELECT id, user_id, label, api_key, api_secret, created_at, updated_at, exchange_status
 FROM api_keys
 WHERE id = $1
 `
@@ -79,12 +82,13 @@ func (q *Queries) GetAPIKeyByID(ctx context.Context, id pgtype.UUID) (ApiKey, er
 		&i.ApiSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ExchangeStatus,
 	)
 	return i, err
 }
 
 const getAPIKeyByUserID = `-- name: GetAPIKeyByUserID :one
-SELECT id, user_id, label, api_key, api_secret, created_at, updated_at
+SELECT id, user_id, label, api_key, api_secret, created_at, updated_at, exchange_status
 FROM api_keys
 WHERE user_id = $1
 `
@@ -100,6 +104,23 @@ func (q *Queries) GetAPIKeyByUserID(ctx context.Context, userID pgtype.UUID) (Ap
 		&i.ApiSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ExchangeStatus,
 	)
 	return i, err
+}
+
+const updateExchangeStatus = `-- name: UpdateExchangeStatus :exec
+UPDATE api_keys
+SET exchange_status = $2, updated_at = now()
+WHERE id = $1
+`
+
+type UpdateExchangeStatusParams struct {
+	ID             pgtype.UUID
+	ExchangeStatus string
+}
+
+func (q *Queries) UpdateExchangeStatus(ctx context.Context, arg UpdateExchangeStatusParams) error {
+	_, err := q.db.Exec(ctx, updateExchangeStatus, arg.ID, arg.ExchangeStatus)
+	return err
 }

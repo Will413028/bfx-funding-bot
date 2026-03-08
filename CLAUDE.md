@@ -83,3 +83,11 @@ Bitfinex 自動放貸 SaaS 平台。
 - `🔧 Chore:` 工具/設定調整
 - `📝 Docs:` 文件
 - `🎉 Init:` 初始化
+- `♻️ Refactor:` 重構
+- `✅ Test:` 測試
+- `🔥 Remove:` 移除程式碼或檔案
+- `🚀 Deploy:` 部署
+- `💄 Style:` UI / 樣式
+- `👷 CI:` CI/CD
+- `⚡️ Perf:` 效能優化
+- `🩹 Patch:` 非關鍵小修正

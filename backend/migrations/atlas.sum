@@ -1,4 +1,5 @@
-h1:q5P5EmHmu3Dl6EPPBhQBidbcXaeFAvYseC9N62fWVvc=
+h1:0BqvT7f63Ead3dNSmox+/h1B4389tIkiNX0xM3SSIyQ=
 20260307182925_create_users.sql h1:ITvvLrLLNjABTwzA1WZHqdJyyov4UoO0Awiup9bjdrU=
 20260307192840_create_api_keys.sql h1:IWPAeSiOPYKkGWpr6vKqIX2gkm3QHu5ijjyzFuavvqM=
 20260308030457_create_user_configs.sql h1:LmF560ns1naVwYqrwHgsHZCPajO6Lj+xdOtpmOatAcw=
+20260308035500_add_exchange_status.sql h1:/aGo/zvthPVDP2KqjQHzBycwGhwCyBPOJJvIwDqs3ZU=

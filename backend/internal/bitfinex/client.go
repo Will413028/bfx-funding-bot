@@ -23,6 +23,10 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{httpClient: httpClient}
 }
 
+func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
+	return &Client{httpClient: httpClient, baseURLOverride: baseURL}
+}
+
 func (c *Client) doAuth(ctx context.Context, apiPath, apiKey, apiSecret string, body any) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {

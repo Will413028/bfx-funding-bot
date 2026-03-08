@@ -65,6 +65,11 @@ table "api_keys" {
     type = bytea
     null = false
   }
+  column "exchange_status" {
+    type    = text
+    null    = false
+    default = "unverified"
+  }
   column "created_at" {
     type    = timestamptz
     null    = false

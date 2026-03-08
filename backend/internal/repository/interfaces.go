@@ -13,9 +13,10 @@ type UserRepository interface {
 }
 
 type APIKeyRepository interface {
-	Create(ctx context.Context, userID, label, apiKey string, encryptedSecret []byte) (*domain.APIKey, error)
+	Create(ctx context.Context, userID, label, apiKey string, encryptedSecret []byte, exchangeStatus string) (*domain.APIKey, error)
 	GetByID(ctx context.Context, id string) (*domain.APIKey, []byte, error)
 	GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error)
+	UpdateExchangeStatus(ctx context.Context, id, status string) error
 	Delete(ctx context.Context, id, userID string) error
 }
 
