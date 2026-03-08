@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-08
+> 最後更新：2026-03-09
 > 參考文件：`backend_architecture.md`
 
 ---
@@ -34,6 +34,7 @@
 | C3 | Signal Modules | `lending/signal/` — 5 信號源 (book, liquidation, momentum, margin, crossccy) + MDC 加權聚合器 | `30276ac` |
 | C4 | Order Book Analysis | `lending/orderbook/` — dust filter, wall detection (single+distributed), hidden ratio, competitor | `2052afd` |
 | C5 | Regime Detection | `lending/signal/regime.go` — 體制識別 (contango/backwardation/neutral/crisis) + hysteresis | `f429899` |
+| D1 | Pricing Strategy | `domain/decision.go` + `lending/strategy/pricing.go` — DecisionContext/Result types + MDC 溢價映射 + regime 調整 | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -106,11 +107,10 @@ marketfeed/service.go (C1)
 
 ### Phase D — 放貸引擎：策略決策層
 
-13 個策略模組，基於市場分析做出利率 / 天數 / 金額決策。
+12 個策略模組（D1 已完成），基於市場分析做出利率 / 天數 / 金額決策。
 
 | # | 功能 | 說明 | 架構文件對應 | 複雜度 |
 |---|------|------|-------------|--------|
-| D1 | Pricing Strategy | 溢價係數 + MDC 映射 | `lending/strategy/pricing.go` | 高 |
 | D2 | Floor Strategy | 利率地板 + 機會成本框架 | `lending/strategy/floor.go` | 中 |
 | D3 | Period Strategy | 天數決策（曲線形態、線性縮放） | `lending/strategy/period.go` | 高 |
 | D4 | Lockup Cost | 鎖倉機會成本折扣 | `lending/strategy/lockup.go` | 中 |
@@ -153,14 +153,14 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 25 項 |
+| 已完成 | 26 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
-| Phase D（策略決策層） | 13 項 |
+| Phase D（策略決策層） | 12 項（D1 已完成） |
 | Phase E（執行層 + Worker） | 8 項 |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **24 項** |
+| **待開發合計** | **23 項** |
 
 ## 依賴關係
 
@@ -173,7 +173,7 @@ Phase A ✅ 全部完成
     │                  Phase C ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal) ← **下一步**
+    │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal) ← **進行中 (D1 ✅)**
     │                      │
     │                      ▼
     ├── A5 (Execution) ✅ → Phase E (執行層，依賴 A5 Execution Records + D 策略)
@@ -190,6 +190,6 @@ Phase A ✅ 全部完成
 4. ~~**A5 → A6** — Execution + Billing 完善資料層~~ ✅
 5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
-7. **D1-D13** — 策略決策模組（可分批實作，優先 D1-D6）← **下一步**
+7. **D2-D13** — 策略決策模組（D1 ✅，優先 D2-D6）← **下一步**
 8. **E1-E8** — 執行層 + Worker Pool（完成後取代 `engine/` MVP）
 9. **F1 → F2 → F3** — 前端 + 監控
