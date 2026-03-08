@@ -149,6 +149,7 @@ marketfeed/service.go (C1)
 | F13 | WebSocket Frontend | `ws-client.ts` (自動重連+心跳) + Zustand `use-ws-store` + `useDashboardWS` hook → overview 即時更新 | 中 |
 | F14 | Charts | Recharts — 收益走勢圖 (24h/7d/30d) + 利率走勢圖 + APY 歷史曲線 | 中 |
 | F15 | Production Hardening | Sentry 錯誤監控 + CSP 安全標頭 + env 驗證 fail-fast + Vercel 部署設定 | 低 |
+| F16 | Testing | Vitest 單元測試 (format, query-keys, api-client 純函式) + Playwright E2E (auth, api-keys, strategy, history, i18n 主流程) | 中 |
 
 ### Phase H — 運維
 
@@ -219,6 +220,7 @@ Phase A ✅ 全部完成
          │        └→ F5→F6,F7,F8,F9,F10 (Dashboard 各頁面，F5 之後可平行)
          │        └→ F11 (Marketing，可獨立開發)
          │        └→ F12→F13→F14 (WebSocket + Charts)
+         │        └→ F16 (Testing — Vitest unit + Playwright E2E，F4 之後可開始)
          │        └→ F15 (Production hardening，最後)
          │
          └── Phase H (運維)
@@ -240,8 +242,9 @@ Phase A ✅ 全部完成
 11. **F7 → F8 → F9 → F10** — Dashboard 各功能頁面（可平行開發）
 12. **F11** — Marketing pages（可獨立開發）
 13. **F12 → F13 → F14** — WebSocket 即時推送 + Charts
-14. **F15** — 前端 Production hardening（Sentry + CSP）
-15. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
-16. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
-17. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
-18. **H1 → H2 → H3** — 運維監控（Prometheus + Grafana + Alerting）
+14. **F16** — 前端測試（Vitest unit 20% + Playwright E2E 80%，F4 之後可逐步加入）
+15. **F15** — 前端 Production hardening（Sentry + CSP）
+16. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
+17. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
+18. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
+19. **H1 → H2 → H3** — 運維監控（Prometheus + Grafana + Alerting）

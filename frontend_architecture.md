@@ -1408,6 +1408,72 @@ import { Link } from "@/i18n/navigation";
 
 ---
 
+## 測試策略
+
+### 核心原則
+
+Next.js App Router 的非同步伺服器元件 (Async Server Components) 目前在 Vitest / Jest 的支援度不完善，官方建議 Async Components 直接用 E2E 測試覆蓋。因此採用 **20/80 策略**：
+
+| 層級 | 工具 | 佔比 | 測試範圍 |
+|------|------|------|----------|
+| Unit | Vitest + React Testing Library | 20% | 核心商業邏輯（純函式） |
+| E2E | Playwright | 80% | 使用者主流程（頁面互動） |
+
+### Vitest — 單元測試（20%）
+
+只測最核心、絕對不能算錯的商業邏輯：
+
+```typescript
+// __tests__/lib/format.test.ts
+import { describe, expect, it } from "vitest";
+import { formatAPR, formatDailyRate, formatUSD, formatPeriod } from "@/lib/format";
+
+describe("formatAPR", () => {
+  it("converts daily rate to annualized percentage", () => {
+    expect(formatAPR(0.0001)).toBe("3.65%");
+  });
+});
+```
+
+**測試對象**（白名單，其餘不測）：
+- `lib/format.ts` — 利率計算、貨幣格式化
+- `lib/query-keys.ts` — Query Key 結構正確性
+- `lib/api-client.ts` — ApiError 建構、URL 組合邏輯
+
+**不測的東西**：
+- UI 排版元件（shadcn/ui wrapper）
+- Server Components（交給 E2E）
+- 第三方套件的行為（next-intl、zustand）
+
+### Playwright — E2E 測試（80%）
+
+3-5 個腳本覆蓋使用者主流程：
+
+| 腳本 | 覆蓋流程 |
+|------|----------|
+| `auth.spec.ts` | 註冊 → 登入 → 登出 → 未登入重導向 |
+| `api-keys.spec.ts` | 新增 API Key → 驗證連線 → 刪除 |
+| `strategy.spec.ts` | 修改放貸參數 → 儲存 → 確認生效 |
+| `history.spec.ts` | 查看執行記錄 → 分頁翻頁 → 查看帳單 |
+| `i18n.spec.ts` | 切換語系 (en ↔ zh-TW) → 確認翻譯 |
+
+**E2E 全綠 = 可安心推上 Vercel + Koyeb。**
+
+### package.json 測試指令
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  }
+}
+```
+
+---
+
 ## Vercel 部署
 
 ### 部署流程
