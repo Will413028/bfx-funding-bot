@@ -38,26 +38,37 @@ type CreditSummary struct {
 	OpenedAt  time.Time `json:"opened_at"`
 }
 
+type MarketSummary struct {
+	FRR         float64          `json:"frr"`
+	Regime      domain.RegimeType `json:"regime"`
+	MDCScore    float64          `json:"mdc_score"`
+	FlashFreeze bool             `json:"flash_freeze"`
+	Timestamp   time.Time        `json:"timestamp"`
+}
+
 type DashboardSummary struct {
 	Wallet      *WalletSummary  `json:"wallet"`
 	Offers      []OfferSummary  `json:"offers"`
 	Credits     []CreditSummary `json:"credits"`
+	Market      *MarketSummary  `json:"market"`
 	EngineReady bool            `json:"engine_ready"`
 }
 
 type DashboardService struct {
-	bfx        *bitfinex.Client
-	apiKeyRepo repository.APIKeyRepository
-	configRepo repository.ConfigRepository
-	cipher     *crypto.AES
+	bfx           *bitfinex.Client
+	apiKeyRepo    repository.APIKeyRepository
+	configRepo    repository.ConfigRepository
+	snapshotCache repository.SnapshotCache
+	cipher        *crypto.AES
 }
 
-func NewDashboardService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, cipher *crypto.AES) *DashboardService {
+func NewDashboardService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, snapshotCache repository.SnapshotCache, cipher *crypto.AES) *DashboardService {
 	return &DashboardService{
-		bfx:        bfx,
-		apiKeyRepo: apiKeyRepo,
-		configRepo: configRepo,
-		cipher:     cipher,
+		bfx:           bfx,
+		apiKeyRepo:    apiKeyRepo,
+		configRepo:    configRepo,
+		snapshotCache: snapshotCache,
+		cipher:        cipher,
 	}
 }
 
@@ -138,6 +149,18 @@ func (s *DashboardService) GetSummary(ctx context.Context, userID string) (*Dash
 	}()
 
 	wg.Wait()
+
+	// Read market snapshot from Redis cache (non-fatal if missing)
+	snapshot, _ := s.snapshotCache.Get(ctx, "f"+currency)
+	if snapshot != nil {
+		summary.Market = &MarketSummary{
+			FRR:         snapshot.FRR,
+			Regime:      snapshot.Regime,
+			MDCScore:    snapshot.MDC.Score,
+			FlashFreeze: snapshot.FlashFreeze,
+			Timestamp:   snapshot.Timestamp,
+		}
+	}
 
 	// Map results
 	if wallet != nil {

@@ -30,6 +30,17 @@ The system SHALL call Bitfinex API endpoints (`wallets`, `offers/fCURRENCY`, `cr
 - **WHEN** one or more Bitfinex API calls fail
 - **THEN** the system SHALL return the successfully retrieved data and set failed sections to null/empty, without returning an HTTP error
 
+### Requirement: Market snapshot from Redis cache
+The system SHALL read the latest MarketSnapshot from Redis cache (via SnapshotCache) and include it in the dashboard response. The cache key is derived from the user's configured currency (e.g., `fUSD`).
+
+#### Scenario: Snapshot available
+- **WHEN** a MarketSnapshot exists in Redis for the user's currency
+- **THEN** the response SHALL include `market` with `frr`, `regime`, `mdc_score`, `flash_freeze`, and `timestamp`
+
+#### Scenario: Snapshot unavailable
+- **WHEN** no MarketSnapshot exists in Redis (cache miss or engine not running)
+- **THEN** the response SHALL set `market: null` without returning an HTTP error
+
 ### Requirement: Dashboard response format
 The system SHALL return the dashboard data in a structured JSON format.
 
@@ -39,4 +50,5 @@ The system SHALL return the dashboard data in a structured JSON format.
   - `wallet`: `{ currency, balance, balance_available }` or null
   - `offers`: array of `{ id, currency, amount, rate, period, status, created_at }`
   - `credits`: array of `{ id, currency, amount, rate, period, status, auto_renew, opened_at }`
+  - `market`: `{ frr, regime, mdc_score, flash_freeze, timestamp }` or null
   - `engine_ready`: boolean indicating if the lending engine is active for this user

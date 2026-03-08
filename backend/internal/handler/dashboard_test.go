@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,24 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
 )
+
+type testSnapshotCache struct {
+	snapshots map[string]*domain.MarketSnapshot
+}
+
+func (m *testSnapshotCache) Set(_ context.Context, symbol string, snapshot *domain.MarketSnapshot, _ time.Duration) error {
+	m.snapshots[symbol] = snapshot
+	return nil
+}
+
+func (m *testSnapshotCache) Get(_ context.Context, symbol string) (*domain.MarketSnapshot, error) {
+	return m.snapshots[symbol], nil
+}
+
+func (m *testSnapshotCache) Delete(_ context.Context, symbol string) error {
+	delete(m.snapshots, symbol)
+	return nil
+}
 
 func setupDashboardRouter(t *testing.T) *gin.Engine {
 	t.Helper()
@@ -55,7 +74,8 @@ func setupDashboardRouter(t *testing.T) *gin.Engine {
 		},
 	}
 
-	svc := service.NewDashboardService(bfx, apiKeyRepo, configRepo, aes)
+	cache := &testSnapshotCache{snapshots: make(map[string]*domain.MarketSnapshot)}
+	svc := service.NewDashboardService(bfx, apiKeyRepo, configRepo, cache, aes)
 	h := NewDashboardHandler(svc)
 
 	r := gin.New()
