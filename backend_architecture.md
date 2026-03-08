@@ -86,7 +86,7 @@ backend/
 │   │   ├── user.go                      # 用戶註冊 / 登入 / Profile / 改密碼
 │   │   ├── apikey.go                    # API Key CRUD + 加密 + 權限驗證
 │   │   ├── config.go                    # 策略參數管理 + 通知 Worker 熱載入
-│   │   ├── dashboard.go                 # Dashboard 摘要（wallet + offers + credits）
+│   │   ├── dashboard.go                 # Dashboard 摘要（wallet + offers + credits + market snapshot）
 │   │   ├── earnings.go                  # 收益統計（daily estimate, APY, 7d/30d）
 │   │   ├── execution.go                 # 放貸執行紀錄查詢
 │   │   └── billing.go                   # 帳單查詢 + 訂閱方案功能權限
@@ -110,7 +110,7 @@ backend/
 │   │   │   ├── momentum.go              #   雙速 VWAP
 │   │   │   ├── margin.go                #   保證金持倉量
 │   │   │   ├── crossccy.go              #   跨幣種 Funding Rate
-│   │   │   ├── intraday.go              #   日內時段 + 月內修正
+│   │   │   ├── intraday.go             #   日內時段 + 月內修正
 │   │   │   └── regime.go                #   市場體制識別
 │   │   │
 │   │   ├── orderbook/                   # 掛單簿分析
@@ -226,7 +226,7 @@ backend/
 │   └── atlas.hcl                              #   Atlas 專案配置（env、data source）
 │
 ├── migrations/                                # Atlas 版本化 Migration（自動產生）
-│   ├── 20260307180227_create_users.sql
+│   ├── 20260307182925_create_users.sql
 │   ├── 20260307192840_create_api_keys.sql
 │   ├── 20260308030457_create_user_configs.sql
 │   ├── 20260308035500_add_exchange_status.sql
@@ -259,7 +259,7 @@ backend/
 handler/auth.go      → service/user.go
 handler/apikey.go    → service/apikey.go
 handler/config.go    → service/config.go → 通知 lending/worker 熱載入
-handler/dashboard.go → service/dashboard.go（透過 Redis 讀取 MarketSnapshot）
+handler/dashboard.go → service/dashboard.go（Bitfinex REST 拉取用戶資料 + Redis 讀取 MarketSnapshot）
 handler/health.go    → infra (pgxpool, redis) + EngineHealthProvider (domain.EngineStatus)
 ```
 

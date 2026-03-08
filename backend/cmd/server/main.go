@@ -104,6 +104,7 @@ func newMarketFeedService(log *zap.Logger, cache repository.SnapshotCache) *mark
 		signal.NewMomentum(),
 		signal.NewMarginUsage(),
 		signal.NewCrossCurrency(),
+		signal.NewIntraday(),
 	}
 
 	return marketfeed.NewService(log, cfg, cache, sources, nil)
