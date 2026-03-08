@@ -9,13 +9,14 @@ import (
 )
 
 type ApiKey struct {
-	ID        pgtype.UUID
-	UserID    pgtype.UUID
-	Label     string
-	ApiKey    string
-	ApiSecret []byte
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
+	ID             pgtype.UUID
+	UserID         pgtype.UUID
+	Label          string
+	ApiKey         string
+	ApiSecret      []byte
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+	ExchangeStatus string
 }
 
 type User struct {
