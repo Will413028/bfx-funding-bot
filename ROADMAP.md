@@ -45,7 +45,8 @@
 | D9 | Partial Fill | `lending/strategy/partial.go` — 殘留偵測 + fillProxy 成交活躍度 + 金額調整 | `d478436` |
 | D10 | Stagger | `lending/strategy/stagger.go` — 到期分佈分析 + 最佳 period 選擇 + 集中度偵測 | `21e20c5` |
 | D11 | Weekend Premium | `lending/strategy/weekend.go` — 週末遞減溢價 (週五晚+2%, 週六+5%, 週日+3%) | `6311117` |
-| D12 | Event Calendar | `lending/strategy/calendar.go` — 月末/季度交割事件溢價 + period 縮短 | |
+| D12 | Event Calendar | `lending/strategy/calendar.go` — 月末/季度交割事件溢價 + period 縮短 | `14136bf` |
+| D13 | Noise | `lending/strategy/noise.go` — 隨機擾動 (rate ±1%, amount ±2%) + 心理價位避讓 | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -116,14 +117,6 @@ marketfeed/service.go (C1)
 
 ## 待開發功能
 
-### Phase D — 放貸引擎：策略決策層
-
-1 個策略模組（D1-D12 已完成），基於市場分析做出利率 / 天數 / 金額決策。
-
-| # | 功能 | 說明 | 架構文件對應 | 複雜度 |
-|---|------|------|-------------|--------|
-| D13 | Noise | 隨機擾動 + 心理價位避讓 | `lending/strategy/noise.go` | 低 |
-
 ### Phase E — 放貸引擎：執行層 & Worker Pool
 
 掛單執行 + Per-User Worker 生命週期管理。完成後取代目前 `engine/` MVP。
@@ -153,14 +146,14 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 37 項 |
+| 已完成 | 38 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
-| Phase D（策略決策層） | 1 項（D1-D12 已完成） |
+| ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
 | Phase E（執行層 + Worker） | 8 項 |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **12 項** |
+| **待開發合計** | **11 項** |
 
 ## 依賴關係
 
@@ -173,7 +166,7 @@ Phase A ✅ 全部完成
     │                  Phase C ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal) ← **進行中 (D1-D12 ✅)**
+    │                  Phase D ✅ 全部完成 (13 策略模組)
     │                      │
     │                      ▼
     ├── A5 (Execution) ✅ → Phase E (執行層，依賴 A5 Execution Records + D 策略)
@@ -190,6 +183,6 @@ Phase A ✅ 全部完成
 4. ~~**A5 → A6** — Execution + Billing 完善資料層~~ ✅
 5. ~~**B1 → B2 → B3** — WebSocket + 市場數據基礎~~ ✅
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
-7. **D13** — 策略決策模組（D1-D12 ✅，繼續 D13）← **下一步**
-8. **E1-E8** — 執行層 + Worker Pool（完成後取代 `engine/` MVP）
+7. ~~**D1-D13** — 策略決策模組~~ ✅
+8. **E1-E8** — 執行層 + Worker Pool（完成後取代 `engine/` MVP）← **下一步**
 9. **F1 → F2 → F3** — 前端 + 監控
