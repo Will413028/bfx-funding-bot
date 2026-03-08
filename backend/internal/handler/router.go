@@ -43,17 +43,18 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 	// API v1 routes
 	v1 := r.Group("/api/v1")
 	{
+		// Health check — no rate limiting
 		v1.GET("/health", health.Status)
 
-		// Public auth routes
-		authGroup := v1.Group("/auth")
+		// Public auth routes — strict rate limit (5 r/s, burst 10)
+		authGroup := v1.Group("/auth", middleware.RateLimit(5, 10))
 		{
 			authGroup.POST("/register", authH.Register)
 			authGroup.POST("/login", authH.Login)
 		}
 
-		// Protected routes (JWT required)
-		protected := v1.Group("", middleware.JWTAuth(jwtMgr))
+		// Protected routes (JWT required) — relaxed rate limit (20 r/s, burst 40)
+		protected := v1.Group("", middleware.RateLimit(20, 40), middleware.JWTAuth(jwtMgr))
 		{
 			protected.POST("/apikeys", apiKeyH.Create)
 			protected.GET("/apikeys", apiKeyH.List)
