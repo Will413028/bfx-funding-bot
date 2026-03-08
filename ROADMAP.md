@@ -11,39 +11,61 @@
 |---|------|---------|--------|
 | 1 | Database Foundation | `schema/schema.hcl` (users, api_keys, user_configs) + Atlas migration | `4b30880` 之前 |
 | 2 | Backend API Foundation | Gin + fx + zap, `cmd/server/main.go`, router, health check | 同上 |
-| 3 | Bitfinex REST Client | `bitfinex/client.go` + `auth.go` — HMAC-SHA384 認證, funding 操作 (wallet/offers/credits/earnings/cancel) | `4b30880` |
+| 3 | Bitfinex REST Client | `bitfinex/client.go` + `auth.go` — HMAC-SHA384 認證, funding 操作 | `4b30880` |
 | 4 | User Auth JWT | `auth/jwt.go` + `handler/auth.go` + `middleware/jwt.go` — 註冊/登入/JWT 驗證 | `9e08a79` 之前 |
 | 5 | AES-256-GCM Crypto | `crypto/aes.go` — API Key 加密儲存 | 同上 |
 | 6 | API Key Management | `handler/apikey.go` + `service/apikey.go` + `repository/postgres/apikey.go` — CRUD + Bitfinex 驗證 | `9e08a79` |
 | 7 | Strategy Config | `handler/config.go` + `service/config.go` + `repository/postgres/config.go` — CRUD | `9e08a79` 之前 |
 | 8 | Lending Engine MVP | `engine/engine.go` + `strategy.go` — ticker loop (3min) + fixed-interval 策略 | `494c794` |
-| 9 | Dashboard API | `handler/dashboard.go` + `service/dashboard.go` — GET /dashboard (wallet, offers, credits) | `760d11b` |
-| 10 | Earnings API | `handler/earnings.go` + `service/earnings.go` — GET /earnings (daily estimate, APY, history) | `c7a5615` |
+| 9 | Dashboard API | `handler/dashboard.go` + `service/dashboard.go` — GET /dashboard | `760d11b` |
+| 10 | Earnings API | `handler/earnings.go` + `service/earnings.go` — GET /earnings | `c7a5615` |
 | 11 | Middleware | `middleware/jwt.go`, `requestid.go`, `logger.go`, `recovery.go` | 各 commit |
+| A1 | Rate Limiting Middleware | `middleware/ratelimit.go` — per-IP token bucket (auth 5r/s, protected 20r/s) | `6f03141` |
+| A2 | User Profile API | `handler/user.go` + `service/user.go` — GET /me, PUT /me/password | `187d305` |
+| A3 | Redis Integration | `infra/redis.go` — Upstash go-redis/v9 + health check degraded mode | `c324fb6` |
+| A4 | Notification Service | `notification/notifier.go` + `resend.go` — Resend email (welcome, API key alert, generic) | `6add1b8` |
+| A5 | Execution Records | `domain/execution.go` + `executions` table + repo/service/handler 全套 — GET /executions | `30a3315` |
+| A6 | Billing API | `domain/billing.go` + `billing_records` table + `users.plan` 欄位 + 月費方案 (free/starter/pro/enterprise) — GET /billing, GET /billing/plan | `915443b` |
 
-### 目前 DB Schema (3 tables)
+### 目前 DB Schema (5 tables)
 
-- `users` (id, email, password_hash, status, created_at, updated_at)
+- `users` (id, email, password_hash, status, **plan**, created_at, updated_at)
 - `api_keys` (id, user_id, label, api_key, api_secret, exchange_status, created_at, updated_at)
 - `user_configs` (id, user_id, config JSONB, created_at, updated_at)
+- `executions` (id, user_id, action, currency, amount, rate, period, offer_id, status, error_message, created_at)
+- `billing_records` (id, user_id, period_start, period_end, plan, amount, currency, status, paid_at, created_at)
 
 ### 目前 API Endpoints
 
 ```
 GET    /api/v1/health
-POST   /api/v1/auth/register
-POST   /api/v1/auth/login
-POST   /api/v1/apikeys          (JWT)
-GET    /api/v1/apikeys          (JWT)
-GET    /api/v1/apikeys/:id      (JWT)
-DELETE /api/v1/apikeys/:id      (JWT)
-POST   /api/v1/apikeys/:id/verify (JWT)
-PUT    /api/v1/configs          (JWT)
-GET    /api/v1/configs          (JWT)
-DELETE /api/v1/configs          (JWT)
-GET    /api/v1/dashboard        (JWT)
-GET    /api/v1/earnings         (JWT)
+POST   /api/v1/auth/register       (rate limit: 5r/s)
+POST   /api/v1/auth/login          (rate limit: 5r/s)
+GET    /api/v1/me                  (JWT, 20r/s)
+PUT    /api/v1/me/password         (JWT, 20r/s)
+POST   /api/v1/apikeys             (JWT)
+GET    /api/v1/apikeys             (JWT)
+GET    /api/v1/apikeys/:id         (JWT)
+DELETE /api/v1/apikeys/:id         (JWT)
+POST   /api/v1/apikeys/:id/verify  (JWT)
+PUT    /api/v1/configs             (JWT)
+GET    /api/v1/configs             (JWT)
+DELETE /api/v1/configs             (JWT)
+GET    /api/v1/dashboard           (JWT)
+GET    /api/v1/earnings            (JWT)
+GET    /api/v1/executions          (JWT)
+GET    /api/v1/billing             (JWT)
+GET    /api/v1/billing/plan        (JWT)
 ```
+
+### 訂閱方案
+
+| Plan | 月費 | 功能 |
+|------|------|------|
+| free | $0 | 基本儀表板、手動放貸 |
+| starter | $9.99 | 自動放貸（固定利率策略）、email 通知 |
+| pro | $29.99 | 進階策略（市場分析、多策略）、優先 API 配額 |
+| enterprise | $99.99 | 所有功能、專屬支援、自訂策略參數 |
 
 ### 目前未使用的 Domain Types
 
@@ -57,19 +79,6 @@ GET    /api/v1/earnings         (JWT)
 ---
 
 ## 待開發功能
-
-### Phase A — CRUD 補齊 & 基礎設施
-
-獨立性強，可平行開發。為後續進階功能打基礎。
-
-| # | 功能 | 說明 | 涵蓋項目 | 複雜度 |
-|---|------|------|---------|--------|
-| A1 | Rate Limiting Middleware | 保護 API 免被濫用 | `middleware/ratelimit.go` | 低 |
-| A2 | User Profile API | 用戶資料查詢 / 修改 / 停用 | `handler/user.go` + `service/` 擴充 | 低 |
-| A3 | Redis Integration | Upstash 連線初始化 + Session 儲存 | `infra/redis.go` + `repository/redis/session.go` + `appconfig` 加 RedisURL | 中 |
-| A4 | Notification Service | Email 告警通知（帳單、異常） | `notification/service.go` + `email.go` | 低 |
-| A5 | Execution Records | 放貸操作歷史紀錄持久化 | `domain/execution.go` + DB schema + `repository/postgres/execution.go` + query SQL | 中 |
-| A6 | Billing API | 帳單計算 + 查詢 | `domain/billing.go` + DB schema + handler/service/repo 全套 | 中 |
 
 ### Phase B — Bitfinex WebSocket & 市場數據基礎
 
@@ -142,21 +151,21 @@ GET    /api/v1/earnings         (JWT)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 11 項 |
-| Phase A（CRUD + 基礎設施） | 6 項 |
+| 已完成 | 17 項 |
+| ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | Phase B（WebSocket + 市場數據） | 3 項 |
 | Phase C（市場分析層） | 5 項 |
 | Phase D（策略決策層） | 13 項 |
 | Phase E（執行層 + Worker） | 8 項 |
 | Phase F（前端 + 運維） | 3 項 |
-| **待開發合計** | **38 項** |
+| **待開發合計** | **32 項** |
 
 ## 依賴關係
 
 ```
-Phase A (獨立，可平行)
+Phase A ✅ 全部完成
     │
-    ├── A3 (Redis) ──→ Phase B (B3 需要 Redis)
+    ├── A3 (Redis) ✅ ──→ Phase B (B3 需要 Redis)
     │                      │
     │                      ▼
     │                  Phase C (市場分析，依賴 B1 WebSocket + B2 Domain Types)
@@ -165,19 +174,19 @@ Phase A (獨立，可平行)
     │                  Phase D (策略決策，依賴 C 的 MarketSnapshot + Signal)
     │                      │
     │                      ▼
-    ├── A5 (Execution) ─→ Phase E (執行層，依賴 A5 Execution Records + D 策略)
+    ├── A5 (Execution) ✅ → Phase E (執行層，依賴 A5 Execution Records + D 策略)
     │                      │
     │                      ▼
-    └── A6 (Billing) ──→ Phase F (前端需要所有 API ready)
+    └── A6 (Billing) ✅ ─→ Phase F (前端需要所有 API ready)
 ```
 
 ## 建議開發順序
 
-1. **A1 → A2** — 快速補齊 CRUD，低複雜度
-2. **A3** — Redis 整合，為後續市場數據快取做準備
-3. **A5 → A6** — Execution + Billing 完善資料層
-4. **A4** — Notification（可延後到需要時）
-5. **B1 → B2 → B3** — WebSocket + 市場數據基礎
+1. ~~**A1 → A2** — 快速補齊 CRUD，低複雜度~~ ✅
+2. ~~**A3** — Redis 整合~~ ✅
+3. ~~**A4** — Notification~~ ✅
+4. ~~**A5 → A6** — Execution + Billing 完善資料層~~ ✅
+5. **B1 → B2 → B3** — WebSocket + 市場數據基礎 ← **下一步**
 6. **C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）
 7. **D1-D13** — 策略決策模組（可分批實作，優先 D1-D6）
 8. **E1-E8** — 執行層 + Worker Pool（完成後取代 `engine/` MVP）

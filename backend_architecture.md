@@ -64,23 +64,31 @@ backend/
 │   ├── handler/
 │   │   ├── router.go                    # 路由註冊
 │   │   ├── auth.go                      # 註冊 / 登入 / JWT 簽發
-│   │   ├── user.go                      # 用戶 CRUD
+│   │   ├── user.go                      # 用戶 CRUD (GET /me, PUT /me/password)
 │   │   ├── apikey.go                    # API Key 管理
 │   │   ├── config.go                    # 策略參數 CRUD
-│   │   ├── billing.go                   # 帳單查詢
-│   │   ├── dashboard.go                 # WebSocket 即時推送
-│   │   └── health.go                    # 健康檢查 + Readiness
+│   │   ├── dashboard.go                 # Dashboard 摘要 (REST，未來改 WebSocket)
+│   │   ├── earnings.go                  # 收益統計
+│   │   ├── execution.go                 # 放貸執行紀錄查詢
+│   │   ├── billing.go                   # 帳單查詢 + 訂閱方案
+│   │   └── health.go                    # 健康檢查 (Postgres + Redis)
 │   │
 │   ├── middleware/
 │   │   ├── jwt.go                       # JWT 驗證
-│   │   └── ratelimit.go                 # 請求頻率限制
+│   │   ├── ratelimit.go                 # Per-IP token bucket 頻率限制
+│   │   ├── requestid.go                 # X-Request-ID 注入
+│   │   ├── logger.go                    # 請求日誌 (zap)
+│   │   └── recovery.go                  # Panic 恢復
 │   │
 │   │   # ── Application 層：CRUD 業務 ──
 │   ├── service/
-│   │   ├── user.go                      # 用戶註冊 / 登入 / 管理
+│   │   ├── user.go                      # 用戶註冊 / 登入 / Profile / 改密碼
 │   │   ├── apikey.go                    # API Key CRUD + 加密 + 權限驗證
 │   │   ├── config.go                    # 策略參數管理 + 通知 Worker 熱載入
-│   │   └── billing.go                   # 計費計算 + 帳單生成
+│   │   ├── dashboard.go                 # Dashboard 摘要（wallet + offers + credits）
+│   │   ├── earnings.go                  # 收益統計（daily estimate, APY, 7d/30d）
+│   │   ├── execution.go                 # 放貸執行紀錄查詢
+│   │   └── billing.go                   # 帳單查詢 + 訂閱方案功能權限
 │   │
 │   │   # ── Application 層：放貸引擎 ──
 │   ├── lending/
@@ -138,16 +146,19 @@ backend/
 │   │
 │   │   # ── Domain 層 ──
 │   ├── domain/
-│   │   ├── user.go                      # User, UserStatus
+│   │   ├── user.go                      # User, UserStatus (含 Plan 欄位)
 │   │   ├── apikey.go                    # APIKey, KeyPermissions
 │   │   ├── offer.go                     # FundingOffer, OfferParams
 │   │   ├── credit.go                    # FundingCredit, CreditStatus
-│   │   ├── execution.go                 # ExecutionRecord（V10 §9.1 全欄位）
-│   │   ├── billing.go                   # BillingRecord, BillingPeriod
-│   │   ├── snapshot.go                  # MarketSnapshot, RawMarketData
-│   │   ├── signal.go                    # SignalValue, MDCResult, SignalFreshness
-│   │   ├── regime.go                    # RegimeType, RegimeParams
-│   │   └── config.go                    # StrategyConfig（附錄 B 全參數型別定義）
+│   │   ├── wallet.go                    # Wallet
+│   │   ├── earning.go                   # FundingEarning
+│   │   ├── execution.go                 # ExecutionRecord (place/cancel/filled/renew)
+│   │   ├── billing.go                   # BillingRecord, PlanFeatures, 訂閱方案常數
+│   │   ├── errors.go                    # AppError 統一錯誤型別
+│   │   ├── config.go                    # StrategyConfig（附錄 B 全參數型別定義）
+│   │   ├── snapshot.go                  # MarketSnapshot, RawMarketData (待實作)
+│   │   ├── signal.go                    # SignalValue, MDCResult (待實作)
+│   │   └── regime.go                    # RegimeType, RegimeParams (待實作)
 │   │
 │   │   # ── Infrastructure 層 ──
 │   │
@@ -195,27 +206,26 @@ backend/
 │   │   └── types.go                     # API 回應型別轉換
 │   │
 │   ├── notification/
-│   │   ├── service.go                   # 統一通知入口
-│   │   └── email.go                     # Email 發送實作
+│   │   ├── notifier.go                  # Notifier interface 定義
+│   │   └── resend.go                    # Resend Email 實作 (welcome, alert)
 │   │
 │   ├── crypto/
 │   │   └── aes.go                       # AES-256-GCM 加解密
 │   │
 │   └── appconfig/
-│       └── appconfig.go                 # 環境變數 / YAML 載入
+│       └── config.go                    # 環境變數載入（含 Redis, Resend 配置）
 │
 ├── schema/                                    # Atlas 宣告式 Schema（Desired State）
 │   ├── schema.hcl                             #   完整資料庫 schema 定義
 │   └── atlas.hcl                              #   Atlas 專案配置（env、data source）
 │
 ├── migrations/                                # Atlas 版本化 Migration（自動產生）
-│   ├── 20260307000001_create_users.sql
-│   ├── 20260307000002_create_api_keys.sql
-│   ├── 20260307000003_create_user_configs.sql
-│   ├── 20260307000004_create_executions.sql
-│   ├── 20260307000005_create_billing.sql
-│   ├── 20260307000006_create_audit_log.sql
-│   ├── 20260307000007_create_worker_snapshots.sql
+│   ├── 20260307180227_create_users.sql
+│   ├── 20260307192840_create_api_keys.sql
+│   ├── 20260308030457_create_user_configs.sql
+│   ├── 20260308035500_add_exchange_status.sql
+│   ├── 20260308065022_create_executions.sql
+│   ├── 20260308065825_add_plan_and_billing.sql
 │   └── atlas.sum                              #   Migration 完整性校驗
 │
 ├── sqlc.yaml                                  # sqlc 配置
@@ -487,19 +497,36 @@ func Module() fx.Option {
 package repository
 
 type UserRepository interface {
-    Create(ctx context.Context, user *domain.User) error
+    Create(ctx context.Context, email, passwordHash string) (*domain.User, error)
     GetByID(ctx context.Context, id string) (*domain.User, error)
     GetByEmail(ctx context.Context, email string) (*domain.User, error)
-    UpdateStatus(ctx context.Context, id string, status domain.UserStatus) error
+    UpdatePassword(ctx context.Context, id, passwordHash string) error
+}
+
+type APIKeyRepository interface {
+    Create(ctx context.Context, userID, label, apiKey string, encryptedSecret []byte, exchangeStatus string) (*domain.APIKey, []byte, error)
+    GetByID(ctx context.Context, id string) (*domain.APIKey, []byte, error)
+    GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error)
+    ListVerified(ctx context.Context) ([]domain.APIKey, [][]byte, error)
+    UpdateExchangeStatus(ctx context.Context, id, status string) error
+    Delete(ctx context.Context, id, userID string) error
+}
+
+type ConfigRepository interface {
+    Upsert(ctx context.Context, userID string, configJSON []byte) (*domain.UserConfig, error)
+    GetByUserID(ctx context.Context, userID string) (*domain.UserConfig, error)
+    DeleteByUserID(ctx context.Context, userID string) error
 }
 
 type ExecutionRepository interface {
-    Save(ctx context.Context, record *domain.ExecutionRecord) error
-    QueryByUser(ctx context.Context, userID string, since time.Time) ([]domain.ExecutionRecord, error)
-    AggregateWeeklyAlpha(ctx context.Context, userID string, since time.Time) (*domain.AlphaReport, error)
+    Create(ctx context.Context, record *domain.ExecutionRecord) (*domain.ExecutionRecord, error)
+    ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error)
 }
 
-// ... 其他 Repository interface
+type BillingRepository interface {
+    Create(ctx context.Context, record *domain.BillingRecord) (*domain.BillingRecord, error)
+    ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error)
+}
 ```
 
 ```go
@@ -611,67 +638,54 @@ lending/service.go 啟動
 ## 6. `main.go` 啟動流程（fx）
 
 ```go
-// cmd/server/main.go
+// cmd/server/main.go（目前已實作的版本）
 func main() {
     fx.New(
         // ── Infrastructure（連線初始化）──
-        fx.Provide(appconfig.Load),
-        infra.Module(),          // *pgxpool.Pool + *redis.Client
-        fx.Provide(bitfinex.NewClient),
-        fx.Provide(crypto.NewAES),
-        fx.Provide(notification.NewService),
+        appconfig.Module,           // Config 載入
+        infra.Module,               // *pgxpool.Pool + *redis.Client
+        repository.Module,          // 聚合 postgres 所有 DAO
 
-        // ── Repository（聚合 postgres + redis 所有 DAO）──
-        repository.Module(),
-
-        // ── Lending Engine ──
-        // fx 自動將 *lending.Service 注入為 service.WorkerManager / service.ConfigReloader
-        fx.Provide(lending.NewService),
+        fx.Provide(newLogger),
+        fx.Provide(func(cfg appconfig.Config) *auth.JWTManager { ... }),
+        fx.Provide(func(cfg appconfig.Config) (*crypto.AES, error) { ... }),
+        fx.Provide(func() *bitfinex.Client { ... }),
+        fx.Provide(func(cfg appconfig.Config) notification.Notifier {
+            return notification.NewResendNotifier(cfg.ResendAPIKey, cfg.NotificationFromEmail)
+        }),
 
         // ── Service 層 ──
-        fx.Provide(
-            service.NewUserService,
-            service.NewAPIKeyService,     // 接收 WorkerManager interface
-            service.NewConfigService,     // 接收 ConfigReloader interface
-            service.NewBillingService,
-        ),
+        fx.Provide(service.NewUserService),
+        fx.Provide(service.NewAPIKeyService),
+        fx.Provide(service.NewConfigService),
+        fx.Provide(service.NewDashboardService),
+        fx.Provide(service.NewEarningsService),
+        fx.Provide(service.NewExecutionService),
+        fx.Provide(service.NewBillingService),
+
+        // ── Lending Engine MVP ──
+        fx.Provide(engine.NewEngine),
 
         // ── Transport 層 ──
-        fx.Provide(
-            handler.NewAuthHandler,
-            handler.NewUserHandler,
-            handler.NewAPIKeyHandler,
-            handler.NewConfigHandler,
-            handler.NewBillingHandler,
-            handler.NewDashboardHandler,
-            handler.NewHealthHandler,
-        ),
+        fx.Provide(handler.NewAuthHandler),
+        fx.Provide(handler.NewUserHandler),
+        fx.Provide(handler.NewAPIKeyHandler),
+        fx.Provide(handler.NewConfigHandler),
+        fx.Provide(handler.NewDashboardHandler),
+        fx.Provide(handler.NewEarningsHandler),
+        fx.Provide(handler.NewExecutionHandler),
+        fx.Provide(handler.NewBillingHandler),
+        fx.Provide(handler.NewHealthHandler),
         fx.Provide(handler.NewRouter),
 
         // ── 生命週期管理 ──
-        fx.Invoke(registerHooks),
+        fx.Invoke(startServer),
+        fx.Invoke(startEngine),
     ).Run()
 }
 
-// registerHooks 註冊 HTTP server 和 Lending Engine 的啟停
-func registerHooks(lc fx.Lifecycle, cfg *appconfig.Config, router http.Handler, lendingSvc *lending.Service) {
-    srv := &http.Server{Addr: cfg.ListenAddr, Handler: router}
-
-    lc.Append(fx.Hook{
-        OnStart: func(ctx context.Context) error {
-            // 啟動放貸引擎
-            go lendingSvc.Start(ctx)
-            // 啟動 HTTP server
-            go srv.ListenAndServe()
-            return nil
-        },
-        OnStop: func(ctx context.Context) error {
-            // fx 收到 SIGINT/SIGTERM 自動觸發 OnStop
-            lendingSvc.Stop(ctx)
-            return srv.Shutdown(ctx)
-        },
-    })
-}
+// 未來 lending.Service 完成後，會取代 engine.NewEngine，
+// 並透過 fx 自動注入為 service.WorkerManager / service.ConfigReloader
 ```
 
 **fx 的優勢**：
@@ -870,20 +884,25 @@ Koyeb 透過 SIGTERM 終止應用。後端必須正確處理，確保 WebSocket 
 ```bash
 # Server
 PORT=8080
+ENVIRONMENT=development  # development | production
 
 # Database (Neon)
-DATABASE_URL=postgresql://user:pass@ep-xxx.region.aws.neon.tech/dbname?sslmode=require
+DATABASE_URL="postgresql://user:pass@ep-xxx.region.aws.neon.tech/dbname?sslmode=require"
 
 # Cache (Upstash)
-REDIS_URL=rediss://default:xxx@xxx.upstash.io:6379
+REDIS_URL="rediss://default:xxx@xxx.upstash.io:6379"
 
 # Auth
 JWT_PRIVATE_KEY=...    # RS256 private key (PEM)
 JWT_PUBLIC_KEY=...     # RS256 public key (PEM)
-AES_KEY=...            # API Key 加密用 256-bit key
+AES_KEY=...            # API Key 加密用 256-bit hex key (32 bytes)
+
+# Notification (Resend)
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+NOTIFICATION_FROM_EMAIL=noreply@bfx-funding.bot
 
 # Frontend
-FRONTEND_URL=https://app.example.com   # CORS 白名單 + cookie domain
+FRONTEND_URL=https://app.example.com   # CORS 白名單
 ```
 
 > **Neon 連線注意**：Neon 要求 `sslmode=require`。放貸引擎 24/7 常駐會持續查詢 DB，Neon compute 基本不會 auto-suspend，需注意持續計費。
