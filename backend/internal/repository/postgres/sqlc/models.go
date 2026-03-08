@@ -8,6 +8,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ApiKey struct {
+	ID        pgtype.UUID
+	UserID    pgtype.UUID
+	Label     string
+	ApiKey    string
+	ApiSecret []byte
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
 type User struct {
 	ID           pgtype.UUID
 	Email        string

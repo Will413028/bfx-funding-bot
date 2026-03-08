@@ -12,4 +12,5 @@ var Module = fx.Module("repository.postgres",
 		return sqlc.New(pool)
 	}),
 	fx.Provide(NewUserRepo),
+	fx.Provide(NewAPIKeyRepo),
 )

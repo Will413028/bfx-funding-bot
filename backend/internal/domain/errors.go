@@ -63,3 +63,11 @@ func ErrInvalidToken() *AppError {
 func ErrTokenExpired() *AppError {
 	return NewAppError(401, "TOKEN_EXPIRED", "Token has expired")
 }
+
+func ErrAPIKeyAlreadyExists() *AppError {
+	return NewAppError(409, "APIKEY_ALREADY_EXISTS", "API key already exists for this user")
+}
+
+func ErrAPIKeyNotFound() *AppError {
+	return NewAppError(404, "NOT_FOUND", "API key not found")
+}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
 	"github.com/will/bfx-funding-bot/backend/internal/auth"
+	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/handler"
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
@@ -28,8 +29,13 @@ func main() {
 		fx.Provide(func(cfg appconfig.Config) *auth.JWTManager {
 			return auth.NewJWTManager(cfg.JWTPrivateKey, cfg.JWTPublicKey)
 		}),
+		fx.Provide(func(cfg appconfig.Config) (*crypto.AES, error) {
+			return crypto.NewAES(cfg.AESKey)
+		}),
 		fx.Provide(service.NewUserService),
+		fx.Provide(service.NewAPIKeyService),
 		fx.Provide(handler.NewAuthHandler),
+		fx.Provide(handler.NewAPIKeyHandler),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {

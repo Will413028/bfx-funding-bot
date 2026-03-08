@@ -1,13 +1,4 @@
-### Requirement: Load configuration from environment variables
-The system SHALL load all configuration from environment variables at startup via `appconfig.Load()`.
-
-#### Scenario: All required variables present
-- **WHEN** all required environment variables are set
-- **THEN** `appconfig.Load()` SHALL return a valid `Config` struct
-
-#### Scenario: Missing required variable
-- **WHEN** a required environment variable (e.g., `FRONTEND_URL`) is missing
-- **THEN** `appconfig.Load()` SHALL return an error describing the missing variable, and the application SHALL fail to start
+## MODIFIED Requirements
 
 ### Requirement: Configuration struct definition
 The `Config` struct SHALL contain the following fields:
@@ -33,10 +24,3 @@ The `Config` struct SHALL contain the following fields:
 #### Scenario: Invalid AES_KEY format
 - **WHEN** `AES_KEY` is not valid hex or decodes to a length other than 32 bytes
 - **THEN** `appconfig.Load()` SHALL return an error describing the invalid key format
-
-### Requirement: Configuration available via fx
-The `Config` struct SHALL be provided to fx's dependency graph so that any component can receive it via constructor injection.
-
-#### Scenario: Component receives config
-- **WHEN** a component declares `appconfig.Config` as a constructor parameter
-- **THEN** fx SHALL inject the loaded configuration

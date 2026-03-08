@@ -3,6 +3,7 @@ package appconfig
 import (
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -18,6 +19,8 @@ type Config struct {
 
 	JWTPrivateKey *rsa.PrivateKey
 	JWTPublicKey  *rsa.PublicKey
+
+	AESKey []byte
 }
 
 func Load() (Config, error) {
@@ -52,6 +55,19 @@ func Load() (Config, error) {
 
 	cfg.JWTPrivateKey = privKey
 	cfg.JWTPublicKey = pubKey
+
+	aesHex := os.Getenv("AES_KEY")
+	if aesHex == "" {
+		return Config{}, fmt.Errorf("required environment variable AES_KEY is not set")
+	}
+	aesKey, err := hex.DecodeString(aesHex)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing AES_KEY: invalid hex: %w", err)
+	}
+	if len(aesKey) != 32 {
+		return Config{}, fmt.Errorf("parsing AES_KEY: expected 32 bytes, got %d", len(aesKey))
+	}
+	cfg.AESKey = aesKey
 
 	return cfg, nil
 }
