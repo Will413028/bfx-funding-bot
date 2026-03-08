@@ -97,14 +97,14 @@ GET    /api/v1/billing/plan        (JWT)
 | pro | $29.99 | 進階策略（市場分析、多策略）、優先 API 配額 |
 | enterprise | $99.99 | 所有功能、專屬支援、自訂策略參數 |
 
-### 目前未使用的 Domain Types
+### 非 DB 持久化的 Domain Types
 
-這些 domain types 已定義但僅供 Bitfinex client 及 dashboard/earnings service 使用，尚無對應 DB 持久化：
+這些 domain types 無對應 DB table，由 Bitfinex API 即時取得，供 lending engine、dashboard、earnings 使用：
 
-- `domain/wallet.go` — Wallet
-- `domain/offer.go` — FundingOffer, OfferParams
-- `domain/credit.go` — FundingCredit
-- `domain/earning.go` — FundingEarning
+- `domain/wallet.go` — Wallet（fetcher 拉取餘額）
+- `domain/offer.go` — FundingOffer, OfferParams（fetcher 拉取 + execution 掛單）
+- `domain/credit.go` — FundingCredit（fetcher 拉取 + execution 債權管理）
+- `domain/earning.go` — FundingEarning（earnings service 收益統計）
 
 ### 放貸引擎市場分析 Pipeline (Phase B+C)
 

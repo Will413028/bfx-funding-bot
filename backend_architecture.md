@@ -8,7 +8,7 @@
 | :--- | :--- | :--- |
 | 語言 | Go 1.25+ | 單一二進位部署，goroutine 驅動 |
 | HTTP 框架 | Gin | handler + middleware |
-| 資料庫 | PostgreSQL (Neon) | 多租戶持久化，Row-Level Security |
+| 資料庫 | PostgreSQL (Neon) | 多租戶持久化，WHERE user_id 隔離 |
 | 快取 | Redis (Upstash) | Session、MarketSnapshot 快取、Pub/Sub |
 | Bitfinex API | 自製 `bitfinex/` | HMAC-SHA384 REST client + WebSocket（公開+認證頻道） |
 | 加密 | AES-256-GCM | API Key 加密儲存 |
@@ -233,8 +233,6 @@ backend/
 │   └── atlas.sum                              #   Migration 完整性校驗
 │
 ├── sqlc.yaml                                  # sqlc 配置
-├── Dockerfile
-├── docker-compose.yml
 ├── Makefile
 ├── go.mod
 └── go.sum
@@ -503,7 +501,7 @@ var Module = fx.Module("infra",
 // infra/postgres.go
 package infra
 
-func NewPostgresPool(lc fx.Lifecycle, cfg *appconfig.Config) (*pgxpool.Pool, error) {
+func NewPostgresPool(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*pgxpool.Pool, error) {
     pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
     if err != nil {
         return nil, err
@@ -651,7 +649,7 @@ handler/router.go → middleware/jwt.go → handler/config.go
     ▼
 service/config.go
     │  1. 呼叫 domain.StrategyConfig.Validate() 驗證參數合理性
-    │  2. 呼叫 repository.ConfigRepository.Save() 持久化
+    │  2. 呼叫 repository.ConfigRepository.Upsert() 持久化
     │  3. 呼叫 ConfigReloader.ReloadConfig(userID, newConfig) 通知 Worker
     │     （ConfigReloader 由 fx 注入，實際為 *lending.Service）
     ▼
@@ -803,6 +801,7 @@ func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.
 
 | Package | import path | 用途 | 對應 V10 章節 |
 | :--- | :--- | :--- | :--- |
+| `auth` | `internal/auth` | JWT 簽發 + 驗證（RS256） | §10.4 |
 | `handler` | `internal/handler` | HTTP 請求處理 + 路由註冊 | §10.8 |
 | `middleware` | `internal/middleware` | JWT, Rate Limit | §10.8 |
 | `service` | `internal/service` | CRUD 業務編排 | §10.4, 10.6, 10.7 |
