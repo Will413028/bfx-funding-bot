@@ -38,3 +38,15 @@ type BillingRepository interface {
 	Create(ctx context.Context, record *domain.BillingRecord) (*domain.BillingRecord, error)
 	ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error)
 }
+
+type SnapshotCache interface {
+	Set(ctx context.Context, symbol string, snapshot *domain.MarketSnapshot, ttl time.Duration) error
+	Get(ctx context.Context, symbol string) (*domain.MarketSnapshot, error)
+	Delete(ctx context.Context, symbol string) error
+}
+
+type SnapshotPubSub interface {
+	Publish(ctx context.Context, snapshot *domain.MarketSnapshot) error
+	Subscribe(ctx context.Context) (<-chan *domain.MarketSnapshot, error)
+	Close() error
+}
