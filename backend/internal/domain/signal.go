@@ -12,6 +12,7 @@ const (
 	SignalMomentum             SignalType = "momentum"
 	SignalMarginUsage          SignalType = "margin_usage"
 	SignalCrossCurrency        SignalType = "cross_currency"
+	SignalIntraday             SignalType = "intraday"
 )
 
 // SignalValue represents the result of a single signal computation.

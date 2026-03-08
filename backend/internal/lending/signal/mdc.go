@@ -14,7 +14,7 @@ var defaultWeights = map[domain.SignalType]float64{
 	domain.SignalMarginUsage:        0.20,
 	domain.SignalMomentum:           0.15,
 	domain.SignalCrossCurrency:      0.10,
-	// Remaining 10% reserved for future intraday signal
+	domain.SignalIntraday:           0.10,
 }
 
 // Default decay λ per signal (per second).
@@ -25,6 +25,7 @@ var defaultLambda = map[domain.SignalType]float64{
 	domain.SignalMarginUsage:        0.008,
 	domain.SignalMomentum:           0.01,
 	domain.SignalCrossCurrency:      0.005,
+	domain.SignalIntraday:           0.002,
 }
 
 // MDCAggregator computes the Market Demand Curve composite score

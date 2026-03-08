@@ -129,6 +129,27 @@ func TestMDC_DemandSupplyDecomposition(t *testing.T) {
 	}
 }
 
+func TestMDC_WeightsSumToOne(t *testing.T) {
+	var total float64
+	for _, w := range defaultWeights {
+		total += w
+	}
+	if total < 0.999 || total > 1.001 {
+		t.Errorf("expected weights to sum to 1.0, got %f", total)
+	}
+	if len(defaultWeights) != 6 {
+		t.Errorf("expected 6 signal weights, got %d", len(defaultWeights))
+	}
+}
+
+func TestMDC_AllSignalsHaveDecay(t *testing.T) {
+	for sig := range defaultWeights {
+		if _, ok := defaultLambda[sig]; !ok {
+			t.Errorf("signal %s has weight but no decay lambda", sig)
+		}
+	}
+}
+
 func TestMDC_ZeroConfidenceIgnored(t *testing.T) {
 	agg := NewMDCAggregator()
 	now := time.Now()
