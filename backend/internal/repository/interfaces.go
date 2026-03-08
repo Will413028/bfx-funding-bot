@@ -33,3 +33,8 @@ type ExecutionRepository interface {
 	Create(ctx context.Context, record *domain.ExecutionRecord) (*domain.ExecutionRecord, error)
 	ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error)
 }
+
+type BillingRepository interface {
+	Create(ctx context.Context, record *domain.BillingRecord) (*domain.BillingRecord, error)
+	ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.BillingRecord, error)
+}

@@ -44,6 +44,7 @@ func main() {
 		fx.Provide(service.NewDashboardService),
 		fx.Provide(service.NewEarningsService),
 		fx.Provide(service.NewExecutionService),
+		fx.Provide(service.NewBillingService),
 		fx.Provide(func(cfg appconfig.Config) notification.Notifier {
 			return notification.NewResendNotifier(cfg.ResendAPIKey, cfg.NotificationFromEmail)
 		}),
@@ -55,6 +56,7 @@ func main() {
 		fx.Provide(handler.NewDashboardHandler),
 		fx.Provide(handler.NewEarningsHandler),
 		fx.Provide(handler.NewExecutionHandler),
+		fx.Provide(handler.NewBillingHandler),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {

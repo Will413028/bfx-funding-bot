@@ -19,6 +19,19 @@ type ApiKey struct {
 	ExchangeStatus string
 }
 
+type BillingRecord struct {
+	ID          pgtype.UUID
+	UserID      pgtype.UUID
+	PeriodStart pgtype.Timestamptz
+	PeriodEnd   pgtype.Timestamptz
+	Plan        string
+	Amount      float64
+	Currency    string
+	Status      string
+	PaidAt      pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+}
+
 type Execution struct {
 	ID           pgtype.UUID
 	UserID       pgtype.UUID
@@ -40,6 +53,7 @@ type User struct {
 	Status       string
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+	Plan         string
 }
 
 type UserConfig struct {

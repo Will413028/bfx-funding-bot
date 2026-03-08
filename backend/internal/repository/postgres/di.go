@@ -15,4 +15,5 @@ var Module = fx.Module("repository.postgres",
 	fx.Provide(NewAPIKeyRepo),
 	fx.Provide(NewConfigRepo),
 	fx.Provide(NewExecutionRepo),
+	fx.Provide(NewBillingRepo),
 )
