@@ -34,8 +34,10 @@ func main() {
 		}),
 		fx.Provide(service.NewUserService),
 		fx.Provide(service.NewAPIKeyService),
+		fx.Provide(service.NewConfigService),
 		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewAPIKeyHandler),
+		fx.Provide(handler.NewConfigHandler),
 		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {

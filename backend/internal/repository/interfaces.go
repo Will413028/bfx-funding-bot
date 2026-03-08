@@ -18,3 +18,9 @@ type APIKeyRepository interface {
 	GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error)
 	Delete(ctx context.Context, id, userID string) error
 }
+
+type ConfigRepository interface {
+	Upsert(ctx context.Context, userID string, configJSON []byte) (*domain.UserConfig, error)
+	GetByUserID(ctx context.Context, userID string) (*domain.UserConfig, error)
+	DeleteByUserID(ctx context.Context, userID string) error
+}

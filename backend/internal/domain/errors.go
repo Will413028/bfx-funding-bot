@@ -71,3 +71,11 @@ func ErrAPIKeyAlreadyExists() *AppError {
 func ErrAPIKeyNotFound() *AppError {
 	return NewAppError(404, "NOT_FOUND", "API key not found")
 }
+
+func ErrConfigNotFound() *AppError {
+	return NewAppError(404, "NOT_FOUND", "Strategy config not found")
+}
+
+func ErrConfigValidation(details string) *AppError {
+	return NewAppError(400, "VALIDATION_ERROR", details)
+}
