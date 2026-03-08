@@ -11,6 +11,7 @@ func assembleSnapshot(
 	symbol string,
 	raw *domain.RawMarketData,
 	signals []domain.SignalValue,
+	mdc domain.MDCResult,
 	regime domain.RegimeType,
 	regimeParams domain.RegimeParams,
 	flashFreeze bool,
@@ -23,6 +24,7 @@ func assembleSnapshot(
 
 	return &domain.MarketSnapshot{
 		Symbol:             symbol,
+		MDC:                mdc,
 		Regime:             regime,
 		RegimeParams:       regimeParams,
 		Signals:            signals,

@@ -11,6 +11,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/orderbook"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/signal"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
@@ -48,8 +49,10 @@ type Service struct {
 	flashCrash    *FlashCrashDetector
 
 	states     map[string]*symbolState // symbol → state
+	mdcAgg     *signal.MDCAggregator
 	hiddenEst  map[string]*orderbook.HiddenRatioEstimator
 	compDet    map[string]*orderbook.CompetitorDetector
+	regimeDet  map[string]*signal.RegimeDetector
 	outCh      chan *domain.MarketSnapshot
 	stopFn     context.CancelFunc
 }
@@ -75,12 +78,14 @@ func NewService(
 	states := make(map[string]*symbolState, len(cfg.Symbols))
 	hiddenEst := make(map[string]*orderbook.HiddenRatioEstimator, len(cfg.Symbols))
 	compDet := make(map[string]*orderbook.CompetitorDetector, len(cfg.Symbols))
+	regimeDet := make(map[string]*signal.RegimeDetector, len(cfg.Symbols))
 	for _, sym := range cfg.Symbols {
 		states[sym] = &symbolState{
 			book: make(map[string]domain.BookEntry),
 		}
 		hiddenEst[sym] = orderbook.NewHiddenRatioEstimator()
 		compDet[sym] = orderbook.NewCompetitorDetector()
+		regimeDet[sym] = signal.NewRegimeDetector(nil)
 	}
 
 	return &Service{
@@ -89,9 +94,11 @@ func NewService(
 		cache:         cache,
 		signalSources: signalSources,
 		flashCrash:    NewFlashCrashDetector(flashCrashCfg),
+		mdcAgg:        signal.NewMDCAggregator(),
 		states:        states,
 		hiddenEst:     hiddenEst,
 		compDet:       compDet,
+		regimeDet:     regimeDet,
 		outCh:         make(chan *domain.MarketSnapshot, snapshotChannelBuffer),
 	}
 }
@@ -342,15 +349,17 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 		signals = append(signals, sig)
 	}
 
-	// Phase 3: Regime detection (placeholder — C5 will implement)
-	regime := domain.RegimeNeutral
-	regimeParams := domain.RegimeParams{}
+	// Phase 2.5: MDC aggregation
+	mdc := s.mdcAgg.Aggregate(signals, now)
+
+	// Phase 3: Regime detection
+	regime, regimeParams := s.regimeDet[symbol].Detect(mdc, &tickerCopy, flashFreeze, now)
 
 	// Order book analysis
 	hiddenRatio := s.hiddenEst[symbol].Estimate(filtered, trades, now)
 	competitorActivity := s.compDet[symbol].Analyze(filtered)
 
-	return assembleSnapshot(symbol, raw, signals, regime, regimeParams, flashFreeze, hiddenRatio, competitorActivity, now)
+	return assembleSnapshot(symbol, raw, signals, mdc, regime, regimeParams, flashFreeze, hiddenRatio, competitorActivity, now)
 }
 
 func bookEntryKey(rate float64, period int) string {
