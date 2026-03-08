@@ -6,11 +6,11 @@
 
 | 層級 | 技術 | 說明 |
 | :--- | :--- | :--- |
-| 語言 | Go 1.24+ | 單一二進位部署，goroutine 驅動 |
-| HTTP 框架 | Gin / Echo | handler + middleware |
+| 語言 | Go 1.25+ | 單一二進位部署，goroutine 驅動 |
+| HTTP 框架 | Gin | handler + middleware |
 | 資料庫 | PostgreSQL (Neon) | 多租戶持久化，Row-Level Security |
 | 快取 | Redis (Upstash) | Session、MarketSnapshot 快取、Pub/Sub |
-| Bitfinex API | bitfinex-api-go/v2 | 官方 Go SDK，REST + WebSocket |
+| Bitfinex API | 自製 `bitfinex/` | HMAC-SHA384 REST client + WebSocket（公開+認證頻道） |
 | 加密 | AES-256-GCM | API Key 加密儲存 |
 | 認證 | JWT (RS256) | Stateless Token |
 | 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
@@ -92,7 +92,10 @@ backend/
 │   │
 │   │   # ── Application 層：放貸引擎 ──
 │   ├── lending/
-│   │   ├── service.go                   # 引擎入口：啟動共享層 + Worker Pool
+│   │   ├── service.go                   # 引擎入口：Worker Pool + Quota + Snapshot 廣播
+│   │   ├── factory.go                   # WorkerDepsFactory 實作（組裝 Worker 依賴）
+│   │   ├── fetcher.go                   # DataFetcher 實作（Bitfinex REST 拉取用戶資料）
+│   │   ├── adapter.go                   # OfferExecutor adapter（execution → worker 型別轉換）
 │   │   │
 │   │   ├── marketfeed/                  # 共享市場數據服務（Phase 0-3）
 │   │   │   ├── service.go               #   主循環：數據拉取 → 信號計算 → 廣播
@@ -277,14 +280,15 @@ type WorkerManager interface {
 }
 
 type APIKeyService struct {
-    repo    repository.APIKeyRepository
-    crypto  *crypto.AES
-    bfx     *bitfinex.Client
-    workers WorkerManager   // fx 自動注入 *lending.Service
+    repo       repository.APIKeyRepository
+    configRepo repository.ConfigRepository
+    cipher     *crypto.AES
+    bfx        *bitfinex.Client
+    workers    WorkerManager   // fx 自動注入 *lending.Service
 }
 
-func NewAPIKeyService(repo repository.APIKeyRepository, crypto *crypto.AES,
-    bfx *bitfinex.Client, workers WorkerManager) *APIKeyService { ... }
+func NewAPIKeyService(repo repository.APIKeyRepository, configRepo repository.ConfigRepository,
+    cipher *crypto.AES, bfx *bitfinex.Client, workers WorkerManager) *APIKeyService { ... }
 ```
 
 ```go
@@ -314,28 +318,50 @@ type ConfigService struct {
 ```go
 package lending
 
-type Service struct {
-    marketFeed *marketfeed.Service
-    workerPool *worker.Pool
-    quota      *quota.Allocator
+// WorkerDepsFactory 為每個新 Worker 建立完整的依賴（Strategy, DataFetcher, OfferExecutor）。
+// 由 lending/factory.go 的 DepsFactory 實作，避免 Service 直接 import strategy/ 或 execution/。
+type WorkerDepsFactory interface {
+    BuildWorkerDeps(userID string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps
 }
 
-func NewService(deps Dependencies) *Service { ... }
+type Service struct {
+    pool        *worker.Pool
+    quota       *quota.Allocator
+    depsFactory WorkerDepsFactory
+    config      Config
+    snapshotChs map[string]chan *domain.MarketSnapshot // per-user snapshot channels
+}
 
-// Start 啟動共享層 + Worker Pool，阻塞直到 ctx 取消
+func NewService(depsFactory WorkerDepsFactory, cfg Config) *Service { ... }
+
+// Start 啟動 quota refill + Worker Pool，阻塞直到 ctx 取消
 func (s *Service) Start(ctx context.Context) error { ... }
 
-// Stop 優雅關閉：停止心跳 → 撤銷所有掛單 → 關閉 WS 連接
+// Stop 優雅關閉：停止所有 Worker → 關閉 snapshot channels → 停止 quota refill
 func (s *Service) Stop(ctx context.Context) error { ... }
 
-// StartWorker 新增一個用戶的 Worker（由 service/apikey.go 呼叫）
+// StartWorker 新增一個用戶的 Worker（由 service/apikey.go 透過 WorkerManager 呼叫）
 func (s *Service) StartWorker(userID string, cfg domain.StrategyConfig) error { ... }
 
 // StopWorker 停止一個用戶的 Worker
 func (s *Service) StopWorker(userID string) error { ... }
 
-// ReloadConfig 通知 Worker 熱載入新參數（由 service/config.go 呼叫）
+// ReloadConfig 通知 Worker 熱載入新參數（由 service/config.go 透過 ConfigReloader 呼叫）
 func (s *Service) ReloadConfig(userID string, cfg domain.StrategyConfig) error { ... }
+
+// BroadcastSnapshot 廣播 MarketSnapshot 到所有 Worker（由 main.go 的 snapshot 轉發 goroutine 呼叫）
+func (s *Service) BroadcastSnapshot(snapshot *domain.MarketSnapshot) { ... }
+```
+
+`lending/factory.go`：WorkerDepsFactory 具體實作。
+```go
+// DepsFactory 持有共享基礎設施（Bitfinex client、加密、API key repo、執行紀錄 repo），
+// 為每個 Worker 建立：
+// - Strategy: strategy.PricingStrategy
+// - DataFetcher: 透過 Bitfinex REST 拉取 wallet + offers + credits
+// - OfferExecutor: 包裝 execution.OfferExecutor 為 worker.OfferExecutor adapter
+type DepsFactory struct { ... }
+func NewDepsFactory(client, cipher, apiKeyRepo, execRepo) *DepsFactory { ... }
 ```
 
 **Consumer-Side Interface 設計**：
@@ -358,13 +384,23 @@ type Strategy interface {
     Apply(ctx *domain.DecisionContext) *domain.DecisionResult
 }
 
-type Executor interface {
-    PlaceOffer(ctx context.Context, params domain.OfferParams) error
-    CancelOffer(ctx context.Context, offerID int64) error
+type DataFetcher interface {
+    FetchUserData(ctx context.Context, userID string) (*UserData, error)
+}
+
+type OfferExecutor interface {
+    ExecuteDecision(ctx context.Context, userID string, decision *domain.DecisionResult) (*ExecutionSummary, error)
+}
+
+type Deps struct {
+    Strategy   Strategy
+    Fetcher    DataFetcher
+    Executor   OfferExecutor
+    SnapshotCh <-chan *domain.MarketSnapshot
 }
 ```
 
-`signal/`、`strategy/`、`execution/` 只依賴 `domain/`，自然滿足上述 interface（Go 的隱式實作），無需 import 消費方 package。由 `lending/service.go` 負責在啟動時將具體實作注入各消費方。
+`signal/`、`strategy/`、`execution/` 只依賴 `domain/`，自然滿足上述 interface（Go 的隱式實作），無需 import 消費方 package。由 `lending/factory.go` 的 `DepsFactory` 負責建立 adapter 並注入具體實作。
 
 **子 package 職責**：
 
@@ -382,7 +418,7 @@ type Executor interface {
 - `signal/`、`orderbook/`、`strategy/` 是純計算模組，**只依賴 `domain/`**，不依賴 I/O，不 import 任何 sibling 或 parent package。
 - `marketfeed/` 依賴 `bitfinex/`（拉取數據）和 `signal/`、`orderbook/`（計算），自行定義 `SignalSource` interface。
 - `execution/` 依賴 `bitfinex/`（操作掛單）和 `repository/`（寫紀錄）。
-- `worker/` 透過自行定義的 `Strategy`、`Executor` interface 做決策與執行，不直接 import `strategy/` 或 `execution/`。具體實作由 `lending/service.go` 注入。
+- `worker/` 透過自行定義的 `Strategy`、`Executor` interface 做決策與執行，不直接 import `strategy/` 或 `execution/`。具體實作由 `lending/factory.go` 的 `DepsFactory` 建立並注入。
 - **禁止循環依賴**：子 package 絕不 import parent `lending/`，子 package 之間不互相 import。所有組裝由 `lending/service.go` 完成。
 
 ### 4.4 Domain 層 (`domain/`)
@@ -664,7 +700,7 @@ lending/service.go 啟動
 ## 6. `main.go` 啟動流程（fx）
 
 ```go
-// cmd/server/main.go（目前已實作的版本）
+// cmd/server/main.go
 func main() {
     fx.New(
         // ── Infrastructure（連線初始化）──
@@ -680,38 +716,37 @@ func main() {
             return notification.NewResendNotifier(cfg.ResendAPIKey, cfg.NotificationFromEmail)
         }),
 
+        // ── Lending Engine ──
+        fx.Provide(lending.NewDepsFactory),
+        fx.Provide(newLendingService),    // 同時提供 *lending.Service + WorkerManager + ConfigReloader
+        fx.Provide(newMarketFeedService), // marketfeed.Service with 5 signal sources
+
         // ── Service 層 ──
         fx.Provide(service.NewUserService),
-        fx.Provide(service.NewAPIKeyService),
-        fx.Provide(service.NewConfigService),
+        fx.Provide(service.NewAPIKeyService),   // 注入 WorkerManager
+        fx.Provide(service.NewConfigService),   // 注入 ConfigReloader
         fx.Provide(service.NewDashboardService),
         fx.Provide(service.NewEarningsService),
         fx.Provide(service.NewExecutionService),
         fx.Provide(service.NewBillingService),
 
-        // ── Lending Engine MVP ──
-        fx.Provide(engine.NewEngine),
-
         // ── Transport 層 ──
         fx.Provide(handler.NewAuthHandler),
-        fx.Provide(handler.NewUserHandler),
-        fx.Provide(handler.NewAPIKeyHandler),
-        fx.Provide(handler.NewConfigHandler),
-        fx.Provide(handler.NewDashboardHandler),
-        fx.Provide(handler.NewEarningsHandler),
-        fx.Provide(handler.NewExecutionHandler),
-        fx.Provide(handler.NewBillingHandler),
-        fx.Provide(handler.NewHealthHandler),
+        // ... (all handlers)
         fx.Provide(handler.NewRouter),
 
         // ── 生命週期管理 ──
         fx.Invoke(startServer),
-        fx.Invoke(startEngine),
+        fx.Invoke(startLendingEngine),  // marketfeed → lending.Service → snapshot 轉發 → 既有用戶恢復
     ).Run()
 }
 
-// 未來 lending.Service 完成後，會取代 engine.NewEngine，
-// 並透過 fx 自動注入為 service.WorkerManager / service.ConfigReloader
+// newLendingService 同時回傳 *lending.Service 和兩個 interface，
+// 讓 fx 自動注入 service.WorkerManager + service.ConfigReloader
+func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.WorkerManager, service.ConfigReloader) {
+    svc := lending.NewService(factory, lending.DefaultConfig())
+    return svc, svc, svc
+}
 ```
 
 **fx 的優勢**：
