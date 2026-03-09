@@ -72,7 +72,9 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
 
 function isTokenExpired(token: string): boolean {
 	try {
-		const payload = JSON.parse(atob(token.split(".")[1]));
+		const base64Url = token.split(".")[1];
+		const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+		const payload = JSON.parse(atob(base64));
 		return !payload.exp || payload.exp * 1000 < Date.now();
 	} catch {
 		return true;
@@ -96,7 +98,8 @@ export default function middleware(request: NextRequest) {
 		const locale =
 			pathname.match(localePrefix)?.[1] || routing.defaultLocale;
 		const loginUrl = new URL(`/${locale}/login`, request.url);
-		loginUrl.searchParams.set("callbackUrl", pathnameWithoutLocale);
+		const callbackPath = pathnameWithoutLocale + request.nextUrl.search;
+		loginUrl.searchParams.set("callbackUrl", callbackPath);
 		return applySecurityHeaders(NextResponse.redirect(loginUrl));
 	}
 

@@ -13,9 +13,8 @@ const (
 )
 
 // Momentum computes dual-speed VWAP difference signal.
-type Momentum struct {
-	trades []vwapTrade
-}
+// It operates statelessly on the provided RecentTrades buffer.
+type Momentum struct{}
 
 type vwapTrade struct {
 	rate   float64
@@ -32,34 +31,34 @@ func (m *Momentum) Name() string { return string(domain.SignalMomentum) }
 func (m *Momentum) Compute(data *domain.RawMarketData) domain.SignalValue {
 	now := data.Timestamp
 
-	// Append new trades
-	for _, t := range data.RecentTrades {
-		m.trades = append(m.trades, vwapTrade{
-			rate:   t.Rate,
-			volume: math.Abs(t.Amount),
-			ts:     t.MTS,
-		})
-	}
-
-	// Prune older than slow window
-	cutoff := now.Add(-slowVWAPWindow)
-	pruned := m.trades[:0]
-	for _, t := range m.trades {
-		if t.ts.After(cutoff) {
-			pruned = append(pruned, t)
+	if len(data.RecentTrades) == 0 {
+		return domain.SignalValue{
+			Type: domain.SignalMomentum, Value: 0, Confidence: 0, Timestamp: now,
 		}
 	}
-	m.trades = pruned
 
-	if len(m.trades) == 0 {
+	// Convert to vwapTrade slice, filtering to slow window
+	cutoff := now.Add(-slowVWAPWindow)
+	var trades []vwapTrade
+	for _, t := range data.RecentTrades {
+		if t.MTS.After(cutoff) {
+			trades = append(trades, vwapTrade{
+				rate:   t.Rate,
+				volume: math.Abs(t.Amount),
+				ts:     t.MTS,
+			})
+		}
+	}
+
+	if len(trades) == 0 {
 		return domain.SignalValue{
 			Type: domain.SignalMomentum, Value: 0, Confidence: 0, Timestamp: now,
 		}
 	}
 
 	fastCutoff := now.Add(-fastVWAPWindow)
-	fastVWAP := computeVWAP(m.trades, fastCutoff)
-	slowVWAP := computeVWAP(m.trades, cutoff)
+	fastVWAP := computeVWAP(trades, fastCutoff)
+	slowVWAP := computeVWAP(trades, cutoff)
 
 	if slowVWAP == 0 {
 		return domain.SignalValue{
@@ -71,7 +70,7 @@ func (m *Momentum) Compute(data *domain.RawMarketData) domain.SignalValue {
 	diff := (fastVWAP - slowVWAP) / slowVWAP
 	signal := math.Tanh(diff * 100) // scale and compress
 
-	confidence := math.Min(float64(len(m.trades))/20.0, 1.0)
+	confidence := math.Min(float64(len(trades))/20.0, 1.0)
 
 	return domain.SignalValue{
 		Type: domain.SignalMomentum, Value: signal, Confidence: confidence, Timestamp: now,

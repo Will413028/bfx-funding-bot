@@ -98,8 +98,7 @@ func newLogger(cfg appconfig.Config) (*zap.Logger, error) {
 
 // newLendingService creates *lending.Service and also provides it as
 // service.WorkerManager and service.ConfigReloader via fx.
-func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.WorkerManager, service.ConfigReloader) {
-	limiterPool := quota.NewRateLimiterPool(1000, 1000)
+func newLendingService(factory *lending.DepsFactory, limiterPool *quota.RateLimiterPool) (*lending.Service, service.WorkerManager, service.ConfigReloader) {
 	svc := lending.NewService(factory, lending.DefaultConfig(), limiterPool)
 	return svc, svc, svc
 }
@@ -131,9 +130,17 @@ func startLendingEngine(
 	cipher *crypto.AES,
 	log *zap.Logger,
 ) {
+	var engineCtx context.Context
+	var engineCancel context.CancelFunc
+
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			log.Info("starting lending engine")
+
+			// Create a long-lived context for engine goroutines.
+			// The fx start ctx has a short timeout and must not be used
+			// for goroutines that outlive the start phase.
+			engineCtx, engineCancel = context.WithCancel(context.Background())
 
 			// Start market feed (WS connection + snapshot loop)
 			if err := mfSvc.Start(ctx); err != nil {
@@ -142,7 +149,7 @@ func startLendingEngine(
 			}
 
 			// Start lending service (pool + quota refill)
-			go lendingSvc.Start(ctx)
+			go lendingSvc.Start(engineCtx)
 
 			// Wait for service to initialize (deterministic)
 			select {
@@ -153,15 +160,17 @@ func startLendingEngine(
 			}
 
 			// Resume workers for existing users with verified keys + configs
-			go resumeWorkers(ctx, lendingSvc, apiKeyRepo, configRepo, cipher, log)
+			go resumeWorkers(engineCtx, lendingSvc, apiKeyRepo, configRepo, cipher, log)
 
 			// Forward snapshots from marketfeed to lending service
-			go forwardSnapshots(ctx, mfSvc, lendingSvc, log)
+			go forwardSnapshots(engineCtx, mfSvc, lendingSvc, log)
 
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
 			log.Info("stopping lending engine")
+
+			engineCancel()
 
 			if err := lendingSvc.Stop(ctx); err != nil {
 				log.Error("lending service stop error", zap.Error(err))

@@ -71,8 +71,8 @@ func (cm *CreditManager) ProcessCredits(ctx context.Context, userID string, cred
 		expiresAt := credit.OpenedAt.AddDate(0, 0, credit.Period)
 		remaining := expiresAt.Sub(now)
 
-		// Skip if not expiring within 24 hours or not auto-renew
-		if remaining > 24*time.Hour || !credit.AutoRenew {
+		// Skip if already expired, not expiring within 24 hours, or not auto-renew
+		if remaining > 24*time.Hour || remaining < 0 || !credit.AutoRenew {
 			summary.Skipped++
 			continue
 		}

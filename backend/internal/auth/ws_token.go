@@ -47,7 +47,7 @@ const maxTokenLen = 64
 // Validate checks a WS token and returns the associated user ID.
 // The token is consumed (deleted) on successful validation.
 func (m *WSTokenManager) Validate(ctx context.Context, token string) (string, error) {
-	if len(token) == 0 || len(token) > maxTokenLen {
+	if len(token) != maxTokenLen {
 		return "", fmt.Errorf("ws token invalid or expired")
 	}
 	key := wsTokenPrefix + token
