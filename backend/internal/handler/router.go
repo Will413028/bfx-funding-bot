@@ -12,7 +12,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 )
 
-func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler, userH *UserHandler, apiKeyH *APIKeyHandler, configH *ConfigHandler, dashH *DashboardHandler, earnH *EarningsHandler, execH *ExecutionHandler, billH *BillingHandler) *gin.Engine {
+func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, health *HealthHandler, authH *AuthHandler, userH *UserHandler, apiKeyH *APIKeyHandler, configH *ConfigHandler, dashH *DashboardHandler, earnH *EarningsHandler, execH *ExecutionHandler, billH *BillingHandler, wsTokenH *WSTokenHandler, hub *Hub) *gin.Engine {
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -53,6 +53,9 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 			authGroup.POST("/login", authH.Login)
 		}
 
+		// WebSocket upgrade — token-based auth (no JWT middleware)
+		v1.GET("/ws", hub.HandleWS)
+
 		// Protected routes (JWT required) — relaxed rate limit (20 r/s, burst 40)
 		protected := v1.Group("", middleware.RateLimit(20, 40), middleware.JWTAuth(jwtMgr))
 		{
@@ -75,6 +78,8 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 
 			protected.GET("/billing", billH.Get)
 			protected.GET("/billing/plan", billH.GetPlan)
+
+			protected.POST("/auth/ws-token", wsTokenH.Create)
 		}
 	}
 

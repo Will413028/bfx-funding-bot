@@ -58,6 +58,11 @@ func main() {
 			return notification.NewResendNotifier(cfg.ResendAPIKey, cfg.NotificationFromEmail)
 		}),
 
+		// WebSocket
+		fx.Provide(auth.NewWSTokenManager),
+		fx.Provide(handler.NewWSTokenHandler),
+		fx.Provide(handler.NewHub),
+
 		// Transport layer
 		fx.Provide(handler.NewAuthHandler),
 		fx.Provide(handler.NewUserHandler),
@@ -68,13 +73,14 @@ func main() {
 		fx.Provide(handler.NewExecutionHandler),
 		fx.Provide(handler.NewBillingHandler),
 		fx.Provide(func(svc *lending.Service) handler.EngineHealthProvider { return svc }),
-	fx.Provide(handler.NewHealthHandler),
+		fx.Provide(handler.NewHealthHandler),
 		fx.Provide(handler.NewRouter),
 		fx.WithLogger(func(log *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: log}
 		}),
 		fx.Invoke(startServer),
 		fx.Invoke(startLendingEngine),
+		fx.Invoke(startWSHub),
 	).Run()
 }
 
@@ -217,6 +223,21 @@ func forwardSnapshots(
 			lendingSvc.BroadcastSnapshot(snap)
 		}
 	}
+}
+
+func startWSHub(lc fx.Lifecycle, hub *handler.Hub, log *zap.Logger) {
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			log.Info("starting WebSocket hub")
+			hub.Run(ctx)
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			log.Info("stopping WebSocket hub")
+			hub.Close()
+			return nil
+		},
+	})
 }
 
 func startServer(lc fx.Lifecycle, cfg appconfig.Config, router *gin.Engine, log *zap.Logger) {
