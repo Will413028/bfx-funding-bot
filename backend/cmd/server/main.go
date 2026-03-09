@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"time"
 
+	adapter "github.com/axiomhq/axiom-go/adapters/zap"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
 	"github.com/will/bfx-funding-bot/backend/internal/auth"
@@ -89,11 +91,44 @@ func main() {
 	).Run()
 }
 
-func newLogger(cfg appconfig.Config) (*zap.Logger, error) {
+func newLogger(lc fx.Lifecycle, cfg appconfig.Config) (*zap.Logger, error) {
+	var baseLogger *zap.Logger
+	var err error
 	if cfg.Environment == "production" {
-		return zap.NewProduction()
+		baseLogger, err = zap.NewProduction()
+	} else {
+		baseLogger, err = zap.NewDevelopment()
 	}
-	return zap.NewDevelopment()
+	if err != nil {
+		return nil, err
+	}
+
+	// If Axiom is configured, tee logs to both stdout and Axiom
+	if cfg.AxiomToken != "" && cfg.AxiomDataset != "" {
+		axiomCore, axiomErr := adapter.New(
+			adapter.SetDataset(cfg.AxiomDataset),
+		)
+		if axiomErr != nil {
+			baseLogger.Warn("failed to initialize Axiom adapter, using stdout only", zap.Error(axiomErr))
+			return baseLogger, nil
+		}
+
+		teeCore := zapcore.NewTee(baseLogger.Core(), axiomCore)
+		logger := zap.New(teeCore, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+
+		lc.Append(fx.Hook{
+			OnStop: func(ctx context.Context) error {
+				_ = axiomCore.Sync()
+				return nil
+			},
+		})
+
+		logger.Info("axiom logging enabled", zap.String("dataset", cfg.AxiomDataset))
+		return logger, nil
+	}
+
+	baseLogger.Info("axiom logging disabled (AXIOM_TOKEN or AXIOM_DATASET not set)")
+	return baseLogger, nil
 }
 
 // newLendingService creates *lending.Service and also provides it as

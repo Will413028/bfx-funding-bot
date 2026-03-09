@@ -16,7 +16,7 @@
 | 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
 | 資料庫託管 | Neon | Serverless PostgreSQL，自動擴縮 |
 | 快取託管 | Upstash | Serverless Redis，按用量計費 |
-| 監控 | Prometheus + Grafana（規劃中） | 指標收集 + 儀表板（Phase F） |
+| 監控 | Axiom | 集中式日誌收集 + 儀表板 + 告警（Phase H） |
 | DB Migration | Atlas | 宣告式 Schema + 版本化 Migration |
 | DB Query | sqlc | SQL → Type-Safe Go Code 生成 |
 | DI 框架 | go.uber.org/fx | 建構式依賴注入 + 生命週期管理 |
