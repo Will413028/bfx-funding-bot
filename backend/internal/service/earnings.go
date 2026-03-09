@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -10,6 +11,11 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
+
+type DailyEarning struct {
+	Date   string  `json:"date"`
+	Amount float64 `json:"amount"`
+}
 
 type EarningsSummary struct {
 	EstimatedDailyEarning float64 `json:"estimatedDailyEarning"`
@@ -132,4 +138,64 @@ func (s *EarningsService) GetEarnings(ctx context.Context, userID string) (*Earn
 	}
 
 	return summary, nil
+}
+
+func (s *EarningsService) GetEarningsHistory(ctx context.Context, userID string, days int) ([]DailyEarning, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if days > 90 {
+		days = 90
+	}
+
+	key, encryptedSecret, err := s.apiKeyRepo.GetByUserID(ctx, userID)
+	if err != nil {
+		return nil, domain.ErrInternal("failed to query API key")
+	}
+	if key == nil || key.ExchangeStatus != "verified" {
+		return []DailyEarning{}, nil
+	}
+
+	secret, err := s.cipher.Decrypt(encryptedSecret)
+	if err != nil {
+		return nil, domain.ErrInternal("failed to decrypt API secret")
+	}
+
+	currency := "USD"
+	config, err := s.configRepo.GetByUserID(ctx, userID)
+	if err == nil && config != nil {
+		currency = config.Config.Currency
+	}
+
+	now := time.Now().UTC()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -days+1)
+	end := now
+
+	earnings, err := s.bfx.GetFundingEarnings(ctx, key.APIKey, string(secret), currency, start, end)
+	if err != nil {
+		return nil, domain.ErrInternal("failed to fetch earnings from exchange")
+	}
+
+	// Bucket by UTC date
+	buckets := make(map[string]float64)
+	for _, e := range earnings {
+		dateKey := e.Timestamp.UTC().Format("2006-01-02")
+		buckets[dateKey] += e.Amount
+	}
+
+	// Fill gaps and build result
+	result := make([]DailyEarning, 0, days)
+	for d := start; !d.After(now); d = d.AddDate(0, 0, 1) {
+		dateKey := d.Format("2006-01-02")
+		result = append(result, DailyEarning{
+			Date:   dateKey,
+			Amount: buckets[dateKey],
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Date < result[j].Date
+	})
+
+	return result, nil
 }

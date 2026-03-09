@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -26,4 +27,23 @@ func (h *EarningsHandler) Get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": summary})
+}
+
+func (h *EarningsHandler) History(c *gin.Context) {
+	userID := c.GetString(middleware.ContextUserID)
+
+	days := 30
+	if d := c.Query("days"); d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 {
+			days = parsed
+		}
+	}
+
+	history, err := h.svc.GetEarningsHistory(c.Request.Context(), userID, days)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": history})
 }
