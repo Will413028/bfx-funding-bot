@@ -19,6 +19,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/infra"
 	"github.com/will/bfx-funding-bot/backend/internal/lending"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/marketfeed"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/signal"
 	"github.com/will/bfx-funding-bot/backend/internal/notification"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
@@ -42,6 +43,10 @@ func main() {
 		}),
 
 		// Lending engine
+		fx.Provide(func() *quota.RateLimiterPool {
+			// 90 req/min ≈ 1.5 req/sec per user, burst of 3 for parallel fetches
+			return quota.NewRateLimiterPool(1.5, 3)
+		}),
 		fx.Provide(lending.NewDepsFactory),
 		fx.Provide(newLendingService),
 		fx.Provide(newMarketFeedService),
@@ -94,12 +99,13 @@ func newLogger(cfg appconfig.Config) (*zap.Logger, error) {
 // newLendingService creates *lending.Service and also provides it as
 // service.WorkerManager and service.ConfigReloader via fx.
 func newLendingService(factory *lending.DepsFactory) (*lending.Service, service.WorkerManager, service.ConfigReloader) {
-	svc := lending.NewService(factory, lending.DefaultConfig())
+	limiterPool := quota.NewRateLimiterPool(1000, 1000)
+	svc := lending.NewService(factory, lending.DefaultConfig(), limiterPool)
 	return svc, svc, svc
 }
 
 // newMarketFeedService creates a MarketFeed service with all signal sources.
-func newMarketFeedService(log *zap.Logger, cache repository.SnapshotCache) *marketfeed.Service {
+func newMarketFeedService(log *zap.Logger, cache repository.SnapshotCache, pubsub repository.SnapshotPubSub) *marketfeed.Service {
 	cfg := marketfeed.Config{
 		Symbols: []string{"fUSD"},
 	}
@@ -113,7 +119,7 @@ func newMarketFeedService(log *zap.Logger, cache repository.SnapshotCache) *mark
 		signal.NewIntraday(),
 	}
 
-	return marketfeed.NewService(log, cfg, cache, sources, nil)
+	return marketfeed.NewService(log, cfg, cache, pubsub, sources, nil)
 }
 
 func startLendingEngine(

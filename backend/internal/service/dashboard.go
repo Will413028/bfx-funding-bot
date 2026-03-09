@@ -5,9 +5,12 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
@@ -52,6 +55,7 @@ type DashboardSummary struct {
 	Credits     []CreditSummary `json:"credits"`
 	Market      *MarketSummary  `json:"market"`
 	EngineReady bool            `json:"engineReady"`
+	Warnings    []string        `json:"warnings,omitempty"`
 }
 
 type DashboardService struct {
@@ -60,15 +64,19 @@ type DashboardService struct {
 	configRepo    repository.ConfigRepository
 	snapshotCache repository.SnapshotCache
 	cipher        *crypto.AES
+	log           *zap.Logger
+	limiterPool   *quota.RateLimiterPool
 }
 
-func NewDashboardService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, snapshotCache repository.SnapshotCache, cipher *crypto.AES) *DashboardService {
+func NewDashboardService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, snapshotCache repository.SnapshotCache, cipher *crypto.AES, log *zap.Logger, limiterPool *quota.RateLimiterPool) *DashboardService {
 	return &DashboardService{
 		bfx:           bfx,
 		apiKeyRepo:    apiKeyRepo,
 		configRepo:    configRepo,
 		snapshotCache: snapshotCache,
 		cipher:        cipher,
+		log:           log,
+		limiterPool:   limiterPool,
 	}
 }
 
@@ -107,51 +115,84 @@ func (s *DashboardService) GetSummary(ctx context.Context, userID string) (*Dash
 
 	apiKey := key.APIKey
 	apiSecret := string(secret)
+	limiter := s.limiterPool.Get(userID)
 
 	var (
-		wallet  *domain.Wallet
-		offers  []domain.FundingOffer
-		credits []domain.FundingCredit
-		mu      sync.Mutex
-		wg      sync.WaitGroup
+		wallet   *domain.Wallet
+		offers   []domain.FundingOffer
+		credits  []domain.FundingCredit
+		warnings []string
+		mu       sync.Mutex
+		wg       sync.WaitGroup
 	)
 
 	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
+		if err := limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			warnings = append(warnings, "wallet_fetch_failed")
+			mu.Unlock()
+			return
+		}
 		w, err := s.bfx.GetFundingBalance(ctx, apiKey, apiSecret, currency)
-		if err == nil {
-			mu.Lock()
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			s.log.Warn("failed to fetch wallet", zap.Error(err))
+			warnings = append(warnings, "wallet_fetch_failed")
+		} else {
 			wallet = w
-			mu.Unlock()
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
+		if err := limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			warnings = append(warnings, "offers_fetch_failed")
+			mu.Unlock()
+			return
+		}
 		o, err := s.bfx.GetActiveFundingOffers(ctx, apiKey, apiSecret, currency)
-		if err == nil {
-			mu.Lock()
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			s.log.Warn("failed to fetch offers", zap.Error(err))
+			warnings = append(warnings, "offers_fetch_failed")
+		} else {
 			offers = o
-			mu.Unlock()
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		c, err := s.bfx.GetActiveFundingCredits(ctx, apiKey, apiSecret, currency)
-		if err == nil {
+		if err := limiter.Wait(ctx); err != nil {
 			mu.Lock()
-			credits = c
+			warnings = append(warnings, "credits_fetch_failed")
 			mu.Unlock()
+			return
+		}
+		c, err := s.bfx.GetActiveFundingCredits(ctx, apiKey, apiSecret, currency)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			s.log.Warn("failed to fetch credits", zap.Error(err))
+			warnings = append(warnings, "credits_fetch_failed")
+		} else {
+			credits = c
 		}
 	}()
 
 	wg.Wait()
+	summary.Warnings = warnings
 
 	// Read market snapshot from Redis cache (non-fatal if missing)
-	snapshot, _ := s.snapshotCache.Get(ctx, "f"+currency)
+	snapshot, err := s.snapshotCache.Get(ctx, "f"+currency)
+	if err != nil {
+		s.log.Warn("failed to read snapshot cache", zap.Error(err))
+	}
 	if snapshot != nil {
 		summary.Market = &MarketSummary{
 			FRR:         snapshot.FRR,

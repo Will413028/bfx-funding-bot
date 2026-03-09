@@ -9,6 +9,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
 
@@ -18,28 +19,31 @@ type DailyEarning struct {
 }
 
 type EarningsSummary struct {
-	EstimatedDailyEarning float64 `json:"estimatedDailyEarning"`
-	WeightedAPY           float64 `json:"weightedAPY"`
-	Earnings7d            float64 `json:"earnings7d"`
-	Earnings30d           float64 `json:"earnings30d"`
-	TotalLent             float64 `json:"totalLent"`
-	ActiveCredits         int     `json:"activeCredits"`
-	Currency              string  `json:"currency"`
+	EstimatedDailyEarning float64  `json:"estimatedDailyEarning"`
+	WeightedAPY           float64  `json:"weightedAPY"`
+	Earnings7d            float64  `json:"earnings7d"`
+	Earnings30d           float64  `json:"earnings30d"`
+	TotalLent             float64  `json:"totalLent"`
+	ActiveCredits         int      `json:"activeCredits"`
+	Currency              string   `json:"currency"`
+	Warnings              []string `json:"warnings,omitempty"`
 }
 
 type EarningsService struct {
-	bfx        *bitfinex.Client
-	apiKeyRepo repository.APIKeyRepository
-	configRepo repository.ConfigRepository
-	cipher     *crypto.AES
+	bfx         *bitfinex.Client
+	apiKeyRepo  repository.APIKeyRepository
+	configRepo  repository.ConfigRepository
+	cipher      *crypto.AES
+	limiterPool *quota.RateLimiterPool
 }
 
-func NewEarningsService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, cipher *crypto.AES) *EarningsService {
+func NewEarningsService(bfx *bitfinex.Client, apiKeyRepo repository.APIKeyRepository, configRepo repository.ConfigRepository, cipher *crypto.AES, limiterPool *quota.RateLimiterPool) *EarningsService {
 	return &EarningsService{
-		bfx:        bfx,
-		apiKeyRepo: apiKeyRepo,
-		configRepo: configRepo,
-		cipher:     cipher,
+		bfx:         bfx,
+		apiKeyRepo:  apiKeyRepo,
+		configRepo:  configRepo,
+		cipher:      cipher,
+		limiterPool: limiterPool,
 	}
 }
 
@@ -72,11 +76,13 @@ func (s *EarningsService) GetEarnings(ctx context.Context, userID string) (*Earn
 	apiKey := key.APIKey
 	apiSecret := string(secret)
 	now := time.Now()
+	limiter := s.limiterPool.Get(userID)
 
 	var (
 		credits    []domain.FundingCredit
 		earnings7  []domain.FundingEarning
 		earnings30 []domain.FundingEarning
+		warnings   []string
 		mu         sync.Mutex
 		wg         sync.WaitGroup
 	)
@@ -85,35 +91,60 @@ func (s *EarningsService) GetEarnings(ctx context.Context, userID string) (*Earn
 
 	go func() {
 		defer wg.Done()
+		if err := limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			warnings = append(warnings, "credits_fetch_failed")
+			mu.Unlock()
+			return
+		}
 		c, err := s.bfx.GetActiveFundingCredits(ctx, apiKey, apiSecret, currency)
-		if err == nil {
-			mu.Lock()
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			warnings = append(warnings, "credits_fetch_failed")
+		} else {
 			credits = c
-			mu.Unlock()
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
+		if err := limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			warnings = append(warnings, "earnings_7d_fetch_failed")
+			mu.Unlock()
+			return
+		}
 		e, err := s.bfx.GetFundingEarnings(ctx, apiKey, apiSecret, currency, now.AddDate(0, 0, -7), now)
-		if err == nil {
-			mu.Lock()
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			warnings = append(warnings, "earnings_7d_fetch_failed")
+		} else {
 			earnings7 = e
-			mu.Unlock()
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		e, err := s.bfx.GetFundingEarnings(ctx, apiKey, apiSecret, currency, now.AddDate(0, 0, -30), now)
-		if err == nil {
+		if err := limiter.Wait(ctx); err != nil {
 			mu.Lock()
-			earnings30 = e
+			warnings = append(warnings, "earnings_30d_fetch_failed")
 			mu.Unlock()
+			return
+		}
+		e, err := s.bfx.GetFundingEarnings(ctx, apiKey, apiSecret, currency, now.AddDate(0, 0, -30), now)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			warnings = append(warnings, "earnings_30d_fetch_failed")
+		} else {
+			earnings30 = e
 		}
 	}()
 
 	wg.Wait()
+	summary.Warnings = warnings
 
 	// Calculate from active credits
 	var totalWeightedRate, totalLent float64
@@ -170,6 +201,10 @@ func (s *EarningsService) GetEarningsHistory(ctx context.Context, userID string,
 	now := time.Now().UTC()
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -days+1)
 	end := now
+
+	if err := s.limiterPool.Get(userID).Wait(ctx); err != nil {
+		return nil, domain.ErrInternal("rate limit wait cancelled")
+	}
 
 	earnings, err := s.bfx.GetFundingEarnings(ctx, key.APIKey, string(secret), currency, start, end)
 	if err != nil {

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -20,7 +22,7 @@ func defaultConfig() *domain.StrategyConfig {
 }
 
 func newTestCreditManager(client *mockFundingClient, keys *mockKeyStore, log *mockExecutionLog) *CreditManager {
-	cm := NewCreditManager(client, keys, &mockCipher{}, log)
+	cm := NewCreditManager(client, keys, &mockCipher{}, log, rate.NewLimiter(rate.Inf, 0))
 	return cm
 }
 
@@ -346,7 +348,7 @@ func TestCredit_DecryptFailure(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	client := &mockFundingClient{}
 	log := &mockExecutionLog{}
-	cm := NewCreditManager(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log)
+	cm := NewCreditManager(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log, rate.NewLimiter(rate.Inf, 0))
 	cm.now = func() time.Time { return now }
 
 	credits := []domain.FundingCredit{

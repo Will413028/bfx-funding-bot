@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
 )
@@ -75,7 +77,7 @@ func setupDashboardRouter(t *testing.T) *gin.Engine {
 	}
 
 	cache := &testSnapshotCache{snapshots: make(map[string]*domain.MarketSnapshot)}
-	svc := service.NewDashboardService(bfx, apiKeyRepo, configRepo, cache, aes)
+	svc := service.NewDashboardService(bfx, apiKeyRepo, configRepo, cache, aes, zap.NewNop(), quota.NewRateLimiterPool(1000, 1000))
 	h := NewDashboardHandler(svc)
 
 	r := gin.New()

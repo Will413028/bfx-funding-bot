@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
@@ -24,15 +25,25 @@ type Client struct {
 	limiter         *rate.Limiter
 }
 
-func NewClient(httpClient *http.Client) *Client {
-	return newClientInternal(httpClient, "")
+// ClientOption configures a Client.
+type ClientOption func(*Client)
+
+// WithRateLimit sets the platform-level rate limiter.
+func WithRateLimit(ratePerSec float64, burst int) ClientOption {
+	return func(c *Client) {
+		c.limiter = rate.NewLimiter(rate.Limit(ratePerSec), burst)
+	}
 }
 
-func NewClientWithBaseURL(httpClient *http.Client, baseURL string) *Client {
-	return newClientInternal(httpClient, baseURL)
+func NewClient(httpClient *http.Client, opts ...ClientOption) *Client {
+	return newClientInternal(httpClient, "", opts...)
 }
 
-func newClientInternal(httpClient *http.Client, baseOverride string) *Client {
+func NewClientWithBaseURL(httpClient *http.Client, baseURL string, opts ...ClientOption) *Client {
+	return newClientInternal(httpClient, baseURL, opts...)
+}
+
+func newClientInternal(httpClient *http.Client, baseOverride string, opts ...ClientOption) *Client {
 	cb := gobreaker.NewCircuitBreaker[[]byte](gobreaker.Settings{
 		Name:        "bitfinex-rest",
 		MaxRequests: 3,
@@ -43,12 +54,18 @@ func newClientInternal(httpClient *http.Client, baseOverride string) *Client {
 		},
 	})
 
-	return &Client{
+	c := &Client{
 		httpClient:      httpClient,
 		baseURLOverride: baseOverride,
 		cb:              cb,
-		limiter:         rate.NewLimiter(rate.Limit(1.0), 5), // 1 req/s, burst 5
+		limiter:         rate.NewLimiter(rate.Limit(15), 20), // platform-level: 15 req/s, burst 20
 	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // CircuitBreakerState returns the current state of the circuit breaker.
@@ -159,13 +176,21 @@ func (c *Client) GetFundingBalance(ctx context.Context, apiKey, apiSecret, curre
 			continue
 		}
 		var wType, wCurrency string
-		json.Unmarshal(w[0], &wType)
-		json.Unmarshal(w[1], &wCurrency)
+		if err := json.Unmarshal(w[0], &wType); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(w[1], &wCurrency); err != nil {
+			continue
+		}
 
 		if wType == "funding" && wCurrency == currency {
 			var balance, available float64
-			json.Unmarshal(w[2], &balance)
-			json.Unmarshal(w[4], &available)
+			if err := json.Unmarshal(w[2], &balance); err != nil {
+				return nil, fmt.Errorf("parse wallet balance: %w", err)
+			}
+			if err := json.Unmarshal(w[4], &available); err != nil {
+				return nil, fmt.Errorf("parse wallet available: %w", err)
+			}
 			return &domain.Wallet{
 				Currency:         currency,
 				Balance:          balance,
@@ -181,8 +206,8 @@ func (c *Client) SubmitFundingOffer(ctx context.Context, apiKey, apiSecret strin
 	body := map[string]any{
 		"type":   "LIMIT",
 		"symbol": "f" + params.Currency,
-		"amount": fmt.Sprintf("%f", params.Amount),
-		"rate":   fmt.Sprintf("%f", params.Rate),
+		"amount": strconv.FormatFloat(params.Amount, 'f', -1, 64),
+		"rate":   strconv.FormatFloat(params.Rate, 'f', -1, 64),
 		"period": params.Period,
 		"flags":  0,
 	}
@@ -208,7 +233,9 @@ func parseSubmitOfferResponse(data []byte, currency string) (*domain.FundingOffe
 
 	// Check STATUS field
 	var status string
-	json.Unmarshal(resp[6], &status)
+	if err := json.Unmarshal(resp[6], &status); err != nil {
+		return nil, fmt.Errorf("parse submit status: %w", err)
+	}
 	if status != "SUCCESS" {
 		var text string
 		if len(resp) > 7 {
@@ -231,10 +258,18 @@ func parseSubmitOfferResponse(data []byte, currency string) (*domain.FundingOffe
 	var amount, rate float64
 	var period int64
 
-	json.Unmarshal(offerArr[0], &id)
-	json.Unmarshal(offerArr[4], &amount)
-	json.Unmarshal(offerArr[14], &rate)
-	json.Unmarshal(offerArr[15], &period)
+	if err := json.Unmarshal(offerArr[0], &id); err != nil {
+		return nil, fmt.Errorf("parse offer id: %w", err)
+	}
+	if err := json.Unmarshal(offerArr[4], &amount); err != nil {
+		return nil, fmt.Errorf("parse offer amount: %w", err)
+	}
+	if err := json.Unmarshal(offerArr[14], &rate); err != nil {
+		return nil, fmt.Errorf("parse offer rate: %w", err)
+	}
+	if err := json.Unmarshal(offerArr[15], &period); err != nil {
+		return nil, fmt.Errorf("parse offer period: %w", err)
+	}
 
 	return &domain.FundingOffer{
 		ID:       id,
@@ -261,7 +296,9 @@ func (c *Client) CancelFundingOffer(ctx context.Context, apiKey, apiSecret strin
 	}
 	if len(resp) >= 7 {
 		var status string
-		json.Unmarshal(resp[6], &status)
+		if err := json.Unmarshal(resp[6], &status); err != nil {
+			return fmt.Errorf("parse cancel status: %w", err)
+		}
 		if status != "SUCCESS" {
 			return domain.ErrBitfinexAPI(0, "cancel failed")
 		}
@@ -279,7 +316,7 @@ func (c *Client) GetActiveFundingOffers(ctx context.Context, apiKey, apiSecret, 
 
 	var raw [][]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return []domain.FundingOffer{}, nil
+		return nil, fmt.Errorf("parse offers list: %w", err)
 	}
 
 	offers := make([]domain.FundingOffer, 0, len(raw))
@@ -305,15 +342,29 @@ func parseOfferItem(item []json.RawMessage, currency string) (*domain.FundingOff
 	var period int64
 	var status string
 
-	json.Unmarshal(item[0], &id)
-	json.Unmarshal(item[4], &amount)
-	json.Unmarshal(item[10], &status)
-	json.Unmarshal(item[14], &rate)
-	json.Unmarshal(item[15], &period)
+	if err := json.Unmarshal(item[0], &id); err != nil {
+		return nil, fmt.Errorf("parse offer id: %w", err)
+	}
+	if err := json.Unmarshal(item[4], &amount); err != nil {
+		return nil, fmt.Errorf("parse offer amount: %w", err)
+	}
+	if err := json.Unmarshal(item[10], &status); err != nil {
+		return nil, fmt.Errorf("parse offer status: %w", err)
+	}
+	if err := json.Unmarshal(item[14], &rate); err != nil {
+		return nil, fmt.Errorf("parse offer rate: %w", err)
+	}
+	if err := json.Unmarshal(item[15], &period); err != nil {
+		return nil, fmt.Errorf("parse offer period: %w", err)
+	}
 
 	var createdMs, updatedMs int64
-	json.Unmarshal(item[2], &createdMs)
-	json.Unmarshal(item[3], &updatedMs)
+	if err := json.Unmarshal(item[2], &createdMs); err != nil {
+		return nil, fmt.Errorf("parse offer createdAt: %w", err)
+	}
+	if err := json.Unmarshal(item[3], &updatedMs); err != nil {
+		return nil, fmt.Errorf("parse offer updatedAt: %w", err)
+	}
 
 	return &domain.FundingOffer{
 		ID:        id,

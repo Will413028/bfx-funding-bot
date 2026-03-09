@@ -24,7 +24,7 @@ const (
 // This allows the Service to inject concrete Strategy, DataFetcher,
 // and OfferExecutor implementations without importing those packages.
 type WorkerDepsFactory interface {
-	BuildWorkerDeps(userID string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps
+	BuildWorkerDeps(userID string, currency string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps
 }
 
 // Config holds Service-level configuration.
@@ -47,6 +47,7 @@ func DefaultConfig() Config {
 type Service struct {
 	pool        *worker.Pool
 	quota       *quota.Allocator
+	limiterPool *quota.RateLimiterPool
 	depsFactory WorkerDepsFactory
 	config      Config
 
@@ -54,12 +55,14 @@ type Service struct {
 	snapshotChs  map[string]chan *domain.MarketSnapshot
 	cancelRefill context.CancelFunc
 	ready        chan struct{}
+	readyOnce    sync.Once
 }
 
 // NewService creates a new lending engine Service.
-func NewService(depsFactory WorkerDepsFactory, cfg Config) *Service {
+func NewService(depsFactory WorkerDepsFactory, cfg Config, limiterPool *quota.RateLimiterPool) *Service {
 	svc := &Service{
 		quota:       quota.NewAllocator(cfg.GlobalQuota),
+		limiterPool: limiterPool,
 		depsFactory: depsFactory,
 		config:      cfg,
 		snapshotChs: make(map[string]chan *domain.MarketSnapshot),
@@ -80,8 +83,8 @@ func (s *Service) Start(ctx context.Context) error {
 	// Start quota refill
 	s.quota.StartRefill(refillCtx, s.config.RefillInterval)
 
-	// Signal readiness
-	close(s.ready)
+	// Signal readiness (safe against double-call via sync.Once)
+	s.readyOnce.Do(func() { close(s.ready) })
 
 	// Block until context is cancelled
 	<-ctx.Done()
@@ -146,6 +149,9 @@ func (s *Service) StartWorker(_ context.Context, userID string, cfg domain.Strat
 	// Set quota based on plan (derived from config or default to starter)
 	s.quota.SetUserQuota(userID, quotaStarter)
 
+	// Ensure rate limiter exists for this user
+	s.limiterPool.Get(userID)
+
 	// Start worker in pool
 	err := pool.Start(userID, cfg)
 	if err != nil {
@@ -176,8 +182,9 @@ func (s *Service) StopWorker(_ context.Context, userID string) error {
 		return err
 	}
 
-	// Clean up quota and snapshot channel
+	// Clean up quota, rate limiter, and snapshot channel
 	s.quota.RemoveUser(userID)
+	s.limiterPool.Remove(userID)
 
 	s.mu.Lock()
 	if ch, exists := s.snapshotChs[userID]; exists {
@@ -267,7 +274,8 @@ func (s *Service) workerFactory(ctx context.Context, userID string, config domai
 		ch = dummy
 	}
 
-	deps := s.depsFactory.BuildWorkerDeps(userID, ch)
+	deps := s.depsFactory.BuildWorkerDeps(userID, config.Currency, ch)
+	deps.Quota = s.quota
 	return worker.NewLendingWorker(userID, config, deps)
 }
 

@@ -57,3 +57,22 @@ The system SHALL periodically clean up rate limiter state for client IPs that ha
 
 - **WHEN** a client IP has not sent any request for more than 10 minutes
 - **THEN** the system SHALL remove its rate limiter from memory on the next cleanup cycle
+
+### Requirement: Platform-level Bitfinex API rate limiter
+
+The `bitfinex.Client` SHALL use a platform-level `rate.Limiter` as a safety net to prevent exceeding the Bitfinex API platform-wide rate limit. The rate and burst SHALL be configurable via `ClientOption` functional options, with defaults of 15 req/s and burst 20.
+
+#### Scenario: Platform limiter does not throttle under normal load
+
+- **WHEN** the system has fewer than 15 concurrent Bitfinex API requests per second across all users
+- **THEN** the platform-level limiter SHALL not block any requests
+
+#### Scenario: Platform limiter throttles under extreme load
+
+- **WHEN** the system exceeds 20 concurrent Bitfinex API requests in a burst
+- **THEN** the platform-level limiter SHALL block excess requests until tokens are available
+
+#### Scenario: Custom platform rate via option
+
+- **WHEN** `bitfinex.NewClient(httpClient, WithRateLimit(30, 40))` is called
+- **THEN** the client's platform limiter SHALL use rate=30 and burst=40

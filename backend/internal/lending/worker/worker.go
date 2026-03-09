@@ -37,11 +37,17 @@ type OfferExecutor interface {
 	ExecuteDecision(ctx context.Context, userID string, decision *domain.DecisionResult) (*ExecutionSummary, error)
 }
 
+// QuotaAcquirer checks if API call budget is available.
+type QuotaAcquirer interface {
+	Acquire(userID string, n int) bool
+}
+
 // Deps holds all dependencies needed by a LendingWorker.
 type Deps struct {
 	Strategy   Strategy
 	Fetcher    DataFetcher
 	Executor   OfferExecutor
+	Quota      QuotaAcquirer
 	SnapshotCh <-chan *domain.MarketSnapshot
 }
 
@@ -142,6 +148,11 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		}
 	}()
 
+	// Phase 0: Check quota (nil-safe for tests without quota)
+	if w.deps.Quota != nil && !w.deps.Quota.Acquire(w.userID, 3) {
+		return // skip tick, quota exhausted
+	}
+
 	// Phase 1: Fetch private data
 	userData, err := w.deps.Fetcher.FetchUserData(ctx, w.userID)
 	if err != nil {
@@ -163,6 +174,7 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 
 	// Phase 4: Execute
 	if decision != nil {
+		decision.Currency = w.config.Currency
 		_, execErr := w.deps.Executor.ExecuteDecision(ctx, w.userID, decision)
 		if execErr != nil {
 			// Execution error — logged by executor, worker continues

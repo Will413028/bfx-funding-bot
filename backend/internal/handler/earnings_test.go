@@ -14,6 +14,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
 )
@@ -53,7 +54,7 @@ func setupEarningsRouter(t *testing.T) *gin.Engine {
 		},
 	}
 
-	svc := service.NewEarningsService(bfx, apiKeyRepo, configRepo, aes)
+	svc := service.NewEarningsService(bfx, apiKeyRepo, configRepo, aes, quota.NewRateLimiterPool(1000, 1000))
 	h := NewEarningsHandler(svc)
 
 	r := gin.New()
