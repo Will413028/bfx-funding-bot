@@ -53,8 +53,8 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 			authGroup.POST("/login", authH.Login)
 		}
 
-		// WebSocket upgrade — token-based auth (no JWT middleware)
-		v1.GET("/ws", hub.HandleWS)
+		// WebSocket upgrade — token-based auth (no JWT middleware), rate limited
+		v1.GET("/ws", middleware.RateLimit(2, 5), hub.HandleWS)
 
 		// Protected routes (JWT required) — relaxed rate limit (20 r/s, burst 40)
 		protected := v1.Group("", middleware.RateLimit(20, 40), middleware.JWTAuth(jwtMgr))

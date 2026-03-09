@@ -2,7 +2,7 @@ package marketfeed
 
 import (
 	"context"
-	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,6 +45,7 @@ type Service struct {
 	cfg           Config
 	wsClient      *bitfinex.WSClient
 	cache         repository.SnapshotCache
+	pubsub        repository.SnapshotPubSub
 	signalSources []SignalSource
 	flashCrash    *FlashCrashDetector
 
@@ -62,6 +63,7 @@ func NewService(
 	log *zap.Logger,
 	cfg Config,
 	cache repository.SnapshotCache,
+	pubsub repository.SnapshotPubSub,
 	signalSources []SignalSource,
 	flashCrashCfg *FlashCrashConfig,
 ) *Service {
@@ -92,6 +94,7 @@ func NewService(
 		log:           log,
 		cfg:           cfg,
 		cache:         cache,
+		pubsub:        pubsub,
 		signalSources: signalSources,
 		flashCrash:    NewFlashCrashDetector(flashCrashCfg),
 		mdcAgg:        signal.NewMDCAggregator(),
@@ -157,7 +160,8 @@ func (s *Service) Stop() {
 	if s.wsClient != nil {
 		s.wsClient.Close()
 	}
-	close(s.outCh)
+	// outCh is closed by snapshotLoop when it exits (via defer),
+	// ensuring no write-after-close race.
 }
 
 // --- WS callback handlers ---
@@ -264,6 +268,7 @@ func (s *Service) handleTradeExecuted(symbol string, trade bitfinex.FundingTrade
 // --- Snapshot loop ---
 
 func (s *Service) snapshotLoop(ctx context.Context) {
+	defer close(s.outCh) // snapshotLoop owns the channel lifetime
 	ticker := time.NewTicker(s.cfg.SnapshotInterval)
 	defer ticker.Stop()
 
@@ -287,6 +292,12 @@ func (s *Service) snapshotLoop(ctx context.Context) {
 				if s.cache != nil {
 					if err := s.cache.Set(ctx, sym, snap, snapshotCacheTTL); err != nil {
 						s.log.Warn("cache snapshot failed", zap.Error(err))
+					}
+				}
+				// Publish to PubSub so Hub (and other subscribers) receive snapshots
+				if s.pubsub != nil {
+					if err := s.pubsub.Publish(ctx, snap); err != nil {
+						s.log.Warn("pubsub publish snapshot failed", zap.Error(err))
 					}
 				}
 			}
@@ -368,14 +379,9 @@ func bookEntryKey(rate float64, period int) string {
 }
 
 func formatFloat(f float64) string {
-	// Fixed precision string for map key
-	bits := math.Float64bits(f)
-	return string([]byte{
-		byte(bits >> 56), byte(bits >> 48), byte(bits >> 40), byte(bits >> 32),
-		byte(bits >> 24), byte(bits >> 16), byte(bits >> 8), byte(bits),
-	})
+	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 func formatInt(i int) string {
-	return string(rune(i))
+	return strconv.Itoa(i)
 }

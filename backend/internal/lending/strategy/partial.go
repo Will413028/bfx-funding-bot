@@ -27,8 +27,13 @@ func NewPartialStrategy() *PartialStrategy {
 
 // Apply detects residuals, computes fill proxy, and adjusts amount.
 func (p *PartialStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResult {
+	// Guard: nil snapshot — no market data, skip this tick
+	if ctx.Snapshot == nil {
+		return &domain.DecisionResult{Reason: "no_snapshot"}
+	}
+
 	// Guard: flash freeze
-	if ctx.Snapshot != nil && ctx.Snapshot.FlashFreeze {
+	if ctx.Snapshot.FlashFreeze {
 		return &domain.DecisionResult{Reason: "flash_freeze"}
 	}
 

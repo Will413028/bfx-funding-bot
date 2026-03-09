@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -17,6 +18,8 @@ const snapshotChannel = "market:snapshot:updates"
 type SnapshotPubSubRepo struct {
 	client *redis.Client
 	log    *zap.Logger
+
+	mu     sync.Mutex
 	pubsub *redis.PubSub
 	cancel context.CancelFunc
 }
@@ -46,8 +49,10 @@ func (r *SnapshotPubSubRepo) Subscribe(ctx context.Context) (<-chan *domain.Mark
 	}
 
 	subCtx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
 	r.pubsub = pubsub
 	r.cancel = cancel
+	r.mu.Unlock()
 
 	ch := make(chan *domain.MarketSnapshot, 64)
 
@@ -82,11 +87,18 @@ func (r *SnapshotPubSubRepo) Subscribe(ctx context.Context) (<-chan *domain.Mark
 }
 
 func (r *SnapshotPubSubRepo) Close() error {
-	if r.cancel != nil {
-		r.cancel()
+	r.mu.Lock()
+	cancel := r.cancel
+	pubsub := r.pubsub
+	r.cancel = nil
+	r.pubsub = nil
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
-	if r.pubsub != nil {
-		return r.pubsub.Close()
+	if pubsub != nil {
+		return pubsub.Close()
 	}
 	return nil
 }

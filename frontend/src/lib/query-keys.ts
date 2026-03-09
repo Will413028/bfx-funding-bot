@@ -1,3 +1,8 @@
+export const userKeys = {
+  all: ["user"] as const,
+  me: () => [...userKeys.all, "me"] as const,
+};
+
 export const apiKeyKeys = {
   all: ["api-keys"] as const,
   list: () => [...apiKeyKeys.all, "list"] as const,

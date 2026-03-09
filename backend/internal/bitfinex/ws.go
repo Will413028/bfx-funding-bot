@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,6 +35,9 @@ type WSClient struct {
 	authenticated bool
 	maintenance   bool
 
+	writeMu  sync.Mutex   // serializes all writes to conn (gorilla requires single-writer)
+	connDone chan struct{} // closed when the current connection ends (reconnect or shutdown)
+
 	urlOverride string // for testing
 
 	done   chan struct{}
@@ -55,6 +59,14 @@ func NewWSClient(log *zap.Logger, apiKey, apiSecret string, handlers EventHandle
 
 // Connect establishes the WebSocket connection and starts the read loop.
 func (ws *WSClient) Connect() error {
+	// Guard against reconnect() calling Connect() after Close() has been called.
+	ws.mu.RLock()
+	if ws.closed {
+		ws.mu.RUnlock()
+		return fmt.Errorf("client is closed")
+	}
+	ws.mu.RUnlock()
+
 	url := wsPublicURL
 	if ws.apiKey != "" {
 		url = wsAuthURL
@@ -69,12 +81,17 @@ func (ws *WSClient) Connect() error {
 	}
 
 	ws.mu.Lock()
+	// Close previous connDone to stop any lingering heartbeat goroutine.
+	if ws.connDone != nil {
+		close(ws.connDone)
+	}
+	ws.connDone = make(chan struct{})
 	ws.conn = conn
-	ws.closed = false
 	ws.channels = make(map[int]ChannelInfo)
+	connDone := ws.connDone
 	ws.mu.Unlock()
 
-	go ws.readLoop()
+	go ws.readLoop(connDone)
 
 	return nil
 }
@@ -90,9 +107,17 @@ func (ws *WSClient) Close() {
 	ws.closed = true
 	close(ws.done)
 
+	// Stop the current connection's heartbeat goroutine.
+	if ws.connDone != nil {
+		close(ws.connDone)
+		ws.connDone = nil
+	}
+
 	if ws.conn != nil {
+		ws.writeMu.Lock()
 		ws.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		ws.writeMu.Unlock()
 		ws.conn.Close()
 	}
 }
@@ -201,25 +226,42 @@ func (ws *WSClient) sendJSON(v any) error {
 	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
+
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
 	return conn.WriteJSON(v)
 }
 
 // readLoop reads messages from the WebSocket and dispatches them.
-func (ws *WSClient) readLoop() {
-	heartbeat := time.NewTimer(heartbeatTimeout)
-	defer heartbeat.Stop()
+// connDone is closed when this connection is replaced (reconnect) or the client is shut down,
+// which ensures the heartbeat goroutine exits promptly.
+func (ws *WSClient) readLoop(connDone <-chan struct{}) {
+	// Store last heartbeat time atomically to avoid timer concurrency issues.
+	// The goroutine periodically checks this value instead of using timer.Reset
+	// from the main loop (which would be a data race on time.Timer).
+	var lastMsg atomic.Int64
+	lastMsg.Store(time.Now().UnixNano())
 
 	go func() {
-		select {
-		case <-heartbeat.C:
-			ws.log.Warn("heartbeat timeout, reconnecting")
-			ws.mu.RLock()
-			conn := ws.conn
-			ws.mu.RUnlock()
-			if conn != nil {
-				conn.Close()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				last := time.Unix(0, lastMsg.Load())
+				if time.Since(last) > heartbeatTimeout {
+					ws.log.Warn("heartbeat timeout, reconnecting")
+					ws.mu.RLock()
+					conn := ws.conn
+					ws.mu.RUnlock()
+					if conn != nil {
+						conn.Close()
+					}
+					return
+				}
+			case <-connDone:
+				return
 			}
-		case <-ws.done:
 		}
 	}()
 
@@ -246,8 +288,8 @@ func (ws *WSClient) readLoop() {
 			return
 		}
 
-		// Reset heartbeat timer on any message
-		heartbeat.Reset(heartbeatTimeout)
+		// Record last message time atomically (read by heartbeat goroutine)
+		lastMsg.Store(time.Now().UnixNano())
 
 		ws.handleMessage(msg)
 	}

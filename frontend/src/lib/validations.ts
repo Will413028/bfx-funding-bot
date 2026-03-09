@@ -22,14 +22,14 @@ export const createApiKeySchema = z.object({
 
 export type CreateApiKeyInput = z.infer<typeof createApiKeySchema>;
 
-const rangeSchema = (label: string) =>
+const rangeSchema = (_label: string) =>
   z
     .object({
-      min: z.number({ error: "required" }),
-      max: z.number({ error: "required" }),
+      min: z.number({ error: "required" }).positive(),
+      max: z.number({ error: "required" }).positive(),
     })
     .refine((d) => d.min <= d.max, {
-      message: `${label} min must be ≤ max`,
+      message: "rangeMinMax",
       path: ["min"],
     });
 

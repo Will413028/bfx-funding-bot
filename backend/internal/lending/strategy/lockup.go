@@ -33,8 +33,13 @@ func NewLockupStrategy() *LockupStrategy {
 
 // Apply computes the lockup cost and returns adjusted rate and period.
 func (l *LockupStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResult {
+	// Guard: no market data
+	if ctx.Snapshot == nil {
+		return &domain.DecisionResult{Reason: "no_snapshot"}
+	}
+
 	// Guard: flash freeze
-	if ctx.Snapshot != nil && ctx.Snapshot.FlashFreeze {
+	if ctx.Snapshot.FlashFreeze {
 		return &domain.DecisionResult{Reason: "flash_freeze"}
 	}
 

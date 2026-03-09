@@ -206,6 +206,7 @@ func newTestService() *Service {
 			SnapshotInterval: 1 * time.Second,
 		},
 		nil, // no cache in unit tests
+		nil, // no pubsub in unit tests
 		[]SignalSource{&mockSignalSource{name: "test_signal", value: 0.5}},
 		nil,
 	)

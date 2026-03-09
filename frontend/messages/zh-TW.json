@@ -74,7 +74,9 @@
     "required": "此欄位為必填",
     "maxLength": "超過最大長度限制",
     "minLength": "至少需要 8 個字元",
-    "invalidEmail": "請輸入有效的電子郵件"
+    "invalidEmail": "請輸入有效的電子郵件",
+    "passwordMismatch": "密碼不一致",
+    "rangeMinMax": "最小值必須小於或等於最大值"
   },
   "landing": {
     "heroTitle": "Bitfinex 自動放貸",

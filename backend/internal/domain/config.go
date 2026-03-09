@@ -13,6 +13,11 @@ const (
 	maxPeriodDays = 120
 )
 
+// AllowedCurrencies is the whitelist of currencies accepted for funding.
+var AllowedCurrencies = map[string]bool{
+	"USD": true, "UST": true, "BTC": true, "ETH": true,
+}
+
 type AmountConfig struct {
 	Min float64 `json:"min"`
 	Max float64 `json:"max"`
@@ -39,8 +44,8 @@ type StrategyConfig struct {
 func (c StrategyConfig) Validate() error {
 	var errs []string
 
-	if c.Currency == "" {
-		errs = append(errs, "currency is required")
+	if !AllowedCurrencies[c.Currency] {
+		errs = append(errs, "currency must be one of: USD, UST, BTC, ETH")
 	}
 
 	if c.Amount.Min < minAmount {

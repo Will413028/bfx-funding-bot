@@ -2,8 +2,9 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { login } from "@/app/[locale]/(auth)/actions";
@@ -29,14 +30,22 @@ export function LoginForm() {
 
   async function onSubmit(data: LoginFormInput) {
     setServerError(null);
-    const result = await login(data.email, data.password);
+
+    let result: Awaited<ReturnType<typeof login>>;
+    try {
+      result = await login(data.email, data.password);
+    } catch {
+      setServerError("Login failed");
+      return;
+    }
 
     if (!result.success) {
       setServerError(result.error ?? "Login failed");
       return;
     }
 
-    const callbackUrl = searchParams.get("callbackUrl") || "/overview";
+    const raw = searchParams.get("callbackUrl") || "/overview";
+    const callbackUrl = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/overview";
     router.push(callbackUrl);
     router.refresh();
   }

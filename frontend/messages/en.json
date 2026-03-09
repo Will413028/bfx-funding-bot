@@ -74,7 +74,9 @@
     "required": "This field is required",
     "maxLength": "Exceeds maximum length",
     "minLength": "Must be at least 8 characters",
-    "invalidEmail": "Please enter a valid email"
+    "invalidEmail": "Please enter a valid email",
+    "passwordMismatch": "Passwords do not match",
+    "rangeMinMax": "Min must be less than or equal to max"
   },
   "landing": {
     "heroTitle": "Automated Bitfinex Funding",

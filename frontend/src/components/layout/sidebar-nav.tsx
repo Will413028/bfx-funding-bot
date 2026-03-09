@@ -9,10 +9,13 @@ import {
   Settings,
 } from "lucide-react";
 import { usePathname } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { logout } from "@/app/[locale]/(auth)/actions";
 import { Link } from "@/i18n/navigation";
+import { routing } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
+
+const localePrefix = new RegExp(`^/(${routing.locales.join("|")})`);
 
 const navItems = [
   { href: "/overview", icon: LayoutDashboard, labelKey: "overview" },
@@ -24,10 +27,11 @@ const navItems = [
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const t = useTranslations("nav");
+  const locale = useLocale();
   const pathname = usePathname();
 
   // Strip locale prefix for matching (e.g. /en/overview → /overview)
-  const pathnameWithoutLocale = pathname.replace(/^\/(en|zh-TW)/, "") || "/";
+  const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
   return (
     <nav className="flex flex-1 flex-col justify-between">
@@ -57,7 +61,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
       <div className="border-t border-white/5 px-3 py-3">
         <button
           type="button"
-          onClick={() => logout()}
+          onClick={() => logout(locale)}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground"
         >
           <LogOut className="size-4" />

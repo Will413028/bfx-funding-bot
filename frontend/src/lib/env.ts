@@ -25,7 +25,15 @@ function parseEnv() {
         "[env] Client environment validation failed:",
         result.error.flatten().fieldErrors,
       );
-      return clientEnvSchema.parse({});
+      if (typeof window !== "undefined") {
+        console.warn("[env] App may not function correctly — check environment variables.");
+      }
+      return {
+        NEXT_PUBLIC_APP_URL: "",
+        NEXT_PUBLIC_APP_NAME: "bfx-funding-bot",
+        NEXT_PUBLIC_WS_URL: "",
+        NEXT_PUBLIC_SENTRY_DSN: undefined,
+      };
     }
     return result.data;
   }

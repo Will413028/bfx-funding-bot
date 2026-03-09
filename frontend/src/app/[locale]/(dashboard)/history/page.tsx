@@ -14,7 +14,7 @@ export default function HistoryPage() {
   const executionRecords = executions.data?.pages.flatMap((p) => p.data) ?? [];
   const billingRecords = billing.data?.pages.flatMap((p) => p.data) ?? [];
 
-  const isLoading = executions.isLoading && billing.isLoading;
+  const isLoading = executions.isLoading || billing.isLoading;
 
   if (isLoading) {
     return (

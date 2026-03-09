@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -17,21 +19,23 @@ type RenewSummary struct {
 
 // CreditManager handles auto-renewal of expiring funding credits.
 type CreditManager struct {
-	client FundingClient
-	keys   KeyStore
-	cipher Cipher
-	log    ExecutionLog
-	now    func() time.Time
+	client  FundingClient
+	keys    KeyStore
+	cipher  Cipher
+	log     ExecutionLog
+	limiter *rate.Limiter
+	now     func() time.Time
 }
 
 // NewCreditManager creates a new CreditManager.
-func NewCreditManager(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog) *CreditManager {
+func NewCreditManager(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog, limiter *rate.Limiter) *CreditManager {
 	return &CreditManager{
-		client: client,
-		keys:   keys,
-		cipher: cipher,
-		log:    log,
-		now:    time.Now,
+		client:  client,
+		keys:    keys,
+		cipher:  cipher,
+		log:     log,
+		limiter: limiter,
+		now:     time.Now,
 	}
 }
 
@@ -83,10 +87,28 @@ func (cm *CreditManager) ProcessCredits(ctx context.Context, userID string, cred
 			period = config.Period.Min
 		}
 
+		if err := cm.limiter.Wait(ctx); err != nil {
+			summary.RenewFail++
+			record := &domain.ExecutionRecord{
+				UserID:   userID,
+				Action:   domain.ActionRenew,
+				Currency: credit.Currency,
+				Amount:   credit.Amount,
+				Rate:     rate,
+				Period:   period,
+				Status:   "error",
+			}
+			errMsg := fmt.Sprintf("rate limiter: %v", err)
+			record.ErrorMessage = &errMsg
+			_, _ = cm.log.Create(ctx, record)
+			continue
+		}
+
 		params := domain.OfferParams{
-			Amount: credit.Amount,
-			Rate:   rate,
-			Period: period,
+			Currency: credit.Currency,
+			Amount:   credit.Amount,
+			Rate:     rate,
+			Period:   period,
 		}
 
 		placed, placeErr := cm.client.SubmitFundingOffer(ctx, apiKeyStr, apiSecretStr, params)
@@ -113,7 +135,7 @@ func (cm *CreditManager) ProcessCredits(ctx context.Context, userID string, cred
 			}
 		}
 
-		cm.log.Create(ctx, record)
+		_, _ = cm.log.Create(ctx, record) // best-effort audit log
 	}
 
 	return summary, nil

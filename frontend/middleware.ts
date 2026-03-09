@@ -16,13 +16,38 @@ const protectedPaths = [
 ];
 const authPaths = ["/login", "/register"];
 
+const isDev = process.env.NODE_ENV === "development";
+
+// Build connect-src with WebSocket backend origin (different from frontend in prod)
+function buildConnectSrc(): string {
+	const sources = ["'self'", "*.sentry.io", "*.ingest.sentry.io"];
+	const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+	if (wsUrl) {
+		try {
+			const url = new URL(wsUrl);
+			// Allow the WS origin (wss:// or ws://)
+			sources.push(url.origin);
+			// Also allow the HTTPS variant for the TLS upgrade handshake
+			if (url.protocol === "wss:") {
+				sources.push(`https://${url.host}`);
+			} else if (url.protocol === "ws:") {
+				sources.push(`http://${url.host}`);
+			}
+		} catch {
+			// Invalid URL — skip silently; the WS connection will fail at runtime
+			// but at least the rest of the app won't break
+		}
+	}
+	return `connect-src ${sources.join(" ")}`;
+}
+
 const cspDirectives = [
 	"default-src 'self'",
-	"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+	`script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
 	"style-src 'self' 'unsafe-inline'",
 	"img-src 'self' data: blob:",
 	"font-src 'self'",
-	"connect-src 'self' *.sentry.io *.ingest.sentry.io",
+	buildConnectSrc(),
 	"frame-ancestors 'none'",
 	"base-uri 'self'",
 	"form-action 'self'",
@@ -45,11 +70,21 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
 	return response;
 }
 
+function isTokenExpired(token: string): boolean {
+	try {
+		const payload = JSON.parse(atob(token.split(".")[1]));
+		return !payload.exp || payload.exp * 1000 < Date.now();
+	} catch {
+		return true;
+	}
+}
+
 export default function middleware(request: NextRequest) {
 	const { pathname } = request.nextUrl;
 	const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
-	const token = request.cookies.get("auth_token")?.value;
+	const rawToken = request.cookies.get("auth_token")?.value;
+	const token = rawToken && !isTokenExpired(rawToken) ? rawToken : undefined;
 	const isProtected = protectedPaths.some((p) =>
 		pathnameWithoutLocale.startsWith(p),
 	);

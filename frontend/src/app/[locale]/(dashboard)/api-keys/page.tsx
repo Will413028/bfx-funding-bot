@@ -76,8 +76,8 @@ export default function ApiKeysPage() {
               apiKey={key}
               onVerify={(id) => verifyMutation.mutate(id)}
               onDelete={(id) => deleteMutation.mutate(id)}
-              isVerifying={verifyMutation.isPending}
-              isDeleting={deleteMutation.isPending}
+              isVerifying={verifyMutation.isPending && verifyMutation.variables === key.id}
+              isDeleting={deleteMutation.isPending && deleteMutation.variables === key.id}
             />
           ))}
         </div>

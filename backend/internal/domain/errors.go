@@ -40,6 +40,10 @@ func ErrPasswordTooShort() *AppError {
 	return NewAppError(400, "PASSWORD_TOO_SHORT", "Password must be at least 8 characters")
 }
 
+func ErrPasswordTooLong() *AppError {
+	return NewAppError(400, "PASSWORD_TOO_LONG", "Password must be at most 72 characters")
+}
+
 func ErrEmailAlreadyExists() *AppError {
 	return NewAppError(409, "EMAIL_ALREADY_EXISTS", "Email is already registered")
 }
@@ -80,8 +84,8 @@ func ErrConfigValidation(details string) *AppError {
 	return NewAppError(400, "VALIDATION_ERROR", details)
 }
 
-func ErrBitfinexAPI(code int, message string) *AppError {
-	return NewAppError(502, "BITFINEX_API_ERROR", fmt.Sprintf("Bitfinex API error %d: %s", code, message))
+func ErrBitfinexAPI(code int, msg string) *AppError {
+	return NewAppError(502, "BITFINEX_API_ERROR", "Exchange API request failed")
 }
 
 func ErrInsufficientFunds() *AppError {

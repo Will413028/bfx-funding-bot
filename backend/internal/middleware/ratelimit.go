@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,73 +14,56 @@ import (
 
 type ipEntry struct {
 	limiter  *rate.Limiter
-	lastSeen time.Time
+	lastSeen atomic.Int64 // UnixNano
 }
 
 // IPRateLimiter manages per-IP rate limiters with automatic cleanup.
 type IPRateLimiter struct {
-	ips   sync.Map
-	rate  rate.Limit
-	burst int
-
-	stopCleanup chan struct{}
+	ips         sync.Map
+	rate        rate.Limit
+	burst       int
+	lastCleanup atomic.Int64 // UnixNano
 }
 
 // NewIPRateLimiter creates a rate limiter that tracks per-IP request rates.
-// Call Stop() to release the background cleanup goroutine.
 func NewIPRateLimiter(r rate.Limit, burst int) *IPRateLimiter {
 	rl := &IPRateLimiter{
-		rate:        r,
-		burst:       burst,
-		stopCleanup: make(chan struct{}),
+		rate:  r,
+		burst: burst,
 	}
-	go rl.cleanupLoop()
+	rl.lastCleanup.Store(time.Now().UnixNano())
 	return rl
 }
 
+const cleanupInterval = int64(5 * time.Minute)
+
 func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
-	now := time.Now()
+	now := time.Now().UnixNano()
 
-	if v, ok := rl.ips.Load(ip); ok {
-		entry := v.(*ipEntry)
-		entry.lastSeen = now
-		return entry.limiter
+	// Lazy cleanup every 5 minutes (CAS prevents duplicate goroutines)
+	old := rl.lastCleanup.Load()
+	if now-old > cleanupInterval && rl.lastCleanup.CompareAndSwap(old, now) {
+		go rl.cleanup()
 	}
 
-	limiter := rate.NewLimiter(rl.rate, rl.burst)
-	rl.ips.Store(ip, &ipEntry{limiter: limiter, lastSeen: now})
-	return limiter
-}
+	newEntry := &ipEntry{limiter: rate.NewLimiter(rl.rate, rl.burst)}
+	newEntry.lastSeen.Store(now)
 
-// cleanupLoop removes entries idle for more than 10 minutes, every 5 minutes.
-func (rl *IPRateLimiter) cleanupLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-rl.stopCleanup:
-			return
-		case <-ticker.C:
-			rl.cleanup()
-		}
-	}
+	v, _ := rl.ips.LoadOrStore(ip, newEntry)
+	entry := v.(*ipEntry)
+	entry.lastSeen.Store(now)
+	return entry.limiter
 }
 
 func (rl *IPRateLimiter) cleanup() {
-	cutoff := time.Now().Add(-10 * time.Minute)
+	cutoff := time.Now().Add(-10 * time.Minute).UnixNano()
 	rl.ips.Range(func(key, value any) bool {
 		entry := value.(*ipEntry)
-		if entry.lastSeen.Before(cutoff) {
+		if entry.lastSeen.Load() < cutoff {
 			rl.ips.Delete(key)
 		}
 		return true
 	})
-}
-
-// Stop terminates the background cleanup goroutine.
-func (rl *IPRateLimiter) Stop() {
-	close(rl.stopCleanup)
 }
 
 // RateLimit returns a Gin middleware that enforces per-IP rate limiting.

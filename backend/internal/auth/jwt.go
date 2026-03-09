@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rsa"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -50,6 +51,9 @@ func (m *JWTManager) GenerateToken(userID, email string) (string, time.Time, err
 
 func (m *JWTManager) ValidateToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(t *jwt.Token) (interface{}, error) {
+		if t.Method != jwt.SigningMethodRS256 {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
 		return m.publicKey, nil
 	})
 	if err != nil {
