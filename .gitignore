@@ -25,6 +25,7 @@ Thumbs.db
 *.swo
 
 # Go
+backend/server
 *.exe
 *.exe~
 *.dll
