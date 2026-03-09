@@ -201,7 +201,14 @@ export interface EngineStatus {
   workerCount: number;
 }
 
-// ── WebSocket (Phase F12-F13, not yet implemented) ──
+// ── Charts ──
+
+export interface DailyEarning {
+  date: string;
+  amount: number;
+}
+
+// ── WebSocket ──
 
 export interface MarketSnapshot {
   frr: number;

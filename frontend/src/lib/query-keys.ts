@@ -16,6 +16,7 @@ export const dashboardKeys = {
 export const earningsKeys = {
   all: ["earnings"] as const,
   summary: () => [...earningsKeys.all, "summary"] as const,
+  history: (days?: number) => [...earningsKeys.all, "history", days] as const,
 };
 
 export const billingKeys = {

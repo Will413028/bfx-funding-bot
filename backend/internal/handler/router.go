@@ -74,6 +74,7 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 
 			protected.GET("/dashboard", dashH.Get)
 			protected.GET("/earnings", earnH.Get)
+			protected.GET("/earnings/history", earnH.History)
 			protected.GET("/executions", execH.List)
 
 			protected.GET("/billing", billH.Get)
