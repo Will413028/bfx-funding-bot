@@ -64,9 +64,9 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 
 			protected.POST("/api-keys", apiKeyH.Create)
 			protected.GET("/api-keys", apiKeyH.List)
-			protected.GET("/apikeys/:id", apiKeyH.GetByID)
-			protected.DELETE("/apikeys/:id", apiKeyH.Delete)
-			protected.POST("/apikeys/:id/verify", apiKeyH.Verify)
+			protected.GET("/api-keys/:id", apiKeyH.GetByID)
+			protected.DELETE("/api-keys/:id", apiKeyH.Delete)
+			protected.POST("/api-keys/:id/verify", apiKeyH.Verify)
 
 			protected.PUT("/configs", configH.Save)
 			protected.GET("/configs", configH.Get)

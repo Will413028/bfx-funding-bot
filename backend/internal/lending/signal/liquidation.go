@@ -8,24 +8,19 @@ import (
 )
 
 const (
-	liquidationWindow         = 5 * time.Minute
-	liquidationTradeThreshold = 50000.0 // single trade amount threshold
+	liquidationTradeThreshold  = 50000.0   // single trade amount threshold
 	liquidationVolumeThreshold = 5000000.0
-	regressionInterval        = 5 * time.Minute // per regression step
+	regressionInterval         = 5 * time.Minute // per regression step
 )
 
 // LiquidationCascade detects cascading liquidation events.
+// It computes large-trade volume directly from the provided RecentTrades buffer
+// instead of accumulating trades internally.
 type LiquidationCascade struct {
-	triggered     bool
-	triggeredAt   time.Time
-	currentLevel  float64 // 1.0 → 0.7 → 0.3 → 0.0
+	triggered      bool
+	triggeredAt    time.Time
+	currentLevel   float64 // 1.0 → 0.7 → 0.3 → 0.0
 	lastLargeTrade time.Time
-	window        []tradeRecord
-}
-
-type tradeRecord struct {
-	amount float64
-	ts     time.Time
 }
 
 func NewLiquidationCascade() *LiquidationCascade {
@@ -37,25 +32,17 @@ func (l *LiquidationCascade) Name() string { return string(domain.SignalLiquidat
 func (l *LiquidationCascade) Compute(data *domain.RawMarketData) domain.SignalValue {
 	now := data.Timestamp
 
-	// Add large trades to window
-	for _, t := range data.RecentTrades {
-		if math.Abs(t.Amount) >= liquidationTradeThreshold {
-			l.window = append(l.window, tradeRecord{amount: math.Abs(t.Amount), ts: t.MTS})
-			l.lastLargeTrade = t.MTS
-		}
-	}
-
-	// Prune window
-	cutoff := now.Add(-liquidationWindow)
-	pruned := l.window[:0]
+	// Compute large-trade volume directly from the provided buffer
 	var totalVolume float64
-	for _, tr := range l.window {
-		if tr.ts.After(cutoff) {
-			pruned = append(pruned, tr)
-			totalVolume += tr.amount
+	for _, t := range data.RecentTrades {
+		amt := math.Abs(t.Amount)
+		if amt >= liquidationTradeThreshold {
+			totalVolume += amt
+			if t.MTS.After(l.lastLargeTrade) {
+				l.lastLargeTrade = t.MTS
+			}
 		}
 	}
-	l.window = pruned
 
 	// Check trigger
 	if totalVolume >= liquidationVolumeThreshold && !l.triggered {

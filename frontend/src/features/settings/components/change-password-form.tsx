@@ -27,7 +27,12 @@ export function ChangePasswordForm() {
   function onSubmit(data: ChangePasswordInput) {
     mutation.mutate(
       { currentPassword: data.currentPassword, newPassword: data.newPassword },
-      { onSuccess: () => reset() },
+      {
+        onSuccess: () => {
+          reset();
+          setTimeout(() => mutation.reset(), 2000);
+        },
+      },
     );
   }
 

@@ -21,22 +21,21 @@ func TestMomentum_FlatRate(t *testing.T) {
 	m := NewMomentum()
 	now := time.Now()
 
-	// Feed trades at a constant rate across the slow window
+	// Build a full trade buffer with constant rate across the slow window
+	trades := make([]domain.FundingTradeRecord, 0, 21)
 	for i := 0; i < 20; i++ {
 		ts := now.Add(-20*time.Minute + time.Duration(i)*time.Minute)
-		m.Compute(&domain.RawMarketData{
-			RecentTrades: []domain.FundingTradeRecord{
-				{Rate: 0.001, Amount: 1000, MTS: ts},
-			},
-			Timestamp: ts,
+		trades = append(trades, domain.FundingTradeRecord{
+			Rate: 0.001, Amount: 1000, MTS: ts,
 		})
 	}
+	trades = append(trades, domain.FundingTradeRecord{
+		Rate: 0.001, Amount: 1000, MTS: now,
+	})
 
 	sv := m.Compute(&domain.RawMarketData{
-		RecentTrades: []domain.FundingTradeRecord{
-			{Rate: 0.001, Amount: 1000, MTS: now},
-		},
-		Timestamp: now,
+		RecentTrades: trades,
+		Timestamp:    now,
 	})
 	// Fast VWAP ≈ Slow VWAP → signal ≈ 0
 	if math.Abs(sv.Value) > 0.1 {
@@ -48,32 +47,27 @@ func TestMomentum_RisingRate(t *testing.T) {
 	m := NewMomentum()
 	now := time.Now()
 
-	// Old trades at low rate
+	// Build a buffer with old low-rate trades and recent high-rate trades
+	var trades []domain.FundingTradeRecord
 	for i := 0; i < 10; i++ {
 		ts := now.Add(-15*time.Minute + time.Duration(i)*time.Minute)
-		m.Compute(&domain.RawMarketData{
-			RecentTrades: []domain.FundingTradeRecord{
-				{Rate: 0.0005, Amount: 1000, MTS: ts},
-			},
-			Timestamp: ts,
+		trades = append(trades, domain.FundingTradeRecord{
+			Rate: 0.0005, Amount: 1000, MTS: ts,
 		})
 	}
-	// Recent trades at high rate
 	for i := 0; i < 5; i++ {
 		ts := now.Add(-4*time.Minute + time.Duration(i)*time.Minute)
-		m.Compute(&domain.RawMarketData{
-			RecentTrades: []domain.FundingTradeRecord{
-				{Rate: 0.002, Amount: 1000, MTS: ts},
-			},
-			Timestamp: ts,
+		trades = append(trades, domain.FundingTradeRecord{
+			Rate: 0.002, Amount: 1000, MTS: ts,
 		})
 	}
+	trades = append(trades, domain.FundingTradeRecord{
+		Rate: 0.002, Amount: 1000, MTS: now,
+	})
 
 	sv := m.Compute(&domain.RawMarketData{
-		RecentTrades: []domain.FundingTradeRecord{
-			{Rate: 0.002, Amount: 1000, MTS: now},
-		},
-		Timestamp: now,
+		RecentTrades: trades,
+		Timestamp:    now,
 	})
 	// Fast VWAP > Slow VWAP → positive signal
 	if sv.Value <= 0 {
@@ -81,28 +75,28 @@ func TestMomentum_RisingRate(t *testing.T) {
 	}
 }
 
-func TestMomentum_TradesPruned(t *testing.T) {
+func TestMomentum_OldTradesPruned(t *testing.T) {
 	m := NewMomentum()
 	now := time.Now()
 
-	// Old trade beyond slow window
-	m.Compute(&domain.RawMarketData{
-		RecentTrades: []domain.FundingTradeRecord{
-			{Rate: 0.001, Amount: 1000, MTS: now.Add(-30 * time.Minute)},
-		},
-		Timestamp: now.Add(-30 * time.Minute),
+	// Buffer with one old trade beyond slow window and one recent trade
+	trades := []domain.FundingTradeRecord{
+		{Rate: 0.001, Amount: 1000, MTS: now.Add(-30 * time.Minute)},
+		{Rate: 0.002, Amount: 1000, MTS: now},
+	}
+
+	sv := m.Compute(&domain.RawMarketData{
+		RecentTrades: trades,
+		Timestamp:    now,
 	})
 
-	// New compute should prune old trades
-	m.Compute(&domain.RawMarketData{
-		RecentTrades: []domain.FundingTradeRecord{
-			{Rate: 0.001, Amount: 1000, MTS: now},
-		},
-		Timestamp: now,
-	})
-
-	// Only 1 trade should remain (the old one pruned)
-	if len(m.trades) != 1 {
-		t.Errorf("expected 1 trade after pruning, got %d", len(m.trades))
+	// The old trade is beyond slowVWAPWindow (20min) and should be ignored.
+	// Only the recent trade contributes, so VWAP should reflect 0.002.
+	// With a single trade, fast and slow VWAP are the same → signal ≈ 0.
+	if math.Abs(sv.Value) > 0.1 {
+		t.Errorf("expected near-zero signal with single valid trade, got %f", sv.Value)
+	}
+	if sv.Confidence != 0.05 { // 1 trade / 20.0 = 0.05
+		t.Errorf("expected confidence 0.05 for 1 valid trade, got %f", sv.Confidence)
 	}
 }

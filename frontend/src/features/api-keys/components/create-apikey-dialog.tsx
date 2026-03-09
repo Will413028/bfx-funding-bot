@@ -2,6 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +36,10 @@ export function CreateApiKeyDialog({
   } = useForm<CreateApiKeyInput>({
     resolver: zodResolver(createApiKeySchema),
   });
+
+  useEffect(() => {
+    if (open) reset();
+  }, [open, reset]);
 
   function handleOpenChange(value: boolean) {
     if (!value) reset();

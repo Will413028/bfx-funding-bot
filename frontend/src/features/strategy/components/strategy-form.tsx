@@ -73,7 +73,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
   }, [userConfig, reset]);
 
   function onSave(data: StrategyConfigInput) {
-    saveMutation.mutate(toApiPayload(data));
+    saveMutation.mutate(toApiPayload(data), {
+      onSuccess: () => {
+        setTimeout(() => saveMutation.reset(), 2000);
+      },
+    });
   }
 
   function onReset() {
@@ -247,6 +251,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
           Reset to Defaults
         </Button>
       </div>
+      {(saveMutation.isError || resetMutation.isError) && (
+        <p className="text-sm text-rose-500">
+          {saveMutation.error?.message ?? resetMutation.error?.message ?? "Operation failed"}
+        </p>
+      )}
     </form>
   );
 }

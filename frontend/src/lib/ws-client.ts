@@ -51,7 +51,11 @@ export class WSClient {
       return;
     }
 
-    const url = `${this.opts.wsUrl}/api/v1/ws?token=${token}`;
+    if (this.intentionalClose) {
+      return;
+    }
+
+    const url = `${this.opts.wsUrl}/api/v1/ws?token=${encodeURIComponent(token)}`;
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
