@@ -387,7 +387,7 @@ func (c *Client) GetActiveFundingCredits(ctx context.Context, apiKey, apiSecret,
 
 	var raw [][]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return []domain.FundingCredit{}, nil
+		return nil, fmt.Errorf("parse credits list: %w", err)
 	}
 
 	credits := make([]domain.FundingCredit, 0, len(raw))
@@ -415,13 +415,27 @@ func parseCreditItem(item []json.RawMessage, currency string) (*domain.FundingCr
 	var openingMs int64
 	var renew int
 
-	json.Unmarshal(item[0], &id)
-	json.Unmarshal(item[5], &amount)
-	json.Unmarshal(item[7], &status)
-	json.Unmarshal(item[11], &rate)
-	json.Unmarshal(item[12], &period)
-	json.Unmarshal(item[13], &openingMs)
-	json.Unmarshal(item[18], &renew)
+	if err := json.Unmarshal(item[0], &id); err != nil {
+		return nil, fmt.Errorf("parse credit id: %w", err)
+	}
+	if err := json.Unmarshal(item[5], &amount); err != nil {
+		return nil, fmt.Errorf("parse credit amount: %w", err)
+	}
+	if err := json.Unmarshal(item[7], &status); err != nil {
+		return nil, fmt.Errorf("parse credit status: %w", err)
+	}
+	if err := json.Unmarshal(item[11], &rate); err != nil {
+		return nil, fmt.Errorf("parse credit rate: %w", err)
+	}
+	if err := json.Unmarshal(item[12], &period); err != nil {
+		return nil, fmt.Errorf("parse credit period: %w", err)
+	}
+	if err := json.Unmarshal(item[13], &openingMs); err != nil {
+		return nil, fmt.Errorf("parse credit openedAt: %w", err)
+	}
+	if err := json.Unmarshal(item[18], &renew); err != nil {
+		return nil, fmt.Errorf("parse credit renew: %w", err)
+	}
 
 	return &domain.FundingCredit{
 		ID:        id,
@@ -451,7 +465,7 @@ func (c *Client) GetFundingEarnings(ctx context.Context, apiKey, apiSecret, curr
 
 	var raw [][]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return []domain.FundingEarning{}, nil
+		return nil, fmt.Errorf("parse earnings list: %w", err)
 	}
 
 	earnings := make([]domain.FundingEarning, 0, len(raw))
@@ -477,11 +491,21 @@ func parseLedgerItem(item []json.RawMessage, currency string) (*domain.FundingEa
 	var mts int64
 	var description string
 
-	json.Unmarshal(item[0], &id)
-	json.Unmarshal(item[3], &mts)
-	json.Unmarshal(item[5], &amount)
-	json.Unmarshal(item[6], &balance)
-	json.Unmarshal(item[8], &description)
+	if err := json.Unmarshal(item[0], &id); err != nil {
+		return nil, fmt.Errorf("parse ledger id: %w", err)
+	}
+	if err := json.Unmarshal(item[3], &mts); err != nil {
+		return nil, fmt.Errorf("parse ledger timestamp: %w", err)
+	}
+	if err := json.Unmarshal(item[5], &amount); err != nil {
+		return nil, fmt.Errorf("parse ledger amount: %w", err)
+	}
+	if err := json.Unmarshal(item[6], &balance); err != nil {
+		return nil, fmt.Errorf("parse ledger balance: %w", err)
+	}
+	if err := json.Unmarshal(item[8], &description); err != nil {
+		return nil, fmt.Errorf("parse ledger description: %w", err)
+	}
 
 	return &domain.FundingEarning{
 		ID:          id,

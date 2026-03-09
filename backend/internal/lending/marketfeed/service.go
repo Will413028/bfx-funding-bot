@@ -311,20 +311,19 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 		return nil
 	}
 
-	st.mu.RLock()
+	st.mu.Lock()
 	// Skip if no ticker data yet
 	if st.ticker == nil {
-		st.mu.RUnlock()
+		st.mu.Unlock()
 		return nil
 	}
 
-	// Copy data under lock
+	// Copy data and prune trades under a single lock
 	tickerCopy := *st.ticker
 	bookEntries := make([]domain.BookEntry, 0, len(st.book))
 	for _, e := range st.book {
 		bookEntries = append(bookEntries, e)
 	}
-	// Prune old trades and copy
 	cutoff := now.Add(-tradeBufferDuration)
 	trades := make([]domain.FundingTradeRecord, 0, len(st.recentTrades))
 	for _, t := range st.recentTrades {
@@ -332,10 +331,6 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 			trades = append(trades, t)
 		}
 	}
-	st.mu.RUnlock()
-
-	// Update pruned trades
-	st.mu.Lock()
 	st.recentTrades = trades
 	st.mu.Unlock()
 

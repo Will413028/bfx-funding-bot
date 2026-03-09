@@ -64,6 +64,9 @@ func BatchCredits(credits []domain.FundingCredit, config *domain.StrategyConfig,
 		g := groups[day]
 
 		// Weighted average rate
+		if g.totalAmt == 0 {
+			continue
+		}
 		rate := g.weightedR / g.totalAmt
 
 		// Apply config bounds
