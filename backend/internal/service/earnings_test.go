@@ -13,6 +13,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 )
 
 func testEarningsCipher(t *testing.T) *crypto.AES {
@@ -67,7 +68,7 @@ func TestEarnings_ActiveCreditsWithHistory(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedEarningsConfig(configRepo, "user1")
 
-	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher, quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetEarnings(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +108,7 @@ func TestEarnings_NoAPIKey(t *testing.T) {
 	apiKeyRepo := newMockAPIKeyRepo()
 	configRepo := newMockConfigRepo()
 
-	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher, quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetEarnings(context.Background(), "no-user")
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +146,7 @@ func TestEarnings_NoCredits(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedEarningsConfig(configRepo, "user1")
 
-	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher, quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetEarnings(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +189,7 @@ func TestEarnings_PartialFailure(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedEarningsConfig(configRepo, "user1")
 
-	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher)
+	svc := NewEarningsService(bfx, apiKeyRepo, configRepo, cipher, quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetEarnings(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -201,5 +202,8 @@ func TestEarnings_PartialFailure(t *testing.T) {
 	// Earnings should be 0 (ledger failed gracefully)
 	if summary.Earnings7d != 0 {
 		t.Errorf("expected earnings_7d 0, got %f", summary.Earnings7d)
+	}
+	if len(summary.Warnings) != 2 {
+		t.Errorf("expected 2 warnings (both earnings fetches failed), got %v", summary.Warnings)
 	}
 }

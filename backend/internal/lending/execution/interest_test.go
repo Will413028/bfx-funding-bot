@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -18,7 +20,7 @@ func reinvestConfig() *domain.StrategyConfig {
 }
 
 func newTestCollector(client *mockFundingClient, keys *mockKeyStore, log *mockExecutionLog) *InterestCollector {
-	return NewInterestCollector(client, keys, &mockCipher{}, log)
+	return NewInterestCollector(client, keys, &mockCipher{}, log, rate.NewLimiter(rate.Inf, 0))
 }
 
 func TestReinvest_AboveMinimum(t *testing.T) {
@@ -210,7 +212,7 @@ func TestReinvest_APIKeyNotFound(t *testing.T) {
 func TestReinvest_DecryptFailure(t *testing.T) {
 	client := &mockFundingClient{}
 	log := &mockExecutionLog{}
-	ic := NewInterestCollector(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log)
+	ic := NewInterestCollector(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log, rate.NewLimiter(rate.Inf, 0))
 
 	_, err := ic.CheckAndReinvest(context.Background(), "user-1", 1000, reinvestConfig())
 	if err == nil {

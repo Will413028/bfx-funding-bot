@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 )
 
 type mockSnapshotCache struct {
@@ -93,7 +96,7 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 		Timestamp:   time.Now(),
 	}
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cache, cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, cache, cipher, zap.NewNop(), quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +138,7 @@ func TestDashboard_NoAPIKey(t *testing.T) {
 	apiKeyRepo := newMockAPIKeyRepo()
 	configRepo := newMockConfigRepo()
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher, zap.NewNop(), quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetSummary(context.Background(), "no-user")
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +170,7 @@ func TestDashboard_UnverifiedKey(t *testing.T) {
 	}
 	configRepo := newMockConfigRepo()
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher, zap.NewNop(), quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +213,7 @@ func TestDashboard_PartialBitfinexFailure(t *testing.T) {
 	configRepo := newMockConfigRepo()
 	seedConfig(configRepo, "user1", domain.StrategyConfig{Currency: "USD"})
 
-	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher)
+	svc := NewDashboardService(bfx, apiKeyRepo, configRepo, newMockSnapshotCache(), cipher, zap.NewNop(), quota.NewRateLimiterPool(1000, 1000))
 	summary, err := svc.GetSummary(context.Background(), "user1")
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +227,9 @@ func TestDashboard_PartialBitfinexFailure(t *testing.T) {
 	}
 	if len(summary.Offers) != 0 {
 		t.Errorf("expected 0 offers (failed gracefully), got %d", len(summary.Offers))
+	}
+	if len(summary.Warnings) != 1 || summary.Warnings[0] != "offers_fetch_failed" {
+		t.Errorf("expected warnings [offers_fetch_failed], got %v", summary.Warnings)
 	}
 }
 

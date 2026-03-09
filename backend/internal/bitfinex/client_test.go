@@ -495,7 +495,7 @@ func TestRateLimiter_BurstAllowed(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Burst of 5 should succeed (burst=5 in default config)
+	// Burst of 5 should succeed (burst=20 in default config)
 	for i := 0; i < 5; i++ {
 		err := client.VerifyCredentials(ctx, "key", "secret")
 		if err != nil {

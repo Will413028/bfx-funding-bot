@@ -3,6 +3,9 @@ package lending
 import (
 	"context"
 	"fmt"
+	"sync"
+
+	"golang.org/x/time/rate"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/worker"
@@ -31,14 +34,16 @@ type userDataFetcher struct {
 	keys     fetcherKeyStore
 	cipher   fetcherCipher
 	currency string
+	limiter  *rate.Limiter
 }
 
-func newUserDataFetcher(client fetcherClient, keys fetcherKeyStore, cipher fetcherCipher, currency string) *userDataFetcher {
+func newUserDataFetcher(client fetcherClient, keys fetcherKeyStore, cipher fetcherCipher, currency string, limiter *rate.Limiter) *userDataFetcher {
 	return &userDataFetcher{
 		client:   client,
 		keys:     keys,
 		cipher:   cipher,
 		currency: currency,
+		limiter:  limiter,
 	}
 }
 
@@ -60,19 +65,87 @@ func (f *userDataFetcher) FetchUserData(ctx context.Context, userID string) (*wo
 	key := apiKey.APIKey
 	sec := string(secret)
 
-	wallet, err := f.client.GetFundingBalance(ctx, key, sec, f.currency)
-	if err != nil {
-		return nil, fmt.Errorf("get funding balance: %w", err)
-	}
+	var (
+		wallet  *domain.Wallet
+		offers  []domain.FundingOffer
+		credits []domain.FundingCredit
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		firstErr error
+	)
 
-	offers, err := f.client.GetActiveFundingOffers(ctx, key, sec, f.currency)
-	if err != nil {
-		return nil, fmt.Errorf("get active offers: %w", err)
-	}
+	wg.Add(3)
 
-	credits, err := f.client.GetActiveFundingCredits(ctx, key, sec, f.currency)
-	if err != nil {
-		return nil, fmt.Errorf("get active credits: %w", err)
+	go func() {
+		defer wg.Done()
+		if err := f.limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			defer mu.Unlock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rate limiter: %w", err)
+			}
+			return
+		}
+		w, err := f.client.GetFundingBalance(ctx, key, sec, f.currency)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("get funding balance: %w", err)
+			}
+		} else {
+			wallet = w
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if err := f.limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			defer mu.Unlock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rate limiter: %w", err)
+			}
+			return
+		}
+		o, err := f.client.GetActiveFundingOffers(ctx, key, sec, f.currency)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("get active offers: %w", err)
+			}
+		} else {
+			offers = o
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if err := f.limiter.Wait(ctx); err != nil {
+			mu.Lock()
+			defer mu.Unlock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rate limiter: %w", err)
+			}
+			return
+		}
+		c, err := f.client.GetActiveFundingCredits(ctx, key, sec, f.currency)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("get active credits: %w", err)
+			}
+		} else {
+			credits = c
+		}
+	}()
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	available := 0.0

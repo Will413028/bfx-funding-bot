@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/worker"
 )
 
@@ -32,7 +33,7 @@ func (m *mockOfferExecutor) ExecuteDecision(ctx context.Context, userID string, 
 
 type mockDepsFactory struct{}
 
-func (m *mockDepsFactory) BuildWorkerDeps(userID string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps {
+func (m *mockDepsFactory) BuildWorkerDeps(userID string, currency string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps {
 	return worker.Deps{
 		Strategy:   &mockStrategy{},
 		Fetcher:    &mockDataFetcher{},
@@ -61,7 +62,7 @@ func testStrategyConfig() domain.StrategyConfig {
 
 func startedService(t *testing.T) (*Service, context.CancelFunc) {
 	t.Helper()
-	svc := NewService(&mockDepsFactory{}, testServiceConfig())
+	svc := NewService(&mockDepsFactory{}, testServiceConfig(), quota.NewRateLimiterPool(1000, 1000))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go svc.Start(ctx)
@@ -78,7 +79,7 @@ func startedService(t *testing.T) (*Service, context.CancelFunc) {
 // --- Tests ---
 
 func TestService_ReadySignal(t *testing.T) {
-	svc := NewService(&mockDepsFactory{}, testServiceConfig())
+	svc := NewService(&mockDepsFactory{}, testServiceConfig(), quota.NewRateLimiterPool(1000, 1000))
 
 	// Before Start, ready channel should not be closed
 	select {
@@ -102,7 +103,7 @@ func TestService_ReadySignal(t *testing.T) {
 }
 
 func TestService_NewService(t *testing.T) {
-	svc := NewService(&mockDepsFactory{}, testServiceConfig())
+	svc := NewService(&mockDepsFactory{}, testServiceConfig(), quota.NewRateLimiterPool(1000, 1000))
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
@@ -310,7 +311,7 @@ func TestService_StopAllCleansUp(t *testing.T) {
 }
 
 func TestService_SetUserPlan(t *testing.T) {
-	svc := NewService(&mockDepsFactory{}, testServiceConfig())
+	svc := NewService(&mockDepsFactory{}, testServiceConfig(), quota.NewRateLimiterPool(1000, 1000))
 
 	svc.SetUserPlan("u1", domain.PlanPro)
 	if r := svc.quota.Remaining("u1"); r != quotaPro {

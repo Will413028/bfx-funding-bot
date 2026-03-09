@@ -5,6 +5,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/execution"
+	"github.com/will/bfx-funding-bot/backend/internal/lending/quota"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/strategy"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/worker"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
@@ -13,10 +14,11 @@ import (
 // DepsFactory builds worker.Deps for each user. It holds shared infrastructure
 // references and creates per-user DataFetcher and OfferExecutor instances.
 type DepsFactory struct {
-	client     *bitfinex.Client
-	cipher     *crypto.AES
-	apiKeyRepo repository.APIKeyRepository
-	execRepo   repository.ExecutionRepository
+	client      *bitfinex.Client
+	cipher      *crypto.AES
+	apiKeyRepo  repository.APIKeyRepository
+	execRepo    repository.ExecutionRepository
+	limiterPool *quota.RateLimiterPool
 }
 
 // NewDepsFactory creates a new DepsFactory.
@@ -25,22 +27,23 @@ func NewDepsFactory(
 	cipher *crypto.AES,
 	apiKeyRepo repository.APIKeyRepository,
 	execRepo repository.ExecutionRepository,
+	limiterPool *quota.RateLimiterPool,
 ) *DepsFactory {
 	return &DepsFactory{
-		client:     client,
-		cipher:     cipher,
-		apiKeyRepo: apiKeyRepo,
-		execRepo:   execRepo,
+		client:      client,
+		cipher:      cipher,
+		apiKeyRepo:  apiKeyRepo,
+		execRepo:    execRepo,
+		limiterPool: limiterPool,
 	}
 }
 
 // BuildWorkerDeps creates a complete worker.Deps for the given user.
-func (f *DepsFactory) BuildWorkerDeps(userID string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps {
-	currency := "USD" // default; could be derived from user config in the future
+func (f *DepsFactory) BuildWorkerDeps(userID string, currency string, snapshotCh <-chan *domain.MarketSnapshot) worker.Deps {
+	limiter := f.limiterPool.Get(userID)
+	fetcher := newUserDataFetcher(f.client, f.apiKeyRepo, f.cipher, currency, limiter)
 
-	fetcher := newUserDataFetcher(f.client, f.apiKeyRepo, f.cipher, currency)
-
-	offerExecutor := execution.NewOfferExecutor(f.client, f.apiKeyRepo, f.cipher, f.execRepo)
+	offerExecutor := execution.NewOfferExecutor(f.client, f.apiKeyRepo, f.cipher, f.execRepo, limiter)
 	executor := newExecutorAdapter(offerExecutor)
 
 	return worker.Deps{

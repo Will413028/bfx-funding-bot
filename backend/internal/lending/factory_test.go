@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/lending/worker"
 )
@@ -50,6 +52,11 @@ func (s *stubFetcherCipher) Decrypt(ciphertext []byte) ([]byte, error) {
 
 // --- Fetcher tests ---
 
+// testLimiter creates an unlimited rate limiter for tests.
+func testLimiter() *rate.Limiter {
+	return rate.NewLimiter(rate.Inf, 0)
+}
+
 func TestUserDataFetcher_Success(t *testing.T) {
 	fetcher := newUserDataFetcher(
 		&stubFetcherClient{
@@ -63,6 +70,7 @@ func TestUserDataFetcher_Success(t *testing.T) {
 		},
 		&stubFetcherCipher{plaintext: []byte("secret123")},
 		"USD",
+		testLimiter(),
 	)
 
 	data, err := fetcher.FetchUserData(context.Background(), "u1")
@@ -86,6 +94,7 @@ func TestUserDataFetcher_NoAPIKey(t *testing.T) {
 		&stubFetcherKeyStore{key: nil},
 		&stubFetcherCipher{plaintext: []byte("secret")},
 		"USD",
+		testLimiter(),
 	)
 
 	_, err := fetcher.FetchUserData(context.Background(), "u1")
@@ -103,6 +112,7 @@ func TestUserDataFetcher_DecryptError(t *testing.T) {
 		},
 		&stubFetcherCipher{err: fmt.Errorf("decrypt failed")},
 		"USD",
+		testLimiter(),
 	)
 
 	_, err := fetcher.FetchUserData(context.Background(), "u1")
@@ -117,6 +127,7 @@ func TestUserDataFetcher_RepoError(t *testing.T) {
 		&stubFetcherKeyStore{err: fmt.Errorf("db error")},
 		&stubFetcherCipher{plaintext: []byte("secret")},
 		"USD",
+		testLimiter(),
 	)
 
 	_, err := fetcher.FetchUserData(context.Background(), "u1")

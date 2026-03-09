@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -77,7 +79,7 @@ func defaultKeyStore() *mockKeyStore {
 }
 
 func newTestExecutor(client *mockFundingClient, keys *mockKeyStore, log *mockExecutionLog) *OfferExecutor {
-	return NewOfferExecutor(client, keys, &mockCipher{}, log)
+	return NewOfferExecutor(client, keys, &mockCipher{}, log, rate.NewLimiter(rate.Inf, 0))
 }
 
 // --- Tests ---
@@ -364,7 +366,7 @@ func TestExecute_MixedResults(t *testing.T) {
 func TestExecute_DecryptFailure(t *testing.T) {
 	client := &mockFundingClient{}
 	log := &mockExecutionLog{}
-	exec := NewOfferExecutor(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log)
+	exec := NewOfferExecutor(client, defaultKeyStore(), &mockCipher{err: errors.New("decrypt failed")}, log, rate.NewLimiter(rate.Inf, 0))
 
 	decision := &domain.DecisionResult{
 		Offers: []domain.OfferDecision{
