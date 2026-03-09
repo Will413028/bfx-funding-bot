@@ -151,13 +151,13 @@ marketfeed/service.go (C1)
 | F15 | Production Hardening | Sentry 錯誤監控 + CSP 安全標頭 + env 驗證 fail-fast + Vercel 部署設定 | 低 |
 | F16 | Testing | Vitest 單元測試 (format, query-keys, api-client 純函式) + Playwright E2E (auth, api-keys, strategy, history, i18n 主流程) | 中 |
 
-### Phase H — 運維
+### Phase H — 運維（Axiom 集中式日誌 + 監控）
 
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
-| H1 | Prometheus Metrics | Go `/metrics` endpoint — engine/worker/API/WS 連線指標收集 (prometheus/client_golang) | 中 |
-| H2 | Grafana Dashboard | 監控面板 template — Worker 數/API 配額使用率/心跳延遲/WS 連線健康度 | 中 |
-| H3 | Alerting Rules | 告警規則 — Worker 崩潰率 >3 次/hr, API 配額 >85%, WS 斷線 >2min | 低 |
+| H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式)，結構化日誌集中收集 + shutdown flush | 低 |
+| H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs 自動收集 | 低 |
+| H3 | Axiom Dashboard & Alerts | Axiom UI 建立監控面板 + 告警規則（Worker 崩潰率、API 錯誤率、WS 斷線） | 中 |
 
 ### Phase G — 策略行為增強
 
@@ -223,8 +223,8 @@ Phase A ✅ 全部完成
          │        └→ F16 (Testing — Vitest unit + Playwright E2E，F4 之後可開始)
          │        └→ F15 (Production hardening，最後)
          │
-         └── Phase H (運維)
-             H1→H2→H3 (Metrics → Dashboard → Alerting)
+         └── Phase H (運維 — Axiom)
+             H1→H2 (Backend + Frontend 整合，可平行) → H3 (Dashboard & Alerts)
 ```
 
 ## 建議開發順序
@@ -247,4 +247,4 @@ Phase A ✅ 全部完成
 16. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
 17. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
 18. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
-19. **H1 → H2 → H3** — 運維監控（Prometheus + Grafana + Alerting）
+19. **H1, H2** — Axiom 日誌整合（Backend + Frontend，可平行）→ **H3** — Axiom Dashboard & Alerts

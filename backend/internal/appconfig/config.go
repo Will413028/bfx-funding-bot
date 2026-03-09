@@ -25,6 +25,9 @@ type Config struct {
 
 	ResendAPIKey          string
 	NotificationFromEmail string
+
+	AxiomToken   string
+	AxiomDataset string
 }
 
 func Load() (Config, error) {
@@ -82,6 +85,9 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("required environment variable RESEND_API_KEY is not set")
 	}
 	cfg.NotificationFromEmail = getEnvOrDefault("NOTIFICATION_FROM_EMAIL", "noreply@bfx-funding.bot")
+
+	cfg.AxiomToken = os.Getenv("AXIOM_TOKEN")
+	cfg.AxiomDataset = os.Getenv("AXIOM_DATASET")
 
 	return cfg, nil
 }
