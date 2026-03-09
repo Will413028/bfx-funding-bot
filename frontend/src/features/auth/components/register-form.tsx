@@ -2,8 +2,8 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { register as registerAction } from "@/app/[locale]/(auth)/actions";
@@ -28,7 +28,14 @@ export function RegisterForm() {
 
   async function onSubmit(data: RegisterFormInput) {
     setServerError(null);
-    const result = await registerAction(data.email, data.password);
+
+    let result: Awaited<ReturnType<typeof registerAction>>;
+    try {
+      result = await registerAction(data.email, data.password);
+    } catch {
+      setServerError("Registration failed");
+      return;
+    }
 
     if (!result.success) {
       setServerError(result.error ?? "Registration failed");

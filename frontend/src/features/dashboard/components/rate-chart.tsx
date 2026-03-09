@@ -26,6 +26,13 @@ export function RateChart() {
   const [data, setData] = useState<RatePoint[]>([]);
 
   useEffect(() => {
+    if (status !== "connected") {
+      bufferRef.current = [];
+      setData([]);
+    }
+  }, [status]);
+
+  useEffect(() => {
     if (!snapshot) return;
 
     const point: RatePoint = {

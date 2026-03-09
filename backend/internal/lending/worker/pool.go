@@ -71,9 +71,12 @@ func (p *Pool) Start(userID string, config domain.StrategyConfig) error {
 	go func() {
 		defer p.wg.Done()
 		_ = w.Run(workerCtx)
-		// Auto-cleanup: remove from map when Run exits
+		// Auto-cleanup: remove from map only if the entry still belongs to this worker.
+		// A new replacement worker may have been started for the same userID after Stop().
 		p.mu.Lock()
-		delete(p.workers, userID)
+		if current, ok := p.workers[userID]; ok && current.worker == w {
+			delete(p.workers, userID)
+		}
 		p.mu.Unlock()
 	}()
 

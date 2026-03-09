@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	"github.com/will/bfx-funding-bot/backend/internal/appconfig"
 	"github.com/will/bfx-funding-bot/backend/internal/auth"
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
@@ -24,12 +25,18 @@ const (
 	sendBufSize    = 16
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // CORS handled at middleware level
-	},
+func newUpgrader(allowedOrigin string) websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // Same-origin or non-browser client
+			}
+			return origin == allowedOrigin
+		},
+	}
 }
 
 // wsMessage is the envelope for all WebSocket messages.
@@ -105,20 +112,22 @@ type Hub struct {
 	unregister chan *client
 	broadcast  chan []byte
 
-	pubsub repository.SnapshotPubSub
-	log    *zap.Logger
-	wsMgr  *auth.WSTokenManager
+	upgrader websocket.Upgrader
+	pubsub   repository.SnapshotPubSub
+	log      *zap.Logger
+	wsMgr    *auth.WSTokenManager
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewHub(pubsub repository.SnapshotPubSub, wsMgr *auth.WSTokenManager, log *zap.Logger) *Hub {
+func NewHub(cfg appconfig.Config, pubsub repository.SnapshotPubSub, wsMgr *auth.WSTokenManager, log *zap.Logger) *Hub {
 	return &Hub{
 		clients:    make(map[*client]bool),
 		register:   make(chan *client),
 		unregister: make(chan *client),
 		broadcast:  make(chan []byte, 64),
+		upgrader:   newUpgrader(cfg.FrontendURL),
 		pubsub:     pubsub,
 		wsMgr:      wsMgr,
 		log:        log,
@@ -249,7 +258,7 @@ func (h *Hub) HandleWS(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		h.log.Error("ws upgrade failed", zap.Error(err), zap.String("userID", userID))
 		return

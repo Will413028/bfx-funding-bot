@@ -2,6 +2,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { routing } from "@/i18n/routing";
 
 // eslint-disable-next-line -- server-only, validated by env.ts at startup
 const API_URL = process.env.API_URL as string;
@@ -26,22 +27,34 @@ export async function login(
   email: string,
   password: string,
 ): Promise<AuthResult> {
-  const res = await fetch(`${API_URL}/api/v1/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch {
+    return { success: false, error: "Network error" };
+  }
 
-  const body = await res.json();
+  let body: Record<string, unknown>;
+  try {
+    body = await res.json();
+  } catch {
+    return { success: false, error: "Login failed" };
+  }
 
   if (!res.ok) {
+    const err = body.error as { message?: string } | undefined;
     return {
       success: false,
-      error: body.error?.message ?? "Login failed",
+      error: err?.message ?? "Login failed",
     };
   }
 
-  await setAuthCookie(body.data.token);
+  const data = body.data as { token: string };
+  await setAuthCookie(data.token);
   return { success: true };
 }
 
@@ -49,18 +62,29 @@ export async function register(
   email: string,
   password: string,
 ): Promise<AuthResult> {
-  const res = await fetch(`${API_URL}/api/v1/auth/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/v1/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch {
+    return { success: false, error: "Network error" };
+  }
 
-  const body = await res.json();
+  let body: Record<string, unknown>;
+  try {
+    body = await res.json();
+  } catch {
+    return { success: false, error: "Registration failed" };
+  }
 
   if (!res.ok) {
+    const err = body.error as { message?: string } | undefined;
     return {
       success: false,
-      error: body.error?.message ?? "Registration failed",
+      error: err?.message ?? "Registration failed",
     };
   }
 
@@ -68,7 +92,8 @@ export async function register(
   return login(email, password);
 }
 
-export async function logout() {
+export async function logout(locale: string = "en") {
+  const safeLocale = routing.locales.includes(locale as typeof routing.locales[number]) ? locale : routing.defaultLocale;
   (await cookies()).delete("auth_token");
-  redirect("/login");
+  redirect(`/${safeLocale}/login`);
 }

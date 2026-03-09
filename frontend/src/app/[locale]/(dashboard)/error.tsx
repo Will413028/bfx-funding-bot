@@ -14,7 +14,7 @@ export default function DashboardError({
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4">
       <h1 className="text-2xl font-bold">{t("error")}</h1>
-      <p className="text-sm text-muted-foreground">{error.message}</p>
+      <p className="text-sm text-muted-foreground">{process.env.NODE_ENV === "development" ? error.message : "An unexpected error occurred"}</p>
       <button
         type="button"
         onClick={reset}

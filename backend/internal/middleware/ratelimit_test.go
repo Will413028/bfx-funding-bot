@@ -111,20 +111,19 @@ func TestRateLimit_IndependentIPs(t *testing.T) {
 
 func TestIPRateLimiter_Cleanup(t *testing.T) {
 	rl := &IPRateLimiter{
-		rate:        10,
-		burst:       5,
-		stopCleanup: make(chan struct{}),
+		rate:  10,
+		burst: 5,
 	}
+	rl.lastCleanup.Store(time.Now().UnixNano())
 
 	// Add entries: one recent, one stale
-	rl.ips.Store("recent", &ipEntry{
-		limiter:  nil,
-		lastSeen: time.Now(),
-	})
-	rl.ips.Store("stale", &ipEntry{
-		limiter:  nil,
-		lastSeen: time.Now().Add(-15 * time.Minute),
-	})
+	recentEntry := &ipEntry{limiter: nil}
+	recentEntry.lastSeen.Store(time.Now().UnixNano())
+	rl.ips.Store("recent", recentEntry)
+
+	staleEntry := &ipEntry{limiter: nil}
+	staleEntry.lastSeen.Store(time.Now().Add(-15 * time.Minute).UnixNano())
+	rl.ips.Store("stale", staleEntry)
 
 	rl.cleanup()
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -16,19 +18,21 @@ type ReinvestSummary struct {
 
 // InterestCollector checks for idle available balance and reinvests it.
 type InterestCollector struct {
-	client FundingClient
-	keys   KeyStore
-	cipher Cipher
-	log    ExecutionLog
+	client  FundingClient
+	keys    KeyStore
+	cipher  Cipher
+	log     ExecutionLog
+	limiter *rate.Limiter
 }
 
 // NewInterestCollector creates a new InterestCollector.
-func NewInterestCollector(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog) *InterestCollector {
+func NewInterestCollector(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog, limiter *rate.Limiter) *InterestCollector {
 	return &InterestCollector{
-		client: client,
-		keys:   keys,
-		cipher: cipher,
-		log:    log,
+		client:  client,
+		keys:    keys,
+		cipher:  cipher,
+		log:     log,
+		limiter: limiter,
 	}
 }
 
@@ -66,9 +70,14 @@ func (ic *InterestCollector) CheckAndReinvest(ctx context.Context, userID string
 	}
 
 	params := domain.OfferParams{
-		Amount: amount,
-		Rate:   config.Rate.Min,
-		Period: config.Period.Min,
+		Currency: config.Currency,
+		Amount:   amount,
+		Rate:     config.Rate.Min,
+		Period:   config.Period.Min,
+	}
+
+	if err := ic.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter: %w", err)
 	}
 
 	placed, placeErr := ic.client.SubmitFundingOffer(ctx, apiKeyStr, apiSecretStr, params)
@@ -86,7 +95,7 @@ func (ic *InterestCollector) CheckAndReinvest(ctx context.Context, userID string
 		record.Status = "error"
 		errMsg := placeErr.Error()
 		record.ErrorMessage = &errMsg
-		ic.log.Create(ctx, record)
+		_, _ = ic.log.Create(ctx, record) // best-effort audit log
 		return &ReinvestSummary{
 			Placed: false,
 			Amount: amount,
@@ -98,7 +107,7 @@ func (ic *InterestCollector) CheckAndReinvest(ctx context.Context, userID string
 	if placed != nil {
 		record.OfferID = &placed.ID
 	}
-	ic.log.Create(ctx, record)
+	_, _ = ic.log.Create(ctx, record) // best-effort audit log
 
 	return &ReinvestSummary{
 		Placed: true,

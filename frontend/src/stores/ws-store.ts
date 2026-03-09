@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { env } from "@/lib/env";
 import { WSClient } from "@/lib/ws-client";
 import type { MarketSnapshot } from "@/types";
 
@@ -12,21 +13,23 @@ interface WSState {
 }
 
 let client: WSClient | null = null;
+let connecting = false;
 
 export const useWSStore = create<WSState>((set) => ({
   snapshot: null,
   status: "disconnected",
 
   connect: () => {
-    if (client) return;
+    if (client || connecting) return;
+    connecting = true;
 
     client = new WSClient({
-      wsUrl: process.env.NEXT_PUBLIC_WS_URL || "",
+      wsUrl: env.NEXT_PUBLIC_WS_URL,
       onSnapshot: (snapshot) => set({ snapshot }),
       onStatusChange: (status) => set({ status }),
     });
 
-    client.connect();
+    client.connect().finally(() => { connecting = false; });
   },
 
   disconnect: () => {
@@ -34,6 +37,7 @@ export const useWSStore = create<WSState>((set) => ({
       client.disconnect();
       client = null;
     }
+    connecting = false;
     set({ status: "disconnected" });
   },
 }));

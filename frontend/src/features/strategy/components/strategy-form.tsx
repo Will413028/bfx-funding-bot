@@ -40,8 +40,8 @@ function toApiPayload(values: StrategyConfigInput): StrategyConfig {
     currency: values.currency,
     amount: values.amount,
     rate: {
-      min: values.rate.min / 365 / 100,
-      max: values.rate.max / 365 / 100,
+      min: Number.parseFloat((values.rate.min / 365 / 100).toFixed(10)),
+      max: Number.parseFloat((values.rate.max / 365 / 100).toFixed(10)),
     },
     period: values.period,
     autoRenew: values.autoRenew,
@@ -145,9 +145,9 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
         </div>
-        {errors.amount?.min && (
+        {(errors.amount?.min || errors.amount?.max) && (
           <p className="mt-1 text-xs text-rose-500">
-            {errors.amount.min.message}
+            {errors.amount?.min?.message || errors.amount?.max?.message}
           </p>
         )}
       </div>
@@ -178,9 +178,9 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
         </div>
-        {errors.rate?.min && (
+        {(errors.rate?.min || errors.rate?.max) && (
           <p className="mt-1 text-xs text-rose-500">
-            {errors.rate.min.message}
+            {errors.rate?.min?.message || errors.rate?.max?.message}
           </p>
         )}
       </div>
@@ -211,9 +211,9 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
         </div>
-        {errors.period?.min && (
+        {(errors.period?.min || errors.period?.max) && (
           <p className="mt-1 text-xs text-rose-500">
-            {errors.period.min.message}
+            {errors.period?.min?.message || errors.period?.max?.message}
           </p>
         )}
       </div>

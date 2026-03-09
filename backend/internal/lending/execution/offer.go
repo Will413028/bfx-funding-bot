@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"golang.org/x/time/rate"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -39,19 +41,21 @@ type ExecutionSummary struct {
 // OfferExecutor translates DecisionResult into Bitfinex API calls
 // and records each operation.
 type OfferExecutor struct {
-	client FundingClient
-	keys   KeyStore
-	cipher Cipher
-	log    ExecutionLog
+	client  FundingClient
+	keys    KeyStore
+	cipher  Cipher
+	log     ExecutionLog
+	limiter *rate.Limiter
 }
 
 // NewOfferExecutor creates a new OfferExecutor.
-func NewOfferExecutor(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog) *OfferExecutor {
+func NewOfferExecutor(client FundingClient, keys KeyStore, cipher Cipher, log ExecutionLog, limiter *rate.Limiter) *OfferExecutor {
 	return &OfferExecutor{
-		client: client,
-		keys:   keys,
-		cipher: cipher,
-		log:    log,
+		client:  client,
+		keys:    keys,
+		cipher:  cipher,
+		log:     log,
+		limiter: limiter,
 	}
 }
 
@@ -82,12 +86,27 @@ func (e *OfferExecutor) ExecuteDecision(ctx context.Context, userID string, deci
 
 	// Phase 1: Execute cancels
 	for _, offerID := range decision.Cancels {
+		if err := e.limiter.Wait(ctx); err != nil {
+			summary.CancelFail++
+			record := &domain.ExecutionRecord{
+				UserID:   userID,
+				Action:   domain.ActionCancel,
+				Currency: decision.Currency,
+				OfferID:  &offerID,
+				Status:   "error",
+			}
+			errMsg := fmt.Sprintf("rate limiter: %v", err)
+			record.ErrorMessage = &errMsg
+			_, _ = e.log.Create(ctx, record)
+			continue
+		}
+
 		cancelErr := e.client.CancelFundingOffer(ctx, apiKeyStr, apiSecretStr, offerID)
 
 		record := &domain.ExecutionRecord{
 			UserID:   userID,
 			Action:   domain.ActionCancel,
-			Currency: "",
+			Currency: decision.Currency,
 			OfferID:  &offerID,
 		}
 
@@ -101,15 +120,33 @@ func (e *OfferExecutor) ExecuteDecision(ctx context.Context, userID string, deci
 			record.Status = "success"
 		}
 
-		e.log.Create(ctx, record)
+		_, _ = e.log.Create(ctx, record) // best-effort audit log
 	}
 
 	// Phase 2: Execute offers
 	for _, offer := range decision.Offers {
+		if err := e.limiter.Wait(ctx); err != nil {
+			summary.PlaceFail++
+			record := &domain.ExecutionRecord{
+				UserID:   userID,
+				Action:   domain.ActionPlace,
+				Currency: decision.Currency,
+				Amount:   offer.Amount,
+				Rate:     offer.Rate,
+				Period:   offer.Period,
+				Status:   "error",
+			}
+			errMsg := fmt.Sprintf("rate limiter: %v", err)
+			record.ErrorMessage = &errMsg
+			_, _ = e.log.Create(ctx, record)
+			continue
+		}
+
 		params := domain.OfferParams{
-			Amount: offer.Amount,
-			Rate:   offer.Rate,
-			Period: offer.Period,
+			Currency: decision.Currency,
+			Amount:   offer.Amount,
+			Rate:     offer.Rate,
+			Period:   offer.Period,
 		}
 
 		placed, placeErr := e.client.SubmitFundingOffer(ctx, apiKeyStr, apiSecretStr, params)
@@ -136,7 +173,7 @@ func (e *OfferExecutor) ExecuteDecision(ctx context.Context, userID string, deci
 			}
 		}
 
-		e.log.Create(ctx, record)
+		_, _ = e.log.Create(ctx, record) // best-effort audit log
 	}
 
 	return summary, nil

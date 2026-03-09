@@ -13,6 +13,7 @@ type DecisionContext struct {
 
 // DecisionResult represents the output of strategy decision-making.
 type DecisionResult struct {
+	Currency     string          // e.g. "fUSD" — set by worker before execution
 	Offers       []OfferDecision // recommended offers to place
 	Cancels      []int64         // offer IDs to cancel
 	RenewCredits []int64         // credit IDs to renew

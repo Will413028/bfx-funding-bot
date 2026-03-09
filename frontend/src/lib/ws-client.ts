@@ -31,7 +31,13 @@ export class WSClient {
 
     let token: string;
     try {
-      const res = await fetch("/api/proxy/auth/ws-token", { method: "POST" });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch("/api/proxy/auth/ws-token", {
+        method: "POST",
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
       if (!res.ok) {
         this.opts.onStatusChange("disconnected");
         this.scheduleReconnect();

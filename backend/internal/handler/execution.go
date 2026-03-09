@@ -71,7 +71,10 @@ func executionPagination(records []domain.ExecutionRecord, limit int) Pagination
 
 func parseIntQuery(c *gin.Context, key string) int {
 	if l := c.Query(key); l != "" {
-		n, _ := strconv.Atoi(l)
+		n, err := strconv.Atoi(l)
+		if err != nil {
+			return 0
+		}
 		return n
 	}
 	return 0

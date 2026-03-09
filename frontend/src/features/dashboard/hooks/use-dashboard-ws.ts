@@ -6,12 +6,14 @@ import type { DashboardSummary, MarketSummary } from "@/types";
 
 export function useDashboardWS() {
   const queryClient = useQueryClient();
-  const { connect, disconnect, snapshot, status } = useWSStore();
+  const snapshot = useWSStore((s) => s.snapshot);
+  const status = useWSStore((s) => s.status);
 
   useEffect(() => {
+    const { connect, disconnect } = useWSStore.getState();
     connect();
     return () => disconnect();
-  }, [connect, disconnect]);
+  }, []);
 
   // Sync WS snapshot into React Query cache
   useEffect(() => {

@@ -33,6 +33,9 @@ func (s *UserService) Register(ctx context.Context, email, password string) (*do
 	if len(password) < 8 {
 		return nil, domain.ErrPasswordTooShort()
 	}
+	if len(password) > 72 {
+		return nil, domain.ErrPasswordTooLong()
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
@@ -88,6 +91,9 @@ func (s *UserService) GetProfile(ctx context.Context, userID string) (*domain.Us
 func (s *UserService) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
 	if len(newPassword) < 8 {
 		return domain.ErrPasswordTooShort()
+	}
+	if len(newPassword) > 72 {
+		return domain.ErrPasswordTooLong()
 	}
 
 	user, err := s.repo.GetByID(ctx, userID)

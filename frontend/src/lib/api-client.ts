@@ -57,6 +57,18 @@ async function request<T>(
     ...options?.headers,
   };
 
+  if (isServer) {
+    try {
+      const { cookies } = await import("next/headers");
+      const token = (await cookies()).get("auth_token")?.value;
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+    } catch {
+      // Outside Next.js request context (e.g., tests) — skip auth
+    }
+  }
+
   const res = await fetch(url.toString(), {
     method,
     headers,
@@ -127,12 +139,13 @@ async function put<T>(
   return response.data;
 }
 
-/** DELETE — auto-unwraps `{ "data": T }` → `T` */
+/** DELETE — returns T (handles 204 No Content gracefully) */
 async function del<T = void>(
   path: string,
   options?: RequestOptions,
 ): Promise<T> {
-  const response = await request<ApiResponse<T>>("DELETE", path, options);
+  const response = await request<ApiResponse<T> | undefined>("DELETE", path, options);
+  if (!response) return undefined as T;
   return response.data;
 }
 
