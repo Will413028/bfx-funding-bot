@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-09
+> 最後更新：2026-03-10
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
@@ -57,6 +57,24 @@
 | E8 | Engine Orchestrator | `lending/service.go` — 引擎頂層編排 (worker.Pool + quota.Allocator + snapshot 廣播 + plan-based quota) | |
 | INT | Engine Integration | `lending/factory.go` + `fetcher.go` + `adapter.go` + `main.go` 改寫 — WorkerDepsFactory + service↔lending 橋接 + fx lifecycle + 刪除 engine/ | |
 | PH | Production Hardening | Circuit Breaker (gobreaker) + Rate Limiter (token bucket) on Bitfinex client, cursor-based pagination (execution + billing), engine health check, context propagation, deterministic startup (ready channel) | `6894ae4` |
+| F1 | Project Scaffold | Next.js 16 + Tailwind v4 + shadcn/ui + Zustand + TanStack Query + React Hook Form + nuqs + Biome + Knip + next-intl (en/zh-TW) | `eea352a` |
+| F2 | Core Lib & Types | `api-client.ts`, `format.ts`, `env.ts`, `utils.ts`, `types/index.ts` | `e42bebe` |
+| F3 | API Proxy & Cookie Auth | `/api/proxy/[...path]` 同源代理 + login Server Action + middleware 權限檢查 | `6315ad7` |
+| F4 | Auth Pages | `(auth)/login` + `(auth)/register` + Zod 表單驗證 | `e8c91c2` |
+| F5 | Dashboard Layout | `(dashboard)/layout.tsx` — 側邊欄 + 頂部列 + mobile responsive | `d4517b7` |
+| F6 | Overview Page | 統計卡片 + offers list + market panel + chart placeholder | `dbdec32` |
+| F7 | API Key Management | API Key CRUD 頁面 + verify + premium dark theme | `519e06d` |
+| F8 | Strategy Config | 三層參數表單 + APR conversion + Zod validation | `86f7c6d` |
+| F9 | History Page | execution + billing tables + cursor pagination | `74d1f5b` |
+| F10 | Settings Page | profile card + change password form | `4275159` |
+| F11 | Marketing Pages | landing page + pricing page + marketing layout | `47688cc` |
+| F12 | WebSocket Backend | Go `handler/ws.go` — Hub + ws-token + snapshot broadcast | `18c483d` |
+| F13 | WebSocket Frontend | `ws-client.ts` + Zustand store + live dashboard | `b19de60` |
+| F14 | Charts | Recharts — earnings history API + charts | `f5f8237` |
+| F15 | Production Hardening | Sentry + CSP + security headers + env fail-fast | `a014da0` |
+| F16 | Testing | Vitest unit tests + Playwright E2E setup | `358ea07` |
+| H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式) + shutdown flush | `70db7a7` |
+| H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs | `70db7a7` |
 
 ### 目前 DB Schema (5 tables)
 
@@ -72,6 +90,7 @@
 GET    /api/v1/health
 POST   /api/v1/auth/register       (rate limit: 5r/s)
 POST   /api/v1/auth/login          (rate limit: 5r/s)
+GET    /api/v1/auth/ws-token       (JWT)
 GET    /api/v1/me                  (JWT, 20r/s)
 PUT    /api/v1/me/password         (JWT, 20r/s)
 POST   /api/v1/api-keys             (JWT)
@@ -87,6 +106,7 @@ GET    /api/v1/earnings            (JWT)
 GET    /api/v1/executions          (JWT, cursor pagination: ?after=&limit=)
 GET    /api/v1/billing             (JWT, cursor pagination: ?after=&limit=)
 GET    /api/v1/billing/plan        (JWT)
+GET    /api/v1/ws                  (WebSocket upgrade)
 ```
 
 ### 訂閱方案
@@ -127,36 +147,10 @@ marketfeed/service.go (C1)
 
 ## 待開發功能
 
-### Phase F — 前端
-
-> 參考文件：`frontend_architecture.md`
-> 技術棧：Next.js 16 (App Router) + Tailwind v4 + shadcn/ui + next-intl + Zustand + TanStack Query
-
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| F1 | Project Scaffold | Next.js 16 + Tailwind v4 + shadcn/ui + Zustand + TanStack Query + React Hook Form + nuqs + Biome + Knip + next-intl (en/zh-TW) 基礎建置 | 中 |
-| F2 | Core Lib & Types | `api-client.ts` (同源代理封裝), `format.ts` (利率/貨幣), `env.ts` (Zod 驗證), `utils.ts` (cn), `types/index.ts` | 低 |
-| F3 | API Proxy & Cookie Auth | `/api/proxy/[...path]` 同源代理 + login Server Action 設定 HttpOnly cookie + middleware 權限檢查 | 中 |
-| F4 | Auth Pages | `(auth)/login` + `(auth)/register` 頁面 + 極簡置中 layout + Zod 表單驗證 | 低 |
-| F5 | Dashboard Layout | `(dashboard)/layout.tsx` — 側邊欄 + 頂部列 + loading skeleton + error boundary | 中 |
-| F6 | Overview Page | 統計卡片 (wallet, offers, credits, daily earning) + market snapshot 面板 (REST 版) | 中 |
-| F7 | API Key Management | API Key CRUD 頁面 + Bitfinex 權限狀態顯示 + 刪除確認 dialog | 中 |
-| F8 | Strategy Config | 三層參數表單 (基礎滑桿/進階數值/專家 JSON) + save + reset to default | 高 |
-| F9 | History Page | execution table + billing table + cursor pagination (nuqs URL 同步) | 中 |
-| F10 | Settings Page | 帳戶資訊顯示 + 密碼修改表單 | 低 |
-| F11 | Marketing Pages | `(marketing)/` Landing page (產品介紹、功能特色) + Pricing page (方案比較表) | 中 |
-| F12 | WebSocket Backend | Go `handler/ws.go` — WS 升級 + `/api/v1/auth/ws-token` 短期 token + per-user snapshot 推送 | 中 |
-| F13 | WebSocket Frontend | `ws-client.ts` (自動重連+心跳) + Zustand `use-ws-store` + `useDashboardWS` hook → overview 即時更新 | 中 |
-| F14 | Charts | Recharts — 收益走勢圖 (24h/7d/30d) + 利率走勢圖 + APY 歷史曲線 | 中 |
-| F15 | Production Hardening | Sentry 錯誤監控 + CSP 安全標頭 + env 驗證 fail-fast + Vercel 部署設定 | 低 |
-| F16 | Testing | Vitest 單元測試 (format, query-keys, api-client 純函式) + Playwright E2E (auth, api-keys, strategy, history, i18n 主流程) | 中 |
-
 ### Phase H — 運維（Axiom 集中式日誌 + 監控）
 
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
-| H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式)，結構化日誌集中收集 + shutdown flush | 低 |
-| H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs 自動收集 | 低 |
 | H3 | Axiom Dashboard & Alerts | Axiom UI 建立監控面板 + 告警規則（Worker 崩潰率、API 錯誤率、WS 斷線） | 中 |
 
 ### Phase G — 策略行為增強
@@ -183,16 +177,16 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 48 項 |
+| 已完成 | 66 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ 全部完成 |
-| Phase F（前端） | 15 項 |
+| ~~Phase F（前端）~~ | ~~16 項~~ ✅ 全部完成 |
 | Phase G（策略行為增強） | 10 項 |
-| Phase H（運維） | 3 項 |
-| **待開發合計** | **28 項** |
+| ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅ 完成，H3 待部署後設定 |
+| **待開發合計** | **11 項** |
 
 ## 依賴關係
 
@@ -215,16 +209,10 @@ Phase A ✅ 全部完成
     │
     └── All backend APIs ready
          │
-         ├── Phase F (前端)
-         │   F1→F2→F3→F4 (基礎建置)
-         │        └→ F5→F6,F7,F8,F9,F10 (Dashboard 各頁面，F5 之後可平行)
-         │        └→ F11 (Marketing，可獨立開發)
-         │        └→ F12→F13→F14 (WebSocket + Charts)
-         │        └→ F16 (Testing — Vitest unit + Playwright E2E，F4 之後可開始)
-         │        └→ F15 (Production hardening，最後)
+         ├── Phase F ✅ 全部完成 (16 項)
          │
          └── Phase H (運維 — Axiom)
-             H1→H2 (Backend + Frontend 整合，可平行) → H3 (Dashboard & Alerts)
+             ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
 ```
 
 ## 建議開發順序
@@ -237,14 +225,15 @@ Phase A ✅ 全部完成
 6. ~~**C1 → C2 → C3 → C4 → C5** — 市場分析層（放貸引擎核心）~~ ✅
 7. ~~**D1-D13** — 策略決策模組~~ ✅
 8. ~~**E8** — Engine Orchestrator~~ ✅
-9. **F1 → F2 → F3 → F4** — 前端基礎建置（scaffold + lib + proxy + auth pages）
-10. **F5 → F6** — Dashboard layout + Overview 頁面
-11. **F7 → F8 → F9 → F10** — Dashboard 各功能頁面（可平行開發）
-12. **F11** — Marketing pages（可獨立開發）
-13. **F12 → F13 → F14** — WebSocket 即時推送 + Charts
-14. **F16** — 前端測試（Vitest unit 20% + Playwright E2E 80%，F4 之後可逐步加入）
-15. **F15** — 前端 Production hardening（Sentry + CSP）
-16. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
-17. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
-18. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
-19. **H1, H2** — Axiom 日誌整合（Backend + Frontend，可平行）→ **H3** — Axiom Dashboard & Alerts
+9. ~~**F1 → F2 → F3 → F4** — 前端基礎建置~~ ✅
+10. ~~**F5 → F6** — Dashboard layout + Overview 頁面~~ ✅
+11. ~~**F7 → F8 → F9 → F10** — Dashboard 各功能頁面~~ ✅
+12. ~~**F11** — Marketing pages~~ ✅
+13. ~~**F12 → F13 → F14** — WebSocket 即時推送 + Charts~~ ✅
+14. ~~**F16** — 前端測試~~ ✅
+15. ~~**F15** — 前端 Production hardening（Sentry + CSP）~~ ✅
+16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
+17. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
+18. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
+19. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
+20. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
