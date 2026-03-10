@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.uber.org/fx"
 )
@@ -49,8 +50,8 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("required environment variable REDIS_URL is not set")
 	}
 
-	privPEM := os.Getenv("JWT_PRIVATE_KEY")
-	pubPEM := os.Getenv("JWT_PUBLIC_KEY")
+	privPEM := strings.ReplaceAll(os.Getenv("JWT_PRIVATE_KEY"), `\n`, "\n")
+	pubPEM := strings.ReplaceAll(os.Getenv("JWT_PUBLIC_KEY"), `\n`, "\n")
 	if privPEM == "" || pubPEM == "" {
 		return Config{}, fmt.Errorf("required environment variables JWT_PRIVATE_KEY and JWT_PUBLIC_KEY are not set")
 	}
