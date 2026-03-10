@@ -98,7 +98,16 @@ func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found")
 	}
-	return x509.ParsePKCS1PrivateKey(block.Bytes)
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		// fallback to PKCS1
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	}
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("not an RSA private key")
+	}
+	return rsaKey, nil
 }
 
 func parseRSAPublicKey(pemStr string) (*rsa.PublicKey, error) {
