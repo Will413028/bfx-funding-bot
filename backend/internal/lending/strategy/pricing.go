@@ -26,6 +26,13 @@ const (
 
 	// Minimum balance
 	minBalance = 50.0
+
+	// Adaptive Deviation Guard (§8.1): max deviation from FRR per regime
+	deviationContango       = 0.40 // bull: 40%
+	deviationBackwardation  = 0.20 // bear: 20%
+	deviationNeutral        = 0.25 // neutral: 25%
+	deviationCrisis         = 0.60 // crisis: 60%
+	deviationHardCeiling    = 0.80 // absolute max: 80%
 )
 
 // PricingStrategy computes the recommended offer rate based on market state.
@@ -72,7 +79,10 @@ func (p *PricingStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 	// Step 5: Wall avoidance
 	rate = p.applyWallAvoidance(rate, snap.WallPositions)
 
-	// Step 6: Clamp to config bounds
+	// Step 6: Adaptive Deviation Guard (§8.1)
+	rate = p.applyDeviationGuard(rate, baseRate, snap.Regime)
+
+	// Step 7: Clamp to config bounds
 	rate = clamp(rate, cfg.Rate.Min, cfg.Rate.Max)
 
 	return &domain.DecisionResult{
@@ -144,6 +154,32 @@ func (p *PricingStrategy) applyWallAvoidance(rate float64, walls []domain.WallPo
 		}
 	}
 	return rate
+}
+
+// applyDeviationGuard clamps the rate so it doesn't deviate from the base rate
+// (FRR) by more than a regime-dependent ceiling. Hard ceiling of 80% always applies.
+func (p *PricingStrategy) applyDeviationGuard(rate, baseRate float64, regime domain.RegimeType) float64 {
+	if baseRate <= 0 {
+		return rate
+	}
+
+	ceiling := deviationNeutral
+	switch regime {
+	case domain.RegimeContango:
+		ceiling = deviationContango
+	case domain.RegimeBackwardation:
+		ceiling = deviationBackwardation
+	case domain.RegimeCrisis:
+		ceiling = deviationCrisis
+	}
+
+	// Hard ceiling always applies
+	ceiling = math.Min(ceiling, deviationHardCeiling)
+
+	maxRate := baseRate * (1.0 + ceiling)
+	minRate := baseRate * (1.0 - ceiling)
+
+	return clamp(rate, minRate, maxRate)
 }
 
 func clamp(v, lo, hi float64) float64 {

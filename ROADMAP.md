@@ -78,7 +78,8 @@
 | I1 | GitHub Actions CI | `.github/workflows/ci.yml` — backend (go vet + golangci-lint + go test -race + go build) + frontend (tsc + biome + vitest)，push/PR 觸發，雙 job 平行 | `3bc0151` |
 | I2 | Backend Linter | `backend/.golangci.yml` — gocritic, gosec, misspell, copyloopvar 等 + lint fix (rangeValCopy, errorlint, unparam) + dashboard_test mock credit 格式修正 | `3bc0151` |
 | J3 | CORS Middleware | `router.go` — `gin-contrib/cors` 已於初始實作中配置 `FRONTEND_URL` 白名單（review 時誤判為缺口） | 既有 |
-| J5 | Per-User Rate Limit | `middleware/userratelimit.go` — per-user token bucket (10r/s, burst 20) + auto-cleanup + 5 tests，掛載於 protected routes | |
+| J5 | Per-User Rate Limit | `middleware/userratelimit.go` — per-user token bucket (10r/s, burst 20) + auto-cleanup + 5 tests，掛載於 protected routes | `d4c5966` |
+| G1 | Adaptive Deviation Guard | `strategy/pricing.go` — per-regime FRR deviation ceiling (牛 40%/熊 20%/震盪 25%/危機 60%) + hard ceiling 80% + 6 tests | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -164,7 +165,7 @@ marketfeed/service.go (C1)
 
 | # | 規範章節 | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|----------|------|------|---------|--------|
-| G1 | §8.1 | Adaptive Deviation Guard | 掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%） | `strategy/pricing.go` | 低 |
+| ~~G1~~ | ~~§8.1~~ | ~~Adaptive Deviation Guard~~ | ~~掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%）~~ | ~~`strategy/pricing.go`~~ | ~~低~~ ✅ |
 | G2 | §2.4 | Signal Recovery Smoothing | 信號恢復時 3 步線性遞增權重（33%→66%→100%），防止 MDC 從衰減突然跳回滿額 | `signal/mdc.go` | 中 |
 | G3 | §4.3 | Smart Hidden Offers | 根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單 | 新增 `strategy/hidden.go` | 中 |
 | G4 | §5.1 | Term Structure Analysis | 利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器 | 新增 `strategy/termstructure.go` | 中 |
@@ -226,7 +227,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 70 項 |
+| 已完成 | 71 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -240,7 +241,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **27 項** |
+| **待開發合計** | **26 項** |
 
 ## 依賴關係
 
