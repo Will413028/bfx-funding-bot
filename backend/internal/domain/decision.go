@@ -18,6 +18,7 @@ type DecisionResult struct {
 	Cancels      []int64         // offer IDs to cancel
 	RenewCredits []int64         // credit IDs to renew
 	UseHidden    bool            // true → use hidden order flag (flags: 64) (§4.3)
+	StrategyTags []string        // strategy modules that contributed to this decision (§9.2)
 	Reason       string          // human-readable decision reason
 }
 
