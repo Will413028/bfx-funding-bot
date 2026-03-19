@@ -99,7 +99,7 @@ func TestSnapshotCache_TTLExpiry(t *testing.T) {
 	ctx := context.Background()
 
 	snap := sampleSnapshot()
-	repo.Set(ctx, "fUSD", snap, 1*time.Second)
+	_ = repo.Set(ctx, "fUSD", snap, 1*time.Second)
 
 	// Fast-forward time in miniredis
 	mr.FastForward(2 * time.Second)
@@ -120,11 +120,11 @@ func TestSnapshotCache_Overwrite(t *testing.T) {
 
 	snap1 := sampleSnapshot()
 	snap1.HiddenRatio = 0.1
-	repo.Set(ctx, "fUSD", snap1, 60*time.Second)
+	_ = repo.Set(ctx, "fUSD", snap1, 60*time.Second)
 
 	snap2 := sampleSnapshot()
 	snap2.HiddenRatio = 0.9
-	repo.Set(ctx, "fUSD", snap2, 60*time.Second)
+	_ = repo.Set(ctx, "fUSD", snap2, 60*time.Second)
 
 	got, _ := repo.Get(ctx, "fUSD")
 	if got.HiddenRatio != 0.9 {
@@ -138,7 +138,7 @@ func TestSnapshotCache_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	snap := sampleSnapshot()
-	repo.Set(ctx, "fUSD", snap, 60*time.Second)
+	_ = repo.Set(ctx, "fUSD", snap, 60*time.Second)
 
 	if err := repo.Delete(ctx, "fUSD"); err != nil {
 		t.Fatalf("Delete failed: %v", err)

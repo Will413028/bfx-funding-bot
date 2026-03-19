@@ -55,8 +55,8 @@ func (r *BillingRepo) ListByUser(ctx context.Context, userID string, since time.
 	}
 
 	records := make([]domain.BillingRecord, len(rows))
-	for i, row := range rows {
-		records[i] = *toDomainBilling(row)
+	for i := range rows {
+		records[i] = *toDomainBilling(rows[i])
 	}
 	return records, nil
 }
@@ -93,8 +93,8 @@ func (r *BillingRepo) ListByUserPaginated(ctx context.Context, userID string, cu
 	}
 
 	records := make([]domain.BillingRecord, len(rows))
-	for i, row := range rows {
-		records[i] = *toDomainBilling(row)
+	for i := range rows {
+		records[i] = *toDomainBilling(rows[i])
 	}
 	return records, nil
 }

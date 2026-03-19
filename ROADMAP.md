@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-10
+> 最後更新：2026-03-19
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
@@ -171,6 +171,51 @@ marketfeed/service.go (C1)
 | G9 | §6.3 | Graceful Degradation | 信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認 | `signal/mdc.go` + `marketfeed/service.go` | 高 |
 | G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
 
+### Phase I — DevOps / CI/CD
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| I1 | GitHub Actions CI | `go test ./...` + `go vet` + `biome check` + `vitest` — push/PR 觸發 | 低 |
+| I2 | Backend Linter | golangci-lint 設定（`.golangci.yml`）— 與 CI 整合 | 低 |
+| I3 | Staging 環境 | Koyeb + Vercel preview 環境，與 production 分離，PR 自動部署 preview | 中 |
+| I4 | Koyeb Health Check 設定 | 設定 `/api/v1/health` 為 Koyeb readiness/liveness probe | 低 |
+
+### Phase J — 安全性 & 帳號
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| J1 | Email 驗證 | 註冊後發送驗證信 + `users.status` 狀態切換（pending → active）— 已有 Resend + status 欄位 | 中 |
+| J2 | Forgot Password | 忘記密碼 flow（Resend 發送 reset link + token 驗證 + 重設密碼 endpoint） | 中 |
+| J3 | CORS Middleware | 後端明確設定 CORS 白名單（`FRONTEND_URL`），目前僅靠前端 proxy 繞過 | 低 |
+| J4 | CSRF Protection | httpOnly cookie + SPA 需要 CSRF token 或 Double Submit Cookie 防護 | 中 |
+| J5 | Per-User Rate Limit | 認證後 API 加入 per-user rate limit（目前僅 per-IP），防止單一帳號濫用 | 低 |
+| J6 | JWT Refresh Token | 實作 refresh token rotation（Redis session store 已存在，缺 refresh flow） | 中 |
+
+### Phase K — 測試補強
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| K1 | Frontend E2E Tests | Playwright 測試 critical path：註冊 → 登入 → 設定 API Key → Dashboard → 策略設定 | 中 |
+| K2 | Frontend Component Tests | features/ 下 hooks + components 的 Vitest 單元測試（目前只覆蓋 lib/） | 中 |
+| K3 | Backend Integration Tests | 使用 testcontainers-go 跑真實 PostgreSQL 的 repository 層測試 | 高 |
+
+### Phase L — 前端體驗
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| L1 | Loading Skeleton | 各頁面加入 Skeleton / Shimmer loading 狀態（目前僅有 global error boundary） | 低 |
+| L2 | User Onboarding Flow | 新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導 | 中 |
+| L3 | Per-Page Error Boundary | 各 feature 區塊加入局部 error boundary + retry，避免單一區塊錯誤炸掉整頁 | 低 |
+| L4 | PWA Support | `manifest.json` + service worker — 行動裝置加到主畫面 | 低 |
+| L5 | Accessibility (a11y) | ARIA labels + 鍵盤導航 + 色彩對比度檢查 | 中 |
+
+### Phase M — 商業邏輯
+
+| # | 功能 | 說明 | 複雜度 |
+|---|------|------|--------|
+| M1 | Stripe 付款整合 | Stripe Checkout / Customer Portal 串接 — `billing_records` 表已備、需加入 Stripe webhook handler | 高 |
+| M2 | 訂閱生命週期管理 | 升降級 plan、到期處理、grace period、取消訂閱 → 自動降級 free plan | 高 |
+
 ---
 
 ## 統計
@@ -186,7 +231,12 @@ marketfeed/service.go (C1)
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ 全部完成 |
 | Phase G（策略行為增強） | 10 項 |
 | ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅ 完成，H3 待部署後設定 |
-| **待開發合計** | **11 項** |
+| Phase I（DevOps / CI/CD） | 4 項 |
+| Phase J（安全性 & 帳號） | 6 項 |
+| Phase K（測試補強） | 3 項 |
+| Phase L（前端體驗） | 5 項 |
+| Phase M（商業邏輯） | 2 項 |
+| **待開發合計** | **31 項** |
 
 ## 依賴關係
 
@@ -207,12 +257,23 @@ Phase A ✅ 全部完成
     │                      ▼
     │                  Phase G (策略增強，依賴 C+D+E 既有模組)
     │
-    └── All backend APIs ready
-         │
-         ├── Phase F ✅ 全部完成 (16 項)
-         │
-         └── Phase H (運維 — Axiom)
-             ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
+    ├── All backend APIs ready
+    │    │
+    │    ├── Phase F ✅ 全部完成 (16 項)
+    │    │    │
+    │    │    ├── Phase K (測試補強，依賴 F 完成的頁面)
+    │    │    └── Phase L (前端體驗，在 F 基礎上增強)
+    │    │
+    │    └── Phase H (運維 — Axiom)
+    │        ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
+    │
+    ├── Phase I (DevOps / CI/CD，獨立於功能開發)
+    │
+    ├── Phase J (安全性 & 帳號，依賴 A4 Notification + Auth 基礎)
+    │    ├── J1 (Email 驗證) → J2 (Forgot Password)
+    │    └── J3-J6 獨立可平行
+    │
+    └── A6 (Billing) ✅ → Phase M (Stripe 整合，依賴 billing schema)
 ```
 
 ## 建議開發順序
@@ -233,7 +294,20 @@ Phase A ✅ 全部完成
 14. ~~**F16** — 前端測試~~ ✅
 15. ~~**F15** — 前端 Production hardening（Sentry + CSP）~~ ✅
 16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
-17. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
-18. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 策略增強（低→中複雜度）
-19. **G8 → G9** — 高複雜度增強（機會成本模型、優雅降級）
-20. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
+17. **I1 → I2** — CI/CD + Linter（低成本高回報，越早建越好）
+18. **J3 → J5** — CORS + per-user rate limit（低複雜度安全性修補）
+19. **G1 → G6 → G9** — 引擎安全三件套（偏離防護 + 冷啟動 + 降級）
+20. **J1 → J2** — Email 驗證 + Forgot Password（帳號安全基礎）
+21. **J4 → J6** — CSRF + JWT Refresh（安全性完善）
+22. **L1 → L3** — Loading skeleton + Error boundary（前端體驗基礎）
+23. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
+24. **I4** — Koyeb Health Check 設定
+25. **K1** — Playwright E2E critical path 測試
+26. **G2 → G3 → G4 → G5 → G7** — 策略增強（中複雜度）
+27. **L2** — User Onboarding Flow
+28. **M1 → M2** — Stripe 整合 + 訂閱管理（需要收費時再做）
+29. **G8 → G9** — 高複雜度策略增強
+30. **I3** — Staging 環境（用戶量增長後）
+31. **K2 → K3** — 補強前端 component + 後端 integration 測試
+32. **L4 → L5** — PWA + Accessibility
+33. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）

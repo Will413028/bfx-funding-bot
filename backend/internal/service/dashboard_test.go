@@ -54,7 +54,7 @@ func testDashboardCipher(t *testing.T) *crypto.AES {
 
 func seedConfig(repo *mockConfigRepo, userID string, cfg domain.StrategyConfig) {
 	configJSON, _ := json.Marshal(cfg)
-	repo.Upsert(context.Background(), userID, configJSON)
+	_, _ = repo.Upsert(context.Background(), userID, configJSON)
 }
 
 func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
@@ -69,7 +69,7 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 		case containsPath(r.URL.Path, "offers"):
 			w.Write([]byte(fmt.Sprintf(`[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)))
 		case containsPath(r.URL.Path, "credits"):
-			w.Write([]byte(fmt.Sprintf(`[[67890,"fUSD",%d,%d,300,null,0.0002,7,null,0,"ACTIVE",null,null,null,0,0,null,0,null,1,null,%d]]`, now, now, now)))
+			w.Write([]byte(fmt.Sprintf(`[[67890,"fUSD",0,%d,%d,300,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,1]]`, now, now, now)))
 		}
 	}))
 	defer ts.Close()

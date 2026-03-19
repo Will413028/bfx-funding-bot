@@ -23,9 +23,9 @@ func (m *mockExecutionRepo) ListByUserPaginated(ctx context.Context, userID stri
 
 func (m *mockExecutionRepo) ListByUser(ctx context.Context, userID string, since time.Time, limit int) ([]domain.ExecutionRecord, error) {
 	var result []domain.ExecutionRecord
-	for _, r := range m.records {
-		if r.UserID == userID && !r.CreatedAt.Before(since) {
-			result = append(result, r)
+	for i := range m.records {
+		if m.records[i].UserID == userID && !m.records[i].CreatedAt.Before(since) {
+			result = append(result, m.records[i])
 			if len(result) >= limit {
 				break
 			}

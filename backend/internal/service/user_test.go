@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"testing"
 	"time"
 
@@ -231,8 +232,8 @@ func assertAppErrorCode(t *testing.T, err error, code string) {
 	if err == nil {
 		t.Fatalf("expected error with code %s, got nil", code)
 	}
-	appErr, ok := err.(*domain.AppError)
-	if !ok {
+	var appErr *domain.AppError
+	if !errors.As(err, &appErr) {
 		t.Fatalf("expected *domain.AppError, got %T: %v", err, err)
 	}
 	if appErr.Code != code {
