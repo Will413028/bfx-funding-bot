@@ -44,15 +44,23 @@ func NewMDCAggregator() *MDCAggregator {
 
 // Aggregate computes the MDC result from a set of signal values.
 // health is optional (nil = backward compatible, all signals treated as healthy).
-func (m *MDCAggregator) Aggregate(signals []domain.SignalValue, health domain.SignalHealthSummary, now time.Time) domain.MDCResult {
+// recoveryWeights maps signal types to their recovery dampening factor (0.0–1.0).
+// Recovering signals with a weight are included (not excluded) with dampened weight.
+func (m *MDCAggregator) Aggregate(signals []domain.SignalValue, health domain.SignalHealthSummary, now time.Time, recoveryWeights ...map[domain.SignalType]float64) domain.MDCResult {
 	if len(signals) == 0 {
 		return domain.MDCResult{Score: 0, DemandPressure: 0, SupplyPressure: 0, Timestamp: now}
+	}
+
+	// Merge recovery weights from variadic arg
+	var recWeights map[domain.SignalType]float64
+	if len(recoveryWeights) > 0 {
+		recWeights = recoveryWeights[0]
 	}
 
 	// Check for liquidation hard override (only if liquidation is not degraded)
 	for _, s := range signals {
 		if s.Type == domain.SignalLiquidationCascade && s.Value > 0 {
-			if !isExcluded(s.Type, health) {
+			if !isFullyExcluded(s.Type, health, recWeights) {
 				return domain.MDCResult{
 					Score:          s.Value,
 					DemandPressure: s.Value,
@@ -64,12 +72,12 @@ func (m *MDCAggregator) Aggregate(signals []domain.SignalValue, health domain.Si
 	}
 
 	// Order Book failure → FRR-only mode (MDC = 0)
-	if isExcluded(domain.SignalBookConsumption, health) {
+	if isFullyExcluded(domain.SignalBookConsumption, health, recWeights) {
 		return domain.MDCResult{Score: 0, DemandPressure: 0, SupplyPressure: 0, Timestamp: now}
 	}
 
 	// Build effective weights with degradation overrides
-	effectiveWeights := m.buildDegradedWeights(health)
+	effectiveWeights := m.buildDegradedWeights(health, recWeights)
 
 	// Compute weighted sum with freshness decay
 	var totalWeight float64
@@ -120,8 +128,10 @@ func (m *MDCAggregator) Aggregate(signals []domain.SignalValue, health domain.Si
 	}
 }
 
-// isExcluded returns true if the signal should be excluded from MDC calculation.
-func isExcluded(sigType domain.SignalType, health domain.SignalHealthSummary) bool {
+// isFullyExcluded returns true if the signal should be completely excluded from MDC.
+// Degraded signals are always excluded. Recovering signals are excluded only if
+// no recovery weight is provided (backward compat with G9-only behavior).
+func isFullyExcluded(sigType domain.SignalType, health domain.SignalHealthSummary, recWeights map[domain.SignalType]float64) bool {
 	if health == nil {
 		return false
 	}
@@ -129,12 +139,25 @@ func isExcluded(sigType domain.SignalType, health domain.SignalHealthSummary) bo
 	if !ok {
 		return false
 	}
-	return state == domain.SignalDegraded || state == domain.SignalRecovering
+	if state == domain.SignalDegraded {
+		return true
+	}
+	if state == domain.SignalRecovering {
+		// If recovery weights provided, include with dampened weight
+		if recWeights != nil {
+			if w, ok := recWeights[sigType]; ok && w > 0 {
+				return false
+			}
+		}
+		return true // no recovery weight → exclude (backward compat)
+	}
+	return false
 }
 
 // buildDegradedWeights applies degradation rules and returns adjusted weights.
 // Returns a new map with excluded signals zeroed and remaining weights renormalized.
-func (m *MDCAggregator) buildDegradedWeights(health domain.SignalHealthSummary) map[domain.SignalType]float64 {
+// Recovering signals with recovery weights get dampened instead of zeroed.
+func (m *MDCAggregator) buildDegradedWeights(health domain.SignalHealthSummary, recWeights map[domain.SignalType]float64) map[domain.SignalType]float64 {
 	if health == nil {
 		return m.weights
 	}
@@ -145,17 +168,23 @@ func (m *MDCAggregator) buildDegradedWeights(health domain.SignalHealthSummary) 
 	}
 
 	// Apply specific degradation rules before zeroing
-	if isExcluded(domain.SignalLiquidationCascade, health) {
+	if isFullyExcluded(domain.SignalLiquidationCascade, health, recWeights) {
 		// Liquidation failure → boost BookConsumption to 35%
 		weights[domain.SignalBookConsumption] = 0.35
 	}
 
-	// Zero out excluded signals
+	// Zero out excluded signals, apply recovery dampening for recovering ones
 	var removedWeight float64
 	for sigType := range weights {
-		if isExcluded(sigType, health) {
+		if isFullyExcluded(sigType, health, recWeights) {
 			removedWeight += weights[sigType]
 			weights[sigType] = 0
+		} else if health[sigType] == domain.SignalRecovering && recWeights != nil {
+			if rw, ok := recWeights[sigType]; ok && rw < 1.0 {
+				dampened := weights[sigType] * rw
+				removedWeight += weights[sigType] - dampened
+				weights[sigType] = dampened
+			}
 		}
 	}
 
@@ -164,7 +193,7 @@ func (m *MDCAggregator) buildDegradedWeights(health domain.SignalHealthSummary) 
 	}
 
 	// Special case: momentum failure → redistribute to margin + crosscurrency only
-	if isExcluded(domain.SignalMomentum, health) && !isExcluded(domain.SignalMarginUsage, health) && !isExcluded(domain.SignalCrossCurrency, health) {
+	if isFullyExcluded(domain.SignalMomentum, health, recWeights) && !isFullyExcluded(domain.SignalMarginUsage, health, recWeights) && !isFullyExcluded(domain.SignalCrossCurrency, health, recWeights) {
 		// Already zeroed momentum; redistribute momentum's weight proportionally to margin + cross
 		marginBase := weights[domain.SignalMarginUsage]
 		crossBase := weights[domain.SignalCrossCurrency]

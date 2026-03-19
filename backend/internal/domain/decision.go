@@ -17,6 +17,7 @@ type DecisionResult struct {
 	Offers       []OfferDecision // recommended offers to place
 	Cancels      []int64         // offer IDs to cancel
 	RenewCredits []int64         // credit IDs to renew
+	UseHidden    bool            // true → use hidden order flag (flags: 64) (§4.3)
 	Reason       string          // human-readable decision reason
 }
 

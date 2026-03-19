@@ -366,10 +366,19 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 		signals = append(signals, sig)
 	}
 
-	// Phase 2.5: Signal health tracking + MDC aggregation
+	// Phase 2.5: Signal health tracking + MDC aggregation with recovery smoothing (§2.4)
 	s.healthTracker.Update(signals, now)
 	health := s.healthTracker.GetHealth(now, s.cfg.SnapshotInterval)
-	mdc := s.mdcAgg.Aggregate(signals, health, now)
+
+	// Build recovery weights for recovering signals (§2.4: 33%→66%→100%)
+	recWeights := make(map[domain.SignalType]float64)
+	for sigType, state := range health {
+		if state == domain.SignalRecovering {
+			recWeights[sigType] = s.healthTracker.RecoveryWeight(sigType)
+		}
+	}
+
+	mdc := s.mdcAgg.Aggregate(signals, health, now, recWeights)
 
 	// Phase 3: Regime detection
 	regime, regimeParams := s.regimeDet[symbol].Detect(mdc, &tickerCopy, flashFreeze, now)

@@ -86,7 +86,12 @@
 | J2 | Forgot Password | `POST /auth/forgot-password` + `POST /auth/reset-password` + Redis token (1hr TTL) + anti-enumeration | `745facd` |
 | J6 | JWT Refresh Token | access token 15min + refresh token 7d Redis rotation + `POST /auth/refresh` + `POST /auth/logout` + 前端 proxy 透明刷新 + 雙 cookie (auth_token + refresh_token) | `3b5865f` |
 | L1 | Loading Skeleton | `components/ui/skeleton.tsx` + `components/shared/page-skeleton.tsx` — 5 頁面專屬 skeleton (overview/api-keys/strategy/history/settings) | |
-| L3 | Per-Page Error Boundary | `components/shared/query-error.tsx` — 5 頁面改用 QueryError + retry button，取代原本的純文字錯誤 | |
+| L3 | Per-Page Error Boundary | `components/shared/query-error.tsx` — 5 頁面改用 QueryError + retry button，取代原本的純文字錯誤 | `319fe90` |
+| G2 | Signal Recovery Smoothing | `signal/health.go` RecoveryWeight() 3 步漸進 (33%→66%→100%) + MDC Aggregate 套用 dampened weight | |
+| G3 | Smart Hidden Offers | `strategy/hidden.go` — HiddenRatio>30% 或高競爭+中 hidden→flags:64 + 5 tests | |
+| G4 | Term Structure Analysis | `strategy/termstructure.go` — 4 種曲線形態 (steep/humped/inverted/flat) + FilterPeriod 前置過濾 + 8 tests | |
+| G5 | Early Return Adjustment | `strategy/earlyreturn.go` — hold_rate<60% → 天數偏好衰減 (min 0.5x) + EffectiveReturn + 5 tests | |
+| G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -178,12 +183,12 @@ marketfeed/service.go (C1)
 | # | 規範章節 | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|----------|------|------|---------|--------|
 | ~~G1~~ | ~~§8.1~~ | ~~Adaptive Deviation Guard~~ | ~~掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%）~~ | ~~`strategy/pricing.go`~~ | ~~低~~ ✅ |
-| G2 | §2.4 | Signal Recovery Smoothing | 信號恢復時 3 步線性遞增權重（33%→66%→100%），防止 MDC 從衰減突然跳回滿額 | `signal/mdc.go` | 中 |
-| G3 | §4.3 | Smart Hidden Offers | 根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單 | 新增 `strategy/hidden.go` | 中 |
-| G4 | §5.1 | Term Structure Analysis | 利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器 | 新增 `strategy/termstructure.go` | 中 |
-| G5 | §5.6 | Early Return Adjustment | `有效回報 = Rate × 歷史持有率`，持有率 < 60% 時降低天數偏好 | `strategy/period.go` | 中 |
+| ~~G2~~ | ~~§2.4~~ | ~~Signal Recovery Smoothing~~ | ~~信號恢復時 3 步線性遞增權重（33%→66%→100%）~~ | ~~`signal/mdc.go` + `signal/health.go`~~ | ~~中~~ ✅ |
+| ~~G3~~ | ~~§4.3~~ | ~~Smart Hidden Offers~~ | ~~根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單~~ | ~~新增 `strategy/hidden.go`~~ | ~~中~~ ✅ |
+| ~~G4~~ | ~~§5.1~~ | ~~Term Structure Analysis~~ | ~~利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器~~ | ~~新增 `strategy/termstructure.go`~~ | ~~中~~ ✅ |
+| ~~G5~~ | ~~§5.6~~ | ~~Early Return Adjustment~~ | ~~`有效回報 = Rate × 歷史持有率`，持有率 < 60% 時降低天數偏好~~ | ~~新增 `strategy/earlyreturn.go`~~ | ~~中~~ ✅ |
 | ~~G6~~ | ~~§6.4~~ | ~~Cold Start Protocol~~ | ~~Worker 啟動前 30 分鐘分 3 階段逐步啟用信號（目前直接全量運行）~~ | ~~`worker/worker.go`~~ | ~~中~~ ✅ |
-| G7 | §7.1 | Maintenance Behaviors | 隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊） | `worker/worker.go` + `execution/offer.go` | 中 |
+| ~~G7~~ | ~~§7.1~~ | ~~Maintenance Behaviors~~ | ~~隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊）~~ | ~~新增 `strategy/maintenance.go`~~ | ~~中~~ ✅ |
 | G8 | §4.8 | Opportunity Cost Framework | 完整 EV_deploy vs EV_wait 比較模型（目前 floor.go 僅有靜態地板） | `strategy/floor.go` 或新增 | 高 |
 | ~~G9~~ | ~~§6.3~~ | ~~Graceful Degradation~~ | ~~信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認~~ | ~~`signal/mdc.go` + `marketfeed/service.go`~~ | ~~高~~ ✅ |
 | G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
@@ -239,7 +244,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 79 項 |
+| 已完成 | 84 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -253,7 +258,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **18 項** |
+| **待開發合計** | **13 項** |
 
 ## 依賴關係
 
@@ -320,7 +325,7 @@ Phase A ✅ 全部完成
 23. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
 24. **I4** — Koyeb Health Check 設定
 25. **K1** — Playwright E2E critical path 測試
-26. **G2 → G3 → G4 → G5 → G7** — 策略增強（中複雜度）
+26. ~~**G2 → G3 → G4 → G5 → G7** — 策略增強（中複雜度）~~ ✅
 27. **L2** — User Onboarding Flow
 28. **M1 → M2** — Stripe 整合 + 訂閱管理（需要收費時再做）
 29. **G8 → G9** — 高複雜度策略增強

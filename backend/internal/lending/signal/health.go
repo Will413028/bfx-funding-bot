@@ -11,8 +11,8 @@ const (
 	warningHeartbeats  = 2
 	degradedHeartbeats = 5
 
-	// Recovery confirmation: signal must be healthy for this many heartbeats
-	recoveryConfirmationHeartbeats = 2
+	// Recovery smoothing (§2.4): 3-step linear ramp before full reintegration
+	recoverySmoothingSteps = 3
 )
 
 // signalState tracks per-signal timing and recovery state.
@@ -83,7 +83,7 @@ func (t *SignalHealthTracker) GetHealth(now time.Time, heartbeat time.Duration) 
 			// Data is fresh — check if recovering from degraded
 			if st.wasDegraded {
 				st.recoveryHeartbeats++
-				if st.recoveryHeartbeats >= recoveryConfirmationHeartbeats {
+				if st.recoveryHeartbeats >= recoverySmoothingSteps {
 					// Recovery confirmed — back to healthy
 					st.wasDegraded = false
 					st.recoveryHeartbeats = 0
@@ -98,4 +98,21 @@ func (t *SignalHealthTracker) GetHealth(now time.Time, heartbeat time.Duration) 
 	}
 
 	return summary
+}
+
+// RecoveryWeight returns the dampening factor for a recovering signal (§2.4).
+// Step 1 → 0.33, Step 2 → 0.66, Step 3+ → 1.0 (fully recovered).
+// Returns 1.0 for non-recovering signals, 0.0 for degraded signals.
+func (t *SignalHealthTracker) RecoveryWeight(sigType domain.SignalType) float64 {
+	st, ok := t.states[sigType]
+	if !ok {
+		return 1.0
+	}
+	if !st.wasDegraded {
+		return 1.0
+	}
+	if st.recoveryHeartbeats <= 0 {
+		return 0.0 // still degraded
+	}
+	return float64(st.recoveryHeartbeats) / float64(recoverySmoothingSteps)
 }
