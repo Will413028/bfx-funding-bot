@@ -91,7 +91,8 @@
 | G3 | Smart Hidden Offers | `strategy/hidden.go` — HiddenRatio>30% 或高競爭+中 hidden→flags:64 + 5 tests | |
 | G4 | Term Structure Analysis | `strategy/termstructure.go` — 4 種曲線形態 (steep/humped/inverted/flat) + FilterPeriod 前置過濾 + 8 tests | |
 | G5 | Early Return Adjustment | `strategy/earlyreturn.go` — hold_rate<60% → 天數偏好衰減 (min 0.5x) + EffectiveReturn + 5 tests | |
-| G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | |
+| G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | `57d9b8c` |
+| L2 | User Onboarding Flow | `features/dashboard/components/setup-checklist.tsx` — 3 步驟引導 (API Key → Strategy → Earning) + 進度條 + 自動偵測完成狀態 | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -226,7 +227,7 @@ marketfeed/service.go (C1)
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
 | ~~L1~~ | ~~Loading Skeleton~~ | ~~各頁面加入 Skeleton / Shimmer loading 狀態~~ | ~~低~~ ✅ |
-| L2 | User Onboarding Flow | 新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導 | 中 |
+| ~~L2~~ | ~~User Onboarding Flow~~ | ~~新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導~~ | ~~中~~ ✅ |
 | ~~L3~~ | ~~Per-Page Error Boundary~~ | ~~各 feature 區塊加入局部 error boundary + retry~~ | ~~低~~ ✅ |
 | L4 | PWA Support | `manifest.json` + service worker — 行動裝置加到主畫面 | 低 |
 | L5 | Accessibility (a11y) | ARIA labels + 鍵盤導航 + 色彩對比度檢查 | 中 |
@@ -244,7 +245,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 84 項 |
+| 已完成 | 85 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -258,7 +259,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **13 項** |
+| **待開發合計** | **12 項** |
 
 ## 依賴關係
 
@@ -326,7 +327,7 @@ Phase A ✅ 全部完成
 24. **I4** — Koyeb Health Check 設定
 25. **K1** — Playwright E2E critical path 測試
 26. ~~**G2 → G3 → G4 → G5 → G7** — 策略增強（中複雜度）~~ ✅
-27. **L2** — User Onboarding Flow
+27. ~~**L2** — User Onboarding Flow~~ ✅
 28. **M1 → M2** — Stripe 整合 + 訂閱管理（需要收費時再做）
 29. **G8 → G9** — 高複雜度策略增強
 30. **I3** — Staging 環境（用戶量增長後）
