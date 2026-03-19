@@ -75,6 +75,10 @@
 | F16 | Testing | Vitest unit tests + Playwright E2E setup | `358ea07` |
 | H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式) + shutdown flush | `70db7a7` |
 | H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs | `70db7a7` |
+| I1 | GitHub Actions CI | `.github/workflows/ci.yml` — backend (go vet + golangci-lint + go test -race + go build) + frontend (tsc + biome + vitest)，push/PR 觸發，雙 job 平行 | `3bc0151` |
+| I2 | Backend Linter | `backend/.golangci.yml` — gocritic, gosec, misspell, copyloopvar 等 + lint fix (rangeValCopy, errorlint, unparam) + dashboard_test mock credit 格式修正 | `3bc0151` |
+| J3 | CORS Middleware | `router.go` — `gin-contrib/cors` 已於初始實作中配置 `FRONTEND_URL` 白名單（review 時誤判為缺口） | 既有 |
+| J5 | Per-User Rate Limit | `middleware/userratelimit.go` — per-user token bucket (10r/s, burst 20) + auto-cleanup + 5 tests，掛載於 protected routes | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -175,8 +179,8 @@ marketfeed/service.go (C1)
 
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
-| I1 | GitHub Actions CI | `go test ./...` + `go vet` + `biome check` + `vitest` — push/PR 觸發 | 低 |
-| I2 | Backend Linter | golangci-lint 設定（`.golangci.yml`）— 與 CI 整合 | 低 |
+| ~~I1~~ | ~~GitHub Actions CI~~ | ~~`go test ./...` + `go vet` + `biome check` + `vitest` — push/PR 觸發~~ | ~~低~~ ✅ |
+| ~~I2~~ | ~~Backend Linter~~ | ~~golangci-lint 設定（`.golangci.yml`）— 與 CI 整合~~ | ~~低~~ ✅ |
 | I3 | Staging 環境 | Koyeb + Vercel preview 環境，與 production 分離，PR 自動部署 preview | 中 |
 | I4 | Koyeb Health Check 設定 | 設定 `/api/v1/health` 為 Koyeb readiness/liveness probe | 低 |
 
@@ -186,9 +190,9 @@ marketfeed/service.go (C1)
 |---|------|------|--------|
 | J1 | Email 驗證 | 註冊後發送驗證信 + `users.status` 狀態切換（pending → active）— 已有 Resend + status 欄位 | 中 |
 | J2 | Forgot Password | 忘記密碼 flow（Resend 發送 reset link + token 驗證 + 重設密碼 endpoint） | 中 |
-| J3 | CORS Middleware | 後端明確設定 CORS 白名單（`FRONTEND_URL`），目前僅靠前端 proxy 繞過 | 低 |
+| ~~J3~~ | ~~CORS Middleware~~ | ~~後端明確設定 CORS 白名單（`FRONTEND_URL`）~~ — 已在 `router.go` 中用 `gin-contrib/cors` 實作 | ~~低~~ ✅ |
 | J4 | CSRF Protection | httpOnly cookie + SPA 需要 CSRF token 或 Double Submit Cookie 防護 | 中 |
-| J5 | Per-User Rate Limit | 認證後 API 加入 per-user rate limit（目前僅 per-IP），防止單一帳號濫用 | 低 |
+| ~~J5~~ | ~~Per-User Rate Limit~~ | ~~認證後 API 加入 per-user rate limit（目前僅 per-IP），防止單一帳號濫用~~ | ~~低~~ ✅ |
 | J6 | JWT Refresh Token | 實作 refresh token rotation（Redis session store 已存在，缺 refresh flow） | 中 |
 
 ### Phase K — 測試補強
@@ -222,7 +226,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 66 項 |
+| 已完成 | 70 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -231,12 +235,12 @@ marketfeed/service.go (C1)
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ 全部完成 |
 | Phase G（策略行為增強） | 10 項 |
 | ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅ 完成，H3 待部署後設定 |
-| Phase I（DevOps / CI/CD） | 4 項 |
+| Phase I（DevOps / CI/CD） | ~~I1+I2~~ ✅ 完成，2 項待開發 |
 | Phase J（安全性 & 帳號） | 6 項 |
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **31 項** |
+| **待開發合計** | **27 項** |
 
 ## 依賴關係
 
@@ -267,7 +271,7 @@ Phase A ✅ 全部完成
     │    └── Phase H (運維 — Axiom)
     │        ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
     │
-    ├── Phase I (DevOps / CI/CD，獨立於功能開發)
+    ├── Phase I (DevOps / CI/CD，獨立於功能開發) — I1+I2 ✅
     │
     ├── Phase J (安全性 & 帳號，依賴 A4 Notification + Auth 基礎)
     │    ├── J1 (Email 驗證) → J2 (Forgot Password)
@@ -294,8 +298,8 @@ Phase A ✅ 全部完成
 14. ~~**F16** — 前端測試~~ ✅
 15. ~~**F15** — 前端 Production hardening（Sentry + CSP）~~ ✅
 16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
-17. **I1 → I2** — CI/CD + Linter（低成本高回報，越早建越好）
-18. **J3 → J5** — CORS + per-user rate limit（低複雜度安全性修補）
+17. ~~**I1 → I2** — CI/CD + Linter（低成本高回報，越早建越好）~~ ✅
+18. ~~**J3 → J5** — CORS + per-user rate limit（低複雜度安全性修補）~~ ✅
 19. **G1 → G6 → G9** — 引擎安全三件套（偏離防護 + 冷啟動 + 降級）
 20. **J1 → J2** — Email 驗證 + Forgot Password（帳號安全基礎）
 21. **J4 → J6** — CSRF + JWT Refresh（安全性完善）
