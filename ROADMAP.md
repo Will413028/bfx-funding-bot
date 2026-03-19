@@ -93,7 +93,8 @@
 | G5 | Early Return Adjustment | `strategy/earlyreturn.go` — hold_rate<60% → 天數偏好衰減 (min 0.5x) + EffectiveReturn + 5 tests | |
 | G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | `57d9b8c` |
 | L2 | User Onboarding Flow | `features/dashboard/components/setup-checklist.tsx` — 3 步驟引導 (API Key → Strategy → Earning) + 進度條 + 自動偵測完成狀態 | `d7ab19b` |
-| L4 | PWA Support | `manifest.json` + icon-192/512 + metadata (themeColor, appleWebApp) — 行動裝置加到主畫面 | |
+| L4 | PWA Support | `manifest.json` + icon-192/512 + metadata (themeColor, appleWebApp) — 行動裝置加到主畫面 | `e2462e2` |
+| K2 | Frontend Component Tests | @testing-library/react + jsdom + 3 test files: SetupChecklist (5), StatsGrid (6), QueryError (5) — 16 new tests, 65 total | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -220,7 +221,7 @@ marketfeed/service.go (C1)
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
 | K1 | Frontend E2E Tests | Playwright 測試 critical path：註冊 → 登入 → 設定 API Key → Dashboard → 策略設定 | 中 |
-| K2 | Frontend Component Tests | features/ 下 hooks + components 的 Vitest 單元測試（目前只覆蓋 lib/） | 中 |
+| ~~K2~~ | ~~Frontend Component Tests~~ | ~~features/ 下 hooks + components 的 Vitest 單元測試~~ | ~~中~~ ✅ |
 | K3 | Backend Integration Tests | 使用 testcontainers-go 跑真實 PostgreSQL 的 repository 層測試 | 高 |
 
 ### Phase L — 前端體驗
@@ -246,7 +247,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 86 項 |
+| 已完成 | 87 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -260,7 +261,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **11 項** |
+| **待開發合計** | **10 項** |
 
 ## 依賴關係
 
