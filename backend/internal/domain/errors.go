@@ -95,3 +95,11 @@ func ErrInsufficientFunds() *AppError {
 func ErrInvalidAPIKey() *AppError {
 	return NewAppError(401, "INVALID_API_KEY", "Invalid or expired Bitfinex API key")
 }
+
+func ErrEmailNotVerified() *AppError {
+	return NewAppError(403, "EMAIL_NOT_VERIFIED", "Please verify your email address before logging in")
+}
+
+func ErrInvalidOrExpiredToken() *AppError {
+	return NewAppError(400, "INVALID_TOKEN", "Token is invalid or has expired")
+}

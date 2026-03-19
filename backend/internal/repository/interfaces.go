@@ -12,6 +12,14 @@ type UserRepository interface {
 	GetByID(ctx context.Context, id string) (*domain.User, error)
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
 	UpdatePassword(ctx context.Context, id, passwordHash string) error
+	UpdateStatus(ctx context.Context, id string, status domain.UserStatus) error
+}
+
+// TokenRepository manages ephemeral tokens (email verification, password reset).
+type TokenRepository interface {
+	Store(ctx context.Context, tokenHash string, userID string, tokenType string, ttl time.Duration) error
+	Get(ctx context.Context, tokenHash string, tokenType string) (userID string, err error)
+	Delete(ctx context.Context, tokenHash string, tokenType string) error
 }
 
 type APIKeyRepository interface {

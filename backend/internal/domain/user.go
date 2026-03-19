@@ -5,6 +5,7 @@ import "time"
 type UserStatus string
 
 const (
+	UserStatusPending   UserStatus = "pending"
 	UserStatusActive    UserStatus = "active"
 	UserStatusSuspended UserStatus = "suspended"
 )

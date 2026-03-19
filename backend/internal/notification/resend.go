@@ -33,6 +33,32 @@ func (n *ResendNotifier) SendWelcome(ctx context.Context, email string) error {
 	return nil
 }
 
+func (n *ResendNotifier) SendVerification(ctx context.Context, email, token string) error {
+	_, err := n.client.Emails.SendWithContext(ctx, &resend.SendEmailRequest{
+		From:    n.from,
+		To:      []string{email},
+		Subject: "Verify your email — BFX Funding Bot",
+		Text:    fmt.Sprintf("Please verify your email address by using the following token:\n\n%s\n\nThis token expires in 24 hours. If you did not create an account, please ignore this email.", token),
+	})
+	if err != nil {
+		return fmt.Errorf("send verification email: %w", err)
+	}
+	return nil
+}
+
+func (n *ResendNotifier) SendPasswordReset(ctx context.Context, email, token string) error {
+	_, err := n.client.Emails.SendWithContext(ctx, &resend.SendEmailRequest{
+		From:    n.from,
+		To:      []string{email},
+		Subject: "Reset your password — BFX Funding Bot",
+		Text:    fmt.Sprintf("You requested a password reset. Use the following token:\n\n%s\n\nThis token expires in 1 hour. If you did not request this, please ignore this email.", token),
+	})
+	if err != nil {
+		return fmt.Errorf("send password reset email: %w", err)
+	}
+	return nil
+}
+
 func (n *ResendNotifier) SendAPIKeyAlert(ctx context.Context, email, message string) error {
 	_, err := n.client.Emails.SendWithContext(ctx, &resend.SendEmailRequest{
 		From:    n.from,

@@ -38,4 +38,8 @@ var Module = fx.Module("repository",
 		func(r *redisrepo.SnapshotPubSubRepo) SnapshotPubSub { return r },
 		fx.As(new(SnapshotPubSub)),
 	)),
+	fx.Provide(fx.Annotate(
+		func(r *redisrepo.TokenRepo) TokenRepository { return r },
+		fx.As(new(TokenRepository)),
+	)),
 )

@@ -92,3 +92,19 @@ func (q *Queries) UpdatePassword(ctx context.Context, arg UpdatePasswordParams) 
 	_, err := q.db.Exec(ctx, updatePassword, arg.ID, arg.PasswordHash)
 	return err
 }
+
+const updateStatus = `-- name: UpdateStatus :exec
+UPDATE users
+SET status = $2, updated_at = now()
+WHERE id = $1
+`
+
+type UpdateStatusParams struct {
+	ID     pgtype.UUID
+	Status string
+}
+
+func (q *Queries) UpdateStatus(ctx context.Context, arg UpdateStatusParams) error {
+	_, err := q.db.Exec(ctx, updateStatus, arg.ID, arg.Status)
+	return err
+}
