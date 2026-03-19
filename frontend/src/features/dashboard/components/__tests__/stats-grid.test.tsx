@@ -4,7 +4,7 @@ import { StatsGrid } from "../stats-grid";
 import type { DashboardSummary, EarningsSummary } from "@/types";
 
 const mockDashboard: DashboardSummary = {
-  wallet: { balanceAvailable: 5000, balanceTotal: 8000 },
+  wallet: { currency: "USD", balance: 8000, balanceAvailable: 5000 },
   offers: [],
   credits: [],
   market: null,
@@ -18,6 +18,7 @@ const mockEarnings: EarningsSummary = {
   earnings30d: 375,
   totalLent: 50000,
   activeCredits: 3,
+  currency: "USD",
 };
 
 describe("StatsGrid", () => {

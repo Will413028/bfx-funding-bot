@@ -94,6 +94,8 @@ export function SetupChecklist({
             <Link
               key={step.id}
               href={step.done ? "#" : step.href}
+              aria-disabled={!isNext && !step.done ? true : undefined}
+              tabIndex={step.done || (!isNext && !step.done) ? -1 : undefined}
               className={`flex items-center gap-4 rounded-lg border p-4 transition-colors ${
                 step.done
                   ? "border-emerald-500/20 bg-emerald-500/5 cursor-default"

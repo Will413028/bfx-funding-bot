@@ -94,7 +94,8 @@
 | G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | `57d9b8c` |
 | L2 | User Onboarding Flow | `features/dashboard/components/setup-checklist.tsx` — 3 步驟引導 (API Key → Strategy → Earning) + 進度條 + 自動偵測完成狀態 | `d7ab19b` |
 | L4 | PWA Support | `manifest.json` + icon-192/512 + metadata (themeColor, appleWebApp) — 行動裝置加到主畫面 | `e2462e2` |
-| K2 | Frontend Component Tests | @testing-library/react + jsdom + 3 test files: SetupChecklist (5), StatsGrid (6), QueryError (5) — 16 new tests, 65 total | |
+| K2 | Frontend Component Tests | @testing-library/react + jsdom + 3 test files: SetupChecklist (5), StatsGrid (6), QueryError (5) — 16 new tests, 65 total | `3f3b336` |
+| L5 | Accessibility | aria-label (nav, sidebar, mobile menu), aria-current (active links), aria-invalid + aria-describedby (forms), role=alert (errors), aria-disabled (checklist), landmarks | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -232,7 +233,7 @@ marketfeed/service.go (C1)
 | ~~L2~~ | ~~User Onboarding Flow~~ | ~~新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導~~ | ~~中~~ ✅ |
 | ~~L3~~ | ~~Per-Page Error Boundary~~ | ~~各 feature 區塊加入局部 error boundary + retry~~ | ~~低~~ ✅ |
 | ~~L4~~ | ~~PWA Support~~ | ~~`manifest.json` + 行動裝置加到主畫面~~ | ~~低~~ ✅ |
-| L5 | Accessibility (a11y) | ARIA labels + 鍵盤導航 + 色彩對比度檢查 | 中 |
+| ~~L5~~ | ~~Accessibility (a11y)~~ | ~~ARIA labels + 鍵盤導航 + 色彩對比度檢查~~ | ~~中~~ ✅ |
 
 ### Phase M — 商業邏輯
 
@@ -247,7 +248,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 87 項 |
+| 已完成 | 88 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -261,7 +262,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **10 項** |
+| **待開發合計** | **9 項** |
 
 ## 依賴關係
 

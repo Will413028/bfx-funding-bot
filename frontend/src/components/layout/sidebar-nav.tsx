@@ -34,7 +34,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
   return (
-    <nav className="flex flex-1 flex-col justify-between">
+    <nav aria-label="Main navigation" className="flex flex-1 flex-col justify-between">
       <ul className="flex flex-col gap-1 px-3 py-2">
         {navItems.map((item) => {
           const isActive = pathnameWithoutLocale.startsWith(item.href);
@@ -43,6 +43,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
               <Link
                 href={item.href}
                 onClick={onNavigate}
+                aria-current={isActive ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                   isActive
