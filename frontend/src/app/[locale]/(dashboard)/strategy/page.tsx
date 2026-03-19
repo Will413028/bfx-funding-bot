@@ -1,25 +1,19 @@
 "use client";
 
+import { StrategySkeleton } from "@/components/shared/page-skeleton";
+import { QueryError } from "@/components/shared/query-error";
 import { StrategyForm } from "@/features/strategy/components/strategy-form";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
 export default function StrategyPage() {
-  const { data: userConfig, isLoading, isError } = useConfig();
+  const { data: userConfig, isLoading, isError, refetch } = useConfig();
 
   if (isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-      </div>
-    );
+    return <StrategySkeleton />;
   }
 
   if (isError) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-zinc-500">Failed to load strategy config</p>
-      </div>
-    );
+    return <QueryError message="Failed to load strategy config" onRetry={refetch} />;
   }
 
   return (

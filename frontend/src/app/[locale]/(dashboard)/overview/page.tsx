@@ -1,5 +1,7 @@
 "use client";
 
+import { OverviewSkeleton } from "@/components/shared/page-skeleton";
+import { QueryError } from "@/components/shared/query-error";
 import { EarningsChart } from "@/features/dashboard/components/earnings-chart";
 import { MarketPanel } from "@/features/dashboard/components/market-panel";
 import { OffersList } from "@/features/dashboard/components/offers-list";
@@ -10,24 +12,16 @@ import { useDashboardWS } from "@/features/dashboard/hooks/use-dashboard-ws";
 import { useEarnings } from "@/features/dashboard/hooks/use-earnings";
 
 export default function OverviewPage() {
-  const { data: dashboard, isLoading: dashLoading } = useDashboard();
-  const { data: earnings, isLoading: earnLoading } = useEarnings();
+  const { data: dashboard, isLoading: dashLoading, isError: dashError, refetch: dashRefetch } = useDashboard();
+  const { data: earnings, isLoading: earnLoading, isError: earnError, refetch: earnRefetch } = useEarnings();
   const { status: wsStatus } = useDashboardWS();
 
   if (dashLoading || earnLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-      </div>
-    );
+    return <OverviewSkeleton />;
   }
 
-  if (!dashboard || !earnings) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-zinc-500">Failed to load dashboard data</p>
-      </div>
-    );
+  if (dashError || earnError || !dashboard || !earnings) {
+    return <QueryError message="Failed to load dashboard data" onRetry={() => { dashRefetch(); earnRefetch(); }} />;
   }
 
   return (

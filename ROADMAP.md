@@ -84,7 +84,9 @@
 | G9 | Graceful Degradation | `signal/health.go` + `signal/mdc.go` + `marketfeed/service.go` — 信號健康度追蹤 (healthy/warning/degraded/recovering) + MDC 降級權重重分配 + Order Book 故障 FRR-only + 恢復確認 2 心跳 + 13 new tests | `bae8d96` |
 | J1 | Email 驗證 | 註冊建立 pending 用戶 + Redis token + Resend 驗證信 + `POST /auth/verify-email` + Login 拒絕未驗證 | |
 | J2 | Forgot Password | `POST /auth/forgot-password` + `POST /auth/reset-password` + Redis token (1hr TTL) + anti-enumeration | `745facd` |
-| J6 | JWT Refresh Token | access token 15min + refresh token 7d Redis rotation + `POST /auth/refresh` + `POST /auth/logout` + 前端 proxy 透明刷新 + 雙 cookie (auth_token + refresh_token) | |
+| J6 | JWT Refresh Token | access token 15min + refresh token 7d Redis rotation + `POST /auth/refresh` + `POST /auth/logout` + 前端 proxy 透明刷新 + 雙 cookie (auth_token + refresh_token) | `3b5865f` |
+| L1 | Loading Skeleton | `components/ui/skeleton.tsx` + `components/shared/page-skeleton.tsx` — 5 頁面專屬 skeleton (overview/api-keys/strategy/history/settings) | |
+| L3 | Per-Page Error Boundary | `components/shared/query-error.tsx` — 5 頁面改用 QueryError + retry button，取代原本的純文字錯誤 | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -218,9 +220,9 @@ marketfeed/service.go (C1)
 
 | # | 功能 | 說明 | 複雜度 |
 |---|------|------|--------|
-| L1 | Loading Skeleton | 各頁面加入 Skeleton / Shimmer loading 狀態（目前僅有 global error boundary） | 低 |
+| ~~L1~~ | ~~Loading Skeleton~~ | ~~各頁面加入 Skeleton / Shimmer loading 狀態~~ | ~~低~~ ✅ |
 | L2 | User Onboarding Flow | 新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導 | 中 |
-| L3 | Per-Page Error Boundary | 各 feature 區塊加入局部 error boundary + retry，避免單一區塊錯誤炸掉整頁 | 低 |
+| ~~L3~~ | ~~Per-Page Error Boundary~~ | ~~各 feature 區塊加入局部 error boundary + retry~~ | ~~低~~ ✅ |
 | L4 | PWA Support | `manifest.json` + service worker — 行動裝置加到主畫面 | 低 |
 | L5 | Accessibility (a11y) | ARIA labels + 鍵盤導航 + 色彩對比度檢查 | 中 |
 
@@ -237,7 +239,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 77 項 |
+| 已完成 | 79 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -251,7 +253,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **20 項** |
+| **待開發合計** | **18 項** |
 
 ## 依賴關係
 
@@ -314,7 +316,7 @@ Phase A ✅ 全部完成
 19. ~~**G1 → G6 → G9** — 引擎安全三件套（偏離防護 + 冷啟動 + 降級）~~ ✅
 20. ~~**J1 → J2** — Email 驗證 + Forgot Password（帳號安全基礎）~~ ✅
 21. ~~**J4 → J6** — CSRF (N/A) + JWT Refresh Token Rotation~~ ✅
-22. **L1 → L3** — Loading skeleton + Error boundary（前端體驗基礎）
+22. ~~**L1 → L3** — Loading skeleton + Error boundary（前端體驗基礎）~~ ✅
 23. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
 24. **I4** — Koyeb Health Check 設定
 25. **K1** — Playwright E2E critical path 測試

@@ -1,6 +1,8 @@
 "use client";
 
 import { LoadMoreButton } from "@/components/shared/load-more-button";
+import { HistorySkeleton } from "@/components/shared/page-skeleton";
+import { QueryError } from "@/components/shared/query-error";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BillingTable } from "@/features/history/components/billing-table";
 import { ExecutionTable } from "@/features/history/components/execution-table";
@@ -15,13 +17,14 @@ export default function HistoryPage() {
   const billingRecords = billing.data?.pages.flatMap((p) => p.data) ?? [];
 
   const isLoading = executions.isLoading || billing.isLoading;
+  const isError = executions.isError || billing.isError;
 
   if (isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-      </div>
-    );
+    return <HistorySkeleton />;
+  }
+
+  if (isError) {
+    return <QueryError message="Failed to load history" onRetry={() => { executions.refetch(); billing.refetch(); }} />;
   }
 
   return (

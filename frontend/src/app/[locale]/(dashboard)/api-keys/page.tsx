@@ -3,6 +3,8 @@
 import { KeyRound, Plus } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ApiKeysSkeleton } from "@/components/shared/page-skeleton";
+import { QueryError } from "@/components/shared/query-error";
 import { ApiKeyCard } from "@/features/api-keys/components/api-key-card";
 import { CreateApiKeyDialog } from "@/features/api-keys/components/create-apikey-dialog";
 import {
@@ -15,7 +17,7 @@ import type { CreateApiKeyInput } from "@/lib/validations";
 
 export default function ApiKeysPage() {
   const [createOpen, setCreateOpen] = useState(false);
-  const { data: apiKeys, isLoading } = useApiKeys();
+  const { data: apiKeys, isLoading, isError, refetch } = useApiKeys();
   const createMutation = useCreateApiKey();
   const deleteMutation = useDeleteApiKey();
   const verifyMutation = useVerifyApiKey();
@@ -27,11 +29,11 @@ export default function ApiKeysPage() {
   }
 
   if (isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-      </div>
-    );
+    return <ApiKeysSkeleton />;
+  }
+
+  if (isError) {
+    return <QueryError message="Failed to load API keys" onRetry={refetch} />;
   }
 
   const keys = apiKeys ?? [];
