@@ -51,6 +51,9 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 		{
 			authGroup.POST("/register", authH.Register)
 			authGroup.POST("/login", authH.Login)
+			authGroup.POST("/verify-email", authH.VerifyEmail)
+			authGroup.POST("/forgot-password", authH.ForgotPassword)
+			authGroup.POST("/reset-password", authH.ResetPassword)
 		}
 
 		// WebSocket upgrade — token-based auth (no JWT middleware), rate limited

@@ -76,6 +76,31 @@ func (m *testUserRepo) UpdatePassword(_ context.Context, id, passwordHash string
 	return nil
 }
 
+func (m *testUserRepo) UpdateStatus(_ context.Context, id string, status domain.UserStatus) error {
+	u, ok := m.users[id]
+	if !ok {
+		return pgx.ErrNoRows
+	}
+	u.Status = status
+	return nil
+}
+
+// testTokenRepo is a no-op token repo for handler tests.
+type testTokenRepo struct{}
+
+func (m *testTokenRepo) Store(_ context.Context, _, _, _ string, _ time.Duration) error { return nil }
+func (m *testTokenRepo) Get(_ context.Context, _, _ string) (string, error)             { return "", nil }
+func (m *testTokenRepo) Delete(_ context.Context, _, _ string) error                    { return nil }
+
+// testNotifier is a no-op notifier for handler tests.
+type testNotifier struct{}
+
+func (m *testNotifier) SendWelcome(_ context.Context, _ string) error         { return nil }
+func (m *testNotifier) SendVerification(_ context.Context, _, _ string) error { return nil }
+func (m *testNotifier) SendPasswordReset(_ context.Context, _, _ string) error { return nil }
+func (m *testNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error  { return nil }
+func (m *testNotifier) SendAlert(_ context.Context, _, _, _ string) error     { return nil }
+
 func setupUserTest(t *testing.T) (*gin.Engine, *testUserRepo) {
 	t.Helper()
 	repo := newTestUserRepo()
@@ -84,7 +109,7 @@ func setupUserTest(t *testing.T) (*gin.Engine, *testUserRepo) {
 		t.Fatal(err)
 	}
 	jwtMgr := auth.NewJWTManager(priv, &priv.PublicKey)
-	userSvc := service.NewUserService(repo, jwtMgr)
+	userSvc := service.NewUserService(repo, &testTokenRepo{}, jwtMgr, &testNotifier{})
 	h := NewUserHandler(userSvc)
 
 	r := gin.New()

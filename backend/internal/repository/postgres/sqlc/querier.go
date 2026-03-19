@@ -31,6 +31,7 @@ type Querier interface {
 	ListVerifiedAPIKeys(ctx context.Context) ([]ApiKey, error)
 	UpdateExchangeStatus(ctx context.Context, arg UpdateExchangeStatusParams) error
 	UpdatePassword(ctx context.Context, arg UpdatePasswordParams) error
+	UpdateStatus(ctx context.Context, arg UpdateStatusParams) error
 	UpsertConfig(ctx context.Context, arg UpsertConfigParams) (UserConfig, error)
 }
 

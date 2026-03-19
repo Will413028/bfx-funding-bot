@@ -60,6 +60,17 @@ func (r *UserRepo) UpdatePassword(ctx context.Context, id, passwordHash string) 
 	})
 }
 
+func (r *UserRepo) UpdateStatus(ctx context.Context, id string, status domain.UserStatus) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	return r.q.UpdateStatus(ctx, sqlc.UpdateStatusParams{
+		ID:     uid,
+		Status: string(status),
+	})
+}
+
 func toDomainUser(row sqlc.User) *domain.User {
 	return &domain.User{
 		ID:           uuidToString(row.ID),

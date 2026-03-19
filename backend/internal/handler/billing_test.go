@@ -77,6 +77,9 @@ func (m *testBillingUserRepo) GetByEmail(_ context.Context, email string) (*doma
 func (m *testBillingUserRepo) UpdatePassword(_ context.Context, id, passwordHash string) error {
 	return nil
 }
+func (m *testBillingUserRepo) UpdateStatus(_ context.Context, _ string, _ domain.UserStatus) error {
+	return nil
+}
 
 func setupBillingRouter(billingRepo *testBillingRepo, userRepo *testBillingUserRepo) *gin.Engine {
 	gin.SetMode(gin.TestMode)

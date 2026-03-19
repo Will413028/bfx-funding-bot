@@ -75,6 +75,51 @@ func (m *mockUserRepo) UpdatePassword(_ context.Context, id, passwordHash string
 	return nil
 }
 
+func (m *mockUserRepo) UpdateStatus(_ context.Context, id string, status domain.UserStatus) error {
+	u, ok := m.users[id]
+	if !ok {
+		return pgx.ErrNoRows
+	}
+	u.Status = status
+	return nil
+}
+
+// mockTokenRepo implements repository.TokenRepository for testing.
+type mockTokenRepo struct {
+	tokens map[string]string // key = type:hash → userID
+}
+
+func newMockTokenRepo() *mockTokenRepo {
+	return &mockTokenRepo{tokens: make(map[string]string)}
+}
+
+func (m *mockTokenRepo) Store(_ context.Context, tokenHash, userID, tokenType string, _ time.Duration) error {
+	m.tokens[tokenType+":"+tokenHash] = userID
+	return nil
+}
+
+func (m *mockTokenRepo) Get(_ context.Context, tokenHash, tokenType string) (string, error) {
+	uid, ok := m.tokens[tokenType+":"+tokenHash]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	return uid, nil
+}
+
+func (m *mockTokenRepo) Delete(_ context.Context, tokenHash, tokenType string) error {
+	delete(m.tokens, tokenType+":"+tokenHash)
+	return nil
+}
+
+// mockNotifier implements notification.Notifier for testing.
+type mockNotifier struct{}
+
+func (m *mockNotifier) SendWelcome(_ context.Context, _ string) error                    { return nil }
+func (m *mockNotifier) SendVerification(_ context.Context, _, _ string) error             { return nil }
+func (m *mockNotifier) SendPasswordReset(_ context.Context, _, _ string) error            { return nil }
+func (m *mockNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error              { return nil }
+func (m *mockNotifier) SendAlert(_ context.Context, _, _, _ string) error                 { return nil }
+
 func testJWTManager(t *testing.T) *auth.JWTManager {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -85,7 +130,7 @@ func testJWTManager(t *testing.T) *auth.JWTManager {
 }
 
 func TestRegister_Success(t *testing.T) {
-	svc := NewUserService(newMockRepo(), testJWTManager(t))
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	user, err := svc.Register(context.Background(), "test@example.com", "password123")
 	if err != nil {
@@ -97,14 +142,14 @@ func TestRegister_Success(t *testing.T) {
 }
 
 func TestRegister_InvalidEmail(t *testing.T) {
-	svc := NewUserService(newMockRepo(), testJWTManager(t))
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, err := svc.Register(context.Background(), "not-an-email", "password123")
 	assertAppErrorCode(t, err, "INVALID_EMAIL")
 }
 
 func TestRegister_PasswordTooShort(t *testing.T) {
-	svc := NewUserService(newMockRepo(), testJWTManager(t))
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, err := svc.Register(context.Background(), "test@example.com", "short")
 	assertAppErrorCode(t, err, "PASSWORD_TOO_SHORT")
@@ -112,7 +157,7 @@ func TestRegister_PasswordTooShort(t *testing.T) {
 
 func TestRegister_DuplicateEmail(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 	_, err := svc.Register(context.Background(), "test@example.com", "password456")
@@ -122,7 +167,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 func TestLogin_Success(t *testing.T) {
 	repo := newMockRepo()
 	jwtMgr := testJWTManager(t)
-	svc := NewUserService(repo, jwtMgr)
+	svc := NewUserService(repo, newMockTokenRepo(), jwtMgr, &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
@@ -140,7 +185,7 @@ func TestLogin_Success(t *testing.T) {
 
 func TestLogin_WrongPassword(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
@@ -149,7 +194,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 }
 
 func TestLogin_NonExistentUser(t *testing.T) {
-	svc := NewUserService(newMockRepo(), testJWTManager(t))
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _, err := svc.Login(context.Background(), "nobody@example.com", "password123")
 	assertAppErrorCode(t, err, "INVALID_CREDENTIALS")
@@ -157,7 +202,7 @@ func TestLogin_NonExistentUser(t *testing.T) {
 
 func TestLogin_SuspendedUser(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.MinCost)
 	repo.byEmail["suspended@example.com"] = &domain.User{
@@ -173,7 +218,7 @@ func TestLogin_SuspendedUser(t *testing.T) {
 
 func TestGetProfile_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
@@ -191,7 +236,7 @@ func TestGetProfile_Success(t *testing.T) {
 
 func TestChangePassword_Success(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
@@ -209,7 +254,7 @@ func TestChangePassword_Success(t *testing.T) {
 
 func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
@@ -219,7 +264,7 @@ func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 
 func TestChangePassword_NewPasswordTooShort(t *testing.T) {
 	repo := newMockRepo()
-	svc := NewUserService(repo, testJWTManager(t))
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
