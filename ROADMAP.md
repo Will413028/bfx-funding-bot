@@ -96,7 +96,8 @@
 | L4 | PWA Support | `manifest.json` + icon-192/512 + metadata (themeColor, appleWebApp) — 行動裝置加到主畫面 | `e2462e2` |
 | K2 | Frontend Component Tests | @testing-library/react + jsdom + 3 test files: SetupChecklist (5), StatsGrid (6), QueryError (5) — 16 new tests, 65 total | `3f3b336` |
 | L5 | Accessibility | aria-label (nav, sidebar, mobile menu), aria-current (active links), aria-invalid + aria-describedby (forms), role=alert (errors), aria-disabled (checklist), landmarks | `44475d5` |
-| G8 | Opportunity Cost Framework | `strategy/opportunitycost.go` — EV_deploy vs EV_wait + MDC slope P(higher_rate) + safety valve (2hr→20% floor discount) + 8 tests | |
+| G8 | Opportunity Cost Framework | `strategy/opportunitycost.go` — EV_deploy vs EV_wait + MDC slope P(higher_rate) + safety valve (2hr→20% floor discount) + 8 tests | `31161b1` |
+| G10 | Performance Tracking | `lending/tracking/` — alpha.go (計算+record builder) + summary.go (7d 滾動摘要) + attribution.go (per-tag 歸因) + feedback.go (±10% 調整建議) + Redis persistence + 12 tests | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -196,7 +197,7 @@ marketfeed/service.go (C1)
 | ~~G7~~ | ~~§7.1~~ | ~~Maintenance Behaviors~~ | ~~隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊）~~ | ~~新增 `strategy/maintenance.go`~~ | ~~中~~ ✅ |
 | ~~G8~~ | ~~§4.8~~ | ~~Opportunity Cost Framework~~ | ~~完整 EV_deploy vs EV_wait 比較模型~~ | ~~新增 `strategy/opportunitycost.go`~~ | ~~高~~ ✅ |
 | ~~G9~~ | ~~§6.3~~ | ~~Graceful Degradation~~ | ~~信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認~~ | ~~`signal/mdc.go` + `marketfeed/service.go`~~ | ~~高~~ ✅ |
-| G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
+| ~~G10~~ | ~~§9.1-9.3~~ | ~~Performance Tracking~~ | ~~Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調）~~ | ~~新增 `lending/tracking/`~~ | ~~極高~~ ✅ |
 
 ### Phase I — DevOps / CI/CD
 
@@ -249,7 +250,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 89 項 |
+| 已完成 | 90 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -263,7 +264,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **8 項** |
+| **待開發合計** | **7 項** |
 
 ## 依賴關係
 
@@ -337,4 +338,4 @@ Phase A ✅ 全部完成
 30. **I3** — Staging 環境（用戶量增長後）
 31. **K2 → K3** — 補強前端 component + 後端 integration 測試
 32. **L4 → L5** — PWA + Accessibility
-33. **G10** — 績效追蹤（極高複雜度，需 DB schema 擴充）
+33. ~~**G10** — 績效追蹤（Redis 儲存，DB migration 未來補）~~ ✅

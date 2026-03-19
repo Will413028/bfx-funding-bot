@@ -93,7 +93,8 @@ func (p *PricingStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 				Period: cfg.Period.Min,
 			},
 		},
-		Reason: "pricing",
+		StrategyTags: []string{"pricing"},
+		Reason:       "pricing",
 	}
 }
 

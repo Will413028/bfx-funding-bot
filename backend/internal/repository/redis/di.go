@@ -6,4 +6,5 @@ var Module = fx.Module("repository.redis",
 	fx.Provide(NewSnapshotCacheRepo),
 	fx.Provide(NewSnapshotPubSubRepo),
 	fx.Provide(NewTokenRepo),
+	fx.Provide(NewPerformanceRepo),
 )
