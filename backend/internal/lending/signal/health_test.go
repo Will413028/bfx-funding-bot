@@ -89,11 +89,10 @@ func TestHealth_Degraded_AfterLongStale(t *testing.T) {
 	}
 }
 
-func TestHealth_Recovery_RequiresTwoHeartbeats(t *testing.T) {
+func TestHealth_Recovery_RequiresThreeHeartbeats(t *testing.T) {
 	tracker := NewSignalHealthTracker([]domain.SignalType{domain.SignalMomentum})
 	t0 := time.Now()
 
-	// Initial update
 	tracker.Update([]domain.SignalValue{
 		{Type: domain.SignalMomentum, Value: 0.5, Confidence: 1.0, Timestamp: t0},
 	}, t0)
@@ -105,24 +104,40 @@ func TestHealth_Recovery_RequiresTwoHeartbeats(t *testing.T) {
 		t.Fatalf("expected degraded, got %s", health[domain.SignalMomentum])
 	}
 
-	// Signal comes back — first heartbeat
+	// Signal comes back — step 1 (33% weight)
 	t2 := t1.Add(1 * time.Millisecond)
 	tracker.Update([]domain.SignalValue{
 		{Type: domain.SignalMomentum, Value: 0.3, Confidence: 0.8, Timestamp: t2},
 	}, t2)
 	health = tracker.GetHealth(t2, testHeartbeat)
 	if health[domain.SignalMomentum] != domain.SignalRecovering {
-		t.Errorf("1st heartbeat: expected recovering, got %s", health[domain.SignalMomentum])
+		t.Errorf("step 1: expected recovering, got %s", health[domain.SignalMomentum])
+	}
+	if w := tracker.RecoveryWeight(domain.SignalMomentum); w < 0.32 || w > 0.34 {
+		t.Errorf("step 1 weight: expected ~0.33, got %f", w)
 	}
 
-	// Second heartbeat — still fresh
+	// Step 2 (66% weight)
 	t3 := t2.Add(testHeartbeat)
 	tracker.Update([]domain.SignalValue{
 		{Type: domain.SignalMomentum, Value: 0.4, Confidence: 0.9, Timestamp: t3},
 	}, t3)
 	health = tracker.GetHealth(t3, testHeartbeat)
+	if health[domain.SignalMomentum] != domain.SignalRecovering {
+		t.Errorf("step 2: expected recovering, got %s", health[domain.SignalMomentum])
+	}
+	if w := tracker.RecoveryWeight(domain.SignalMomentum); w < 0.65 || w > 0.67 {
+		t.Errorf("step 2 weight: expected ~0.66, got %f", w)
+	}
+
+	// Step 3 → fully recovered (100% weight)
+	t4 := t3.Add(testHeartbeat)
+	tracker.Update([]domain.SignalValue{
+		{Type: domain.SignalMomentum, Value: 0.5, Confidence: 1.0, Timestamp: t4},
+	}, t4)
+	health = tracker.GetHealth(t4, testHeartbeat)
 	if health[domain.SignalMomentum] != domain.SignalHealthy {
-		t.Errorf("2nd heartbeat: expected healthy (recovery confirmed), got %s", health[domain.SignalMomentum])
+		t.Errorf("step 3: expected healthy (recovery complete), got %s", health[domain.SignalMomentum])
 	}
 }
 
