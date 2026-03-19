@@ -3,8 +3,21 @@ package worker
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
+)
+
+// Cold Start Protocol (§6.4) phase durations and MDC weights.
+const (
+	coldStartPhase1Duration = 10 * time.Minute
+	coldStartPhase2Duration = 10 * time.Minute
+	coldStartPhase3Duration = 10 * time.Minute
+	coldStartTotalDuration  = coldStartPhase1Duration + coldStartPhase2Duration + coldStartPhase3Duration
+
+	coldStartPhase1MDC = 0.0  // pure FRR following
+	coldStartPhase2MDC = 0.50 // VWAP activated
+	coldStartPhase3MDC = 0.75 // advanced signals activated
 )
 
 // Strategy computes lending decisions from market + user context.
@@ -53,24 +66,28 @@ type Deps struct {
 
 // LendingWorker implements the Worker interface for a single user.
 type LendingWorker struct {
-	userID   string
-	config   domain.StrategyConfig
-	deps     Deps
-	lc       *lifecycle
-	stopCh   chan struct{}
-	configCh chan domain.StrategyConfig
-	onError  func(userID string, err interface{}) // optional error callback for testing
+	userID    string
+	config    domain.StrategyConfig
+	deps      Deps
+	lc        *lifecycle
+	stopCh    chan struct{}
+	configCh  chan domain.StrategyConfig
+	startedAt time.Time                              // Cold Start Protocol (§6.4): tracks worker startup time
+	onError   func(userID string, err interface{})    // optional error callback for testing
+	nowFn     func() time.Time                        // injectable clock for testing
 }
 
 // NewLendingWorker creates a new LendingWorker.
 func NewLendingWorker(userID string, config domain.StrategyConfig, deps Deps) *LendingWorker {
 	return &LendingWorker{
-		userID:   userID,
-		config:   config,
-		deps:     deps,
-		lc:       newLifecycle(),
-		stopCh:   make(chan struct{}),
-		configCh: make(chan domain.StrategyConfig, 1),
+		userID:    userID,
+		config:    config,
+		deps:      deps,
+		lc:        newLifecycle(),
+		stopCh:    make(chan struct{}),
+		configCh:  make(chan domain.StrategyConfig, 1),
+		startedAt: time.Now(),
+		nowFn:     time.Now,
 	}
 }
 
@@ -137,6 +154,54 @@ func (w *LendingWorker) State() WorkerState {
 	return w.lc.State()
 }
 
+// ColdStartPhase returns the current cold start phase (1-4).
+// Phase 1: pure FRR (0-10min), Phase 2: +VWAP (10-20min),
+// Phase 3: +advanced (20-30min), Phase 4: full strategy (30min+).
+func (w *LendingWorker) ColdStartPhase() int {
+	elapsed := w.nowFn().Sub(w.startedAt)
+	switch {
+	case elapsed < coldStartPhase1Duration:
+		return 1
+	case elapsed < coldStartPhase1Duration+coldStartPhase2Duration:
+		return 2
+	case elapsed < coldStartTotalDuration:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// applyColdStart creates a modified copy of the snapshot with scaled MDC
+// based on the current cold start phase.
+func (w *LendingWorker) applyColdStart(snapshot *domain.MarketSnapshot) *domain.MarketSnapshot {
+	phase := w.ColdStartPhase()
+	if phase >= 4 {
+		return snapshot // full strategy mode
+	}
+
+	// Shallow copy to avoid mutating shared snapshot
+	modified := *snapshot
+
+	var mdcWeight float64
+	switch phase {
+	case 1:
+		mdcWeight = coldStartPhase1MDC
+	case 2:
+		mdcWeight = coldStartPhase2MDC
+	case 3:
+		mdcWeight = coldStartPhase3MDC
+	}
+
+	modified.MDC = domain.MDCResult{
+		Score:          snapshot.MDC.Score * mdcWeight,
+		DemandPressure: snapshot.MDC.DemandPressure,
+		SupplyPressure: snapshot.MDC.SupplyPressure,
+		Timestamp:      snapshot.MDC.Timestamp,
+	}
+
+	return &modified
+}
+
 // tick executes one cycle: fetch data → build context → strategy → execute.
 // Panics are recovered to keep the worker alive.
 func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapshot) {
@@ -152,6 +217,9 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 	if w.deps.Quota != nil && !w.deps.Quota.Acquire(w.userID, 3) {
 		return // skip tick, quota exhausted
 	}
+
+	// Cold Start Protocol (§6.4): scale MDC based on startup phase
+	snapshot = w.applyColdStart(snapshot)
 
 	// Phase 1: Fetch private data
 	userData, err := w.deps.Fetcher.FetchUserData(ctx, w.userID)

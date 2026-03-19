@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -79,12 +80,15 @@ func testSnapshot() *domain.MarketSnapshot {
 }
 
 func newTestWorker(snapshotCh chan *domain.MarketSnapshot, strategy *mockStrategy, fetcher *mockDataFetcher, executor *mockOfferExecutor) *LendingWorker {
-	return NewLendingWorker("user-1", workerConfig(), Deps{
+	w := NewLendingWorker("user-1", workerConfig(), Deps{
 		Strategy:   strategy,
 		Fetcher:    fetcher,
 		Executor:   executor,
 		SnapshotCh: snapshotCh,
 	})
+	// Default: skip cold start for existing tests (simulate 1 hour elapsed)
+	w.startedAt = time.Now().Add(-1 * time.Hour)
+	return w
 }
 
 // --- Tests ---
@@ -467,4 +471,178 @@ func TestWorker_EmptyDecision(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+// --- Cold Start Protocol (§6.4) ---
+
+func TestColdStart_Phase1_MDCZero(t *testing.T) {
+	snapshotCh := make(chan *domain.MarketSnapshot, 1)
+	var capturedMDC float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedMDC = ctx.Snapshot.MDC.Score
+			return &domain.DecisionResult{}
+		},
+	}
+	w := newTestWorker(snapshotCh, strategy, &mockDataFetcher{}, &mockOfferExecutor{})
+	w.startedAt = time.Now() // phase 1: just started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); w.Run(ctx) }()
+
+	time.Sleep(10 * time.Millisecond)
+	snap := testSnapshot()
+	snap.MDC = domain.MDCResult{Score: 0.8}
+	snapshotCh <- snap
+	time.Sleep(50 * time.Millisecond)
+
+	if capturedMDC != 0.0 {
+		t.Errorf("phase 1 MDC: got %f, want 0.0", capturedMDC)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+func TestColdStart_Phase2_MDCHalf(t *testing.T) {
+	snapshotCh := make(chan *domain.MarketSnapshot, 1)
+	var capturedMDC float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedMDC = ctx.Snapshot.MDC.Score
+			return &domain.DecisionResult{}
+		},
+	}
+	w := newTestWorker(snapshotCh, strategy, &mockDataFetcher{}, &mockOfferExecutor{})
+	w.startedAt = time.Now().Add(-15 * time.Minute) // phase 2: 15min elapsed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); w.Run(ctx) }()
+
+	time.Sleep(10 * time.Millisecond)
+	snap := testSnapshot()
+	snap.MDC = domain.MDCResult{Score: 0.8}
+	snapshotCh <- snap
+	time.Sleep(50 * time.Millisecond)
+
+	expected := 0.8 * 0.5
+	if math.Abs(capturedMDC-expected) > 1e-10 {
+		t.Errorf("phase 2 MDC: got %f, want %f", capturedMDC, expected)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+func TestColdStart_Phase3_MDC75(t *testing.T) {
+	snapshotCh := make(chan *domain.MarketSnapshot, 1)
+	var capturedMDC float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedMDC = ctx.Snapshot.MDC.Score
+			return &domain.DecisionResult{}
+		},
+	}
+	w := newTestWorker(snapshotCh, strategy, &mockDataFetcher{}, &mockOfferExecutor{})
+	w.startedAt = time.Now().Add(-25 * time.Minute) // phase 3: 25min elapsed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); w.Run(ctx) }()
+
+	time.Sleep(10 * time.Millisecond)
+	snap := testSnapshot()
+	snap.MDC = domain.MDCResult{Score: 0.8}
+	snapshotCh <- snap
+	time.Sleep(50 * time.Millisecond)
+
+	expected := 0.8 * 0.75
+	if math.Abs(capturedMDC-expected) > 1e-10 {
+		t.Errorf("phase 3 MDC: got %f, want %f", capturedMDC, expected)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+func TestColdStart_Phase4_FullMDC(t *testing.T) {
+	snapshotCh := make(chan *domain.MarketSnapshot, 1)
+	var capturedMDC float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedMDC = ctx.Snapshot.MDC.Score
+			return &domain.DecisionResult{}
+		},
+	}
+	w := newTestWorker(snapshotCh, strategy, &mockDataFetcher{}, &mockOfferExecutor{})
+	// startedAt already -1hr in newTestWorker → phase 4
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); w.Run(ctx) }()
+
+	time.Sleep(10 * time.Millisecond)
+	snap := testSnapshot()
+	snap.MDC = domain.MDCResult{Score: 0.8}
+	snapshotCh <- snap
+	time.Sleep(50 * time.Millisecond)
+
+	if capturedMDC != 0.8 {
+		t.Errorf("phase 4 MDC: got %f, want 0.8", capturedMDC)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+func TestColdStart_PhaseDetection(t *testing.T) {
+	w := NewLendingWorker("u", domain.StrategyConfig{}, Deps{})
+
+	w.nowFn = func() time.Time { return w.startedAt }
+	if p := w.ColdStartPhase(); p != 1 {
+		t.Errorf("0min: got phase %d, want 1", p)
+	}
+
+	w.nowFn = func() time.Time { return w.startedAt.Add(9 * time.Minute) }
+	if p := w.ColdStartPhase(); p != 1 {
+		t.Errorf("9min: got phase %d, want 1", p)
+	}
+
+	w.nowFn = func() time.Time { return w.startedAt.Add(10 * time.Minute) }
+	if p := w.ColdStartPhase(); p != 2 {
+		t.Errorf("10min: got phase %d, want 2", p)
+	}
+
+	w.nowFn = func() time.Time { return w.startedAt.Add(20 * time.Minute) }
+	if p := w.ColdStartPhase(); p != 3 {
+		t.Errorf("20min: got phase %d, want 3", p)
+	}
+
+	w.nowFn = func() time.Time { return w.startedAt.Add(30 * time.Minute) }
+	if p := w.ColdStartPhase(); p != 4 {
+		t.Errorf("30min: got phase %d, want 4", p)
+	}
+}
+
+func TestColdStart_SnapshotNotMutated(t *testing.T) {
+	w := NewLendingWorker("u", domain.StrategyConfig{}, Deps{})
+	// phase 1 (just started)
+
+	original := &domain.MarketSnapshot{
+		MDC: domain.MDCResult{Score: 0.9},
+	}
+	modified := w.applyColdStart(original)
+
+	if original.MDC.Score != 0.9 {
+		t.Errorf("original MDC mutated: got %f, want 0.9", original.MDC.Score)
+	}
+	if modified.MDC.Score != 0.0 {
+		t.Errorf("modified MDC: got %f, want 0.0", modified.MDC.Score)
+	}
 }
