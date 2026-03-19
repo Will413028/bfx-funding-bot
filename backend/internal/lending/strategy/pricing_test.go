@@ -54,8 +54,9 @@ func TestPricing_MDC_Positive(t *testing.T) {
 		t.Fatalf("expected 1 offer, got %d", len(res.Offers))
 	}
 	// base=0.00025, mdc_mul=1.0+0.8*0.5=1.4, regime=neutral(1.0)
-	// rate = 0.00025 * 1.4 = 0.00035
-	expected := 0.00025 * 1.4
+	// rate = 0.00025 * 1.4 = 0.00035 → deviation 40% > neutral ceiling 25%
+	// deviation guard clamps to FRR * 1.25 = 0.0003125
+	expected := 0.00025 * 1.25
 	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
 		t.Errorf("positive MDC: got %f, want %f", res.Offers[0].Rate, expected)
 	}
@@ -314,5 +315,96 @@ func TestPricing_OfferAmountAndPeriod(t *testing.T) {
 	// Period = config.Period.Min = 2
 	if res.Offers[0].Period != 2 {
 		t.Errorf("period: got %d, want 2", res.Offers[0].Period)
+	}
+}
+
+// --- Adaptive Deviation Guard (§8.1) ---
+
+func TestPricing_DeviationGuard_Neutral_Clamps(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=+1.0 → multiplier=1.5 → rate=0.000375, deviation=50% > neutral ceiling 25%
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 1.0
+		c.Snapshot.Regime = domain.RegimeNeutral
+	})
+	res := ps.Apply(ctx)
+	// Should be clamped to FRR * 1.25 = 0.0003125
+	maxAllowed := 0.00025 * 1.25
+	if res.Offers[0].Rate > maxAllowed+1e-10 {
+		t.Errorf("neutral deviation guard: rate %f exceeds max allowed %f", res.Offers[0].Rate, maxAllowed)
+	}
+}
+
+func TestPricing_DeviationGuard_Contango_WiderCeiling(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=+1.0 → multiplier=1.5, regime contango → *1.05 → deviation ~57.5% > 40%
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 1.0
+		c.Snapshot.Regime = domain.RegimeContango
+	})
+	res := ps.Apply(ctx)
+	// Should be clamped to FRR * 1.40 = 0.00035
+	maxAllowed := 0.00025 * 1.40
+	if res.Offers[0].Rate > maxAllowed+1e-10 {
+		t.Errorf("contango deviation guard: rate %f exceeds max allowed %f", res.Offers[0].Rate, maxAllowed)
+	}
+}
+
+func TestPricing_DeviationGuard_Backwardation_TightCeiling(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=+0.5 → multiplier=1.25, regime backwardation → *0.90 → rate=0.00025*1.25*0.90=0.00028125
+	// deviation = (0.00028125-0.00025)/0.00025 = 12.5% — within bear 20% ceiling
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 0.5
+		c.Snapshot.Regime = domain.RegimeBackwardation
+	})
+	res := ps.Apply(ctx)
+	expected := 0.00025 * 1.25 * 0.90
+	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
+		t.Errorf("backwardation within ceiling: got %f, want %f", res.Offers[0].Rate, expected)
+	}
+}
+
+func TestPricing_DeviationGuard_Backwardation_Clamped(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=+1.0 → multiplier=1.5, regime backwardation → *0.90 → rate=0.00025*1.5*0.90=0.0003375
+	// deviation = (0.0003375-0.00025)/0.00025 = 35% > bear 20% ceiling
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 1.0
+		c.Snapshot.Regime = domain.RegimeBackwardation
+	})
+	res := ps.Apply(ctx)
+	maxAllowed := 0.00025 * 1.20
+	if res.Offers[0].Rate > maxAllowed+1e-10 {
+		t.Errorf("backwardation deviation guard: rate %f exceeds max allowed %f", res.Offers[0].Rate, maxAllowed)
+	}
+}
+
+func TestPricing_DeviationGuard_NegativeDeviation(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=-1.0 → multiplier=0.7 → rate=0.000175, deviation=-30% — neutral ceiling 25%
+	// Should clamp to FRR * 0.75 = 0.0001875
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = -1.0
+		c.Snapshot.Regime = domain.RegimeNeutral
+	})
+	res := ps.Apply(ctx)
+	minAllowed := 0.00025 * 0.75
+	if res.Offers[0].Rate < minAllowed-1e-10 {
+		t.Errorf("negative deviation guard: rate %f below min allowed %f", res.Offers[0].Rate, minAllowed)
+	}
+}
+
+func TestPricing_DeviationGuard_NoClampNeeded(t *testing.T) {
+	ps := NewPricingStrategy()
+	// MDC=+0.3 → multiplier=1.15, neutral → deviation=15% < 25% ceiling
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 0.3
+		c.Snapshot.Regime = domain.RegimeNeutral
+	})
+	res := ps.Apply(ctx)
+	expected := 0.00025 * 1.15
+	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
+		t.Errorf("no clamp needed: got %f, want %f", res.Offers[0].Rate, expected)
 	}
 }
