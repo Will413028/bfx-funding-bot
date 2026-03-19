@@ -11,7 +11,7 @@ export default function DashboardLayout({
       <Sidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <TopBar />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+        <main aria-label="Dashboard content" className="flex-1 overflow-y-auto p-6">{children}</main>
       </div>
     </div>
   );

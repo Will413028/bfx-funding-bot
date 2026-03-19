@@ -58,10 +58,12 @@ export function LoginForm() {
           id="email"
           type="email"
           autoComplete="email"
+          aria-invalid={!!errors.email}
+          aria-describedby={errors.email ? "email-error" : undefined}
           {...register("email")}
         />
         {errors.email && (
-          <p className="text-sm text-destructive">
+          <p id="email-error" role="alert" className="text-sm text-destructive">
             {tv(errors.email.message as string)}
           </p>
         )}
@@ -73,16 +75,18 @@ export function LoginForm() {
           id="password"
           type="password"
           autoComplete="current-password"
+          aria-invalid={!!errors.password}
+          aria-describedby={errors.password ? "password-error" : undefined}
           {...register("password")}
         />
         {errors.password && (
-          <p className="text-sm text-destructive">
+          <p id="password-error" role="alert" className="text-sm text-destructive">
             {tv(errors.password.message as string)}
           </p>
         )}
       </div>
 
-      {serverError && <p className="text-sm text-destructive">{serverError}</p>}
+      {serverError && <p role="alert" className="text-sm text-destructive">{serverError}</p>}
 
       <Button
         type="submit"
