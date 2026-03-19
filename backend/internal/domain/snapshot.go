@@ -100,5 +100,8 @@ type MarketSnapshot struct {
 	HiddenRatio        float64 // estimated hidden order ratio
 	CompetitorActivity float64 // 0-1 composite competitor activity score
 	FlashFreeze        bool    // true if flash crash detected, trading paused
+	SignalHealth   SignalHealthSummary // per-signal health state (§6.3)
+	DegradedMode   bool               // true if operating in degraded mode (e.g., FRR-only)
+	DegradedReason string             // human-readable reason for degradation
 	Timestamp     time.Time
 }
