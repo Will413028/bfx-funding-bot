@@ -17,6 +17,9 @@ func assembleSnapshot(
 	flashFreeze bool,
 	hiddenRatio float64,
 	competitorActivity float64,
+	signalHealth domain.SignalHealthSummary,
+	degradedMode bool,
+	degradedReason string,
 	now time.Time,
 ) *domain.MarketSnapshot {
 	summary := orderbook.ComputeSummary(raw.Book)
@@ -39,6 +42,9 @@ func assembleSnapshot(
 		HiddenRatio:        hiddenRatio,
 		CompetitorActivity: competitorActivity,
 		FlashFreeze:        flashFreeze,
+		SignalHealth:       signalHealth,
+		DegradedMode:       degradedMode,
+		DegradedReason:     degradedReason,
 		Timestamp:          now,
 	}
 }

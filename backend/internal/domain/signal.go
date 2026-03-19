@@ -23,6 +23,19 @@ type SignalValue struct {
 	Timestamp  time.Time
 }
 
+// SignalHealthState represents the health state of a signal source.
+type SignalHealthState string
+
+const (
+	SignalHealthy    SignalHealthState = "healthy"
+	SignalWarning    SignalHealthState = "warning"
+	SignalDegraded   SignalHealthState = "degraded"
+	SignalRecovering SignalHealthState = "recovering"
+)
+
+// SignalHealthSummary maps each signal source to its health state.
+type SignalHealthSummary map[SignalType]SignalHealthState
+
 // MDCResult represents the Market Demand Curve computation result.
 // MDC aggregates multiple signal sources into a weighted composite score.
 type MDCResult struct {

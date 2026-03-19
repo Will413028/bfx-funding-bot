@@ -49,8 +49,9 @@ type Service struct {
 	signalSources []SignalSource
 	flashCrash    *FlashCrashDetector
 
-	states     map[string]*symbolState // symbol → state
-	mdcAgg     *signal.MDCAggregator
+	states       map[string]*symbolState // symbol → state
+	mdcAgg       *signal.MDCAggregator
+	healthTracker *signal.SignalHealthTracker
 	hiddenEst  map[string]*orderbook.HiddenRatioEstimator
 	compDet    map[string]*orderbook.CompetitorDetector
 	regimeDet  map[string]*signal.RegimeDetector
@@ -90,6 +91,15 @@ func NewService(
 		regimeDet[sym] = signal.NewRegimeDetector(nil)
 	}
 
+	healthTracker := signal.NewSignalHealthTracker([]domain.SignalType{
+		domain.SignalBookConsumption,
+		domain.SignalLiquidationCascade,
+		domain.SignalMarginUsage,
+		domain.SignalMomentum,
+		domain.SignalCrossCurrency,
+		domain.SignalIntraday,
+	})
+
 	return &Service{
 		log:           log,
 		cfg:           cfg,
@@ -98,6 +108,7 @@ func NewService(
 		signalSources: signalSources,
 		flashCrash:    NewFlashCrashDetector(flashCrashCfg),
 		mdcAgg:        signal.NewMDCAggregator(),
+		healthTracker: healthTracker,
 		states:        states,
 		hiddenEst:     hiddenEst,
 		compDet:       compDet,
@@ -355,8 +366,10 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 		signals = append(signals, sig)
 	}
 
-	// Phase 2.5: MDC aggregation
-	mdc := s.mdcAgg.Aggregate(signals, now)
+	// Phase 2.5: Signal health tracking + MDC aggregation
+	s.healthTracker.Update(signals, now)
+	health := s.healthTracker.GetHealth(now, s.cfg.SnapshotInterval)
+	mdc := s.mdcAgg.Aggregate(signals, health, now)
 
 	// Phase 3: Regime detection
 	regime, regimeParams := s.regimeDet[symbol].Detect(mdc, &tickerCopy, flashFreeze, now)
@@ -365,7 +378,15 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 	hiddenRatio := s.hiddenEst[symbol].Estimate(filtered, trades, now)
 	competitorActivity := s.compDet[symbol].Analyze(filtered)
 
-	return assembleSnapshot(symbol, raw, signals, mdc, regime, regimeParams, flashFreeze, hiddenRatio, competitorActivity, now)
+	// Check for degraded mode
+	degradedMode := false
+	degradedReason := ""
+	if state, ok := health[domain.SignalBookConsumption]; ok && (state == domain.SignalDegraded || state == domain.SignalRecovering) {
+		degradedMode = true
+		degradedReason = "order_book_failure"
+	}
+
+	return assembleSnapshot(symbol, raw, signals, mdc, regime, regimeParams, flashFreeze, hiddenRatio, competitorActivity, health, degradedMode, degradedReason, now)
 }
 
 func bookEntryKey(rate float64, period int) string {

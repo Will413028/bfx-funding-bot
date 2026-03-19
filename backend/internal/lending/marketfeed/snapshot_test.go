@@ -109,7 +109,7 @@ func TestAssembleSnapshot(t *testing.T) {
 	now := time.Now()
 
 	mdc := domain.MDCResult{Score: 0.5, DemandPressure: 0.3, SupplyPressure: 0.1}
-	snap := assembleSnapshot("fUSD", raw, signals, mdc, domain.RegimeContango, domain.RegimeParams{}, false, 0.3, 0.5, now)
+	snap := assembleSnapshot("fUSD", raw, signals, mdc, domain.RegimeContango, domain.RegimeParams{}, false, 0.3, 0.5, nil, false, "", now)
 
 	if snap.Symbol != "fUSD" {
 		t.Errorf("Symbol: got %s, want fUSD", snap.Symbol)
