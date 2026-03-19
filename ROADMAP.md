@@ -83,7 +83,8 @@
 | G6 | Cold Start Protocol | `worker/worker.go` — 3 階段 MDC 漸進啟用 (0%→50%→75%→100%, 每階段 10min) + injectable clock + 6 tests | `0e1541d` |
 | G9 | Graceful Degradation | `signal/health.go` + `signal/mdc.go` + `marketfeed/service.go` — 信號健康度追蹤 (healthy/warning/degraded/recovering) + MDC 降級權重重分配 + Order Book 故障 FRR-only + 恢復確認 2 心跳 + 13 new tests | `bae8d96` |
 | J1 | Email 驗證 | 註冊建立 pending 用戶 + Redis token + Resend 驗證信 + `POST /auth/verify-email` + Login 拒絕未驗證 | |
-| J2 | Forgot Password | `POST /auth/forgot-password` + `POST /auth/reset-password` + Redis token (1hr TTL) + anti-enumeration | |
+| J2 | Forgot Password | `POST /auth/forgot-password` + `POST /auth/reset-password` + Redis token (1hr TTL) + anti-enumeration | `745facd` |
+| J6 | JWT Refresh Token | access token 15min + refresh token 7d Redis rotation + `POST /auth/refresh` + `POST /auth/logout` + 前端 proxy 透明刷新 + 雙 cookie (auth_token + refresh_token) | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -99,9 +100,11 @@
 GET    /api/v1/health
 POST   /api/v1/auth/register        (rate limit: 5r/s)
 POST   /api/v1/auth/login           (rate limit: 5r/s)
+POST   /api/v1/auth/refresh         (rate limit: 5r/s)
 POST   /api/v1/auth/verify-email    (rate limit: 5r/s)
 POST   /api/v1/auth/forgot-password (rate limit: 5r/s)
 POST   /api/v1/auth/reset-password  (rate limit: 5r/s)
+POST   /api/v1/auth/logout          (JWT, protected)
 GET    /api/v1/auth/ws-token       (JWT)
 GET    /api/v1/me                  (JWT, 20r/s)
 PUT    /api/v1/me/password         (JWT, 20r/s)
@@ -199,9 +202,9 @@ marketfeed/service.go (C1)
 | ~~J1~~ | ~~Email 驗證~~ | ~~註冊後發送驗證信 + `users.status` 狀態切換（pending → active）~~ | ~~中~~ ✅ |
 | ~~J2~~ | ~~Forgot Password~~ | ~~忘記密碼 flow（Resend 發送 reset link + token 驗證 + 重設密碼 endpoint）~~ | ~~中~~ ✅ |
 | ~~J3~~ | ~~CORS Middleware~~ | ~~後端明確設定 CORS 白名單（`FRONTEND_URL`）~~ — 已在 `router.go` 中用 `gin-contrib/cors` 實作 | ~~低~~ ✅ |
-| J4 | CSRF Protection | httpOnly cookie + SPA 需要 CSRF token 或 Double Submit Cookie 防護 | 中 |
+| ~~J4~~ | ~~CSRF Protection~~ | ~~不適用~~ — 已使用 httpOnly cookie + SameSite=Strict/Lax，token 不暴露給 JS，天然免疫 CSRF | ~~中~~ N/A |
 | ~~J5~~ | ~~Per-User Rate Limit~~ | ~~認證後 API 加入 per-user rate limit（目前僅 per-IP），防止單一帳號濫用~~ | ~~低~~ ✅ |
-| J6 | JWT Refresh Token | 實作 refresh token rotation（Redis session store 已存在，缺 refresh flow） | 中 |
+| ~~J6~~ | ~~JWT Refresh Token~~ | ~~實作 refresh token rotation~~ | ~~中~~ ✅ |
 
 ### Phase K — 測試補強
 
@@ -234,7 +237,7 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 75 項 |
+| 已完成 | 77 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
@@ -248,7 +251,7 @@ marketfeed/service.go (C1)
 | Phase K（測試補強） | 3 項 |
 | Phase L（前端體驗） | 5 項 |
 | Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **22 項** |
+| **待開發合計** | **20 項** |
 
 ## 依賴關係
 
@@ -310,7 +313,7 @@ Phase A ✅ 全部完成
 18. ~~**J3 → J5** — CORS + per-user rate limit（低複雜度安全性修補）~~ ✅
 19. ~~**G1 → G6 → G9** — 引擎安全三件套（偏離防護 + 冷啟動 + 降級）~~ ✅
 20. ~~**J1 → J2** — Email 驗證 + Forgot Password（帳號安全基礎）~~ ✅
-21. **J4 → J6** — CSRF + JWT Refresh（安全性完善）
+21. ~~**J4 → J6** — CSRF (N/A) + JWT Refresh Token Rotation~~ ✅
 22. **L1 → L3** — Loading skeleton + Error boundary（前端體驗基礎）
 23. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
 24. **I4** — Koyeb Health Check 設定

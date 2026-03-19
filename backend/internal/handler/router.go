@@ -51,6 +51,7 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 		{
 			authGroup.POST("/register", authH.Register)
 			authGroup.POST("/login", authH.Login)
+			authGroup.POST("/refresh", authH.Refresh)
 			authGroup.POST("/verify-email", authH.VerifyEmail)
 			authGroup.POST("/forgot-password", authH.ForgotPassword)
 			authGroup.POST("/reset-password", authH.ResetPassword)
@@ -84,6 +85,7 @@ func NewRouter(cfg appconfig.Config, log *zap.Logger, jwtMgr *auth.JWTManager, h
 			protected.GET("/billing/plan", billH.GetPlan)
 
 			protected.POST("/auth/ws-token", wsTokenH.Create)
+			protected.POST("/auth/logout", authH.Logout)
 		}
 	}
 
