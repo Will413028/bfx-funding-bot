@@ -37,12 +37,12 @@ func (s *BillingService) GetBilling(ctx context.Context, userID string, since ti
 	}
 
 	summary := &BillingSummary{Records: records}
-	for _, r := range records {
-		switch r.Status {
+	for i := range records {
+		switch records[i].Status {
 		case domain.BillingStatusPaid:
-			summary.TotalPaid += r.Amount
+			summary.TotalPaid += records[i].Amount
 		case domain.BillingStatusPending, domain.BillingStatusOverdue:
-			summary.TotalPending += r.Amount
+			summary.TotalPending += records[i].Amount
 		}
 	}
 

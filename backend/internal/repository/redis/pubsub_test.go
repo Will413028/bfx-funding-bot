@@ -12,16 +12,16 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
-func newTestPubSub(t *testing.T) (*goredis.Client, *miniredis.Miniredis, *zap.Logger) {
+func newTestPubSub(t *testing.T) (*goredis.Client, *zap.Logger) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
 	log, _ := zap.NewDevelopment()
-	return client, mr, log
+	return client, log
 }
 
 func TestSnapshotPubSub_PublishAndSubscribe(t *testing.T) {
-	client, _, log := newTestPubSub(t)
+	client, log := newTestPubSub(t)
 	ctx := context.Background()
 
 	pub := NewSnapshotPubSubRepo(client, log)
@@ -61,7 +61,7 @@ func TestSnapshotPubSub_PublishAndSubscribe(t *testing.T) {
 }
 
 func TestSnapshotPubSub_Close(t *testing.T) {
-	client, _, log := newTestPubSub(t)
+	client, log := newTestPubSub(t)
 	ctx := context.Background()
 
 	sub := NewSnapshotPubSubRepo(client, log)
@@ -86,7 +86,7 @@ func TestSnapshotPubSub_Close(t *testing.T) {
 }
 
 func TestSnapshotPubSub_MultipleMessages(t *testing.T) {
-	client, _, log := newTestPubSub(t)
+	client, log := newTestPubSub(t)
 	ctx := context.Background()
 
 	pub := NewSnapshotPubSubRepo(client, log)
@@ -105,7 +105,7 @@ func TestSnapshotPubSub_MultipleMessages(t *testing.T) {
 	for _, sym := range symbols {
 		snap := sampleSnapshot()
 		snap.Symbol = sym
-		pub.Publish(ctx, snap)
+		_ = pub.Publish(ctx, snap)
 	}
 
 	received := make([]string, 0, 3)

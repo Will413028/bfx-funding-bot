@@ -1,0 +1,50 @@
+run:
+  timeout: 3m
+
+linters:
+  disable:
+    - errcheck # TODO: enable after fixing fire-and-forget patterns (ws writes, goroutine starts)
+  enable:
+    - gocritic
+    - gosec
+    - misspell
+    - unconvert
+    - copyloopvar
+    - makezero
+    - reassign
+    - wastedassign
+    - durationcheck
+    - errname
+
+linters-settings:
+  gocritic:
+    enabled-tags:
+      - diagnostic
+    disabled-checks:
+      - commentedOutCode
+      - ifElseChain
+  gosec:
+    excludes:
+      - G104
+      - G112
+      - G115
+      - G304
+  errcheck:
+    exclude-functions:
+      - (*github.com/gin-gonic/gin.Context).Error
+
+issues:
+  exclude-dirs:
+    - internal/repository/postgres/sqlc
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+
+output:
+  formats:
+    - format: colored-line-number
+  sort-results: true
+  sort-order:
+    - file

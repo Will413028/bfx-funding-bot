@@ -32,7 +32,7 @@ func testEarningsCipher(t *testing.T) *crypto.AES {
 func seedEarningsConfig(repo *mockConfigRepo, userID string) {
 	cfg := domain.StrategyConfig{Currency: "USD"}
 	configJSON, _ := json.Marshal(cfg)
-	repo.Upsert(context.Background(), userID, configJSON)
+	_, _ = repo.Upsert(context.Background(), userID, configJSON)
 }
 
 func TestEarnings_ActiveCreditsWithHistory(t *testing.T) {

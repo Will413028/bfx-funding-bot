@@ -64,8 +64,8 @@ func (r *ExecutionRepo) ListByUser(ctx context.Context, userID string, since tim
 	}
 
 	records := make([]domain.ExecutionRecord, len(rows))
-	for i, row := range rows {
-		records[i] = *toDomainExecution(row)
+	for i := range rows {
+		records[i] = *toDomainExecution(rows[i])
 	}
 	return records, nil
 }
@@ -102,8 +102,8 @@ func (r *ExecutionRepo) ListByUserPaginated(ctx context.Context, userID string, 
 	}
 
 	records := make([]domain.ExecutionRecord, len(rows))
-	for i, row := range rows {
-		records[i] = *toDomainExecution(row)
+	for i := range rows {
+		records[i] = *toDomainExecution(rows[i])
 	}
 	return records, nil
 }

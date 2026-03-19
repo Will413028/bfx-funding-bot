@@ -1,10 +1,17 @@
-.PHONY: dev build sqlc migrate-diff migrate-apply
+.PHONY: dev build test lint sqlc migrate-diff migrate-apply
 
 dev:
 	FRONTEND_URL=http://localhost:3000 go run ./cmd/server/
 
 build:
 	go build -o bin/server ./cmd/server/
+
+test:
+	go test ./... -count=1 -race -timeout 5m
+
+lint:
+	go vet ./...
+	golangci-lint run ./...
 
 sqlc:
 	sqlc generate

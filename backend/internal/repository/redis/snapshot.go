@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -36,7 +37,7 @@ func (r *SnapshotCacheRepo) Set(ctx context.Context, symbol string, snapshot *do
 
 func (r *SnapshotCacheRepo) Get(ctx context.Context, symbol string) (*domain.MarketSnapshot, error) {
 	data, err := r.client.Get(ctx, snapshotKey(symbol)).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
 	if err != nil {
