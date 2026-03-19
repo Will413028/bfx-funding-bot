@@ -1,26 +1,20 @@
 "use client";
 
+import { SettingsSkeleton } from "@/components/shared/page-skeleton";
+import { QueryError } from "@/components/shared/query-error";
 import { ChangePasswordForm } from "@/features/settings/components/change-password-form";
 import { ProfileCard } from "@/features/settings/components/profile-card";
 import { useUser } from "@/features/settings/hooks/use-user";
 
 export default function SettingsPage() {
-  const { data: user, isLoading } = useUser();
+  const { data: user, isLoading, isError, refetch } = useUser();
 
   if (isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="size-6 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
-      </div>
-    );
+    return <SettingsSkeleton />;
   }
 
-  if (!user) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-zinc-500">Failed to load user data</p>
-      </div>
-    );
+  if (isError || !user) {
+    return <QueryError message="Failed to load user data" onRetry={refetch} />;
   }
 
   return (
