@@ -171,15 +171,18 @@ func TestLogin_Success(t *testing.T) {
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
-	token, expiresAt, err := svc.Login(context.Background(), "test@example.com", "password123")
+	result, err := svc.Login(context.Background(), "test@example.com", "password123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if token == "" {
-		t.Error("expected non-empty token")
+	if result.AccessToken == "" {
+		t.Error("expected non-empty access token")
 	}
-	if time.Until(expiresAt) < 23*time.Hour {
-		t.Error("expected expiry ~24h from now")
+	if result.RefreshToken == "" {
+		t.Error("expected non-empty refresh token")
+	}
+	if time.Until(result.ExpiresAt) < 14*time.Minute {
+		t.Error("expected expiry ~15min from now")
 	}
 }
 
@@ -189,14 +192,14 @@ func TestLogin_WrongPassword(t *testing.T) {
 
 	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
 
-	_, _, err := svc.Login(context.Background(), "test@example.com", "wrongpassword")
+	_, err := svc.Login(context.Background(), "test@example.com", "wrongpassword")
 	assertAppErrorCode(t, err, "INVALID_CREDENTIALS")
 }
 
 func TestLogin_NonExistentUser(t *testing.T) {
 	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
-	_, _, err := svc.Login(context.Background(), "nobody@example.com", "password123")
+	_, err := svc.Login(context.Background(), "nobody@example.com", "password123")
 	assertAppErrorCode(t, err, "INVALID_CREDENTIALS")
 }
 
@@ -212,7 +215,7 @@ func TestLogin_SuspendedUser(t *testing.T) {
 		Status:       domain.UserStatusSuspended,
 	}
 
-	_, _, err := svc.Login(context.Background(), "suspended@example.com", "password123")
+	_, err := svc.Login(context.Background(), "suspended@example.com", "password123")
 	assertAppErrorCode(t, err, "USER_SUSPENDED")
 }
 

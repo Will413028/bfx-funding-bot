@@ -30,8 +30,8 @@ func TestGenerateAndValidateToken(t *testing.T) {
 	if token == "" {
 		t.Fatal("expected non-empty token")
 	}
-	if time.Until(expiresAt) < 23*time.Hour {
-		t.Fatalf("expected expiry ~24h from now, got %v", expiresAt)
+	if time.Until(expiresAt) < 14*time.Minute {
+		t.Fatalf("expected expiry ~15min from now, got %v", expiresAt)
 	}
 
 	claims, err := mgr.ValidateToken(token)

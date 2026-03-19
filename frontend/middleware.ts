@@ -86,7 +86,11 @@ export default function middleware(request: NextRequest) {
 	const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
 	const rawToken = request.cookies.get("auth_token")?.value;
+	const hasRefreshToken = request.cookies.has("refresh_token");
 	const token = rawToken && !isTokenExpired(rawToken) ? rawToken : undefined;
+	// User is "authenticated" if they have a valid access token OR a refresh token
+	// (the API proxy will handle transparent refresh for expired access tokens)
+	const isAuthenticated = !!token || hasRefreshToken;
 	const isProtected = protectedPaths.some((p) =>
 		pathnameWithoutLocale.startsWith(p),
 	);
@@ -94,7 +98,7 @@ export default function middleware(request: NextRequest) {
 		pathnameWithoutLocale.startsWith(p),
 	);
 
-	if (isProtected && !token) {
+	if (isProtected && !isAuthenticated) {
 		const locale =
 			pathname.match(localePrefix)?.[1] || routing.defaultLocale;
 		const loginUrl = new URL(`/${locale}/login`, request.url);
@@ -103,7 +107,7 @@ export default function middleware(request: NextRequest) {
 		return applySecurityHeaders(NextResponse.redirect(loginUrl));
 	}
 
-	if (isAuthPage && token) {
+	if (isAuthPage && isAuthenticated) {
 		const locale =
 			pathname.match(localePrefix)?.[1] || routing.defaultLocale;
 		return applySecurityHeaders(

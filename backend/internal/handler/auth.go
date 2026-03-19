@@ -41,6 +41,10 @@ type resetPasswordRequest struct {
 	NewPassword string `json:"newPassword" binding:"required"`
 }
 
+type refreshRequest struct {
+	RefreshToken string `json:"refreshToken" binding:"required"`
+}
+
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req registerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -73,7 +77,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, expiresAt, err := h.userSvc.Login(c.Request.Context(), req.Email, req.Password)
+	result, err := h.userSvc.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
 		handleError(c, err)
 		return
@@ -81,9 +85,40 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"data": gin.H{
-			"token":     token,
-			"expiresAt": expiresAt,
+			"accessToken":  result.AccessToken,
+			"refreshToken": result.RefreshToken,
+			"expiresAt":    result.ExpiresAt,
 		},
+	})
+}
+
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "VALIDATION_ERROR", "message": "refreshToken is required"},
+		})
+		return
+	}
+
+	result, err := h.userSvc.RefreshToken(c.Request.Context(), req.RefreshToken)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"accessToken":  result.AccessToken,
+			"refreshToken": result.RefreshToken,
+			"expiresAt":    result.ExpiresAt,
+		},
+	})
+}
+
+func (h *AuthHandler) Logout(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{"message": "Logged out successfully"},
 	})
 }
 

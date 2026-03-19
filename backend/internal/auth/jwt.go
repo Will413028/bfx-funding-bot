@@ -8,7 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const tokenExpiry = 24 * time.Hour
+const tokenExpiry = 15 * time.Minute
 
 type Claims struct {
 	jwt.RegisteredClaims
