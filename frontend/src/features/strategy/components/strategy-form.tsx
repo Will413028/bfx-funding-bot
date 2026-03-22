@@ -2,6 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2, RotateCcw, Save } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,8 @@ interface StrategyFormProps {
 }
 
 export function StrategyForm({ userConfig }: StrategyFormProps) {
+  const t = useTranslations("strategy");
+  const tc = useTranslations("common");
   const saveMutation = useSaveConfig();
   const resetMutation = useResetConfig();
 
@@ -81,11 +84,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
   }
 
   function onReset() {
-    if (
-      !window.confirm(
-        "Reset strategy to defaults? This will delete your saved config.",
-      )
-    ) {
+    if (!window.confirm(t("confirmReset"))) {
       return;
     }
     resetMutation.mutate(undefined, {
@@ -98,11 +97,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
       {/* Basic Settings */}
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-          Basic Settings
+          {t("basicSettings")}
         </h3>
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="currency">Currency</Label>
+            <Label htmlFor="currency">{t("currency")}</Label>
             <Input id="currency" disabled {...register("currency")} />
           </div>
           <div className="flex items-end gap-3 pb-0.5">
@@ -116,7 +115,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
                 className="size-4 rounded border-white/10 bg-white/5"
                 {...register("autoRenew")}
               />
-              Auto Renew
+              {t("autoRenew")}
             </label>
           </div>
         </div>
@@ -125,11 +124,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
       {/* Range Parameters */}
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-          Amount Range (USD)
+          {t("amountRange")}
         </h3>
         <div className="mt-4 grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="amount-min">Min</Label>
+            <Label htmlFor="amount-min">{tc("min")}</Label>
             <Input
               id="amount-min"
               type="number"
@@ -139,7 +138,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="amount-max">Max</Label>
+            <Label htmlFor="amount-max">{tc("max")}</Label>
             <Input
               id="amount-max"
               type="number"
@@ -158,11 +157,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
 
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-          Rate Range (APR %)
+          {t("rateRange")}
         </h3>
         <div className="mt-4 grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="rate-min">Min</Label>
+            <Label htmlFor="rate-min">{tc("min")}</Label>
             <Input
               id="rate-min"
               type="number"
@@ -172,7 +171,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="rate-max">Max</Label>
+            <Label htmlFor="rate-max">{tc("max")}</Label>
             <Input
               id="rate-max"
               type="number"
@@ -191,11 +190,11 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
 
       <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-          Period Range (Days)
+          {t("periodRange")}
         </h3>
         <div className="mt-4 grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="period-min">Min</Label>
+            <Label htmlFor="period-min">{tc("min")}</Label>
             <Input
               id="period-min"
               type="number"
@@ -205,7 +204,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="period-max">Max</Label>
+            <Label htmlFor="period-max">{tc("max")}</Label>
             <Input
               id="period-max"
               type="number"
@@ -234,7 +233,7 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
           ) : (
             <Save className="mr-1.5 size-4" />
           )}
-          {saveMutation.isSuccess ? "Saved!" : "Save"}
+          {saveMutation.isSuccess ? t("saved") : tc("save")}
         </Button>
         <Button
           type="button"
@@ -248,12 +247,14 @@ export function StrategyForm({ userConfig }: StrategyFormProps) {
           ) : (
             <RotateCcw className="mr-1.5 size-4" />
           )}
-          Reset to Defaults
+          {t("resetDefault")}
         </Button>
       </div>
       {(saveMutation.isError || resetMutation.isError) && (
         <p className="text-sm text-rose-500">
-          {saveMutation.error?.message ?? resetMutation.error?.message ?? "Operation failed"}
+          {saveMutation.error?.message ??
+            resetMutation.error?.message ??
+            t("operationFailed")}
         </p>
       )}
     </form>

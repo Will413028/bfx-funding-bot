@@ -1,6 +1,7 @@
 "use client";
 
 import { Activity, DollarSign, TrendingUp, Wallet } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { StatCard } from "@/components/shared/stat-card";
 import { formatUSD } from "@/lib/format";
 import type { DashboardSummary, EarningsSummary } from "@/types";
@@ -24,6 +25,8 @@ interface StatsGridProps {
 }
 
 export function StatsGrid({ dashboard, earnings }: StatsGridProps) {
+  const t = useTranslations("overview");
+  const ts = useTranslations("status");
   const totalLent = earnings.totalLent;
   const available = dashboard.wallet?.balanceAvailable ?? 0;
   const dailyEarning = earnings.estimatedDailyEarning;
@@ -33,25 +36,25 @@ export function StatsGrid({ dashboard, earnings }: StatsGridProps) {
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard
         icon={Wallet}
-        label="Total Lent"
+        label={t("totalLent")}
         value={<UsdValue amount={totalLent} />}
-        subtitle={`${earnings.activeCredits} active credits`}
+        subtitle={t("activeCreditsCount", { count: earnings.activeCredits })}
       />
       <StatCard
         icon={DollarSign}
-        label="Available Balance"
+        label={t("availableBalance")}
         value={<UsdValue amount={available} />}
       />
       <StatCard
         icon={TrendingUp}
-        label="Est. Daily Earning"
+        label={t("estimatedDailyEarning")}
         value={<UsdValue amount={dailyEarning} />}
         subtitle={`APY ${(earnings.weightedAPY * 100).toFixed(2)}%`}
       />
       <StatCard
         icon={Activity}
-        label="Worker Status"
-        value={engineRunning ? "Running" : "Stopped"}
+        label={t("workerStatus")}
+        value={engineRunning ? ts("running") : ts("stopped")}
         className={engineRunning ? "text-emerald-400" : "text-rose-500"}
       />
     </div>

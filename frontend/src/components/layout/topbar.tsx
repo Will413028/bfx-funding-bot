@@ -1,6 +1,7 @@
 "use client";
 
 import { Menu } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -9,6 +10,7 @@ import { LocaleSwitcher } from "./locale-switcher";
 import { SidebarNav } from "./sidebar-nav";
 
 export function TopBar() {
+  const t = useTranslations("app");
   const [open, setOpen] = useState(false);
 
   return (
@@ -17,7 +19,12 @@ export function TopBar() {
         {/* Mobile menu */}
         <Sheet open={open} onOpenChange={setOpen}>
           <SheetTrigger asChild>
-            <Button variant="ghost" size="icon-sm" className="md:hidden" aria-label="Toggle navigation menu">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="md:hidden"
+              aria-label={t("toggleMenu")}
+            >
               <Menu className="size-5" />
             </Button>
           </SheetTrigger>
@@ -27,7 +34,7 @@ export function TopBar() {
           >
             <div className="flex h-14 items-center px-6">
               <span className="text-sm font-bold tracking-tight">
-                BFX Funding Bot
+                {t("name")}
               </span>
             </div>
             <Separator className="bg-white/5" />
@@ -37,7 +44,7 @@ export function TopBar() {
 
         {/* Logo (visible on mobile, hidden on desktop since sidebar has it) */}
         <span className="text-sm font-bold tracking-tight md:hidden">
-          BFX Funding Bot
+          {t("name")}
         </span>
       </div>
 

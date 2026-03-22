@@ -4,13 +4,13 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { login } from "@/app/[locale]/(auth)/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRouter } from "@/i18n/navigation";
 import { type LoginFormInput, loginSchema } from "@/lib/validations";
 
 export function LoginForm() {
@@ -35,17 +35,18 @@ export function LoginForm() {
     try {
       result = await login(data.email, data.password);
     } catch {
-      setServerError("Login failed");
+      setServerError(t("loginFailed"));
       return;
     }
 
     if (!result.success) {
-      setServerError(result.error ?? "Login failed");
+      setServerError(result.error ?? t("loginFailed"));
       return;
     }
 
     const raw = searchParams.get("callbackUrl") || "/overview";
-    const callbackUrl = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/overview";
+    const callbackUrl =
+      raw.startsWith("/") && !raw.startsWith("//") ? raw : "/overview";
     router.push(callbackUrl);
     router.refresh();
   }
@@ -80,13 +81,21 @@ export function LoginForm() {
           {...register("password")}
         />
         {errors.password && (
-          <p id="password-error" role="alert" className="text-sm text-destructive">
+          <p
+            id="password-error"
+            role="alert"
+            className="text-sm text-destructive"
+          >
             {tv(errors.password.message as string)}
           </p>
         )}
       </div>
 
-      {serverError && <p role="alert" className="text-sm text-destructive">{serverError}</p>}
+      {serverError && (
+        <p role="alert" className="text-sm text-destructive">
+          {serverError}
+        </p>
+      )}
 
       <Button
         type="submit"

@@ -34,7 +34,10 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
   return (
-    <nav aria-label="Main navigation" className="flex flex-1 flex-col justify-between">
+    <nav
+      aria-label="Main navigation"
+      className="flex flex-1 flex-col justify-between"
+    >
       <ul className="flex flex-col gap-1 px-3 py-2">
         {navItems.map((item) => {
           const isActive = pathnameWithoutLocale.startsWith(item.href);

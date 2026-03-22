@@ -1,10 +1,10 @@
 "use client";
 
 import { useTranslations } from "next-intl";
+import { Link } from "@/i18n/navigation";
 
-export default function DashboardError({
+export default function AuthError({
   error,
-  reset,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
@@ -19,13 +19,12 @@ export default function DashboardError({
           ? error.message
           : t("unexpectedError")}
       </p>
-      <button
-        type="button"
-        onClick={reset}
+      <Link
+        href="/"
         className="rounded bg-accent px-4 py-2 text-accent-foreground"
       >
-        {t("tryAgain")}
-      </button>
+        {t("backToHome")}
+      </Link>
     </div>
   );
 }

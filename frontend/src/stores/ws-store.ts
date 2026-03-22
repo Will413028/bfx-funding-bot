@@ -8,20 +8,21 @@ type WSStatus = "disconnected" | "connecting" | "connected";
 interface WSState {
   snapshot: MarketSnapshot | null;
   status: WSStatus;
+  connecting: boolean;
   connect: () => void;
   disconnect: () => void;
 }
 
 let client: WSClient | null = null;
-let connecting = false;
 
-export const useWSStore = create<WSState>((set) => ({
+export const useWSStore = create<WSState>((set, get) => ({
   snapshot: null,
   status: "disconnected",
+  connecting: false,
 
   connect: () => {
-    if (client || connecting) return;
-    connecting = true;
+    if (client || get().connecting) return;
+    set({ connecting: true });
 
     client = new WSClient({
       wsUrl: env.NEXT_PUBLIC_WS_URL,
@@ -29,7 +30,9 @@ export const useWSStore = create<WSState>((set) => ({
       onStatusChange: (status) => set({ status }),
     });
 
-    client.connect().finally(() => { connecting = false; });
+    client.connect().finally(() => {
+      set({ connecting: false });
+    });
   },
 
   disconnect: () => {
@@ -37,7 +40,6 @@ export const useWSStore = create<WSState>((set) => ({
       client.disconnect();
       client = null;
     }
-    connecting = false;
-    set({ status: "disconnected" });
+    set({ status: "disconnected", connecting: false });
   },
 }));

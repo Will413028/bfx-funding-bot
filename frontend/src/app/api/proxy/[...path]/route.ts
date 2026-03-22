@@ -8,6 +8,9 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ACCESS_TOKEN_MAX_AGE = 15 * 60;
 const REFRESH_TOKEN_MAX_AGE = 60 * 60 * 24 * 7;
 
+// Dedup concurrent refresh requests within the same process
+let refreshPromise: Promise<string | null> | null = null;
+
 async function proxyRequest(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> },
@@ -37,10 +40,10 @@ async function proxyRequest(
 
   // If 401 and we have a refresh token, try to refresh
   if (res.status === 401) {
-    const refreshed = await tryRefresh();
-    if (refreshed) {
+    const newToken = await tryRefreshDedup();
+    if (newToken) {
       // Retry with new access token
-      res = await doFetch(url, request.method, body);
+      res = await doFetch(url, request.method, body, newToken);
     }
   }
 
@@ -57,8 +60,9 @@ async function doFetch(
   url: URL,
   method: string,
   body: string | undefined,
+  overrideToken?: string,
 ): Promise<Response> {
-  const token = (await cookies()).get("auth_token")?.value;
+  const token = overrideToken ?? (await cookies()).get("auth_token")?.value;
 
   const headers = new Headers();
   if (body !== undefined) {
@@ -75,11 +79,19 @@ async function doFetch(
   });
 }
 
-async function tryRefresh(): Promise<boolean> {
+async function tryRefreshDedup(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = tryRefresh().finally(() => {
+    refreshPromise = null;
+  });
+  return refreshPromise;
+}
+
+async function tryRefresh(): Promise<string | null> {
   const jar = await cookies();
   const refreshToken = jar.get("refresh_token")?.value;
   if (!refreshToken) {
-    return false;
+    return null;
   }
 
   try {
@@ -93,7 +105,7 @@ async function tryRefresh(): Promise<boolean> {
       // Refresh failed — clear cookies
       jar.delete("auth_token");
       jar.delete({ name: "refresh_token", path: "/api" });
-      return false;
+      return null;
     }
 
     const data = (await res.json()) as {
@@ -116,9 +128,9 @@ async function tryRefresh(): Promise<boolean> {
       maxAge: REFRESH_TOKEN_MAX_AGE,
     });
 
-    return true;
+    return data.data.accessToken;
   } catch {
-    return false;
+    return null;
   }
 }
 

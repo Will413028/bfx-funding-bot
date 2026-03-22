@@ -1,10 +1,11 @@
 "use client";
 
 import { KeyRound, Plus } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { ApiKeysSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
+import { Button } from "@/components/ui/button";
 import { ApiKeyCard } from "@/features/api-keys/components/api-key-card";
 import { CreateApiKeyDialog } from "@/features/api-keys/components/create-apikey-dialog";
 import {
@@ -16,6 +17,7 @@ import {
 import type { CreateApiKeyInput } from "@/lib/validations";
 
 export default function ApiKeysPage() {
+  const t = useTranslations("apiKeys");
   const [createOpen, setCreateOpen] = useState(false);
   const { data: apiKeys, isLoading, isError, refetch } = useApiKeys();
   const createMutation = useCreateApiKey();
@@ -33,7 +35,7 @@ export default function ApiKeysPage() {
   }
 
   if (isError) {
-    return <QueryError message="Failed to load API keys" onRetry={refetch} />;
+    return <QueryError message={t("loadFailed")} onRetry={refetch} />;
   }
 
   const keys = apiKeys ?? [];
@@ -42,7 +44,7 @@ export default function ApiKeysPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="font-semibold text-xl tracking-tight">API Keys</h1>
+        <h1 className="font-semibold text-xl tracking-tight">{t("title")}</h1>
         {!hasKey && (
           <Button
             size="sm"
@@ -50,7 +52,7 @@ export default function ApiKeysPage() {
             className="active:scale-[0.98]"
           >
             <Plus className="mr-1.5 size-4" />
-            Add Key
+            {t("addKeyShort")}
           </Button>
         )}
       </div>
@@ -58,16 +60,14 @@ export default function ApiKeysPage() {
       {!hasKey ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.01] py-16">
           <KeyRound className="size-10 text-zinc-600" />
-          <p className="mt-4 text-sm text-zinc-500">
-            No API keys yet. Add your Bitfinex API key to get started.
-          </p>
+          <p className="mt-4 text-sm text-zinc-500">{t("empty")}</p>
           <Button
             size="sm"
             className="mt-4 active:scale-[0.98]"
             onClick={() => setCreateOpen(true)}
           >
             <Plus className="mr-1.5 size-4" />
-            Add Key
+            {t("addKeyShort")}
           </Button>
         </div>
       ) : (
@@ -78,8 +78,12 @@ export default function ApiKeysPage() {
               apiKey={key}
               onVerify={(id) => verifyMutation.mutate(id)}
               onDelete={(id) => deleteMutation.mutate(id)}
-              isVerifying={verifyMutation.isPending && verifyMutation.variables === key.id}
-              isDeleting={deleteMutation.isPending && deleteMutation.variables === key.id}
+              isVerifying={
+                verifyMutation.isPending && verifyMutation.variables === key.id
+              }
+              isDeleting={
+                deleteMutation.isPending && deleteMutation.variables === key.id
+              }
             />
           ))}
         </div>

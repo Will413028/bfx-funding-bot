@@ -120,6 +120,17 @@ type AppError struct {
 | axiom-go | 雲端日誌（optional） |
 | resend | Email 通知 |
 
+## .env 注意事項
+
+- **DATABASE_URL 必須用雙引號包裹** — 連線字串含 `&`（query string），zsh `source .env` 會把 `&` 解讀為背景執行
+  ```
+  # 正確
+  DATABASE_URL="postgresql://...?sslmode=require&channel_binding=require"
+
+  # 錯誤 — & 會被 zsh 解析
+  DATABASE_URL=postgresql://...?sslmode=require&channel_binding=require
+  ```
+
 ## Docker
 
 - Multi-stage build：golang:1.25-alpine → alpine:3.21

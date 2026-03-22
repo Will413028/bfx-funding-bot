@@ -163,16 +163,6 @@ export interface BillingListResponse {
   pagination: CursorPagination;
 }
 
-export interface PlanFeatures {
-  plan: string;
-  price: number;
-  autoLending: boolean;
-  advancedStrategy: boolean;
-  emailNotify: boolean;
-  priorityQuota: boolean;
-  customParams: boolean;
-}
-
 // ── Execution ──
 
 export interface ExecutionRecord {
@@ -194,13 +184,6 @@ export interface ExecutionListResponse {
   pagination: CursorPagination;
 }
 
-// ── Engine Status ──
-
-export interface EngineStatus {
-  running: boolean;
-  workerCount: number;
-}
-
 // ── Charts ──
 
 export interface DailyEarning {
@@ -216,13 +199,4 @@ export interface MarketSnapshot {
   mdcScore: number;
   flashFreeze: boolean;
   timestamp: string;
-}
-
-export interface LendingStatus {
-  activeOffers: number;
-  activeCredits: number;
-  totalLent: number;
-  availableBalance: number;
-  estimatedDailyEarning: number;
-  workerStatus: "running" | "paused" | "stopped";
 }

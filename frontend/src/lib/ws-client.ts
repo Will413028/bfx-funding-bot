@@ -2,6 +2,8 @@ import type { MarketSnapshot } from "@/types";
 
 const MIN_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 30_000;
+const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1_000; // Reconnect 2 min before expiry
+const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1_000; // Assume 15-min TTL
 
 interface WSMessage {
   type: string;
@@ -18,6 +20,7 @@ export class WSClient {
   private ws: WebSocket | null = null;
   private reconnectMs = MIN_RECONNECT_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
   private opts: WSClientOptions;
 
@@ -55,6 +58,8 @@ export class WSClient {
       return;
     }
 
+    this.scheduleTokenRefresh();
+
     const url = `${this.opts.wsUrl}/api/v1/ws?token=${encodeURIComponent(token)}`;
     const ws = new WebSocket(url);
 
@@ -76,6 +81,7 @@ export class WSClient {
 
     ws.onclose = () => {
       this.ws = null;
+      this.clearTokenRefreshTimer();
       this.opts.onStatusChange("disconnected");
       if (!this.intentionalClose) {
         this.scheduleReconnect();
@@ -96,6 +102,7 @@ export class WSClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.clearTokenRefreshTimer();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -112,5 +119,24 @@ export class WSClient {
     }, this.reconnectMs);
 
     this.reconnectMs = Math.min(this.reconnectMs * 2, MAX_RECONNECT_MS);
+  }
+
+  private scheduleTokenRefresh(): void {
+    this.clearTokenRefreshTimer();
+    const refreshIn = DEFAULT_TOKEN_TTL_MS - TOKEN_REFRESH_BUFFER_MS;
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.tokenRefreshTimer = null;
+      // Close current WS — onclose will trigger reconnect with a fresh token
+      if (this.ws) {
+        this.ws.close();
+      }
+    }, refreshIn);
+  }
+
+  private clearTokenRefreshTimer(): void {
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
   }
 }

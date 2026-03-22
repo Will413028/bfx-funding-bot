@@ -1,6 +1,7 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 
 interface LoadMoreButtonProps {
@@ -14,6 +15,8 @@ export function LoadMoreButton({
   isFetchingNextPage,
   onClick,
 }: LoadMoreButtonProps) {
+  const t = useTranslations("common");
+
   if (!hasMore) return null;
 
   return (
@@ -28,7 +31,7 @@ export function LoadMoreButton({
         {isFetchingNextPage && (
           <Loader2 className="mr-1.5 size-4 animate-spin" />
         )}
-        Load More
+        {t("loadMore")}
       </Button>
     </div>
   );

@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { formatAPR, formatPeriod, formatUSD } from "@/lib/format";
 import type { ExecutionRecord } from "@/types";
@@ -16,10 +17,12 @@ interface ExecutionTableProps {
 }
 
 export function ExecutionTable({ records }: ExecutionTableProps) {
+  const t = useTranslations("history");
+
   if (records.length === 0) {
     return (
       <p className="py-12 text-center text-sm text-zinc-500">
-        No execution records
+        {t("noExecutions")}
       </p>
     );
   }
@@ -28,13 +31,13 @@ export function ExecutionTable({ records }: ExecutionTableProps) {
     <div className="rounded-xl border border-white/5 bg-white/[0.02] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
       {/* Header */}
       <div className="grid grid-cols-[80px_60px_1fr_1fr_60px_80px_1fr] gap-2 border-b border-white/5 px-4 py-2.5 text-xs font-medium uppercase tracking-wider text-zinc-500">
-        <span>Action</span>
-        <span>CCY</span>
-        <span className="text-right">Amount</span>
-        <span className="text-right">Rate (APR)</span>
-        <span className="text-right">Period</span>
-        <span>Status</span>
-        <span className="text-right">Time</span>
+        <span>{t("action")}</span>
+        <span>{t("ccy")}</span>
+        <span className="text-right">{t("amount")}</span>
+        <span className="text-right">{t("rateApr")}</span>
+        <span className="text-right">{t("period")}</span>
+        <span>{t("status")}</span>
+        <span className="text-right">{t("time")}</span>
       </div>
       {/* Rows */}
       {records.map((r) => (

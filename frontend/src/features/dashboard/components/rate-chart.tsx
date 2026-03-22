@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
 import {
   Area,
@@ -20,6 +21,7 @@ interface RatePoint {
 }
 
 export function RateChart() {
+  const t = useTranslations("overview");
   const snapshot = useWSStore((s) => s.snapshot);
   const status = useWSStore((s) => s.status);
   const bufferRef = useRef<RatePoint[]>([]);
@@ -53,15 +55,15 @@ export function RateChart() {
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
       <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-        FRR (APR%) — Live
+        {t("rateChartTitle")}
       </h3>
 
       {data.length === 0 ? (
         <div className="mt-4 flex h-[200px] items-center justify-center">
           <p className="text-sm text-zinc-500">
             {status === "connected"
-              ? "Waiting for market data..."
-              : "Connecting to market feed..."}
+              ? t("waitingForData")
+              : t("connectingToFeed")}
           </p>
         </div>
       ) : (

@@ -47,52 +47,12 @@ Bitfinex 自動放貸 SaaS 平台。
 - 實作完成後必須確認 `go test ./...` 全部通過才能 archive
 - 純文件修改（ROADMAP、strategy-journal 等）不需要走 OpenSpec
 
-### Atlas Migration
-
-- **套用 migration 一律使用 `atlas migrate apply --env neon`，不可用 MCP 直接執行 SQL**
-- `atlas.hcl` 設定 `revisions_schema = "public"` — Neon pooler 不支援獨立 schema 存 revision
-- `atlas migrate diff` 用於生成 migration 檔案（需要 Docker 執行 dev DB）
-- 執行前需 `source ../../.env` 或 `export DATABASE_URL=...`
-
-### sqlc 工作流
-
-1. 修改 `backend/internal/repository/postgres/query/*.sql`
-2. 在 `backend/` 下執行 `sqlc generate`
-3. **`backend/internal/repository/postgres/sqlc/` 目錄是自動產生的，不可手改**
-
-### .env 注意事項
-
-- **DATABASE_URL 必須用雙引號包裹** — 連線字串含 `&`（query string），zsh `source .env` 會把 `&` 解讀為背景執行
-  ```
-  # 正確
-  DATABASE_URL="postgresql://...?sslmode=require&channel_binding=require"
-
-  # 錯誤 — & 會被 zsh 解析
-  DATABASE_URL=postgresql://...?sslmode=require&channel_binding=require
-  ```
-
-### Neon PostgreSQL
-
-- Project ID: `lingering-resonance-64910611`
-- 使用 pooler 連線（hostname 含 `-pooler`）
-- sqlc 搭配 `pgx/v5` driver
-
-### 三層架構
-
-- `handler/` → `service/` → `repository/`（consumer-side interface pattern）
-- fx 依賴注入：`repository/di.go` 用 `fx.Annotate` + `fx.As` 綁定 interface
-- 錯誤處理：統一使用 `domain.AppError`
-- 每個使用者限一筆 API Key 和一筆 Strategy Config（UNIQUE constraint on user_id）
-
 ### 測試與品質（強制）
 
 - **每個 change 必須包含對應的單元測試**，不可只寫程式不寫測試
-- 每層用 in-memory mock repo 測試，不依賴 DB
-- `assertAppErrorCode(t, err, "CODE")` helper 定義在 `service/user_test.go`，跨 test 檔案共用
-- handler test 用 `httptest.NewRecorder` + `gin.TestMode`
-- 後端提交前驗證：`cd backend && golangci-lint run ./... && go test ./...`
-- 前端提交前驗證：`cd frontend && pnpm lint && pnpm test`（lint = tsc + biome check）
-- 前端 E2E 測試：`cd frontend && pnpm test:e2e`（Playwright，涉及 UI 改動時必須執行）
+- **套用 migration 一律使用 `atlas migrate apply --env neon`，不可用 MCP 直接執行 SQL**
+- 後端架構、測試慣例、sqlc/Atlas 工作流詳見 `backend/CLAUDE.md`
+- 前端測試指令、架構慣例詳見 `frontend/CLAUDE.md`
 
 ### Commit 訊息格式
 

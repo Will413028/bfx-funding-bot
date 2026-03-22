@@ -64,7 +64,7 @@ async function request<T>(
       const { cookies } = await import("next/headers");
       const token = (await cookies()).get("auth_token")?.value;
       if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
+        headers.Authorization = `Bearer ${token}`;
       }
     } catch {
       // Outside Next.js request context (e.g., tests) — skip auth
