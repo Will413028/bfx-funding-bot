@@ -47,7 +47,7 @@ func (r *BillingRepo) ListByUser(ctx context.Context, userID string, since time.
 
 	rows, err := r.q.ListBillingByUser(ctx, sqlc.ListBillingByUserParams{
 		UserID:      uid,
-		PeriodStart: pgtype.Timestamptz{Time: since, Valid: true},
+		CreatedAt: pgtype.Timestamptz{Time: since, Valid: true},
 		Limit:       int32(limit),
 	})
 	if err != nil {
