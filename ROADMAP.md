@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-22（G0-G11 + GT1-5 + P1 全部 + I/J/K/L 完成）
+> 最後更新：2026-03-22（G0-G11 + GT1-6 + P1-P3 全部 + I/J/K/L 完成）
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
@@ -82,6 +82,8 @@
 | GT4 | `rateNoiseRange` 0.01→0.004 | 減少排隊位置損失 | `a86e34b` |
 | GT5 | `aggressiveRateMul` 1.25→1.12 | 提高 aggressive tier fill rate | `a86e34b` |
 | M1 | `FeeRate` 常數 | 新增 Bitfinex 15% 手續費常數供後續計算使用 | `a86e34b` |
+| P2 | Timing & Fill Rate (7 項) | GT6 sigmoid + G12 FRR Trend + G15 Smart Wall + S1 BestAsk Pricing + S5 Cascade + S6 Dynamic Weekend + M5 Rate Spike | `03f63ad` |
+| P3 | Data-Driven (5 項) | G14 Auto-Renew Re-pricing + G16 Gap Detection + S4 RatePercentile + S10 Mean-Reversion + M2 Gap Cost Tracking | `12829a2` |
 
 ### 目前 DB Schema (5 tables)
 
@@ -163,29 +165,20 @@ marketfeed/service.go (C1)
 ### Phase G — 策略行為增強
 
 > 對照 `strategy_specification.md`（§11-13）+ `docs/strategy-journal.md`。
-> 進度：25/41 完成。
+> 進度：37/41 完成。
 
 #### G0 — 策略 Pipeline 接線 ✅
 
 - [x] G0 Composite Strategy Pipeline — 13 模組串連成 4 階段 pipeline（`12c9e25`）
 
-#### G-Tune — 參數調校（5/6）
+#### G-Tune — 參數調校 ✅
 
 - [x] GT1 `frrFloorRatio` 0.80 → **0.92**（`12c9e25`）
 - [x] GT2 `maxPremiumDown` 0.30 → **0.18**（`12c9e25`）
 - [x] GT3 `regimeContangoPeriodRatio` 0.75 → **0.88**（`12c9e25`）
 - [x] GT4 `rateNoiseRange` 0.01 → **0.004**（`12c9e25`）
 - [x] GT5 `aggressiveRateMul` 1.25 → **1.12**（`12c9e25`）
-- [ ] GT6 Queue discount — 兩段式跳躍 → 線性/sigmoid 曲線
-
-<details>
-<summary>GT6 詳細規格</summary>
-
-| # | 參數 | 目前值 | 建議值 | 理由 | 涉及檔案 |
-|---|------|--------|--------|------|---------|
-| GT6 | queue discount | 兩段式跳躍 (20%/-2%, 50%/-5%) | 線性/sigmoid 曲線 | 閾值附近震盪不穩定 | `strategy/queue.go` |
-
-</details>
+- [x] GT6 Queue discount — sigmoid smoothstep 曲線（`03f63ad`）
 
 #### G1–G10 — 規範定義增強 ✅
 
@@ -200,14 +193,14 @@ marketfeed/service.go (C1)
 - [x] G9 Graceful Degradation（`bae8d96`）
 - [x] G10 Performance Tracking（`6f19484`）
 
-#### G11–G16 — 實作 Review 新增項目（1/6）
+#### G11–G16 — 實作 Review 新增項目（5/6）
 
 - [x] G11 Idle Capital Urgency（`e5825aa`）
-- [ ] G12 FRR Trend Tracking — FRR EMA 趨勢判斷
+- [x] G12 FRR Trend Tracking — FRR EMA 趨勢判斷（`03f63ad`）
 - [ ] G13 Historical Fill Rate Learning — 數據驅動定價
-- [ ] G14 Auto-Renew Re-pricing — 到期走 pipeline 重新定價
-- [ ] G15 Smart Wall Positioning — price just below wall
-- [ ] G16 Order Book Gap Detection — book 空隙報價
+- [x] G14 Auto-Renew Re-pricing — 到期走 pipeline 重新定價（`12829a2`）
+- [x] G15 Smart Wall Positioning — price just below wall（`03f63ad`）
+- [x] G16 Order Book Gap Detection — book 空隙報價（`12829a2`）
 
 <details>
 <summary>G12–G16 詳細規格</summary>
@@ -222,20 +215,20 @@ marketfeed/service.go (C1)
 
 </details>
 
-#### S1–S10 — 策略設計 Review 新增項目（3/10）
+#### S1–S10 — 策略設計 Review 新增項目（8/10）
 
 > 見 `strategy_specification.md` §12。
 
-- [ ] S1 BestAsk-Relative Pricing — 定價改為 bestAsk 偏移
+- [x] S1 BestAsk-Relative Pricing — 定價改為 bestAsk 偏移（`03f63ad`）
 - [x] S2 Auto-Renew Always-On（`e5825aa`）
 - [x] S3 Remove Random Noise（`e5825aa`）
-- [ ] S4 RatePercentile Signal — 歷史百分位信號
-- [ ] S5 Cascade Phase Response — 瀑布分三階段回應
-- [ ] S6 Dynamic Weekend Premium — 歷史 ratio 動態計算
+- [x] S4 RatePercentile Signal — 歷史百分位信號（`12829a2`）
+- [x] S5 Cascade Phase Response — 瀑布分三階段回應（`03f63ad`）
+- [x] S6 Dynamic Weekend Premium — 歷史 ratio 動態計算（`03f63ad`）
 - [ ] S7 Per-Currency Parameters — stablecoin / crypto 分組
 - [x] S8 Confidence-Scaled Deployment（`e5825aa`）
 - [ ] S9 Rolling Period Ladder — 到期梯隊管理
-- [ ] S10 Mean-Reversion P(higher) — EV_wait 均值回歸公式
+- [x] S10 Mean-Reversion P(higher) — EV_wait 均值回歸公式（`12829a2`）
 
 <details>
 <summary>S 系列待開發詳細規格</summary>
@@ -252,15 +245,15 @@ marketfeed/service.go (C1)
 
 </details>
 
-#### M1–M8 — 市場微觀結構 Review 新增項目（5/8）
+#### M1–M8 — 市場微觀結構 Review 新增項目（7/8）
 
 > 見 `strategy_specification.md` §13。
 
 - [x] M1 Fee-Adjusted Calculations — `FeeRate = 0.15` 常數（`12c9e25`）
-- [ ] M2 Gap Cost Tracking + Pre-scheduling — 到期→成交空檔追蹤
+- [x] M2 Gap Cost Tracking + Pre-scheduling — 到期→成交空檔追蹤（`12829a2`）
 - [x] M3 Proactive Offer Refresh（`e5825aa`）
 - [x] M4 Early Return Risk Premium（`e5825aa`）
-- [ ] M5 Non-Liquidation Rate Spike Detector — 非清算性 spike 偵測
+- [x] M5 Non-Liquidation Rate Spike Detector — 非清算性 spike 偵測（`03f63ad`）
 - [x] M6 FRR Manipulation Guard（`e5825aa`）
 - [ ] M7 Temporal Laddering — 跨心跳分批部署
 - [x] M8 FRR Feedback Loop Awareness（`e5825aa`）
@@ -282,20 +275,20 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 91 項 |
+| 已完成 | 103 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ |
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ |
-| Phase G（策略行為增強） | 25/41 完成，**16 項待開發** |
+| Phase G（策略行為增強） | 37/41 完成，**4 項待開發** |
 | ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅，H3 待部署後設定 |
 | ~~Phase I（CI/CD）~~ | ~~I1+I2~~ ✅ |
 | ~~Phase J（Auth 強化）~~ | ~~J1+J2+J3+J5+J6~~ ✅ |
 | ~~Phase K（前端測試）~~ | ~~K2~~ ✅ |
 | ~~Phase L（UX 強化）~~ | ~~L1+L2+L3+L4+L5~~ ✅ |
-| **待開發合計** | **17 項**（GT6 + G12-G16 + S1/S4-S7/S9-S10 + M2/M5/M7 + H3） |
+| **待開發合計** | **5 項**（G13 + S7/S9 + M7 + H3） |
 
 ## 依賴關係
 
@@ -314,9 +307,9 @@ Phase A ✅ 全部完成
     ├── A5 (Execution) ✅ → Phase E ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase G（25/41 完成）
-    │                      ├── G0-G11 ✅ + GT1-5 ✅ + M1/M3/M4/M6/M8 ✅ + S2/S3/S8 ✅
-    │                      └── 待開發：GT6 + G12-G16 + S1/S4-S7/S9-S10 + M2/M5/M7
+    │                  Phase G（37/41 完成）
+    │                      ├── G0-G12/G14-G16 ✅ + GT1-6 ✅ + M1-M6/M8 ✅ + S1-S6/S8/S10 ✅
+    │                      └── 待開發：G13 + S7/S9 + M7
     │
     └── All backend APIs ready
          │

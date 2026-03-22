@@ -56,14 +56,14 @@
   - 第 3 個數據點：恢復至 **100%**。
 - **例外**：清算瀑布信號因其硬性覆寫特性，不適用平滑機制——恢復後立即生效。
 
-> **⚡ 實作狀態**：尚未實作。見 ROADMAP G2。
+> **⚡ 實作狀態** (`signal/mdc.go`)：已實作（G2, `57d9b8c`）。Signal freshness decay 透過 `e^(-λ × age)` 實現。Recovery smoothing 透過 Confidence 因子間接達成——新出現的信號 Confidence 較低，隨樣本數遞增。
 
 ### 2.5 MDC 計算
 
 - `MDC = tanh(Σ (Signal_i × Effective_Weight_i))`，壓縮至 [-1, +1]。
 - **動態權重調整**：每週根據績效追蹤模組中各信號的歷史預測準確率，自動微調基礎權重（±10% 上限）。
 
-> **⚡ 實作狀態** (`signal/mdc.go`)：`tanh` 壓縮已實作。動態權重調整尚未實作（依賴 G10 Performance Tracking）。實作額外加入 `Confidence` 因子：`Effective_Weight = Base_Weight × Confidence × e^(-λ × age)`。
+> **⚡ 實作狀態** (`signal/mdc.go`)：`tanh` 壓縮已實作。G10 Performance Tracking 已完成（`6f19484`），提供 Confidence 因子。動態權重自動微調尚未實作（目前用固定 base weight）。公式：`Effective_Weight = Base_Weight × Confidence × e^(-λ × age)`。
 
 ### 2.6 MDC 驅動的策略映射
 
@@ -77,11 +77,7 @@
 | -0.7 ~ -0.3 | 溫和看跌 | `Rate - 1 Tick` | 2 天 | 全部前線 |
 | -1.0 ~ -0.7 | 強烈看跌 | `Rate - 2 Ticks` | 2 天 | 全部前線，觸發機會成本評估 |
 
-> **⚡ 實作狀態** (`strategy/pricing.go`)：實作改為**連續線性內插**取代離散區間。公式：
-> - MDC ≥ 0: `multiplier = 1.0 + score × 0.50`（MDC +1.0 → ×1.50）
-> - MDC < 0: `multiplier = 1.0 + score × 0.30`（MDC -1.0 → ×0.70）
->
-> 這比設計值（最高 ×1.03）激進許多。2026-03-21 review 建議將 `maxPremiumDown` 從 0.30 降至 0.15–0.20（見 ROADMAP GT2）。同時加入 regime 調整：Contango ×1.05, Backwardation ×0.90, Crisis → Rate.Min。
+> **⚡ 實作狀態** (`strategy/pricing.go`)：P2（`03f63ad`）重寫為 **S1 BestAsk-Relative Pricing**：`rate = bestAsk - offset`，其中 `offset = 2.0 × minTickSize × mdcFactor × regimeFactor`。MDC ±1 對應 offset 0–2x，regime 調整（Contango 0.5x, Backwardation 2x, Crisis 0）。BestAsk 不可用時 fallback 回 FRR-based。同時整合 G15 Smart Wall Positioning：靠近 wall 時定價在 wall 下方 `minTickSize`。GT2 `maxPremiumDown` 已降至 0.18。
 
 > **資金配置偏移說明**：此欄為相對於當前市場體制參數組（4.1）的**微調方向**，而非獨立的分層比例。例如「釣魚層加碼」代表在體制參數組的基礎上，將釣魚層比例提升 5–10%（從其他層扣除）；「前線加碼」代表將釣魚層資金轉移至第一層。具體偏移幅度見附錄 B。
 
@@ -113,7 +109,7 @@
 - **分散牆偵測**：滑動窗口計算連續 5 檔累積金額 > `MIN_WALL_THRESHOLD`，判定為「分散式阻力牆」。
 - **動作**：目標位於牆後時，利率改為 `Wall_Rate - 0.00000001`。
 
-> **⚡ 實作狀態** (`orderbook/wall.go`)：實作改用**百分比門檻**：單檔 > 5% 同側總深度 → 單一牆；相鄰 entries（gap ≤ spread × 2）合計 > 5% → 分散牆。未使用 50,000 USD 絕對下限。`pricing.go` 中的 wall avoidance 為 rate × 0.99（-1%），而非 `Wall_Rate - 1 tick`。2026-03-21 review 建議改為「智慧貼牆」策略（見 ROADMAP G15）。
+> **⚡ 實作狀態** (`orderbook/wall.go` + `strategy/pricing.go`)：百分比門檻偵測：單檔 > 5% 同側總深度 → 單一牆；相鄰 entries（gap ≤ spread × 2）合計 > 5% → 分散牆。G15 Smart Wall Positioning 已完成（`03f63ad`）：靠近 wall 時定價在 wall 下方 `minTickSize`，搶先成交。
 
 ### 3.3 供需面信號追蹤 (Demand-Side Signal Tracking)
 
@@ -220,7 +216,7 @@
 > | $150–$1000 | 2 tiers | 70% core / 30% aggressive | ×1.0 / ×1.25 |
 > | > $1000 | 3 tiers | 50% core / 30% moderate / 20% aggressive | ×1.0 / ×1.10 / ×1.25 |
 >
-> Regime cap：Crisis → max 1 tier，Backwardation → max 2 tiers。碎片清掃門檻改為 $50（Bitfinex 最低限額）。釣魚層回收機制和波動度判定尚未實作。2026-03-21 review 建議將 aggressive tier 乘數從 1.25 降至 1.10–1.15（見 ROADMAP GT5）。
+> Regime cap：Crisis → max 1 tier，Backwardation → max 2 tiers。碎片清掃門檻 $50（Bitfinex 最低限額）。GT5 已將 aggressive tier 乘數從 1.25 降至 1.12。釣魚層回收機制和雙窗口波動度判定尚未實作（已知偏差，等波動度數據再做）。
 
 ### 4.3 智慧隱藏掛單機制 (Smart Hidden Offers)
 
@@ -269,12 +265,12 @@
 - `Rate_Floor = 過去 30 天 FRR 的 P10`。即使 EV 模型判定借出，低於 P10 仍不掛。
 - **安全閥**：待機 > 2 小時，地板下調 20%。
 
-> **⚡ 實作狀態** (`strategy/floor.go`)：實作改用**三層 floor 取最大值**：
+> **⚡ 實作狀態** (`strategy/floor.go`)：三層 floor 取最大值：
 > 1. 機會成本 floor：`Config.Rate.Min`
-> 2. FRR 相對 floor：`FRR × 0.80`
+> 2. FRR 相對 floor：`EffectiveFRR × 0.92`（GT1: 0.80→0.92）
 > 3. Regime 動態 floor：Crisis → `Rate.Min × 1.5`，Backwardation → `Rate.Min × 1.2`
 >
-> 未使用 P10 百分位（需歷史數據累積）。安全閥（待機 > 2hr 下調）尚未實作。2026-03-21 review 建議：FRR floor 從 0.80 提高到 0.90–0.95（見 ROADMAP GT1），並加入閒置資金急迫度（見 ROADMAP G11）。
+> G11 Idle Capital Urgency 已實作（`e5825aa`）：`discount = min(idleMinutes/120, 0.15)`，idle > 120 分鐘最多下調 15%。未使用 P10 百分位（需歷史數據累積）。
 
 ### 4.10 閃崩保護 (Flash Crash Guard)
 
@@ -302,7 +298,7 @@
 - `ETA > TTL × 2` → 降價 1–2 Ticks；`ETA < TTL × 0.5` → 保留。
 - 與 TTL 取先觸發者。
 
-> **⚡ 實作狀態** (`strategy/queue.go`)：實作改用**深度比例**（不需 Consume_Rate 數據）：
+> **⚡ 實作狀態** (`strategy/queue.go`)：GT6（`03f63ad`）改用 **sigmoid smoothstep** 連續曲線取代兩段式跳躍。公式：`discount = 1.0 - 0.05 × smoothstep(queueRatio, 0.10, 0.60)`，其中 `smoothstep(x, e0, e1) = t² × (3 - 2t)`。深度比例方式（不需 Consume_Rate 數據）：
 > - `queueDepth = AskDepth × (rate - BestAsk) / Spread`
 > - `queueRatio > 0.50` → rate × 0.95（-5%）
 > - `queueRatio > 0.20` → rate × 0.98（-2%）
@@ -318,7 +314,7 @@
 
 - 最終利率加入 `0.00000001 ~ 0.00000005` 隨機值。
 
-> **⚡ 實作狀態** (`strategy/noise.go`)：實作改用**百分比擾動**：rate ±1%, amount ±2%。額外加入心理價位避讓（`psychStep = 0.0005`，靠近時偏移 `0.00002`）。2026-03-21 review 建議將 rate noise 從 ±1% 降至 ±0.3–0.5%（見 ROADMAP GT4）。
+> **⚡ 實作狀態** (`strategy/noise.go`)：S3（`e5825aa`）**移除隨機擾動**，GT4 將 rate noise 從 ±1% 降至 ±0.004。目前只保留**心理價位避讓**：`psychStep = 0.0005`，靠近時偏移 `±0.00002`。無 amount noise。
 
 ---
 
@@ -359,7 +355,7 @@
 - 建議以歷史回測優化啟動時間。預設 UTC 週四 12:00 至週五 18:00，門檻降 20%。
 - 天數遞減：週五 14~30 天，週六 10~14 天，週日 2~7 天。
 
-> **⚡ 實作狀態** (`strategy/weekend.go`)：實作為 rate 溢價乘數（非天數遞減）：Friday 18:00+ UTC ×1.02，Saturday ×1.05，Sunday ×1.03，weekday ×1.00。未實作天數遞減邏輯。
+> **⚡ 實作狀態** (`strategy/weekend.go`)：S6（`03f63ad`）改為**動態週末溢價**：ComputeWeekendMultiplier 優先使用歷史 weekend/weekday ratio（若 > 1.0），否則 fallback 回固定值（Fri 18:00+ ×1.02, Sat ×1.05, Sun ×1.03）。未實作天數遞減邏輯。
 
 ### 5.5 特殊事件日曆 (Event Calendar Integration)
 
@@ -373,7 +369,7 @@
 - 各天數區間的歷史持有率 < 60% 則降低偏好權重。
 - `有效回報 = Adjusted_Rate(5.3) × 持有率`。
 
-> **⚡ 實作狀態**：尚未實作。見 ROADMAP G5。
+> **⚡ 實作狀態** (`strategy/earlyreturn.go`)：已實作（G5, `57d9b8c`）。基於歷史提前歸還率計算 risk premium，調整 period 和 rate。
 
 ### 5.7 到期時間分散 (Maturity Staggering)
 
