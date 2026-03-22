@@ -90,7 +90,7 @@ Bitfinex 自動放貸 SaaS 平台。
 - 每層用 in-memory mock repo 測試，不依賴 DB
 - `assertAppErrorCode(t, err, "CODE")` helper 定義在 `service/user_test.go`，跨 test 檔案共用
 - handler test 用 `httptest.NewRecorder` + `gin.TestMode`
-- 後端提交前驗證：`cd backend && go build ./... && go test ./...`
+- 後端提交前驗證：`cd backend && golangci-lint run ./... && go test ./...`
 - 前端提交前驗證：`cd frontend && pnpm lint && pnpm test`（lint = tsc + biome check）
 - 前端 E2E 測試：`cd frontend && pnpm test:e2e`（Playwright，涉及 UI 改動時必須執行）
 
