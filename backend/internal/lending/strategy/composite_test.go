@@ -164,6 +164,9 @@ func TestComposite_MultiTierAllocation(t *testing.T) {
 	ctx := baseCtx()
 	ctx.Available = 2000 // > threeTierThreshold (1000)
 	ctx.Config.Amount.Max = 2000
+	// S8: add signals so deployment ratio is ~1.0
+	ctx.Snapshot.MDC.Score = 1.0
+	ctx.Snapshot.Signals = []domain.SignalValue{{Confidence: 1.0}}
 
 	result := s.Apply(ctx)
 
@@ -184,6 +187,9 @@ func TestComposite_SplittingForLargeAmount(t *testing.T) {
 	ctx.Available = 50000
 	ctx.Config.Amount.Max = 50000
 	ctx.Snapshot.OrderBook.AskDepth = 10000 // small depth → 5% = $500 per order max
+	// S8: add signals so deployment ratio is ~1.0
+	ctx.Snapshot.MDC.Score = 1.0
+	ctx.Snapshot.Signals = []domain.SignalValue{{Confidence: 1.0}}
 
 	result := s.Apply(ctx)
 

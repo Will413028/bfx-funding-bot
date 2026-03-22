@@ -12,6 +12,7 @@ func TestFloor_OpportunityCost_Baseline(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005 // FRR floor = 0.00004, below config.Rate.Min
+		c.Snapshot.OrderBook.MidRate = 0.00005
 		c.Snapshot.Regime = domain.RegimeNeutral
 	})
 	// config.Rate.Min = 0.0001, FRR floor = 0.00004, regime floor = 0.0001
@@ -51,6 +52,7 @@ func TestFloor_FRR_Zero(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0 // FRR floor = 0
+		c.Snapshot.OrderBook.MidRate = 0
 		c.Snapshot.Regime = domain.RegimeNeutral
 	})
 	res := fs.Apply(ctx)
@@ -66,6 +68,7 @@ func TestFloor_Regime_Crisis(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005 // FRR floor = 0.00004
+		c.Snapshot.OrderBook.MidRate = 0.00005
 		c.Snapshot.Regime = domain.RegimeCrisis
 	})
 	res := fs.Apply(ctx)
@@ -84,6 +87,7 @@ func TestFloor_Regime_Backwardation(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005 // FRR floor = 0.00004
+		c.Snapshot.OrderBook.MidRate = 0.00005
 		c.Snapshot.Regime = domain.RegimeBackwardation
 	})
 	res := fs.Apply(ctx)
@@ -101,6 +105,7 @@ func TestFloor_Regime_Contango(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005 // FRR floor = 0.00004
+		c.Snapshot.OrderBook.MidRate = 0.00005
 		c.Snapshot.Regime = domain.RegimeContango
 	})
 	res := fs.Apply(ctx)
@@ -114,6 +119,7 @@ func TestFloor_Regime_Neutral(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005
+		c.Snapshot.OrderBook.MidRate = 0.00005
 		c.Snapshot.Regime = domain.RegimeNeutral
 	})
 	res := fs.Apply(ctx)
@@ -182,6 +188,7 @@ func TestFloor_Reason_Tracking(t *testing.T) {
 	// Case 1: opportunity cost wins
 	ctx1 := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0
+		c.Snapshot.OrderBook.MidRate = 0
 		c.Snapshot.Regime = domain.RegimeNeutral
 	})
 	if r := fs.Apply(ctx1); r.Reason != "floor:opportunity_cost" {
@@ -200,6 +207,7 @@ func TestFloor_Reason_Tracking(t *testing.T) {
 	// Case 3: regime wins
 	ctx3 := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0
+		c.Snapshot.OrderBook.MidRate = 0
 		c.Snapshot.Regime = domain.RegimeCrisis
 	})
 	if r := fs.Apply(ctx3); r.Reason != "floor:regime" {

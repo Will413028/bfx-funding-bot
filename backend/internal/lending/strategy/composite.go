@@ -8,6 +8,11 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
+const (
+	// M3: Proactive offer refresh — cancel offers that are both old and deep in queue
+	refreshAge = 10 * time.Minute
+)
+
 // CompositeStrategy orchestrates all 13 strategy modules into a single
 // pipeline following spec Appendix A Phase 4-5. It calls exported helper
 // functions from each module in sequence to produce a unified DecisionResult.
@@ -45,8 +50,24 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	// 1a. Base rate from pricing (FRR + MDC + regime + depth + walls)
 	rate := ComputeBaseRate(snap, cfg)
 
+	// M8: FRR feedback loop awareness — reduce FRR influence when market share is high
+	if snap.OrderBook.AskDepth > 0 {
+		marketShare := ctx.Available / snap.OrderBook.AskDepth
+		if marketShare > 0.05 {
+			frrReduction := (marketShare - 0.05) * 2.0
+			if frrReduction > 0.5 {
+				frrReduction = 0.5 // cap at 50% reduction
+			}
+			// Blend rate toward book mid rate
+			bookRate := snap.OrderBook.MidRate
+			if bookRate > 0 {
+				rate = rate*(1-frrReduction) + bookRate*frrReduction
+			}
+		}
+	}
+
 	// 1b. Floor enforcement
-	floorRate := ComputeFloorRate(snap, cfg)
+	floorRate := ComputeFloorRate(snap, cfg, ctx.IdleMinutes)
 	if rate < floorRate {
 		rate = floorRate
 	}
@@ -112,6 +133,10 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 
 	// ── Stage 3: Offer Structure ──
 
+	// S8: Confidence-scaled deployment — deploy less when signals are contradictory
+	deployRatio := computeDeploymentRatio(snap)
+	available *= deployRatio
+
 	tiers := ComputeTiers(available, snap.Regime)
 	var offers []domain.OfferDecision
 
@@ -167,11 +192,23 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	}
 	offers = filtered
 
-	// 4c. Collect cancels (stale + residuals)
+	// 4c. Collect cancels (stale + residuals + refresh)
 	residualCancels := DetectResiduals(ctx.ActiveOffers)
+
+	// M3: Proactive offer refresh — cancel old offers stuck deep in queue
+	var refreshCancels []int64
+	for _, o := range ctx.ActiveOffers {
+		if !o.CreatedAt.IsZero() && time.Since(o.CreatedAt) > refreshAge {
+			if ComputeQueueDiscount(o.Rate, snap.OrderBook) < 1.0 {
+				refreshCancels = append(refreshCancels, o.ID)
+			}
+		}
+	}
+
 	var allCancels []int64
 	allCancels = append(allCancels, staleCancels...)
 	allCancels = append(allCancels, residualCancels...)
+	allCancels = append(allCancels, refreshCancels...)
 	allCancels = dedup(allCancels)
 
 	// ── Build result ──
@@ -183,6 +220,24 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 		Cancels: allCancels,
 		Reason:  reason,
 	}
+}
+
+// computeDeploymentRatio returns the fraction of capital to deploy based on signal confidence.
+// Range: [0.5, 1.0]. Low confidence → deploy 50%. High confidence + strong MDC → deploy ~100%.
+func computeDeploymentRatio(snap *domain.MarketSnapshot) float64 {
+	if len(snap.Signals) == 0 {
+		return 0.5
+	}
+	var totalConf float64
+	for _, s := range snap.Signals {
+		totalConf += s.Confidence
+	}
+	avgConf := totalConf / float64(len(snap.Signals))
+	ratio := 0.5 + 0.5*math.Abs(snap.MDC.Score)*avgConf
+	if ratio > 1.0 {
+		return 1.0
+	}
+	return ratio
 }
 
 // dedup removes duplicate int64 values from a slice.

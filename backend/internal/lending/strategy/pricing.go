@@ -197,12 +197,24 @@ func clamp(v, lo, hi float64) float64 {
 	return v
 }
 
+// EffectiveFRR guards against FRR manipulation by comparing with order book mid rate.
+// Returns max(frr, bookMidRate * 0.9) to prevent artificially low FRR from affecting strategy.
+func EffectiveFRR(frr float64, bookMidRate float64) float64 {
+	bookFloor := bookMidRate * 0.9
+	if frr < bookFloor {
+		return bookFloor
+	}
+	return frr
+}
+
 // ComputeBaseRate computes the MDC-adjusted rate with regime, depth pressure,
 // and wall avoidance applied. This is the core pricing logic used by CompositeStrategy.
 func ComputeBaseRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
 	p := &PricingStrategy{}
 
 	baseRate := p.selectBaseRate(snap)
+	// M6: Guard against FRR manipulation
+	baseRate = EffectiveFRR(baseRate, snap.OrderBook.MidRate)
 	rate := baseRate * p.mdcMultiplier(snap.MDC.Score)
 	rate = p.applyRegime(rate, snap.Regime, cfg)
 	rate = p.applyDepthPressure(rate, snap.OrderBook)

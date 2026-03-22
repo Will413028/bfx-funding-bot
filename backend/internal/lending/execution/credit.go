@@ -17,6 +17,10 @@ type RenewSummary struct {
 	Skipped   int
 }
 
+// S2: Auto-renew is kept enabled on Bitfinex as a safety net.
+// The engine proactively manages credit expiry by re-pricing before expiry.
+// Auto-renew only activates when the engine fails to act (downtime/crash).
+
 // CreditManager handles auto-renewal of expiring funding credits.
 type CreditManager struct {
 	client  FundingClient
