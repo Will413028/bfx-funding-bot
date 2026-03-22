@@ -15,6 +15,7 @@ const (
 	SignalIntraday           SignalType = "intraday"
 	SignalFRRTrend           SignalType = "frr_trend"
 	SignalRateSpike          SignalType = "rate_spike"
+	SignalRatePercentile     SignalType = "rate_percentile"
 )
 
 // SignalValue represents the result of a single signal computation.

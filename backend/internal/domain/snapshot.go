@@ -59,6 +59,13 @@ type OrderBookSummary struct {
 	EntryCount int     // number of book entries
 }
 
+// RateGap represents a gap in the order book where no offers exist.
+type RateGap struct {
+	Low   float64 // gap start (lower rate)
+	High  float64 // gap end (higher rate)
+	Width float64 // High - Low
+}
+
 // WallType identifies the kind of detected wall.
 type WallType string
 
@@ -102,7 +109,9 @@ type MarketSnapshot struct {
 	FRR                float64            // Flash Return Rate
 	HiddenRatio        float64            // estimated hidden order ratio
 	CompetitorActivity float64            // 0-1 composite competitor activity score
+	RatePercentile     float64            // S4: rate percentile signal [-1, +1]
 	FRRTrend           float64            // G12: FRR trend signal [-1, +1]
+	BookGaps           []RateGap          // G16: detected order book gaps
 	WeekendRatio       float64            // S6: historical weekend/weekday rate ratio
 	FlashFreeze        bool               // true if flash crash detected, trading paused
 	DegradedMode       bool               // true if operating in degraded mode (e.g., FRR-only)

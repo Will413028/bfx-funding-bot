@@ -235,6 +235,11 @@ func ComputeBaseRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) fl
 	// G12: FRR trend adjustment
 	rate = applyFRRTrend(rate, snap.FRRTrend)
 
+	// G16: Order book gap detection — if rate falls in a gap, use gap low for fastest fill
+	if gap := findGapForRate(snap.BookGaps, rate); gap != nil {
+		rate = gap.Low
+	}
+
 	// M6: Guard against FRR manipulation for deviation guard
 	effectiveFRR := EffectiveFRR(snap.FRR, snap.OrderBook.MidRate)
 	rate = p.applyDeviationGuard(rate, effectiveFRR, snap.Regime)
@@ -277,6 +282,16 @@ func computeTickOffset(mdcScore float64, regime domain.RegimeType) float64 {
 	}
 
 	return baseOffset * mdcFactor * regimeFactor
+}
+
+// findGapForRate returns the gap containing the given rate, or nil.
+func findGapForRate(gaps []domain.RateGap, rate float64) *domain.RateGap {
+	for i := range gaps {
+		if rate > gaps[i].Low && rate < gaps[i].High {
+			return &gaps[i]
+		}
+	}
+	return nil
 }
 
 // applyFRRTrend adjusts rate based on FRR trend signal.

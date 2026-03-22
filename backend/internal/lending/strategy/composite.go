@@ -72,6 +72,22 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 		rate = floorRate
 	}
 
+	// S10: Mean reversion adjusts floor tolerance
+	if snap.RegimeParams.Volatility > 0 {
+		ema7dProxy := snap.FRR * (1.0 + snap.FRRTrend*0.05)
+		pHigher := PHigherRate(rate, ema7dProxy, snap.RegimeParams.Volatility, 1.0)
+		if pHigher > 0.7 && ctx.IdleMinutes > 0 {
+			// Rates likely to rise — reduce urgency discount by half
+			adjustedFloor := ComputeFloorRate(snap, cfg, ctx.IdleMinutes*0.5)
+			if adjustedFloor > floorRate {
+				floorRate = adjustedFloor
+				if rate < floorRate {
+					rate = floorRate
+				}
+			}
+		}
+	}
+
 	// 1c. Weekend premium
 	ts := snap.Timestamp
 	if ts.IsZero() {
@@ -141,6 +157,27 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 		period = clampInt(lockupPeriod, cfg.Period.Min, cfg.Period.Max)
 	}
 
+	// M2: Gap cost favors longer periods when gap time is significant
+	if ctx.AvgGapMinutes > 0 {
+		// Short periods have higher relative gap cost
+		// gapCost2d = avgGap / (2 * 1440) vs gapCost30d = avgGap / (30 * 1440)
+		gapCost := ctx.AvgGapMinutes / (float64(period) * 1440.0)
+		if gapCost > 0.005 { // >0.5% downtime -> prefer longer period
+			period = clampInt(period+2, cfg.Period.Min, cfg.Period.Max)
+		}
+	}
+
+	// S4: Rate percentile influences period
+	if snap.RatePercentile > 0.5 {
+		// High percentile (> P75) -> extend period to lock in high rate
+		extension := int(float64(cfg.Period.Max-period) * (snap.RatePercentile - 0.5) * 2)
+		period = clampInt(period+extension, cfg.Period.Min, cfg.Period.Max)
+	} else if snap.RatePercentile < -0.5 {
+		// Low percentile (< P25) -> shorten period, wait for recovery
+		reduction := int(float64(period-cfg.Period.Min) * (-snap.RatePercentile - 0.5) * 2)
+		period = clampInt(period-reduction, cfg.Period.Min, cfg.Period.Max)
+	}
+
 	// Stagger: adjust period to reduce expiry concentration
 	period = AdjustPeriodForStagger(period, ctx.ActiveCredits, cfg, c.now())
 
@@ -148,6 +185,12 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 
 	// S8: Confidence-scaled deployment — deploy less when signals are contradictory
 	deployRatio := computeDeploymentRatio(snap)
+
+	// S4: Low percentile further reduces deployment
+	if snap.RatePercentile < -0.5 {
+		deployRatio *= 0.8 // reduce by 20% when rates are historically low
+	}
+
 	available *= deployRatio
 
 	tiers := ComputeTiers(available, snap.Regime)
