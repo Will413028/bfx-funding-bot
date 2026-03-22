@@ -2,6 +2,7 @@ package infra
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -16,7 +17,9 @@ func NewPostgresPool(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*p
 		return nil, err
 	}
 
-	if err := pool.Ping(context.Background()); err != nil {
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
 		return nil, err
 	}

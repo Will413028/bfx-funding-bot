@@ -1,5 +1,5 @@
-import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { render } from "@/lib/test-utils";
 import type { DashboardSummary, EarningsSummary } from "@/types";
 import { StatsGrid } from "../stats-grid";
 
