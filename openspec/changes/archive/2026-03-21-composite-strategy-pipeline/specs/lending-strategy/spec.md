@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Basic lending strategy execution
 The system SHALL execute a lending strategy for each active user based on their `StrategyConfig`. The strategy SHALL check available balance, manage active offers, and submit new offers when appropriate. **策略執行由 CompositeStrategy pipeline 驅動，而非單一 PricingStrategy。**
@@ -14,31 +14,6 @@ The system SHALL execute a lending strategy for each active user based on their 
 #### Scenario: Skip when active offer exists and not stale
 - **WHEN** the user has an active offer that was created less than 15 minutes ago
 - **THEN** the system SHALL skip offer submission (keep existing offer)
-
-### Requirement: Stale offer cancellation (Zombie TTL)
-The system SHALL cancel active offers that have not been filled within 15 minutes (spec §7.1 simplified).
-
-#### Scenario: Offer exceeds TTL
-- **WHEN** an active offer has been pending for more than 15 minutes
-- **THEN** the system SHALL cancel the offer, allowing the next tick to resubmit with potentially updated parameters
-
-#### Scenario: Offer within TTL
-- **WHEN** an active offer has been pending for less than 15 minutes
-- **THEN** the system SHALL leave the offer unchanged
-
-### Requirement: Interest reinvestment
-The system SHALL automatically include newly settled interest in the lending pool (spec §7.1).
-
-#### Scenario: Interest accumulates to lendable amount
-- **WHEN** the available balance (including settled interest) reaches >= 50 USD after previous offers are filled
-- **THEN** the system SHALL submit a new offer for the available amount on the next tick
-
-### Requirement: Minimum balance safety guard
-The system SHALL not submit offers when the available balance is below the minimum threshold (spec §8.2).
-
-#### Scenario: Balance below minimum
-- **WHEN** the funding wallet available balance is < 50 USD
-- **THEN** the system SHALL not submit any offers and SHALL log the skip reason
 
 ### Requirement: Offer parameters from strategy config
 The system SHALL use the user's `StrategyConfig` to determine offer parameter **bounds**, with actual values computed by the CompositeStrategy pipeline.
@@ -58,6 +33,8 @@ The system SHALL use the user's `StrategyConfig` to determine offer parameter **
 #### Scenario: Currency selection
 - **WHEN** submitting an offer
 - **THEN** the system SHALL use `config.Currency` as the offer currency (prefixed with "f" for Bitfinex symbol)
+
+## ADDED Requirements
 
 ### Requirement: Strategy modules expose helper functions
 

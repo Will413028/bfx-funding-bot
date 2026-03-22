@@ -47,7 +47,7 @@ func (f *DepsFactory) BuildWorkerDeps(userID string, currency string, snapshotCh
 	executor := newExecutorAdapter(offerExecutor)
 
 	return worker.Deps{
-		Strategy:   strategy.NewPricingStrategy(),
+		Strategy:   strategy.NewCompositeStrategy(),
 		Fetcher:    fetcher,
 		Executor:   executor,
 		SnapshotCh: snapshotCh,

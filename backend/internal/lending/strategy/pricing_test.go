@@ -68,8 +68,8 @@ func TestPricing_MDC_Negative(t *testing.T) {
 		c.Snapshot.MDC.Score = -0.6
 	})
 	res := ps.Apply(ctx)
-	// base=0.00025, mdc_mul=1.0+(-0.6)*0.3=0.82
-	expected := 0.00025 * 0.82
+	// base=0.00025, mdc_mul=1.0+(-0.6)*0.18=0.892
+	expected := 0.00025 * 0.892
 	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
 		t.Errorf("negative MDC: got %f, want %f", res.Offers[0].Rate, expected)
 	}
@@ -235,7 +235,7 @@ func TestPricing_Clamp_BelowMin(t *testing.T) {
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Snapshot.FRR = 0.00005 // very low FRR
 		c.Snapshot.MDC.Score = -1.0
-		// rate = 0.00005 * 0.7 = 0.000035 < config.Rate.Min=0.0001
+		// rate = 0.00005 * 0.82 = 0.000041 < config.Rate.Min=0.0001
 	})
 	res := ps.Apply(ctx)
 	if res.Offers[0].Rate != 0.0001 {

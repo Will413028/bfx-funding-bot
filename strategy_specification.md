@@ -1,4 +1,10 @@
 # Bitfinex 自動放貸 SaaS 平台：策略設計規範
+
+> **最後更新**：2026-03-21
+> **實作同步狀態**：本文件同時作為設計規範和實作參考。各章節標有 `⚡ 實作狀態` 的區塊說明實際程式碼與原始設計的差異。
+> **實作程式碼**：`backend/internal/lending/` — signal/, strategy/, orderbook/, worker/, execution/
+> **策略 Review**：`docs/strategy-journal.md` — 2026-03-21 全面 review 記錄
+
 ---
 
 ## 1. 系統核心目標
@@ -22,14 +28,16 @@
 
 ### 2.2 信號源與權重
 
-| 信號源 | 基礎權重 | 輸出範圍 | 延遲特性 | 衰減係數 λ |
-| :--- | :--- | :--- | :--- | :--- |
-| Book 消耗速度（3.4） | **25%** | -1 ~ +1 | 最即時（秒級） | 0.05 |
-| 清算瀑布（3.5） | **20%** | 0 ~ +1（僅看漲） | 即時（秒級） | 0.03 |
-| 保證金持倉量（3.3） | **20%** | -1 ~ +1 | 中等（分鐘級） | 0.005 |
-| 雙速 VWAP 動量（4.4） | **15%** | -1 ~ +1 | 中等（分鐘級） | 0.01 |
-| 跨幣種 Funding Rate（3.6） | **10%** | -1 ~ +1 | 較慢（10-30 分鐘） | 0.002 |
-| 日內時段效應（4.5） | **10%** | -0.5 ~ +0.5 | 預測性（小時級） | 0.001 |
+| 信號源 | 基礎權重 | 輸出範圍 | 延遲特性 | 設計 λ | 實作 λ |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Book 消耗速度（3.4） | **25%** | -1 ~ +1 | 最即時（秒級） | 0.05 | **0.01** |
+| 清算瀑布（3.5） | **20%** | 0 ~ +1（僅看漲） | 即時（秒級） | 0.03 | **0.005** |
+| 保證金持倉量（3.3） | **20%** | -1 ~ +1 | 中等（分鐘級） | 0.005 | **0.008** |
+| 雙速 VWAP 動量（4.4） | **15%** | -1 ~ +1 | 中等（分鐘級） | 0.01 | 0.01 |
+| 跨幣種 Funding Rate（3.6） | **10%** | -1 ~ +1 | 較慢（10-30 分鐘） | 0.002 | **0.005** |
+| 日內時段效應（4.5） | **10%** | -0.5 ~ +0.5 | 預測性（小時級） | 0.001 | **0.002** |
+
+> **⚡ 實作狀態** (`signal/mdc.go`)：基礎權重一致，λ 值偏差較大。實作的 λ 整體較低（信號衰減較慢），讓信號保持更長的影響力。待 G10 (Performance Tracking) 上線後以實際數據校準。
 
 ### 2.3 信號時效性衰減 (Signal Freshness Decay)
 
@@ -48,22 +56,32 @@
   - 第 3 個數據點：恢復至 **100%**。
 - **例外**：清算瀑布信號因其硬性覆寫特性，不適用平滑機制——恢復後立即生效。
 
+> **⚡ 實作狀態**：尚未實作。見 ROADMAP G2。
+
 ### 2.5 MDC 計算
 
 - `MDC = tanh(Σ (Signal_i × Effective_Weight_i))`，壓縮至 [-1, +1]。
 - **動態權重調整**：每週根據績效追蹤模組中各信號的歷史預測準確率，自動微調基礎權重（±10% 上限）。
 
+> **⚡ 實作狀態** (`signal/mdc.go`)：`tanh` 壓縮已實作。動態權重調整尚未實作（依賴 G10 Performance Tracking）。實作額外加入 `Confidence` 因子：`Effective_Weight = Base_Weight × Confidence × e^(-λ × age)`。
+
 ### 2.6 MDC 驅動的策略映射
 
 > **基準利率定義**：下表中的 `Rate` 統一定義為**當前 Order Book 最優可成交利率**（即 Dust Filter 過濾後，排隊最前方的最低利率掛單）。溢價係數以此為基礎計算。
 
-| MDC 區間 | 市場判讀 | 溢價係數 | 天數偏好 | 資金配置偏移 |
+| MDC 區間 | 市場判讀 | 溢價係數（設計） | 天數偏好 | 資金配置偏移 |
 | :--- | :--- | :--- | :--- | :--- |
 | +0.7 ~ +1.0 | 強烈看漲 | **×1.03** | 偏長天數 | 釣魚層加碼 |
 | +0.3 ~ +0.7 | 溫和看漲 | **×1.02** | 標準 | 標準配置 |
 | -0.3 ~ +0.3 | 中性 / 不確定 | **×1.00** | 偏短天數 | 前線加碼 |
 | -0.7 ~ -0.3 | 溫和看跌 | `Rate - 1 Tick` | 2 天 | 全部前線 |
 | -1.0 ~ -0.7 | 強烈看跌 | `Rate - 2 Ticks` | 2 天 | 全部前線，觸發機會成本評估 |
+
+> **⚡ 實作狀態** (`strategy/pricing.go`)：實作改為**連續線性內插**取代離散區間。公式：
+> - MDC ≥ 0: `multiplier = 1.0 + score × 0.50`（MDC +1.0 → ×1.50）
+> - MDC < 0: `multiplier = 1.0 + score × 0.30`（MDC -1.0 → ×0.70）
+>
+> 這比設計值（最高 ×1.03）激進許多。2026-03-21 review 建議將 `maxPremiumDown` 從 0.30 降至 0.15–0.20（見 ROADMAP GT2）。同時加入 regime 調整：Contango ×1.05, Backwardation ×0.90, Crisis → Rate.Min。
 
 > **資金配置偏移說明**：此欄為相對於當前市場體制參數組（4.1）的**微調方向**，而非獨立的分層比例。例如「釣魚層加碼」代表在體制參數組的基礎上，將釣魚層比例提升 5–10%（從其他層扣除）；「前線加碼」代表將釣魚層資金轉移至第一層。具體偏移幅度見附錄 B。
 
@@ -87,11 +105,15 @@
 | 區間震盪 | **300 USD** | 中等過濾 |
 | 危機模式 | **500 USD** | 危機時大量小額清算單是雜訊 |
 
+> **⚡ 實作狀態** (`orderbook/dust.go`)：實作改用**中位數百分比**方式：`threshold = median(side_amounts) × 0.05`，不區分 regime。設計更自適應但失去 regime 差異化。
+
 ### 3.2 巨單牆偵測與領先掛單 (Wall Detection & Front-running)
 
 - **單檔偵測**：前 30 檔有效掛單的中位數或 90% 分位數。絕對下限 `MIN_WALL_THRESHOLD = 50,000 USD`。若 Amount > max(Median × 5, MIN_WALL_THRESHOLD)，判定為「巨單牆」。
 - **分散牆偵測**：滑動窗口計算連續 5 檔累積金額 > `MIN_WALL_THRESHOLD`，判定為「分散式阻力牆」。
 - **動作**：目標位於牆後時，利率改為 `Wall_Rate - 0.00000001`。
+
+> **⚡ 實作狀態** (`orderbook/wall.go`)：實作改用**百分比門檻**：單檔 > 5% 同側總深度 → 單一牆；相鄰 entries（gap ≤ spread × 2）合計 > 5% → 分散牆。未使用 50,000 USD 絕對下限。`pricing.go` 中的 wall avoidance 為 rate × 0.99（-1%），而非 `Wall_Rate - 1 tick`。2026-03-21 review 建議改為「智慧貼牆」策略（見 ROADMAP G15）。
 
 ### 3.3 供需面信號追蹤 (Demand-Side Signal Tracking)
 
@@ -126,6 +148,8 @@
 - 掛單後 **10 秒內**同一利率 ±2 ticks 出現 **3 筆以上**新掛單 → 假退再進（撤單 → 30 秒 → 更優利率重掛）。
 - **冷卻**：同一心跳週期最多 1 次。
 
+> **⚡ 實作狀態** (`orderbook/competitor.go`)：實作改用**統計偵測**：跨 10 個 snapshot 追蹤 `followRate`（新 entry 出現在 best ask 附近的頻率，權重 0.6）+ `roundRatio`（整數 bps 報價比例，權重 0.4）→ composite score [0, 1]。未實作假退再進的反制邏輯。
+
 ### 3.8 隱藏單深度估算 (Hidden Order Depth Estimation)
 
 - **問題**：智慧隱藏掛單（4.3）根據「可見」競爭資金判斷是否使用隱藏單，但其他機器人的隱藏單不可見。若大量隱藏單存在，「競爭少」是假象，用公開單反而暴露意圖。
@@ -149,6 +173,13 @@
 | **危機模式** | 清算瀑布觸發 或 短窗口 Sigma > 歷史 +4σ | 7–14d | 最激進 | 20% |
 
 - **體制參數組**：每種體制對應一組預設參數，切換時整組載入。
+
+> **⚡ 實作狀態** (`signal/regime.go`)：
+> - **命名差異**：設計「趨勢牛市/熊市」→ 實作 `Contango/Backwardation`（更符合放貸市場術語）。
+> - **閾值差異**：進入門檻 ±0.3（非 ±0.5），退出門檻 ±0.2（hysteresis）。
+> - **Crisis 判定**：`FlashFreeze || (|MDC| > 0.9 && volatility > 20%)`，未用 Sigma +4σ。
+> - **未實作**：雙窗口 Sigma 判定、非對稱體制切換確認（1 vs 3 心跳）。
+> - **額外實作**：Volatility EMA smoothing（α=0.3），DemandSupplyRatio 計算。
 
 #### 非對稱體制切換確認
 
@@ -180,6 +211,16 @@
 #### 碎片清掃邏輯 (Dust Sweeping)
 
 - 剩餘資金 < **52 USD** 時全數併入最後一層。
+
+> **⚡ 實作狀態** (`strategy/allocation.go`)：實作改用**餘額門檻**分層，取代雙窗口波動度：
+>
+> | 餘額 | Tiers | 比例 | Rate 乘數 |
+> | :--- | :--- | :--- | :--- |
+> | < $150 | 1 tier | 100% core | ×1.0 |
+> | $150–$1000 | 2 tiers | 70% core / 30% aggressive | ×1.0 / ×1.25 |
+> | > $1000 | 3 tiers | 50% core / 30% moderate / 20% aggressive | ×1.0 / ×1.10 / ×1.25 |
+>
+> Regime cap：Crisis → max 1 tier，Backwardation → max 2 tiers。碎片清掃門檻改為 $50（Bitfinex 最低限額）。釣魚層回收機制和波動度判定尚未實作。2026-03-21 review 建議將 aggressive tier 乘數從 1.25 降至 1.10–1.15（見 ROADMAP GT5）。
 
 ### 4.3 智慧隱藏掛單機制 (Smart Hidden Offers)
 
@@ -228,11 +269,20 @@
 - `Rate_Floor = 過去 30 天 FRR 的 P10`。即使 EV 模型判定借出，低於 P10 仍不掛。
 - **安全閥**：待機 > 2 小時，地板下調 20%。
 
+> **⚡ 實作狀態** (`strategy/floor.go`)：實作改用**三層 floor 取最大值**：
+> 1. 機會成本 floor：`Config.Rate.Min`
+> 2. FRR 相對 floor：`FRR × 0.80`
+> 3. Regime 動態 floor：Crisis → `Rate.Min × 1.5`，Backwardation → `Rate.Min × 1.2`
+>
+> 未使用 P10 百分位（需歷史數據累積）。安全閥（待機 > 2hr 下調）尚未實作。2026-03-21 review 建議：FRR floor 從 0.80 提高到 0.90–0.95（見 ROADMAP GT1），並加入閒置資金急迫度（見 ROADMAP G11）。
+
 ### 4.10 閃崩保護 (Flash Crash Guard)
 
 - **偵測**：利率 1 分鐘內下跌 > 50%。
 - **動作**：暫停新增掛單 60 秒（不撤已有掛單）。
 - **解除**：60 秒後回升至閃崩前 70% 以上恢復；否則地板機制接手。
+
+> **⚡ 實作狀態** (`marketfeed/flashcrash.go`)：已實作。偵測閾值改為 dailyChangePerc ≤ -30%（非 1 分鐘 50%），凍結 cooldown 5 分鐘（非 60 秒），自動解除條件為 rate 回升（dailyChange > -30%）。FlashFreeze 旗標直接觸發 Crisis regime。
 
 ### 4.11 自身市場衝擊管理 (Self-Impact Management)
 
@@ -252,6 +302,14 @@
 - `ETA > TTL × 2` → 降價 1–2 Ticks；`ETA < TTL × 0.5` → 保留。
 - 與 TTL 取先觸發者。
 
+> **⚡ 實作狀態** (`strategy/queue.go`)：實作改用**深度比例**（不需 Consume_Rate 數據）：
+> - `queueDepth = AskDepth × (rate - BestAsk) / Spread`
+> - `queueRatio > 0.50` → rate × 0.95（-5%）
+> - `queueRatio > 0.20` → rate × 0.98（-2%）
+> - Stale 偵測：`offer.Rate > BestAsk + 2×Spread` → 取消
+>
+> 2026-03-21 review 建議改用線性/sigmoid 曲線取代兩段式跳躍（見 ROADMAP GT6）。
+
 ### 4.13 部分成交管理 (Partial Fill Management)
 
 - 殘餘利率偏離 > 5 Ticks → 撤銷重掛；< 52 USD → 併入下一筆；合理範圍 → 保留。
@@ -259,6 +317,8 @@
 ### 4.14 隨機擾動 (Anti-Frontrunning Noise)
 
 - 最終利率加入 `0.00000001 ~ 0.00000005` 隨機值。
+
+> **⚡ 實作狀態** (`strategy/noise.go`)：實作改用**百分比擾動**：rate ±1%, amount ±2%。額外加入心理價位避讓（`psychStep = 0.0005`，靠近時偏移 `0.00002`）。2026-03-21 review 建議將 rate noise 從 ±1% 降至 ±0.3–0.5%（見 ROADMAP GT4）。
 
 ---
 
@@ -299,15 +359,21 @@
 - 建議以歷史回測優化啟動時間。預設 UTC 週四 12:00 至週五 18:00，門檻降 20%。
 - 天數遞減：週五 14~30 天，週六 10~14 天，週日 2~7 天。
 
+> **⚡ 實作狀態** (`strategy/weekend.go`)：實作為 rate 溢價乘數（非天數遞減）：Friday 18:00+ UTC ×1.02，Saturday ×1.05，Sunday ×1.03，weekday ×1.00。未實作天數遞減邏輯。
+
 ### 5.5 特殊事件日曆 (Event Calendar Integration)
 
 - 季度合約交割日、大型代幣解鎖、重大經濟數據（CPI、FOMC）。
 - 事件前 **24–48 小時**主動拉長天數。
 
+> **⚡ 實作狀態** (`strategy/calendar.go`)：實作為月末和季度結算的固定溢價（月末 ×1.02–1.05、季度 ×1.03–1.10，各 ±3 天窗口）+ 事件臨近時縮短 period。未整合外部事件源（代幣解鎖、CPI、FOMC）。
+
 ### 5.6 提前歸還率修正 (Early Return Adjustment)
 
 - 各天數區間的歷史持有率 < 60% 則降低偏好權重。
 - `有效回報 = Adjusted_Rate(5.3) × 持有率`。
+
+> **⚡ 實作狀態**：尚未實作。見 ROADMAP G5。
 
 ### 5.7 到期時間分散 (Maturity Staggering)
 
@@ -856,7 +922,361 @@ worker_snapshots (
 
 ---
 
+## 11. 2026-03-21 策略 Review 新增項目
+
+> 基於全面策略 review 新增的收益優化項目。完整分析見 `docs/strategy-journal.md`。
+
+### 11.1 策略 Pipeline 接線 (G0)
+
+**問題**：`factory.go` 目前只實例化 `PricingStrategy`，其餘 12 個策略模組寫好但未組合使用。
+
+**方案**：建立 `CompositeStrategy`，依序執行 13 個模組，各模組的 `DecisionResult` 合併後交由 Executor 執行。
+
+### 11.2 閒置資金急迫度 (G11)
+
+**問題**：引擎不追蹤資金閒置時長，死資金的 APY = 0%。
+
+**方案**：
+- 追蹤 `lastLentAt` 時間戳
+- `urgencyDiscount = min(idleMinutes / 120, 0.15)`
+- `effectiveFloor = floor × (1 - urgencyDiscount)`
+
+### 11.3 FRR 趨勢追蹤 (G12)
+
+**問題**：只用 spot FRR 定價，不知道 FRR 是在上升還是下降趨勢。
+
+**方案**：
+- `frrEMA_short = EMA(FRR, 30min)`
+- `frrEMA_long = EMA(FRR, 4hr)`
+- `frrTrend = (short - long) / long`
+- 上升趨勢 → pricing 更積極，下降趨勢 → 搶先成交
+
+### 11.4 歷史 Fill Rate 學習 (G13)
+
+**問題**：所有 premium/discount 常數缺乏回饋迴路。
+
+**方案**：追蹤每個 rate bucket 的 fill rate + time-to-fill，用數據驅動 pricing 取代靜態常數。需 DB schema 擴充。
+
+### 11.5 Auto-Renew 重新定價 (G14)
+
+**問題**：Credit 到期 renew 時沿用原 rate，沒有根據當前市場重新定價。
+
+**方案**：Renew 時走完整 pricing pipeline。
+
+### 11.6 智慧貼牆策略 (G15)
+
+**問題**：靠近 wall 只盲目降 1%。Wall 提供的是定價資訊而非威脅。
+
+**方案**：`targetRate = wallRate - minTickSize`，搶先排在 wall 前面被吃到。
+
+### 11.7 Order Book Gap Detection (G16)
+
+**問題**：Order book 的 rate 空隙代表無競爭者的機會，目前未利用。
+
+**方案**：掃描 book 找最近的 gap，在空隙中報價以最大化 fill probability。
+
+---
+
+## 12. 2026-03-21 策略設計層面 Review — 根本性收益盲點
+
+> 以虛擬貨幣放貸專家角度審視策略設計本身（非實作差異）。完整分析見 `docs/strategy-journal.md`。
+
+### 12.1 定價改為相對 bestAsk 偏移 (S1)
+
+**問題**：§2.6 的定價基於 `FRR × MDC_premium`，但 Bitfinex offer 按利率排序 + FIFO 匹配。真正的競爭力取決於相對 bestAsk 的位置，不是相對 FRR 的乘數。比 bestAsk 低 1 tick 幾乎肯定成交，高 2% 可能永遠排不到。
+
+**方案**：
+```
+targetRate = bestAsk - tickOffset(MDC, regime)
+```
+- MDC 強烈看漲 → offset ≈ 0（甚至 +1 tick，報比 bestAsk 高）
+- MDC 中性 → offset = 1-2 ticks（搶先排隊）
+- MDC 看跌 → offset = 3-5 ticks（積極求成交）
+
+### 12.2 Auto-Renew 預設開啟 (S1)
+
+**問題**：§7.2 說「永遠關閉 auto-renew」。但 auto-renew 是免費保險——引擎宕機時資金空轉 APY=0%。
+
+**方案**：反轉邏輯：
+- Auto-renew **永遠開啟**作為安全網
+- 引擎正常時，在到期前**主動取消 auto-renew**並走完整 pricing pipeline 重新定價
+- Auto-renew 只在引擎失能時實際觸發，防止資金閒置
+
+### 12.3 移除隨機噪音、保留心理價位避讓 (S1)
+
+**問題**：§4.14 的隨機擾動來自交易機器人（防前跑），但放貸不是零和博弈，沒有前跑風險。隨機 noise 只是在燒錢。
+
+**方案**：
+- 保留 §4.7 心理價位避讓（有效減少整數價位競爭）
+- 移除或限制 §4.14 的隨機 noise。如果保留，noise 應只有 **+ 方向**（永不低於目標 rate）
+
+### 12.4 新增 RatePercentile 信號 (S2)
+
+**問題**：MDC 框架用 6 個信號預測「利率會漲還是跌」（交易思維），但放貸利率是**均值回歸**的。真正重要的問題是「當前利率在歷史分佈中排第幾」。
+
+**方案**：
+```
+RatePercentile = percentile_rank(current_rate, rate_history_7d)
+```
+- `> P75`：積極放貸 + 鎖長期（利率高於歷史 75%）
+- `P25–P75`：正常策略
+- `< P25`：短期或等待（利率偏低，均值回歸大概率會上升）
+
+此信號可作為 MDC 的**第 7 個信號源**或作為**獨立的 pre-filter**（低百分位時直接降低部署比例）。
+
+### 12.5 清算瀑布分階段回應 (S2)
+
+**問題**：§3.5 的瀑布回應是 `MDC = +1.0` 全量覆寫 + 統一 7-14d，但瀑布有三個階段，每階段最佳策略不同。
+
+**方案**：
+
+| 階段 | 時間 | 特徵 | Period | Rate |
+|------|------|------|--------|------|
+| 早期 | 0-30min | 利率飆升 | **2d**（捕捉瞬間暴利，快速回收再部署） | 最高可能 |
+| 中期 | 30min-2hr | 高位盤整 | **7-14d**（spike 已確認，鎖住高利率） | 高於 FRR |
+| 後期 | 2hr+ | 利率回落 | **停止新增** | N/A |
+
+判定：追蹤 `cascadeStartTime` + 利率趨勢。利率開始下降 → 進入後期。
+
+### 12.6 Weekend Premium 動態化 (S2)
+
+**問題**：§5.4 設計固定 +2~5% 溢價，但實際週末利率比平日高 20-50%（正常市場）甚至 3-5×（大行情），固定值嚴重低估。
+
+**方案**：
+```
+weekendPremium = rolling_4wk_weekend_avg_rate / rolling_4wk_weekday_avg_rate
+```
+- 正常市場可能得到 1.3（+30%）
+- 死水市場可能得到 1.05（+5%）
+- 大行情可能得到 2.0+（+100%）
+
+自適應追蹤，不再用固定值猜測。
+
+### 12.7 Per-Currency 參數組 (S3)
+
+**問題**：所有幣種共用同一套 MDC 權重、regime 閾值和 premium 映射。但 fUSD（低波動、高流動性）和 fETH（高波動、事件驅動）的最佳策略完全不同。
+
+**方案**：§2.2 權重和 §4.1 閾值改為 per-currency 或至少分兩組：
+
+| 參數 | Stablecoin (fUSD/fUST) | Crypto (fBTC/fETH) |
+|------|------------------------|---------------------|
+| Book 消耗權重 | 降至 15%（流動性深，信號弱） | 提至 30%（流動性淺，信號強） |
+| Regime 進入閾值 | ±0.4（穩定，需更大偏離才確認） | ±0.25（波動大，要快速反應） |
+| Period 偏好 | 偏長（利率穩定，鎖長期） | 偏短（利率多變，保持靈活） |
+
+### 12.8 信心度 × 部署比例 (S3)
+
+**問題**：MDC 只影響 rate 和 period，不影響部署多少資金。信號矛盾時不應全量部署。
+
+**方案**：
+```
+avgConfidence = mean(signal_i.Confidence for active signals)
+deploymentRatio = 0.5 + 0.5 × |MDC| × avgConfidence
+actualAmount = available × deploymentRatio
+```
+- 信號一致看漲（MDC=0.8, avgConf=0.9）→ 部署 86%
+- 信號矛盾（MDC=0.1, avgConf=0.5）→ 部署 52.5%，保留彈藥等待更明確信號
+
+### 12.9 滾動放貸與到期梯隊管理 (S3)
+
+**問題**：§5.7 的到期分散是防禦性的（避免集中衝擊），缺少主動的到期結構管理。
+
+**方案**：維持三梯隊到期結構：
+- **1/3 短期**（2-3d）：高流動性，捕捉 spike
+- **1/3 中期**（7-14d）：平衡收益和靈活性
+- **1/3 長期**（21-30d）：鎖定穩定收益
+
+到期時根據 RatePercentile（12.4）決定續約天數：
+- `> P75` → 轉長期（鎖住高利率）
+- `P25–P75` → 維持同梯隊
+- `< P25` → 轉短期（等待回升）
+
+### 12.10 P(higher_rate) 均值回歸公式 (S3)
+
+**問題**：§4.8 的 EV_wait 需要 `P(higher_rate)`，spec 說「歷史統計」但無具體公式。
+
+**方案**：利用利率均值回歸特性：
+```
+β = mean_reversion_coefficient (from historical regression)
+σ = rate_volatility (rolling 7d)
+μ = EMA_7d(rate)
+
+P(higher_rate | wait t hours) = Φ((μ - current_rate) / (σ × √t))
+```
+- 利率遠低於均值 → P 高 → 等待
+- 利率遠高於均值 → P 低 → 立即放貸 + 鎖長期
+
+---
+
+## 13. 2026-03-21 市場微觀結構 Review — 隱形收益殺手
+
+> 從 Bitfinex 放貸市場的微觀結構和手續費結構角度審視。完整分析見 `docs/strategy-journal.md`。
+
+### 13.1 Bitfinex 15% 手續費納入計算 (M1)
+
+**問題**：整份 spec 未考慮 Bitfinex 對 funding earnings 收取的 **15% 手續費**。有效日利率只有名義的 85%。所有涉及 rate 比較的邏輯（floor、period 選擇、EV 模型）都有系統性偏差。
+
+**影響**：
+
+1. **Period 決策**：短期（2d）vs 長期（30d）的複利效率比較在加入手續費後結論改變。穩定利率下，長期單省去「成交空檔」和手續費重複計算，略優於短期多次複利。
+2. **Floor 計算**：§4.9 的 floor 應基於淨利率 `rate × 0.85`，而非毛利率。
+3. **EV 模型**：§4.8 的 `EV_deploy` 應為 `current_rate × 0.85 × expected_duration`。
+
+**方案**：全局引入 `FEE_RATE = 0.15` 常數，所有 rate 比較和 EV 計算使用 `netRate = rate × (1 - FEE_RATE)`。
+
+### 13.2 成交空檔追蹤與預排程 (M1)
+
+**問題**：Credit 到期到新 offer 成交之間的「空檔」是隱形的 capital downtime。假設每次平均 20 分鐘：
+
+| Period | 月到期次數 | 空檔總時間 | Capital Downtime |
+|--------|-----------|-----------|-----------------|
+| 2d | 15 | 5hr | 0.69% |
+| 7d | 4.3 | 1.4hr | 0.19% |
+| 14d | 2.1 | 0.7hr | 0.10% |
+| 30d | 1 | 0.3hr | 0.05% |
+
+**方案**：
+1. 追蹤 `avgGapMinutes`（每次到期到成交的實際耗時）
+2. Period 決策加入 gap cost：`gapCost(period) = avgGapMinutes / (period × 1440)`
+3. **到期前預排程**：到期前 1 個心跳提前掛好下一筆 offer（如果有閒置餘額），到期瞬間新 offer 已在 queue
+
+### 13.3 Proactive Offer Refresh (M1)
+
+**問題**：Bitfinex 同利率 FIFO 匹配。排太深的 offer 可能等很久，但 §4.12 只在 stale 時才撤。
+
+**方案**：主動搶隊首——如果 offer 超過 `refreshAge` 且 queueRatio > 0.3：
+```
+cancel(offer)
+newRate = bestAsk - 1tick
+place(newOffer at newRate)
+```
+
+與 §7.1 隊首保留互補：
+- 已在隊首 → **保留**（§7.1 邏輯）
+- 排太後面 → **主動 refresh**（本節邏輯）
+
+### 13.4 提前歸還風險溢價 (M2)
+
+**問題**：§5.6 的提前歸還修正只降低天數偏好權重，但沒有量化**逆向選擇**風險：
+- 利率下跌 → 借方還舊借新 → 你被提前歸還（壞情況）
+- 利率上漲 → 借方不還 → 你被鎖住（也是壞情況）
+
+這是**負凸性**（callable bond risk）。長期單需要額外補償。
+
+**方案**：
+```
+earlyReturnPremium = historicalEarlyReturnRate × (period / 30) × 0.05
+adjustedRate = targetRate + earlyReturnPremium
+```
+- 天數越長 → 溢價越大
+- 歷史提前歸還率越高 → 溢價越大
+- 2 天單溢價 ≈ 0（幾乎不會被提前歸還）
+
+### 13.5 非清算性 Rate Spike 偵測 (M2)
+
+**問題**：§3.5 只偵測清算瀑布，但大戶開倉、套利需求、流動性事件也會導致利率飆升，且不觸發清算瀑布信號。
+
+**方案**：獨立的 `RateSpike` 偵測器：
+```
+if currentRate > EMA_1h × spikeThreshold:  // spikeThreshold = 2.0
+    spike = true
+    action: 立即放貸，短期（2d），搶住高利率
+```
+
+與清算瀑布的區別：
+- 清算瀑布：有大額清算流 + 硬性 MDC 覆寫 + 7-14d period
+- Rate Spike：純利率異常 + 不覆寫 MDC + 短期 2d（因為不確定持續性）
+
+### 13.6 FRR 操縱防護 (M2)
+
+**問題**：FRR 是所有 active funding 的加權平均。大戶可用 wash lending（低利率自借自貸）拉低 FRR，你的 floor（FRR × 0.90）跟著被拉低。
+
+**方案**：
+```
+bookMidRate = (bestBid + bestAsk) / 2  // 不受 active credits 影響
+effectiveFRR = max(FRR, bookMidRate × 0.9)
+```
+
+偵測操縱：如果 `FRR < bookMidRate × 0.7`（FRR 明顯低於 book），標記為可疑，降低 FRR 在定價中的權重。
+
+### 13.7 Temporal Laddering (M3)
+
+**問題**：§4.2 的 allocation 同時掛出所有 offer，全部基於同一個 snapshot 的 bestAsk。但利率每分鐘都在變。
+
+**方案**：跨心跳分批部署：
+- T+0：部署 1/3 at current bestAsk（立即成交）
+- T+3min：部署 1/3 at current bestAsk（可能已變化）
+- T+6min：部署 1/3 at current bestAsk
+
+類似 DCA，分散時間風險。在波動市場中，至少有一批可能捕捉到更好利率。
+
+### 13.8 FRR 反饋迴路意識 (M3)
+
+**問題**：管理的資金佔市場 total funding 比例上升時，你的 credits → 影響 FRR → 影響你的定價 → 影響你的 credits，形成正反饋迴路。
+
+**方案**：
+```
+marketShare = managedFunding / totalMarketFunding
+if marketShare > 0.05:
+    frrWeight *= (1 - (marketShare - 0.05) × 2)  // 線性降低 FRR 權重
+    // marketShare 10% → frrWeight 降 10%
+    // marketShare 20% → frrWeight 降 30%
+```
+
+超過 5% 市佔時，逐步降低 FRR 對定價的影響，改用 order book 原始數據。
+
+---
+
 ## 變更日誌（完整版本歷史）
+
+### V13 市場微觀結構 Review (2026-03-21)
+
+| 模組 | 變更內容 |
+| :--- | :--- |
+| 13.1 手續費 | 新增 Bitfinex 15% 手續費對 floor/period/EV 的全局影響 |
+| 13.2 成交空檔 | 新增 gap cost 量化 + 到期前預排程機制 |
+| 13.3 Offer Refresh | 新增主動搶隊首邏輯（排隊 >30% 深度時撤單重掛） |
+| 13.4 提前歸還溢價 | 新增 callable risk 溢價公式（負凸性補償） |
+| 13.5 Rate Spike | 新增非清算性利率飆升偵測器（獨立於 §3.5） |
+| 13.6 FRR 防操縱 | 新增 effectiveFRR = max(FRR, bookMidRate×0.9) |
+| 13.7 Temporal Ladder | 新增跨心跳分批部署（時間分散 vs 利率分散） |
+| 13.8 FRR 反饋迴路 | 新增市佔率感知的 FRR 權重調整 |
+
+### V12 策略設計層面 Review (2026-03-21)
+
+| 模組 | 變更內容 |
+| :--- | :--- |
+| 12.1 bestAsk 定價 | 定價邏輯從 FRR 乘數改為 bestAsk 偏移，反映 Bitfinex FIFO 匹配機制 |
+| 12.2 Auto-Renew 反轉 | 預設開啟作為安全網，引擎主動管理到期，取代 §7.2 的「永遠關閉」 |
+| 12.3 Noise 簡化 | 移除隨機擾動、保留心理價位避讓，noise 限制為 + 方向 |
+| 12.4 RatePercentile | 新增第 7 信號源：當前利率在 7d 歷史分佈的百分位，直接指導放/等決策 |
+| 12.5 瀑布分階段 | 清算瀑布從單一回應改為三階段（早期 2d/中期 7-14d/後期停止） |
+| 12.6 Weekend 動態化 | 固定 +2-5% 改為滾動 4 週 weekend/weekday ratio |
+| 12.7 Per-Currency | MDC 權重和 regime 閾值分 stablecoin / crypto 兩組 |
+| 12.8 信心度部署 | deploymentRatio = 0.5 + 0.5 × \|MDC\| × avgConfidence |
+| 12.9 滾動放貸 | 新增到期梯隊管理（1/3 短 + 1/3 中 + 1/3 長），到期時按 RatePercentile 決定續約天數 |
+| 12.10 均值回歸 | P(higher_rate) 改用 Ornstein-Uhlenbeck 公式，取代模糊的「歷史統計」 |
+
+### V11 實作同步 + 策略 Review (2026-03-21)
+
+| 模組 | 變更內容 |
+| :--- | :--- |
+| 全文件 | 新增 `⚡ 實作狀態` 標注，同步規範與實際程式碼的差異 |
+| 2.2 信號權重表 | 新增「實作 λ」欄位，標記與設計值的偏差 |
+| 2.5 MDC 計算 | 標注 Confidence 因子的額外實作 |
+| 2.6 MDC 策略映射 | 標注實作改用線性內插（max ×1.50），非離散區間（max ×1.03） |
+| 3.1 Dust Filter | 標注實作改用中位數百分比（5%），非固定 USD 門檻 |
+| 3.2 巨單牆偵測 | 標注實作改用百分比門檻（5%），非 50,000 USD 絕對下限 |
+| 3.7 競爭者偵測 | 標注實作改用統計偵測（followRate + roundRatio） |
+| 4.1 體制識別 | 標注命名（Contango/Backwardation）、閾值（±0.3）差異 |
+| 4.2 資金分層 | 標注實作改用餘額門檻分層，非雙窗口波動度 |
+| 4.9 利率地板 | 標注實作改用三層 floor（FRR × 0.80），非 P10 百分位 |
+| 4.10 閃崩保護 | 標注偵測閾值（-30%）和 cooldown（5min）差異 |
+| 4.12 排隊估算 | 標注實作改用深度比例，非 ETA |
+| 4.14 隨機擾動 | 標注實作改用百分比（±1%），非絕對值 |
+| 5.4 週末溢價 | 標注實作為 rate 乘數，非天數遞減 |
+| 5.5 事件日曆 | 標注實作為月末/季度固定溢價，未整合外部事件源 |
+| 11. 策略 Review | 新增 §11.1-11.7：Pipeline 接線、閒置急迫度、FRR 趨勢、Fill Rate 學習、Renew 重定價、智慧貼牆、Gap Detection |
 
 ### V10 SaaS Multi-Tenant 擴展
 
@@ -1091,12 +1511,12 @@ Phase 7: 紀錄與回饋
 | VWAP 動量基礎權重 | 2.2 | 15% | 5%–25% | ✅ | |
 | 跨幣種 Funding Rate 基礎權重 | 2.2 | 10% | 5%–20% | ✅ | |
 | 日內時段基礎權重 | 2.2 | 10% | 5%–20% | ✅ | |
-| λ_Book 消耗 | 2.3 | 0.05 | 0.02–0.10 | ✅ | 信號衰減速率 |
-| λ_清算瀑布 | 2.3 | 0.03 | 0.01–0.06 | ✅ | |
-| λ_持倉量 | 2.3 | 0.005 | 0.002–0.01 | ✅ | |
-| λ_VWAP | 2.3 | 0.01 | 0.005–0.02 | ✅ | |
-| λ_Funding Rate | 2.3 | 0.002 | 0.001–0.005 | ✅ | |
-| λ_日內時段 | 2.3 | 0.001 | 0.0005–0.003 | ✅ | |
+| λ_Book 消耗 | 2.3 | 0.05 | 0.02–0.10 | ✅ | 信號衰減速率（實作：**0.01**） |
+| λ_清算瀑布 | 2.3 | 0.03 | 0.01–0.06 | ✅ | （實作：**0.005**） |
+| λ_持倉量 | 2.3 | 0.005 | 0.002–0.01 | ✅ | （實作：**0.008**） |
+| λ_VWAP | 2.3 | 0.01 | 0.005–0.02 | ✅ | （實作：0.01 ✅） |
+| λ_Funding Rate | 2.3 | 0.002 | 0.001–0.005 | ✅ | （實作：**0.005**） |
+| λ_日內時段 | 2.3 | 0.001 | 0.0005–0.003 | ✅ | （實作：**0.002**） |
 | 復甦平滑步數 | 2.4 | 3 | 2–5 | ✅ | 信號恢復的遞增數據點數 |
 | MDC 強烈看漲閾值 | 2.6 | +0.7 | +0.6–+0.8 | ❌ | 策略映射邊界 |
 | MDC 溫和看漲閾值 | 2.6 | +0.3 | +0.2–+0.4 | ❌ | |
@@ -1177,7 +1597,7 @@ Phase 7: 紀錄與回饋
 | ETA 保留閾值 | 4.12 | 0.5× TTL | 0.3×–0.8× | ✅ | |
 | 主動降價 Ticks | 4.12 | 1–2 | 1–3 | ❌ | |
 | 部分成交偏離閾值 | 4.13 | 5 Ticks | 3–8 Ticks | ❌ | |
-| 隨機擾動範圍 | 4.14 | 1e-8 ~ 5e-8 | — | ❌ | |
+| 隨機擾動範圍 | 4.14 | 1e-8 ~ 5e-8 | — | ❌ | （實作：**rate ±1%, amount ±2%**） |
 
 ### B.4 天數決策參數
 

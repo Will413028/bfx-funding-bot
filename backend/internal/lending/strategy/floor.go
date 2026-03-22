@@ -8,7 +8,7 @@ import (
 
 const (
 	// FRR relative floor: don't go below FRR × this ratio
-	frrFloorRatio = 0.8
+	frrFloorRatio = 0.92 // GT1: 0.80→0.92, FRR 本身是市場均衡，打 8 折等於賤賣
 
 	// Regime floor multipliers on config.Rate.Min
 	regimeCrisisFloorMul        = 1.5
@@ -89,4 +89,23 @@ func (f *FloorStrategy) regimeFloor(minRate float64, regime domain.RegimeType) f
 	default: // contango, neutral
 		return minRate
 	}
+}
+
+// ComputeFloorRate computes the three-layer floor rate (opportunity cost, FRR
+// relative, regime-adjusted) and returns the maximum. Used by CompositeStrategy.
+func ComputeFloorRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
+	f := &FloorStrategy{}
+
+	opportunityCost := cfg.Rate.Min
+	frrFloor := snap.FRR * frrFloorRatio
+	regimeFloor := f.regimeFloor(cfg.Rate.Min, snap.Regime)
+
+	floor := opportunityCost
+	if frrFloor > floor {
+		floor = frrFloor
+	}
+	if regimeFloor > floor {
+		floor = regimeFloor
+	}
+	return floor
 }

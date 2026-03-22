@@ -118,3 +118,62 @@ func (s *StaggerStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 		Reason: reason,
 	}
 }
+
+// AdjustPeriodForStagger returns an adjusted period that minimizes expiry
+// concentration based on active credit distribution. If no credits exist,
+// returns basePeriod unchanged. Used by CompositeStrategy.
+func AdjustPeriodForStagger(basePeriod int, credits []domain.FundingCredit, cfg *domain.StrategyConfig, now time.Time) int {
+	if len(credits) == 0 {
+		return basePeriod
+	}
+
+	// Build expiry buckets
+	buckets := make(map[int]float64)
+	for _, c := range credits {
+		expiryTime := c.OpenedAt.Add(time.Duration(c.Period) * 24 * time.Hour)
+		daysUntil := int(math.Ceil(expiryTime.Sub(now).Hours() / 24))
+		if daysUntil < 1 {
+			daysUntil = 1
+		}
+		buckets[daysUntil] += c.Amount
+	}
+
+	// Find day with least expiry amount in [Min, Max]
+	bestPeriod := basePeriod
+	minAmount := math.MaxFloat64
+	var candidates []int
+
+	for day := cfg.Period.Min; day <= cfg.Period.Max; day++ {
+		amt := buckets[day]
+		if amt < minAmount {
+			minAmount = amt
+			bestPeriod = day
+			candidates = []int{day}
+		} else if amt == minAmount {
+			candidates = append(candidates, day)
+		}
+	}
+
+	// If multiple days tied, pick the one closest to basePeriod
+	if len(candidates) > 1 {
+		closest := candidates[0]
+		closestDist := abs(closest - basePeriod)
+		for _, d := range candidates[1:] {
+			dist := abs(d - basePeriod)
+			if dist < closestDist {
+				closest = d
+				closestDist = dist
+			}
+		}
+		bestPeriod = closest
+	}
+
+	return bestPeriod
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

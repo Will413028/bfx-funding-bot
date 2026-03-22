@@ -111,3 +111,32 @@ func (m *ImpactStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResu
 		Reason: "impact:high",
 	}
 }
+
+// ComputeImpactMultiplier returns (rate multiplier, max allowed amount) based
+// on the market impact ratio. multiplier is 1.0 if no adjustment needed.
+// maxAmount <= 0 means impact is over limit. Used by CompositeStrategy.
+func ComputeImpactMultiplier(amount float64, existingAmount float64, askDepth float64) (multiplier float64, maxAmount float64) {
+	if askDepth <= 0 {
+		return 1.0, amount
+	}
+
+	impactRatio := (existingAmount + amount) / askDepth
+
+	if impactRatio <= impactLowThreshold {
+		return 1.0, amount
+	}
+
+	if impactRatio <= impactHighThreshold {
+		return impactModeratePremium, amount
+	}
+
+	// High impact — rate premium + amount reduction
+	maxAllowed := impactHighThreshold*askDepth - existingAmount
+	if maxAllowed < minBalance {
+		return impactHighPremium, 0 // over limit
+	}
+	if amount > maxAllowed {
+		amount = maxAllowed
+	}
+	return impactHighPremium, amount
+}

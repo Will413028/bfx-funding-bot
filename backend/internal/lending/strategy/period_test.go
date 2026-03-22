@@ -16,10 +16,10 @@ func TestPeriod_Regime_Contango(t *testing.T) {
 		c.Snapshot.FRR = 0 // disable rate scaling
 	})
 	// Period.Min=2, Period.Max=30, range=28
-	// contango: 2 + 0.75 * 28 = 23
+	// contango: 2 + 0.88 * 28 = 26.64 → round to 27
 	res := ps.Apply(ctx)
-	if res.Offers[0].Period != 23 {
-		t.Errorf("contango period: got %d, want 23", res.Offers[0].Period)
+	if res.Offers[0].Period != 27 {
+		t.Errorf("contango period: got %d, want 27", res.Offers[0].Period)
 	}
 }
 
@@ -182,9 +182,9 @@ func TestPeriod_Clamp_AboveMax(t *testing.T) {
 		c.Config.Period.Min = 2
 		c.Config.Period.Max = 10
 	})
-	// contango: 2 + 0.75 * 8 = 8
+	// contango: 2 + 0.88 * 8 = 9.04
 	// rate scale: 1.0 + (2.0 - 1.0) * 0.3 = 1.30
-	// 8 * 1.30 = 10.4 → round 10 → within max=10
+	// 9.04 * 1.30 = 11.75 → round 12 → clamp to max=10
 	res := ps.Apply(ctx)
 	if res.Offers[0].Period > 10 {
 		t.Errorf("clamp above max: got %d, want <= 10", res.Offers[0].Period)

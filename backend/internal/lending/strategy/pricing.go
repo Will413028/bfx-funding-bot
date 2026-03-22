@@ -10,7 +10,7 @@ const (
 	// MDC premium mapping: linear interpolation
 	// MDC +1 → maxPremium, MDC 0 → 1.0, MDC -1 → minPremium
 	maxPremiumUp   = 0.5  // positive MDC premium range (1.0 → 1.5)
-	maxPremiumDown = 0.3  // negative MDC discount range (1.0 → 0.7)
+	maxPremiumDown = 0.18 // negative MDC discount range (1.0 → 0.82) — GT2: 0.30→0.18, backwardation 降價過慷慨
 
 	// Regime multipliers
 	regimeContangoMul       = 1.05 // +5%
@@ -33,6 +33,10 @@ const (
 	deviationNeutral        = 0.25 // neutral: 25%
 	deviationCrisis         = 0.60 // crisis: 60%
 	deviationHardCeiling    = 0.80 // absolute max: 80%
+
+	// Bitfinex funding fee (15% of earnings)
+	// M1: All rate comparisons should use netRate = rate × (1 - FeeRate)
+	FeeRate = 0.15
 )
 
 // PricingStrategy computes the recommended offer rate based on market state.
@@ -191,4 +195,18 @@ func clamp(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// ComputeBaseRate computes the MDC-adjusted rate with regime, depth pressure,
+// and wall avoidance applied. This is the core pricing logic used by CompositeStrategy.
+func ComputeBaseRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
+	p := &PricingStrategy{}
+
+	baseRate := p.selectBaseRate(snap)
+	rate := baseRate * p.mdcMultiplier(snap.MDC.Score)
+	rate = p.applyRegime(rate, snap.Regime, cfg)
+	rate = p.applyDepthPressure(rate, snap.OrderBook)
+	rate = p.applyWallAvoidance(rate, snap.WallPositions)
+
+	return rate
 }

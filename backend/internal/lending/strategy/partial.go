@@ -111,3 +111,45 @@ func (p *PartialStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 		Reason:  reason,
 	}
 }
+
+// ComputeFillAdjustment returns an adjusted amount based on active offer fill
+// activity proxy. Used by CompositeStrategy.
+func ComputeFillAdjustment(amount float64, activeOffers []domain.FundingOffer, cfg *domain.StrategyConfig) float64 {
+	var validSum float64
+	var validCount int
+
+	for _, o := range activeOffers {
+		if o.Amount >= minBalance {
+			validSum += o.Amount
+			validCount++
+		}
+	}
+
+	if validCount > 0 && cfg.Amount.Max > 0 {
+		avgSize := validSum / float64(validCount)
+		fillProxy := 1.0 - (avgSize / cfg.Amount.Max)
+		if fillProxy < 0 {
+			fillProxy = 0
+		}
+
+		if fillProxy > fillProxyHigh {
+			amount *= partialHighMul
+		} else if fillProxy < fillProxyLow {
+			amount *= partialLowMul
+		}
+	}
+
+	return amount
+}
+
+// DetectResiduals returns IDs of offers with amount below the minimum balance.
+// Used by CompositeStrategy.
+func DetectResiduals(offers []domain.FundingOffer) []int64 {
+	var cancels []int64
+	for _, o := range offers {
+		if o.Amount < minBalance {
+			cancels = append(cancels, o.ID)
+		}
+	}
+	return cancels
+}

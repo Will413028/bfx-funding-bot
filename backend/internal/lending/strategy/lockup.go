@@ -118,3 +118,20 @@ func (l *LockupStrategy) regimeMultiplier(regime domain.RegimeType) float64 {
 		return 1.0
 	}
 }
+
+// ComputeLockupPremium computes the lockup opportunity cost premium and
+// optionally adjusts the period if cost exceeds the threshold.
+// Used by CompositeStrategy.
+func ComputeLockupPremium(baseRate float64, period int, volatility float64, regime domain.RegimeType) (premium float64, adjustedPeriod int) {
+	l := &LockupStrategy{}
+
+	cost := l.computeCost(period, volatility, regime)
+
+	adjustedPeriod = period
+	if baseRate > 0 && cost/baseRate > maxCostRatio {
+		adjustedPeriod = l.suggestPeriod(baseRate, volatility, regime)
+		cost = l.computeCost(adjustedPeriod, volatility, regime)
+	}
+
+	return cost, adjustedPeriod
+}

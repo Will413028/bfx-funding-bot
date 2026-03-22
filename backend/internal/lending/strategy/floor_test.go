@@ -33,12 +33,12 @@ func TestFloor_OpportunityCost_Baseline(t *testing.T) {
 func TestFloor_FRR_Available(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
-		c.Snapshot.FRR = 0.0005 // FRR floor = 0.0004, above config.Rate.Min=0.0001
+		c.Snapshot.FRR = 0.0005 // FRR floor = 0.00046, above config.Rate.Min=0.0001
 		c.Snapshot.Regime = domain.RegimeNeutral
 	})
 	res := fs.Apply(ctx)
-	// FRR floor = 0.0005 * 0.8 = 0.0004
-	expected := 0.0005 * 0.8
+	// FRR floor = 0.0005 * 0.92 = 0.00046
+	expected := 0.0005 * 0.92
 	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
 		t.Errorf("FRR floor: got %f, want %f", res.Offers[0].Rate, expected)
 	}
@@ -127,12 +127,12 @@ func TestFloor_Regime_Neutral(t *testing.T) {
 func TestFloor_MaxLayer_FRRWins(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
-		c.Snapshot.FRR = 0.001 // FRR floor = 0.0008
+		c.Snapshot.FRR = 0.001 // FRR floor = 0.00092
 		c.Snapshot.Regime = domain.RegimeNeutral
 		// opportunity cost = 0.0001, regime = 0.0001
 	})
 	res := fs.Apply(ctx)
-	expected := 0.001 * 0.8
+	expected := 0.001 * 0.92
 	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
 		t.Errorf("FRR wins: got %f, want %f", res.Offers[0].Rate, expected)
 	}
@@ -145,7 +145,7 @@ func TestFloor_MaxLayer_RegimeWins(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Config.Rate.Min = 0.0003 // opportunity cost = 0.0003
-		c.Snapshot.FRR = 0.0003    // FRR floor = 0.00024
+		c.Snapshot.FRR = 0.0003    // FRR floor = 0.000276
 		c.Snapshot.Regime = domain.RegimeCrisis
 		// regime floor = 0.0003 * 1.5 = 0.00045
 	})
@@ -163,7 +163,7 @@ func TestFloor_MaxLayer_OpportunityCostWins(t *testing.T) {
 	fs := NewFloorStrategy()
 	ctx := testCtx(func(c *domain.DecisionContext) {
 		c.Config.Rate.Min = 0.0005 // opportunity cost = 0.0005
-		c.Snapshot.FRR = 0.0004    // FRR floor = 0.00032
+		c.Snapshot.FRR = 0.0004    // FRR floor = 0.000368
 		c.Snapshot.Regime = domain.RegimeNeutral
 		// regime floor = 0.0005 * 1.0 = 0.0005, ties with opportunity cost
 	})

@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-19
+> 最後更新：2026-03-21
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
@@ -75,29 +75,6 @@
 | F16 | Testing | Vitest unit tests + Playwright E2E setup | `358ea07` |
 | H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式) + shutdown flush | `70db7a7` |
 | H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs | `70db7a7` |
-| I1 | GitHub Actions CI | `.github/workflows/ci.yml` — backend (go vet + golangci-lint + go test -race + go build) + frontend (tsc + biome + vitest)，push/PR 觸發，雙 job 平行 | `3bc0151` |
-| I2 | Backend Linter | `backend/.golangci.yml` — gocritic, gosec, misspell, copyloopvar 等 + lint fix (rangeValCopy, errorlint, unparam) + dashboard_test mock credit 格式修正 | `3bc0151` |
-| J3 | CORS Middleware | `router.go` — `gin-contrib/cors` 已於初始實作中配置 `FRONTEND_URL` 白名單（review 時誤判為缺口） | 既有 |
-| J5 | Per-User Rate Limit | `middleware/userratelimit.go` — per-user token bucket (10r/s, burst 20) + auto-cleanup + 5 tests，掛載於 protected routes | `d4c5966` |
-| G1 | Adaptive Deviation Guard | `strategy/pricing.go` — per-regime FRR deviation ceiling (牛 40%/熊 20%/震盪 25%/危機 60%) + hard ceiling 80% + 6 tests | `853347b` |
-| G6 | Cold Start Protocol | `worker/worker.go` — 3 階段 MDC 漸進啟用 (0%→50%→75%→100%, 每階段 10min) + injectable clock + 6 tests | `0e1541d` |
-| G9 | Graceful Degradation | `signal/health.go` + `signal/mdc.go` + `marketfeed/service.go` — 信號健康度追蹤 (healthy/warning/degraded/recovering) + MDC 降級權重重分配 + Order Book 故障 FRR-only + 恢復確認 2 心跳 + 13 new tests | `bae8d96` |
-| J1 | Email 驗證 | 註冊建立 pending 用戶 + Redis token + Resend 驗證信 + `POST /auth/verify-email` + Login 拒絕未驗證 | |
-| J2 | Forgot Password | `POST /auth/forgot-password` + `POST /auth/reset-password` + Redis token (1hr TTL) + anti-enumeration | `745facd` |
-| J6 | JWT Refresh Token | access token 15min + refresh token 7d Redis rotation + `POST /auth/refresh` + `POST /auth/logout` + 前端 proxy 透明刷新 + 雙 cookie (auth_token + refresh_token) | `3b5865f` |
-| L1 | Loading Skeleton | `components/ui/skeleton.tsx` + `components/shared/page-skeleton.tsx` — 5 頁面專屬 skeleton (overview/api-keys/strategy/history/settings) | |
-| L3 | Per-Page Error Boundary | `components/shared/query-error.tsx` — 5 頁面改用 QueryError + retry button，取代原本的純文字錯誤 | `319fe90` |
-| G2 | Signal Recovery Smoothing | `signal/health.go` RecoveryWeight() 3 步漸進 (33%→66%→100%) + MDC Aggregate 套用 dampened weight | |
-| G3 | Smart Hidden Offers | `strategy/hidden.go` — HiddenRatio>30% 或高競爭+中 hidden→flags:64 + 5 tests | |
-| G4 | Term Structure Analysis | `strategy/termstructure.go` — 4 種曲線形態 (steep/humped/inverted/flat) + FilterPeriod 前置過濾 + 8 tests | |
-| G5 | Early Return Adjustment | `strategy/earlyreturn.go` — hold_rate<60% → 天數偏好衰減 (min 0.5x) + EffectiveReturn + 5 tests | |
-| G7 | Maintenance Behaviors | `strategy/maintenance.go` — 隊首 epsilon 保留 + zombie TTL (active 12min/dead 52min) + atomic swap + 6 tests | `57d9b8c` |
-| L2 | User Onboarding Flow | `features/dashboard/components/setup-checklist.tsx` — 3 步驟引導 (API Key → Strategy → Earning) + 進度條 + 自動偵測完成狀態 | `d7ab19b` |
-| L4 | PWA Support | `manifest.json` + icon-192/512 + metadata (themeColor, appleWebApp) — 行動裝置加到主畫面 | `e2462e2` |
-| K2 | Frontend Component Tests | @testing-library/react + jsdom + 3 test files: SetupChecklist (5), StatsGrid (6), QueryError (5) — 16 new tests, 65 total | `3f3b336` |
-| L5 | Accessibility | aria-label (nav, sidebar, mobile menu), aria-current (active links), aria-invalid + aria-describedby (forms), role=alert (errors), aria-disabled (checklist), landmarks | `44475d5` |
-| G8 | Opportunity Cost Framework | `strategy/opportunitycost.go` — EV_deploy vs EV_wait + MDC slope P(higher_rate) + safety valve (2hr→20% floor discount) + 8 tests | `31161b1` |
-| G10 | Performance Tracking | `lending/tracking/` — alpha.go (計算+record builder) + summary.go (7d 滾動摘要) + attribution.go (per-tag 歸因) + feedback.go (±10% 調整建議) + Redis persistence + 12 tests | |
 
 ### 目前 DB Schema (5 tables)
 
@@ -111,13 +88,8 @@
 
 ```
 GET    /api/v1/health
-POST   /api/v1/auth/register        (rate limit: 5r/s)
-POST   /api/v1/auth/login           (rate limit: 5r/s)
-POST   /api/v1/auth/refresh         (rate limit: 5r/s)
-POST   /api/v1/auth/verify-email    (rate limit: 5r/s)
-POST   /api/v1/auth/forgot-password (rate limit: 5r/s)
-POST   /api/v1/auth/reset-password  (rate limit: 5r/s)
-POST   /api/v1/auth/logout          (JWT, protected)
+POST   /api/v1/auth/register       (rate limit: 5r/s)
+POST   /api/v1/auth/login          (rate limit: 5r/s)
 GET    /api/v1/auth/ws-token       (JWT)
 GET    /api/v1/me                  (JWT, 20r/s)
 PUT    /api/v1/me/password         (JWT, 20r/s)
@@ -183,66 +155,85 @@ marketfeed/service.go (C1)
 
 ### Phase G — 策略行為增強
 
-> 對照 `strategy_specification.md`，以下功能在規範中定義但尚未實作。
-> 多數屬於現有模組的行為增強，非獨立策略模組。
+> 對照 `strategy_specification.md` + 2026-03-21 策略 review（見 `docs/strategy-journal.md`）。
+> G0 為最高優先（pipeline 接線），G11-G16 為 review 新增項目。
+
+#### G0 — 策略 Pipeline 接線（最高優先）
+
+| # | 功能 | 說明 | 涉及檔案 | 複雜度 |
+|---|------|------|---------|--------|
+| G0 | Composite Strategy Pipeline | `factory.go` 目前只接 `PricingStrategy`，需將 13 個策略模組組合成完整 pipeline。各模組依序處理 DecisionContext → 累積 DecisionResult | `lending/factory.go` + 新增 `strategy/composite.go` | 中 |
+
+#### G-Tune — 參數調校（快速收益）
+
+> 基於 review 的常數修正，每項只需改一個數字。建議搭配 A/B 測試驗證。
+
+| # | 參數 | 目前值 | 建議值 | 理由 | 涉及檔案 |
+|---|------|--------|--------|------|---------|
+| GT1 | `frrFloorRatio` | 0.80 | 0.90–0.95 | FRR 本身是市場均衡，打 8 折等於賤賣 | `strategy/floor.go` |
+| GT2 | `maxPremiumDown` | 0.30 | 0.15–0.20 | Backwardation 降 30% 太慷慨，race to bottom | `strategy/pricing.go` |
+| GT3 | `regimeContangoPeriodRatio` | 0.75 | 0.85–0.90 | Contango 是高利率窗口，應更積極鎖長期 | `strategy/period.go` |
+| GT4 | `rateNoiseRange` | 0.01 | 0.003–0.005 | 放貸 spread 很薄，±1% 影響排隊位置過大 | `strategy/noise.go` |
+| GT5 | aggressive tier mul | 1.25 | 1.10–1.15 | 高 25% 的 offer 長期閒置拉低 utilization | `strategy/allocation.go` |
+| GT6 | queue discount | 兩段式跳躍 | 線性/sigmoid 曲線 | 閾值附近震盪不穩定 | `strategy/queue.go` |
+
+#### G1–G10 — 規範定義增強
 
 | # | 規範章節 | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|----------|------|------|---------|--------|
-| ~~G1~~ | ~~§8.1~~ | ~~Adaptive Deviation Guard~~ | ~~掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%）~~ | ~~`strategy/pricing.go`~~ | ~~低~~ ✅ |
-| ~~G2~~ | ~~§2.4~~ | ~~Signal Recovery Smoothing~~ | ~~信號恢復時 3 步線性遞增權重（33%→66%→100%）~~ | ~~`signal/mdc.go` + `signal/health.go`~~ | ~~中~~ ✅ |
-| ~~G3~~ | ~~§4.3~~ | ~~Smart Hidden Offers~~ | ~~根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單~~ | ~~新增 `strategy/hidden.go`~~ | ~~中~~ ✅ |
-| ~~G4~~ | ~~§5.1~~ | ~~Term Structure Analysis~~ | ~~利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器~~ | ~~新增 `strategy/termstructure.go`~~ | ~~中~~ ✅ |
-| ~~G5~~ | ~~§5.6~~ | ~~Early Return Adjustment~~ | ~~`有效回報 = Rate × 歷史持有率`，持有率 < 60% 時降低天數偏好~~ | ~~新增 `strategy/earlyreturn.go`~~ | ~~中~~ ✅ |
-| ~~G6~~ | ~~§6.4~~ | ~~Cold Start Protocol~~ | ~~Worker 啟動前 30 分鐘分 3 階段逐步啟用信號（目前直接全量運行）~~ | ~~`worker/worker.go`~~ | ~~中~~ ✅ |
-| ~~G7~~ | ~~§7.1~~ | ~~Maintenance Behaviors~~ | ~~隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊）~~ | ~~新增 `strategy/maintenance.go`~~ | ~~中~~ ✅ |
-| ~~G8~~ | ~~§4.8~~ | ~~Opportunity Cost Framework~~ | ~~完整 EV_deploy vs EV_wait 比較模型~~ | ~~新增 `strategy/opportunitycost.go`~~ | ~~高~~ ✅ |
-| ~~G9~~ | ~~§6.3~~ | ~~Graceful Degradation~~ | ~~信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認~~ | ~~`signal/mdc.go` + `marketfeed/service.go`~~ | ~~高~~ ✅ |
-| ~~G10~~ | ~~§9.1-9.3~~ | ~~Performance Tracking~~ | ~~Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調）~~ | ~~新增 `lending/tracking/`~~ | ~~極高~~ ✅ |
+| G1 | §8.1 | Adaptive Deviation Guard | 掛單利率偏離 FRR 上限保護（per-regime: 牛市 40%、熊市 20%、震盪 25%、危機 60%） | `strategy/pricing.go` | 低 |
+| G2 | §2.4 | Signal Recovery Smoothing | 信號恢復時 3 步線性遞增權重（33%→66%→100%），防止 MDC 從衰減突然跳回滿額 | `signal/mdc.go` | 中 |
+| G3 | §4.3 | Smart Hidden Offers | 根據競爭度 + HiddenRatio 決定使用隱藏單（`flags: 64`）或公開單 | 新增 `strategy/hidden.go` | 中 |
+| G4 | §5.1 | Term Structure Analysis | 利率曲線形態偵測（陡峭/駝峰/倒掛/平坦），作為天數決策前置過濾器 | 新增 `strategy/termstructure.go` | 中 |
+| G5 | §5.6 | Early Return Adjustment | `有效回報 = Rate × 歷史持有率`，持有率 < 60% 時降低天數偏好 | `strategy/period.go` | 中 |
+| G6 | §6.4 | Cold Start Protocol | Worker 啟動前 30 分鐘分 3 階段逐步啟用信號（目前直接全量運行） | `worker/worker.go` | 中 |
+| G7 | §7.1 | Maintenance Behaviors | 隊首保留檢查、僵屍單動態 TTL 撤銷、原子化換單（先掛新再撤舊） | `worker/worker.go` + `execution/offer.go` | 中 |
+| G8 | §4.8 | Opportunity Cost Framework | 完整 EV_deploy vs EV_wait 比較模型（目前 floor.go 僅有靜態地板） | `strategy/floor.go` 或新增 | 高 |
+| G9 | §6.3 | Graceful Degradation | 信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認 | `signal/mdc.go` + `marketfeed/service.go` | 高 |
+| G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
 
-### Phase I — DevOps / CI/CD
+#### G11–G16 — 實作 Review 新增項目
 
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| ~~I1~~ | ~~GitHub Actions CI~~ | ~~`go test ./...` + `go vet` + `biome check` + `vitest` — push/PR 觸發~~ | ~~低~~ ✅ |
-| ~~I2~~ | ~~Backend Linter~~ | ~~golangci-lint 設定（`.golangci.yml`）— 與 CI 整合~~ | ~~低~~ ✅ |
-| I3 | Staging 環境 | Koyeb + Vercel preview 環境，與 production 分離，PR 自動部署 preview | 中 |
-| I4 | Koyeb Health Check 設定 | 設定 `/api/v1/health` 為 Koyeb readiness/liveness probe | 低 |
+| # | 功能 | 說明 | 涉及檔案 | 複雜度 |
+|---|------|------|---------|--------|
+| G11 | Idle Capital Urgency | 追蹤資金閒置時長，隨時間逐步降低 floor rate。`urgencyDiscount = min(idleMinutes / 120, 0.15)`，避免死資金 APY=0% | `strategy/floor.go` + `worker/worker.go` | 中 |
+| G12 | FRR Trend Tracking | FRR 的 EMA(30min) vs EMA(4hr) 趨勢判斷。上升趨勢 → 更敢報高價，下降趨勢 → 搶先成交 | `signal/` 新增或 `marketfeed/` | 中 |
+| G13 | Historical Fill Rate Learning | 追蹤每個 rate bucket 的實際 fill rate + time-to-fill，用數據驅動定價取代固定常數 | 新增 `lending/tracking/fillrate.go` + DB schema | 高 |
+| G14 | Auto-Renew Re-pricing | Credit 到期 renew 時走完整 pricing pipeline 重新定價，而非沿用原 rate | `execution/credit.go` | 低 |
+| G15 | Smart Wall Positioning | 靠近 wall 不盲目降 1%，改為 price just below wall 搶先成交。Wall 是定價參考而非威脅 | `strategy/pricing.go` | 中 |
+| G16 | Order Book Gap Detection | 掃描 book 找 rate 空隙，在無競爭者的 gap 中報價以最大化 fill probability | 新增 `orderbook/gap.go` + `strategy/pricing.go` | 中 |
 
-### Phase J — 安全性 & 帳號
+#### S1–S10 — 策略設計 Review 新增項目
 
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| ~~J1~~ | ~~Email 驗證~~ | ~~註冊後發送驗證信 + `users.status` 狀態切換（pending → active）~~ | ~~中~~ ✅ |
-| ~~J2~~ | ~~Forgot Password~~ | ~~忘記密碼 flow（Resend 發送 reset link + token 驗證 + 重設密碼 endpoint）~~ | ~~中~~ ✅ |
-| ~~J3~~ | ~~CORS Middleware~~ | ~~後端明確設定 CORS 白名單（`FRONTEND_URL`）~~ — 已在 `router.go` 中用 `gin-contrib/cors` 實作 | ~~低~~ ✅ |
-| ~~J4~~ | ~~CSRF Protection~~ | ~~不適用~~ — 已使用 httpOnly cookie + SameSite=Strict/Lax，token 不暴露給 JS，天然免疫 CSRF | ~~中~~ N/A |
-| ~~J5~~ | ~~Per-User Rate Limit~~ | ~~認證後 API 加入 per-user rate limit（目前僅 per-IP），防止單一帳號濫用~~ | ~~低~~ ✅ |
-| ~~J6~~ | ~~JWT Refresh Token~~ | ~~實作 refresh token rotation~~ | ~~中~~ ✅ |
+> 基於 2026-03-21 策略設計層面 review，見 `strategy_specification.md` §12。
 
-### Phase K — 測試補強
+| # | 功能 | 說明 | 涉及檔案 | 複雜度 |
+|---|------|------|---------|--------|
+| S1 | BestAsk-Relative Pricing | 定價改為相對 bestAsk 偏移（`bestAsk - tickOffset(MDC)`），取代 FRR 乘數。反映 FIFO 匹配機制 | `strategy/pricing.go` 重寫 | 中 |
+| S2 | Auto-Renew Always-On | 反轉 §7.2：auto-renew 預設開啟作為安全網，引擎主動在到期前取消並重新定價 | `execution/credit.go` | 低 |
+| S3 | Remove Random Noise | 移除 §4.14 隨機擾動（或限 + 方向），保留 §4.7 心理價位避讓 | `strategy/noise.go` | 低 |
+| S4 | RatePercentile Signal | 新增第 7 信號源：當前利率在 7d 分佈的百分位，`> P75` 積極放貸，`< P25` 等待 | 新增 `signal/percentile.go` + `marketfeed/` | 中 |
+| S5 | Cascade Phase Response | 清算瀑布分三階段回應：早期 2d 捕暴利、中期 7-14d 鎖高利率、後期停止新增 | `signal/liquidation.go` + `strategy/pricing.go` | 中 |
+| S6 | Dynamic Weekend Premium | 固定 +2-5% 改為滾動 4 週 weekend/weekday ratio（實際可達 +20-50%） | `strategy/weekend.go` | 中 |
+| S7 | Per-Currency Parameters | MDC 權重和 regime 閾值分 stablecoin / crypto 兩組 | `signal/mdc.go` + `signal/regime.go` + config | 高 |
+| S8 | Confidence-Scaled Deployment | `deploymentRatio = 0.5 + 0.5 × |MDC| × avgConfidence`，低信心時保留彈藥 | `strategy/allocation.go` | 低 |
+| S9 | Rolling Period Ladder | 維持 1/3 短 + 1/3 中 + 1/3 長到期結構，到期時按 RatePercentile 決定續約天數 | `strategy/period.go` + `strategy/stagger.go` | 高 |
+| S10 | Mean-Reversion P(higher) | `P(higher_rate) = Φ((EMA_7d - current) / σ√t)`，用於 §4.8 EV_wait 計算 | `strategy/floor.go` 或新增 | 中 |
 
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| K1 | Frontend E2E Tests | Playwright 測試 critical path：註冊 → 登入 → 設定 API Key → Dashboard → 策略設定 | 中 |
-| ~~K2~~ | ~~Frontend Component Tests~~ | ~~features/ 下 hooks + components 的 Vitest 單元測試~~ | ~~中~~ ✅ |
-| K3 | Backend Integration Tests | 使用 testcontainers-go 跑真實 PostgreSQL 的 repository 層測試 | 高 |
+#### M1–M8 — 市場微觀結構 Review 新增項目
 
-### Phase L — 前端體驗
+> 基於 2026-03-21 市場微觀結構 review，見 `strategy_specification.md` §13。
 
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| ~~L1~~ | ~~Loading Skeleton~~ | ~~各頁面加入 Skeleton / Shimmer loading 狀態~~ | ~~低~~ ✅ |
-| ~~L2~~ | ~~User Onboarding Flow~~ | ~~新用戶引導：歡迎 → 設定 API Key → 設定策略 → 啟動引擎，分步引導~~ | ~~中~~ ✅ |
-| ~~L3~~ | ~~Per-Page Error Boundary~~ | ~~各 feature 區塊加入局部 error boundary + retry~~ | ~~低~~ ✅ |
-| ~~L4~~ | ~~PWA Support~~ | ~~`manifest.json` + 行動裝置加到主畫面~~ | ~~低~~ ✅ |
-| ~~L5~~ | ~~Accessibility (a11y)~~ | ~~ARIA labels + 鍵盤導航 + 色彩對比度檢查~~ | ~~中~~ ✅ |
-
-### Phase M — 商業邏輯
-
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| M1 | Stripe 付款整合 | Stripe Checkout / Customer Portal 串接 — `billing_records` 表已備、需加入 Stripe webhook handler | 高 |
-| M2 | 訂閱生命週期管理 | 升降級 plan、到期處理、grace period、取消訂閱 → 自動降級 free plan | 高 |
+| # | 功能 | 說明 | 涉及檔案 | 複雜度 |
+|---|------|------|---------|--------|
+| M1 | Fee-Adjusted Calculations | Bitfinex 15% 手續費納入所有 rate/period/EV 計算。`netRate = rate × 0.85` | 全局常數 + `strategy/floor.go`, `strategy/period.go` | 低 |
+| M2 | Gap Cost Tracking + Pre-scheduling | 追蹤到期→成交空檔（`avgGapMinutes`），到期前預排程下一筆 offer，`gapCost` 作為 period 決策輸入 | `worker/worker.go` + `execution/credit.go` | 中 |
+| M3 | Proactive Offer Refresh | 排隊 >30% 深度 + 超過 refreshAge 時主動撤單重掛到 bestAsk-1tick，搶 FIFO 隊首 | `strategy/queue.go` 或 `worker/worker.go` | 低 |
+| M4 | Early Return Risk Premium | 長期單加入提前歸還風險溢價（負凸性補償）：`premium = earlyReturnRate × (period/30) × 0.05` | `strategy/pricing.go` + `strategy/lockup.go` | 低 |
+| M5 | Non-Liquidation Rate Spike Detector | 獨立偵測利率飆升（`rate > EMA_1h × 2.0`），不依賴清算瀑布。觸發即時短期放貸 | 新增 `signal/ratespike.go` | 中 |
+| M6 | FRR Manipulation Guard | `effectiveFRR = max(FRR, bookMidRate × 0.9)`，FRR 明顯低於 book 時標記可疑並降權 | `strategy/floor.go` + `strategy/pricing.go` | 低 |
+| M7 | Temporal Laddering | 跨心跳分批部署（1/3 per tick），分散時間風險。類似 DCA | `worker/worker.go` + `strategy/allocation.go` | 中 |
+| M8 | FRR Feedback Loop Awareness | 管理資金佔市場 >5% 時，線性降低 FRR 權重，改用 book 原始數據，防正反饋失控 | `strategy/pricing.go` | 低 |
 
 ---
 
@@ -250,21 +241,16 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 90 項 |
+| 已完成 | 66 項 |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ 全部完成 |
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ 全部完成 |
-| Phase G（策略行為增強） | 10 項 |
+| Phase G（策略行為增強） | G0 + GT1-6 + G1-G16 + S1-S10 + M1-M8 = 41 項 |
 | ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅ 完成，H3 待部署後設定 |
-| Phase I（DevOps / CI/CD） | ~~I1+I2~~ ✅ 完成，2 項待開發 |
-| Phase J（安全性 & 帳號） | 6 項 |
-| Phase K（測試補強） | 3 項 |
-| Phase L（前端體驗） | 5 項 |
-| Phase M（商業邏輯） | 2 項 |
-| **待開發合計** | **7 項** |
+| **待開發合計** | **42 項** |
 
 ## 依賴關係
 
@@ -283,25 +269,19 @@ Phase A ✅ 全部完成
     ├── A5 (Execution) ✅ → Phase E ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase G (策略增強，依賴 C+D+E 既有模組)
+    │                  Phase G
+    │                      ├── G0 (Pipeline 接線) ← 最高優先
+    │                      ├── GT1-GT6 (參數調校)
+    │                      ├── G1-G7 + G11-G16 (行為增強)
+    │                      ├── S1-S6 + M1-M6 (策略設計 + 微觀結構)
+    │                      └── G8-G10 + G13 + S7-S10 + M7-M8 (高複雜度)
     │
-    ├── All backend APIs ready
-    │    │
-    │    ├── Phase F ✅ 全部完成 (16 項)
-    │    │    │
-    │    │    ├── Phase K (測試補強，依賴 F 完成的頁面)
-    │    │    └── Phase L (前端體驗，在 F 基礎上增強)
-    │    │
-    │    └── Phase H (運維 — Axiom)
-    │        ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
-    │
-    ├── Phase I (DevOps / CI/CD，獨立於功能開發) — I1+I2 ✅
-    │
-    ├── Phase J (安全性 & 帳號，依賴 A4 Notification + Auth 基礎)
-    │    ├── J1 (Email 驗證) → J2 (Forgot Password)
-    │    └── J3-J6 獨立可平行
-    │
-    └── A6 (Billing) ✅ → Phase M (Stripe 整合，依賴 billing schema)
+    └── All backend APIs ready
+         │
+         ├── Phase F ✅ 全部完成 (16 項)
+         │
+         └── Phase H (運維 — Axiom)
+             ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
 ```
 
 ## 建議開發順序
@@ -322,20 +302,54 @@ Phase A ✅ 全部完成
 14. ~~**F16** — 前端測試~~ ✅
 15. ~~**F15** — 前端 Production hardening（Sentry + CSP）~~ ✅
 16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
-17. ~~**I1 → I2** — CI/CD + Linter（低成本高回報，越早建越好）~~ ✅
-18. ~~**J3 → J5** — CORS + per-user rate limit（低複雜度安全性修補）~~ ✅
-19. ~~**G1 → G6 → G9** — 引擎安全三件套（偏離防護 + 冷啟動 + 降級）~~ ✅
-20. ~~**J1 → J2** — Email 驗證 + Forgot Password（帳號安全基礎）~~ ✅
-21. ~~**J4 → J6** — CSRF (N/A) + JWT Refresh Token Rotation~~ ✅
-22. ~~**L1 → L3** — Loading skeleton + Error boundary（前端體驗基礎）~~ ✅
-23. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
-24. **I4** — Koyeb Health Check 設定
-25. **K1** — Playwright E2E critical path 測試
-26. ~~**G2 → G3 → G4 → G5 → G7** — 策略增強（中複雜度）~~ ✅
-27. ~~**L2** — User Onboarding Flow~~ ✅
-28. **M1 → M2** — Stripe 整合 + 訂閱管理（需要收費時再做）
-29. **G8 → G9** — 高複雜度策略增強
-30. **I3** — Staging 環境（用戶量增長後）
-31. **K2 → K3** — 補強前端 component + 後端 integration 測試
-32. **L4 → L5** — PWA + Accessibility
-33. ~~**G10** — 績效追蹤（Redis 儲存，DB migration 未來補）~~ ✅
+17. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
+
+#### P0 — 最高優先（預期 APY +30-50%）
+
+18. **G0** — Composite Strategy Pipeline 接線（解鎖全部 13 個策略模組）
+
+#### P1 — 快速收益（預期 +10-20% capital utilization, +5-10% avg rate）
+
+19. **G11** — 閒置資金急迫度（+10-20% capital utilization，複雜度：低）
+20. **GT1** — `frrFloorRatio` 0.80 → 0.90-0.95（+5-10% avg rate，改常數）
+21. **GT2** — `maxPremiumDown` 0.30 → 0.15-0.20（+3-5% avg rate in backwardation，改常數）
+
+#### P2 — 擇時與 fill rate 提升
+
+22. **G12** — FRR 趨勢追蹤（+5-8% 擇時能力，複雜度：中）
+23. **GT3** — `regimeContangoPeriodRatio` 0.75 → 0.85-0.90（鎖定高利率更久，改常數）
+24. **G15** — 智慧貼牆策略（+5-10% fill rate，複雜度：中）
+25. **GT4, GT5, GT6** — Noise range / Allocation tier / Queue curve（改常數）
+
+#### P3 — 長期自適應最佳化
+
+26. **G13** — 歷史 fill rate 學習（數據驅動定價，複雜度：高）
+27. **G14** — Auto-Renew 重新定價（+3-5% renew 利率，複雜度：低）
+28. **G16** — Order Book Gap Detection（fill rate 提升，複雜度：中）
+
+#### P3.5 — 策略設計 + 微觀結構改進
+
+> 來自策略設計 review（§12）和微觀結構 review（§13）。
+
+29. **M1** — Fee-Adjusted Calculations（15% 手續費全局納入，修正所有 rate 偏差，改常數）
+30. **M3** — Proactive Offer Refresh（搶 FIFO 隊首，+5-10% fill speed，複雜度：低）
+31. **M4, M6, M8** — 提前歸還溢價 + FRR 防操縱 + 反饋迴路意識（均為低複雜度常數/公式修正）
+32. **S1** — BestAsk-Relative Pricing（定價改為 bestAsk 偏移，+10-15% fill rate）
+33. **S2** — Auto-Renew Always-On（反轉 §7.2，消除宕機資金閒置）
+34. **S3** — Remove Random Noise（移除隨機擾動，+0.5-1% avg rate）
+35. **S8** — Confidence-Scaled Deployment（信心度 × 部署比例，低信心保留彈藥）
+36. **M2** — Gap Cost Tracking + Pre-scheduling（到期前預排程，-0.5% capital downtime）
+37. **S4** — RatePercentile Signal（歷史百分位信號，均值回歸最直接指標）
+38. **M5** — Non-Liquidation Rate Spike Detector（捕捉非清算性 spike）
+39. **S5** — Cascade Phase Response（瀑布分三階段，早期捕 2d 暴利）
+40. **S6** — Dynamic Weekend Premium（歷史 ratio 取代固定 +5%，+20-50% 週末收益）
+41. **S10** — Mean-Reversion P(higher)（EV_wait 的精確公式）
+42. **M7** — Temporal Laddering（跨心跳分批部署，分散時間風險）
+
+#### P4 — 規範定義增強 + 高複雜度
+
+43. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 規範定義增強（低→中複雜度）
+44. **G8 → G9** — 機會成本模型 + 優雅降級（高複雜度）
+45. **S7** — Per-Currency Parameters（stablecoin / crypto 分組）
+46. **S9** — Rolling Period Ladder（到期梯隊管理）
+47. **G10** — 績效追蹤 + 自適應參數回饋（極高複雜度，需 DB schema 擴充）

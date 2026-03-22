@@ -103,3 +103,25 @@ func (s *SplittingStrategy) maxOrderSize(askDepth float64) float64 {
 	}
 	return askDepth * depthFraction
 }
+
+// ComputeSplits returns the number of splits for the given amount and ask depth.
+// Returns 1 if no splitting needed. Used by CompositeStrategy.
+func ComputeSplits(amount float64, askDepth float64) int {
+	s := &SplittingStrategy{}
+	maxPerOrder := s.maxOrderSize(askDepth)
+
+	if maxPerOrder <= 0 || amount <= maxPerOrder {
+		return 1
+	}
+
+	splitCount := int(math.Ceil(amount / maxPerOrder))
+	if splitCount > maxSplitCount {
+		splitCount = maxSplitCount
+	}
+
+	for splitCount > 1 && amount/float64(splitCount) < minSplitAmount {
+		splitCount--
+	}
+
+	return splitCount
+}
