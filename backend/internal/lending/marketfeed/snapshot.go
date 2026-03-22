@@ -24,6 +24,7 @@ func assembleSnapshot(
 ) *domain.MarketSnapshot {
 	summary := orderbook.ComputeSummary(raw.Book)
 	walls := orderbook.DetectWalls(raw.Book, summary.Spread, nil)
+	bookGaps := orderbook.DetectGaps(raw.Book, summary.Spread, 0)
 
 	var frr float64
 	if raw.Ticker != nil {
@@ -39,10 +40,21 @@ func assembleSnapshot(
 		}
 	}
 
+	// S4: Extract rate percentile from signals
+	var ratePercentile float64
+	for _, s := range signals {
+		if s.Type == domain.SignalRatePercentile {
+			ratePercentile = s.Value
+			break
+		}
+	}
+
 	return &domain.MarketSnapshot{
 		Symbol:             symbol,
 		FRR:                frr,
+		RatePercentile:     ratePercentile,
 		FRRTrend:           frrTrend,
+		BookGaps:           bookGaps,
 		MDC:                mdc,
 		Regime:             regime,
 		RegimeParams:       regimeParams,

@@ -10,6 +10,7 @@ type DecisionContext struct {
 	ActiveCredits []FundingCredit
 	Available     float64
 	IdleMinutes   float64
+	AvgGapMinutes float64 // M2: EMA of gap between credit expiry and offer fill
 }
 
 // DecisionResult represents the output of strategy decision-making.

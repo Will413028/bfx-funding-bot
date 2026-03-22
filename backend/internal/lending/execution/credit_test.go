@@ -138,12 +138,15 @@ func TestCredit_ConfigRateFloor(t *testing.T) {
 	cm := newTestCreditManager(client, defaultKeyStore(), log)
 	cm.now = func() time.Time { return now }
 
-	// Credit rate 0.0001, config min 0.0003 → should use 0.0003
+	// G14: Re-price on renewal — uses config midpoint (min+max)/2
+	// config min=0.0003, max=0.005 → midpoint = 0.00265
 	credit := expiringCredit(now, 12, true)
 	credit.Rate = 0.0001
 
 	config := defaultConfig()
 	config.Rate.Min = 0.0003
+
+	wantRate := (config.Rate.Min + config.Rate.Max) / 2
 
 	summary, err := cm.ProcessCredits(context.Background(), "user-1", []domain.FundingCredit{credit}, config)
 	if err != nil {
@@ -152,12 +155,12 @@ func TestCredit_ConfigRateFloor(t *testing.T) {
 	if summary.RenewOK != 1 {
 		t.Errorf("RenewOK: got %d, want 1", summary.RenewOK)
 	}
-	if submittedRate != 0.0003 {
-		t.Errorf("rate: got %f, want 0.0003", submittedRate)
+	if submittedRate != wantRate {
+		t.Errorf("rate: got %f, want %f", submittedRate, wantRate)
 	}
 }
 
-func TestCredit_ConfigRateAboveMin(t *testing.T) {
+func TestCredit_ConfigRateMidpoint(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	var submittedRate float64
 	client := &mockFundingClient{
@@ -170,23 +173,27 @@ func TestCredit_ConfigRateAboveMin(t *testing.T) {
 	cm := newTestCreditManager(client, defaultKeyStore(), log)
 	cm.now = func() time.Time { return now }
 
-	// Credit rate 0.0005 > config min 0.0003 → should use 0.0005
+	// G14: Re-price on renewal — always uses config midpoint regardless of credit rate
+	// defaultConfig: Rate.Min=0.0002, Rate.Max=0.005 → midpoint = 0.0026
 	credit := expiringCredit(now, 12, true)
 	credit.Rate = 0.0005
 
-	summary, err := cm.ProcessCredits(context.Background(), "user-1", []domain.FundingCredit{credit}, defaultConfig())
+	cfg := defaultConfig()
+	wantRate := (cfg.Rate.Min + cfg.Rate.Max) / 2
+
+	summary, err := cm.ProcessCredits(context.Background(), "user-1", []domain.FundingCredit{credit}, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if summary.RenewOK != 1 {
 		t.Errorf("RenewOK: got %d, want 1", summary.RenewOK)
 	}
-	if submittedRate != 0.0005 {
-		t.Errorf("rate: got %f, want 0.0005", submittedRate)
+	if submittedRate != wantRate {
+		t.Errorf("rate: got %f, want %f", submittedRate, wantRate)
 	}
 }
 
-func TestCredit_ConfigPeriodFloor(t *testing.T) {
+func TestCredit_ConfigPeriodMidpoint(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	var submittedPeriod int
 	client := &mockFundingClient{
@@ -199,7 +206,8 @@ func TestCredit_ConfigPeriodFloor(t *testing.T) {
 	cm := newTestCreditManager(client, defaultKeyStore(), log)
 	cm.now = func() time.Time { return now }
 
-	// Credit period=2, config.Period.Min=5 → should use 5
+	// G14: Re-price on renewal — uses config midpoint
+	// config.Period.Min=5, config.Period.Max=30 → midpoint = 5 + (30-5)/2 = 17
 	credit := expiringCredit(now, 12, true)
 	credit.Period = 2
 	// Recalculate openedAt for period=2
@@ -208,6 +216,8 @@ func TestCredit_ConfigPeriodFloor(t *testing.T) {
 	config := defaultConfig()
 	config.Period.Min = 5
 
+	wantPeriod := config.Period.Min + (config.Period.Max-config.Period.Min)/2
+
 	summary, err := cm.ProcessCredits(context.Background(), "user-1", []domain.FundingCredit{credit}, config)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -215,8 +225,8 @@ func TestCredit_ConfigPeriodFloor(t *testing.T) {
 	if summary.RenewOK != 1 {
 		t.Errorf("RenewOK: got %d, want 1", summary.RenewOK)
 	}
-	if submittedPeriod != 5 {
-		t.Errorf("period: got %d, want 5", submittedPeriod)
+	if submittedPeriod != wantPeriod {
+		t.Errorf("period: got %d, want %d", submittedPeriod, wantPeriod)
 	}
 }
 

@@ -70,8 +70,10 @@ type LendingWorker struct {
 	lc         *lifecycle
 	stopCh     chan struct{}
 	configCh   chan domain.StrategyConfig
-	startedAt  time.Time                            // Cold Start Protocol (§6.4): tracks worker startup time
-	lastLentAt time.Time                            // G11: tracks last successful offer for idle urgency
+	startedAt        time.Time                       // Cold Start Protocol (§6.4): tracks worker startup time
+	lastLentAt       time.Time                       // G11: tracks last successful offer for idle urgency
+	gapMinutesEMA    float64                         // M2: EMA of gap between credit expiry and offer fill
+	lastCreditExpiry time.Time                       // M2: last credit expiry timestamp
 	onError    func(userID string, err interface{}) // optional error callback for testing
 	nowFn      func() time.Time                     // injectable clock for testing
 	userID     string
@@ -228,6 +230,14 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		return // skip tick on fetch error
 	}
 
+	// M2: Track credit expiry times
+	for _, c := range userData.ActiveCredits {
+		expiry := c.OpenedAt.AddDate(0, 0, c.Period)
+		if expiry.Before(w.nowFn()) && expiry.After(w.lastCreditExpiry) {
+			w.lastCreditExpiry = expiry
+		}
+	}
+
 	// Phase 2: Build DecisionContext
 	decisionCtx := &domain.DecisionContext{
 		Snapshot:      snapshot,
@@ -240,8 +250,11 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 
 	// G11: Compute idle minutes
 	if !w.lastLentAt.IsZero() {
-		decisionCtx.IdleMinutes = time.Since(w.lastLentAt).Minutes()
+		decisionCtx.IdleMinutes = w.nowFn().Sub(w.lastLentAt).Minutes()
 	}
+
+	// M2: Inject gap cost
+	decisionCtx.AvgGapMinutes = w.gapMinutesEMA
 
 	// Phase 3: Strategy decision
 	decision := w.deps.Strategy.Apply(decisionCtx)
@@ -256,7 +269,16 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		}
 		// G11: Update lastLentAt on successful execution
 		if execErr == nil && len(decision.Offers) > 0 {
-			w.lastLentAt = time.Now()
+			w.lastLentAt = w.nowFn()
+
+			// M2: Track gap duration
+			if !w.lastCreditExpiry.IsZero() {
+				gap := w.nowFn().Sub(w.lastCreditExpiry).Minutes()
+				if gap > 0 && gap < 120 { // ignore unreasonable values
+					alpha := 0.1 // EMA smoothing
+					w.gapMinutesEMA = alpha*gap + (1-alpha)*w.gapMinutesEMA
+				}
+			}
 		}
 	}
 }

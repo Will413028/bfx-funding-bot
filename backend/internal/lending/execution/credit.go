@@ -81,13 +81,15 @@ func (cm *CreditManager) ProcessCredits(ctx context.Context, userID string, cred
 			continue
 		}
 
-		// Determine renewal parameters
-		rate := credit.Rate
-		if config.Rate.Min > rate {
+		// G14: Re-price on renewal — use config bounds as improved heuristic.
+		// Full pipeline re-pricing (via CompositeStrategy) requires DI refactor
+		// to inject Strategy into CreditManager. For now, use rate midpoint.
+		rate := (config.Rate.Min + config.Rate.Max) / 2
+		if rate < config.Rate.Min {
 			rate = config.Rate.Min
 		}
-		period := credit.Period
-		if config.Period.Min > period {
+		period := config.Period.Min + (config.Period.Max-config.Period.Min)/2
+		if period < config.Period.Min {
 			period = config.Period.Min
 		}
 
