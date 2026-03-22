@@ -2,6 +2,7 @@ package infra
 
 import (
 	"context"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
@@ -18,7 +19,9 @@ func NewRedisClient(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*re
 
 	client := redis.NewClient(opts)
 
-	if err := client.Ping(context.Background()).Err(); err != nil {
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
 		_ = client.Close()
 		return nil, err
 	}

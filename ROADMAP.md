@@ -99,7 +99,12 @@
 GET    /api/v1/health
 POST   /api/v1/auth/register       (rate limit: 5r/s)
 POST   /api/v1/auth/login          (rate limit: 5r/s)
-GET    /api/v1/auth/ws-token       (JWT)
+POST   /api/v1/auth/refresh        (rate limit: 5r/s)
+POST   /api/v1/auth/verify-email   (rate limit: 5r/s)
+POST   /api/v1/auth/forgot-password (rate limit: 5r/s)
+POST   /api/v1/auth/reset-password (rate limit: 5r/s)
+POST   /api/v1/auth/logout         (JWT)
+POST   /api/v1/auth/ws-token       (JWT)
 GET    /api/v1/me                  (JWT, 20r/s)
 PUT    /api/v1/me/password         (JWT, 20r/s)
 POST   /api/v1/api-keys             (JWT)
@@ -112,6 +117,7 @@ GET    /api/v1/configs             (JWT)
 DELETE /api/v1/configs             (JWT)
 GET    /api/v1/dashboard           (JWT)
 GET    /api/v1/earnings            (JWT)
+GET    /api/v1/earnings/history    (JWT)
 GET    /api/v1/executions          (JWT, cursor pagination: ?after=&limit=)
 GET    /api/v1/billing             (JWT, cursor pagination: ?after=&limit=)
 GET    /api/v1/billing/plan        (JWT)
@@ -360,23 +366,23 @@ Phase A ✅ 全部完成
 
 - [x] G1-G10 全部完成（`853347b` ~ `6f19484`）
 
-#### P2 — 擇時與 fill rate 提升（0/7）
+#### ~~P2 — 擇時與 fill rate 提升（7/7）~~ ✅
 
-- [ ] G12 FRR Trend Tracking
-- [ ] G15 Smart Wall Positioning
-- [ ] GT6 Queue discount sigmoid
-- [ ] S1 BestAsk-Relative Pricing
-- [ ] S5 Cascade Phase Response
-- [ ] S6 Dynamic Weekend Premium
-- [ ] M5 Non-Liquidation Rate Spike Detector
+- [x] G12 FRR Trend Tracking（`03f63ad`）
+- [x] G15 Smart Wall Positioning（`03f63ad`）
+- [x] GT6 Queue discount sigmoid（`03f63ad`）
+- [x] S1 BestAsk-Relative Pricing（`03f63ad`）
+- [x] S5 Cascade Phase Response（`03f63ad`）
+- [x] S6 Dynamic Weekend Premium（`03f63ad`）
+- [x] M5 Non-Liquidation Rate Spike Detector（`03f63ad`）
 
-#### P3 — 數據驅動 + 結構優化（0/5）
+#### ~~P3 — 數據驅動 + 結構優化（5/5）~~ ✅
 
-- [ ] G14 Auto-Renew Re-pricing
-- [ ] G16 Order Book Gap Detection
-- [ ] S4 RatePercentile Signal
-- [ ] S10 Mean-Reversion P(higher)
-- [ ] M2 Gap Cost Tracking + Pre-scheduling
+- [x] G14 Auto-Renew Re-pricing（`12829a2`）
+- [x] G16 Order Book Gap Detection（`12829a2`）
+- [x] S4 RatePercentile Signal（`12829a2`）
+- [x] S10 Mean-Reversion P(higher)（`12829a2`）
+- [x] M2 Gap Cost Tracking + Pre-scheduling（`12829a2`）
 
 #### P5 — 高複雜度架構（0/4）
 

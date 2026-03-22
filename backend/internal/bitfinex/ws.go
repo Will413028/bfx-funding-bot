@@ -231,6 +231,16 @@ func (ws *WSClient) sendJSON(v any) error {
 // connDone is closed when this connection is replaced (reconnect) or the client is shut down,
 // which ensures the heartbeat goroutine exits promptly.
 func (ws *WSClient) readLoop(connDone <-chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			ws.log.Error("panic in readLoop", zap.Any("recover", r))
+			if ws.handlers.OnDisconnect != nil {
+				ws.handlers.OnDisconnect(fmt.Errorf("readLoop panic: %v", r))
+			}
+			ws.reconnect()
+		}
+	}()
+
 	// Store last heartbeat time atomically to avoid timer concurrency issues.
 	// The goroutine periodically checks this value instead of using timer.Reset
 	// from the main loop (which would be a data race on time.Timer).
