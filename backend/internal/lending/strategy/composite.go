@@ -77,7 +77,7 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	if ts.IsZero() {
 		ts = c.now()
 	}
-	rate *= ComputeWeekendMultiplier(ts)
+	rate *= ComputeWeekendMultiplier(ts, snap.WeekendRatio)
 
 	// 1d. Calendar event premium (may constrain period)
 	calMul, calMaxPeriod := ComputeCalendarMultiplier(ts)
@@ -116,6 +116,19 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	// ── Stage 2: Period Resolution ──
 
 	period := ComputePeriod(snap.Regime, snap.RegimeParams.Volatility, rate, snap.FRR, cfg)
+
+	// S5: Cascade phase response
+	if snap.CascadePhase == "late" {
+		return &domain.DecisionResult{
+			Cancels: staleCancels,
+			Reason:  "composite:cascade_late",
+		}
+	}
+	if snap.CascadePhase == "early" {
+		period = cfg.Period.Min
+	} else if snap.CascadePhase == "mid" {
+		period = clampInt(14, cfg.Period.Min, cfg.Period.Max)
+	}
 
 	// Apply calendar constraint
 	if calMaxPeriod > 0 && calMaxPeriod < period {
