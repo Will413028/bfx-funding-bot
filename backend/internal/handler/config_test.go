@@ -14,6 +14,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
+	"go.uber.org/zap"
 )
 
 type testConfigRepo struct {
@@ -62,7 +63,7 @@ func setupConfigRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 
 	repo := &testConfigRepo{configs: make(map[string]*domain.UserConfig)}
-	svc := service.NewConfigService(repo, nil)
+	svc := service.NewConfigService(repo, nil, zap.NewNop())
 	h := NewConfigHandler(svc)
 
 	r := gin.New()

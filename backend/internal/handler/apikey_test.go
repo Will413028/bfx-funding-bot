@@ -18,6 +18,7 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/middleware"
 	"github.com/will/bfx-funding-bot/backend/internal/service"
+	"go.uber.org/zap"
 )
 
 func init() {
@@ -117,7 +118,7 @@ func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 	bfx := bitfinex.NewClientWithBaseURL(bfxServer.Client(), bfxServer.URL)
 
 	repo := &testAPIKeyRepo{keys: make(map[string]*testStoredKey)}
-	svc := service.NewAPIKeyService(repo, &noopConfigRepo{}, aes, bfx, nil)
+	svc := service.NewAPIKeyService(repo, &noopConfigRepo{}, aes, bfx, nil, zap.NewNop())
 	h := NewAPIKeyHandler(svc)
 
 	r := gin.New()

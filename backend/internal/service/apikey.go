@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"go.uber.org/zap"
 
 	"github.com/will/bfx-funding-bot/backend/internal/bitfinex"
 	"github.com/will/bfx-funding-bot/backend/internal/crypto"
@@ -31,6 +32,7 @@ type APIKeyService struct {
 	cipher     *crypto.AES
 	bfx        *bitfinex.Client
 	workers    WorkerManager
+	log        *zap.Logger
 }
 
 func NewAPIKeyService(
@@ -39,6 +41,7 @@ func NewAPIKeyService(
 	cipher *crypto.AES,
 	bfx *bitfinex.Client,
 	workers WorkerManager,
+	log *zap.Logger,
 ) *APIKeyService {
 	return &APIKeyService{
 		repo:       repo,
@@ -46,6 +49,7 @@ func NewAPIKeyService(
 		cipher:     cipher,
 		bfx:        bfx,
 		workers:    workers,
+		log:        log,
 	}
 }
 
@@ -164,5 +168,8 @@ func (s *APIKeyService) tryStartWorker(ctx context.Context, userID string) {
 		return
 	}
 
-	_ = s.workers.StartWorker(ctx, userID, uc.Config)
+	if err := s.workers.StartWorker(ctx, userID, uc.Config); err != nil {
+		s.log.Warn("failed to start worker after API key verification",
+			zap.String("userID", userID), zap.Error(err))
+	}
 }
