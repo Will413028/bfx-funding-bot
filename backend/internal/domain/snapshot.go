@@ -102,6 +102,9 @@ type MarketSnapshot struct {
 	FRR                float64            // Flash Return Rate
 	HiddenRatio        float64            // estimated hidden order ratio
 	CompetitorActivity float64            // 0-1 composite competitor activity score
+	FRRTrend           float64            // G12: FRR trend signal [-1, +1]
+	WeekendRatio       float64            // S6: historical weekend/weekday rate ratio
 	FlashFreeze        bool               // true if flash crash detected, trading paused
 	DegradedMode       bool               // true if operating in degraded mode (e.g., FRR-only)
+	CascadePhase       string             // S5: liquidation cascade phase (early/mid/late/none)
 }

@@ -17,6 +17,11 @@ const (
 
 	// Stale offer: rate > bestAsk + staleSpreadMul × spread
 	staleSpreadMul = 2.0
+
+	// Sigmoid queue discount parameters (GT6)
+	maxQueueDiscount = 0.05 // max 5% discount at full queue
+	sigmoidEdgeLow   = 0.10 // queue ratio where discount starts
+	sigmoidEdgeHigh  = 0.60 // queue ratio where discount maxes out
 )
 
 // QueueStrategy estimates the queue position of the user's offers
@@ -108,6 +113,7 @@ func (q *QueueStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResul
 }
 
 // ComputeQueueDiscount returns the rate discount multiplier based on queue depth.
+// Uses smoothstep sigmoid for continuous adjustment (GT6).
 // Returns 1.0 if no adjustment needed. Used by CompositeStrategy.
 func ComputeQueueDiscount(rate float64, ob domain.OrderBookSummary) float64 {
 	if ob.AskDepth <= 0 || ob.Spread <= 0 {
@@ -121,13 +127,21 @@ func ComputeQueueDiscount(rate float64, ob domain.OrderBookSummary) float64 {
 
 	queueRatio := queueDepth / ob.AskDepth
 
-	if queueRatio > queueHighThreshold {
-		return queueDeepDiscount
+	// Smoothstep sigmoid: continuous transition from 1.0 to (1.0 - maxQueueDiscount)
+	t := smoothstep(queueRatio, sigmoidEdgeLow, sigmoidEdgeHigh)
+	return 1.0 - maxQueueDiscount*t
+}
+
+// smoothstep performs Hermite interpolation between 0 and 1.
+func smoothstep(x, edge0, edge1 float64) float64 {
+	t := (x - edge0) / (edge1 - edge0)
+	if t < 0 {
+		t = 0
 	}
-	if queueRatio > queueLowThreshold {
-		return queueModerateDiscount
+	if t > 1 {
+		t = 1
 	}
-	return 1.0
+	return t * t * (3 - 2*t)
 }
 
 // DetectStaleOffers returns IDs of offers whose rate exceeds the stale threshold.

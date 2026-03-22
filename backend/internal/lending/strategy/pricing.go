@@ -24,6 +24,9 @@ const (
 	wallProximityPct  = 0.10 // 10% of rate
 	wallAvoidDiscount = 0.99 // -1%
 
+	// Smart wall positioning (G15): minimum tick size on Bitfinex
+	minTickSize = 0.00000001
+
 	// Minimum balance
 	minBalance = 50.0
 
@@ -147,7 +150,7 @@ func (p *PricingStrategy) applyDepthPressure(rate float64, ob domain.OrderBookSu
 	return rate
 }
 
-// applyWallAvoidance reduces rate slightly if an offer wall is near the calculated rate.
+// applyWallAvoidance positions the offer just below a nearby wall for faster fill (G15).
 func (p *PricingStrategy) applyWallAvoidance(rate float64, walls []domain.WallPosition) float64 {
 	for _, w := range walls {
 		if w.Side != "offer" {
@@ -155,7 +158,8 @@ func (p *PricingStrategy) applyWallAvoidance(rate float64, walls []domain.WallPo
 		}
 		distance := math.Abs(w.Rate-rate) / rate
 		if distance < wallProximityPct {
-			return rate * wallAvoidDiscount
+			// G15: Price just below the wall to queue ahead of it
+			return w.Rate - minTickSize
 		}
 	}
 	return rate
@@ -207,18 +211,79 @@ func EffectiveFRR(frr float64, bookMidRate float64) float64 {
 	return frr
 }
 
-// ComputeBaseRate computes the MDC-adjusted rate with regime, depth pressure,
-// and wall avoidance applied. This is the core pricing logic used by CompositeStrategy.
+// ComputeBaseRate computes the rate using bestAsk-relative pricing (S1).
+// Falls back to FRR-based pricing when bestAsk is unavailable.
 func ComputeBaseRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
 	p := &PricingStrategy{}
 
+	bestAsk := snap.OrderBook.BestAsk
+	if bestAsk <= 0 {
+		// Fallback: FRR-based pricing
+		return computeFRRBasedRate(snap, cfg, p)
+	}
+
+	// S1: BestAsk-relative pricing
+	offset := computeTickOffset(snap.MDC.Score, snap.Regime)
+	rate := bestAsk - offset
+
+	// Apply depth pressure
+	rate = p.applyDepthPressure(rate, snap.OrderBook)
+
+	// G15: Smart wall positioning
+	rate = p.applyWallAvoidance(rate, snap.WallPositions)
+
+	// G12: FRR trend adjustment
+	rate = applyFRRTrend(rate, snap.FRRTrend)
+
+	// M6: Guard against FRR manipulation for deviation guard
+	effectiveFRR := EffectiveFRR(snap.FRR, snap.OrderBook.MidRate)
+	rate = p.applyDeviationGuard(rate, effectiveFRR, snap.Regime)
+
+	return rate
+}
+
+// computeFRRBasedRate is the legacy FRR-based pricing used as fallback.
+func computeFRRBasedRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig, p *PricingStrategy) float64 {
 	baseRate := p.selectBaseRate(snap)
-	// M6: Guard against FRR manipulation
 	baseRate = EffectiveFRR(baseRate, snap.OrderBook.MidRate)
 	rate := baseRate * p.mdcMultiplier(snap.MDC.Score)
 	rate = p.applyRegime(rate, snap.Regime, cfg)
 	rate = p.applyDepthPressure(rate, snap.OrderBook)
 	rate = p.applyWallAvoidance(rate, snap.WallPositions)
-
+	rate = applyFRRTrend(rate, snap.FRRTrend)
 	return rate
+}
+
+// computeTickOffset determines the offset from bestAsk based on MDC and regime.
+// Bullish → small offset (close to bestAsk), bearish → larger offset.
+func computeTickOffset(mdcScore float64, regime domain.RegimeType) float64 {
+	baseOffset := 2.0 * minTickSize
+
+	// MDC: +1 → factor 0 (match bestAsk), -1 → factor 2 (2x offset)
+	mdcFactor := 1.0 - mdcScore
+	if mdcFactor < 0 {
+		mdcFactor = 0
+	}
+
+	// Regime factor
+	regimeFactor := 1.0
+	switch regime {
+	case domain.RegimeContango:
+		regimeFactor = 0.5
+	case domain.RegimeBackwardation:
+		regimeFactor = 2.0
+	case domain.RegimeCrisis:
+		regimeFactor = 0.0 // zero offset: match bestAsk
+	}
+
+	return baseOffset * mdcFactor * regimeFactor
+}
+
+// applyFRRTrend adjusts rate based on FRR trend signal.
+// Positive trend (rates rising) → increase rate up to +10%.
+func applyFRRTrend(rate float64, frrTrend float64) float64 {
+	if frrTrend == 0 {
+		return rate
+	}
+	return rate * (1.0 + frrTrend*0.1)
 }

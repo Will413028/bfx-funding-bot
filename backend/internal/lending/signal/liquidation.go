@@ -11,6 +11,10 @@ const (
 	liquidationTradeThreshold  = 50000.0 // single trade amount threshold
 	liquidationVolumeThreshold = 5000000.0
 	regressionInterval         = 5 * time.Minute // per regression step
+
+	// Cascade phase durations
+	cascadeEarlyDuration = 30 * time.Minute
+	cascadeMidDuration   = 2 * time.Hour
 )
 
 // LiquidationCascade detects cascading liquidation events.
@@ -85,5 +89,21 @@ func (l *LiquidationCascade) Compute(data *domain.RawMarketData) domain.SignalVa
 		Value:      l.currentLevel,
 		Confidence: confidence,
 		Timestamp:  now,
+	}
+}
+
+// CascadePhase returns the current phase of the liquidation cascade.
+func (l *LiquidationCascade) CascadePhase(now time.Time) string {
+	if !l.triggered {
+		return "none"
+	}
+	elapsed := now.Sub(l.triggeredAt)
+	switch {
+	case elapsed < cascadeEarlyDuration:
+		return "early"
+	case elapsed < cascadeMidDuration:
+		return "mid"
+	default:
+		return "late"
 	}
 }

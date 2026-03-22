@@ -30,9 +30,19 @@ func assembleSnapshot(
 		frr = raw.Ticker.FRR
 	}
 
+	// G12: Extract FRR trend from signals
+	var frrTrend float64
+	for _, s := range signals {
+		if s.Type == domain.SignalFRRTrend {
+			frrTrend = s.Value
+			break
+		}
+	}
+
 	return &domain.MarketSnapshot{
 		Symbol:             symbol,
 		FRR:                frr,
+		FRRTrend:           frrTrend,
 		MDC:                mdc,
 		Regime:             regime,
 		RegimeParams:       regimeParams,

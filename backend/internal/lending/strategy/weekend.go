@@ -89,10 +89,37 @@ func (w *WeekendStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 	}
 }
 
-// ComputeWeekendMultiplier returns the weekend premium multiplier for the given time.
-// Returns 1.0 for weekdays. Used by CompositeStrategy.
-func ComputeWeekendMultiplier(t time.Time) float64 {
+// ComputeWeekendMultiplier returns the weekend premium multiplier.
+// Uses historicalRatio if available (> 0), otherwise falls back to fixed premiums.
+// Used by CompositeStrategy.
+func ComputeWeekendMultiplier(t time.Time, historicalRatio float64) float64 {
 	t = t.UTC()
+
+	isWeekend := false
+	switch t.Weekday() {
+	case time.Friday:
+		if t.Hour() >= fridayEveningHour {
+			isWeekend = true
+		}
+	case time.Saturday, time.Sunday:
+		isWeekend = true
+	}
+
+	if !isWeekend {
+		return 1.0
+	}
+
+	// S6: Use historical ratio if available
+	if historicalRatio > 1.0 {
+		return historicalRatio
+	}
+
+	// Fallback to fixed premiums
+	return fixedWeekendPremium(t)
+}
+
+// fixedWeekendPremium returns the legacy fixed premium for the given time.
+func fixedWeekendPremium(t time.Time) float64 {
 	switch t.Weekday() {
 	case time.Friday:
 		if t.Hour() >= fridayEveningHour {

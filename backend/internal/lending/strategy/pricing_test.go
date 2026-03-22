@@ -199,8 +199,8 @@ func TestPricing_WallAvoidance_NearbyWall(t *testing.T) {
 		}
 	})
 	res := ps.Apply(ctx)
-	// base=0.00025, wall discount=0.99
-	expected := 0.00025 * 0.99
+	// G15: price just below the wall rate
+	expected := 0.000252 - minTickSize
 	if !approxEqual(res.Offers[0].Rate, expected, 1e-10) {
 		t.Errorf("wall avoidance: got %f, want %f", res.Offers[0].Rate, expected)
 	}
