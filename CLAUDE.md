@@ -32,6 +32,21 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 開發規範
 
+### OpenSpec 工作流（強制）
+
+**所有功能開發、bug 修復、重構都必須使用 OpenSpec 工作流。不可跳過。**
+
+流程：
+1. `/opsx:propose` — 建立 change，產出 proposal + design + specs + tasks
+2. `/opsx:apply` — 逐一實作 tasks，每完成一個打勾
+3. `/opsx:archive` — 歸檔 change，同步 specs 到 `openspec/specs/`
+
+規則：
+- **每個 change 必須包含單元測試**。tasks.md 的最後一組必須有驗證項（`go build` + `go test`）
+- Specs 中的每個 Requirement 必須有至少一個 Scenario（測試案例）
+- 實作完成後必須確認 `go test ./...` 全部通過才能 archive
+- 純文件修改（ROADMAP、strategy-journal 等）不需要走 OpenSpec
+
 ### Atlas Migration
 
 - **套用 migration 一律使用 `atlas migrate apply --env neon`，不可用 MCP 直接執行 SQL**
@@ -69,11 +84,15 @@ Bitfinex 自動放貸 SaaS 平台。
 - 錯誤處理：統一使用 `domain.AppError`
 - 每個使用者限一筆 API Key 和一筆 Strategy Config（UNIQUE constraint on user_id）
 
-### 測試慣例
+### 測試與品質（強制）
 
+- **每個 change 必須包含對應的單元測試**，不可只寫程式不寫測試
 - 每層用 in-memory mock repo 測試，不依賴 DB
 - `assertAppErrorCode(t, err, "CODE")` helper 定義在 `service/user_test.go`，跨 test 檔案共用
 - handler test 用 `httptest.NewRecorder` + `gin.TestMode`
+- 後端提交前驗證：`cd backend && go build ./... && go test ./...`
+- 前端提交前驗證：`cd frontend && pnpm lint && pnpm test`（lint = tsc + biome check）
+- 前端 E2E 測試：`cd frontend && pnpm test:e2e`（Playwright，涉及 UI 改動時必須執行）
 
 ### Commit 訊息格式
 
