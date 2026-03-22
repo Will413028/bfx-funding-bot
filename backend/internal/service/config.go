@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"go.uber.org/zap"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 	"github.com/will/bfx-funding-bot/backend/internal/repository"
 )
@@ -17,10 +19,11 @@ type ConfigReloader interface {
 type ConfigService struct {
 	repo     repository.ConfigRepository
 	reloader ConfigReloader
+	log      *zap.Logger
 }
 
-func NewConfigService(repo repository.ConfigRepository, reloader ConfigReloader) *ConfigService {
-	return &ConfigService{repo: repo, reloader: reloader}
+func NewConfigService(repo repository.ConfigRepository, reloader ConfigReloader, log *zap.Logger) *ConfigService {
+	return &ConfigService{repo: repo, reloader: reloader, log: log}
 }
 
 func (s *ConfigService) Save(ctx context.Context, userID string, cfg domain.StrategyConfig) (*domain.UserConfig, error) {
@@ -40,7 +43,10 @@ func (s *ConfigService) Save(ctx context.Context, userID string, cfg domain.Stra
 
 	// Best-effort: notify Worker to hot-reload
 	if s.reloader != nil {
-		_ = s.reloader.ReloadConfig(ctx, userID, cfg)
+		if err := s.reloader.ReloadConfig(ctx, userID, cfg); err != nil {
+			s.log.Warn("failed to reload worker config",
+				zap.String("userID", userID), zap.Error(err))
+		}
 	}
 
 	return uc, nil

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
@@ -73,7 +75,7 @@ func validConfig() domain.StrategyConfig {
 }
 
 func TestConfig_Save_Success(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	uc, err := svc.Save(context.Background(), "user-1", validConfig())
 	if err != nil {
@@ -88,7 +90,7 @@ func TestConfig_Save_Success(t *testing.T) {
 }
 
 func TestConfig_Save_ValidationError(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	bad := validConfig()
 	bad.Currency = ""
@@ -99,7 +101,7 @@ func TestConfig_Save_ValidationError(t *testing.T) {
 }
 
 func TestConfig_Save_Upsert(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	cfg1 := validConfig()
 	cfg1.Amount.Max = 500
@@ -117,7 +119,7 @@ func TestConfig_Save_Upsert(t *testing.T) {
 }
 
 func TestConfig_Get_Exists(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	_, _ = svc.Save(context.Background(), "user-1", validConfig())
 
@@ -131,14 +133,14 @@ func TestConfig_Get_Exists(t *testing.T) {
 }
 
 func TestConfig_Get_NotFound(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	_, err := svc.Get(context.Background(), "user-1")
 	assertAppErrorCode(t, err, "NOT_FOUND")
 }
 
 func TestConfig_Delete_Success(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	_, _ = svc.Save(context.Background(), "user-1", validConfig())
 	err := svc.Delete(context.Background(), "user-1")
@@ -151,7 +153,7 @@ func TestConfig_Delete_Success(t *testing.T) {
 }
 
 func TestConfig_Delete_NotFound(t *testing.T) {
-	svc := NewConfigService(newMockConfigRepo(), nil)
+	svc := NewConfigService(newMockConfigRepo(), nil, zap.NewNop())
 
 	err := svc.Delete(context.Background(), "user-1")
 	assertAppErrorCode(t, err, "NOT_FOUND")
