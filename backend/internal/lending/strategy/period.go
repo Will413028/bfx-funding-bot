@@ -8,9 +8,9 @@ import (
 
 const (
 	// Regime → base period ratio within [Period.Min, Period.Max]
-	regimeContangoPeriodRatio       = 0.88 // GT3: 0.75→0.88, contango 是高利率窗口，更積極鎖長期
-	regimeNeutralPeriodRatio        = 0.50
-	regimeBackwardationPeriodRatio  = 0.25
+	regimeContangoPeriodRatio      = 0.88 // GT3: 0.75→0.88, contango 是高利率窗口，更積極鎖長期
+	regimeNeutralPeriodRatio       = 0.50
+	regimeBackwardationPeriodRatio = 0.25
 	// crisis → 0.0 (use Period.Min)
 
 	// Rate scaling: ±30% adjustment based on rate/FRR ratio

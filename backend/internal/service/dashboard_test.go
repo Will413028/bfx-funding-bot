@@ -67,7 +67,7 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 		case containsPath(r.URL.Path, "wallets"):
 			_, _ = w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 		case containsPath(r.URL.Path, "offers"):
-			_, _ = fmt.Fprintf(w,`[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)
+			_, _ = fmt.Fprintf(w, `[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)
 		case containsPath(r.URL.Path, "credits"):
 			_, _ = w.Write([]byte(fmt.Sprintf(`[[67890,"fUSD",0,%d,%d,300,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,1]]`, now, now, now)))
 		}

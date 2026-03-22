@@ -98,7 +98,7 @@ func TestBatch_AllSameDay(t *testing.T) {
 		makeCredit(102, 2000, 0.0003, 10, base),
 		makeCredit(103, 3000, 0.0003, 10, base),
 		makeCredit(104, 1500, 0.0003, 10, base),
-		makeCredit(105, 2500, 0.0003, 10, base.Add(6 * time.Hour)), // same day, different hour
+		makeCredit(105, 2500, 0.0003, 10, base.Add(6*time.Hour)), // same day, different hour
 	}
 
 	batches := BatchCredits(credits, batchConfig(), now)
@@ -278,7 +278,7 @@ func TestBatch_CreditIDsPreserved(t *testing.T) {
 func TestBatch_SortedChronologically(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	// Later expiry first in input, should be sorted
-	cLater := makeCredit(102, 2000, 0.0003, 10, now.AddDate(0, 0, -3))  // expires Mar 15
+	cLater := makeCredit(102, 2000, 0.0003, 10, now.AddDate(0, 0, -3))   // expires Mar 15
 	cEarlier := makeCredit(101, 1000, 0.0003, 10, now.AddDate(0, 0, -8)) // expires Mar 10
 
 	batches := BatchCredits([]domain.FundingCredit{cLater, cEarlier}, batchConfig(), now)

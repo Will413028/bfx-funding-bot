@@ -25,9 +25,9 @@ func TestCompetitor_HighFollowRate(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		bestAsk := 0.0001 + float64(i)*0.000001
 		entries := []domain.BookEntry{
-			{Rate: bestAsk, Amount: 1000},                          // best ask
-			{Rate: bestAsk + 0.0000001, Amount: 500},               // near best ask (new each time)
-			{Rate: bestAsk + 0.001, Amount: 2000},                  // far entry
+			{Rate: bestAsk, Amount: 1000},            // best ask
+			{Rate: bestAsk + 0.0000001, Amount: 500}, // near best ask (new each time)
+			{Rate: bestAsk + 0.001, Amount: 2000},    // far entry
 		}
 		cd.Analyze(entries)
 	}

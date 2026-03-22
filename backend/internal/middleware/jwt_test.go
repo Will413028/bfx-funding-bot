@@ -31,7 +31,7 @@ func testSetup(t *testing.T) (*auth.JWTManager, *gin.Engine) {
 	r.GET("/test", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"userId": c.GetString(ContextUserID),
-			"email":   c.GetString(ContextEmail),
+			"email":  c.GetString(ContextEmail),
 		})
 	})
 

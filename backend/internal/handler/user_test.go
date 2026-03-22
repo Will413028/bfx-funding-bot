@@ -95,11 +95,11 @@ func (m *testTokenRepo) Delete(_ context.Context, _, _ string) error            
 // testNotifier is a no-op notifier for handler tests.
 type testNotifier struct{}
 
-func (m *testNotifier) SendWelcome(_ context.Context, _ string) error         { return nil }
-func (m *testNotifier) SendVerification(_ context.Context, _, _ string) error { return nil }
+func (m *testNotifier) SendWelcome(_ context.Context, _ string) error          { return nil }
+func (m *testNotifier) SendVerification(_ context.Context, _, _ string) error  { return nil }
 func (m *testNotifier) SendPasswordReset(_ context.Context, _, _ string) error { return nil }
-func (m *testNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error  { return nil }
-func (m *testNotifier) SendAlert(_ context.Context, _, _, _ string) error     { return nil }
+func (m *testNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error   { return nil }
+func (m *testNotifier) SendAlert(_ context.Context, _, _, _ string) error      { return nil }
 
 func setupUserTest(t *testing.T) (*gin.Engine, *testUserRepo) {
 	t.Helper()

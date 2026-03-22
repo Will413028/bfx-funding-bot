@@ -22,7 +22,7 @@ const (
 
 	// Early return risk premium (callable bond negative convexity)
 	earlyReturnBaseRate = 0.30 // estimated 30% historical early return rate
-	earlyReturnScale   = 0.05
+	earlyReturnScale    = 0.05
 )
 
 // LockupStrategy computes the opportunity cost of locking funds for a given

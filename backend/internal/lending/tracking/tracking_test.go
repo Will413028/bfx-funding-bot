@@ -77,7 +77,7 @@ func TestSummarize_FiltersOldRecords(t *testing.T) {
 	now := time.Now()
 	records := []domain.PerformanceRecord{
 		{Alpha: 0.001, Timestamp: now.Add(-48 * time.Hour)}, // old
-		{Alpha: 0.002, Timestamp: now},                       // recent
+		{Alpha: 0.002, Timestamp: now},                      // recent
 	}
 
 	summary := Summarize(records, now.Add(-24*time.Hour))
