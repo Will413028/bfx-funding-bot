@@ -197,3 +197,25 @@ func lastFridayOf(year int, month time.Month) int {
 func daysInMonth(year int, month time.Month) int {
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
+
+// ComputeCalendarMultiplier returns (premium multiplier, max period days) for
+// calendar events at the given time. maxPeriod <= 0 means no period constraint.
+// Used by CompositeStrategy.
+func ComputeCalendarMultiplier(t time.Time) (multiplier float64, maxPeriod int) {
+	c := &CalendarStrategy{now: func() time.Time { return t }}
+	t = t.UTC()
+
+	mePremium, meDays := c.monthEndEvent(t)
+	qePremium, qeDays := c.quarterlyEvent(t)
+
+	premium := math.Max(mePremium, qePremium)
+	bestDays := meDays
+	if qePremium > mePremium {
+		bestDays = qeDays
+	}
+
+	if premium <= 1.0 {
+		return 1.0, 0
+	}
+	return premium, bestDays
+}

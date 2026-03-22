@@ -93,9 +93,9 @@ func TestAllocation_RateMultipliers_TwoTiers(t *testing.T) {
 	if !approxEqual(res.Offers[0].Rate, 0.0002, 1e-10) {
 		t.Errorf("core rate: got %f, want 0.0002", res.Offers[0].Rate)
 	}
-	// Aggressive: 0.0002 × 1.25
-	if !approxEqual(res.Offers[1].Rate, 0.00025, 1e-10) {
-		t.Errorf("aggressive rate: got %f, want 0.00025", res.Offers[1].Rate)
+	// Aggressive: 0.0002 × 1.12
+	if !approxEqual(res.Offers[1].Rate, 0.000224, 1e-10) {
+		t.Errorf("aggressive rate: got %f, want 0.000224", res.Offers[1].Rate)
 	}
 }
 
@@ -117,9 +117,9 @@ func TestAllocation_RateMultipliers_ThreeTiers(t *testing.T) {
 	if !approxEqual(res.Offers[1].Rate, 0.00022, 1e-10) {
 		t.Errorf("moderate rate: got %f, want 0.00022", res.Offers[1].Rate)
 	}
-	// Aggressive: 0.0002 × 1.25 = 0.00025
-	if !approxEqual(res.Offers[2].Rate, 0.00025, 1e-10) {
-		t.Errorf("aggressive rate: got %f, want 0.00025", res.Offers[2].Rate)
+	// Aggressive: 0.0002 × 1.12 = 0.000224
+	if !approxEqual(res.Offers[2].Rate, 0.000224, 1e-10) {
+		t.Errorf("aggressive rate: got %f, want 0.000224", res.Offers[2].Rate)
 	}
 }
 

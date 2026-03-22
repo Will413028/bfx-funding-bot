@@ -106,3 +106,43 @@ func (q *QueueStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResul
 		Reason:  reason,
 	}
 }
+
+// ComputeQueueDiscount returns the rate discount multiplier based on queue depth.
+// Returns 1.0 if no adjustment needed. Used by CompositeStrategy.
+func ComputeQueueDiscount(rate float64, ob domain.OrderBookSummary) float64 {
+	if ob.AskDepth <= 0 || ob.Spread <= 0 {
+		return 1.0
+	}
+
+	queueDepth := ob.AskDepth * (rate - ob.BestAsk) / ob.Spread
+	if queueDepth < 0 {
+		queueDepth = 0
+	}
+
+	queueRatio := queueDepth / ob.AskDepth
+
+	if queueRatio > queueHighThreshold {
+		return queueDeepDiscount
+	}
+	if queueRatio > queueLowThreshold {
+		return queueModerateDiscount
+	}
+	return 1.0
+}
+
+// DetectStaleOffers returns IDs of offers whose rate exceeds the stale threshold.
+// Used by CompositeStrategy.
+func DetectStaleOffers(offers []domain.FundingOffer, ob domain.OrderBookSummary) []int64 {
+	if ob.BestAsk <= 0 || ob.Spread <= 0 {
+		return nil
+	}
+
+	staleThreshold := ob.BestAsk + staleSpreadMul*ob.Spread
+	var cancels []int64
+	for _, o := range offers {
+		if o.Rate > staleThreshold {
+			cancels = append(cancels, o.ID)
+		}
+	}
+	return cancels
+}

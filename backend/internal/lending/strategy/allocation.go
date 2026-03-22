@@ -20,7 +20,7 @@ const (
 	// Rate multipliers per tier
 	coreRateMul       = 1.0
 	moderateRateMul   = 1.10
-	aggressiveRateMul = 1.25
+	aggressiveRateMul = 1.12 // GT5: 1.25→1.12, 高 25% 的 offer 長期閒置拉低 utilization
 
 	// Minimum per-tier amount
 	minTierAmount = 50.0
@@ -165,4 +165,23 @@ func (a *AllocationStrategy) tiersForCount(count int) []tier {
 	default:
 		return threeTiers
 	}
+}
+
+// TierConfig describes a single allocation tier for CompositeStrategy.
+type TierConfig struct {
+	Ratio         float64 // fraction of available balance
+	RateMultiplier float64 // multiplier on base rate
+}
+
+// ComputeTiers returns the tier allocation based on available balance and regime.
+// Used by CompositeStrategy.
+func ComputeTiers(available float64, regime domain.RegimeType) []TierConfig {
+	a := &AllocationStrategy{}
+	tiers := a.selectTiers(available, regime)
+
+	result := make([]TierConfig, len(tiers))
+	for i, t := range tiers {
+		result[i] = TierConfig{Ratio: t.ratio, RateMultiplier: t.rateMul}
+	}
+	return result
 }

@@ -88,3 +88,20 @@ func (w *WeekendStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionRes
 		Reason: reason,
 	}
 }
+
+// ComputeWeekendMultiplier returns the weekend premium multiplier for the given time.
+// Returns 1.0 for weekdays. Used by CompositeStrategy.
+func ComputeWeekendMultiplier(t time.Time) float64 {
+	t = t.UTC()
+	switch t.Weekday() {
+	case time.Friday:
+		if t.Hour() >= fridayEveningHour {
+			return weekendFridayPremium
+		}
+	case time.Saturday:
+		return weekendSaturdayPremium
+	case time.Sunday:
+		return weekendSundayPremium
+	}
+	return 1.0
+}

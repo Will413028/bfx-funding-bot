@@ -9,7 +9,7 @@ import (
 
 const (
 	// Noise ranges
-	rateNoiseRange   = 0.01 // ±1%
+	rateNoiseRange   = 0.004 // ±0.4% — GT4: 0.01→0.004, 放貸 spread 很薄，±1% 影響排隊位置過大
 	amountNoiseRange = 0.02 // ±2%
 
 	// Psychological price avoidance
@@ -93,4 +93,25 @@ func avoidPsychLevel(rate float64) float64 {
 		return rate + psychShift
 	}
 	return rate
+}
+
+// ApplyNoise adds random perturbation to rate and amount, and avoids
+// psychological price levels. Returns adjusted (rate, amount).
+// Used by CompositeStrategy.
+func ApplyNoise(rate float64, amount float64, rateMin float64, rateMax float64) (float64, float64) {
+	// Rate noise: ±1%
+	rateNoise := rate * rateNoiseRange * (2*rand.Float64() - 1)
+	rate += rateNoise
+
+	// Psychological price avoidance
+	rate = avoidPsychLevel(rate)
+
+	// Clamp rate
+	rate = clamp(rate, rateMin, rateMax)
+
+	// Amount noise: ±2%
+	amountNoise := amount * amountNoiseRange * (2*rand.Float64() - 1)
+	amount += amountNoise
+
+	return rate, amount
 }

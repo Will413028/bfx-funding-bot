@@ -8,7 +8,7 @@ import (
 
 const (
 	// Regime → base period ratio within [Period.Min, Period.Max]
-	regimeContangoPeriodRatio       = 0.75
+	regimeContangoPeriodRatio       = 0.88 // GT3: 0.75→0.88, contango 是高利率窗口，更積極鎖長期
 	regimeNeutralPeriodRatio        = 0.50
 	regimeBackwardationPeriodRatio  = 0.25
 	// crisis → 0.0 (use Period.Min)
@@ -132,4 +132,27 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// ComputePeriod computes the optimal lending period based on regime, rate
+// attractiveness, and volatility. Used by CompositeStrategy.
+func ComputePeriod(regime domain.RegimeType, volatility float64, offeredRate float64, frr float64, cfg *domain.StrategyConfig) int {
+	p := &PeriodStrategy{}
+
+	periodRange := float64(cfg.Period.Max - cfg.Period.Min)
+	ratio := p.regimeRatio(regime)
+	basePeriod := float64(cfg.Period.Min) + ratio*periodRange
+
+	// Rate scaling
+	if frr > 0 && offeredRate > 0 {
+		rateRatio := math.Min(offeredRate/frr, rateRatioCap)
+		scaleFactor := 1.0 + (rateRatio-1.0)*rateScaleWeight
+		basePeriod *= scaleFactor
+	}
+
+	// Volatility discount
+	basePeriod = p.applyVolatilityDiscount(basePeriod, volatility)
+
+	period := int(math.Round(basePeriod))
+	return clampInt(period, cfg.Period.Min, cfg.Period.Max)
 }
