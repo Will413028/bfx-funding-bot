@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { StatsGrid } from "../stats-grid";
 import type { DashboardSummary, EarningsSummary } from "@/types";
+import { StatsGrid } from "../stats-grid";
 
 const mockDashboard: DashboardSummary = {
   wallet: { currency: "USD", balance: 8000, balanceAvailable: 5000 },

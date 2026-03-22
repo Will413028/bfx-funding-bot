@@ -1,6 +1,7 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,19 +26,20 @@ export function DeleteConfirmDialog({
   onConfirm,
   isDeleting,
 }: DeleteConfirmDialogProps) {
+  const t = useTranslations("apiKeys");
+  const tc = useTranslations("common");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="border-white/5 bg-zinc-950 sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Delete API Key</DialogTitle>
+          <DialogTitle>{t("deleteTitle")}</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete &quot;{label}&quot;? This action
-            cannot be undone.
+            {t("deleteDescription", { label })}
           </DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
+            {tc("cancel")}
           </Button>
           <Button
             variant="destructive"
@@ -45,7 +47,7 @@ export function DeleteConfirmDialog({
             disabled={isDeleting}
           >
             {isDeleting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-            Delete
+            {tc("delete")}
           </Button>
         </div>
       </DialogContent>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import {
   formatAPR,
@@ -14,14 +15,15 @@ interface OffersListProps {
 }
 
 export function OffersList({ offers }: OffersListProps) {
+  const t = useTranslations("overview");
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
       <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-        Active Offers
+        {t("activeOffers")}
       </h3>
 
       {offers.length === 0 ? (
-        <p className="mt-4 text-sm text-zinc-500">No active offers</p>
+        <p className="mt-4 text-sm text-zinc-500">{t("noActiveOffers")}</p>
       ) : (
         <ul className="mt-4 space-y-3">
           {offers.map((offer) => (
@@ -37,7 +39,7 @@ export function OffersList({ offers }: OffersListProps) {
                   <span className="text-zinc-500">
                     {" "}
                     / {formatDailyRate(offer.rate)}
-                    <span className="text-zinc-500 text-xs"> daily</span>
+                    <span className="text-zinc-500 text-xs"> {t("daily")}</span>
                   </span>
                 </p>
               </div>

@@ -3,6 +3,7 @@
 import { Check, ChevronRight, KeyRound, Settings, Zap } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 interface SetupStep {
   id: string;
@@ -24,33 +25,31 @@ export function SetupChecklist({
   hasStrategy,
   engineReady,
 }: SetupChecklistProps) {
+  const t = useTranslations("overview");
   const params = useParams();
   const locale = (params.locale as string) || "en";
 
   const steps: SetupStep[] = [
     {
       id: "api-key",
-      title: "Connect your Bitfinex API key",
-      description:
-        "Add and verify your Bitfinex API key to allow the bot to manage funding offers on your behalf.",
+      title: t("setupApiKeyTitle"),
+      description: t("setupApiKeyDesc"),
       href: `/${locale}/api-keys`,
       icon: KeyRound,
       done: hasVerifiedKey,
     },
     {
       id: "strategy",
-      title: "Configure your lending strategy",
-      description:
-        "Set your preferred currency, amount range, rate bounds, and lending period to match your risk profile.",
+      title: t("setupStrategyTitle"),
+      description: t("setupStrategyDesc"),
       href: `/${locale}/strategy`,
       icon: Settings,
       done: hasStrategy,
     },
     {
       id: "engine",
-      title: "Start earning",
-      description:
-        "Once your API key is verified and strategy is configured, the lending engine will start working automatically.",
+      title: t("setupEngineTitle"),
+      description: t("setupEngineDesc"),
       href: `/${locale}/overview`,
       icon: Zap,
       done: engineReady,
@@ -67,9 +66,9 @@ export function SetupChecklist({
     <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h2 className="font-semibold text-base">Get started</h2>
+          <h2 className="font-semibold text-base">{t("setupTitle")}</h2>
           <p className="mt-0.5 text-sm text-zinc-500">
-            Complete these steps to start earning funding interest.
+            {t("setupDescription")}
           </p>
         </div>
         <span className="text-sm text-zinc-500">

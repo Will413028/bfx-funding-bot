@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { OverviewSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
@@ -15,6 +16,7 @@ import { useEarnings } from "@/features/dashboard/hooks/use-earnings";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
 export default function OverviewPage() {
+  const t = useTranslations("overview");
   const {
     data: dashboard,
     isLoading: dashLoading,
@@ -38,7 +40,7 @@ export default function OverviewPage() {
   if (dashError || earnError || !dashboard || !earnings) {
     return (
       <QueryError
-        message="Failed to load dashboard data"
+        message={t("loadFailed")}
         onRetry={() => {
           dashRefetch();
           earnRefetch();

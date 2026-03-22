@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { LoadMoreButton } from "@/components/shared/load-more-button";
 import { HistorySkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
@@ -10,6 +11,7 @@ import { useBilling } from "@/features/history/hooks/use-billing";
 import { useExecutions } from "@/features/history/hooks/use-executions";
 
 export default function HistoryPage() {
+  const t = useTranslations("history");
   const executions = useExecutions();
   const billing = useBilling();
 
@@ -24,16 +26,24 @@ export default function HistoryPage() {
   }
 
   if (isError) {
-    return <QueryError message="Failed to load history" onRetry={() => { executions.refetch(); billing.refetch(); }} />;
+    return (
+      <QueryError
+        message={t("loadFailed")}
+        onRetry={() => {
+          executions.refetch();
+          billing.refetch();
+        }}
+      />
+    );
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="font-semibold text-xl tracking-tight">History</h1>
+      <h1 className="font-semibold text-xl tracking-tight">{t("title")}</h1>
       <Tabs defaultValue="executions">
         <TabsList>
-          <TabsTrigger value="executions">Executions</TabsTrigger>
-          <TabsTrigger value="billing">Billing</TabsTrigger>
+          <TabsTrigger value="executions">{t("executionsTab")}</TabsTrigger>
+          <TabsTrigger value="billing">{t("billing")}</TabsTrigger>
         </TabsList>
         <TabsContent value="executions" className="mt-4">
           <ExecutionTable records={executionRecords} />

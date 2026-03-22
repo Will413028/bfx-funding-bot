@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import {
   Area,
   AreaChart,
@@ -12,12 +13,13 @@ import {
 import { useEarningsHistory } from "@/features/dashboard/hooks/use-earnings-history";
 
 export function EarningsChart() {
+  const t = useTranslations("overview");
   const { data, isLoading } = useEarningsHistory(30);
 
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
       <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-        Earnings (30d)
+        {t("earningsTitle")}
       </h3>
 
       {isLoading ? (
@@ -26,7 +28,7 @@ export function EarningsChart() {
         </div>
       ) : !data || data.length === 0 ? (
         <div className="mt-4 flex h-[200px] items-center justify-center">
-          <p className="text-sm text-zinc-500">No earnings data</p>
+          <p className="text-sm text-zinc-500">{t("noEarningsData")}</p>
         </div>
       ) : (
         <div className="mt-4 h-[200px]">
@@ -63,7 +65,7 @@ export function EarningsChart() {
                 labelStyle={{ color: "#a1a1aa" }}
                 formatter={(value) => [
                   `$${Number(value).toFixed(2)}`,
-                  "Earned",
+                  t("earned"),
                 ]}
               />
               <Area

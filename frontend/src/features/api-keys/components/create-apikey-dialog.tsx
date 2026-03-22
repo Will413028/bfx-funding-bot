@@ -2,6 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,8 @@ export function CreateApiKeyDialog({
   onSubmit,
   isPending,
 }: CreateApiKeyDialogProps) {
+  const t = useTranslations("apiKeys");
+  const tc = useTranslations("common");
   const {
     register,
     handleSubmit,
@@ -50,14 +53,14 @@ export function CreateApiKeyDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="border-white/5 bg-zinc-950 sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add API Key</DialogTitle>
+          <DialogTitle>{t("addKey")}</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="label">Label</Label>
+            <Label htmlFor="label">{t("label")}</Label>
             <Input
               id="label"
-              placeholder="My Bitfinex Key"
+              placeholder={t("labelPlaceholder")}
               {...register("label")}
             />
             {errors.label && (
@@ -65,10 +68,10 @@ export function CreateApiKeyDialog({
             )}
           </div>
           <div className="space-y-2">
-            <Label htmlFor="apiKey">API Key</Label>
+            <Label htmlFor="apiKey">{t("apiKey")}</Label>
             <Input
               id="apiKey"
-              placeholder="Enter your Bitfinex API key"
+              placeholder={t("apiKeyPlaceholder")}
               className="font-mono"
               {...register("apiKey")}
             />
@@ -77,11 +80,11 @@ export function CreateApiKeyDialog({
             )}
           </div>
           <div className="space-y-2">
-            <Label htmlFor="apiSecret">API Secret</Label>
+            <Label htmlFor="apiSecret">{t("apiSecret")}</Label>
             <Input
               id="apiSecret"
               type="password"
-              placeholder="Enter your Bitfinex API secret"
+              placeholder={t("apiSecretPlaceholder")}
               className="font-mono"
               {...register("apiSecret")}
             />
@@ -97,11 +100,11 @@ export function CreateApiKeyDialog({
               variant="ghost"
               onClick={() => handleOpenChange(false)}
             >
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button type="submit" disabled={isPending}>
               {isPending && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-              Add Key
+              {t("addKeyShort")}
             </Button>
           </div>
         </form>

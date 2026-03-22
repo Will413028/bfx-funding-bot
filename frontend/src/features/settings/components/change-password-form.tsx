@@ -2,6 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2, Save } from "lucide-react";
+import { useTranslations } from "next-intl";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +14,7 @@ import {
 import { useChangePassword } from "../hooks/use-user";
 
 export function ChangePasswordForm() {
+  const t = useTranslations("settings");
   const mutation = useChangePassword();
 
   const {
@@ -39,11 +41,11 @@ export function ChangePasswordForm() {
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
       <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-        Change Password
+        {t("changePassword")}
       </h3>
       <form onSubmit={handleSubmit(onSubmit)} className="mt-4 space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="currentPassword">Current Password</Label>
+          <Label htmlFor="currentPassword">{t("currentPassword")}</Label>
           <Input
             id="currentPassword"
             type="password"
@@ -56,7 +58,7 @@ export function ChangePasswordForm() {
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="newPassword">New Password</Label>
+          <Label htmlFor="newPassword">{t("newPassword")}</Label>
           <Input
             id="newPassword"
             type="password"
@@ -69,7 +71,7 @@ export function ChangePasswordForm() {
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="confirmPassword">Confirm Password</Label>
+          <Label htmlFor="confirmPassword">{t("confirmPassword")}</Label>
           <Input
             id="confirmPassword"
             type="password"
@@ -84,7 +86,7 @@ export function ChangePasswordForm() {
 
         {mutation.isError && (
           <p className="text-xs text-rose-500">
-            {mutation.error?.message ?? "Failed to change password"}
+            {mutation.error?.message ?? t("changePasswordFailed")}
           </p>
         )}
 
@@ -98,7 +100,7 @@ export function ChangePasswordForm() {
           ) : (
             <Save className="mr-1.5 size-4" />
           )}
-          {mutation.isSuccess ? "Password Changed!" : "Change Password"}
+          {mutation.isSuccess ? t("passwordChanged") : t("changePassword")}
         </Button>
       </form>
     </div>

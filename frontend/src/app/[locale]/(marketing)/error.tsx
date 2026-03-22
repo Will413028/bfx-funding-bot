@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 
-export default function DashboardError({
+export default function MarketingError({
   error,
   reset,
 }: {

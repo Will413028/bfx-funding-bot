@@ -19,12 +19,8 @@ describe("SetupChecklist", () => {
 
     expect(screen.getByText("Get started")).toBeDefined();
     expect(screen.getByText("0/3")).toBeDefined();
-    expect(
-      screen.getByText("Connect your Bitfinex API key"),
-    ).toBeDefined();
-    expect(
-      screen.getByText("Configure your lending strategy"),
-    ).toBeDefined();
+    expect(screen.getByText("Connect your Bitfinex API key")).toBeDefined();
+    expect(screen.getByText("Configure your lending strategy")).toBeDefined();
     expect(screen.getByText("Start earning")).toBeDefined();
   });
 

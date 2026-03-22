@@ -26,7 +26,9 @@ function parseEnv() {
         result.error.flatten().fieldErrors,
       );
       if (typeof window !== "undefined") {
-        console.warn("[env] App may not function correctly — check environment variables.");
+        console.warn(
+          "[env] App may not function correctly — check environment variables.",
+        );
       }
       return {
         NEXT_PUBLIC_APP_URL: "",

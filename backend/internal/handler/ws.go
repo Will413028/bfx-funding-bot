@@ -48,16 +48,25 @@ type wsMessage struct {
 // ---------- Client ----------
 
 type client struct {
-	hub    *Hub
-	conn   *websocket.Conn
-	send   chan []byte
-	userID string
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	userID    string
+	closeOnce sync.Once
+}
+
+// closeSend safely closes the send channel exactly once.
+func (c *client) closeSend() {
+	c.closeOnce.Do(func() { close(c.send) })
 }
 
 // readPump reads messages from the client (only pong frames matter).
 func (c *client) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		select {
+		case c.hub.unregister <- c:
+		case <-c.hub.done:
+		}
 		_ = c.conn.Close()
 	}()
 
@@ -112,6 +121,7 @@ type Hub struct {
 	register   chan *client
 	unregister chan *client
 	broadcast  chan []byte
+	done       chan struct{}
 	log        *zap.Logger
 	wsMgr      *auth.WSTokenManager
 	cancel     context.CancelFunc
@@ -125,6 +135,7 @@ func NewHub(cfg appconfig.Config, pubsub repository.SnapshotPubSub, wsMgr *auth.
 		register:   make(chan *client),
 		unregister: make(chan *client),
 		broadcast:  make(chan []byte, 64),
+		done:       make(chan struct{}),
 		upgrader:   newUpgrader(cfg.FrontendURL),
 		pubsub:     pubsub,
 		wsMgr:      wsMgr,
@@ -149,9 +160,9 @@ func (h *Hub) eventLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Close all clients on shutdown
+			close(h.done)
 			for c := range h.clients {
-				close(c.send)
+				c.closeSend()
 				delete(h.clients, c)
 			}
 			return
@@ -163,7 +174,7 @@ func (h *Hub) eventLoop(ctx context.Context) {
 		case c := <-h.unregister:
 			if _, ok := h.clients[c]; ok {
 				delete(h.clients, c)
-				close(c.send)
+				c.closeSend()
 				h.log.Debug("ws client unregistered", zap.String("userID", c.userID), zap.Int("total", len(h.clients)))
 			}
 
@@ -174,7 +185,7 @@ func (h *Hub) eventLoop(ctx context.Context) {
 				default:
 					// Slow client: close connection
 					delete(h.clients, c)
-					close(c.send)
+					c.closeSend()
 					h.log.Warn("ws client too slow, disconnecting", zap.String("userID", c.userID))
 				}
 			}

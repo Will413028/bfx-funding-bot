@@ -3,13 +3,13 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { register as registerAction } from "@/app/[locale]/(auth)/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRouter } from "@/i18n/navigation";
 import { type RegisterFormInput, registerSchema } from "@/lib/validations";
 
 export function RegisterForm() {
@@ -33,12 +33,12 @@ export function RegisterForm() {
     try {
       result = await registerAction(data.email, data.password);
     } catch {
-      setServerError("Registration failed");
+      setServerError(t("registrationFailed"));
       return;
     }
 
     if (!result.success) {
-      setServerError(result.error ?? "Registration failed");
+      setServerError(result.error ?? t("registrationFailed"));
       return;
     }
 
@@ -59,7 +59,11 @@ export function RegisterForm() {
           {...register("email")}
         />
         {errors.email && (
-          <p id="reg-email-error" role="alert" className="text-sm text-destructive">
+          <p
+            id="reg-email-error"
+            role="alert"
+            className="text-sm text-destructive"
+          >
             {tv(errors.email.message as string)}
           </p>
         )}
@@ -76,13 +80,21 @@ export function RegisterForm() {
           {...register("password")}
         />
         {errors.password && (
-          <p id="reg-password-error" role="alert" className="text-sm text-destructive">
+          <p
+            id="reg-password-error"
+            role="alert"
+            className="text-sm text-destructive"
+          >
             {tv(errors.password.message as string)}
           </p>
         )}
       </div>
 
-      {serverError && <p role="alert" className="text-sm text-destructive">{serverError}</p>}
+      {serverError && (
+        <p role="alert" className="text-sm text-destructive">
+          {serverError}
+        </p>
+      )}
 
       <Button
         type="submit"
