@@ -176,16 +176,26 @@ func (s *UserService) VerifyEmail(ctx context.Context, token string) error {
 
 // RequestPasswordReset generates a reset token and sends email.
 // Always returns nil to prevent email enumeration.
+// Rate-limited to 1 request per email per 20 minutes via Redis cooldown.
 func (s *UserService) RequestPasswordReset(ctx context.Context, email string) error {
 	user, err := s.repo.GetByEmail(ctx, email)
 	if err != nil {
 		return nil // don't reveal whether email exists
 	}
 
+	// Per-email cooldown: skip if a reset was requested recently.
+	cooldownKey := hashToken("reset_cooldown:" + email)
+	if _, err := s.tokens.Get(ctx, cooldownKey, "reset_cooldown"); err == nil {
+		return nil // cooldown active, silently skip
+	}
+
 	token, tokenHash := generateToken()
 	if err := s.tokens.Store(ctx, tokenHash, user.ID, tokenTypeReset, resetTokenTTL); err != nil {
 		return nil // best-effort
 	}
+
+	// Set cooldown (20 minutes).
+	_ = s.tokens.Store(ctx, cooldownKey, user.ID, "reset_cooldown", 20*time.Minute)
 
 	_ = s.notifier.SendPasswordReset(ctx, email, token)
 	return nil

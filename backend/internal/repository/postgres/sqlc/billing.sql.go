@@ -56,19 +56,19 @@ func (q *Queries) CreateBillingRecord(ctx context.Context, arg CreateBillingReco
 const listBillingByUser = `-- name: ListBillingByUser :many
 SELECT id, user_id, period_start, period_end, plan, amount, currency, status, paid_at, created_at
 FROM billing_records
-WHERE user_id = $1 AND period_start >= $2
-ORDER BY period_start DESC
+WHERE user_id = $1 AND created_at >= $2
+ORDER BY created_at DESC
 LIMIT $3
 `
 
 type ListBillingByUserParams struct {
-	UserID      pgtype.UUID
-	PeriodStart pgtype.Timestamptz
-	Limit       int32
+	UserID    pgtype.UUID
+	CreatedAt pgtype.Timestamptz
+	Limit     int32
 }
 
 func (q *Queries) ListBillingByUser(ctx context.Context, arg ListBillingByUserParams) ([]BillingRecord, error) {
-	rows, err := q.db.Query(ctx, listBillingByUser, arg.UserID, arg.PeriodStart, arg.Limit)
+	rows, err := q.db.Query(ctx, listBillingByUser, arg.UserID, arg.CreatedAt, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

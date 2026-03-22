@@ -319,6 +319,30 @@ func TestRequestPasswordReset_ExistingEmail(t *testing.T) {
 	}
 }
 
+func TestRequestPasswordReset_Cooldown(t *testing.T) {
+	repo := newMockRepo()
+	tokenRepo := newMockTokenRepo()
+	svc := NewUserService(repo, tokenRepo, testJWTManager(t), &mockNotifier{})
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	// First call should succeed and set cooldown.
+	_ = svc.RequestPasswordReset(context.Background(), "test@example.com")
+
+	// Count tokens before second call.
+	tokensBefore := len(tokenRepo.tokens)
+
+	// Second call should be silently skipped (cooldown active).
+	err := svc.RequestPasswordReset(context.Background(), "test@example.com")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+
+	// No new tokens should be created (cooldown blocked it).
+	if len(tokenRepo.tokens) != tokensBefore {
+		t.Errorf("expected no new tokens during cooldown, got %d new", len(tokenRepo.tokens)-tokensBefore)
+	}
+}
+
 func TestRequestPasswordReset_NonExistentEmail(t *testing.T) {
 	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
 
