@@ -10,10 +10,10 @@ import (
 
 func TestComputeOrderBookSummary_Normal(t *testing.T) {
 	entries := []domain.BookEntry{
-		{Rate: 0.00024, Period: 2, Count: 3, Amount: -30000},  // bid
-		{Rate: 0.00023, Period: 7, Count: 2, Amount: -20000},  // bid
-		{Rate: 0.00026, Period: 2, Count: 5, Amount: 50000},   // offer
-		{Rate: 0.00027, Period: 30, Count: 2, Amount: 40000},  // offer
+		{Rate: 0.00024, Period: 2, Count: 3, Amount: -30000}, // bid
+		{Rate: 0.00023, Period: 7, Count: 2, Amount: -20000}, // bid
+		{Rate: 0.00026, Period: 2, Count: 5, Amount: 50000},  // offer
+		{Rate: 0.00027, Period: 30, Count: 2, Amount: 40000}, // offer
 	}
 
 	s := orderbook.ComputeSummary(entries)
@@ -50,11 +50,11 @@ func TestDetectWalls(t *testing.T) {
 	// Total offer = 100k + 1k + 1k = 102k; wall threshold 50% = 51k
 	// Total bid = 1k + 95k = 96k; wall threshold 50% = 48k
 	entries := []domain.BookEntry{
-		{Rate: 0.00025, Period: 2, Count: 1, Amount: 100000},  // 100k offer — wall
-		{Rate: 0.00026, Period: 2, Count: 3, Amount: 1000},    // 1k offer — not
-		{Rate: 0.000265, Period: 2, Count: 2, Amount: 1000},   // 1k offer — not
-		{Rate: 0.00024, Period: 2, Count: 2, Amount: -1000},   // 1k bid — not
-		{Rate: 0.00023, Period: 2, Count: 1, Amount: -95000},  // 95k bid — wall
+		{Rate: 0.00025, Period: 2, Count: 1, Amount: 100000}, // 100k offer — wall
+		{Rate: 0.00026, Period: 2, Count: 3, Amount: 1000},   // 1k offer — not
+		{Rate: 0.000265, Period: 2, Count: 2, Amount: 1000},  // 1k offer — not
+		{Rate: 0.00024, Period: 2, Count: 2, Amount: -1000},  // 1k bid — not
+		{Rate: 0.00023, Period: 2, Count: 1, Amount: -95000}, // 95k bid — wall
 	}
 
 	walls := orderbook.DetectWalls(entries, 0, &orderbook.WallOptions{Threshold: 0.50})

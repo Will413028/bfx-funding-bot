@@ -82,8 +82,9 @@ export class WSClient {
       }
     };
 
-    ws.onerror = () => {
-      // onclose will fire after onerror
+    ws.onerror = (event) => {
+      console.warn("[WSClient] connection error", event);
+      // onclose will fire after onerror → triggers reconnect
     };
 
     this.ws = ws;

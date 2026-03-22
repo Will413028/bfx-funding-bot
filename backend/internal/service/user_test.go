@@ -18,8 +18,8 @@ import (
 
 // mockUserRepo implements repository.UserRepository for testing.
 type mockUserRepo struct {
-	users  map[string]*domain.User
-	byEmail map[string]*domain.User
+	users     map[string]*domain.User
+	byEmail   map[string]*domain.User
 	createErr error
 }
 
@@ -114,11 +114,11 @@ func (m *mockTokenRepo) Delete(_ context.Context, tokenHash, tokenType string) e
 // mockNotifier implements notification.Notifier for testing.
 type mockNotifier struct{}
 
-func (m *mockNotifier) SendWelcome(_ context.Context, _ string) error                    { return nil }
-func (m *mockNotifier) SendVerification(_ context.Context, _, _ string) error             { return nil }
-func (m *mockNotifier) SendPasswordReset(_ context.Context, _, _ string) error            { return nil }
-func (m *mockNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error              { return nil }
-func (m *mockNotifier) SendAlert(_ context.Context, _, _, _ string) error                 { return nil }
+func (m *mockNotifier) SendWelcome(_ context.Context, _ string) error          { return nil }
+func (m *mockNotifier) SendVerification(_ context.Context, _, _ string) error  { return nil }
+func (m *mockNotifier) SendPasswordReset(_ context.Context, _, _ string) error { return nil }
+func (m *mockNotifier) SendAPIKeyAlert(_ context.Context, _, _ string) error   { return nil }
+func (m *mockNotifier) SendAlert(_ context.Context, _, _, _ string) error      { return nil }
 
 func testJWTManager(t *testing.T) *auth.JWTManager {
 	t.Helper()
@@ -273,6 +273,151 @@ func TestChangePassword_NewPasswordTooShort(t *testing.T) {
 
 	err := svc.ChangePassword(context.Background(), "test-uuid", "password123", "short")
 	assertAppErrorCode(t, err, "PASSWORD_TOO_SHORT")
+}
+
+// ── VerifyEmail ──
+
+func TestVerifyEmail_Success(t *testing.T) {
+	repo := newMockRepo()
+	tokenRepo := newMockTokenRepo()
+	svc := NewUserService(repo, tokenRepo, testJWTManager(t), &mockNotifier{})
+
+	// Create a pending user and inject a verify token.
+	u, _ := svc.Register(context.Background(), "test@example.com", "password123")
+	tokenHash := hashToken("valid-verify-token")
+	_ = tokenRepo.Store(context.Background(), tokenHash, u.ID, tokenTypeVerify, verifyTokenTTL)
+
+	err := svc.VerifyEmail(context.Background(), "valid-verify-token")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if repo.users[u.ID].Status != domain.UserStatusActive {
+		t.Errorf("expected status active, got %s", repo.users[u.ID].Status)
+	}
+	// Token should be deleted.
+	if _, getErr := tokenRepo.Get(context.Background(), tokenHash, tokenTypeVerify); getErr == nil {
+		t.Error("expected verify token to be deleted")
+	}
+}
+
+func TestVerifyEmail_InvalidToken(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	err := svc.VerifyEmail(context.Background(), "nonexistent-token")
+	assertAppErrorCode(t, err, "INVALID_TOKEN")
+}
+
+// ── RequestPasswordReset ──
+
+func TestRequestPasswordReset_ExistingEmail(t *testing.T) {
+	repo := newMockRepo()
+	svc := NewUserService(repo, newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	_, _ = svc.Register(context.Background(), "test@example.com", "password123")
+
+	err := svc.RequestPasswordReset(context.Background(), "test@example.com")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+}
+
+func TestRequestPasswordReset_NonExistentEmail(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+
+	err := svc.RequestPasswordReset(context.Background(), "nobody@example.com")
+	if err != nil {
+		t.Fatalf("expected nil (prevent enumeration), got %v", err)
+	}
+}
+
+// ── ResetPassword ──
+
+func TestResetPassword_Success(t *testing.T) {
+	repo := newMockRepo()
+	tokenRepo := newMockTokenRepo()
+	svc := NewUserService(repo, tokenRepo, testJWTManager(t), &mockNotifier{})
+
+	u, _ := svc.Register(context.Background(), "test@example.com", "password123")
+	oldHash := repo.users[u.ID].PasswordHash
+
+	tokenHash := hashToken("valid-reset-token")
+	_ = tokenRepo.Store(context.Background(), tokenHash, u.ID, tokenTypeReset, resetTokenTTL)
+
+	err := svc.ResetPassword(context.Background(), "valid-reset-token", "newpassword456")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if repo.users[u.ID].PasswordHash == oldHash {
+		t.Error("expected password hash to change")
+	}
+	if _, getErr := tokenRepo.Get(context.Background(), tokenHash, tokenTypeReset); getErr == nil {
+		t.Error("expected reset token to be deleted")
+	}
+}
+
+func TestResetPassword_InvalidToken(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	err := svc.ResetPassword(context.Background(), "bad-token", "newpassword456")
+	assertAppErrorCode(t, err, "INVALID_TOKEN")
+}
+
+func TestResetPassword_PasswordTooShort(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	err := svc.ResetPassword(context.Background(), "any-token", "short")
+	assertAppErrorCode(t, err, "PASSWORD_TOO_SHORT")
+}
+
+func TestResetPassword_PasswordTooLong(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	long := string(make([]byte, 73))
+	err := svc.ResetPassword(context.Background(), "any-token", long)
+	assertAppErrorCode(t, err, "PASSWORD_TOO_LONG")
+}
+
+// ── RefreshToken ──
+
+func TestRefreshToken_Success(t *testing.T) {
+	repo := newMockRepo()
+	tokenRepo := newMockTokenRepo()
+	jwtMgr := testJWTManager(t)
+	svc := NewUserService(repo, tokenRepo, jwtMgr, &mockNotifier{})
+
+	u, _ := svc.Register(context.Background(), "test@example.com", "password123")
+
+	tokenHash := hashToken("valid-refresh-token")
+	_ = tokenRepo.Store(context.Background(), tokenHash, u.ID, tokenTypeRefresh, refreshTokenTTL)
+
+	result, err := svc.RefreshToken(context.Background(), "valid-refresh-token")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if result.AccessToken == "" {
+		t.Error("expected non-empty access token")
+	}
+	if result.RefreshToken == "" {
+		t.Error("expected non-empty refresh token")
+	}
+	if result.ExpiresAt.IsZero() {
+		t.Error("expected non-zero expiresAt")
+	}
+	// Old refresh token should be deleted (rotation).
+	if _, getErr := tokenRepo.Get(context.Background(), tokenHash, tokenTypeRefresh); getErr == nil {
+		t.Error("expected old refresh token to be deleted")
+	}
+}
+
+func TestRefreshToken_InvalidToken(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	_, err := svc.RefreshToken(context.Background(), "bad-refresh-token")
+	assertAppErrorCode(t, err, "INVALID_TOKEN")
+}
+
+// ── Logout ──
+
+func TestLogout_Success(t *testing.T) {
+	svc := NewUserService(newMockRepo(), newMockTokenRepo(), testJWTManager(t), &mockNotifier{})
+	err := svc.Logout(context.Background(), "any-user-id")
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
 }
 
 func assertAppErrorCode(t *testing.T, err error, code string) {

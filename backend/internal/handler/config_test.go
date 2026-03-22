@@ -79,10 +79,10 @@ func setupConfigRouter(t *testing.T) *gin.Engine {
 
 func validConfigJSON() []byte {
 	body, _ := json.Marshal(map[string]interface{}{
-		"currency":   "USD",
-		"amount":     map[string]float64{"min": 50, "max": 1000},
-		"rate":       map[string]float64{"min": 0.0001, "max": 0.001},
-		"period":     map[string]int{"min": 2, "max": 30},
+		"currency":  "USD",
+		"amount":    map[string]float64{"min": 50, "max": 1000},
+		"rate":      map[string]float64{"min": 0.0001, "max": 0.001},
+		"period":    map[string]int{"min": 2, "max": 30},
 		"autoRenew": true,
 	})
 	return body

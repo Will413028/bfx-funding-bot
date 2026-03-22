@@ -30,9 +30,9 @@ func TestFilterDust_AdaptiveThreshold(t *testing.T) {
 func TestFilterDust_BothSidesIndependent(t *testing.T) {
 	entries := []domain.BookEntry{
 		// Offers: median=1000, threshold=50
-		{Rate: 0.001, Amount: 10},     // dust
-		{Rate: 0.0011, Amount: 1000},  // kept
-		{Rate: 0.0012, Amount: 5000},  // kept
+		{Rate: 0.001, Amount: 10},    // dust
+		{Rate: 0.0011, Amount: 1000}, // kept
+		{Rate: 0.0012, Amount: 5000}, // kept
 		// Bids: median=200, threshold=10
 		{Rate: 0.0009, Amount: -5},    // dust
 		{Rate: 0.0008, Amount: -200},  // kept

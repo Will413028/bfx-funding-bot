@@ -71,11 +71,17 @@ async function request<T>(
     }
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
   const res = await fetch(url.toString(), {
     method,
     headers,
     body: options?.body ? JSON.stringify(options.body) : undefined,
+    signal: controller.signal,
   });
+
+  clearTimeout(timeout);
 
   if (!res.ok) {
     let code = "UNKNOWN";
@@ -146,7 +152,11 @@ async function del<T = void>(
   path: string,
   options?: RequestOptions,
 ): Promise<T> {
-  const response = await request<ApiResponse<T> | undefined>("DELETE", path, options);
+  const response = await request<ApiResponse<T> | undefined>(
+    "DELETE",
+    path,
+    options,
+  );
   if (!response) return undefined as T;
   return response.data;
 }

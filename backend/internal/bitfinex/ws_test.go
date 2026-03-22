@@ -44,8 +44,8 @@ func TestWSClient_ConnectAndClose(t *testing.T) {
 	server := mockWSServer(t, func(conn *websocket.Conn) {
 		// Send info event
 		_ = conn.WriteJSON(map[string]any{
-			"event":   "info",
-			"version": 2,
+			"event":    "info",
+			"version":  2,
 			"platform": map[string]int{"status": 1},
 		})
 		// Keep connection alive until client disconnects
@@ -469,19 +469,19 @@ func TestWSClient_FundingOffers(t *testing.T) {
 
 		// Build a 21-element offer array
 		offer := make([]any, 21)
-		offer[0] = int64(50001)     // ID
-		offer[1] = "fUSD"           // SYMBOL
+		offer[0] = int64(50001)         // ID
+		offer[1] = "fUSD"               // SYMBOL
 		offer[2] = int64(1709884800000) // MTS_CREATED
 		offer[3] = int64(1709884801000) // MTS_UPDATED
-		offer[4] = 10000.0          // AMOUNT
-		offer[5] = 10000.0          // AMOUNT_ORIG
-		offer[6] = "LIMIT"          // TYPE
-		offer[10] = "ACTIVE"        // STATUS
-		offer[14] = 0.00025         // RATE
-		offer[15] = 30              // PERIOD
-		offer[16] = 0               // NOTIFY
-		offer[17] = 0               // HIDDEN
-		offer[19] = 1               // RENEW
+		offer[4] = 10000.0              // AMOUNT
+		offer[5] = 10000.0              // AMOUNT_ORIG
+		offer[6] = "LIMIT"              // TYPE
+		offer[10] = "ACTIVE"            // STATUS
+		offer[14] = 0.00025             // RATE
+		offer[15] = 30                  // PERIOD
+		offer[16] = 0                   // NOTIFY
+		offer[17] = 0                   // HIDDEN
+		offer[19] = 1                   // RENEW
 
 		_ = conn.WriteJSON([]any{0, "fos", []any{offer}})
 		time.Sleep(50 * time.Millisecond)

@@ -16,8 +16,8 @@ type session struct {
 }
 
 var highDemandSessions = []session{
-	{startHour: 0, startMinute: 0, endHour: 3, endMinute: 0, peak: 0.45},  // Asia open
-	{startHour: 7, startMinute: 0, endHour: 9, endMinute: 0, peak: 0.40},  // Europe open
+	{startHour: 0, startMinute: 0, endHour: 3, endMinute: 0, peak: 0.45},   // Asia open
+	{startHour: 7, startMinute: 0, endHour: 9, endMinute: 0, peak: 0.40},   // Europe open
 	{startHour: 13, startMinute: 0, endHour: 15, endMinute: 0, peak: 0.45}, // US open
 }
 

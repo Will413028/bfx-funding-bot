@@ -115,9 +115,9 @@ func TestMDC_DemandSupplyDecomposition(t *testing.T) {
 	now := time.Now()
 
 	signals := []domain.SignalValue{
-		{Type: domain.SignalBookConsumption, Value: 0.8, Confidence: 1.0, Timestamp: now},    // demand
-		{Type: domain.SignalMomentum, Value: -0.6, Confidence: 1.0, Timestamp: now},           // supply
-		{Type: domain.SignalMarginUsage, Value: 0.4, Confidence: 1.0, Timestamp: now},         // demand
+		{Type: domain.SignalBookConsumption, Value: 0.8, Confidence: 1.0, Timestamp: now}, // demand
+		{Type: domain.SignalMomentum, Value: -0.6, Confidence: 1.0, Timestamp: now},       // supply
+		{Type: domain.SignalMarginUsage, Value: 0.4, Confidence: 1.0, Timestamp: now},     // demand
 	}
 	result := agg.Aggregate(signals, nil, now)
 
@@ -178,8 +178,8 @@ func TestMDC_Degradation_SingleSignalExcluded(t *testing.T) {
 
 	health := domain.SignalHealthSummary{
 		domain.SignalBookConsumption: domain.SignalHealthy,
-		domain.SignalCrossCurrency:  domain.SignalDegraded, // excluded
-		domain.SignalMarginUsage:    domain.SignalHealthy,
+		domain.SignalCrossCurrency:   domain.SignalDegraded, // excluded
+		domain.SignalMarginUsage:     domain.SignalHealthy,
 	}
 
 	result := agg.Aggregate(signals, health, now)
@@ -200,7 +200,7 @@ func TestMDC_Degradation_OrderBookFailure_FRROnly(t *testing.T) {
 
 	health := domain.SignalHealthSummary{
 		domain.SignalBookConsumption: domain.SignalDegraded, // Order Book failure
-		domain.SignalMomentum:       domain.SignalHealthy,
+		domain.SignalMomentum:        domain.SignalHealthy,
 	}
 
 	result := agg.Aggregate(signals, health, now)
@@ -243,7 +243,7 @@ func TestMDC_Degradation_RecoveringExcluded(t *testing.T) {
 
 	health := domain.SignalHealthSummary{
 		domain.SignalBookConsumption: domain.SignalHealthy,
-		domain.SignalMomentum:       domain.SignalRecovering, // excluded during recovery
+		domain.SignalMomentum:        domain.SignalRecovering, // excluded during recovery
 	}
 
 	resultWithRecovering := agg.Aggregate(signals, health, now)
@@ -251,7 +251,7 @@ func TestMDC_Degradation_RecoveringExcluded(t *testing.T) {
 	// Compare with both healthy — recovering signal should be excluded
 	healthAll := domain.SignalHealthSummary{
 		domain.SignalBookConsumption: domain.SignalHealthy,
-		domain.SignalMomentum:       domain.SignalHealthy,
+		domain.SignalMomentum:        domain.SignalHealthy,
 	}
 	resultAllHealthy := agg.Aggregate(signals, healthAll, now)
 

@@ -13,8 +13,8 @@ const (
 	maxPremiumDown = 0.18 // negative MDC discount range (1.0 → 0.82) — GT2: 0.30→0.18, backwardation 降價過慷慨
 
 	// Regime multipliers
-	regimeContangoMul       = 1.05 // +5%
-	regimeBackwardationMul  = 0.90 // -10%
+	regimeContangoMul      = 1.05 // +5%
+	regimeBackwardationMul = 0.90 // -10%
 
 	// Order book pressure
 	depthRatioThreshold = 1.5
@@ -31,11 +31,11 @@ const (
 	minBalance = 50.0
 
 	// Adaptive Deviation Guard (§8.1): max deviation from FRR per regime
-	deviationContango       = 0.40 // bull: 40%
-	deviationBackwardation  = 0.20 // bear: 20%
-	deviationNeutral        = 0.25 // neutral: 25%
-	deviationCrisis         = 0.60 // crisis: 60%
-	deviationHardCeiling    = 0.80 // absolute max: 80%
+	deviationContango      = 0.40 // bull: 40%
+	deviationBackwardation = 0.20 // bear: 20%
+	deviationNeutral       = 0.25 // neutral: 25%
+	deviationCrisis        = 0.60 // crisis: 60%
+	deviationHardCeiling   = 0.80 // absolute max: 80%
 
 	// Bitfinex funding fee (15% of earnings)
 	// M1: All rate comparisons should use netRate = rate × (1 - FeeRate)

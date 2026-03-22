@@ -169,7 +169,7 @@ func (a *AllocationStrategy) tiersForCount(count int) []tier {
 
 // TierConfig describes a single allocation tier for CompositeStrategy.
 type TierConfig struct {
-	Ratio         float64 // fraction of available balance
+	Ratio          float64 // fraction of available balance
 	RateMultiplier float64 // multiplier on base rate
 }
 

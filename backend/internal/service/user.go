@@ -20,14 +20,14 @@ import (
 )
 
 const (
-	bcryptCost             = 12
-	tokenBytes             = 32
-	verifyTokenTTL         = 24 * time.Hour
-	resetTokenTTL          = 1 * time.Hour
-	tokenTypeVerify        = "verify"
-	tokenTypeReset         = "reset"
-	tokenTypeRefresh       = "refresh"
-	refreshTokenTTL        = 7 * 24 * time.Hour
+	bcryptCost       = 12
+	tokenBytes       = 32
+	verifyTokenTTL   = 24 * time.Hour
+	resetTokenTTL    = 1 * time.Hour
+	tokenTypeVerify  = "verify"
+	tokenTypeReset   = "reset"
+	tokenTypeRefresh = "refresh"
+	refreshTokenTTL  = 7 * 24 * time.Hour
 )
 
 type UserService struct {

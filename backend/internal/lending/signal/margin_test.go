@@ -28,7 +28,7 @@ func TestMarginUsage_BalancedBook(t *testing.T) {
 	now := time.Now()
 	book := []domain.BookEntry{
 		{Rate: 0.001, Period: 2, Count: 1, Amount: 1000},   // offer
-		{Rate: 0.0008, Period: 2, Count: 1, Amount: -1000},  // bid (equal)
+		{Rate: 0.0008, Period: 2, Count: 1, Amount: -1000}, // bid (equal)
 	}
 	for i := 0; i < 5; i++ {
 		mu.Compute(&domain.RawMarketData{Book: book, Timestamp: now.Add(time.Duration(i) * time.Second)})

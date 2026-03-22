@@ -26,8 +26,8 @@ func TestBookConsumption_StableDepth(t *testing.T) {
 	bc := NewBookConsumption()
 	now := time.Now()
 	book := []domain.BookEntry{
-		{Rate: 0.001, Period: 2, Count: 1, Amount: 1000},   // offer
-		{Rate: 0.0008, Period: 2, Count: 1, Amount: -500},   // bid
+		{Rate: 0.001, Period: 2, Count: 1, Amount: 1000},  // offer
+		{Rate: 0.0008, Period: 2, Count: 1, Amount: -500}, // bid
 	}
 	for i := 0; i < 3; i++ {
 		data := &domain.RawMarketData{Book: book, Timestamp: now.Add(time.Duration(i) * time.Second)}

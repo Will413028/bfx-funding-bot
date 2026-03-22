@@ -130,7 +130,7 @@ func TestService_StartWorker(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	err := svc.StartWorker(context.Background(),"u1", testStrategyConfig())
+	err := svc.StartWorker(context.Background(), "u1", testStrategyConfig())
 	if err != nil {
 		t.Fatalf("StartWorker error: %v", err)
 	}
@@ -147,8 +147,8 @@ func TestService_StartWorkerDuplicate(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
-	err := svc.StartWorker(context.Background(),"u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
+	err := svc.StartWorker(context.Background(), "u1", testStrategyConfig())
 
 	if err == nil {
 		t.Fatal("expected error for duplicate StartWorker")
@@ -160,10 +160,10 @@ func TestService_StopWorker(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
 
-	err := svc.StopWorker(context.Background(),"u1")
+	err := svc.StopWorker(context.Background(), "u1")
 	if err != nil {
 		t.Fatalf("StopWorker error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestService_StopWorkerNonExistent(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	err := svc.StopWorker(context.Background(),"u1")
+	err := svc.StopWorker(context.Background(), "u1")
 	if err == nil {
 		t.Fatal("expected error for non-existent StopWorker")
 	}
@@ -191,13 +191,13 @@ func TestService_ReloadConfig(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
 
 	newCfg := testStrategyConfig()
 	newCfg.Rate.Min = 0.0005
 
-	err := svc.ReloadConfig(context.Background(),"u1", newCfg)
+	err := svc.ReloadConfig(context.Background(), "u1", newCfg)
 	if err != nil {
 		t.Fatalf("ReloadConfig error: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestService_ReloadConfigNonExistent(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	err := svc.ReloadConfig(context.Background(),"u1", testStrategyConfig())
+	err := svc.ReloadConfig(context.Background(), "u1", testStrategyConfig())
 	if err == nil {
 		t.Fatal("expected error for non-existent ReloadConfig")
 	}
@@ -219,8 +219,8 @@ func TestService_BroadcastSnapshot(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
-	_ = svc.StartWorker(context.Background(),"u2", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u2", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
 
 	snapshot := &domain.MarketSnapshot{
@@ -281,9 +281,9 @@ func TestService_StopAllCleansUp(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
-	_ = svc.StartWorker(context.Background(),"u2", testStrategyConfig())
-	_ = svc.StartWorker(context.Background(),"u3", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u2", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u3", testStrategyConfig())
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -355,7 +355,7 @@ func TestService_MultipleStartStop(t *testing.T) {
 	// Start multiple workers
 	for i := 0; i < 5; i++ {
 		userID := "u" + string(rune('1'+i))
-		err := svc.StartWorker(context.Background(),userID, testStrategyConfig())
+		err := svc.StartWorker(context.Background(), userID, testStrategyConfig())
 		if err != nil {
 			t.Fatalf("StartWorker(%s) error: %v", userID, err)
 		}
@@ -368,8 +368,8 @@ func TestService_MultipleStartStop(t *testing.T) {
 	}
 
 	// Stop some workers
-	_ = svc.StopWorker(context.Background(),"u1")
-	_ = svc.StopWorker(context.Background(),"u3")
+	_ = svc.StopWorker(context.Background(), "u1")
+	_ = svc.StopWorker(context.Background(), "u3")
 
 	time.Sleep(30 * time.Millisecond)
 
@@ -383,8 +383,8 @@ func TestService_BroadcastConcurrent(t *testing.T) {
 	defer cancel()
 	defer func() { _ = svc.Stop(context.Background()) }()
 
-	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
-	_ = svc.StartWorker(context.Background(),"u2", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u1", testStrategyConfig())
+	_ = svc.StartWorker(context.Background(), "u2", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
 
 	// Broadcast from multiple goroutines

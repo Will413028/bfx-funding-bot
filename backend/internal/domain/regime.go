@@ -6,10 +6,10 @@ import "time"
 type RegimeType string
 
 const (
-	RegimeContango       RegimeType = "contango"       // demand > supply, rates rising
-	RegimeBackwardation  RegimeType = "backwardation"  // supply > demand, rates falling
-	RegimeNeutral        RegimeType = "neutral"        // balanced market
-	RegimeCrisis         RegimeType = "crisis"         // extreme volatility / flash crash
+	RegimeContango      RegimeType = "contango"      // demand > supply, rates rising
+	RegimeBackwardation RegimeType = "backwardation" // supply > demand, rates falling
+	RegimeNeutral       RegimeType = "neutral"       // balanced market
+	RegimeCrisis        RegimeType = "crisis"        // extreme volatility / flash crash
 )
 
 // RegimeParams holds parameters describing the current market regime.

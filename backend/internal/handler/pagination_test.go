@@ -29,7 +29,7 @@ func TestDecodeCursor_Invalid(t *testing.T) {
 		cursor string
 	}{
 		{"not base64", "!!!invalid!!!"},
-		{"no colon", "bm9jb2xvbg=="},  // "nocolon" base64
+		{"no colon", "bm9jb2xvbg=="}, // "nocolon" base64
 		{"empty", ""},
 	}
 

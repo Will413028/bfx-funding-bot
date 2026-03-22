@@ -105,15 +105,15 @@ type MarketSnapshot struct {
 	MDC                MDCResult
 	OrderBook          OrderBookSummary
 	RegimeParams       RegimeParams
-	DegradedReason     string             // human-readable reason for degradation
-	FRR                float64            // Flash Return Rate
-	HiddenRatio        float64            // estimated hidden order ratio
-	CompetitorActivity float64            // 0-1 composite competitor activity score
-	RatePercentile     float64            // S4: rate percentile signal [-1, +1]
-	FRRTrend           float64            // G12: FRR trend signal [-1, +1]
-	BookGaps           []RateGap          // G16: detected order book gaps
-	WeekendRatio       float64            // S6: historical weekend/weekday rate ratio
-	FlashFreeze        bool               // true if flash crash detected, trading paused
-	DegradedMode       bool               // true if operating in degraded mode (e.g., FRR-only)
-	CascadePhase       string             // S5: liquidation cascade phase (early/mid/late/none)
+	DegradedReason     string    // human-readable reason for degradation
+	FRR                float64   // Flash Return Rate
+	HiddenRatio        float64   // estimated hidden order ratio
+	CompetitorActivity float64   // 0-1 composite competitor activity score
+	RatePercentile     float64   // S4: rate percentile signal [-1, +1]
+	FRRTrend           float64   // G12: FRR trend signal [-1, +1]
+	BookGaps           []RateGap // G16: detected order book gaps
+	WeekendRatio       float64   // S6: historical weekend/weekday rate ratio
+	FlashFreeze        bool      // true if flash crash detected, trading paused
+	DegradedMode       bool      // true if operating in degraded mode (e.g., FRR-only)
+	CascadePhase       string    // S5: liquidation cascade phase (early/mid/late/none)
 }
