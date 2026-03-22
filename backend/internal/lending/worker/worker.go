@@ -66,15 +66,16 @@ type Deps struct {
 
 // LendingWorker implements the Worker interface for a single user.
 type LendingWorker struct {
-	userID    string
-	config    domain.StrategyConfig
-	deps      Deps
-	lc        *lifecycle
-	stopCh    chan struct{}
-	configCh  chan domain.StrategyConfig
-	startedAt time.Time                              // Cold Start Protocol (§6.4): tracks worker startup time
-	onError   func(userID string, err interface{})    // optional error callback for testing
-	nowFn     func() time.Time                        // injectable clock for testing
+	userID     string
+	config     domain.StrategyConfig
+	deps       Deps
+	lc         *lifecycle
+	stopCh     chan struct{}
+	configCh   chan domain.StrategyConfig
+	startedAt  time.Time                            // Cold Start Protocol (§6.4): tracks worker startup time
+	lastLentAt time.Time                            // G11: tracks last successful offer for idle urgency
+	onError    func(userID string, err interface{}) // optional error callback for testing
+	nowFn      func() time.Time                     // injectable clock for testing
 }
 
 // NewLendingWorker creates a new LendingWorker.
@@ -237,6 +238,11 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		Currency:      w.config.Currency,
 	}
 
+	// G11: Compute idle minutes
+	if !w.lastLentAt.IsZero() {
+		decisionCtx.IdleMinutes = time.Since(w.lastLentAt).Minutes()
+	}
+
 	// Phase 3: Strategy decision
 	decision := w.deps.Strategy.Apply(decisionCtx)
 
@@ -247,6 +253,10 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		if execErr != nil {
 			// Execution error — logged by executor, worker continues
 			_ = execErr
+		}
+		// G11: Update lastLentAt on successful execution
+		if execErr == nil && len(decision.Offers) > 0 {
+			w.lastLentAt = time.Now()
 		}
 	}
 }

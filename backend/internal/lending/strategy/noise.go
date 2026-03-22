@@ -57,19 +57,11 @@ func (n *NoiseStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResul
 
 	amount := math.Min(ctx.Available, cfg.Amount.Max)
 
-	// Rate noise: ±1%
-	rateNoise := rate * rateNoiseRange * (2*n.randFloat() - 1)
-	rate += rateNoise
-
-	// Psychological price avoidance
+	// S3: psychological price avoidance only
 	rate = avoidPsychLevel(rate)
 
 	// Clamp rate
 	rate = clamp(rate, cfg.Rate.Min, cfg.Rate.Max)
-
-	// Amount noise: ±2%
-	amountNoise := amount * amountNoiseRange * (2*n.randFloat() - 1)
-	amount += amountNoise
 
 	// Clamp amount
 	amount = math.Min(amount, cfg.Amount.Max)
@@ -95,23 +87,12 @@ func avoidPsychLevel(rate float64) float64 {
 	return rate
 }
 
-// ApplyNoise adds random perturbation to rate and amount, and avoids
-// psychological price levels. Returns adjusted (rate, amount).
+// ApplyNoise applies psychological price avoidance to rate.
+// Returns adjusted (rate, amount).
 // Used by CompositeStrategy.
 func ApplyNoise(rate float64, amount float64, rateMin float64, rateMax float64) (float64, float64) {
-	// Rate noise: ±1%
-	rateNoise := rate * rateNoiseRange * (2*rand.Float64() - 1)
-	rate += rateNoise
-
-	// Psychological price avoidance
+	// S3: Only psychological price avoidance, no random perturbation
 	rate = avoidPsychLevel(rate)
-
-	// Clamp rate
 	rate = clamp(rate, rateMin, rateMax)
-
-	// Amount noise: ±2%
-	amountNoise := amount * amountNoiseRange * (2*rand.Float64() - 1)
-	amount += amountNoise
-
 	return rate, amount
 }

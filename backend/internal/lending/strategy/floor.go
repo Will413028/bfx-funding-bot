@@ -48,8 +48,8 @@ func (f *FloorStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionResul
 	// Layer 1: Opportunity cost floor (user's configured minimum)
 	opportunityCost := cfg.Rate.Min
 
-	// Layer 2: FRR relative floor
-	frrFloor := snap.FRR * frrFloorRatio
+	// Layer 2: FRR relative floor (M6: guard against FRR manipulation)
+	frrFloor := EffectiveFRR(snap.FRR, snap.OrderBook.MidRate) * frrFloorRatio
 
 	// Layer 3: Regime-adjusted floor
 	regimeFloor := f.regimeFloor(cfg.Rate.Min, snap.Regime)
@@ -93,11 +93,11 @@ func (f *FloorStrategy) regimeFloor(minRate float64, regime domain.RegimeType) f
 
 // ComputeFloorRate computes the three-layer floor rate (opportunity cost, FRR
 // relative, regime-adjusted) and returns the maximum. Used by CompositeStrategy.
-func ComputeFloorRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
+func ComputeFloorRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig, idleMinutes float64) float64 {
 	f := &FloorStrategy{}
 
 	opportunityCost := cfg.Rate.Min
-	frrFloor := snap.FRR * frrFloorRatio
+	frrFloor := EffectiveFRR(snap.FRR, snap.OrderBook.MidRate) * frrFloorRatio
 	regimeFloor := f.regimeFloor(cfg.Rate.Min, snap.Regime)
 
 	floor := opportunityCost
@@ -106,6 +106,15 @@ func ComputeFloorRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) f
 	}
 	if regimeFloor > floor {
 		floor = regimeFloor
+	}
+
+	// G11: Idle capital urgency — reduce floor as capital sits idle
+	if idleMinutes > 0 {
+		urgencyDiscount := idleMinutes / 120.0
+		if urgencyDiscount > 0.15 {
+			urgencyDiscount = 0.15
+		}
+		floor *= (1.0 - urgencyDiscount)
 	}
 	return floor
 }

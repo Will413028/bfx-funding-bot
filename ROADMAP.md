@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-03-21
+> 最後更新：2026-03-21（G0 + GT1-5 + M1 完成）
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 
 ---
@@ -75,6 +75,13 @@
 | F16 | Testing | Vitest unit tests + Playwright E2E setup | `358ea07` |
 | H1 | Axiom Backend Integration | Go zap → Axiom adapter (Tee 模式) + shutdown flush | `70db7a7` |
 | H2 | Axiom Frontend Integration | Next.js next-axiom — Web Vitals + server-side logs | `70db7a7` |
+| G0 | Composite Strategy Pipeline | 13 策略模組串連成 4 階段 pipeline（Rate→Period→Structure→Adjustments）+ exported helpers | `a86e34b` |
+| GT1 | `frrFloorRatio` 0.80→0.92 | 停止低於 FRR 均衡賤賣資金 | `a86e34b` |
+| GT2 | `maxPremiumDown` 0.30→0.18 | Backwardation 減少過度降價 | `a86e34b` |
+| GT3 | `regimeContangoPeriodRatio` 0.75→0.88 | Contango 更積極鎖定長期高利率 | `a86e34b` |
+| GT4 | `rateNoiseRange` 0.01→0.004 | 減少排隊位置損失 | `a86e34b` |
+| GT5 | `aggressiveRateMul` 1.25→1.12 | 提高 aggressive tier fill rate | `a86e34b` |
+| M1 | `FeeRate` 常數 | 新增 Bitfinex 15% 手續費常數供後續計算使用 | `a86e34b` |
 
 ### 目前 DB Schema (5 tables)
 
@@ -155,29 +162,46 @@ marketfeed/service.go (C1)
 
 ### Phase G — 策略行為增強
 
-> 對照 `strategy_specification.md` + 2026-03-21 策略 review（見 `docs/strategy-journal.md`）。
-> G0 為最高優先（pipeline 接線），G11-G16 為 review 新增項目。
+> 對照 `strategy_specification.md`（§11-13）+ `docs/strategy-journal.md`。
+> 進度：7/41 完成。
 
-#### G0 — 策略 Pipeline 接線（最高優先）
+#### G0 — 策略 Pipeline 接線
 
-| # | 功能 | 說明 | 涉及檔案 | 複雜度 |
-|---|------|------|---------|--------|
-| G0 | Composite Strategy Pipeline | `factory.go` 目前只接 `PricingStrategy`，需將 13 個策略模組組合成完整 pipeline。各模組依序處理 DecisionContext → 累積 DecisionResult | `lending/factory.go` + 新增 `strategy/composite.go` | 中 |
+- [x] G0 Composite Strategy Pipeline — 13 模組串連成 4 階段 pipeline（`a86e34b`）
 
-#### G-Tune — 參數調校（快速收益）
+#### G-Tune — 參數調校（5/6）
 
-> 基於 review 的常數修正，每項只需改一個數字。建議搭配 A/B 測試驗證。
+- [x] GT1 `frrFloorRatio` 0.80 → **0.92**（`a86e34b`）
+- [x] GT2 `maxPremiumDown` 0.30 → **0.18**（`a86e34b`）
+- [x] GT3 `regimeContangoPeriodRatio` 0.75 → **0.88**（`a86e34b`）
+- [x] GT4 `rateNoiseRange` 0.01 → **0.004**（`a86e34b`）
+- [x] GT5 `aggressiveRateMul` 1.25 → **1.12**（`a86e34b`）
+- [ ] GT6 Queue discount — 兩段式跳躍 → 線性/sigmoid 曲線
+
+<details>
+<summary>GT6 詳細規格</summary>
 
 | # | 參數 | 目前值 | 建議值 | 理由 | 涉及檔案 |
 |---|------|--------|--------|------|---------|
-| GT1 | `frrFloorRatio` | 0.80 | 0.90–0.95 | FRR 本身是市場均衡，打 8 折等於賤賣 | `strategy/floor.go` |
-| GT2 | `maxPremiumDown` | 0.30 | 0.15–0.20 | Backwardation 降 30% 太慷慨，race to bottom | `strategy/pricing.go` |
-| GT3 | `regimeContangoPeriodRatio` | 0.75 | 0.85–0.90 | Contango 是高利率窗口，應更積極鎖長期 | `strategy/period.go` |
-| GT4 | `rateNoiseRange` | 0.01 | 0.003–0.005 | 放貸 spread 很薄，±1% 影響排隊位置過大 | `strategy/noise.go` |
-| GT5 | aggressive tier mul | 1.25 | 1.10–1.15 | 高 25% 的 offer 長期閒置拉低 utilization | `strategy/allocation.go` |
-| GT6 | queue discount | 兩段式跳躍 | 線性/sigmoid 曲線 | 閾值附近震盪不穩定 | `strategy/queue.go` |
+| GT6 | queue discount | 兩段式跳躍 (20%/-2%, 50%/-5%) | 線性/sigmoid 曲線 | 閾值附近震盪不穩定 | `strategy/queue.go` |
 
-#### G1–G10 — 規範定義增強
+</details>
+
+#### G1–G10 — 規範定義增強（0/10）
+
+- [ ] G1 Adaptive Deviation Guard — per-regime FRR 偏離上限保護
+- [ ] G2 Signal Recovery Smoothing — 信號恢復 3 步線性遞增
+- [ ] G3 Smart Hidden Offers — 競爭度 + HiddenRatio 決定隱藏單
+- [ ] G4 Term Structure Analysis — 利率曲線形態偵測
+- [ ] G5 Early Return Adjustment — 持有率 < 60% 降低天數偏好
+- [ ] G6 Cold Start Protocol — Worker 啟動 30 分鐘逐步啟用信號
+- [ ] G7 Maintenance Behaviors — 隊首保留、僵屍單 TTL、原子化換單
+- [ ] G8 Opportunity Cost Framework — EV_deploy vs EV_wait 模型
+- [ ] G9 Graceful Degradation — 信號源健康度追蹤 + 降級
+- [ ] G10 Performance Tracking — Alpha 量化 + 自適應回饋
+
+<details>
+<summary>G1–G10 詳細規格</summary>
 
 | # | 規範章節 | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|----------|------|------|---------|--------|
@@ -192,48 +216,91 @@ marketfeed/service.go (C1)
 | G9 | §6.3 | Graceful Degradation | 信號源健康度追蹤（健康/警告/故障）+ 故障時重分配權重 + 恢復確認 | `signal/mdc.go` + `marketfeed/service.go` | 高 |
 | G10 | §9.1-9.3 | Performance Tracking | Alpha 量化、策略模組歸因、自適應參數回饋（每週 ±10% 微調） | 新增 `lending/tracking/` | 極高 |
 
-#### G11–G16 — 實作 Review 新增項目
+</details>
+
+#### G11–G16 — 實作 Review 新增項目（0/6）
+
+- [ ] G11 Idle Capital Urgency — 閒置資金急迫度，逐步降低 floor
+- [ ] G12 FRR Trend Tracking — FRR EMA 趨勢判斷
+- [ ] G13 Historical Fill Rate Learning — 數據驅動定價
+- [ ] G14 Auto-Renew Re-pricing — 到期走 pipeline 重新定價
+- [ ] G15 Smart Wall Positioning — price just below wall
+- [ ] G16 Order Book Gap Detection — book 空隙報價
+
+<details>
+<summary>G11–G16 詳細規格</summary>
 
 | # | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|------|------|---------|--------|
-| G11 | Idle Capital Urgency | 追蹤資金閒置時長，隨時間逐步降低 floor rate。`urgencyDiscount = min(idleMinutes / 120, 0.15)`，避免死資金 APY=0% | `strategy/floor.go` + `worker/worker.go` | 中 |
-| G12 | FRR Trend Tracking | FRR 的 EMA(30min) vs EMA(4hr) 趨勢判斷。上升趨勢 → 更敢報高價，下降趨勢 → 搶先成交 | `signal/` 新增或 `marketfeed/` | 中 |
-| G13 | Historical Fill Rate Learning | 追蹤每個 rate bucket 的實際 fill rate + time-to-fill，用數據驅動定價取代固定常數 | 新增 `lending/tracking/fillrate.go` + DB schema | 高 |
-| G14 | Auto-Renew Re-pricing | Credit 到期 renew 時走完整 pricing pipeline 重新定價，而非沿用原 rate | `execution/credit.go` | 低 |
-| G15 | Smart Wall Positioning | 靠近 wall 不盲目降 1%，改為 price just below wall 搶先成交。Wall 是定價參考而非威脅 | `strategy/pricing.go` | 中 |
-| G16 | Order Book Gap Detection | 掃描 book 找 rate 空隙，在無競爭者的 gap 中報價以最大化 fill probability | 新增 `orderbook/gap.go` + `strategy/pricing.go` | 中 |
+| G11 | Idle Capital Urgency | 追蹤資金閒置時長，`urgencyDiscount = min(idleMinutes / 120, 0.15)`，避免死資金 APY=0% | `strategy/floor.go` + `worker/worker.go` | 中 |
+| G12 | FRR Trend Tracking | FRR 的 EMA(30min) vs EMA(4hr) 趨勢判斷。上升趨勢 → 更敢報高價 | `signal/` 新增或 `marketfeed/` | 中 |
+| G13 | Historical Fill Rate Learning | 追蹤每個 rate bucket 的實際 fill rate + time-to-fill | 新增 `lending/tracking/fillrate.go` + DB schema | 高 |
+| G14 | Auto-Renew Re-pricing | Credit 到期 renew 時走完整 pricing pipeline 重新定價 | `execution/credit.go` | 低 |
+| G15 | Smart Wall Positioning | 靠近 wall 改為 price just below wall 搶先成交 | `strategy/pricing.go` | 中 |
+| G16 | Order Book Gap Detection | 掃描 book 找 rate 空隙，在無競爭者的 gap 中報價 | 新增 `orderbook/gap.go` + `strategy/pricing.go` | 中 |
 
-#### S1–S10 — 策略設計 Review 新增項目
+</details>
 
-> 基於 2026-03-21 策略設計層面 review，見 `strategy_specification.md` §12。
+#### S1–S10 — 策略設計 Review 新增項目（0/10）
+
+> 見 `strategy_specification.md` §12。
+
+- [ ] S1 BestAsk-Relative Pricing — 定價改為 bestAsk 偏移
+- [ ] S2 Auto-Renew Always-On — 預設開啟作為安全網
+- [ ] S3 Remove Random Noise — 移除隨機擾動，保留心理價位
+- [ ] S4 RatePercentile Signal — 歷史百分位信號
+- [ ] S5 Cascade Phase Response — 瀑布分三階段回應
+- [ ] S6 Dynamic Weekend Premium — 歷史 ratio 動態計算
+- [ ] S7 Per-Currency Parameters — stablecoin / crypto 分組
+- [ ] S8 Confidence-Scaled Deployment — 信心度 × 部署比例
+- [ ] S9 Rolling Period Ladder — 到期梯隊管理
+- [ ] S10 Mean-Reversion P(higher) — EV_wait 均值回歸公式
+
+<details>
+<summary>S1–S10 詳細規格</summary>
 
 | # | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|------|------|---------|--------|
-| S1 | BestAsk-Relative Pricing | 定價改為相對 bestAsk 偏移（`bestAsk - tickOffset(MDC)`），取代 FRR 乘數。反映 FIFO 匹配機制 | `strategy/pricing.go` 重寫 | 中 |
-| S2 | Auto-Renew Always-On | 反轉 §7.2：auto-renew 預設開啟作為安全網，引擎主動在到期前取消並重新定價 | `execution/credit.go` | 低 |
+| S1 | BestAsk-Relative Pricing | 定價改為相對 bestAsk 偏移（`bestAsk - tickOffset(MDC)`），反映 FIFO 匹配 | `strategy/pricing.go` 重寫 | 中 |
+| S2 | Auto-Renew Always-On | 反轉 §7.2：auto-renew 預設開啟，引擎主動管理到期 | `execution/credit.go` | 低 |
 | S3 | Remove Random Noise | 移除 §4.14 隨機擾動（或限 + 方向），保留 §4.7 心理價位避讓 | `strategy/noise.go` | 低 |
-| S4 | RatePercentile Signal | 新增第 7 信號源：當前利率在 7d 分佈的百分位，`> P75` 積極放貸，`< P25` 等待 | 新增 `signal/percentile.go` + `marketfeed/` | 中 |
-| S5 | Cascade Phase Response | 清算瀑布分三階段回應：早期 2d 捕暴利、中期 7-14d 鎖高利率、後期停止新增 | `signal/liquidation.go` + `strategy/pricing.go` | 中 |
-| S6 | Dynamic Weekend Premium | 固定 +2-5% 改為滾動 4 週 weekend/weekday ratio（實際可達 +20-50%） | `strategy/weekend.go` | 中 |
+| S4 | RatePercentile Signal | 新增第 7 信號源：當前利率在 7d 分佈的百分位 | 新增 `signal/percentile.go` + `marketfeed/` | 中 |
+| S5 | Cascade Phase Response | 清算瀑布分三階段：早期 2d 捕暴利、中期 7-14d 鎖高利率、後期停止 | `signal/liquidation.go` + `strategy/pricing.go` | 中 |
+| S6 | Dynamic Weekend Premium | 固定 +2-5% 改為滾動 4 週 weekend/weekday ratio | `strategy/weekend.go` | 中 |
 | S7 | Per-Currency Parameters | MDC 權重和 regime 閾值分 stablecoin / crypto 兩組 | `signal/mdc.go` + `signal/regime.go` + config | 高 |
-| S8 | Confidence-Scaled Deployment | `deploymentRatio = 0.5 + 0.5 × |MDC| × avgConfidence`，低信心時保留彈藥 | `strategy/allocation.go` | 低 |
-| S9 | Rolling Period Ladder | 維持 1/3 短 + 1/3 中 + 1/3 長到期結構，到期時按 RatePercentile 決定續約天數 | `strategy/period.go` + `strategy/stagger.go` | 高 |
-| S10 | Mean-Reversion P(higher) | `P(higher_rate) = Φ((EMA_7d - current) / σ√t)`，用於 §4.8 EV_wait 計算 | `strategy/floor.go` 或新增 | 中 |
+| S8 | Confidence-Scaled Deployment | `deploymentRatio = 0.5 + 0.5 × |MDC| × avgConfidence` | `strategy/allocation.go` | 低 |
+| S9 | Rolling Period Ladder | 維持 1/3 短 + 1/3 中 + 1/3 長到期結構 | `strategy/period.go` + `strategy/stagger.go` | 高 |
+| S10 | Mean-Reversion P(higher) | `P(higher_rate) = Φ((EMA_7d - current) / σ√t)` | `strategy/floor.go` 或新增 | 中 |
 
-#### M1–M8 — 市場微觀結構 Review 新增項目
+</details>
 
-> 基於 2026-03-21 市場微觀結構 review，見 `strategy_specification.md` §13。
+#### M1–M8 — 市場微觀結構 Review 新增項目（1/8）
+
+> 見 `strategy_specification.md` §13。
+
+- [x] M1 Fee-Adjusted Calculations — `FeeRate = 0.15` 常數（`a86e34b`）
+- [ ] M2 Gap Cost Tracking + Pre-scheduling — 到期→成交空檔追蹤
+- [ ] M3 Proactive Offer Refresh — 搶 FIFO 隊首
+- [ ] M4 Early Return Risk Premium — 提前歸還負凸性補償
+- [ ] M5 Non-Liquidation Rate Spike Detector — 非清算性 spike 偵測
+- [ ] M6 FRR Manipulation Guard — FRR 防操縱
+- [ ] M7 Temporal Laddering — 跨心跳分批部署
+- [ ] M8 FRR Feedback Loop Awareness — 大規模時降低 FRR 權重
+
+<details>
+<summary>M2–M8 詳細規格</summary>
 
 | # | 功能 | 說明 | 涉及檔案 | 複雜度 |
 |---|------|------|---------|--------|
-| M1 | Fee-Adjusted Calculations | Bitfinex 15% 手續費納入所有 rate/period/EV 計算。`netRate = rate × 0.85` | 全局常數 + `strategy/floor.go`, `strategy/period.go` | 低 |
-| M2 | Gap Cost Tracking + Pre-scheduling | 追蹤到期→成交空檔（`avgGapMinutes`），到期前預排程下一筆 offer，`gapCost` 作為 period 決策輸入 | `worker/worker.go` + `execution/credit.go` | 中 |
-| M3 | Proactive Offer Refresh | 排隊 >30% 深度 + 超過 refreshAge 時主動撤單重掛到 bestAsk-1tick，搶 FIFO 隊首 | `strategy/queue.go` 或 `worker/worker.go` | 低 |
-| M4 | Early Return Risk Premium | 長期單加入提前歸還風險溢價（負凸性補償）：`premium = earlyReturnRate × (period/30) × 0.05` | `strategy/pricing.go` + `strategy/lockup.go` | 低 |
-| M5 | Non-Liquidation Rate Spike Detector | 獨立偵測利率飆升（`rate > EMA_1h × 2.0`），不依賴清算瀑布。觸發即時短期放貸 | 新增 `signal/ratespike.go` | 中 |
-| M6 | FRR Manipulation Guard | `effectiveFRR = max(FRR, bookMidRate × 0.9)`，FRR 明顯低於 book 時標記可疑並降權 | `strategy/floor.go` + `strategy/pricing.go` | 低 |
-| M7 | Temporal Laddering | 跨心跳分批部署（1/3 per tick），分散時間風險。類似 DCA | `worker/worker.go` + `strategy/allocation.go` | 中 |
-| M8 | FRR Feedback Loop Awareness | 管理資金佔市場 >5% 時，線性降低 FRR 權重，改用 book 原始數據，防正反饋失控 | `strategy/pricing.go` | 低 |
+| M2 | Gap Cost Tracking + Pre-scheduling | 追蹤 `avgGapMinutes`，到期前預排程，`gapCost` 作為 period 輸入 | `worker/worker.go` + `execution/credit.go` | 中 |
+| M3 | Proactive Offer Refresh | 排隊 >30% + 超過 refreshAge 時撤單重掛到 bestAsk-1tick | `strategy/queue.go` 或 `worker/worker.go` | 低 |
+| M4 | Early Return Risk Premium | `premium = earlyReturnRate × (period/30) × 0.05` | `strategy/pricing.go` + `strategy/lockup.go` | 低 |
+| M5 | Non-Liquidation Rate Spike Detector | `rate > EMA_1h × 2.0` → 即時短期放貸 | 新增 `signal/ratespike.go` | 中 |
+| M6 | FRR Manipulation Guard | `effectiveFRR = max(FRR, bookMidRate × 0.9)` | `strategy/floor.go` + `strategy/pricing.go` | 低 |
+| M7 | Temporal Laddering | 跨心跳分批部署（1/3 per tick），類似 DCA | `worker/worker.go` + `strategy/allocation.go` | 中 |
+| M8 | FRR Feedback Loop Awareness | 市佔 >5% 時線性降低 FRR 權重 | `strategy/pricing.go` | 低 |
+
+</details>
 
 ---
 
@@ -241,16 +308,16 @@ marketfeed/service.go (C1)
 
 | 類別 | 數量 |
 |------|------|
-| 已完成 | 66 項 |
+| 已完成 | 73 項（66 + G0 + GT1-GT5 + M1） |
 | ~~Phase A（CRUD + 基礎設施）~~ | ~~6 項~~ ✅ 全部完成 |
 | ~~Phase B（WebSocket + 市場數據）~~ | ~~3 項~~ ✅ 全部完成 |
 | ~~Phase C（市場分析層）~~ | ~~5 項~~ ✅ 全部完成 |
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ 全部完成 |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ 全部完成 |
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ 全部完成 |
-| Phase G（策略行為增強） | G0 + GT1-6 + G1-G16 + S1-S10 + M1-M8 = 41 項 |
+| Phase G（策略行為增強） | ~~G0~~ ✅ + ~~GT1-5~~ ✅ + GT6 + G1-G16 + S1-S10 + ~~M1~~ ✅ + M2-M8 = 34 項待開發 |
 | ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅ 完成，H3 待部署後設定 |
-| **待開發合計** | **42 項** |
+| **待開發合計** | **35 項**（GT6 + G1-G16 + S1-S10 + M2-M8 + H3） |
 
 ## 依賴關係
 
@@ -270,10 +337,9 @@ Phase A ✅ 全部完成
     │                      │
     │                      ▼
     │                  Phase G
-    │                      ├── G0 (Pipeline 接線) ← 最高優先
-    │                      ├── GT1-GT6 (參數調校)
-    │                      ├── G1-G7 + G11-G16 (行為增強)
-    │                      ├── S1-S6 + M1-M6 (策略設計 + 微觀結構)
+    │                      ├── G0 ✅ + GT1-5 ✅ + M1 ✅
+    │                      ├── GT6 + G1-G7 + G11-G16 (行為增強)
+    │                      ├── S1-S6 + M2-M6 (策略設計 + 微觀結構)
     │                      └── G8-G10 + G13 + S7-S10 + M7-M8 (高複雜度)
     │
     └── All backend APIs ready
@@ -304,52 +370,54 @@ Phase A ✅ 全部完成
 16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
 17. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
 
-#### P0 — 最高優先（預期 APY +30-50%）
+#### P0 — Pipeline 接線 ✅
 
-18. **G0** — Composite Strategy Pipeline 接線（解鎖全部 13 個策略模組）
+- [x] G0 Composite Strategy Pipeline（`a86e34b`）
+- [x] GT1-GT5 參數調校（`a86e34b`）
+- [x] M1 FeeRate 常數（`a86e34b`）
 
-#### P1 — 快速收益（預期 +10-20% capital utilization, +5-10% avg rate）
+#### P1 — 快速收益（+10-20% utilization, +5-10% rate）
 
-19. **G11** — 閒置資金急迫度（+10-20% capital utilization，複雜度：低）
-20. **GT1** — `frrFloorRatio` 0.80 → 0.90-0.95（+5-10% avg rate，改常數）
-21. **GT2** — `maxPremiumDown` 0.30 → 0.15-0.20（+3-5% avg rate in backwardation，改常數）
+- [ ] G11 閒置資金急迫度
+- [ ] S2 Auto-Renew Always-On
+- [ ] S3 Remove Random Noise
+- [ ] M3 Proactive Offer Refresh
+- [ ] M4 Early Return Risk Premium
+- [ ] M6 FRR Manipulation Guard
+- [ ] M8 FRR Feedback Loop Awareness
+- [ ] S8 Confidence-Scaled Deployment
 
 #### P2 — 擇時與 fill rate 提升
 
-22. **G12** — FRR 趨勢追蹤（+5-8% 擇時能力，複雜度：中）
-23. **GT3** — `regimeContangoPeriodRatio` 0.75 → 0.85-0.90（鎖定高利率更久，改常數）
-24. **G15** — 智慧貼牆策略（+5-10% fill rate，複雜度：中）
-25. **GT4, GT5, GT6** — Noise range / Allocation tier / Queue curve（改常數）
+- [ ] G12 FRR Trend Tracking
+- [ ] G15 Smart Wall Positioning
+- [ ] GT6 Queue discount sigmoid
+- [ ] S1 BestAsk-Relative Pricing
+- [ ] S5 Cascade Phase Response
+- [ ] S6 Dynamic Weekend Premium
+- [ ] M5 Non-Liquidation Rate Spike Detector
 
-#### P3 — 長期自適應最佳化
+#### P3 — 數據驅動 + 結構優化
 
-26. **G13** — 歷史 fill rate 學習（數據驅動定價，複雜度：高）
-27. **G14** — Auto-Renew 重新定價（+3-5% renew 利率，複雜度：低）
-28. **G16** — Order Book Gap Detection（fill rate 提升，複雜度：中）
+- [ ] G14 Auto-Renew Re-pricing
+- [ ] G16 Order Book Gap Detection
+- [ ] S4 RatePercentile Signal
+- [ ] S10 Mean-Reversion P(higher)
+- [ ] M2 Gap Cost Tracking + Pre-scheduling
 
-#### P3.5 — 策略設計 + 微觀結構改進
+#### P4 — 規範增強 + 高複雜度
 
-> 來自策略設計 review（§12）和微觀結構 review（§13）。
-
-29. **M1** — Fee-Adjusted Calculations（15% 手續費全局納入，修正所有 rate 偏差，改常數）
-30. **M3** — Proactive Offer Refresh（搶 FIFO 隊首，+5-10% fill speed，複雜度：低）
-31. **M4, M6, M8** — 提前歸還溢價 + FRR 防操縱 + 反饋迴路意識（均為低複雜度常數/公式修正）
-32. **S1** — BestAsk-Relative Pricing（定價改為 bestAsk 偏移，+10-15% fill rate）
-33. **S2** — Auto-Renew Always-On（反轉 §7.2，消除宕機資金閒置）
-34. **S3** — Remove Random Noise（移除隨機擾動，+0.5-1% avg rate）
-35. **S8** — Confidence-Scaled Deployment（信心度 × 部署比例，低信心保留彈藥）
-36. **M2** — Gap Cost Tracking + Pre-scheduling（到期前預排程，-0.5% capital downtime）
-37. **S4** — RatePercentile Signal（歷史百分位信號，均值回歸最直接指標）
-38. **M5** — Non-Liquidation Rate Spike Detector（捕捉非清算性 spike）
-39. **S5** — Cascade Phase Response（瀑布分三階段，早期捕 2d 暴利）
-40. **S6** — Dynamic Weekend Premium（歷史 ratio 取代固定 +5%，+20-50% 週末收益）
-41. **S10** — Mean-Reversion P(higher)（EV_wait 的精確公式）
-42. **M7** — Temporal Laddering（跨心跳分批部署，分散時間風險）
-
-#### P4 — 規範定義增強 + 高複雜度
-
-43. **G1 → G2 → G3 → G4 → G5 → G6 → G7** — 規範定義增強（低→中複雜度）
-44. **G8 → G9** — 機會成本模型 + 優雅降級（高複雜度）
-45. **S7** — Per-Currency Parameters（stablecoin / crypto 分組）
-46. **S9** — Rolling Period Ladder（到期梯隊管理）
-47. **G10** — 績效追蹤 + 自適應參數回饋（極高複雜度，需 DB schema 擴充）
+- [ ] G1 Adaptive Deviation Guard
+- [ ] G2 Signal Recovery Smoothing
+- [ ] G3 Smart Hidden Offers
+- [ ] G4 Term Structure Analysis
+- [ ] G5 Early Return Adjustment
+- [ ] G6 Cold Start Protocol
+- [ ] G7 Maintenance Behaviors
+- [ ] G8 Opportunity Cost Framework
+- [ ] G9 Graceful Degradation
+- [ ] S7 Per-Currency Parameters
+- [ ] S9 Rolling Period Ladder
+- [ ] M7 Temporal Laddering
+- [ ] G13 Historical Fill Rate Learning
+- [ ] G10 Performance Tracking

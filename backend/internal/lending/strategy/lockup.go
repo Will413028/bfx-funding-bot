@@ -19,6 +19,10 @@ const (
 
 	// Maximum lockup cost as fraction of rate before suggesting shorter period
 	maxCostRatio = 0.20
+
+	// Early return risk premium (callable bond negative convexity)
+	earlyReturnBaseRate = 0.30 // estimated 30% historical early return rate
+	earlyReturnScale   = 0.05
 )
 
 // LockupStrategy computes the opportunity cost of locking funds for a given
@@ -133,5 +137,7 @@ func ComputeLockupPremium(baseRate float64, period int, volatility float64, regi
 		cost = l.computeCost(adjustedPeriod, volatility, regime)
 	}
 
-	return cost, adjustedPeriod
+	// M4: Early return risk premium
+	earlyReturnPremium := earlyReturnBaseRate * (float64(adjustedPeriod) / 30.0) * earlyReturnScale
+	return cost + earlyReturnPremium, adjustedPeriod
 }

@@ -9,6 +9,7 @@ type DecisionContext struct {
 	ActiveCredits []FundingCredit
 	Available     float64 // available balance in funding wallet
 	Currency      string  // e.g. "fUSD"
+	IdleMinutes   float64 // minutes since last successful offer execution (G11)
 }
 
 // DecisionResult represents the output of strategy decision-making.
