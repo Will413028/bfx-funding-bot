@@ -24,39 +24,38 @@ const (
 
 // Config holds configuration for the Market Feed Service.
 type Config struct {
-	Symbols          []string      // e.g. ["fUSD"]
-	SnapshotInterval time.Duration // default 3s
-	BookPrecision    string        // default "P0"
-	BookLength       int           // default 25
+	BookPrecision    string
+	Symbols          []string
+	SnapshotInterval time.Duration
+	BookLength       int
 }
 
 // symbolState holds accumulated market data for a single symbol.
 type symbolState struct {
-	mu           sync.RWMutex
 	ticker       *domain.FundingTicker
-	book         map[string]domain.BookEntry // key: rate string for dedup
+	book         map[string]domain.BookEntry
 	recentTrades []domain.FundingTradeRecord
+	mu           sync.RWMutex
 }
 
 // Service is the Market Feed Service that receives WebSocket data,
 // computes signals, and broadcasts MarketSnapshot.
 type Service struct {
-	log           *zap.Logger
-	cfg           Config
-	wsClient      *bitfinex.WSClient
 	cache         repository.SnapshotCache
 	pubsub        repository.SnapshotPubSub
-	signalSources []SignalSource
+	mdcAgg        *signal.MDCAggregator
+	wsClient      *bitfinex.WSClient
+	log           *zap.Logger
+	states        map[string]*symbolState
 	flashCrash    *FlashCrashDetector
-
-	states       map[string]*symbolState // symbol → state
-	mdcAgg       *signal.MDCAggregator
 	healthTracker *signal.SignalHealthTracker
-	hiddenEst  map[string]*orderbook.HiddenRatioEstimator
-	compDet    map[string]*orderbook.CompetitorDetector
-	regimeDet  map[string]*signal.RegimeDetector
-	outCh      chan *domain.MarketSnapshot
-	stopFn     context.CancelFunc
+	hiddenEst     map[string]*orderbook.HiddenRatioEstimator
+	compDet       map[string]*orderbook.CompetitorDetector
+	regimeDet     map[string]*signal.RegimeDetector
+	outCh         chan *domain.MarketSnapshot
+	stopFn        context.CancelFunc
+	signalSources []SignalSource
+	cfg           Config
 }
 
 // NewService creates a new Market Feed Service.
@@ -137,9 +136,9 @@ func (s *Service) Start(ctx context.Context) error {
 		OnError: func(err error) {
 			s.log.Error("market feed ws error", zap.Error(err))
 		},
-		OnTicker:       s.handleTicker,
-		OnBookSnapshot: s.handleBookSnapshot,
-		OnBookUpdate:   s.handleBookUpdate,
+		OnTicker:        s.handleTicker,
+		OnBookSnapshot:  s.handleBookSnapshot,
+		OnBookUpdate:    s.handleBookUpdate,
 		OnTradeSnapshot: s.handleTradeSnapshot,
 		OnTradeExecuted: s.handleTradeExecuted,
 	}
@@ -153,9 +152,9 @@ func (s *Service) Start(ctx context.Context) error {
 
 	// Subscribe to all symbols
 	for _, sym := range s.cfg.Symbols {
-		s.wsClient.SubscribeTicker(sym)
-		s.wsClient.SubscribeBook(sym, s.cfg.BookPrecision, s.cfg.BookLength)
-		s.wsClient.SubscribeTrades(sym)
+		_ = s.wsClient.SubscribeTicker(sym)
+		_ = s.wsClient.SubscribeBook(sym, s.cfg.BookPrecision, s.cfg.BookLength)
+		_ = s.wsClient.SubscribeTrades(sym)
 	}
 
 	go s.snapshotLoop(ctx)

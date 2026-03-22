@@ -23,7 +23,7 @@ func setupEarningsRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 
 	key := make([]byte, 32)
-	rand.Read(key)
+	_, _ = rand.Read(key)
 	aes, _ := crypto.NewAES(key)
 	secret, _ := aes.Encrypt([]byte("test-secret"))
 
@@ -31,9 +31,9 @@ func setupEarningsRouter(t *testing.T) *gin.Engine {
 	bfxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsEarn(r.URL.Path, "credits"):
-			w.Write([]byte(fmt.Sprintf(`[[11111,"fUSD",0,%d,%d,500,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,0,null,null,null]]`, now, now, now)))
+			_, _ = fmt.Fprintf(w, `[[11111,"fUSD",0,%d,%d,500,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,0,null,null,null]]`, now, now, now)
 		case containsEarn(r.URL.Path, "ledgers"):
-			w.Write([]byte(fmt.Sprintf(`[[100001,"fUSD",null,%d,null,0.10,10000.10,null,"Margin Funding Payment"]]`, now)))
+			_, _ = fmt.Fprintf(w, `[[100001,"fUSD",null,%d,null,0.10,10000.10,null,"Margin Funding Payment"]]`, now)
 		}
 	}))
 	t.Cleanup(bfxServer.Close)

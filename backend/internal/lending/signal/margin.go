@@ -15,9 +15,9 @@ type MarginUsage struct {
 }
 
 type ratioSnapshot struct {
-	bidDepth  float64
-	askDepth  float64
-	ts        time.Time
+	ts       time.Time
+	bidDepth float64
+	askDepth float64
 }
 
 func NewMarginUsage() *MarginUsage {

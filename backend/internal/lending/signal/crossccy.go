@@ -15,8 +15,8 @@ type CrossCurrency struct {
 }
 
 type rateSnapshot struct {
-	avgRate float64
 	ts      time.Time
+	avgRate float64
 }
 
 func NewCrossCurrency() *CrossCurrency {

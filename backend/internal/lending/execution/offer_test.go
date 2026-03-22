@@ -35,9 +35,9 @@ func (m *mockFundingClient) CancelFundingOffer(ctx context.Context, apiKey, apiS
 }
 
 type mockKeyStore struct {
+	err       error
 	apiKey    *domain.APIKey
 	encSecret []byte
-	err       error
 }
 
 func (m *mockKeyStore) GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error) {
@@ -45,8 +45,8 @@ func (m *mockKeyStore) GetByUserID(ctx context.Context, userID string) (*domain.
 }
 
 type mockCipher struct {
-	decrypted []byte
 	err       error
+	decrypted []byte
 }
 
 func (m *mockCipher) Decrypt(ciphertext []byte) ([]byte, error) {

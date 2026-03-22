@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	liquidationTradeThreshold  = 50000.0   // single trade amount threshold
+	liquidationTradeThreshold  = 50000.0 // single trade amount threshold
 	liquidationVolumeThreshold = 5000000.0
 	regressionInterval         = 5 * time.Minute // per regression step
 )
@@ -17,10 +17,10 @@ const (
 // It computes large-trade volume directly from the provided RecentTrades buffer
 // instead of accumulating trades internally.
 type LiquidationCascade struct {
-	triggered      bool
 	triggeredAt    time.Time
-	currentLevel   float64 // 1.0 → 0.7 → 0.3 → 0.0
 	lastLargeTrade time.Time
+	currentLevel   float64
+	triggered      bool
 }
 
 func NewLiquidationCascade() *LiquidationCascade {

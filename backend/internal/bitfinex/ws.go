@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	wsPublicURL  = "wss://api-pub.bitfinex.com/ws/2"
-	wsAuthURL    = "wss://api.bitfinex.com/ws/2"
+	wsPublicURL      = "wss://api-pub.bitfinex.com/ws/2"
+	wsAuthURL        = "wss://api.bitfinex.com/ws/2"
 	heartbeatTimeout = 20 * time.Second
 	maxBackoff       = 30 * time.Second
 	initialBackoff   = 1 * time.Second
@@ -22,26 +22,21 @@ const (
 
 // WSClient manages a WebSocket connection to Bitfinex.
 type WSClient struct {
-	log       *zap.Logger
-	apiKey    string
-	apiSecret string
-
-	handlers EventHandlers
-
-	mu            sync.RWMutex
+	handlers      EventHandlers
+	channels      map[int]ChannelInfo
+	connDone      chan struct{}
+	done          chan struct{}
+	log           *zap.Logger
 	conn          *websocket.Conn
-	channels      map[int]ChannelInfo  // chanId → channel info
-	subscriptions []Subscription       // for reconnection
+	apiSecret     string
+	urlOverride   string
+	apiKey        string
+	subscriptions []Subscription
+	mu            sync.RWMutex
+	writeMu       sync.Mutex
 	authenticated bool
 	maintenance   bool
-
-	writeMu  sync.Mutex   // serializes all writes to conn (gorilla requires single-writer)
-	connDone chan struct{} // closed when the current connection ends (reconnect or shutdown)
-
-	urlOverride string // for testing
-
-	done   chan struct{}
-	closed bool
+	closed        bool
 }
 
 // NewWSClient creates a new WebSocket client.
@@ -115,10 +110,10 @@ func (ws *WSClient) Close() {
 
 	if ws.conn != nil {
 		ws.writeMu.Lock()
-		ws.conn.WriteMessage(websocket.CloseMessage,
+		_ = ws.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		ws.writeMu.Unlock()
-		ws.conn.Close()
+		_ = ws.conn.Close()
 	}
 }
 
@@ -255,7 +250,7 @@ func (ws *WSClient) readLoop(connDone <-chan struct{}) {
 					conn := ws.conn
 					ws.mu.RUnlock()
 					if conn != nil {
-						conn.Close()
+						_ = conn.Close()
 					}
 					return
 				}
@@ -301,7 +296,7 @@ func (ws *WSClient) handleMessage(msg []byte) {
 	if err := json.Unmarshal(msg, &event); err == nil {
 		if evtRaw, ok := event["event"]; ok {
 			var evtType string
-			json.Unmarshal(evtRaw, &evtType)
+			_ = json.Unmarshal(evtRaw, &evtType)
 			ws.handleEvent(evtType, event)
 			return
 		}
@@ -345,10 +340,10 @@ func (ws *WSClient) handleEvent(evtType string, event map[string]json.RawMessage
 		var msg string
 		var code int
 		if raw, ok := event["msg"]; ok {
-			json.Unmarshal(raw, &msg)
+			_ = json.Unmarshal(raw, &msg)
 		}
 		if raw, ok := event["code"]; ok {
-			json.Unmarshal(raw, &code)
+			_ = json.Unmarshal(raw, &code)
 		}
 		ws.log.Error("ws error event", zap.Int("code", code), zap.String("msg", msg))
 		if ws.handlers.OnError != nil {
@@ -361,7 +356,7 @@ func (ws *WSClient) handleInfoEvent(event map[string]json.RawMessage) {
 	// Check for maintenance / reconnect codes
 	if codeRaw, ok := event["code"]; ok {
 		var code int
-		json.Unmarshal(codeRaw, &code)
+		_ = json.Unmarshal(codeRaw, &code)
 
 		switch code {
 		case 20051: // Reconnection requested
@@ -370,7 +365,7 @@ func (ws *WSClient) handleInfoEvent(event map[string]json.RawMessage) {
 			conn := ws.conn
 			ws.mu.RUnlock()
 			if conn != nil {
-				conn.Close()
+				_ = conn.Close()
 			}
 			// readLoop will detect close and call reconnect
 		case 20060: // Entering maintenance
@@ -387,7 +382,7 @@ func (ws *WSClient) handleInfoEvent(event map[string]json.RawMessage) {
 			conn := ws.conn
 			ws.mu.RUnlock()
 			if conn != nil {
-				conn.Close()
+				_ = conn.Close()
 			}
 		}
 		return
@@ -414,21 +409,21 @@ func (ws *WSClient) handleSubscribedEvent(event map[string]json.RawMessage) {
 	var chanId int
 	var channel, symbol string
 
-	json.Unmarshal(event["chanId"], &chanId)
-	json.Unmarshal(event["channel"], &channel)
-	json.Unmarshal(event["symbol"], &symbol)
+	_ = json.Unmarshal(event["chanId"], &chanId)
+	_ = json.Unmarshal(event["channel"], &channel)
+	_ = json.Unmarshal(event["symbol"], &symbol)
 
 	info := ChannelInfo{
 		Channel: channel,
 		Symbol:  symbol,
 	}
 	if precRaw, ok := event["prec"]; ok {
-		json.Unmarshal(precRaw, &info.Prec)
+		_ = json.Unmarshal(precRaw, &info.Prec)
 	}
 	if lenRaw, ok := event["len"]; ok {
 		var l string
-		json.Unmarshal(lenRaw, &l)
-		fmt.Sscanf(l, "%d", &info.Len)
+		_ = json.Unmarshal(lenRaw, &l)
+		_, _ = fmt.Sscanf(l, "%d", &info.Len)
 	}
 
 	ws.mu.Lock()
@@ -441,7 +436,7 @@ func (ws *WSClient) handleSubscribedEvent(event map[string]json.RawMessage) {
 
 func (ws *WSClient) handleUnsubscribedEvent(event map[string]json.RawMessage) {
 	var chanId int
-	json.Unmarshal(event["chanId"], &chanId)
+	_ = json.Unmarshal(event["chanId"], &chanId)
 
 	ws.mu.Lock()
 	info, ok := ws.channels[chanId]
@@ -462,7 +457,7 @@ func (ws *WSClient) handleUnsubscribedEvent(event map[string]json.RawMessage) {
 
 func (ws *WSClient) handleAuthEvent(event map[string]json.RawMessage) {
 	var status string
-	json.Unmarshal(event["status"], &status)
+	_ = json.Unmarshal(event["status"], &status)
 
 	if status == "OK" {
 		ws.mu.Lock()
@@ -474,10 +469,10 @@ func (ws *WSClient) handleAuthEvent(event map[string]json.RawMessage) {
 		var msg string
 		var code int
 		if raw, ok := event["msg"]; ok {
-			json.Unmarshal(raw, &msg)
+			_ = json.Unmarshal(raw, &msg)
 		}
 		if raw, ok := event["code"]; ok {
-			json.Unmarshal(raw, &code)
+			_ = json.Unmarshal(raw, &code)
 		}
 		ws.log.Error("authentication failed", zap.String("status", status),
 			zap.Int("code", code), zap.String("msg", msg))
@@ -524,20 +519,20 @@ func (ws *WSClient) handleTickerData(symbol string, data json.RawMessage) {
 
 func parseFundingTicker(symbol string, arr []json.RawMessage) FundingTicker {
 	t := FundingTicker{Symbol: symbol}
-	json.Unmarshal(arr[0], &t.FRR)
-	json.Unmarshal(arr[1], &t.Bid)
+	_ = json.Unmarshal(arr[0], &t.FRR)
+	_ = json.Unmarshal(arr[1], &t.Bid)
 	parseIntField(arr[2], &t.BidPeriod)
-	json.Unmarshal(arr[3], &t.BidSize)
-	json.Unmarshal(arr[4], &t.Ask)
+	_ = json.Unmarshal(arr[3], &t.BidSize)
+	_ = json.Unmarshal(arr[4], &t.Ask)
 	parseIntField(arr[5], &t.AskPeriod)
-	json.Unmarshal(arr[6], &t.AskSize)
-	json.Unmarshal(arr[7], &t.DailyChange)
-	json.Unmarshal(arr[8], &t.DailyChangePerc)
-	json.Unmarshal(arr[9], &t.LastPrice)
-	json.Unmarshal(arr[10], &t.Volume)
-	json.Unmarshal(arr[11], &t.High)
-	json.Unmarshal(arr[12], &t.Low)
-	json.Unmarshal(arr[15], &t.FRRAmountAvail)
+	_ = json.Unmarshal(arr[6], &t.AskSize)
+	_ = json.Unmarshal(arr[7], &t.DailyChange)
+	_ = json.Unmarshal(arr[8], &t.DailyChangePerc)
+	_ = json.Unmarshal(arr[9], &t.LastPrice)
+	_ = json.Unmarshal(arr[10], &t.Volume)
+	_ = json.Unmarshal(arr[11], &t.High)
+	_ = json.Unmarshal(arr[12], &t.Low)
+	_ = json.Unmarshal(arr[15], &t.FRRAmountAvail)
 	return t
 }
 
@@ -589,10 +584,10 @@ func isNestedArray(data json.RawMessage) bool {
 
 func parseBookEntry(symbol string, arr []json.RawMessage) BookEntry {
 	e := BookEntry{Symbol: symbol}
-	json.Unmarshal(arr[0], &e.Rate)
+	_ = json.Unmarshal(arr[0], &e.Rate)
 	parseIntField(arr[1], &e.Period)
 	parseIntField(arr[2], &e.Count)
-	json.Unmarshal(arr[3], &e.Amount)
+	_ = json.Unmarshal(arr[3], &e.Amount)
 	return e
 }
 
@@ -641,12 +636,12 @@ func (ws *WSClient) handleTradesData(symbol string, raw []json.RawMessage) {
 
 func parseFundingTrade(symbol string, arr []json.RawMessage) FundingTrade {
 	t := FundingTrade{Symbol: symbol}
-	json.Unmarshal(arr[0], &t.ID)
+	_ = json.Unmarshal(arr[0], &t.ID)
 	var mts int64
-	json.Unmarshal(arr[1], &mts)
+	_ = json.Unmarshal(arr[1], &mts)
 	t.MTS = time.UnixMilli(mts)
-	json.Unmarshal(arr[2], &t.Amount)
-	json.Unmarshal(arr[3], &t.Rate)
+	_ = json.Unmarshal(arr[2], &t.Amount)
+	_ = json.Unmarshal(arr[3], &t.Rate)
 	parseIntField(arr[4], &t.Period)
 	return t
 }
@@ -727,23 +722,23 @@ func parseWSFundingOffer(arr []json.RawMessage) WSFundingOffer {
 	if len(arr) < 21 {
 		return o
 	}
-	json.Unmarshal(arr[0], &o.ID)
-	json.Unmarshal(arr[1], &o.Symbol)
+	_ = json.Unmarshal(arr[0], &o.ID)
+	_ = json.Unmarshal(arr[1], &o.Symbol)
 	var createdMs, updatedMs int64
-	json.Unmarshal(arr[2], &createdMs)
-	json.Unmarshal(arr[3], &updatedMs)
+	_ = json.Unmarshal(arr[2], &createdMs)
+	_ = json.Unmarshal(arr[3], &updatedMs)
 	o.Created = time.UnixMilli(createdMs)
 	o.Updated = time.UnixMilli(updatedMs)
-	json.Unmarshal(arr[4], &o.Amount)
-	json.Unmarshal(arr[5], &o.AmountOrig)
-	json.Unmarshal(arr[6], &o.Type)
-	json.Unmarshal(arr[10], &o.Status)
-	json.Unmarshal(arr[14], &o.Rate)
+	_ = json.Unmarshal(arr[4], &o.Amount)
+	_ = json.Unmarshal(arr[5], &o.AmountOrig)
+	_ = json.Unmarshal(arr[6], &o.Type)
+	_ = json.Unmarshal(arr[10], &o.Status)
+	_ = json.Unmarshal(arr[14], &o.Rate)
 	parseIntField(arr[15], &o.Period)
 	var notify, hidden, renew int
-	json.Unmarshal(arr[16], &notify)
-	json.Unmarshal(arr[17], &hidden)
-	json.Unmarshal(arr[19], &renew)
+	_ = json.Unmarshal(arr[16], &notify)
+	_ = json.Unmarshal(arr[17], &hidden)
+	_ = json.Unmarshal(arr[19], &renew)
 	o.Notify = notify == 1
 	o.Hidden = hidden == 1
 	o.Renew = renew == 1
@@ -781,28 +776,28 @@ func parseWSFundingCredit(arr []json.RawMessage) WSFundingCredit {
 	if len(arr) < 22 {
 		return c
 	}
-	json.Unmarshal(arr[0], &c.ID)
-	json.Unmarshal(arr[1], &c.Symbol)
-	json.Unmarshal(arr[2], &c.Side)
+	_ = json.Unmarshal(arr[0], &c.ID)
+	_ = json.Unmarshal(arr[1], &c.Symbol)
+	_ = json.Unmarshal(arr[2], &c.Side)
 	var createdMs, updatedMs int64
-	json.Unmarshal(arr[3], &createdMs)
-	json.Unmarshal(arr[4], &updatedMs)
+	_ = json.Unmarshal(arr[3], &createdMs)
+	_ = json.Unmarshal(arr[4], &updatedMs)
 	c.Created = time.UnixMilli(createdMs)
 	c.Updated = time.UnixMilli(updatedMs)
-	json.Unmarshal(arr[5], &c.Amount)
-	json.Unmarshal(arr[7], &c.Status)
-	json.Unmarshal(arr[11], &c.Rate)
+	_ = json.Unmarshal(arr[5], &c.Amount)
+	_ = json.Unmarshal(arr[7], &c.Status)
+	_ = json.Unmarshal(arr[11], &c.Rate)
 	parseIntField(arr[12], &c.Period)
 	var openMs int64
-	json.Unmarshal(arr[13], &openMs)
+	_ = json.Unmarshal(arr[13], &openMs)
 	c.Opened = time.UnixMilli(openMs)
 	var renew, noClose int
-	json.Unmarshal(arr[18], &renew)
-	json.Unmarshal(arr[20], &noClose)
+	_ = json.Unmarshal(arr[18], &renew)
+	_ = json.Unmarshal(arr[20], &noClose)
 	c.Renew = renew == 1
 	c.NoClose = noClose == 1
 	if len(arr) > 21 {
-		json.Unmarshal(arr[21], &c.PositionPair)
+		_ = json.Unmarshal(arr[21], &c.PositionPair)
 	}
 	return c
 }
@@ -844,11 +839,11 @@ func parseWSWallet(arr []json.RawMessage) WSWallet {
 	if len(arr) < 5 {
 		return w
 	}
-	json.Unmarshal(arr[0], &w.Type)
-	json.Unmarshal(arr[1], &w.Currency)
-	json.Unmarshal(arr[2], &w.Balance)
-	json.Unmarshal(arr[3], &w.Unsettled)
-	json.Unmarshal(arr[4], &w.Available)
+	_ = json.Unmarshal(arr[0], &w.Type)
+	_ = json.Unmarshal(arr[1], &w.Currency)
+	_ = json.Unmarshal(arr[2], &w.Balance)
+	_ = json.Unmarshal(arr[3], &w.Unsettled)
+	_ = json.Unmarshal(arr[4], &w.Available)
 	return w
 }
 
@@ -863,14 +858,14 @@ func (ws *WSClient) handleNotification(data json.RawMessage) {
 
 	n := WSNotification{}
 	var mts int64
-	json.Unmarshal(arr[0], &mts)
+	_ = json.Unmarshal(arr[0], &mts)
 	n.MTS = time.UnixMilli(mts)
-	json.Unmarshal(arr[1], &n.Type)
-	json.Unmarshal(arr[2], &n.MessageID)
+	_ = json.Unmarshal(arr[1], &n.Type)
+	_ = json.Unmarshal(arr[2], &n.MessageID)
 	n.NotifyInfo = []byte(arr[4])
-	json.Unmarshal(arr[5], &n.Code)
-	json.Unmarshal(arr[6], &n.Status)
-	json.Unmarshal(arr[7], &n.Text)
+	_ = json.Unmarshal(arr[5], &n.Code)
+	_ = json.Unmarshal(arr[6], &n.Status)
+	_ = json.Unmarshal(arr[7], &n.Text)
 
 	ws.handlers.OnNotification(n)
 }

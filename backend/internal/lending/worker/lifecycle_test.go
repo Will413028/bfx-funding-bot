@@ -30,14 +30,14 @@ func TestLifecycle_Transitions(t *testing.T) {
 
 func TestWorkerState_String(t *testing.T) {
 	tests := []struct {
-		state WorkerState
 		want  string
+		state WorkerState
 	}{
-		{StateStarting, "starting"},
-		{StateRunning, "running"},
-		{StateStopping, "stopping"},
-		{StateStopped, "stopped"},
-		{WorkerState(99), "unknown"},
+		{"starting", StateStarting},
+		{"running", StateRunning},
+		{"stopping", StateStopping},
+		{"stopped", StateStopped},
+		{"unknown", WorkerState(99)},
 	}
 	for _, tt := range tests {
 		if got := tt.state.String(); got != tt.want {

@@ -10,7 +10,7 @@ const RequestIDKey = "request_id"
 // isValidRequestID checks that the ID contains only alphanumeric, hyphen, or underscore characters.
 func isValidRequestID(id string) bool {
 	for _, c := range id {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}

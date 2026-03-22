@@ -65,11 +65,11 @@ func TestDashboard_VerifiedKeyWithConfig(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsPath(r.URL.Path, "wallets"):
-			w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
+			_, _ = w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 		case containsPath(r.URL.Path, "offers"):
-			w.Write([]byte(fmt.Sprintf(`[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)))
+			_, _ = fmt.Fprintf(w,`[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)
 		case containsPath(r.URL.Path, "credits"):
-			w.Write([]byte(fmt.Sprintf(`[[67890,"fUSD",0,%d,%d,300,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,1]]`, now, now, now)))
+			_, _ = w.Write([]byte(fmt.Sprintf(`[[67890,"fUSD",0,%d,%d,300,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,1]]`, now, now, now)))
 		}
 	}))
 	defer ts.Close()
@@ -191,12 +191,12 @@ func TestDashboard_PartialBitfinexFailure(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsPath(r.URL.Path, "wallets"):
-			w.Write([]byte(`[["funding","USD",500,0,400,null,null]]`))
+			_, _ = w.Write([]byte(`[["funding","USD",500,0,400,null,null]]`))
 		case containsPath(r.URL.Path, "offers"):
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`["error",10000,"Internal Server Error"]`))
+			_, _ = w.Write([]byte(`["error",10000,"Internal Server Error"]`))
 		case containsPath(r.URL.Path, "credits"):
-			w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`[]`))
 		}
 	}))
 	defer ts.Close()

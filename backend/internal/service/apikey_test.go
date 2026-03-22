@@ -109,7 +109,7 @@ func testBfxClient(t *testing.T, handler http.HandlerFunc) *bitfinex.Client {
 
 func TestAPIKey_Create_WithVerification_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -130,7 +130,7 @@ func TestAPIKey_Create_WithVerification_Success(t *testing.T) {
 
 func TestAPIKey_Create_WithVerification_InvalidKey(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`["error",10100,"apikey: invalid"]`))
+		_, _ = w.Write([]byte(`["error",10100,"apikey: invalid"]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -151,7 +151,7 @@ func TestAPIKey_Create_WithVerification_InvalidKey(t *testing.T) {
 
 func TestAPIKey_Create_Duplicate(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -162,7 +162,7 @@ func TestAPIKey_Create_Duplicate(t *testing.T) {
 
 func TestAPIKey_Verify_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",500,0,400,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",500,0,400,null,null]]`))
 	})
 	repo := newMockAPIKeyRepo()
 	svc := NewAPIKeyService(repo, newMockConfigRepo(), testAES(t), bfx, nil)
@@ -180,7 +180,7 @@ func TestAPIKey_Verify_Success(t *testing.T) {
 
 func TestAPIKey_Verify_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -192,7 +192,7 @@ func TestAPIKey_Verify_WrongUser(t *testing.T) {
 
 func TestAPIKey_List_WithKey(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -225,7 +225,7 @@ func TestAPIKey_List_Empty(t *testing.T) {
 
 func TestAPIKey_GetByID_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	repo := newMockAPIKeyRepo()
 	svc := NewAPIKeyService(repo, newMockConfigRepo(), testAES(t), bfx, nil)
@@ -243,7 +243,7 @@ func TestAPIKey_GetByID_Success(t *testing.T) {
 
 func TestAPIKey_GetByID_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -255,7 +255,7 @@ func TestAPIKey_GetByID_WrongUser(t *testing.T) {
 
 func TestAPIKey_Delete_Success(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 
@@ -274,7 +274,7 @@ func TestAPIKey_Delete_Success(t *testing.T) {
 
 func TestAPIKey_Delete_WrongUser(t *testing.T) {
 	bfx := testBfxClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",100,0,100,null,null]]`))
 	})
 	svc := NewAPIKeyService(newMockAPIKeyRepo(), newMockConfigRepo(), testAES(t), bfx, nil)
 

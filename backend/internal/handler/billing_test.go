@@ -122,7 +122,7 @@ func TestBillingHandler_Get(t *testing.T) {
 		Data       []domain.BillingRecord `json:"data"`
 		Pagination PaginationResponse     `json:"pagination"`
 	}
-	json.NewDecoder(w.Body).Decode(&body)
+	_ = json.NewDecoder(w.Body).Decode(&body)
 	if len(body.Data) != 1 {
 		t.Errorf("expected 1 record, got %d", len(body.Data))
 	}
@@ -149,7 +149,7 @@ func TestBillingHandler_GetPlan(t *testing.T) {
 	var envelope struct {
 		Data domain.PlanFeatures `json:"data"`
 	}
-	json.NewDecoder(w.Body).Decode(&envelope)
+	_ = json.NewDecoder(w.Body).Decode(&envelope)
 	if envelope.Data.Plan != domain.PlanPro {
 		t.Errorf("expected pro, got %s", envelope.Data.Plan)
 	}

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultGlobalQuota = 90 // requests per minute
+	defaultGlobalQuota  = 90 // requests per minute
 	quotaRefillInterval = 1 * time.Minute
 
 	quotaStarter    = 15
@@ -29,8 +29,8 @@ type WorkerDepsFactory interface {
 
 // Config holds Service-level configuration.
 type Config struct {
-	GlobalQuota     int
-	RefillInterval  time.Duration
+	GlobalQuota    int
+	RefillInterval time.Duration
 }
 
 // DefaultConfig returns sensible defaults.
@@ -45,16 +45,15 @@ func DefaultConfig() Config {
 // It integrates worker.Pool, quota.Allocator, and snapshot broadcasting.
 // Satisfies service.WorkerManager and service.ConfigReloader interfaces.
 type Service struct {
-	pool        *worker.Pool
-	quota       *quota.Allocator
-	limiterPool *quota.RateLimiterPool
-	depsFactory WorkerDepsFactory
-	config      Config
-
-	mu           sync.RWMutex
+	depsFactory  WorkerDepsFactory
+	pool         *worker.Pool
+	quota        *quota.Allocator
+	limiterPool  *quota.RateLimiterPool
 	snapshotChs  map[string]chan *domain.MarketSnapshot
 	cancelRefill context.CancelFunc
 	ready        chan struct{}
+	config       Config
+	mu           sync.RWMutex
 	readyOnce    sync.Once
 }
 

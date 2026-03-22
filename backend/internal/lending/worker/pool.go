@@ -33,11 +33,11 @@ type entry struct {
 
 // Pool manages per-user Worker goroutines.
 type Pool struct {
-	mu      sync.RWMutex
+	rootCtx context.Context
 	workers map[string]*entry
 	factory WorkerFactory
-	rootCtx context.Context
 	wg      sync.WaitGroup
+	mu      sync.RWMutex
 }
 
 // NewPool creates a new Worker Pool.

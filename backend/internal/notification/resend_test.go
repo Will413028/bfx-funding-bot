@@ -26,9 +26,9 @@ func TestResendNotifier_SendWelcome(t *testing.T) {
 	var captured resend.SendEmailRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&captured)
+		_ = json.NewDecoder(r.Body).Decode(&captured)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"id": "test-id-123"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "test-id-123"})
 	}))
 	defer srv.Close()
 
@@ -54,9 +54,9 @@ func TestResendNotifier_SendAPIKeyAlert(t *testing.T) {
 	var captured resend.SendEmailRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&captured)
+		_ = json.NewDecoder(r.Body).Decode(&captured)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"id": "test-id-456"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "test-id-456"})
 	}))
 	defer srv.Close()
 
@@ -79,9 +79,9 @@ func TestResendNotifier_SendAlert(t *testing.T) {
 	var captured resend.SendEmailRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&captured)
+		_ = json.NewDecoder(r.Body).Decode(&captured)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"id": "test-id-789"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "test-id-789"})
 	}))
 	defer srv.Close()
 
@@ -104,7 +104,7 @@ func TestResendNotifier_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"message": "invalid api key"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "invalid api key"})
 	}))
 	defer srv.Close()
 

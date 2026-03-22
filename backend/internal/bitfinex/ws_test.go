@@ -22,7 +22,7 @@ func mockWSServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Se
 		if err != nil {
 			t.Fatalf("upgrade failed: %v", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		handler(conn)
 	}))
 	return server
@@ -43,7 +43,7 @@ func TestWSClient_ConnectAndClose(t *testing.T) {
 	connected := make(chan struct{})
 	server := mockWSServer(t, func(conn *websocket.Conn) {
 		// Send info event
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event":   "info",
 			"version": 2,
 			"platform": map[string]int{"status": 1},
@@ -94,7 +94,7 @@ func TestWSClient_AuthSuccess(t *testing.T) {
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
 		// Send info event
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event":   "info",
 			"version": 2,
 		})
@@ -105,11 +105,11 @@ func TestWSClient_AuthSuccess(t *testing.T) {
 			return
 		}
 		var authMsg map[string]any
-		json.Unmarshal(msg, &authMsg)
+		_ = json.Unmarshal(msg, &authMsg)
 		authReceived <- authMsg
 
 		// Send auth success
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event":  "auth",
 			"status": "OK",
 			"chanId": 0,
@@ -176,13 +176,13 @@ func TestWSClient_AuthFailure(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
 
 		// Read auth
-		conn.ReadMessage()
+		_, _, _ = conn.ReadMessage()
 
 		// Send auth failure
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event":  "auth",
 			"status": "FAILED",
 			"chanId": 0,
@@ -228,13 +228,13 @@ func TestWSClient_Ticker(t *testing.T) {
 	tickerCh := make(chan FundingTicker, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
 
 		// Read subscribe
-		conn.ReadMessage()
+		_, _, _ = conn.ReadMessage()
 
 		// Send subscribed
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event":   "subscribed",
 			"channel": "ticker",
 			"chanId":  1,
@@ -260,7 +260,7 @@ func TestWSClient_Ticker(t *testing.T) {
 			nil,        // placeholder
 			8000000.0,  // FRR_AMOUNT_AVAIL
 		}
-		conn.WriteJSON([]any{1, tickerData})
+		_ = conn.WriteJSON([]any{1, tickerData})
 
 		for {
 			_, _, err := conn.ReadMessage()
@@ -278,10 +278,10 @@ func TestWSClient_Ticker(t *testing.T) {
 	}
 	client := NewWSClient(testLogger(), "", "", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
-	client.SubscribeTicker("fUSD")
+	_ = client.SubscribeTicker("fUSD")
 
 	select {
 	case ticker := <-tickerCh:
@@ -307,10 +307,10 @@ func TestWSClient_BookSnapshotAndUpdate(t *testing.T) {
 	updateCh := make(chan BookEntry, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
-		conn.ReadMessage() // subscribe
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_, _, _ = conn.ReadMessage() // subscribe
 
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event": "subscribed", "channel": "book", "chanId": 2, "symbol": "fUSD",
 		})
 
@@ -320,12 +320,12 @@ func TestWSClient_BookSnapshotAndUpdate(t *testing.T) {
 			[]any{0.00024, 2, 3, 30000.0},
 			[]any{0.00026, 7, 2, -20000.0},
 		}
-		conn.WriteJSON([]any{2, snapshot})
+		_ = conn.WriteJSON([]any{2, snapshot})
 
 		time.Sleep(50 * time.Millisecond)
 
 		// Send book update
-		conn.WriteJSON([]any{2, []any{0.00027, 14, 1, 10000.0}})
+		_ = conn.WriteJSON([]any{2, []any{0.00027, 14, 1, 10000.0}})
 
 		for {
 			_, _, err := conn.ReadMessage()
@@ -346,10 +346,10 @@ func TestWSClient_BookSnapshotAndUpdate(t *testing.T) {
 	}
 	client := NewWSClient(testLogger(), "", "", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
-	client.SubscribeBook("fUSD", "P0", 25)
+	_ = client.SubscribeBook("fUSD", "P0", 25)
 
 	select {
 	case entries := <-snapshotCh:
@@ -384,10 +384,10 @@ func TestWSClient_Trades(t *testing.T) {
 	executedCh := make(chan FundingTrade, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
-		conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_, _, _ = conn.ReadMessage()
 
-		conn.WriteJSON(map[string]any{
+		_ = conn.WriteJSON(map[string]any{
 			"event": "subscribed", "channel": "trades", "chanId": 3, "symbol": "fUSD",
 		})
 
@@ -396,12 +396,12 @@ func TestWSClient_Trades(t *testing.T) {
 			[]any{int64(100001), int64(1709884800000), 5000.0, 0.00025, 30},
 			[]any{int64(100002), int64(1709884801000), -3000.0, 0.00024, 2},
 		}
-		conn.WriteJSON([]any{3, snapshot})
+		_ = conn.WriteJSON([]any{3, snapshot})
 
 		time.Sleep(50 * time.Millisecond)
 
 		// Single trade executed
-		conn.WriteJSON([]any{3, "fte", []any{int64(100003), int64(1709884802000), 1000.0, 0.00026, 7}})
+		_ = conn.WriteJSON([]any{3, "fte", []any{int64(100003), int64(1709884802000), 1000.0, 0.00026, 7}})
 
 		for {
 			_, _, err := conn.ReadMessage()
@@ -422,10 +422,10 @@ func TestWSClient_Trades(t *testing.T) {
 	}
 	client := NewWSClient(testLogger(), "", "", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
-	client.SubscribeTrades("fUSD")
+	_ = client.SubscribeTrades("fUSD")
 
 	select {
 	case trades := <-snapshotCh:
@@ -462,10 +462,10 @@ func TestWSClient_FundingOffers(t *testing.T) {
 	newOfferCh := make(chan WSFundingOffer, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
-		conn.ReadMessage() // auth
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_, _, _ = conn.ReadMessage() // auth
 
-		conn.WriteJSON(map[string]any{"event": "auth", "status": "OK", "chanId": 0})
+		_ = conn.WriteJSON(map[string]any{"event": "auth", "status": "OK", "chanId": 0})
 
 		// Build a 21-element offer array
 		offer := make([]any, 21)
@@ -483,14 +483,14 @@ func TestWSClient_FundingOffers(t *testing.T) {
 		offer[17] = 0               // HIDDEN
 		offer[19] = 1               // RENEW
 
-		conn.WriteJSON([]any{0, "fos", []any{offer}})
+		_ = conn.WriteJSON([]any{0, "fos", []any{offer}})
 		time.Sleep(50 * time.Millisecond)
 
 		offer2 := make([]any, 21)
 		copy(offer2, offer)
 		offer2[0] = int64(50002)
 		offer2[4] = 5000.0
-		conn.WriteJSON([]any{0, "fon", offer2})
+		_ = conn.WriteJSON([]any{0, "fon", offer2})
 
 		for {
 			_, _, err := conn.ReadMessage()
@@ -511,7 +511,7 @@ func TestWSClient_FundingOffers(t *testing.T) {
 	}
 	client := NewWSClient(testLogger(), "key", "secret", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
 	select {
@@ -549,12 +549,12 @@ func TestWSClient_WalletSnapshot(t *testing.T) {
 	walletCh := make(chan []WSWallet, 1)
 
 	server := mockWSServer(t, func(conn *websocket.Conn) {
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
-		conn.ReadMessage()
-		conn.WriteJSON(map[string]any{"event": "auth", "status": "OK", "chanId": 0})
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"event": "auth", "status": "OK", "chanId": 0})
 
 		// Wallet snapshot with mixed types
-		conn.WriteJSON([]any{0, "ws", []any{
+		_ = conn.WriteJSON([]any{0, "ws", []any{
 			[]any{"exchange", "BTC", 1.5, 0.0, 1.5, nil, nil},
 			[]any{"funding", "USD", 50000.0, 0.0, 45000.0, nil, nil},
 			[]any{"margin", "ETH", 10.0, 0.0, 10.0, nil, nil},
@@ -577,7 +577,7 @@ func TestWSClient_WalletSnapshot(t *testing.T) {
 	}
 	client := NewWSClient(testLogger(), "key", "secret", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
 	select {
@@ -614,17 +614,17 @@ func TestWSClient_Reconnect(t *testing.T) {
 		mu.Unlock()
 		connectCh <- count
 
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
 
 		if count == 1 {
 			// Read subscribe
-			conn.ReadMessage()
-			conn.WriteJSON(map[string]any{
+			_, _, _ = conn.ReadMessage()
+			_ = conn.WriteJSON(map[string]any{
 				"event": "subscribed", "channel": "ticker", "chanId": 1, "symbol": "fUSD",
 			})
 			// Force close to trigger reconnect
 			time.Sleep(100 * time.Millisecond)
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 
@@ -634,7 +634,7 @@ func TestWSClient_Reconnect(t *testing.T) {
 			return
 		}
 		var sub map[string]string
-		json.Unmarshal(msg, &sub)
+		_ = json.Unmarshal(msg, &sub)
 		if sub["channel"] != "ticker" || sub["symbol"] != "fUSD" {
 			t.Errorf("expected ticker/fUSD resubscription, got %v", sub)
 		}
@@ -651,10 +651,10 @@ func TestWSClient_Reconnect(t *testing.T) {
 	handlers := EventHandlers{}
 	client := NewWSClient(testLogger(), "", "", handlers)
 	client.urlOverride = wsURL(server)
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
-	client.SubscribeTicker("fUSD")
+	_ = client.SubscribeTicker("fUSD")
 
 	// Wait for first connection
 	select {
@@ -693,7 +693,7 @@ func TestWSClient_HeartbeatTimeout(t *testing.T) {
 		count := connectCount
 		mu.Unlock()
 
-		conn.WriteJSON(map[string]any{"event": "info", "version": 2})
+		_ = conn.WriteJSON(map[string]any{"event": "info", "version": 2})
 		connectCh <- struct{}{}
 
 		if count == 1 {
@@ -731,7 +731,7 @@ func TestWSClient_HeartbeatTimeout(t *testing.T) {
 	// We can't easily modify the heartbeat timeout const, so instead we verify
 	// the disconnect handler is called when the server closes the connection.
 	// The real heartbeat test would need a configurable timeout.
-	client.Connect()
+	_ = client.Connect()
 	defer client.Close()
 
 	// Wait for first connection

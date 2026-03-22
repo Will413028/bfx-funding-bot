@@ -33,8 +33,8 @@ type userDataFetcher struct {
 	client   fetcherClient
 	keys     fetcherKeyStore
 	cipher   fetcherCipher
-	currency string
 	limiter  *rate.Limiter
+	currency string
 }
 
 func newUserDataFetcher(client fetcherClient, keys fetcherKeyStore, cipher fetcherCipher, currency string, limiter *rate.Limiter) *userDataFetcher {
@@ -66,11 +66,11 @@ func (f *userDataFetcher) FetchUserData(ctx context.Context, userID string) (*wo
 	sec := string(secret)
 
 	var (
-		wallet  *domain.Wallet
-		offers  []domain.FundingOffer
-		credits []domain.FundingCredit
-		mu      sync.Mutex
-		wg      sync.WaitGroup
+		wallet   *domain.Wallet
+		offers   []domain.FundingOffer
+		credits  []domain.FundingCredit
+		mu       sync.Mutex
+		wg       sync.WaitGroup
 		firstErr error
 	)
 

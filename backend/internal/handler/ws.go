@@ -58,13 +58,13 @@ type client struct {
 func (c *client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 
 	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
 
@@ -80,22 +80,22 @@ func (c *client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 
 	for {
 		select {
 		case msg, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, nil)
+				_ = c.conn.WriteMessage(websocket.CloseMessage, nil)
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
@@ -107,18 +107,16 @@ func (c *client) writePump() {
 
 // Hub manages all active WebSocket clients and broadcasts snapshots.
 type Hub struct {
+	pubsub     repository.SnapshotPubSub
 	clients    map[*client]bool
 	register   chan *client
 	unregister chan *client
 	broadcast  chan []byte
-
-	upgrader websocket.Upgrader
-	pubsub   repository.SnapshotPubSub
-	log      *zap.Logger
-	wsMgr    *auth.WSTokenManager
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	log        *zap.Logger
+	wsMgr      *auth.WSTokenManager
+	cancel     context.CancelFunc
+	upgrader   websocket.Upgrader
+	wg         sync.WaitGroup
 }
 
 func NewHub(cfg appconfig.Config, pubsub repository.SnapshotPubSub, wsMgr *auth.WSTokenManager, log *zap.Logger) *Hub {

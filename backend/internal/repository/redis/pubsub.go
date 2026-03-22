@@ -18,10 +18,9 @@ const snapshotChannel = "market:snapshot:updates"
 type SnapshotPubSubRepo struct {
 	client *redis.Client
 	log    *zap.Logger
-
-	mu     sync.Mutex
 	pubsub *redis.PubSub
 	cancel context.CancelFunc
+	mu     sync.Mutex
 }
 
 func NewSnapshotPubSubRepo(client *redis.Client, log *zap.Logger) *SnapshotPubSubRepo {
@@ -44,7 +43,7 @@ func (r *SnapshotPubSubRepo) Subscribe(ctx context.Context) (<-chan *domain.Mark
 
 	// Verify subscription is active
 	if _, err := pubsub.Receive(ctx); err != nil {
-		pubsub.Close()
+		_ = pubsub.Close()
 		return nil, fmt.Errorf("subscribe: %w", err)
 	}
 

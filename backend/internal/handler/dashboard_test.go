@@ -43,7 +43,7 @@ func setupDashboardRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 
 	key := make([]byte, 32)
-	rand.Read(key)
+	_, _ = rand.Read(key)
 	aes, _ := crypto.NewAES(key)
 	secret, _ := aes.Encrypt([]byte("test-secret"))
 
@@ -51,11 +51,11 @@ func setupDashboardRouter(t *testing.T) *gin.Engine {
 	bfxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsDash(r.URL.Path, "wallets"):
-			w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
+			_, _ = w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 		case containsDash(r.URL.Path, "offers"):
-			w.Write([]byte(fmt.Sprintf(`[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)))
+			_, _ = fmt.Fprintf(w, `[[12345,"fUSD",%d,%d,500,500,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null]]`, now, now)
 		case containsDash(r.URL.Path, "credits"):
-			w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`[]`))
 		}
 	}))
 	t.Cleanup(bfxServer.Close)

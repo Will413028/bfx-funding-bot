@@ -19,7 +19,7 @@ func NewRedisClient(lc fx.Lifecycle, cfg appconfig.Config, log *zap.Logger) (*re
 	client := redis.NewClient(opts)
 
 	if err := client.Ping(context.Background()).Err(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return nil, err
 	}
 

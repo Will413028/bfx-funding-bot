@@ -31,7 +31,7 @@ func TestVerifyCredentials_Success(t *testing.T) {
 		if r.Header.Get("bfx-signature") == "" {
 			t.Error("missing bfx-signature header")
 		}
-		w.Write([]byte(`[["funding","USD",1000,0,1000,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,1000,null,null]]`))
 	})
 	defer ts.Close()
 
@@ -47,7 +47,7 @@ func TestVerifyCredentials_Success(t *testing.T) {
 
 func TestVerifyCredentials_InvalidKey(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`["error",10100,"apikey: invalid"]`))
+		_, _ = w.Write([]byte(`["error",10100,"apikey: invalid"]`))
 	})
 	defer ts.Close()
 
@@ -69,7 +69,7 @@ func TestVerifyCredentials_InvalidKey(t *testing.T) {
 
 func TestGetFundingBalance_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["exchange","USD",500,0,500,null,null],["funding","USD",1000,0,800,null,null],["funding","ETH",10,0,10,null,null]]`))
+		_, _ = w.Write([]byte(`[["exchange","USD",500,0,500,null,null],["funding","USD",1000,0,800,null,null],["funding","ETH",10,0,10,null,null]]`))
 	})
 	defer ts.Close()
 
@@ -93,7 +93,7 @@ func TestGetFundingBalance_Success(t *testing.T) {
 
 func TestGetFundingBalance_NotFound(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["exchange","USD",500,0,500,null,null]]`))
+		_, _ = w.Write([]byte(`[["exchange","USD",500,0,500,null,null]]`))
 	})
 	defer ts.Close()
 
@@ -111,7 +111,7 @@ func TestGetFundingBalance_NotFound(t *testing.T) {
 
 func TestSubmitFundingOffer_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[1234,"fon-req",null,null,[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,null,null,null,null,null,0.0001,2,0,0,null,0,null],null,"SUCCESS",null]`))
+		_, _ = w.Write([]byte(`[1234,"fon-req",null,null,[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,null,null,null,null,null,0.0001,2,0,0,null,0,null],null,"SUCCESS",null]`))
 	})
 	defer ts.Close()
 
@@ -137,7 +137,7 @@ func TestSubmitFundingOffer_Success(t *testing.T) {
 
 func TestSubmitFundingOffer_Error(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`["error",10020,"Not enough balance"]`))
+		_, _ = w.Write([]byte(`["error",10020,"Not enough balance"]`))
 	})
 	defer ts.Close()
 
@@ -157,7 +157,7 @@ func TestSubmitFundingOffer_Error(t *testing.T) {
 
 func TestCancelFundingOffer_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[1234,"foc-req",null,null,[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,null,"EXECUTED",null,null,null,0.0001,2,0,0,null,0,null],null,"SUCCESS",null]`))
+		_, _ = w.Write([]byte(`[1234,"foc-req",null,null,[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,null,"EXECUTED",null,null,null,0.0001,2,0,0,null,0,null],null,"SUCCESS",null]`))
 	})
 	defer ts.Close()
 
@@ -172,7 +172,7 @@ func TestCancelFundingOffer_Success(t *testing.T) {
 
 func TestGetActiveFundingOffers_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null],[12346,"fUSD",1700000000000,1700000000000,100,100,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0002,5,0,0,null,0,null]]`))
+		_, _ = w.Write([]byte(`[[12345,"fUSD",1700000000000,1700000000000,50,50,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0001,2,0,0,null,0,null],[12346,"fUSD",1700000000000,1700000000000,100,100,"LIMIT",null,null,0,"ACTIVE",null,null,null,0.0002,5,0,0,null,0,null]]`))
 	})
 	defer ts.Close()
 
@@ -196,7 +196,7 @@ func TestGetActiveFundingOffers_Success(t *testing.T) {
 
 func TestGetActiveFundingOffers_Empty(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[]`))
 	})
 	defer ts.Close()
 
@@ -217,7 +217,7 @@ func TestGetActiveFundingOffers_Empty(t *testing.T) {
 
 func TestGetActiveFundingCredits_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[[99999,"fUSD",0,1700000000000,1700000000000,200,0,"ACTIVE","FIXED",null,null,0.00015,7,1700000000000,1700000000000,0,0,null,1,null,0,"tETHUSD"]]`))
+		_, _ = w.Write([]byte(`[[99999,"fUSD",0,1700000000000,1700000000000,200,0,"ACTIVE","FIXED",null,null,0.00015,7,1700000000000,1700000000000,0,0,null,1,null,0,"tETHUSD"]]`))
 	})
 	defer ts.Close()
 
@@ -244,7 +244,7 @@ func TestGetActiveFundingCredits_Success(t *testing.T) {
 
 func TestGetActiveFundingCredits_Empty(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[]`))
 	})
 	defer ts.Close()
 
@@ -280,7 +280,7 @@ func TestParseError_NonError(t *testing.T) {
 func TestGetFundingEarnings_Success(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
 		// Ledger response: [ID, CURRENCY, null, MTS, null, AMOUNT, BALANCE, null, DESCRIPTION]
-		w.Write([]byte(`[
+		_, _ = w.Write([]byte(`[
 			[100001,"fUSD",null,1709856000000,null,0.52,10000.52,null,"Margin Funding Payment on wallet funding"],
 			[100002,"fUSD",null,1709769600000,null,0.48,10000.00,null,"Margin Funding Payment on wallet funding"]
 		]`))
@@ -310,7 +310,7 @@ func TestGetFundingEarnings_Success(t *testing.T) {
 
 func TestGetFundingEarnings_Empty(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[]`))
 	})
 	defer ts.Close()
 
@@ -346,7 +346,7 @@ func TestCircuitBreaker_OpensAfterConsecutiveFailures(t *testing.T) {
 		callCount++
 		// Always return a server error (connection reset simulated)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`["error",10001,"internal error"]`))
+		_, _ = w.Write([]byte(`["error",10001,"internal error"]`))
 	})
 	defer ts.Close()
 	overrideBaseURL(client, ts.URL)
@@ -375,7 +375,7 @@ func TestCircuitBreaker_OpensAfterConsecutiveFailures(t *testing.T) {
 
 func TestCircuitBreaker_ClosedOnSuccess(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
 	})
 	defer ts.Close()
 	overrideBaseURL(client, ts.URL)
@@ -413,9 +413,9 @@ func TestCircuitBreaker_HalfOpenAfterTimeout(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		failCount++
 		if failCount <= 2 {
-			w.Write([]byte(`["error",10001,"fail"]`))
+			_, _ = w.Write([]byte(`["error",10001,"fail"]`))
 		} else {
-			w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+			_, _ = w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
 		}
 	}))
 	defer ts.Close()
@@ -465,7 +465,7 @@ func TestRateLimiter_ContextCancellation(t *testing.T) {
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
 	}))
 	defer ts.Close()
 	client.baseURLOverride = ts.URL
@@ -488,7 +488,7 @@ func TestRateLimiter_ContextCancellation(t *testing.T) {
 
 func TestRateLimiter_BurstAllowed(t *testing.T) {
 	client, ts := setupTestServer(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,1000]]`))
 	})
 	defer ts.Close()
 	overrideBaseURL(client, ts.URL)

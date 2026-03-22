@@ -15,9 +15,9 @@ type BookConsumption struct {
 }
 
 type depthSnapshot struct {
+	ts         time.Time
 	offerDepth float64
 	bidDepth   float64
-	ts         time.Time
 }
 
 func NewBookConsumption() *BookConsumption {

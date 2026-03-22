@@ -27,9 +27,9 @@ type Strategy interface {
 
 // UserData holds the per-user private data fetched each tick.
 type UserData struct {
-	Available     float64
 	ActiveOffers  []domain.FundingOffer
 	ActiveCredits []domain.FundingCredit
+	Available     float64
 }
 
 // DataFetcher retrieves per-user private data from the exchange.
@@ -66,8 +66,6 @@ type Deps struct {
 
 // LendingWorker implements the Worker interface for a single user.
 type LendingWorker struct {
-	userID     string
-	config     domain.StrategyConfig
 	deps       Deps
 	lc         *lifecycle
 	stopCh     chan struct{}
@@ -76,6 +74,8 @@ type LendingWorker struct {
 	lastLentAt time.Time                            // G11: tracks last successful offer for idle urgency
 	onError    func(userID string, err interface{}) // optional error callback for testing
 	nowFn      func() time.Time                     // injectable clock for testing
+	userID     string
+	config     domain.StrategyConfig
 }
 
 // NewLendingWorker creates a new LendingWorker.
