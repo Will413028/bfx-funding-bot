@@ -8,10 +8,6 @@ import (
 )
 
 const (
-	// Noise ranges
-	rateNoiseRange   = 0.004 // ±0.4% — GT4: 0.01→0.004, 放貸 spread 很薄，±1% 影響排隊位置過大
-	amountNoiseRange = 0.02 // ±2%
-
 	// Psychological price avoidance
 	psychStep      = 0.0005  // multiples to avoid
 	psychTolerance = 0.00001 // proximity threshold

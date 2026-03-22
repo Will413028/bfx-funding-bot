@@ -20,9 +20,9 @@ const baseURL = "https://api.bitfinex.com"
 
 type Client struct {
 	httpClient      *http.Client
-	baseURLOverride string // for testing only
 	cb              *gobreaker.CircuitBreaker[[]byte]
 	limiter         *rate.Limiter
+	baseURLOverride string
 }
 
 // ClientOption configures a Client.
@@ -113,7 +113,7 @@ func (c *Client) doHTTP(ctx context.Context, apiPath, apiKey, apiSecret string, 
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -143,10 +143,10 @@ func parseError(data []byte) error {
 	}
 
 	var code int
-	json.Unmarshal(raw[1], &code)
+	_ = json.Unmarshal(raw[1], &code)
 
 	var msg string
-	json.Unmarshal(raw[2], &msg)
+	_ = json.Unmarshal(raw[2], &msg)
 
 	if code == 10100 || code == 10114 {
 		return domain.ErrInvalidAPIKey()
@@ -239,7 +239,7 @@ func parseSubmitOfferResponse(data []byte, currency string) (*domain.FundingOffe
 	if status != "SUCCESS" {
 		var text string
 		if len(resp) > 7 {
-			json.Unmarshal(resp[7], &text)
+			_ = json.Unmarshal(resp[7], &text)
 		}
 		return nil, domain.ErrBitfinexAPI(0, fmt.Sprintf("submit failed: %s %s", status, text))
 	}

@@ -14,11 +14,11 @@ import (
 // --- Mock Worker ---
 
 type mockWorker struct {
-	userID   string
+	runErr   error
 	stopCh   chan struct{}
+	userID   string
 	reloaded []domain.StrategyConfig
 	mu       sync.Mutex
-	runErr   error
 }
 
 func newMockWorker(_ context.Context, userID string, _ domain.StrategyConfig) Worker {

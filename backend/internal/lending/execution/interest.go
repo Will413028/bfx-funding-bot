@@ -11,9 +11,9 @@ import (
 
 // ReinvestSummary reports the outcome of a CheckAndReinvest call.
 type ReinvestSummary struct {
-	Placed bool
-	Amount float64
 	Reason string
+	Amount float64
+	Placed bool
 }
 
 // InterestCollector checks for idle available balance and reinvests it.

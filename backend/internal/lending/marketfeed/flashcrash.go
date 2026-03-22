@@ -15,17 +15,16 @@ const (
 // FlashCrashDetector monitors market data for extreme conditions
 // and triggers a freeze when a flash crash is detected.
 type FlashCrashDetector struct {
+	frozenAt          time.Time
 	rateDropThreshold float64
 	cooldownDuration  time.Duration
-
-	mu        sync.Mutex
-	frozen    bool
-	frozenAt  time.Time
+	mu                sync.Mutex
+	frozen            bool
 }
 
 // FlashCrashConfig holds configuration for the flash crash detector.
 type FlashCrashConfig struct {
-	RateDropThreshold float64       // e.g. -0.30 for -30%
+	RateDropThreshold float64 // e.g. -0.30 for -30%
 	CooldownDuration  time.Duration
 }
 

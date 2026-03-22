@@ -13,22 +13,18 @@ import (
 )
 
 type Config struct {
-	Port        string
-	FrontendURL string
-	Environment string
-	DatabaseURL string
-	RedisURL    string
-
-	JWTPrivateKey *rsa.PrivateKey
-	JWTPublicKey  *rsa.PublicKey
-
-	AESKey []byte
-
+	JWTPrivateKey         *rsa.PrivateKey
+	JWTPublicKey          *rsa.PublicKey
+	Port                  string
+	FrontendURL           string
+	Environment           string
+	DatabaseURL           string
+	RedisURL              string
 	ResendAPIKey          string
 	NotificationFromEmail string
-
-	AxiomToken   string
-	AxiomDataset string
+	AxiomToken            string
+	AxiomDataset          string
+	AESKey                []byte
 }
 
 func Load() (Config, error) {

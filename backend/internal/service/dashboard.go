@@ -21,41 +21,41 @@ type WalletSummary struct {
 }
 
 type OfferSummary struct {
-	ID        int64     `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
 	Currency  string    `json:"currency"`
+	Status    string    `json:"status"`
+	ID        int64     `json:"id"`
 	Amount    float64   `json:"amount"`
 	Rate      float64   `json:"rate"`
 	Period    int       `json:"period"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
 }
 
 type CreditSummary struct {
-	ID        int64     `json:"id"`
+	OpenedAt  time.Time `json:"openedAt"`
 	Currency  string    `json:"currency"`
+	Status    string    `json:"status"`
+	ID        int64     `json:"id"`
 	Amount    float64   `json:"amount"`
 	Rate      float64   `json:"rate"`
 	Period    int       `json:"period"`
-	Status    string    `json:"status"`
 	AutoRenew bool      `json:"autoRenew"`
-	OpenedAt  time.Time `json:"openedAt"`
 }
 
 type MarketSummary struct {
-	FRR         float64          `json:"frr"`
+	Timestamp   time.Time         `json:"timestamp"`
 	Regime      domain.RegimeType `json:"regime"`
-	MDCScore    float64          `json:"mdcScore"`
-	FlashFreeze bool             `json:"flashFreeze"`
-	Timestamp   time.Time        `json:"timestamp"`
+	FRR         float64           `json:"frr"`
+	MDCScore    float64           `json:"mdcScore"`
+	FlashFreeze bool              `json:"flashFreeze"`
 }
 
 type DashboardSummary struct {
 	Wallet      *WalletSummary  `json:"wallet"`
+	Market      *MarketSummary  `json:"market"`
 	Offers      []OfferSummary  `json:"offers"`
 	Credits     []CreditSummary `json:"credits"`
-	Market      *MarketSummary  `json:"market"`
-	EngineReady bool            `json:"engineReady"`
 	Warnings    []string        `json:"warnings,omitempty"`
+	EngineReady bool            `json:"engineReady"`
 }
 
 type DashboardService struct {

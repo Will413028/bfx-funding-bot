@@ -65,9 +65,10 @@ func TestDetectWalls_DistributedWall(t *testing.T) {
 
 	var single, distributed int
 	for _, w := range walls {
-		if w.Type == domain.WallSingle {
+		switch w.Type {
+		case domain.WallSingle:
 			single++
-		} else if w.Type == domain.WallDistributed {
+		case domain.WallDistributed:
 			distributed++
 		}
 	}
@@ -97,8 +98,8 @@ func TestDetectWalls_NonAdjacentNotClustered(t *testing.T) {
 
 func TestDetectWalls_BidSide(t *testing.T) {
 	entries := []domain.BookEntry{
-		{Rate: 0.0009, Period: 2, Count: 1, Amount: -8000},  // 80% → wall
-		{Rate: 0.0008, Period: 2, Count: 1, Amount: -2000},  // 20% → wall
+		{Rate: 0.0009, Period: 2, Count: 1, Amount: -8000}, // 80% → wall
+		{Rate: 0.0008, Period: 2, Count: 1, Amount: -2000}, // 20% → wall
 	}
 	walls := DetectWalls(entries, 0.0001, nil)
 	for _, w := range walls {

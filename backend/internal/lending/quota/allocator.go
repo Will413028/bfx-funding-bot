@@ -15,10 +15,10 @@ type userEntry struct {
 // Allocator manages global and per-user API call quotas.
 // Thread-safe for concurrent use by multiple Worker goroutines.
 type Allocator struct {
-	mu         sync.Mutex
+	users      map[string]*userEntry
 	globalMax  int
 	globalUsed int
-	users      map[string]*userEntry
+	mu         sync.Mutex
 }
 
 // NewAllocator creates a new Allocator with the given global maximum

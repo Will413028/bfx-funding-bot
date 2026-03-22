@@ -25,11 +25,10 @@ type RegimeConfig struct {
 // RegimeDetector identifies the current market regime from MDC results
 // and market data, with hysteresis to prevent rapid switching.
 type RegimeDetector struct {
-	enterThresh float64
-	exitThresh  float64
-
-	currentRegime domain.RegimeType
 	regimeStart   time.Time
+	currentRegime domain.RegimeType
+	enterThresh   float64
+	exitThresh    float64
 	smoothedVol   float64
 	initialized   bool
 }

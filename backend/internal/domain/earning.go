@@ -3,10 +3,10 @@ package domain
 import "time"
 
 type FundingEarning struct {
-	ID          int64
+	Timestamp   time.Time
 	Currency    string
+	Description string
+	ID          int64
 	Amount      float64
 	Balance     float64
-	Description string
-	Timestamp   time.Time
 }

@@ -3,9 +3,9 @@ package domain
 import "fmt"
 
 type AppError struct {
-	StatusCode int    `json:"-"`
 	Code       string `json:"code"`
 	Message    string `json:"message"`
+	StatusCode int    `json:"-"`
 }
 
 func (e *AppError) Error() string {

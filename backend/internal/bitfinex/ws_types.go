@@ -4,21 +4,21 @@ import "time"
 
 // FundingTicker represents a funding ticker snapshot (16 fields).
 type FundingTicker struct {
-	Symbol           string
-	FRR              float64 // Flash Return Rate (daily)
-	Bid              float64
-	BidPeriod        int
-	BidSize          float64
-	Ask              float64
-	AskPeriod        int
-	AskSize          float64
-	DailyChange      float64
-	DailyChangePerc  float64
-	LastPrice        float64
-	Volume           float64
-	High             float64
-	Low              float64
-	FRRAmountAvail   float64
+	Symbol          string
+	FRR             float64 // Flash Return Rate (daily)
+	Bid             float64
+	BidPeriod       int
+	BidSize         float64
+	Ask             float64
+	AskPeriod       int
+	AskSize         float64
+	DailyChange     float64
+	DailyChangePerc float64
+	LastPrice       float64
+	Volume          float64
+	High            float64
+	Low             float64
+	FRRAmountAvail  float64
 }
 
 // BookEntry represents a single funding order book entry.
@@ -32,24 +32,24 @@ type BookEntry struct {
 
 // FundingTrade represents a funding trade event.
 type FundingTrade struct {
+	MTS    time.Time
 	Symbol string
 	ID     int64
-	MTS    time.Time
-	Amount float64 // >0 lend, <0 borrow
+	Amount float64
 	Rate   float64
 	Period int
 }
 
 // WSFundingOffer represents a funding offer from authenticated channel.
 type WSFundingOffer struct {
-	ID         int64
-	Symbol     string
 	Created    time.Time
 	Updated    time.Time
+	Type       string
+	Symbol     string
+	Status     string
 	Amount     float64
 	AmountOrig float64
-	Type       string // "LIMIT", "FRRDELTA"
-	Status     string // "ACTIVE", "EXECUTED", "PARTIALLY FILLED", "CANCELED"
+	ID         int64
 	Rate       float64
 	Period     int
 	Notify     bool
@@ -59,19 +59,19 @@ type WSFundingOffer struct {
 
 // WSFundingCredit represents a funding credit from authenticated channel.
 type WSFundingCredit struct {
-	ID       int64
-	Symbol   string
-	Side     int
-	Created  time.Time
-	Updated  time.Time
-	Amount   float64
-	Status   string
-	Rate     float64
-	Period   int
-	Opened   time.Time
-	Renew    bool
-	NoClose  bool
+	Opened       time.Time
+	Created      time.Time
+	Updated      time.Time
+	Symbol       string
+	Status       string
 	PositionPair string
+	Side         int
+	Amount       float64
+	Rate         float64
+	Period       int
+	ID           int64
+	Renew        bool
+	NoClose      bool
 }
 
 // WSWallet represents a wallet update from authenticated channel.
@@ -87,11 +87,11 @@ type WSWallet struct {
 type WSNotification struct {
 	MTS        time.Time
 	Type       string
-	MessageID  int64
-	NotifyInfo []byte // raw JSON
-	Code       int
-	Status     string // "SUCCESS", "ERROR", "FAILURE"
+	Status     string
 	Text       string
+	NotifyInfo []byte
+	MessageID  int64
+	Code       int
 }
 
 // ChannelInfo holds the mapping between a chanId and its subscription.
@@ -125,9 +125,9 @@ type EventHandlers struct {
 	OnBookUpdate   func(string, BookEntry)   // symbol, entry
 
 	// Public channel - Trades
-	OnTradeSnapshot  func(string, []FundingTrade) // symbol, trades
-	OnTradeExecuted  func(string, FundingTrade)   // symbol, trade
-	OnTradeUpdated   func(string, FundingTrade)   // symbol, trade
+	OnTradeSnapshot func(string, []FundingTrade) // symbol, trades
+	OnTradeExecuted func(string, FundingTrade)   // symbol, trade
+	OnTradeUpdated  func(string, FundingTrade)   // symbol, trade
 
 	// Auth channel - Funding Offers
 	OnFundingOfferSnapshot func([]WSFundingOffer)

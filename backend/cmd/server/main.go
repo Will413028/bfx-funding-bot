@@ -184,7 +184,7 @@ func startLendingEngine(
 			}
 
 			// Start lending service (pool + quota refill)
-			go lendingSvc.Start(engineCtx)
+			go func() { _ = lendingSvc.Start(engineCtx) }()
 
 			// Wait for service to initialize (deterministic)
 			select {

@@ -17,9 +17,9 @@ const (
 type Momentum struct{}
 
 type vwapTrade struct {
+	ts     time.Time
 	rate   float64
 	volume float64
-	ts     time.Time
 }
 
 func NewMomentum() *Momentum {

@@ -9,11 +9,11 @@ import (
 
 // CreditBatch represents a group of credits merged for batch renewal.
 type CreditBatch struct {
-	ExpiryDate time.Time // UTC calendar day (truncated)
+	ExpiryDate time.Time
+	CreditIDs  []int64
 	Amount     float64
 	Rate       float64
 	Period     int
-	CreditIDs  []int64
 }
 
 // BatchCredits groups credits by expiry date (UTC day) and merges them.

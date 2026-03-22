@@ -11,11 +11,11 @@ const (
 )
 
 type User struct {
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	ID           string
 	Email        string
 	PasswordHash string
 	Status       UserStatus
 	Plan         string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
 }

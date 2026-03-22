@@ -106,12 +106,12 @@ func setupAPIKeyRouter(t *testing.T) (*gin.Engine, *service.APIKeyService) {
 	t.Helper()
 
 	key := make([]byte, 32)
-	rand.Read(key)
+	_, _ = rand.Read(key)
 	aes, _ := crypto.NewAES(key)
 
 	// Mock Bitfinex server that returns valid wallet
 	bfxServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
+		_, _ = w.Write([]byte(`[["funding","USD",1000,0,800,null,null]]`))
 	}))
 	t.Cleanup(bfxServer.Close)
 	bfx := bitfinex.NewClientWithBaseURL(bfxServer.Client(), bfxServer.URL)
@@ -153,7 +153,7 @@ func TestHandler_CreateAPIKey(t *testing.T) {
 	}
 
 	var envelope map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &envelope)
+	_ = json.Unmarshal(w.Body.Bytes(), &envelope)
 	resp := envelope["data"].(map[string]interface{})
 	if resp["apiSecret"] != "****" {
 		t.Errorf("expected masked secret, got %v", resp["apiSecret"])
@@ -215,7 +215,7 @@ func TestHandler_ListAPIKeys_Empty(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var envelope map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &envelope)
+	_ = json.Unmarshal(w.Body.Bytes(), &envelope)
 	resp := envelope["data"].([]interface{})
 	if len(resp) != 0 {
 		t.Fatalf("expected empty array, got %d items", len(resp))
@@ -240,7 +240,7 @@ func TestHandler_ListAPIKeys_IncludesExchangeStatus(t *testing.T) {
 	r.ServeHTTP(w2, req2)
 
 	var envelope map[string]interface{}
-	json.Unmarshal(w2.Body.Bytes(), &envelope)
+	_ = json.Unmarshal(w2.Body.Bytes(), &envelope)
 	data := envelope["data"].([]interface{})
 	if len(data) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(data))
@@ -264,7 +264,7 @@ func TestHandler_VerifyAPIKey(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	var createEnvelope map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &createEnvelope)
+	_ = json.Unmarshal(w.Body.Bytes(), &createEnvelope)
 	createResp := createEnvelope["data"].(map[string]interface{})
 	keyID := createResp["id"].(string)
 
@@ -278,7 +278,7 @@ func TestHandler_VerifyAPIKey(t *testing.T) {
 	}
 
 	var verifyEnvelope map[string]interface{}
-	json.Unmarshal(w2.Body.Bytes(), &verifyEnvelope)
+	_ = json.Unmarshal(w2.Body.Bytes(), &verifyEnvelope)
 	verifyResp := verifyEnvelope["data"].(map[string]interface{})
 	if verifyResp["status"] != "verified" {
 		t.Errorf("expected status verified, got %v", verifyResp["status"])

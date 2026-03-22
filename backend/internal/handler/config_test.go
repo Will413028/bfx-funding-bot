@@ -101,7 +101,7 @@ func TestHandler_SaveConfig_Success(t *testing.T) {
 	}
 
 	var envelope map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &envelope)
+	_ = json.Unmarshal(w.Body.Bytes(), &envelope)
 	resp := envelope["data"].(map[string]interface{})
 	if resp["id"] == nil {
 		t.Error("expected id in response")

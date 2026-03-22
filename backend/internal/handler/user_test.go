@@ -147,7 +147,7 @@ func TestUserHandler_GetProfile(t *testing.T) {
 	}
 
 	var envelope map[string]any
-	json.Unmarshal(w.Body.Bytes(), &envelope)
+	_ = json.Unmarshal(w.Body.Bytes(), &envelope)
 	body := envelope["data"].(map[string]any)
 
 	if body["email"] != "test@example.com" {

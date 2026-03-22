@@ -14,9 +14,9 @@ import (
 // --- Stubs for fetcher interfaces ---
 
 type stubFetcherClient struct {
-	balance float64
 	offers  []domain.FundingOffer
 	credits []domain.FundingCredit
+	balance float64
 }
 
 func (s *stubFetcherClient) GetFundingBalance(ctx context.Context, apiKey, apiSecret, currency string) (*domain.Wallet, error) {
@@ -32,9 +32,9 @@ func (s *stubFetcherClient) GetActiveFundingCredits(ctx context.Context, apiKey,
 }
 
 type stubFetcherKeyStore struct {
+	err    error
 	key    *domain.APIKey
 	secret []byte
-	err    error
 }
 
 func (s *stubFetcherKeyStore) GetByUserID(ctx context.Context, userID string) (*domain.APIKey, []byte, error) {
@@ -42,8 +42,8 @@ func (s *stubFetcherKeyStore) GetByUserID(ctx context.Context, userID string) (*
 }
 
 type stubFetcherCipher struct {
-	plaintext []byte
 	err       error
+	plaintext []byte
 }
 
 func (s *stubFetcherCipher) Decrypt(ciphertext []byte) ([]byte, error) {

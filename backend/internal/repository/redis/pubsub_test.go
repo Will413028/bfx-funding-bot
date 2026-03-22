@@ -31,7 +31,7 @@ func TestSnapshotPubSub_PublishAndSubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	// Give subscriber time to set up
 	time.Sleep(50 * time.Millisecond)
@@ -96,7 +96,7 @@ func TestSnapshotPubSub_MultipleMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	time.Sleep(50 * time.Millisecond)
 

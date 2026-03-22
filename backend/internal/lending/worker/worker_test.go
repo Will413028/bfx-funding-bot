@@ -110,7 +110,7 @@ func TestWorker_SnapshotTriggersTick(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	// Wait for worker to start
@@ -149,7 +149,7 @@ func TestWorker_NoSnapshotNoTick(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	// Wait without sending snapshot
@@ -180,7 +180,7 @@ func TestWorker_DataFetcherError(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -209,7 +209,7 @@ func TestWorker_ContextCancelled(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -231,7 +231,7 @@ func TestWorker_StopMethod(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -278,7 +278,7 @@ func TestWorker_ConfigReload(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -339,7 +339,7 @@ func TestWorker_PanicRecovery(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -382,7 +382,7 @@ func TestWorker_StateTransitions(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -421,7 +421,7 @@ func TestWorker_ChannelClosed(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -457,7 +457,7 @@ func TestWorker_EmptyDecision(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.Run(ctx)
+		_ = w.Run(ctx)
 	}()
 
 	time.Sleep(10 * time.Millisecond)

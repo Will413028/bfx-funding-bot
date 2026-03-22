@@ -27,8 +27,8 @@ var PlanPrices = map[string]float64{
 }
 
 type PlanFeatures struct {
-	Plan            string `json:"plan"`
-	Price           float64 `json:"price"`
+	Plan             string  `json:"plan"`
+	Price            float64 `json:"price"`
 	AutoLending      bool    `json:"autoLending"`
 	AdvancedStrategy bool    `json:"advancedStrategy"`
 	EmailNotify      bool    `json:"emailNotify"`
@@ -51,14 +51,14 @@ func GetPlanFeatures(plan string) PlanFeatures {
 }
 
 type BillingRecord struct {
-	ID          string     `json:"id"`
-	UserID      string     `json:"userId"`
 	PeriodStart time.Time  `json:"periodStart"`
 	PeriodEnd   time.Time  `json:"periodEnd"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	PaidAt      *time.Time `json:"paidAt,omitempty"`
+	ID          string     `json:"id"`
+	UserID      string     `json:"userId"`
 	Plan        string     `json:"plan"`
-	Amount      float64    `json:"amount"`
 	Currency    string     `json:"currency"`
 	Status      string     `json:"status"`
-	PaidAt      *time.Time `json:"paidAt,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	Amount      float64    `json:"amount"`
 }

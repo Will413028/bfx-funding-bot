@@ -3,14 +3,14 @@ package domain
 import "time"
 
 type FundingOffer struct {
-	ID        int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
 	Currency  string
+	Status    string
+	ID        int64
 	Amount    float64
 	Rate      float64
 	Period    int
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
 }
 
 type OfferParams struct {

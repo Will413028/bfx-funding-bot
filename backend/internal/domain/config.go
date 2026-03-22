@@ -82,9 +82,9 @@ func (c StrategyConfig) Validate() error {
 }
 
 type UserConfig struct {
+	CreatedAt time.Time
+	UpdatedAt time.Time
 	ID        string
 	UserID    string
 	Config    StrategyConfig
-	CreatedAt time.Time
-	UpdatedAt time.Time
 }

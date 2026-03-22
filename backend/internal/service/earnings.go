@@ -19,14 +19,14 @@ type DailyEarning struct {
 }
 
 type EarningsSummary struct {
+	Currency              string   `json:"currency"`
+	Warnings              []string `json:"warnings,omitempty"`
 	EstimatedDailyEarning float64  `json:"estimatedDailyEarning"`
 	WeightedAPY           float64  `json:"weightedAPY"`
 	Earnings7d            float64  `json:"earnings7d"`
 	Earnings30d           float64  `json:"earnings30d"`
 	TotalLent             float64  `json:"totalLent"`
 	ActiveCredits         int      `json:"activeCredits"`
-	Currency              string   `json:"currency"`
-	Warnings              []string `json:"warnings,omitempty"`
 }
 
 type EarningsService struct {

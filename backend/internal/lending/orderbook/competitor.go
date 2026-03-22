@@ -22,8 +22,8 @@ type CompetitorDetector struct {
 }
 
 type bookSnapshot struct {
-	bestAsk   float64
-	offerRates map[float64]bool // set of offer rates
+	offerRates map[float64]bool
+	bestAsk    float64
 }
 
 func NewCompetitorDetector() *CompetitorDetector {

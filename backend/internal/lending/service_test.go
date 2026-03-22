@@ -65,7 +65,7 @@ func startedService(t *testing.T) (*Service, context.CancelFunc) {
 	svc := NewService(&mockDepsFactory{}, testServiceConfig(), quota.NewRateLimiterPool(1000, 1000))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go svc.Start(ctx)
+	go func() { _ = svc.Start(ctx) }()
 
 	// Wait for deterministic ready signal
 	select {
@@ -91,7 +91,7 @@ func TestService_ReadySignal(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go svc.Start(ctx)
+	go func() { _ = svc.Start(ctx) }()
 
 	// After Start, ready channel should close quickly
 	select {
@@ -128,7 +128,7 @@ func TestService_StartAndStop(t *testing.T) {
 func TestService_StartWorker(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	err := svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	if err != nil {
@@ -145,7 +145,7 @@ func TestService_StartWorker(t *testing.T) {
 func TestService_StartWorkerDuplicate(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	err := svc.StartWorker(context.Background(),"u1", testStrategyConfig())
@@ -158,7 +158,7 @@ func TestService_StartWorkerDuplicate(t *testing.T) {
 func TestService_StopWorker(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
@@ -178,7 +178,7 @@ func TestService_StopWorker(t *testing.T) {
 func TestService_StopWorkerNonExistent(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	err := svc.StopWorker(context.Background(),"u1")
 	if err == nil {
@@ -189,7 +189,7 @@ func TestService_StopWorkerNonExistent(t *testing.T) {
 func TestService_ReloadConfig(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	time.Sleep(20 * time.Millisecond)
@@ -206,7 +206,7 @@ func TestService_ReloadConfig(t *testing.T) {
 func TestService_ReloadConfigNonExistent(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	err := svc.ReloadConfig(context.Background(),"u1", testStrategyConfig())
 	if err == nil {
@@ -217,7 +217,7 @@ func TestService_ReloadConfigNonExistent(t *testing.T) {
 func TestService_BroadcastSnapshot(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	_ = svc.StartWorker(context.Background(),"u2", testStrategyConfig())
@@ -274,7 +274,7 @@ func TestService_BroadcastDropsStale(t *testing.T) {
 	svc.mu.Unlock()
 	close(testCh)
 
-	svc.Stop(context.Background())
+	_ = svc.Stop(context.Background())
 }
 
 func TestService_StopAllCleansUp(t *testing.T) {
@@ -350,7 +350,7 @@ func TestService_PlanQuota(t *testing.T) {
 func TestService_MultipleStartStop(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	// Start multiple workers
 	for i := 0; i < 5; i++ {
@@ -381,7 +381,7 @@ func TestService_MultipleStartStop(t *testing.T) {
 func TestService_BroadcastConcurrent(t *testing.T) {
 	svc, cancel := startedService(t)
 	defer cancel()
-	defer svc.Stop(context.Background())
+	defer func() { _ = svc.Stop(context.Background()) }()
 
 	_ = svc.StartWorker(context.Background(),"u1", testStrategyConfig())
 	_ = svc.StartWorker(context.Background(),"u2", testStrategyConfig())

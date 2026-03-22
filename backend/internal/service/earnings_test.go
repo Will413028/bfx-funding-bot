@@ -45,16 +45,16 @@ func TestEarnings_ActiveCreditsWithHistory(t *testing.T) {
 		case containsPath(r.URL.Path, "credits"):
 			// Two active credits: 500 @ 0.0002/day, 300 @ 0.0003/day
 			// Format: [ID, SYMBOL, SIDE, MTS_CREATE, MTS_UPDATE, AMOUNT, FLAGS, STATUS, RATE_TYPE, null, null, RATE, PERIOD, MTS_OPENING, ...]
-			w.Write([]byte(fmt.Sprintf(`[
+			_, _ = fmt.Fprintf(w, `[
 				[11111,"fUSD",0,%d,%d,500,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,0,null,null,null],
 				[22222,"fUSD",0,%d,%d,300,0,"ACTIVE",null,null,null,0.0003,14,%d,null,0,0,null,0,null,null,null]
-			]`, now, now, now, now, now, now)))
+			]`, now, now, now, now, now, now)
 		case containsPath(r.URL.Path, "ledgers"):
 			// Historical earnings
-			w.Write([]byte(fmt.Sprintf(`[
+			_, _ = fmt.Fprintf(w, `[
 				[100001,"fUSD",null,%d,null,0.10,10000.10,null,"Margin Funding Payment"],
 				[100002,"fUSD",null,%d,null,0.09,10000.00,null,"Margin Funding Payment"]
-			]`, now, now)))
+			]`, now, now)
 		}
 	}))
 	defer ts.Close()
@@ -130,9 +130,9 @@ func TestEarnings_NoCredits(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsPath(r.URL.Path, "credits"):
-			w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`[]`))
 		case containsPath(r.URL.Path, "ledgers"):
-			w.Write([]byte(fmt.Sprintf(`[[100001,"fUSD",null,%d,null,0.50,10000.50,null,"Margin Funding Payment"]]`, now)))
+			_, _ = fmt.Fprintf(w, `[[100001,"fUSD",null,%d,null,0.50,10000.50,null,"Margin Funding Payment"]]`, now)
 		}
 	}))
 	defer ts.Close()
@@ -172,10 +172,10 @@ func TestEarnings_PartialFailure(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case containsPath(r.URL.Path, "credits"):
-			w.Write([]byte(fmt.Sprintf(`[[11111,"fUSD",0,%d,%d,500,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,0,null,null,null]]`, now, now, now)))
+			_, _ = fmt.Fprintf(w, `[[11111,"fUSD",0,%d,%d,500,0,"ACTIVE",null,null,null,0.0002,7,%d,null,0,0,null,0,null,null,null]]`, now, now, now)
 		case containsPath(r.URL.Path, "ledgers"):
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`["error",10000,"Internal Server Error"]`))
+			_, _ = w.Write([]byte(`["error",10000,"Internal Server Error"]`))
 		}
 	}))
 	defer ts.Close()

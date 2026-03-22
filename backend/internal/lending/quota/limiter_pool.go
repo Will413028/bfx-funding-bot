@@ -8,10 +8,10 @@ import (
 
 // RateLimiterPool manages per-user rate.Limiter instances.
 type RateLimiterPool struct {
-	mu    sync.Mutex
 	users map[string]*rate.Limiter
 	rate  rate.Limit
 	burst int
+	mu    sync.Mutex
 }
 
 // NewRateLimiterPool creates a pool with default rate and burst for new user limiters.

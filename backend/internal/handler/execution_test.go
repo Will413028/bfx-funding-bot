@@ -90,7 +90,7 @@ func TestExecutionHandler_List_FirstPage(t *testing.T) {
 		Data       []domain.ExecutionRecord `json:"data"`
 		Pagination PaginationResponse       `json:"pagination"`
 	}
-	json.NewDecoder(w.Body).Decode(&body)
+	_ = json.NewDecoder(w.Body).Decode(&body)
 	if len(body.Data) != 1 {
 		t.Errorf("expected 1 execution, got %d", len(body.Data))
 	}
