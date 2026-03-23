@@ -3,6 +3,7 @@ package marketfeed
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,7 +44,7 @@ type symbolState struct {
 type Service struct {
 	cache         repository.SnapshotCache
 	pubsub        repository.SnapshotPubSub
-	mdcAgg        *signal.MDCAggregator
+	mdcAgg        map[string]*signal.MDCAggregator
 	wsClient      *bitfinex.WSClient
 	log           *zap.Logger
 	states        map[string]*symbolState
@@ -81,13 +82,18 @@ func NewService(
 	hiddenEst := make(map[string]*orderbook.HiddenRatioEstimator, len(cfg.Symbols))
 	compDet := make(map[string]*orderbook.CompetitorDetector, len(cfg.Symbols))
 	regimeDet := make(map[string]*signal.RegimeDetector, len(cfg.Symbols))
+	mdcAgg := make(map[string]*signal.MDCAggregator, len(cfg.Symbols))
 	for _, sym := range cfg.Symbols {
 		states[sym] = &symbolState{
 			book: make(map[string]domain.BookEntry),
 		}
 		hiddenEst[sym] = orderbook.NewHiddenRatioEstimator()
 		compDet[sym] = orderbook.NewCompetitorDetector()
-		regimeDet[sym] = signal.NewRegimeDetector(nil)
+		// Per-currency preset: strip "f" prefix from symbol (e.g. "fUSD" → "USD")
+		ccy := strings.TrimPrefix(sym, "f")
+		preset := domain.PresetForCurrency(ccy)
+		regimeDet[sym] = signal.NewRegimeDetectorWithPreset(preset)
+		mdcAgg[sym] = signal.NewMDCAggregatorWithPreset(preset)
 	}
 
 	healthTracker := signal.NewSignalHealthTracker([]domain.SignalType{
@@ -106,7 +112,7 @@ func NewService(
 		pubsub:        pubsub,
 		signalSources: signalSources,
 		flashCrash:    NewFlashCrashDetector(flashCrashCfg),
-		mdcAgg:        signal.NewMDCAggregator(),
+		mdcAgg:        mdcAgg,
 		healthTracker: healthTracker,
 		states:        states,
 		hiddenEst:     hiddenEst,
@@ -377,7 +383,7 @@ func (s *Service) buildSnapshot(symbol string, now time.Time) *domain.MarketSnap
 		}
 	}
 
-	mdc := s.mdcAgg.Aggregate(signals, health, now, recWeights)
+	mdc := s.mdcAgg[symbol].Aggregate(signals, health, now, recWeights)
 
 	// Phase 3: Regime detection
 	regime, regimeParams := s.regimeDet[symbol].Detect(mdc, &tickerCopy, flashFreeze, now)

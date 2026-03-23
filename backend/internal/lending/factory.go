@@ -46,8 +46,9 @@ func (f *DepsFactory) BuildWorkerDeps(userID string, currency string, snapshotCh
 	offerExecutor := execution.NewOfferExecutor(f.client, f.apiKeyRepo, f.cipher, f.execRepo, limiter)
 	executor := newExecutorAdapter(offerExecutor)
 
+	preset := domain.PresetForCurrency(currency)
 	return worker.Deps{
-		Strategy:   strategy.NewCompositeStrategy(),
+		Strategy:   strategy.NewCompositeStrategyWithPreset(preset),
 		Fetcher:    fetcher,
 		Executor:   executor,
 		SnapshotCh: snapshotCh,

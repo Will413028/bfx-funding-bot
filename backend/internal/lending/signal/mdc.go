@@ -7,27 +7,6 @@ import (
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
 
-// Default base weights for each signal source.
-var defaultWeights = map[domain.SignalType]float64{
-	domain.SignalBookConsumption:    0.25,
-	domain.SignalLiquidationCascade: 0.20,
-	domain.SignalMarginUsage:        0.20,
-	domain.SignalMomentum:           0.15,
-	domain.SignalCrossCurrency:      0.10,
-	domain.SignalIntraday:           0.10,
-}
-
-// Default decay λ per signal (per second).
-// Higher λ = faster decay = signal must be fresher to matter.
-var defaultLambda = map[domain.SignalType]float64{
-	domain.SignalBookConsumption:    0.01,
-	domain.SignalLiquidationCascade: 0.005,
-	domain.SignalMarginUsage:        0.008,
-	domain.SignalMomentum:           0.01,
-	domain.SignalCrossCurrency:      0.005,
-	domain.SignalIntraday:           0.002,
-}
-
 // MDCAggregator computes the Market Demand Curve composite score
 // from multiple signal sources using freshness-weighted aggregation.
 type MDCAggregator struct {
@@ -35,11 +14,17 @@ type MDCAggregator struct {
 	lambda  map[domain.SignalType]float64
 }
 
-func NewMDCAggregator() *MDCAggregator {
+// NewMDCAggregatorWithPreset creates a MDCAggregator using a CurrencyPreset.
+func NewMDCAggregatorWithPreset(preset domain.CurrencyPreset) *MDCAggregator {
 	return &MDCAggregator{
-		weights: defaultWeights,
-		lambda:  defaultLambda,
+		weights: preset.MDCWeights,
+		lambda:  preset.MDCLambda,
 	}
+}
+
+// NewMDCAggregator creates a MDCAggregator with stablecoin defaults (backward compatible).
+func NewMDCAggregator() *MDCAggregator {
+	return NewMDCAggregatorWithPreset(domain.StablecoinPreset)
 }
 
 // Aggregate computes the MDC result from a set of signal values.

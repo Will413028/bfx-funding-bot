@@ -131,20 +131,20 @@ func TestMDC_DemandSupplyDecomposition(t *testing.T) {
 
 func TestMDC_WeightsSumToOne(t *testing.T) {
 	var total float64
-	for _, w := range defaultWeights {
+	for _, w := range domain.StablecoinPreset.MDCWeights {
 		total += w
 	}
 	if total < 0.999 || total > 1.001 {
 		t.Errorf("expected weights to sum to 1.0, got %f", total)
 	}
-	if len(defaultWeights) != 6 {
-		t.Errorf("expected 6 signal weights, got %d", len(defaultWeights))
+	if len(domain.StablecoinPreset.MDCWeights) != 6 {
+		t.Errorf("expected 6 signal weights, got %d", len(domain.StablecoinPreset.MDCWeights))
 	}
 }
 
 func TestMDC_AllSignalsHaveDecay(t *testing.T) {
-	for sig := range defaultWeights {
-		if _, ok := defaultLambda[sig]; !ok {
+	for sig := range domain.StablecoinPreset.MDCWeights {
+		if _, ok := domain.StablecoinPreset.MDCLambda[sig]; !ok {
 			t.Errorf("signal %s has weight but no decay lambda", sig)
 		}
 	}
@@ -301,5 +301,26 @@ func TestMDC_Degradation_MultipleFailures(t *testing.T) {
 	result := agg.Aggregate(signals, health, now)
 	if result.Score <= 0 {
 		t.Errorf("multiple failures: expected positive score from remaining signals, got %f", result.Score)
+	}
+}
+
+func TestMDC_CryptoPreset(t *testing.T) {
+	agg := NewMDCAggregatorWithPreset(domain.CryptoPreset)
+	now := time.Now()
+
+	signals := []domain.SignalValue{
+		{Type: domain.SignalBookConsumption, Value: 0.8, Confidence: 1.0, Timestamp: now},
+		{Type: domain.SignalMomentum, Value: 0.3, Confidence: 1.0, Timestamp: now},
+	}
+
+	resultCrypto := agg.Aggregate(signals, nil, now)
+
+	// Compare with stablecoin: crypto has BookConsumption weight 0.30 vs stablecoin 0.15,
+	// so BookConsumption's contribution should be stronger with crypto preset.
+	aggStable := NewMDCAggregator()
+	resultStable := aggStable.Aggregate(signals, nil, now)
+
+	if resultCrypto.Score <= resultStable.Score {
+		t.Errorf("crypto preset should produce higher score for book-heavy signals: crypto=%f, stablecoin=%f", resultCrypto.Score, resultStable.Score)
 	}
 }

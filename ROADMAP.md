@@ -231,7 +231,7 @@ marketfeed/service.go (C1)
 - [x] S4 RatePercentile Signal — 歷史百分位信號（`12829a2`）
 - [x] S5 Cascade Phase Response — 瀑布分三階段回應（`03f63ad`）
 - [x] S6 Dynamic Weekend Premium — 歷史 ratio 動態計算（`03f63ad`）
-- [ ] S7 Per-Currency Parameters — stablecoin / crypto 分組
+- [x] S7 Per-Currency Parameters — stablecoin / crypto 分組
 - [x] S8 Confidence-Scaled Deployment（`e5825aa`）
 - [ ] S9 Rolling Period Ladder — 到期梯隊管理
 - [x] S10 Mean-Reversion P(higher) — EV_wait 均值回歸公式（`12829a2`）
@@ -384,9 +384,9 @@ Phase A ✅ 全部完成
 - [x] S10 Mean-Reversion P(higher)（`12829a2`）
 - [x] M2 Gap Cost Tracking + Pre-scheduling（`12829a2`）
 
-#### P5 — 高複雜度架構（0/4）
+#### P5 — 高複雜度架構（1/4）
 
-- [ ] S7 Per-Currency Parameters
+- [x] S7 Per-Currency Parameters
 - [ ] S9 Rolling Period Ladder
 - [ ] M7 Temporal Laddering
 - [ ] G13 Historical Fill Rate Learning
