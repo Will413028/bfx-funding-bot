@@ -24,6 +24,7 @@
     "unexpectedError": "發生了非預期的錯誤",
     "backToHome": "回到首頁",
     "loadMore": "載入更多",
+    "notFound": "找不到頁面",
     "loadFailed": "載入資料失敗",
     "min": "最小值",
     "max": "最大值"
