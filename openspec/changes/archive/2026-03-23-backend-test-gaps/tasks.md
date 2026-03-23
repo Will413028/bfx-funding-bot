@@ -19,7 +19,7 @@
 ## 2. Handler 層測試
 
 - [x] 2.1 確認現有 handler test 檔案已覆蓋所有 handlers（11 test files exist）
-- [ ] 2.2 評估後：handler 覆蓋率 48.2% 主要因 helper functions 佔比，核心 path 已覆蓋
+- [x] 2.2 評估：handler 覆蓋率 48.2% 因 helper/router 初始化程式碼佔比，核心 endpoint 路徑已有測試覆蓋
 
 ## 3. 驗證
 
