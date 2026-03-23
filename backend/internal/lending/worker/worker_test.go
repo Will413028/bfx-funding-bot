@@ -646,3 +646,133 @@ func TestColdStart_SnapshotNotMutated(t *testing.T) {
 		t.Errorf("modified MDC: got %f, want 0.0", modified.MDC.Score)
 	}
 }
+
+// --- M7: Temporal Laddering Tests ---
+
+func TestWorker_TemporalLaddering_ThreeTranches(t *testing.T) {
+	var capturedAvailables []float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedAvailables = append(capturedAvailables, ctx.Available)
+			return &domain.DecisionResult{
+				Offers: []domain.OfferDecision{{Amount: ctx.Available, Rate: 0.0003, Period: 5}},
+				Reason: "test",
+			}
+		},
+	}
+	fetcher := &mockDataFetcher{
+		fetchFn: func(_ context.Context, _ string) (*UserData, error) {
+			return &UserData{Available: 3000}, nil
+		},
+	}
+
+	w := NewLendingWorker("u1", workerConfig(), Deps{
+		Strategy: strategy,
+		Fetcher:  fetcher,
+		Executor: &mockOfferExecutor{},
+	})
+	w.nowFn = time.Now
+
+	snap := testSnapshot()
+	ctx := context.Background()
+
+	// Three ticks — each should see progressively limited Available
+	w.tick(ctx, snap)
+	w.tick(ctx, snap)
+	w.tick(ctx, snap)
+
+	if len(capturedAvailables) != 3 {
+		t.Fatalf("expected 3 strategy calls, got %d", len(capturedAvailables))
+	}
+
+	// T+0: 3000 × 1/3 = 1000
+	if math.Abs(capturedAvailables[0]-1000) > 1 {
+		t.Errorf("tranche 0: Available=%.0f, want ~1000", capturedAvailables[0])
+	}
+	// T+1: fetcher still returns 3000 (mock), × 1/2 = 1500
+	if math.Abs(capturedAvailables[1]-1500) > 1 {
+		t.Errorf("tranche 1: Available=%.0f, want ~1500", capturedAvailables[1])
+	}
+	// T+2: fetcher returns 3000, × 1.0 = 3000
+	if math.Abs(capturedAvailables[2]-3000) > 1 {
+		t.Errorf("tranche 2: Available=%.0f, want ~3000", capturedAvailables[2])
+	}
+
+	// After 3 ticks, trancheIndex should reset to 0
+	if w.trancheIndex != 0 {
+		t.Errorf("trancheIndex after 3 ticks = %d, want 0", w.trancheIndex)
+	}
+}
+
+func TestWorker_TemporalLaddering_SmallBalanceSkip(t *testing.T) {
+	var capturedAvailable float64
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			capturedAvailable = ctx.Available
+			return &domain.DecisionResult{
+				Offers: []domain.OfferDecision{{Amount: 50, Rate: 0.0003, Period: 5}},
+				Reason: "test",
+			}
+		},
+	}
+	fetcher := &mockDataFetcher{
+		fetchFn: func(_ context.Context, _ string) (*UserData, error) {
+			return &UserData{Available: 80}, nil // < minLadderingBalance
+		},
+	}
+
+	w := NewLendingWorker("u1", workerConfig(), Deps{
+		Strategy: strategy,
+		Fetcher:  fetcher,
+		Executor: &mockOfferExecutor{},
+	})
+	w.nowFn = time.Now
+
+	w.tick(context.Background(), testSnapshot())
+
+	// Should NOT apply laddering ratio — full 80
+	if capturedAvailable != 80 {
+		t.Errorf("small balance: Available=%.0f, want 80 (no laddering)", capturedAvailable)
+	}
+}
+
+func TestWorker_TemporalLaddering_ResetOnConfigChange(t *testing.T) {
+	w := NewLendingWorker("u1", workerConfig(), Deps{
+		Strategy: &mockStrategy{},
+		Fetcher:  &mockDataFetcher{},
+		Executor: &mockOfferExecutor{},
+	})
+	w.nowFn = time.Now
+
+	// Simulate advancing tranche
+	w.trancheIndex = 2
+
+	newCfg := workerConfig()
+	newCfg.Currency = "fETH"
+	w.ReloadConfig(newCfg)
+
+	if w.trancheIndex != 0 {
+		t.Errorf("after ReloadConfig: trancheIndex=%d, want 0", w.trancheIndex)
+	}
+}
+
+func TestWorker_TemporalLaddering_NoIncrementOnEmptyDecision(t *testing.T) {
+	strategy := &mockStrategy{
+		applyFn: func(ctx *domain.DecisionContext) *domain.DecisionResult {
+			return &domain.DecisionResult{Reason: "flash_freeze"} // no offers
+		},
+	}
+
+	w := NewLendingWorker("u1", workerConfig(), Deps{
+		Strategy: strategy,
+		Fetcher:  &mockDataFetcher{},
+		Executor: &mockOfferExecutor{},
+	})
+	w.nowFn = time.Now
+
+	w.tick(context.Background(), testSnapshot())
+
+	if w.trancheIndex != 0 {
+		t.Errorf("empty decision: trancheIndex=%d, want 0", w.trancheIndex)
+	}
+}

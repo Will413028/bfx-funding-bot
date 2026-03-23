@@ -261,7 +261,7 @@ marketfeed/service.go (C1)
 - [x] M4 Early Return Risk Premium（`e5825aa`）
 - [x] M5 Non-Liquidation Rate Spike Detector — 非清算性 spike 偵測（`03f63ad`）
 - [x] M6 FRR Manipulation Guard（`e5825aa`）
-- [ ] M7 Temporal Laddering — 跨心跳分批部署
+- [x] M7 Temporal Laddering — 跨心跳分批部署
 - [x] M8 FRR Feedback Loop Awareness（`e5825aa`）
 
 <details>
@@ -294,7 +294,7 @@ marketfeed/service.go (C1)
 | ~~Phase J（Auth 強化）~~ | ~~J1+J2+J3+J5+J6~~ ✅ |
 | ~~Phase K（前端測試）~~ | ~~K2~~ ✅ |
 | ~~Phase L（UX 強化）~~ | ~~L1+L2+L3+L4+L5~~ ✅ |
-| **待開發合計** | **3 項**（G13 + M7 + H3） |
+| **待開發合計** | **2 項**（G13 + H3） |
 
 ## 依賴關係
 
@@ -313,9 +313,9 @@ Phase A ✅ 全部完成
     ├── A5 (Execution) ✅ → Phase E ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase G（39/41 完成）
-    │                      ├── G0-G12/G14-G16 ✅ + GT1-6 ✅ + M1-M8 ✅ + S1-S10 ✅
-    │                      └── 待開發：G13 + M7
+    │                  Phase G（40/41 完成）
+    │                      ├── G0-G16 ✅ + GT1-6 ✅ + M1-M8 ✅ + S1-S10 ✅
+    │                      └── 待開發：G13
     │
     └── All backend APIs ready
          │
@@ -384,9 +384,9 @@ Phase A ✅ 全部完成
 - [x] S10 Mean-Reversion P(higher)（`12829a2`）
 - [x] M2 Gap Cost Tracking + Pre-scheduling（`12829a2`）
 
-#### P5 — 高複雜度架構（2/4）
+#### P5 — 高複雜度架構（3/4）
 
 - [x] S7 Per-Currency Parameters
 - [x] S9 Rolling Period Ladder
-- [ ] M7 Temporal Laddering
+- [x] M7 Temporal Laddering
 - [ ] G13 Historical Fill Rate Learning
