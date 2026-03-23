@@ -268,8 +268,9 @@ func (s *Service) workerFactory(ctx context.Context, userID string, config domai
 	if snapshotCh != nil {
 		ch = snapshotCh
 	} else {
-		// Fallback: create a dummy channel (shouldn't happen in normal flow)
+		// Fallback: closed channel returns zero-value immediately, preventing goroutine leak.
 		dummy := make(chan *domain.MarketSnapshot)
+		close(dummy)
 		ch = dummy
 	}
 
