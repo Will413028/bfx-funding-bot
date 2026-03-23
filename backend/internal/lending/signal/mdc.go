@@ -15,10 +15,19 @@ type MDCAggregator struct {
 }
 
 // NewMDCAggregatorWithPreset creates a MDCAggregator using a CurrencyPreset.
+// Maps are copied to prevent mutation of the shared preset singletons.
 func NewMDCAggregatorWithPreset(preset domain.CurrencyPreset) *MDCAggregator {
+	weights := make(map[domain.SignalType]float64, len(preset.MDCWeights))
+	for k, v := range preset.MDCWeights {
+		weights[k] = v
+	}
+	lambda := make(map[domain.SignalType]float64, len(preset.MDCLambda))
+	for k, v := range preset.MDCLambda {
+		lambda[k] = v
+	}
 	return &MDCAggregator{
-		weights: preset.MDCWeights,
-		lambda:  preset.MDCLambda,
+		weights: weights,
+		lambda:  lambda,
 	}
 }
 
