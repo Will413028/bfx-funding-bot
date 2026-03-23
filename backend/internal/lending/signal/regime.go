@@ -8,19 +8,11 @@ import (
 )
 
 const (
-	defaultEnterThreshold    = 0.3
-	defaultExitThreshold     = 0.2
 	defaultCrisisScoreThresh = 0.9
 	defaultCrisisVolThresh   = 0.20 // 20% daily change
 	volatilityEMAAlpha       = 0.3
 	minSupplyPressure        = 0.001
 )
-
-// RegimeConfig configures the regime detector thresholds.
-type RegimeConfig struct {
-	EnterThreshold float64 // MDC score to enter contango/backwardation (default 0.3)
-	ExitThreshold  float64 // MDC score to exit back to neutral (default 0.2)
-}
 
 // RegimeDetector identifies the current market regime from MDC results
 // and market data, with hysteresis to prevent rapid switching.
@@ -33,9 +25,19 @@ type RegimeDetector struct {
 	initialized   bool
 }
 
+// NewRegimeDetectorWithPreset creates a RegimeDetector using a CurrencyPreset.
+func NewRegimeDetectorWithPreset(preset domain.CurrencyPreset) *RegimeDetector {
+	return &RegimeDetector{
+		enterThresh:   preset.RegimeEnterThreshold,
+		exitThresh:    preset.RegimeExitThreshold,
+		currentRegime: domain.RegimeNeutral,
+	}
+}
+
+// NewRegimeDetector creates a RegimeDetector with stablecoin defaults (backward compatible).
 func NewRegimeDetector(cfg *RegimeConfig) *RegimeDetector {
-	enter := defaultEnterThreshold
-	exit := defaultExitThreshold
+	enter := domain.StablecoinPreset.RegimeEnterThreshold
+	exit := domain.StablecoinPreset.RegimeExitThreshold
 	if cfg != nil {
 		if cfg.EnterThreshold > 0 {
 			enter = cfg.EnterThreshold
@@ -49,6 +51,12 @@ func NewRegimeDetector(cfg *RegimeConfig) *RegimeDetector {
 		exitThresh:    exit,
 		currentRegime: domain.RegimeNeutral,
 	}
+}
+
+// RegimeConfig configures the regime detector thresholds (legacy, prefer NewRegimeDetectorWithPreset).
+type RegimeConfig struct {
+	EnterThreshold float64
+	ExitThreshold  float64
 }
 
 // Detect determines the current market regime and computes regime parameters.

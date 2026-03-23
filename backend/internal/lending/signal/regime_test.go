@@ -172,3 +172,23 @@ func TestRegime_Params(t *testing.T) {
 		t.Error("expected non-zero volatility")
 	}
 }
+
+func TestRegime_CryptoThresholds(t *testing.T) {
+	// Crypto preset has lower enter threshold (0.25 vs 0.40),
+	// so a score of 0.30 should trigger contango for crypto but not stablecoin.
+	cryptoDet := NewRegimeDetectorWithPreset(domain.CryptoPreset)
+	stableDet := NewRegimeDetector(nil)
+
+	now := time.Now()
+	mdc := domain.MDCResult{Score: 0.30, DemandPressure: 0.3, SupplyPressure: 0.1, Timestamp: now}
+
+	cryptoRegime, _ := cryptoDet.Detect(mdc, nil, false, now)
+	stableRegime, _ := stableDet.Detect(mdc, nil, false, now)
+
+	if cryptoRegime != domain.RegimeContango {
+		t.Errorf("crypto with score 0.30 should be contango (enter=0.25), got %s", cryptoRegime)
+	}
+	if stableRegime != domain.RegimeNeutral {
+		t.Errorf("stablecoin with score 0.30 should be neutral (enter=0.40), got %s", stableRegime)
+	}
+}

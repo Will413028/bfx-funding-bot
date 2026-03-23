@@ -408,3 +408,22 @@ func TestPricing_DeviationGuard_NoClampNeeded(t *testing.T) {
 		t.Errorf("no clamp needed: got %f, want %f", res.Offers[0].Rate, expected)
 	}
 }
+
+func TestPricing_CryptoPreset(t *testing.T) {
+	cryptoPS := NewPricingStrategyWithPreset(domain.CryptoPreset)
+	stablePS := NewPricingStrategy()
+
+	// MDC=+1 → crypto maxPremiumUp=0.60, stablecoin=0.40
+	ctx := testCtx(func(c *domain.DecisionContext) {
+		c.Snapshot.MDC.Score = 1.0
+		c.Snapshot.Regime = domain.RegimeNeutral
+	})
+
+	cryptoRes := cryptoPS.Apply(ctx)
+	stableRes := stablePS.Apply(ctx)
+
+	if cryptoRes.Offers[0].Rate <= stableRes.Offers[0].Rate {
+		t.Errorf("crypto should have higher rate at MDC=+1: crypto=%f, stablecoin=%f",
+			cryptoRes.Offers[0].Rate, stableRes.Offers[0].Rate)
+	}
+}

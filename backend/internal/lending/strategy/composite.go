@@ -17,12 +17,18 @@ const (
 // pipeline following spec Appendix A Phase 4-5. It calls exported helper
 // functions from each module in sequence to produce a unified DecisionResult.
 type CompositeStrategy struct {
-	now func() time.Time
+	now    func() time.Time
+	preset domain.CurrencyPreset
 }
 
-// NewCompositeStrategy creates a new CompositeStrategy.
+// NewCompositeStrategyWithPreset creates a CompositeStrategy using a CurrencyPreset.
+func NewCompositeStrategyWithPreset(preset domain.CurrencyPreset) *CompositeStrategy {
+	return &CompositeStrategy{now: time.Now, preset: preset}
+}
+
+// NewCompositeStrategy creates a CompositeStrategy with stablecoin defaults (backward compatible).
 func NewCompositeStrategy() *CompositeStrategy {
-	return &CompositeStrategy{now: time.Now}
+	return NewCompositeStrategyWithPreset(domain.StablecoinPreset)
 }
 
 // Apply executes the four-stage pipeline:
@@ -48,7 +54,7 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	// ── Stage 1: Rate Resolution ──
 
 	// 1a. Base rate from pricing (FRR + MDC + regime + depth + walls)
-	rate := ComputeBaseRate(snap, cfg)
+	rate := ComputeBaseRateWithPreset(snap, cfg, c.preset)
 
 	// M8: FRR feedback loop awareness — reduce FRR influence when market share is high
 	if snap.OrderBook.AskDepth > 0 {

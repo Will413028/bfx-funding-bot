@@ -7,12 +7,7 @@ import (
 )
 
 const (
-	// MDC premium mapping: linear interpolation
-	// MDC +1 → maxPremium, MDC 0 → 1.0, MDC -1 → minPremium
-	maxPremiumUp   = 0.5  // positive MDC premium range (1.0 → 1.5)
-	maxPremiumDown = 0.18 // negative MDC discount range (1.0 → 0.82) — GT2: 0.30→0.18, backwardation 降價過慷慨
-
-	// Regime multipliers
+	// Regime multipliers (global — not currency-specific)
 	regimeContangoMul      = 1.05 // +5%
 	regimeBackwardationMul = 0.90 // -10%
 
@@ -21,8 +16,7 @@ const (
 	depthPressureBoost  = 1.02 // +2%
 
 	// Wall avoidance
-	wallProximityPct  = 0.10 // 10% of rate
-	wallAvoidDiscount = 0.99 // -1%
+	wallProximityPct = 0.10 // 10% of rate
 
 	// Smart wall positioning (G15): minimum tick size on Bitfinex
 	minTickSize = 0.00000001
@@ -30,12 +24,8 @@ const (
 	// Minimum balance
 	minBalance = 50.0
 
-	// Adaptive Deviation Guard (§8.1): max deviation from FRR per regime
-	deviationContango      = 0.40 // bull: 40%
-	deviationBackwardation = 0.20 // bear: 20%
-	deviationNeutral       = 0.25 // neutral: 25%
-	deviationCrisis        = 0.60 // crisis: 60%
-	deviationHardCeiling   = 0.80 // absolute max: 80%
+	// Hard ceiling for deviation guard (absolute max)
+	deviationHardCeiling = 0.80
 
 	// Bitfinex funding fee (15% of earnings)
 	// M1: All rate comparisons should use netRate = rate × (1 - FeeRate)
@@ -44,11 +34,30 @@ const (
 
 // PricingStrategy computes the recommended offer rate based on market state.
 // Satisfies the worker.Strategy interface via Apply(*DecisionContext) *DecisionResult.
-type PricingStrategy struct{}
+type PricingStrategy struct {
+	maxPremiumUp           float64
+	maxPremiumDown         float64
+	deviationContango      float64
+	deviationBackwardation float64
+	deviationNeutral       float64
+	deviationCrisis        float64
+}
 
-// NewPricingStrategy creates a new PricingStrategy.
+// NewPricingStrategyWithPreset creates a PricingStrategy using a CurrencyPreset.
+func NewPricingStrategyWithPreset(preset domain.CurrencyPreset) *PricingStrategy {
+	return &PricingStrategy{
+		maxPremiumUp:           preset.MaxPremiumUp,
+		maxPremiumDown:         preset.MaxPremiumDown,
+		deviationContango:      preset.DeviationContango,
+		deviationBackwardation: preset.DeviationBackwardation,
+		deviationNeutral:       preset.DeviationNeutral,
+		deviationCrisis:        preset.DeviationCrisis,
+	}
+}
+
+// NewPricingStrategy creates a PricingStrategy with stablecoin defaults (backward compatible).
 func NewPricingStrategy() *PricingStrategy {
-	return &PricingStrategy{}
+	return NewPricingStrategyWithPreset(domain.StablecoinPreset)
 }
 
 // Apply evaluates the current market state and returns a decision with the recommended rate.
@@ -119,9 +128,9 @@ func (p *PricingStrategy) selectBaseRate(snap *domain.MarketSnapshot) float64 {
 // MDC -1 → 1.0 - maxPremiumDown (0.7)
 func (p *PricingStrategy) mdcMultiplier(score float64) float64 {
 	if score >= 0 {
-		return 1.0 + score*maxPremiumUp
+		return 1.0 + score*p.maxPremiumUp
 	}
-	return 1.0 + score*maxPremiumDown
+	return 1.0 + score*p.maxPremiumDown
 }
 
 // applyRegime adjusts rate based on market regime.
@@ -172,14 +181,14 @@ func (p *PricingStrategy) applyDeviationGuard(rate, baseRate float64, regime dom
 		return rate
 	}
 
-	ceiling := deviationNeutral
+	ceiling := p.deviationNeutral
 	switch regime {
 	case domain.RegimeContango:
-		ceiling = deviationContango
+		ceiling = p.deviationContango
 	case domain.RegimeBackwardation:
-		ceiling = deviationBackwardation
+		ceiling = p.deviationBackwardation
 	case domain.RegimeCrisis:
-		ceiling = deviationCrisis
+		ceiling = p.deviationCrisis
 	}
 
 	// Hard ceiling always applies
@@ -211,10 +220,15 @@ func EffectiveFRR(frr float64, bookMidRate float64) float64 {
 	return frr
 }
 
-// ComputeBaseRate computes the rate using bestAsk-relative pricing (S1).
-// Falls back to FRR-based pricing when bestAsk is unavailable.
+// ComputeBaseRate computes the rate using stablecoin defaults (backward compatible).
 func ComputeBaseRate(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig) float64 {
-	p := &PricingStrategy{}
+	return ComputeBaseRateWithPreset(snap, cfg, domain.StablecoinPreset)
+}
+
+// ComputeBaseRateWithPreset computes the rate using bestAsk-relative pricing (S1)
+// with a per-currency preset. Falls back to FRR-based pricing when bestAsk is unavailable.
+func ComputeBaseRateWithPreset(snap *domain.MarketSnapshot, cfg *domain.StrategyConfig, preset domain.CurrencyPreset) float64 {
+	p := NewPricingStrategyWithPreset(preset)
 
 	bestAsk := snap.OrderBook.BestAsk
 	if bestAsk <= 0 {
