@@ -30,3 +30,15 @@ type OfferDecision struct {
 	Rate   float64
 	Period int
 }
+
+// PeriodTierRange defines the period bounds for one tier of the ladder.
+type PeriodTierRange struct {
+	Min int
+	Max int
+}
+
+// PeriodLadder holds the computed period for each allocation tier.
+// Periods[i] corresponds to the i-th allocation tier.
+type PeriodLadder struct {
+	Periods []int
+}

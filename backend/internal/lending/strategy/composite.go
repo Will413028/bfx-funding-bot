@@ -200,11 +200,22 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 	available *= deployRatio
 
 	tiers := ComputeTiers(available, snap.Regime)
+
+	// S9: Compute period ladder — per-tier periods instead of uniform
+	ladder := ComputePeriodLadder(
+		snap.Regime, snap.RegimeParams.Volatility, rate, snap.FRR, cfg,
+		snap.RatePercentile, ctx.ActiveCredits, len(tiers), c.now(),
+	)
+
 	var offers []domain.OfferDecision
 
-	for _, t := range tiers {
+	for ti, t := range tiers {
 		tierAmount := available * t.Ratio
 		tierRate := clamp(rate*t.RateMultiplier, cfg.Rate.Min, cfg.Rate.Max)
+		tierPeriod := period // fallback
+		if ti < len(ladder.Periods) {
+			tierPeriod = ladder.Periods[ti]
+		}
 
 		// Depth-aware splitting
 		splitCount := ComputeSplits(tierAmount, snap.OrderBook.AskDepth)
@@ -214,7 +225,7 @@ func (c *CompositeStrategy) Apply(ctx *domain.DecisionContext) *domain.DecisionR
 			offers = append(offers, domain.OfferDecision{
 				Amount: perSplit,
 				Rate:   tierRate,
-				Period: period,
+				Period: tierPeriod,
 			})
 		}
 	}

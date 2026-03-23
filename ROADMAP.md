@@ -233,7 +233,7 @@ marketfeed/service.go (C1)
 - [x] S6 Dynamic Weekend Premium — 歷史 ratio 動態計算（`03f63ad`）
 - [x] S7 Per-Currency Parameters — stablecoin / crypto 分組
 - [x] S8 Confidence-Scaled Deployment（`e5825aa`）
-- [ ] S9 Rolling Period Ladder — 到期梯隊管理
+- [x] S9 Rolling Period Ladder — 到期梯隊管理
 - [x] S10 Mean-Reversion P(higher) — EV_wait 均值回歸公式（`12829a2`）
 
 <details>
@@ -294,7 +294,7 @@ marketfeed/service.go (C1)
 | ~~Phase J（Auth 強化）~~ | ~~J1+J2+J3+J5+J6~~ ✅ |
 | ~~Phase K（前端測試）~~ | ~~K2~~ ✅ |
 | ~~Phase L（UX 強化）~~ | ~~L1+L2+L3+L4+L5~~ ✅ |
-| **待開發合計** | **4 項**（G13 + S9 + M7 + H3） |
+| **待開發合計** | **3 項**（G13 + M7 + H3） |
 
 ## 依賴關係
 
@@ -384,9 +384,9 @@ Phase A ✅ 全部完成
 - [x] S10 Mean-Reversion P(higher)（`12829a2`）
 - [x] M2 Gap Cost Tracking + Pre-scheduling（`12829a2`）
 
-#### P5 — 高複雜度架構（1/4）
+#### P5 — 高複雜度架構（2/4）
 
 - [x] S7 Per-Currency Parameters
-- [ ] S9 Rolling Period Ladder
+- [x] S9 Rolling Period Ladder
 - [ ] M7 Temporal Laddering
 - [ ] G13 Historical Fill Rate Learning
