@@ -3,6 +3,7 @@ package strategy
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
@@ -234,5 +235,105 @@ func TestPeriod_InsufficientBalance(t *testing.T) {
 	}
 	if res.Reason != "insufficient_balance" {
 		t.Errorf("reason: got %q, want %q", res.Reason, "insufficient_balance")
+	}
+}
+
+// --- Period Ladder Tests ---
+
+func ladderCfg() *domain.StrategyConfig {
+	return &domain.StrategyConfig{
+		Currency: "USD",
+		Period:   domain.PeriodConfig{Min: 2, Max: 30},
+		Rate:     domain.RateConfig{Min: 0.0001, Max: 0.01},
+		Amount:   domain.AmountConfig{Min: 50, Max: 10000},
+	}
+}
+
+func TestComputePeriodLadder_ThreeTiers(t *testing.T) {
+	cfg := ladderCfg()
+	now := time.Now()
+
+	ladder := ComputePeriodLadder(
+		domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg,
+		0.0, nil, 3, now,
+	)
+
+	if len(ladder.Periods) != 3 {
+		t.Fatalf("expected 3 periods, got %d", len(ladder.Periods))
+	}
+
+	// Short=[2,11], Medium=[12,20], Long=[21,30]
+	if ladder.Periods[0] < 2 || ladder.Periods[0] > 11 {
+		t.Errorf("short period %d not in [2,11]", ladder.Periods[0])
+	}
+	if ladder.Periods[1] < 12 || ladder.Periods[1] > 20 {
+		t.Errorf("medium period %d not in [12,20]", ladder.Periods[1])
+	}
+	if ladder.Periods[2] < 21 || ladder.Periods[2] > 30 {
+		t.Errorf("long period %d not in [21,30]", ladder.Periods[2])
+	}
+}
+
+func TestComputePeriodLadder_Degrade(t *testing.T) {
+	cfg := &domain.StrategyConfig{
+		Currency: "USD",
+		Period:   domain.PeriodConfig{Min: 2, Max: 4}, // range=2 < 3
+		Rate:     domain.RateConfig{Min: 0.0001, Max: 0.01},
+		Amount:   domain.AmountConfig{Min: 50, Max: 10000},
+	}
+	now := time.Now()
+
+	ladder := ComputePeriodLadder(
+		domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg,
+		0.0, nil, 3, now,
+	)
+
+	// Should degrade: all periods same
+	if len(ladder.Periods) != 3 {
+		t.Fatalf("expected 3 periods, got %d", len(ladder.Periods))
+	}
+	if ladder.Periods[0] != ladder.Periods[1] || ladder.Periods[1] != ladder.Periods[2] {
+		t.Errorf("degrade: periods should be identical, got %v", ladder.Periods)
+	}
+}
+
+func TestComputePeriodLadder_RatePercentileShift(t *testing.T) {
+	cfg := ladderCfg()
+	now := time.Now()
+
+	ladderHigh := ComputePeriodLadder(
+		domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg,
+		0.8, nil, 3, now,
+	)
+	ladderLow := ComputePeriodLadder(
+		domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg,
+		-0.8, nil, 3, now,
+	)
+
+	// High percentile should produce longer periods than low
+	for i := 0; i < 3; i++ {
+		if ladderHigh.Periods[i] < ladderLow.Periods[i] {
+			t.Errorf("tier %d: high percentile (%d) should >= low percentile (%d)",
+				i, ladderHigh.Periods[i], ladderLow.Periods[i])
+		}
+	}
+}
+
+func TestComputePeriodLadder_SingleTier(t *testing.T) {
+	cfg := ladderCfg()
+	now := time.Now()
+
+	ladder := ComputePeriodLadder(
+		domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg,
+		0.0, nil, 1, now,
+	)
+
+	if len(ladder.Periods) != 1 {
+		t.Fatalf("expected 1 period, got %d", len(ladder.Periods))
+	}
+	// Single tier uses ComputePeriod fallback
+	expected := ComputePeriod(domain.RegimeNeutral, 0.05, 0.0002, 0.0002, cfg)
+	if ladder.Periods[0] != expected {
+		t.Errorf("single tier: got %d, want %d", ladder.Periods[0], expected)
 	}
 }

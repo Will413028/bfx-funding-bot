@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"math"
+	"time"
 
 	"github.com/will/bfx-funding-bot/backend/internal/domain"
 )
@@ -132,6 +133,116 @@ func clampInt(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// ComputePeriodLadder computes per-tier periods for the rolling period ladder.
+// tierCount determines how many periods to compute (matching allocation tiers).
+// Returns a PeriodLadder with Periods[i] for each tier.
+func ComputePeriodLadder(
+	regime domain.RegimeType,
+	volatility float64,
+	offeredRate float64,
+	frr float64,
+	cfg *domain.StrategyConfig,
+	ratePercentile float64,
+	credits []domain.FundingCredit,
+	tierCount int,
+	now time.Time,
+) domain.PeriodLadder {
+	totalRange := cfg.Period.Max - cfg.Period.Min
+
+	// Degrade: range too small or single tier → use single period
+	if totalRange < 3 || tierCount <= 1 {
+		p := ComputePeriod(regime, volatility, offeredRate, frr, cfg)
+		periods := make([]int, tierCount)
+		for i := range periods {
+			periods[i] = p
+		}
+		return domain.PeriodLadder{Periods: periods}
+	}
+
+	// Split into 3 tier ranges: Short, Medium, Long
+	tierSize := totalRange / 3
+	ranges := []domain.PeriodTierRange{
+		{Min: cfg.Period.Min, Max: cfg.Period.Min + tierSize},
+		{Min: cfg.Period.Min + tierSize + 1, Max: cfg.Period.Min + 2*tierSize},
+		{Min: cfg.Period.Min + 2*tierSize + 1, Max: cfg.Period.Max},
+	}
+
+	// Map allocation tier count to period tiers:
+	// 1 tier → Medium, 2 tiers → Short+Medium, 3 tiers → Short+Medium+Long
+	var selectedRanges []domain.PeriodTierRange
+	switch tierCount {
+	case 2:
+		selectedRanges = ranges[:2] // Short + Medium
+	default:
+		selectedRanges = ranges // Short + Medium + Long
+	}
+
+	ps := &PeriodStrategy{}
+	periods := make([]int, len(selectedRanges))
+	for i, tr := range selectedRanges {
+		// Base period within tier range using regime/rate/volatility
+		tierRange := float64(tr.Max - tr.Min)
+		ratio := ps.regimeRatio(regime)
+		basePeriod := float64(tr.Min) + ratio*tierRange
+
+		// Rate scaling
+		if frr > 0 && offeredRate > 0 {
+			rateRatio := math.Min(offeredRate/frr, rateRatioCap)
+			scaleFactor := 1.0 + (rateRatio-1.0)*rateScaleWeight
+			basePeriod *= scaleFactor
+		}
+
+		// Volatility discount
+		basePeriod = ps.applyVolatilityDiscount(basePeriod, volatility)
+
+		// RatePercentile shift: >0.5 → toward Long, <-0.5 → toward Short
+		if ratePercentile > 0.5 {
+			shift := ratePercentile * tierRange * 0.3
+			basePeriod += shift
+		} else if ratePercentile < -0.5 {
+			shift := ratePercentile * tierRange * 0.3 // negative value
+			basePeriod += shift
+		}
+
+		period := int(math.Round(basePeriod))
+		period = clampInt(period, tr.Min, tr.Max)
+
+		// Per-tier stagger: find least-congested day within tier range
+		period = adjustPeriodInRange(period, credits, tr.Min, tr.Max, now)
+
+		periods[i] = period
+	}
+
+	return domain.PeriodLadder{Periods: periods}
+}
+
+// adjustPeriodInRange finds the least-congested expiry day within [lo, hi].
+func adjustPeriodInRange(basePeriod int, credits []domain.FundingCredit, lo, hi int, now time.Time) int {
+	if len(credits) == 0 {
+		return basePeriod
+	}
+
+	buckets := make(map[int]float64)
+	for _, c := range credits {
+		expiryTime := c.OpenedAt.Add(time.Duration(c.Period) * 24 * time.Hour)
+		daysUntil := int(math.Ceil(expiryTime.Sub(now).Hours() / 24))
+		if daysUntil < 1 {
+			daysUntil = 1
+		}
+		buckets[daysUntil] += c.Amount
+	}
+
+	bestPeriod := basePeriod
+	minAmount := math.MaxFloat64
+	for day := lo; day <= hi; day++ {
+		if buckets[day] < minAmount {
+			minAmount = buckets[day]
+			bestPeriod = day
+		}
+	}
+	return bestPeriod
 }
 
 // ComputePeriod computes the optimal lending period based on regime, rate
