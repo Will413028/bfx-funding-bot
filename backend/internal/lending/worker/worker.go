@@ -18,7 +18,14 @@ const (
 	coldStartPhase1MDC = 0.0  // pure FRR following
 	coldStartPhase2MDC = 0.50 // VWAP activated
 	coldStartPhase3MDC = 0.75 // advanced signals activated
+
+	// M7: Temporal Laddering — deploy in 3 tranches across heartbeats
+	minLadderingBalance = 100.0 // skip laddering below this (minBalance × 2)
 )
+
+// trancheRatios maps trancheIndex → fraction of Available to expose.
+// T+0: 1/3, T+1: 1/2 of remaining (~1/3 original), T+2: all remaining (~1/3 original).
+var trancheRatios = [3]float64{1.0 / 3.0, 1.0 / 2.0, 1.0}
 
 // Strategy computes lending decisions from market + user context.
 type Strategy interface {
@@ -78,6 +85,7 @@ type LendingWorker struct {
 	nowFn            func() time.Time                     // injectable clock for testing
 	userID           string
 	config           domain.StrategyConfig
+	trancheIndex     int // M7: current tranche (0/1/2) for temporal laddering
 }
 
 // NewLendingWorker creates a new LendingWorker.
@@ -134,7 +142,9 @@ func (w *LendingWorker) Stop() {
 }
 
 // ReloadConfig updates the worker's config for the next tick. Non-blocking.
+// M7: Resets trancheIndex to restart the laddering cycle.
 func (w *LendingWorker) ReloadConfig(config domain.StrategyConfig) {
+	w.trancheIndex = 0
 	// Drain old value if present
 	select {
 	case <-w.configCh:
@@ -256,6 +266,11 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 	// M2: Inject gap cost
 	decisionCtx.AvgGapMinutes = w.gapMinutesEMA
 
+	// M7: Temporal Laddering — limit Available to current tranche fraction
+	if decisionCtx.Available >= minLadderingBalance {
+		decisionCtx.Available *= trancheRatios[w.trancheIndex]
+	}
+
 	// Phase 3: Strategy decision
 	decision := w.deps.Strategy.Apply(decisionCtx)
 
@@ -270,6 +285,12 @@ func (w *LendingWorker) tick(ctx context.Context, snapshot *domain.MarketSnapsho
 		// G11: Update lastLentAt on successful execution
 		if execErr == nil && len(decision.Offers) > 0 {
 			w.lastLentAt = w.nowFn()
+
+			// M7: Advance tranche after successful deployment
+			w.trancheIndex++
+			if w.trancheIndex >= len(trancheRatios) {
+				w.trancheIndex = 0
+			}
 
 			// M2: Track gap duration
 			if !w.lastCreditExpiry.IsZero() {
