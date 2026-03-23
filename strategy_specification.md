@@ -1060,6 +1060,8 @@ weekendPremium = rolling_4wk_weekend_avg_rate / rolling_4wk_weekday_avg_rate
 | Regime 進入閾值 | ±0.4（穩定，需更大偏離才確認） | ±0.25（波動大，要快速反應） |
 | Period 偏好 | 偏長（利率穩定，鎖長期） | 偏短（利率多變，保持靈活） |
 
+> ⚡ **實作狀態**（S7, commit `12bb8a8`）：已實作。新增 `domain.CurrencyPreset` 型別，內建 `StablecoinPreset`（保留原始硬編碼值確保向後相容）和 `CryptoPreset`（BookConsumption 0.30、regime enter 0.25、maxPremiumUp 0.60）。MDCAggregator、RegimeDetector、PricingStrategy 均改為注入式建構子。Market Feed 的 MDC/Regime 已改為 per-symbol 實例。Worker 初始化時根據 `config.Currency` 自動選擇 preset。
+
 ### 12.8 信心度 × 部署比例 (S3)
 
 **問題**：MDC 只影響 rate 和 period，不影響部署多少資金。信號矛盾時不應全量部署。
@@ -1086,6 +1088,8 @@ actualAmount = available × deploymentRatio
 - `> P75` → 轉長期（鎖住高利率）
 - `P25–P75` → 維持同梯隊
 - `< P25` → 轉短期（等待回升）
+
+> ⚡ **實作狀態**（S9, commit `7bcaee7`）：已實作。新增 `ComputePeriodLadder()` 將 `[Period.Min, Period.Max]` 等分為 Short/Medium/Long 三層，與 allocation tier 1:1 映射（Core→Short, Moderate→Medium, Aggressive→Long）。RatePercentile 偏移各 tier 的 period（>P75 向 Long，<P25 向 Short）。每個 tier 內獨立做碰撞避免。range < 3 或單 tier 時退化為原始 `ComputePeriod()`。
 
 ### 12.10 P(higher_rate) 均值回歸公式 (S3)
 

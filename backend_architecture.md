@@ -149,28 +149,36 @@ backend/
 │   │   ├── marketfeed/                  # 共享市場數據服務（Phase 0-3）
 │   │   │   ├── service.go               #   主循環：數據拉取 → 信號計算 → 廣播
 │   │   │   ├── snapshot.go              #   MarketSnapshot 組裝
-│   │   │   └── flashcrash.go            #   閃崩偵測（Phase 1.5）
+│   │   │   ├── flashcrash.go            #   閃崩偵測（Phase 1.5）
+│   │   │   └── interfaces.go            #   SignalSource interface 定義
 │   │   │
-│   │   ├── signal/                      # 信號計算模組
-│   │   │   ├── mdc.go                   #   MDC 計算 + 衰減 + 復甦平滑
+│   │   ├── signal/                      # 信號計算模組（13 files）
+│   │   │   ├── mdc.go                   #   MDC 計算 + per-currency preset 權重（S7）
 │   │   │   ├── book.go                  #   Order Book 消耗速度
 │   │   │   ├── liquidation.go           #   清算瀑布偵測
 │   │   │   ├── momentum.go              #   雙速 VWAP
 │   │   │   ├── margin.go                #   保證金持倉量
 │   │   │   ├── crossccy.go              #   跨幣種 Funding Rate
-│   │   │   ├── intraday.go             #   日內時段 + 月內修正
-│   │   │   └── regime.go                #   市場體制識別
+│   │   │   ├── intraday.go              #   日內時段 + 月內修正
+│   │   │   ├── regime.go                #   市場體制識別 + per-currency 門檻（S7）
+│   │   │   ├── health.go                #   信號健康度追蹤（G9 三態偵測）
+│   │   │   ├── frrtrend.go              #   FRR 趨勢信號（G12）
+│   │   │   ├── percentile.go            #   歷史百分位信號（S4）
+│   │   │   └── ratespike.go             #   利率飆升偵測（M5）
 │   │   │
-│   │   ├── orderbook/                   # 掛單簿分析
+│   │   ├── orderbook/                   # 掛單簿分析（6 files）
 │   │   │   ├── dust.go                  #   動態 Dust Filter
 │   │   │   ├── wall.go                  #   巨單牆 + 分散牆偵測
 │   │   │   ├── hidden.go                #   Hidden Ratio 估算
-│   │   │   └── competitor.go            #   競爭者行為偵測
+│   │   │   ├── competitor.go            #   競爭者行為偵測
+│   │   │   ├── gap.go                   #   掛單簿缺口偵測（G16）
+│   │   │   └── summary.go              #   掛單簿摘要統計
 │   │   │
-│   │   ├── strategy/                    # 策略決策（Phase 4）
-│   │   │   ├── pricing.go               #   溢價係數 + MDC 映射
+│   │   ├── strategy/                    # 策略決策（Phase 4，20 files）
+│   │   │   ├── composite.go             #   四階段 pipeline 編排（S7 per-currency preset）
+│   │   │   ├── pricing.go               #   溢價係數 + MDC 映射（S7 per-currency）
 │   │   │   ├── floor.go                 #   利率地板 + 機會成本框架
-│   │   │   ├── period.go                #   天數決策（曲線形態、線性縮放）
+│   │   │   ├── period.go                #   天數決策 + Rolling Period Ladder（S9）
 │   │   │   ├── lockup.go                #   鎖倉機會成本折扣
 │   │   │   ├── allocation.go            #   資金分層佈署
 │   │   │   ├── splitting.go             #   深度感知掛單拆分
@@ -180,7 +188,13 @@ backend/
 │   │   │   ├── stagger.go               #   到期時間分散
 │   │   │   ├── weekend.go               #   週末遞減溢價
 │   │   │   ├── calendar.go              #   特殊事件日曆
-│   │   │   └── noise.go                 #   隨機擾動 + 心理價位避讓
+│   │   │   ├── noise.go                 #   隨機擾動 + 心理價位避讓
+│   │   │   ├── earlyreturn.go           #   提前還款風險溢價（G5）
+│   │   │   ├── hidden.go                #   Hidden order 策略（G14）
+│   │   │   ├── maintenance.go           #   維護模式處理
+│   │   │   ├── meanreversion.go         #   均值回歸 P(higher) 計算（S10）
+│   │   │   ├── opportunitycost.go       #   機會成本框架
+│   │   │   └── termstructure.go         #   期限結構分析
 │   │   │
 │   │   ├── execution/                   # 掛單執行（Phase 5-6）
 │   │   │   ├── offer.go                 #   掛單 / 撤單 / 原子化換單
@@ -193,8 +207,15 @@ backend/
 │   │   │   ├── worker.go                #   單一 Worker 主循環
 │   │   │   └── lifecycle.go             #   啟動 / 暫停 / 崩潰 / 重啟
 │   │   │
-│   │   └── quota/                       # 全局 API 配額分配器
-│   │       └── allocator.go
+│   │   ├── quota/                       # 全局 API 配額分配器
+│   │   │   ├── allocator.go             #   公平分配演算法
+│   │   │   └── limiter_pool.go          #   Per-user rate limiter pool
+│   │   │
+│   │   └── tracking/                    # 效能追蹤（G10）
+│   │       ├── alpha.go                 #   Alpha 收益追蹤（vs FRR baseline）
+│   │       ├── attribution.go           #   策略貢獻歸因
+│   │       ├── feedback.go              #   自適應反饋迴路
+│   │       └── summary.go              #   效能摘要統計
 │   │
 │   │   # ── Domain 層 ──
 │   ├── domain/
