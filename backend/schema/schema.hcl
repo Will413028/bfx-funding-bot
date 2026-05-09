@@ -271,3 +271,93 @@ table "billing_records" {
     on_delete   = CASCADE
   }
 }
+
+table "funding_candles" {
+  schema = schema.public
+
+  column "symbol" {
+    type = text
+    null = false
+  }
+  column "timeframe" {
+    type = text
+    null = false
+  }
+  column "period_agg" {
+    type = text
+    null = false
+  }
+  column "mts" {
+    type = bigint
+    null = false
+  }
+  column "open" {
+    type = double_precision
+    null = true
+  }
+  column "close" {
+    type = double_precision
+    null = true
+  }
+  column "high" {
+    type = double_precision
+    null = true
+  }
+  column "low" {
+    type = double_precision
+    null = true
+  }
+  column "volume" {
+    type = double_precision
+    null = true
+  }
+
+  primary_key {
+    columns = [column.symbol, column.timeframe, column.period_agg, column.mts]
+  }
+
+  index "idx_funding_candles_mts" {
+    columns = [column.mts]
+  }
+}
+
+table "funding_stats" {
+  schema = schema.public
+
+  column "symbol" {
+    type = text
+    null = false
+  }
+  column "mts" {
+    type = bigint
+    null = false
+  }
+  column "frr" {
+    type = double_precision
+    null = true
+  }
+  column "avg_period" {
+    type = double_precision
+    null = true
+  }
+  column "funding_amount" {
+    type = double_precision
+    null = true
+  }
+  column "funding_amount_used" {
+    type = double_precision
+    null = true
+  }
+  column "funding_below_threshold" {
+    type = double_precision
+    null = true
+  }
+
+  primary_key {
+    columns = [column.symbol, column.mts]
+  }
+
+  index "idx_funding_stats_mts" {
+    columns = [column.mts]
+  }
+}
