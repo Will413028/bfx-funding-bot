@@ -1,0 +1,13 @@
+# Lefthook for monorepo: backend/ (go) + frontend/ (nextjs+biome)
+# 套到：bfx-funding-bot
+pre-commit:
+  parallel: true
+  commands:
+    frontend-check:
+      root: "frontend/"
+      glob: "*.{js,ts,jsx,tsx,json,css}"
+      run: npx @biomejs/biome check --write --staged {staged_files}
+    backend-check:
+      root: "backend/"
+      glob: "*.go"
+      run: golangci-lint run --fix
