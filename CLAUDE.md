@@ -6,7 +6,6 @@ Bitfinex 自動放貸 SaaS 平台。
 
 - `backend/` — Go 1.25 後端（Gin + fx + zap）
 - `frontend/` — Next.js 16 前端
-- `openspec/` — OpenSpec 變更管理
 - `backend_architecture.md` — **架構設計 source of truth**（功能規劃、分層架構、DB schema、API endpoints）
 
 ## 部署架構
@@ -28,24 +27,22 @@ Bitfinex 自動放貸 SaaS 平台。
 | `atlas migrate apply` | `backend/schema/` | `cd backend/schema && source ../../.env && atlas migrate apply --env neon` |
 | `sqlc generate` | `backend/` | `cd backend && sqlc generate` |
 | `go test` | `backend/` | `cd backend && go test ./...` |
-| `openspec` | 專案根目錄 | `openspec status --change "xxx"` |
 
 ## 開發規範
 
-### OpenSpec 工作流（強制）
+### 開發工作流（Superpowers）
 
-**所有功能開發、bug 修復、重構都必須使用 OpenSpec 工作流。不可跳過。**
+**所有功能開發、bug 修復、重構使用 Superpowers 技能：**
 
-流程：
-1. `/opsx:propose` — 建立 change，產出 proposal + design + specs + tasks
-2. `/opsx:apply` — 逐一實作 tasks，每完成一個打勾
-3. `/opsx:archive` — 歸檔 change，同步 specs 到 `openspec/specs/`
+1. `brainstorming` skill — 新功能前釐清需求與設計方向
+2. `writing-plans` skill — 輸出實作計畫
+3. `test-driven-development` skill — 實作前先寫測試
+4. `executing-plans` skill — 依計畫逐步實作
+5. `requesting-code-review` skill — 完成後驗證
 
 規則：
-- **每個 change 必須包含單元測試**。tasks.md 的最後一組必須有驗證項（`go build` + `go test`）
-- Specs 中的每個 Requirement 必須有至少一個 Scenario（測試案例）
-- 實作完成後必須確認 `go test ./...` 全部通過才能 archive
-- 純文件修改（ROADMAP、strategy-journal 等）不需要走 OpenSpec
+- 每個功能必須包含單元測試，`go test ./...` 全過才能 commit
+- 純文件修改（ROADMAP、strategy-journal 等）不需要走完整工作流
 
 ### 測試與品質（強制）
 
