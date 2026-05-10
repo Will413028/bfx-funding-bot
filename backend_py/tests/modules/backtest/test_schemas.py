@@ -10,13 +10,17 @@ def test_backtest_result_construction() -> None:
         start_mts=1704067200000,
         end_mts=1706745600000,
         n_candles=720,
-        monthly_return_pct=Decimal("0.45"),
+        gross_monthly_return_pct=Decimal("0.45"),
+        net_monthly_return_pct=Decimal("0.3825"),
         max_drawdown_pct=Decimal("0.05"),
         n_trades=30,
+        fill_rate=Decimal("1.0"),
     )
     assert result.strategy_name == "always_frr"
-    assert result.monthly_return_pct == Decimal("0.45")
+    assert result.gross_monthly_return_pct == Decimal("0.45")
+    assert result.net_monthly_return_pct == Decimal("0.3825")
     assert result.max_drawdown_pct == Decimal("0.05")
+    assert result.fill_rate == Decimal("1.0")
 
 
 def test_lend_decision_construction() -> None:
