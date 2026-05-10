@@ -21,20 +21,3 @@ class FundingCandleRow(Base):
         PrimaryKeyConstraint("symbol", "timeframe", "period_agg", "mts"),
         Index("idx_funding_candles_mts", "mts"),
     )
-
-
-class FundingStatRow(Base):
-    __tablename__ = "funding_stats"
-
-    symbol: Mapped[str] = mapped_column(Text, nullable=False)
-    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    frr: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_period: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_amount_used: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_below_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    __table_args__ = (
-        PrimaryKeyConstraint("symbol", "mts"),
-        Index("idx_funding_stats_mts", "mts"),
-    )
