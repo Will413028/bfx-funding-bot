@@ -1,5 +1,7 @@
-"""Day-4/5 Checkpoint 2 driver: load candles from Neon → run baseline strategy
-→ print monthly return + drawdown.
+"""Backtest CLI: load candles from Neon → run strategy → print friction-aware result.
+
+v2 Phase 1: applies BacktestConfig defaults (fee_rate=0.15, gap_minutes=30,
+fill_alpha=5.0, market_rate_source='candle_close').
 
 Usage:
     cd backend_py
@@ -76,12 +78,14 @@ async def _amain() -> int:
         result = run_backtest(candles, strategy)
 
         logger.info("=" * 60)
-        logger.info("✅ Checkpoint 2 backtest result")
+        logger.info("✅ Backtest result (v2 friction-aware engine)")
         logger.info("  Strategy:           %s", result.strategy_name)
         logger.info("  Symbol:             %s", result.symbol)
         logger.info("  Candles processed:  %d", result.n_candles)
         logger.info("  Trades simulated:   %d", result.n_trades)
-        logger.info("  Monthly return:     %s%% (net)", result.net_monthly_return_pct)
+        logger.info("  Fill rate:          %s", result.fill_rate)
+        logger.info("  Gross monthly ret:  %s%% (pre-fee)", result.gross_monthly_return_pct)
+        logger.info("  Net monthly ret:    %s%% (after 15%% fee + gap)", result.net_monthly_return_pct)
         logger.info("  Max drawdown:       %s%%", result.max_drawdown_pct)
         logger.info("=" * 60)
         return 0
