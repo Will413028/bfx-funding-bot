@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql.dml import Insert as PGInsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -118,8 +118,6 @@ async def get_min_mts(
 ) -> int | None:
     """Return smallest mts for the given (symbol, timeframe, period_agg) series,
     or None if no rows exist."""
-    from sqlalchemy import func
-
     stmt = select(func.min(FundingCandleRow.mts)).where(
         FundingCandleRow.symbol == symbol,
         FundingCandleRow.timeframe == timeframe,

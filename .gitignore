@@ -27,6 +27,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Claude Code local state (scheduled tasks, session locks, etc.)
+.claude/
+
 # Go
 backend/server
 *.exe

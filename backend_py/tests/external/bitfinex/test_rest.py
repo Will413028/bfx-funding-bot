@@ -11,7 +11,6 @@ from bfx_funding_bot.external.bitfinex.errors import (
 )
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.modules.funding_stats.schemas import FundingStat  # noqa: F401
 
 
 @pytest.mark.asyncio
@@ -191,11 +190,12 @@ async def test_get_funding_stats_happy_path(httpx_mock: HTTPXMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_funding_stats_strips_leading_f(httpx_mock: HTTPXMock) -> None:
-    """Symbol 'fUSD' becomes 'fUSD' in URL path (the leading 'f' stays).
+async def test_get_funding_stats_preserves_leading_f(httpx_mock: HTTPXMock) -> None:
+    """Symbol 'fUSD' stays 'fUSD' in the URL path (leading 'f' is preserved).
 
     Bitfinex's funding_stats path is /v2/funding/stats/{Symbol}/hist where
-    Symbol is the full funding symbol (with leading f). Verify call shape.
+    Symbol is the full funding symbol (with leading f) — unlike candles which
+    strips and re-adds it. Verify the path uses fUSD as-is.
     """
     httpx_mock.add_response(
         url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=1&end=0",
