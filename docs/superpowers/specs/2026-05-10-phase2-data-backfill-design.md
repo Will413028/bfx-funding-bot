@@ -144,18 +144,20 @@ class FundingStat(BaseModel):
 
     @classmethod
     def from_bitfinex(cls, raw: list[Any], *, symbol: str) -> "FundingStat":
-        # raw shape (per Bitfinex v2 docs, to be re-verified by curl in Commit 3):
-        # [MTS, FRR, AVG_PERIOD, _, _, _, _, _, _, _,
-        #  FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _, _,
-        #  FUNDING_BELOW_THRESHOLD]   (16 entries)
-        if len(raw) < 16:
-            raise ValueError(f"expected ≥16 elements, got {len(raw)}: {raw!r}")
+        # raw shape (verified 2026-05-10 by curl + bfxapi/types/serializers.py
+        # in github.com/bitfinexcom/bitfinex-api-py — official SDK):
+        # [MTS, _, _, FRR, AVG_PERIOD, _, _,
+        #  FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _,
+        #  FUNDING_BELOW_THRESHOLD]   (12 entries; Bitfinex docs page lists
+        #  fields but not indices — empirical + SDK confirms these positions)
+        if len(raw) < 12:
+            raise ValueError(f"expected ≥12 elements, got {len(raw)}: {raw!r}")
         return cls(
             symbol=symbol, mts=int(raw[0]),
-            frr=_to_decimal(raw[1]), avg_period=_to_decimal(raw[2]),
-            funding_amount=_to_decimal(raw[10]),
-            funding_amount_used=_to_decimal(raw[11]),
-            funding_below_threshold=_to_decimal(raw[15]),
+            frr=_to_decimal(raw[3]), avg_period=_to_decimal(raw[4]),
+            funding_amount=_to_decimal(raw[7]),
+            funding_amount_used=_to_decimal(raw[8]),
+            funding_below_threshold=_to_decimal(raw[11]),
         )
 ```
 
@@ -401,7 +403,7 @@ funding_stats fUSD           ...
 
 | Risk | 緩解 |
 |---|---|
-| Bitfinex `funding/stats` array shape 跟記憶不一致（位置 1/2/10/11/15） | Commit 3 第一步 curl 真 endpoint 對照；不對就改 `from_bitfinex` 索引並更新本 spec |
+| ~~Bitfinex `funding/stats` array shape 跟記憶不一致（位置 1/2/10/11/15）~~ | **已解：** 2026-05-10 Commit 2 curl 確認真實 shape 是 12 元素，FRR=raw[3]、AVG_PERIOD=raw[4]、FUNDING_AMOUNT=raw[7]、FUNDING_AMOUNT_USED=raw[8]、FUNDING_BELOW_THRESHOLD=raw[11]；同時用官方 `bitfinex-api-py` SDK 的 serializer cross-check |
 | Resume-from-DB 在中間有空段時誤判已完成 | Check 4 continuity（≥95% / max-gap）會抓到；失敗 → 明確 fix 而非沉默漏資料 |
 | Walking-back 跑超過預期（rows >> 600k） | orchestrator log 每 series 即時印；超 60 min 自己 Ctrl-C，下次 resume 接著走 |
 | Bitfinex 429 rate limit 在第 N 個 series 觸發 | 既有 `FundingRateLimiter` 處理；該 series 個別失敗、其他繼續，下次重跑 resume |

@@ -289,30 +289,33 @@ Run:
 ```bash
 curl -s 'https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=1' | python3 -m json.tool
 ```
-Expected output 形式（範例）：
+Expected output 形式（**已於 2026-05-10 實測 + 官方 `bitfinex-api-py` SDK serializer cross-check**）：
 ```json
 [
     [
-        1715000000000,    // [0] MTS
-        5.8e-7,            // [1] FRR
-        2.3,               // [2] AVG_PERIOD
-        null, null, null, null, null, null, null,   // [3-9] placeholders
-        4.5e7,             // [10] FUNDING_AMOUNT
-        2.1e7,             // [11] FUNDING_AMOUNT_USED
-        null, null, null,  // [12-14] placeholders
-        1.2e6              // [15] FUNDING_BELOW_THRESHOLD
+        1778411100000,         // [0] MTS
+        null, null,            // [1-2] placeholders
+        1.12e-06,              // [3] FRR
+        94.98,                 // [4] AVG_PERIOD
+        null, null,            // [5-6] placeholders
+        5342703101.10,         // [7] FUNDING_AMOUNT
+        5295166008.38,         // [8] FUNDING_AMOUNT_USED
+        null, null,            // [9-10] placeholders
+        203888740.29           // [11] FUNDING_BELOW_THRESHOLD
     ]
 ]
 ```
 
-**驗證 checklist：**
+**驗證 checklist（執行 curl 後對照）：**
 1. 回傳是 array of arrays
-2. 內層 array 長度 ≥ 16
+2. 內層 array 長度 == 12（不是 16！Bitfinex docs 沒列實際 indices，docs 的順序是字面 list，跟陣列位置不對應）
 3. raw[0] 是 13 位數 ms timestamp
-4. raw[1] 是極小的 float（< 1e-3，符合「秒利率」推測）
-5. raw[10]、raw[11] 是大數字（資金量，USD）
+4. raw[3] 是極小的 float（~1e-6 ~ 1e-7，符合「秒利率」推測）
+5. raw[7]、raw[8] 是大數字且 raw[7] >= raw[8]（amount 必 ≥ amount_used）
 
-若 shape 與上方註解不一致 → **本 commit 後續所有 `from_bitfinex` 索引必須對齊實測 shape**。把實測一筆 raw 例子貼到 `funding_stats/schemas.py` 檔頭 docstring。
+若 shape 與上方註解 12 元素 / 0/3/4/7/8/11 indices 不一致 → 報 NEEDS_CONTEXT；不要自己猜。把實測一筆 raw 例子貼到 `funding_stats/schemas.py` 檔頭 docstring（Step 2.4 用）。
+
+**Cross-check 來源**: `github.com/bitfinexcom/bitfinex-api-py/blob/master/bfxapi/types/serializers.py` 裡 `FundingStatistic` serializer 的 labels 列表。
 
 - [ ] **Step 2.2: Write failing test for `FundingStat.from_bitfinex`**
 
@@ -329,20 +332,22 @@ from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 
 def test_funding_stat_from_bitfinex_array() -> None:
-    """Bitfinex /v2/funding/stats array shape (16 entries):
-    [MTS, FRR, AVG_PERIOD, _, _, _, _, _, _, _,
-     FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _, _,
+    """Bitfinex /v2/funding/stats array shape (12 entries; verified by
+    bfxapi/types/serializers.py + curl 2026-05-10):
+    [MTS, _, _, FRR, AVG_PERIOD, _, _,
+     FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _,
      FUNDING_BELOW_THRESHOLD]
     """
     raw = [
-        1715000000000,
-        5.8e-7,
-        2.3,
-        None, None, None, None, None, None, None,
-        4.5e7,
-        2.1e7,
-        None, None, None,
-        1.2e6,
+        1715000000000,        # [0] MTS
+        None, None,           # [1-2] placeholders
+        5.8e-7,               # [3] FRR
+        2.3,                  # [4] AVG_PERIOD
+        None, None,           # [5-6] placeholders
+        4.5e7,                # [7] FUNDING_AMOUNT
+        2.1e7,                # [8] FUNDING_AMOUNT_USED
+        None, None,           # [9-10] placeholders
+        1.2e6,                # [11] FUNDING_BELOW_THRESHOLD
     ]
     fs = FundingStat.from_bitfinex(raw, symbol="fUSD")
 
@@ -356,30 +361,31 @@ def test_funding_stat_from_bitfinex_array() -> None:
 
 
 def test_funding_stat_decimal_precision() -> None:
-    raw = [1715000000000, 5.823456789e-7, 2.3, None, None, None, None,
-           None, None, None, 4.5e7, 2.1e7, None, None, None, 1.2e6]
+    raw = [1715000000000, None, None, 5.823456789e-7, 2.3,
+           None, None, 4.5e7, 2.1e7, None, None, 1.2e6]
     fs = FundingStat.from_bitfinex(raw, symbol="fUSD")
     assert fs.frr is not None
     assert str(fs.frr).startswith("5.823456789")  # no float drift
 
 
 def test_funding_stat_handles_null_fields() -> None:
-    raw = [1715000000000, None, None, None, None, None, None,
-           None, None, None, None, None, None, None, None, None]
+    """All fields nullable (real Bitfinex returns None for placeholders 1/2/5/6/9/10)."""
+    raw = [1715000000000, None, None, None, None,
+           None, None, None, None, None, None, None]
     fs = FundingStat.from_bitfinex(raw, symbol="fUSD")
     assert fs.frr is None
     assert fs.funding_amount is None
 
 
 def test_funding_stat_timestamp_helper() -> None:
-    raw = [1704067200000, 0.0, 0.0, None, None, None, None,
-           None, None, None, 0.0, 0.0, None, None, None, 0.0]
+    raw = [1704067200000, None, None, 0.0, 0.0,
+           None, None, 0.0, 0.0, None, None, 0.0]
     fs = FundingStat.from_bitfinex(raw, symbol="fUSD")
     assert fs.timestamp() == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 
 
 def test_funding_stat_rejects_short_array() -> None:
-    raw = [1715000000000, 5.8e-7, 2.3]  # too short
+    raw = [1715000000000, None, None, 5.8e-7]  # too short (4 < 12)
     with pytest.raises((ValidationError, ValueError)):
         FundingStat.from_bitfinex(raw, symbol="fUSD")
 ```
@@ -396,14 +402,19 @@ Create: `backend_py/src/bfx_funding_bot/modules/funding_stats/schemas.py`
 ```python
 """Pydantic schema for Bitfinex /v2/funding/stats rows.
 
-Real-Bitfinex array shape (verified by curl in Commit 2 first step, 2026-05-10):
-[MTS, FRR, AVG_PERIOD, _, _, _, _, _, _, _,
- FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _, _,
- FUNDING_BELOW_THRESHOLD]
+Real-Bitfinex array shape (verified by curl 2026-05-10 + cross-check with
+official `bitfinex-api-py` SDK's `FundingStatistic` serializer):
+[MTS, _, _, FRR, AVG_PERIOD, _, _,
+ FUNDING_AMOUNT, FUNDING_AMOUNT_USED, _, _,
+ FUNDING_BELOW_THRESHOLD]   (12 entries)
 
-Sample raw row (paste actual curl output here when running Commit 2 Step 2.1):
-[1715000000000, 5.8e-7, 2.3, null, null, null, null, null, null, null,
- 4.5e7, 2.1e7, null, null, null, 1.2e6]
+Note: Bitfinex's docs page lists field names but does not specify array
+indices. Positions above are empirically verified — DO NOT trust the docs'
+listing order as positions.
+
+Sample raw row (fUSD, 2026-05-10):
+[1778411100000, null, null, 1.12e-06, 94.98, null, null,
+ 5342703101.10, 5295166008.38, null, null, 203888740.29]
 """
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -451,21 +462,21 @@ class FundingStat(BaseModel):
     def from_bitfinex(cls, raw: list[Any], *, symbol: str) -> "FundingStat":
         """Parse Bitfinex array shape — see module docstring for layout.
 
-        Required min length 16 (raw[15] = FUNDING_BELOW_THRESHOLD).
+        Required min length 12 (raw[11] = FUNDING_BELOW_THRESHOLD).
         """
-        if len(raw) < 16:
+        if len(raw) < 12:
             raise ValueError(
-                f"Expected ≥16 elements in Bitfinex funding_stats row, "
+                f"Expected ≥12 elements in Bitfinex funding_stats row, "
                 f"got {len(raw)}: {raw!r}"
             )
         return cls(
             symbol=symbol,
             mts=int(raw[0]),
-            frr=_to_decimal(raw[1]),
-            avg_period=_to_decimal(raw[2]),
-            funding_amount=_to_decimal(raw[10]),
-            funding_amount_used=_to_decimal(raw[11]),
-            funding_below_threshold=_to_decimal(raw[15]),
+            frr=_to_decimal(raw[3]),
+            avg_period=_to_decimal(raw[4]),
+            funding_amount=_to_decimal(raw[7]),
+            funding_amount_used=_to_decimal(raw[8]),
+            funding_below_threshold=_to_decimal(raw[11]),
         )
 ```
 
