@@ -860,10 +860,11 @@ async def test_get_funding_stats_happy_path(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=2&end=1715000000000",
         json=[
-            [1715000000000, 5.8e-7, 2.3, None, None, None, None,
-             None, None, None, 4.5e7, 2.1e7, None, None, None, 1.2e6],
-            [1714996400000, 5.7e-7, 2.4, None, None, None, None,
-             None, None, None, 4.4e7, 2.0e7, None, None, None, 1.1e6],
+            # 12-element shape: [mts, _, _, frr, avg_period, _, _, amount, used, _, _, below_thresh]
+            [1715000000000, None, None, 5.8e-7, 2.3, None, None,
+             4.5e7, 2.1e7, None, None, 1.2e6],
+            [1714996400000, None, None, 5.7e-7, 2.4, None, None,
+             4.4e7, 2.0e7, None, None, 1.1e6],
         ],
     )
 
@@ -894,8 +895,9 @@ async def test_get_funding_stats_strips_leading_f(httpx_mock: HTTPXMock) -> None
     httpx_mock.add_response(
         url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=1&end=0",
         json=[[
-            1715000000000, 5.8e-7, 2.3, None, None, None, None,
-            None, None, None, 4.5e7, 2.1e7, None, None, None, 1.2e6,
+            # 12-element shape (positions 0/3/4/7/8/11)
+            1715000000000, None, None, 5.8e-7, 2.3, None, None,
+            4.5e7, 2.1e7, None, None, 1.2e6,
         ]],
     )
 
