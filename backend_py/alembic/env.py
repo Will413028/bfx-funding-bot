@@ -10,14 +10,13 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from alembic import context
-
-from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.core.settings import Settings
+import bfx_funding_bot.modules.accounts.tables
 
 # Side-effect imports: register tables with Base.metadata
 import bfx_funding_bot.modules.candles.tables  # noqa: F401
-import bfx_funding_bot.modules.accounts.tables  # noqa: F401
+from alembic import context
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.settings import Settings
 
 config = context.config
 
@@ -37,9 +36,7 @@ def include_object(object, name, type_, reflected, compare_to):
     Per Q2 stack decision Alembic now owns schema; the table is left
     untouched as historical audit trail but excluded from drift detection.
     """
-    if type_ == "table" and name == "atlas_schema_revisions":
-        return False
-    return True
+    return not (type_ == "table" and name == "atlas_schema_revisions")
 
 
 def do_run_migrations(connection: Connection) -> None:
