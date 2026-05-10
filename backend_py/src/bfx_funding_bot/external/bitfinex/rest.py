@@ -1,0 +1,116 @@
+import json
+import logging
+
+import httpx
+
+from bfx_funding_bot.external.bitfinex.errors import (
+    BitfinexAPIError,
+    BitfinexRateLimited,
+    BitfinexShapeError,
+)
+from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+
+logger = logging.getLogger(__name__)
+
+
+class BitfinexREST:
+    """Hand-rolled async REST client for Bitfinex public funding endpoints.
+
+    Day-3 scope: ONE endpoint (get_funding_candles). Add others on demand.
+    """
+
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        base_url: str,
+        limiter: FundingRateLimiter,
+    ) -> None:
+        self._http = http
+        self._base_url = base_url.rstrip("/")
+        self._limiter = limiter
+
+    async def get_funding_candles(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        period_agg: str,
+        start: int,
+        end: int,
+        limit: int = 125,
+    ) -> list[FundingCandle]:
+        """Pull funding-rate candles.
+
+        Endpoint: GET /v2/candles/trade:{tf}:f{symbol}:{period_agg}/hist
+                  ?limit=N&start=MS&end=MS
+
+        Returns candles in **descending** mts order (newest first), per Bitfinex.
+        Pagination: max 10000 per call; default 125. start/end in **ms**.
+
+        Args:
+            symbol: e.g. "fUST", "fUSD". Tolerates leading "f".
+            timeframe: "1m", "5m", "1h", "1D", etc.
+            period_agg: aggregation key like "p2" (2-day), "a30" (avg of 30-day).
+            start: ms timestamp inclusive lower bound.
+            end: ms timestamp inclusive upper bound.
+            limit: max candles, max 10000.
+        """
+        sym = symbol[1:] if symbol.startswith("f") else symbol
+        path = f"/v2/candles/trade:{timeframe}:f{sym}:{period_agg}/hist"
+        params = {"limit": limit, "start": start, "end": end}
+
+        async with self._limiter.acquire():
+            try:
+                resp = await self._http.get(
+                    f"{self._base_url}{path}", params=params, timeout=30.0
+                )
+            except httpx.HTTPError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {e}", raw=None
+                ) from e
+
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after_seconds = None
+            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error",
+                raw=resp.text,
+            )
+
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON: {e}") from e
+
+        if not isinstance(payload, list):
+            raise BitfinexShapeError(
+                f"expected list of candles, got {type(payload).__name__}: {payload!r}"
+            )
+
+        candles: list[FundingCandle] = []
+        for entry in payload:
+            if not isinstance(entry, list):
+                raise BitfinexShapeError(
+                    f"expected each candle to be a list, got {type(entry).__name__}"
+                )
+            try:
+                candles.append(
+                    FundingCandle.from_bitfinex(
+                        entry,
+                        symbol=f"f{sym}",
+                        timeframe=timeframe,
+                        period_agg=period_agg,
+                    )
+                )
+            except (ValueError, TypeError) as e:
+                raise BitfinexShapeError(f"candle parse failed: {e}; raw={entry!r}") from e
+
+        return candles
