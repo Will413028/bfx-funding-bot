@@ -15,6 +15,18 @@ from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 logger = logging.getLogger(__name__)
 
 
+def _bitfinex_period_agg_path(period_agg: str) -> str:
+    """Translate user-facing period_agg → Bitfinex URL period_agg.
+
+    For aggregate candles (e.g. "a30"), Bitfinex requires an explicit
+    period range like "a30:p2:p30". Empirically, "a30" alone returns [].
+    Single-period values ("p2", "p30") pass through unchanged.
+    """
+    if period_agg.startswith("a") and ":" not in period_agg:
+        return f"{period_agg}:p2:p30"
+    return period_agg
+
+
 class BitfinexREST:
     """Hand-rolled async REST client for Bitfinex public funding endpoints.
 
@@ -58,7 +70,8 @@ class BitfinexREST:
             limit: max candles, max 10000.
         """
         sym = symbol[1:] if symbol.startswith("f") else symbol
-        path = f"/v2/candles/trade:{timeframe}:f{sym}:{period_agg}/hist"
+        url_period_agg = _bitfinex_period_agg_path(period_agg)
+        path = f"/v2/candles/trade:{timeframe}:f{sym}:{url_period_agg}/hist"
         params = {"limit": limit, "start": start, "end": end}
 
         async with self._limiter.acquire():
@@ -121,20 +134,25 @@ class BitfinexREST:
         *,
         symbol: str,
         end: int,
-        limit: int = 10000,
+        limit: int = 250,
     ) -> list[FundingStat]:
         """Pull funding_stats rows.
 
         Endpoint: GET /v2/funding/stats/{symbol}/hist?limit=N&end=MS
 
         Returns rows in **descending** mts order (newest first), per Bitfinex.
-        Pagination: max 10000 per call. `end` in **ms**, inclusive upper bound.
+        `end` in **ms**, inclusive upper bound.
+
+        Bitfinex empirically caps this endpoint at limit=250 (500+ returns
+        HTTP 500). The doc claims max 10000 but that is the funding_candles
+        limit — funding_stats is stricter. Use the default unless you have
+        verified larger pages work.
 
         Args:
             symbol: e.g. "fUSD", "fUST". Tolerates leading "f" already in
                 place (path uses symbol as-is).
             end: ms timestamp inclusive upper bound.
-            limit: max rows, max 10000.
+            limit: max rows. Empirically capped at 250 by Bitfinex.
         """
         sym = symbol if symbol.startswith("f") else f"f{symbol}"
         path = f"/v2/funding/stats/{sym}/hist"

@@ -19,6 +19,10 @@ _UPSERT_SET_COLS = [
     "funding_below_threshold",
 ]
 
+# asyncpg / PostgreSQL caps bind parameters per statement at 32767. With 7
+# columns per row, 4000 rows = 28000 placeholders — safely under the limit.
+_FUNDING_STAT_CHUNK = 4000
+
 
 def _to_float_or_none(d: Decimal | None) -> float | None:
     return float(d) if d is not None else None
@@ -50,35 +54,42 @@ async def upsert_funding_stats(
     session: AsyncSession,
     stats: list[FundingStat],
 ) -> None:
-    """Upsert funding_stats rows by composite PK (symbol, mts)."""
+    """Upsert funding_stats rows by composite PK (symbol, mts).
+
+    Chunked at _FUNDING_STAT_CHUNK rows per execute() to stay under
+    asyncpg's 32767 bind-parameter limit.
+    """
     if not stats:
         return
 
-    rows = [
-        {
-            "symbol": s.symbol,
-            "mts": s.mts,
-            "frr": _to_float_or_none(s.frr),
-            "avg_period": _to_float_or_none(s.avg_period),
-            "funding_amount": _to_float_or_none(s.funding_amount),
-            "funding_amount_used": _to_float_or_none(s.funding_amount_used),
-            "funding_below_threshold": _to_float_or_none(s.funding_below_threshold),
-        }
-        for s in stats
-    ]
-
     dialect_name = session.bind.dialect.name if session.bind else "postgresql"
-    stmt: PGInsert | SQLiteInsert
-    if dialect_name == "postgresql":
-        stmt = pg_insert(FundingStatRow).values(rows)
-    else:
-        stmt = sqlite_insert(FundingStatRow).values(rows)
 
-    stmt = stmt.on_conflict_do_update(
-        index_elements=_UPSERT_INDEX,
-        set_={col: getattr(stmt.excluded, col) for col in _UPSERT_SET_COLS},
-    )
-    await session.execute(stmt)
+    for i in range(0, len(stats), _FUNDING_STAT_CHUNK):
+        chunk = stats[i : i + _FUNDING_STAT_CHUNK]
+        rows = [
+            {
+                "symbol": s.symbol,
+                "mts": s.mts,
+                "frr": _to_float_or_none(s.frr),
+                "avg_period": _to_float_or_none(s.avg_period),
+                "funding_amount": _to_float_or_none(s.funding_amount),
+                "funding_amount_used": _to_float_or_none(s.funding_amount_used),
+                "funding_below_threshold": _to_float_or_none(s.funding_below_threshold),
+            }
+            for s in chunk
+        ]
+
+        stmt: PGInsert | SQLiteInsert
+        if dialect_name == "postgresql":
+            stmt = pg_insert(FundingStatRow).values(rows)
+        else:
+            stmt = sqlite_insert(FundingStatRow).values(rows)
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=_UPSERT_INDEX,
+            set_={col: getattr(stmt.excluded, col) for col in _UPSERT_SET_COLS},
+        )
+        await session.execute(stmt)
 
 
 async def get_in_range(
