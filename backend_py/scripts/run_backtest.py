@@ -81,7 +81,7 @@ async def _amain() -> int:
         logger.info("  Symbol:             %s", result.symbol)
         logger.info("  Candles processed:  %d", result.n_candles)
         logger.info("  Trades simulated:   %d", result.n_trades)
-        logger.info("  Monthly return:     %s%%", result.monthly_return_pct)
+        logger.info("  Monthly return:     %s%% (net)", result.net_monthly_return_pct)
         logger.info("  Max drawdown:       %s%%", result.max_drawdown_pct)
         logger.info("=" * 60)
         return 0
