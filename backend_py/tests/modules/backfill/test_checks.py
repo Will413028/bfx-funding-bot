@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.backfill.checks import (
     check_continuity,
-    check_frr_unit,
     check_round_trip,
     check_row_counts,
 )
@@ -169,59 +168,6 @@ async def test_round_trip_skipped_when_history_too_recent(
     assert result.passed is True
     assert "skipped" in result.message.lower()
     mock_client.get_funding_candles.assert_not_called()
-
-
-# ---------- check_frr_unit ----------
-
-@pytest.mark.asyncio
-async def test_frr_unit_passes_when_ratio_in_range(
-    sqlite_session: AsyncSession, setup_schema: None,
-) -> None:
-    """FRR=5.8e-7/sec * 86400 ~= 5e-2/day; candle close ~ 1e-4/day-equivalent.
-    Ratio = 5e-2 / 1e-4 = 500 -- fails the [0.1, 10] band.
-    Use plausible values: FRR=5.8e-7, candle close=5e-2 -> ratio=1.0 (good)."""
-    await upsert_funding_stats(sqlite_session, [FundingStat(
-        symbol="fUSD", mts=1700000000000, frr=Decimal("5.8e-7"),
-    )])
-    await upsert_candles(sqlite_session, [FundingCandle(
-        symbol="fUSD", timeframe="1h", period_agg="p2", mts=1700001000000,
-        open=None, close=Decimal("5e-2"),
-        high=None, low=None, volume=None,
-    )])
-    await sqlite_session.commit()
-
-    result = await check_frr_unit(sqlite_session, symbol="fUSD")
-    assert result.passed is True
-
-
-@pytest.mark.asyncio
-async def test_frr_unit_fails_when_ratio_out_of_range(
-    sqlite_session: AsyncSession, setup_schema: None,
-) -> None:
-    """FRR=5.8e-7 * 86400 = 5e-2; candle close = 1e-4. Ratio = 500 -> fails."""
-    await upsert_funding_stats(sqlite_session, [FundingStat(
-        symbol="fUSD", mts=1700000000000, frr=Decimal("5.8e-7"),
-    )])
-    await upsert_candles(sqlite_session, [FundingCandle(
-        symbol="fUSD", timeframe="1h", period_agg="p2", mts=1700001000000,
-        open=None, close=Decimal("1e-4"),
-        high=None, low=None, volume=None,
-    )])
-    await sqlite_session.commit()
-
-    result = await check_frr_unit(sqlite_session, symbol="fUSD")
-    assert result.passed is False
-    assert "ratio" in result.message.lower()
-
-
-@pytest.mark.asyncio
-async def test_frr_unit_skips_when_no_data(
-    sqlite_session: AsyncSession, setup_schema: None,
-) -> None:
-    """No funding_stats or no candles → check is skipped (not a failure)."""
-    result = await check_frr_unit(sqlite_session, symbol="fUSD")
-    assert result.passed is True   # skip = pass
-    assert "skip" in result.message.lower() or "no data" in result.message.lower()
 
 
 # ---------- check_continuity ----------

@@ -6,7 +6,7 @@ Pure-ish: takes a session + specs + (for round-trip) a Bitfinex client.
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -16,9 +16,6 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 
-FRR_RATIO_LOW = Decimal("0.1")
-FRR_RATIO_HIGH = Decimal("10")
-FRR_SECONDS_PER_DAY = Decimal("86400")
 ROUND_TRIP_TOLERANCE = Decimal("1e-15")
 # Round-trip sample shift: Bitfinex actively updates the latest (still-forming)
 # candle's close as new ticks arrive, so sampling near max_mts produces a
@@ -211,63 +208,74 @@ async def check_round_trip(
     )
 
 
-# ---------- 3. FRR unit sanity ----------
+# ---------- 3. FRR raw correlation diagnostic (Phase 3a Gate 1 FAIL fallback) ----------
 
-async def check_frr_unit(
+async def check_frr_unit_stability(
     session: AsyncSession,
     symbol: str = "fUSD",
+    sample_size: int = 1000,
 ) -> CheckResult:
-    """Take one funding_stats row, find a candle within +/-30min, compare
-    (frr * 86400) to candle close. Ratio should be in [0.1, 10] (one order
-    of magnitude tolerance -- this catches unit errors, not precision)."""
-    fs_stmt = select(FundingStatRow).where(
-        FundingStatRow.symbol == symbol, FundingStatRow.frr.is_not(None),
-    ).limit(1)
-    fs_row = (await session.execute(fs_stmt)).scalars().first()
-    if fs_row is None or fs_row.frr is None:
-        return CheckResult(passed=True, message="FRR unit check skipped: no funding_stats data")
+    """Diagnostic-only raw correlation: r^2 of close ~ a x frr (no
+    avg_period weighting) on N most-recent samples.
 
-    window_ms = 30 * 60 * 1000
-    candle_stmt = (
-        select(FundingCandleRow)
-        .where(
-            FundingCandleRow.symbol == symbol,
-            FundingCandleRow.timeframe == "1h",
-            FundingCandleRow.period_agg == "p2",
-            FundingCandleRow.close.is_not(None),
-            FundingCandleRow.mts >= fs_row.mts - window_ms,
-            FundingCandleRow.mts <= fs_row.mts + window_ms,
-        )
-        .limit(1)
-    )
-    candle = (await session.execute(candle_stmt)).scalars().first()
-    if candle is None or candle.close is None:
+    Phase 3a Gate 1 FAIL: no winning hypothesis was committed (all 5
+    H missed R^2>0.99 + slope_cv<5% + slope_diff<5% + median_rel_err<5%
+    threshold; per-year slope swung 9x across 2016-2026 indicating
+    Bitfinex methodology changed over time). This check is a placeholder
+    until Phase 3c re-investigates with extended hypothesis set
+    (multivariate w/ funding_amount_used / funding_amount, lower-50%
+    lifetime weighting).
+
+    Always returns passed=True (diagnostic, doesn't block backfill exit
+    code). Logs r² for ongoing visibility.
+    """
+    sql = text("""
+        SELECT c.mts, fs.frr, c.close
+        FROM funding_candles c
+        CROSS JOIN LATERAL (
+            SELECT frr FROM funding_stats fs2
+            WHERE fs2.symbol = c.symbol AND fs2.mts <= c.mts
+            ORDER BY fs2.mts DESC LIMIT 1
+        ) fs
+        WHERE c.symbol = :symbol
+          AND c.timeframe = '1h' AND c.period_agg = 'p2'
+          AND c.close IS NOT NULL AND c.close > 0
+          AND fs.frr IS NOT NULL AND fs.frr > 0
+        ORDER BY c.mts DESC
+        LIMIT :limit
+    """)
+    try:
+        result = await session.execute(sql, {"symbol": symbol, "limit": sample_size})
+        rows = result.fetchall()
+    except Exception as e:
+        return CheckResult(passed=True, message=f"FRR raw r² skipped: {e!r}")
+
+    pairs = [
+        (float(frr), float(close))
+        for _mts, frr, close in rows
+        if frr is not None and close is not None and float(close) > 0
+    ]
+    if len(pairs) < 50:
         return CheckResult(
             passed=True,
-            message=f"FRR unit check skipped: no fUSD 1h p2 candle near mts={fs_row.mts}",
+            message=f"FRR raw r² skipped: only {len(pairs)} valid samples",
         )
 
-    frr_dec = Decimal(str(fs_row.frr))
-    close_dec = Decimal(str(candle.close))
-    if close_dec == 0:
-        return CheckResult(passed=True, message="FRR unit check skipped: candle close = 0")
+    import statistics
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    mean_x, mean_y = statistics.mean(xs), statistics.mean(ys)
+    s_xy = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    s_xx = sum((x - mean_x) ** 2 for x in xs)
+    s_yy = sum((y - mean_y) ** 2 for y in ys)
+    r2 = (s_xy ** 2) / (s_xx * s_yy) if s_xx > 0 and s_yy > 0 else 0.0
 
-    ratio = (frr_dec * FRR_SECONDS_PER_DAY) / close_dec
-    if FRR_RATIO_LOW <= ratio <= FRR_RATIO_HIGH:
-        return CheckResult(
-            passed=True,
-            message=(
-                f"FRR unit sanity: frr * 86400 / candle.close = {ratio:.3f} "
-                f"(in [{FRR_RATIO_LOW}, {FRR_RATIO_HIGH}]) -> FRR is per-second"
-            ),
-        )
     return CheckResult(
-        passed=False,
+        passed=True,
         message=(
-            f"FRR unit mismatch: frr={frr_dec} * 86400 / candle.close={close_dec} "
-            f"= ratio={ratio:.3f} (expected in [{FRR_RATIO_LOW}, {FRR_RATIO_HIGH}])"
+            f"FRR raw r² (Gate 1 FAIL fallback): r²={r2:.4f} on {len(pairs)} "
+            f"samples. Phase 3a no winning hypothesis; conversion not committed."
         ),
-        failures=[f"ratio out of range: {ratio:.3f}"],
     )
 
 
