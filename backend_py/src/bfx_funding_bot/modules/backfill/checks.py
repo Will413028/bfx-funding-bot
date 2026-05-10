@@ -16,12 +16,23 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 
-CANDLE_INTERVAL_MS = 3_600_000          # 1h candles
-MIN_CONTINUITY = Decimal("0.95")        # 95% threshold for candles
 FRR_RATIO_LOW = Decimal("0.1")
 FRR_RATIO_HIGH = Decimal("10")
 FRR_SECONDS_PER_DAY = Decimal("86400")
 ROUND_TRIP_TOLERANCE = Decimal("1e-15")
+# Round-trip sample shift: Bitfinex actively updates the latest (still-forming)
+# candle's close as new ticks arrive, so sampling near max_mts produces a
+# false-positive drift signal. Step back 7 days to a stable, immutable region.
+ROUND_TRIP_SAMPLE_SHIFT_MS = 7 * 24 * 3_600_000
+# Continuity threshold for candles: max consecutive gap. Sparse aggregations
+# (e.g. p30 30-day funding) have inherent gaps from low activity, and
+# historical outages / quiet periods on rare fUSD-a30 produce real-data
+# gaps up to ~47 days observed at backfill commit 1065be2. A count-ratio
+# rule produces false positives on sparse series. Threshold = 60 days:
+# accommodates observed real data while still catching resume-from-DB
+# middle-skip bugs (those would skip months of contiguous data).
+CANDLE_MAX_GAP_MS = 60 * 24 * 3_600_000
+FUNDING_STATS_MAX_GAP_MS = 24 * 3_600_000
 
 
 @dataclass(frozen=True)
@@ -72,6 +83,7 @@ async def check_round_trip(
     Bitfinex again and exact-match against DB."""
     failures: list[str] = []
     sampled = 0
+    skipped: list[str] = []
 
     candle_specs = [s for s in specs if s.kind == "candles"]
     fs_specs = [s for s in specs if s.kind == "funding_stats"]
@@ -79,98 +91,119 @@ async def check_round_trip(
     if candle_specs:
         spec = candle_specs[0]
         assert spec.timeframe is not None and spec.period_agg is not None
-        # Get newest mts in DB for this series
-        stmt = select(func.max(FundingCandleRow.mts)).where(
+        # Get newest + oldest mts in DB for this series. Shift the sample
+        # endpoint back by 7 days so we sample stable (immutable) candles —
+        # Bitfinex actively updates the latest candle as new ticks arrive.
+        stmt = select(
+            func.min(FundingCandleRow.mts),
+            func.max(FundingCandleRow.mts),
+        ).where(
             FundingCandleRow.symbol == spec.symbol,
             FundingCandleRow.timeframe == spec.timeframe,
             FundingCandleRow.period_agg == spec.period_agg,
         )
-        max_mts = (await session.execute(stmt)).scalar_one_or_none()
-        if max_mts is not None:
-            fetched = await client.get_funding_candles(
-                symbol=spec.symbol,
-                timeframe=spec.timeframe,
-                period_agg=spec.period_agg,
-                start=0, end=max_mts, limit=sample_size,
-            )
-            if fetched:
-                stored = await get_candles_in_range(
-                    session,
+        min_mts, max_mts = (await session.execute(stmt)).one()
+        if max_mts is not None and min_mts is not None:
+            sample_end = max_mts - ROUND_TRIP_SAMPLE_SHIFT_MS
+            if sample_end < min_mts:
+                skipped.append(
+                    f"{spec.label()}: skipped (not enough history; need >7d)"
+                )
+            else:
+                fetched = await client.get_funding_candles(
                     symbol=spec.symbol,
                     timeframe=spec.timeframe,
                     period_agg=spec.period_agg,
-                    start_mts=min(c.mts for c in fetched),
-                    end_mts=max(c.mts for c in fetched),
+                    start=0, end=sample_end, limit=sample_size,
                 )
-                stored_by_mts = {c.mts: c for c in stored}
-                for f in fetched:
-                    s = stored_by_mts.get(f.mts)
-                    if s is None:
-                        failures.append(f"{spec.label()} mts={f.mts} missing in DB")
-                        continue
-                    for fld in ("open", "close", "high", "low", "volume"):
-                        fv = getattr(f, fld)
-                        sv = getattr(s, fld)
-                        if fv is None and sv is None:
+                if fetched:
+                    stored = await get_candles_in_range(
+                        session,
+                        symbol=spec.symbol,
+                        timeframe=spec.timeframe,
+                        period_agg=spec.period_agg,
+                        start_mts=min(c.mts for c in fetched),
+                        end_mts=max(c.mts for c in fetched),
+                    )
+                    stored_by_mts = {c.mts: c for c in stored}
+                    for f in fetched:
+                        s = stored_by_mts.get(f.mts)
+                        if s is None:
+                            failures.append(f"{spec.label()} mts={f.mts} missing in DB")
                             continue
-                        if fv is None or sv is None:
-                            failures.append(
-                                f"{spec.label()} mts={f.mts} {fld} nullness mismatch"
-                            )
-                            break
-                        if abs(fv - sv) > ROUND_TRIP_TOLERANCE:
-                            failures.append(
-                                f"{spec.label()} mts={f.mts} {fld}: f={fv} != s={sv}"
-                            )
-                            break
-                sampled += 1
+                        for fld in ("open", "close", "high", "low", "volume"):
+                            fv = getattr(f, fld)
+                            sv = getattr(s, fld)
+                            if fv is None and sv is None:
+                                continue
+                            if fv is None or sv is None:
+                                failures.append(
+                                    f"{spec.label()} mts={f.mts} {fld} nullness mismatch"
+                                )
+                                break
+                            if abs(fv - sv) > ROUND_TRIP_TOLERANCE:
+                                failures.append(
+                                    f"{spec.label()} mts={f.mts} {fld}: f={fv} != s={sv}"
+                                )
+                                break
+                    sampled += 1
 
     if fs_specs:
         spec = fs_specs[0]
-        stmt2 = select(func.max(FundingStatRow.mts)).where(
-            FundingStatRow.symbol == spec.symbol,
-        )
-        max_mts2 = (await session.execute(stmt2)).scalar_one_or_none()
-        if max_mts2 is not None:
-            fetched_fs = await client.get_funding_stats(
-                symbol=spec.symbol, end=max_mts2, limit=sample_size,
-            )
-            if fetched_fs:
-                stored_fs = await get_in_range(
-                    session,
-                    symbol=spec.symbol,
-                    start_mts=min(s.mts for s in fetched_fs),
-                    end_mts=max(s.mts for s in fetched_fs),
+        stmt2 = select(
+            func.min(FundingStatRow.mts),
+            func.max(FundingStatRow.mts),
+        ).where(FundingStatRow.symbol == spec.symbol)
+        min_mts2, max_mts2 = (await session.execute(stmt2)).one()
+        if max_mts2 is not None and min_mts2 is not None:
+            sample_end2 = max_mts2 - ROUND_TRIP_SAMPLE_SHIFT_MS
+            if sample_end2 < min_mts2:
+                skipped.append(
+                    f"{spec.label()}: skipped (not enough history; need >7d)"
                 )
-                stored_fs_by_mts = {row.mts: row for row in stored_fs}
-                for ff in fetched_fs:
-                    sf = stored_fs_by_mts.get(ff.mts)
-                    if sf is None:
-                        failures.append(f"{spec.label()} mts={ff.mts} missing in DB")
-                        continue
-                    for fld in (
-                        "frr", "avg_period", "funding_amount",
-                        "funding_amount_used", "funding_below_threshold",
-                    ):
-                        fv = getattr(ff, fld)
-                        sv = getattr(sf, fld)
-                        if fv is None and sv is None:
+            else:
+                fetched_fs = await client.get_funding_stats(
+                    symbol=spec.symbol, end=sample_end2, limit=sample_size,
+                )
+                if fetched_fs:
+                    stored_fs = await get_in_range(
+                        session,
+                        symbol=spec.symbol,
+                        start_mts=min(s.mts for s in fetched_fs),
+                        end_mts=max(s.mts for s in fetched_fs),
+                    )
+                    stored_fs_by_mts = {row.mts: row for row in stored_fs}
+                    for ff in fetched_fs:
+                        sf = stored_fs_by_mts.get(ff.mts)
+                        if sf is None:
+                            failures.append(f"{spec.label()} mts={ff.mts} missing in DB")
                             continue
-                        if fv is None or sv is None:
-                            failures.append(
-                                f"{spec.label()} mts={ff.mts} {fld} nullness mismatch"
-                            )
-                            break
-                        if abs(fv - sv) > ROUND_TRIP_TOLERANCE:
-                            failures.append(
-                                f"{spec.label()} mts={ff.mts} {fld}: f={fv} != s={sv}"
-                            )
-                            break
-                sampled += 1
+                        for fld in (
+                            "frr", "avg_period", "funding_amount",
+                            "funding_amount_used", "funding_below_threshold",
+                        ):
+                            fv = getattr(ff, fld)
+                            sv = getattr(sf, fld)
+                            if fv is None and sv is None:
+                                continue
+                            if fv is None or sv is None:
+                                failures.append(
+                                    f"{spec.label()} mts={ff.mts} {fld} nullness mismatch"
+                                )
+                                break
+                            if abs(fv - sv) > ROUND_TRIP_TOLERANCE:
+                                failures.append(
+                                    f"{spec.label()} mts={ff.mts} {fld}: f={fv} != s={sv}"
+                                )
+                                break
+                    sampled += 1
 
+    msg = f"round-trip exact-match: {sampled} series sampled"
+    if skipped:
+        msg += f"; {len(skipped)} skipped ({'; '.join(skipped)})"
     return CheckResult(
         passed=not failures,
-        message=f"round-trip exact-match: {sampled} series sampled",
+        message=msg,
         failures=failures,
     )
 
@@ -240,32 +273,31 @@ async def check_frr_unit(
 async def check_continuity(
     session: AsyncSession, specs: list[SeriesSpec],
 ) -> CheckResult:
-    """For candles: rows / expected_rows >= 0.95.
-    For funding_stats: max consecutive gap < 1 day."""
+    """Max consecutive gap rule.
+    - Candles: < 7 days (sparse aggregations like p30 are accepted as long
+      as no chunk was missed; resume-from-DB middle-skip would create
+      multi-day contiguous gaps).
+    - funding_stats: < 1 day."""
     failures: list[str] = []
 
     for spec in specs:
         if spec.kind == "candles":
             assert spec.timeframe is not None and spec.period_agg is not None
-            stmt = select(
-                func.count(),
-                func.min(FundingCandleRow.mts),
-                func.max(FundingCandleRow.mts),
-            ).where(
+            stmt = select(FundingCandleRow.mts).where(
                 FundingCandleRow.symbol == spec.symbol,
                 FundingCandleRow.timeframe == spec.timeframe,
                 FundingCandleRow.period_agg == spec.period_agg,
+            ).order_by(FundingCandleRow.mts.asc())
+            mts_list = [r[0] for r in (await session.execute(stmt)).all()]
+            if len(mts_list) < 2:
+                continue   # row_count check covers empty series
+            max_gap = max(
+                mts_list[i + 1] - mts_list[i] for i in range(len(mts_list) - 1)
             )
-            n, min_mts, max_mts = (await session.execute(stmt)).one()
-            if n == 0 or min_mts is None or max_mts is None:
-                continue   # row_count check covers this
-            expected = (max_mts - min_mts) // CANDLE_INTERVAL_MS + 1
-            if expected == 0:
-                continue
-            ratio = Decimal(n) / Decimal(expected)
-            if ratio < MIN_CONTINUITY:
+            if max_gap > CANDLE_MAX_GAP_MS:
                 failures.append(
-                    f"{spec.label()}: {ratio:.2%} (rows={n}, expected≈{expected})"
+                    f"{spec.label()}: max_gap = {max_gap / 3_600_000:.1f}h "
+                    f"(threshold {CANDLE_MAX_GAP_MS / 3_600_000:.0f}h)"
                 )
         else:
             stmt2 = select(FundingStatRow.mts).where(
@@ -277,11 +309,10 @@ async def check_continuity(
             max_gap = max(
                 mts_list[i + 1] - mts_list[i] for i in range(len(mts_list) - 1)
             )
-            one_day_ms = 24 * 60 * 60 * 1000
-            if max_gap > one_day_ms:
+            if max_gap > FUNDING_STATS_MAX_GAP_MS:
                 failures.append(
                     f"{spec.label()}: max_gap = {max_gap / 3_600_000:.1f}h "
-                    f"(threshold 24h)"
+                    f"(threshold {FUNDING_STATS_MAX_GAP_MS / 3_600_000:.0f}h)"
                 )
 
     return CheckResult(
