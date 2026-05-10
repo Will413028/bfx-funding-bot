@@ -4,7 +4,8 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 專案結構
 
-- `backend/` — Go 1.25 後端（Gin + fx + zap）
+- `backend_py/` — Python 3.13 後端（FastAPI + SQLAlchemy 2.0 async + httpx + Alembic）— **active**
+- `backend/` — Go 1.25 後端（Gin + fx + zap）— **封存**（Phase 0 重寫至 Python 後不再開發）
 - `frontend/` — Next.js 16 前端
 - `backend_architecture.md` — **架構設計 source of truth**（功能規劃、分層架構、DB schema、API endpoints）
 
@@ -23,10 +24,15 @@ Bitfinex 自動放貸 SaaS 平台。
 
 | 工具 | 執行目錄 | 範例 |
 |------|----------|------|
-| `atlas migrate diff` | `backend/schema/` | `cd backend/schema && atlas migrate diff xxx --env neon` |
-| `atlas migrate apply` | `backend/schema/` | `cd backend/schema && source ../../.env && atlas migrate apply --env neon` |
-| `sqlc generate` | `backend/` | `cd backend && sqlc generate` |
-| `go test` | `backend/` | `cd backend && go test ./...` |
+| `pytest` | `backend_py/` | `cd backend_py && uv run pytest -m "not integration"` |
+| `mypy` / `ruff` | `backend_py/` | `cd backend_py && uv run mypy src/ && uv run ruff check` |
+| `alembic revision --autogenerate` | `backend_py/` | `cd backend_py && uv run alembic revision --autogenerate -m "..."` |
+| `alembic upgrade head` | `backend_py/` | `cd backend_py && uv run alembic upgrade head` |
+| `alembic check` | `backend_py/` | `cd backend_py && uv run alembic check`（驗證 metadata 與 DB 無 drift） |
+
+備註：`backend_py/` 必須 cd 進去才會走 uv 管的 Python 3.13；從 repo root 直接跑會撞 pyenv 3.12 的 sqlalchemy。`.env` 是 repo root 的 symlink（worktree 重建後要 `ln -sf ../.env backend_py/.env`）。
+
+Go `backend/` 的 atlas/sqlc/go test 已封存，不再使用。
 
 ## 開發規範
 
@@ -41,14 +47,15 @@ Bitfinex 自動放貸 SaaS 平台。
 5. `requesting-code-review` skill — 完成後驗證
 
 規則：
-- 每個功能必須包含單元測試，`go test ./...` 全過才能 commit
+- 每個功能必須包含單元測試，`cd backend_py && uv run pytest -m "not integration"` 全過才能 commit
 - 純文件修改（ROADMAP、strategy-journal 等）不需要走完整工作流
 
 ### 測試與品質（強制）
 
 - **每個 change 必須包含對應的單元測試**，不可只寫程式不寫測試
-- **套用 migration 一律使用 `atlas migrate apply --env neon`，不可用 MCP 直接執行 SQL**
-- 後端架構、測試慣例、sqlc/Atlas 工作流詳見 `backend/CLAUDE.md`
+- **套用 migration 一律使用 `cd backend_py && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
+- 後端架構、測試慣例、SQLAlchemy/Alembic 工作流詳見 `backend_py/CLAUDE.md`（待建；目前散見各 module 註解）
+- Go `backend/CLAUDE.md` 是封存版本，不再為現行開發指引
 - 前端測試指令、架構慣例詳見 `frontend/CLAUDE.md`
 
 ### Commit 訊息格式
