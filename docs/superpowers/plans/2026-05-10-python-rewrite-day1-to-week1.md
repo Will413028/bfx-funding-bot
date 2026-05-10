@@ -4,7 +4,7 @@
 
 **Goal:** Stand up a Python backend skeleton that pulls Bitfinex funding candles into Neon Postgres and runs one baseline lending strategy over historical data — enough to pass Checkpoint 1 (Day-3) and Checkpoint 2 (Week-1 end) from the parent rewrite decision.
 
-**Architecture:** Sibling directory `backend_py/` next to existing `backend/` (Go, frozen). FastAPI + SQLAlchemy 2.0 async + Alembic for the persistent layer. Hand-rolled `httpx` async client for Bitfinex (no SDK dependency). Pydantic domain models as the single type system across infra, persistence, API, and backtest. One CLI script (`scripts/backfill_candles.py`) drives the Day-3 end-to-end validation. One `Strategy` ABC + one baseline implementation drives Week-1 backtest validation.
+**Architecture:** Sibling directory `backend_py/` next to existing `backend/` (Go, frozen). FastAPI + SQLAlchemy 2.0 async + Alembic for the persistent layer. Hand-rolled `httpx` async client for Bitfinex (no SDK dependency). Pydantic domain models as the single type system across all layers. **Vertical-sliced layout**: each business feature is a self-contained module (`modules/<feature>/`) with its own schemas / tables / repository / service. Cross-cutting infra in `core/`. Third-party clients in `external/`. New Stage-2 features become new `modules/<feature>/` directories without touching existing modules.
 
 **Tech Stack:** Python 3.13, uv (dep manager + lockfile), FastAPI, SQLAlchemy 2.0 (async, typed `Mapped[]`), asyncpg (async Postgres driver), Alembic (baseline-from-DB), httpx (async REST), aiolimiter (rate limiting), Pydantic v2 + pydantic-settings, pytest + pytest-asyncio + pytest-httpx, ruff + mypy strict.
 
@@ -22,8 +22,6 @@
 ---
 
 ## File Structure (vertical-sliced — feature modules)
-
-Layout: **vertical slicing**. Each business feature is a self-contained module with its own schemas / tables / repository / service. Cross-cutting infra lives in `core/`. Third-party clients live in `external/`. New Stage-2 features (auth, billing) become new `modules/<feature>/` directories without touching existing modules.
 
 ```
 backend_py/
@@ -88,9 +86,11 @@ backend_py/
     │   │   ├── __init__.py
     │   │   ├── test_schemas.py
     │   │   ├── test_tables.py
-    │   │   └── test_repository.py
+    │   │   ├── test_repository.py
+    │   │   └── test_service.py
     │   └── backtest/
     │       ├── __init__.py
+    │       ├── test_schemas.py
     │       ├── test_engine.py
     │       └── strategies/
     │           ├── __init__.py
@@ -145,13 +145,13 @@ Expected: A `postgresql://...neon.tech/...` connection string. If absent, stop a
 source .env && psql "$DATABASE_URL" -c "\dt"
 ```
 
-Expected: Lists 7 tables matching schema.hcl. If `psql` not installed, use `npx pgcli` or skip — Alembic baseline check in Phase 1 will catch any drift.
+Expected: Lists 7 tables matching schema.hcl. If `psql` not installed, skip — Alembic baseline check in Phase 1 will catch any drift.
 
 ---
 
 ## Phase 1 — Day 1: Repo scaffold + DB engine + Alembic baseline
 
-**Phase exit criterion:** `uvicorn bfx_funding_bot.main:app` returns 200 on `/health`, `alembic current` returns the baseline revision, `pytest` passes (1 test for /health), `mypy --strict` and `ruff check` pass.
+**Phase exit criterion:** `uvicorn bfx_funding_bot.main:app` returns 200 on `/health`, `alembic current` returns the baseline revision, `pytest` passes, `mypy --strict` and `ruff check` pass.
 
 ### Task 1.1: Initialize uv project structure
 
@@ -170,8 +170,6 @@ cd backend_py
 echo "3.13" > .python-version
 uv init --no-readme --no-workspace --package
 ```
-
-This creates `pyproject.toml` and `src/backend_py/__init__.py`. We will rename the package to `bfx_funding_bot`.
 
 - [ ] **Step 2: Replace `pyproject.toml` with the project config**
 
@@ -217,7 +215,7 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
-ignore = ["E501"]  # line length handled by formatter
+ignore = ["E501"]
 
 [tool.mypy]
 strict = true
@@ -233,6 +231,9 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: marks tests requiring network/live services (deselect with '-m \"not integration\"')",
+]
 ```
 
 - [ ] **Step 3: Move src layout to bfx_funding_bot package name**
@@ -248,7 +249,6 @@ touch src/bfx_funding_bot/__init__.py
 Path: `backend_py/.env.example`
 
 ```
-# Copy to .env (gitignored) and fill in actual values
 DATABASE_URL=postgresql+asyncpg://user:password@host.neon.tech/dbname
 BITFINEX_API_BASE_URL=https://api-pub.bitfinex.com
 LOG_LEVEL=INFO
@@ -268,7 +268,7 @@ Python rewrite of the Go backend. See `../docs/superpowers/specs/2026-05-09-back
 ```bash
 uv sync
 cp .env.example .env
-# Edit .env: set DATABASE_URL from project-root .env (use the asyncpg variant: postgresql+asyncpg://...)
+# Edit .env: set DATABASE_URL from project-root .env (asyncpg variant: postgresql+asyncpg://...)
 ```
 
 ## Run
@@ -281,7 +281,8 @@ uv run uvicorn bfx_funding_bot.main:app --reload
 
 ```bash
 uv run pytest                    # unit tests (sqlite in-memory)
-uv run mypy src/                  # type check
+uv run pytest -m integration     # integration tests (real services; requires network)
+uv run mypy src/                 # type check
 uv run ruff check                # lint
 uv run ruff format --check       # format check
 ```
@@ -289,10 +290,14 @@ uv run ruff format --check       # format check
 ## Migrations
 
 ```bash
-uv run alembic current            # show baseline revision
+uv run alembic current
 uv run alembic revision --autogenerate -m "<change>"
 uv run alembic upgrade head
 ```
+
+## Layout
+
+Vertical-sliced. See plan doc for module composition rules.
 ````
 
 - [ ] **Step 6: Install deps and verify**
@@ -313,7 +318,7 @@ git commit -m "🎉 Init: backend_py/ uv project skeleton
 
 Python 3.13 + uv. Deps: FastAPI, SQLAlchemy 2.0 async, asyncpg,
 Alembic, httpx, aiolimiter, Pydantic v2. Dev: pytest, pytest-asyncio,
-pytest-httpx, ruff, mypy strict, aiosqlite (test driver).
+pytest-httpx, ruff, mypy strict, aiosqlite.
 
 Per docs/superpowers/plans/2026-05-10-python-rewrite-day1-to-week1.md
 Phase 1 Task 1.1.
@@ -326,20 +331,25 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ### Task 1.2: Settings module (pydantic-settings)
 
 **Files:**
+- Create: `backend_py/src/bfx_funding_bot/core/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/core/settings.py`
 - Create: `backend_py/tests/__init__.py`
-- Create: `backend_py/tests/conftest.py`
-- Test: `backend_py/tests/test_settings.py`
+- Create: `backend_py/tests/core/__init__.py`
+- Test: `backend_py/tests/core/test_settings.py`
 
-- [ ] **Step 1: Create empty `tests/__init__.py`**
+- [ ] **Step 1: Create empty package files**
 
 ```bash
+mkdir -p backend_py/src/bfx_funding_bot/core
+mkdir -p backend_py/tests/core
+touch backend_py/src/bfx_funding_bot/core/__init__.py
 touch backend_py/tests/__init__.py
+touch backend_py/tests/core/__init__.py
 ```
 
 - [ ] **Step 2: Write the failing test**
 
-Path: `backend_py/tests/test_settings.py`
+Path: `backend_py/tests/core/test_settings.py`
 
 ```python
 from bfx_funding_bot.core.settings import Settings
@@ -371,12 +381,12 @@ def test_settings_defaults(monkeypatch):
 - [ ] **Step 3: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/test_settings.py -v
+cd backend_py && uv run pytest tests/core/test_settings.py -v
 ```
 
-Expected: `ModuleNotFoundError: No module named 'bfx_funding_bot.settings'`.
+Expected: `ModuleNotFoundError: No module named 'bfx_funding_bot.core.settings'`.
 
-- [ ] **Step 4: Write minimal implementation**
+- [ ] **Step 4: Write `core/settings.py`**
 
 Path: `backend_py/src/bfx_funding_bot/core/settings.py`
 
@@ -399,7 +409,7 @@ class Settings(BaseSettings):
 - [ ] **Step 5: Run test to verify it passes**
 
 ```bash
-cd backend_py && uv run pytest tests/test_settings.py -v
+cd backend_py && uv run pytest tests/core/test_settings.py -v
 ```
 
 Expected: 2 passed.
@@ -407,8 +417,8 @@ Expected: 2 passed.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/core/settings.py backend_py/tests/test_settings.py backend_py/tests/__init__.py
-git commit -m "✨ Feat: settings module (pydantic-settings)
+git add backend_py/src/bfx_funding_bot/core/ backend_py/tests/__init__.py backend_py/tests/core/
+git commit -m "✨ Feat: core/settings module (pydantic-settings)
 
 Reads DATABASE_URL, BITFINEX_API_BASE_URL, LOG_LEVEL from .env.
 
@@ -417,21 +427,13 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 1.3: SQLAlchemy 2.0 async engine + session
+### Task 1.3: SQLAlchemy 2.0 Base + async engine + session
 
 **Files:**
-- Create: `backend_py/src/bfx_funding_bot/core/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/core/db.py`
-- Test: `backend_py/tests/conftest.py`
+- Create: `backend_py/tests/conftest.py`
 
-- [ ] **Step 1: Create `core/__init__.py`**
-
-```bash
-mkdir -p backend_py/src/bfx_funding_bot/core
-touch backend_py/src/bfx_funding_bot/core/__init__.py
-```
-
-- [ ] **Step 2: Write `engine.py`**
+- [ ] **Step 1: Write `core/db.py`**
 
 Path: `backend_py/src/bfx_funding_bot/core/db.py`
 
@@ -445,8 +447,19 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import DeclarativeBase
 
 from bfx_funding_bot.core.settings import Settings
+
+
+class Base(DeclarativeBase):
+    """Single SQLAlchemy declarative base. ORM tables across all modules
+    inherit from this so Alembic autogenerate sees one unified metadata.
+
+    Tables are defined in modules/<feature>/tables.py. To register them
+    with Alembic, alembic/env.py imports each module's tables file
+    (their import side-effects populate Base.metadata).
+    """
 
 
 def make_engine(settings: Settings) -> AsyncEngine:
@@ -474,7 +487,7 @@ async def session_scope(
             raise
 ```
 
-- [ ] **Step 3: Write `conftest.py` with sqlite test fixture**
+- [ ] **Step 2: Write `tests/conftest.py` with sqlite test fixture**
 
 Path: `backend_py/tests/conftest.py`
 
@@ -488,6 +501,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 
 @pytest_asyncio.fixture
@@ -496,8 +510,6 @@ async def sqlite_engine() -> AsyncIterator[AsyncEngine]:
 
     Uses StaticPool so all sessions share the same in-memory DB.
     """
-    from sqlalchemy.pool import StaticPool
-
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -516,44 +528,173 @@ async def sqlite_session(
         yield session
 ```
 
-- [ ] **Step 4: No production-side test yet for engine.py**
+- [ ] **Step 3: No dedicated test for db.py**
 
-Engine.py is exercised indirectly by `tests/test_health.py` (Task 1.5) and `tests/repositories/test_candles.py` (Task 1.6). Skip dedicated engine.py tests — adding mock-engine-of-mock-engine tests is low-value.
+Engine is exercised indirectly by `tests/test_health.py` (Task 1.6), `tests/modules/candles/test_repository.py` (Task 3.1), and `tests/modules/candles/test_tables.py` (Task 1.4).
 
-- [ ] **Step 5: Verify import works**
+- [ ] **Step 4: Verify import works**
 
 ```bash
-cd backend_py && uv run python -c "from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope; print('ok')"
+cd backend_py && uv run python -c "from bfx_funding_bot.core.db import Base, make_engine, make_session_factory, session_scope; print('ok')"
 ```
 
 Expected: `ok`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/core/ backend_py/tests/conftest.py
-git commit -m "✨ Feat: SQLAlchemy 2.0 async engine + session_scope helper
+git add backend_py/src/bfx_funding_bot/core/db.py backend_py/tests/conftest.py
+git commit -m "✨ Feat: core/db — SQLAlchemy Base + async engine + session_scope
 
-Plus pytest fixtures for in-memory sqlite engine/session used by
-unit tests of repositories.
+Single DeclarativeBase shared across all modules; tables defined in
+modules/<feature>/tables.py register with Base.metadata via import.
+Plus pytest fixtures: in-memory sqlite engine + session.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 1.4: ORM models for ALL existing tables
+### Task 1.4a: ORM tables — candles module
 
 **Files:**
-- Create: `backend_py/src/bfx_funding_bot/core/models.py`
-- Test: `backend_py/tests/modules/candles/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/candles/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/candles/tables.py`
+- Create: `backend_py/tests/modules/__init__.py`
+- Create: `backend_py/tests/modules/candles/__init__.py`
 - Test: `backend_py/tests/modules/candles/test_tables.py`
 
-These models must match the existing Neon schema exactly so the Alembic baseline-from-DB autogenerate produces an empty diff in Task 1.5. The schema source-of-truth is `backend/schema/schema.hcl` and the migrations in `backend/migrations/`.
+- [ ] **Step 1: Create empty package files**
 
-- [ ] **Step 1: Write `db/models.py`**
+```bash
+mkdir -p backend_py/src/bfx_funding_bot/modules/candles
+mkdir -p backend_py/tests/modules/candles
+touch backend_py/src/bfx_funding_bot/modules/__init__.py
+touch backend_py/src/bfx_funding_bot/modules/candles/__init__.py
+touch backend_py/tests/modules/__init__.py
+touch backend_py/tests/modules/candles/__init__.py
+```
 
-Path: `backend_py/src/bfx_funding_bot/core/models.py`
+- [ ] **Step 2: Write `modules/candles/tables.py`**
+
+Path: `backend_py/src/bfx_funding_bot/modules/candles/tables.py`
+
+```python
+from sqlalchemy import BigInteger, Float, Index, PrimaryKeyConstraint, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from bfx_funding_bot.core.db import Base
+
+
+class FundingCandleRow(Base):
+    __tablename__ = "funding_candles"
+
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    timeframe: Mapped[str] = mapped_column(Text, nullable=False)
+    period_agg: Mapped[str] = mapped_column(Text, nullable=False)
+    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "timeframe", "period_agg", "mts"),
+        Index("idx_funding_candles_mts", "mts"),
+    )
+
+
+class FundingStatRow(Base):
+    __tablename__ = "funding_stats"
+
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    frr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_period: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_amount_used: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_below_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "mts"),
+        Index("idx_funding_stats_mts", "mts"),
+    )
+```
+
+- [ ] **Step 3: Smoke-test models**
+
+Path: `backend_py/tests/modules/candles/test_tables.py`
+
+```python
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.candles.tables import (
+    FundingCandleRow,
+    FundingStatRow,
+)
+
+
+@pytest.mark.asyncio
+async def test_candle_tables_create_on_sqlite(sqlite_engine: AsyncEngine) -> None:
+    """Smoke: the two candle ORM tables emit DDL without errors."""
+    async with sqlite_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    table_names = set(Base.metadata.tables.keys())
+    assert "funding_candles" in table_names
+    assert "funding_stats" in table_names
+
+    pk_cols = [c.name for c in FundingCandleRow.__table__.primary_key.columns]
+    assert pk_cols == ["symbol", "timeframe", "period_agg", "mts"]
+
+    stats_pk = [c.name for c in FundingStatRow.__table__.primary_key.columns]
+    assert stats_pk == ["symbol", "mts"]
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+cd backend_py && uv run pytest tests/modules/candles/test_tables.py -v
+```
+
+Expected: 1 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend_py/src/bfx_funding_bot/modules/ backend_py/tests/modules/
+git commit -m "✨ Feat: modules/candles/tables — FundingCandleRow + FundingStatRow
+
+Mirrors backend/schema/schema.hcl funding_* tables exactly. Composite
+PK (symbol, timeframe, period_agg, mts) for funding_candles.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 1.4b: ORM tables — accounts module (Stage-2 placeholder)
+
+**Files:**
+- Create: `backend_py/src/bfx_funding_bot/modules/accounts/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/accounts/tables.py`
+
+These models exist Day-1 only so the Alembic baseline-from-DB autogenerate (Task 1.5) sees the full live schema and produces an empty diff. They are NOT used by Day-3 / Week-1 critical path (auth/billing is Stage 2).
+
+- [ ] **Step 1: Create package marker**
+
+```bash
+mkdir -p backend_py/src/bfx_funding_bot/modules/accounts
+touch backend_py/src/bfx_funding_bot/modules/accounts/__init__.py
+```
+
+- [ ] **Step 2: Write `modules/accounts/tables.py`**
+
+Path: `backend_py/src/bfx_funding_bot/modules/accounts/tables.py`
 
 ```python
 from datetime import datetime
@@ -568,17 +709,13 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
-    PrimaryKeyConstraint,
     Text,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-class Base(DeclarativeBase):
-    pass
+from bfx_funding_bot.core.db import Base
 
 
 class User(Base):
@@ -719,108 +856,20 @@ class BillingRecord(Base):
     __table_args__ = (
         Index("idx_billing_user_period", "user_id", "period_start"),
     )
-
-
-class FundingCandleRow(Base):
-    __tablename__ = "funding_candles"
-
-    symbol: Mapped[str] = mapped_column(Text, nullable=False)
-    timeframe: Mapped[str] = mapped_column(Text, nullable=False)
-    period_agg: Mapped[str] = mapped_column(Text, nullable=False)
-    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    open: Mapped[float | None] = mapped_column(Float, nullable=True)
-    close: Mapped[float | None] = mapped_column(Float, nullable=True)
-    high: Mapped[float | None] = mapped_column(Float, nullable=True)
-    low: Mapped[float | None] = mapped_column(Float, nullable=True)
-    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    __table_args__ = (
-        PrimaryKeyConstraint("symbol", "timeframe", "period_agg", "mts"),
-        Index("idx_funding_candles_mts", "mts"),
-    )
-
-
-class FundingStatRow(Base):
-    __tablename__ = "funding_stats"
-
-    symbol: Mapped[str] = mapped_column(Text, nullable=False)
-    mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    frr: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_period: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_amount_used: Mapped[float | None] = mapped_column(Float, nullable=True)
-    funding_below_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    __table_args__ = (
-        PrimaryKeyConstraint("symbol", "mts"),
-        Index("idx_funding_stats_mts", "mts"),
-    )
 ```
 
-Note: the ORM uses `Float` (= `double precision` in Postgres) to mirror the existing schema exactly. Domain-layer Pydantic models in Task 2.2 will convert to `Decimal` at the boundary for financial math. The `as_uuid=True` flag for `PG_UUID` makes UUID values come back as Python `UUID` objects.
-
-- [ ] **Step 2: Smoke-test models can be imported and create tables on sqlite**
-
-Path: `backend_py/tests/modules/candles/__init__.py`
+- [ ] **Step 3: Smoke-import**
 
 ```bash
-mkdir -p backend_py/tests/db
-touch backend_py/tests/modules/candles/__init__.py
+cd backend_py && uv run python -c "
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.accounts.tables import User, APIKey, UserConfig, Execution, BillingRecord
+from bfx_funding_bot.modules.candles.tables import FundingCandleRow, FundingStatRow
+print(sorted(Base.metadata.tables.keys()))
+"
 ```
 
-Path: `backend_py/tests/modules/candles/test_tables.py`
-
-```python
-import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine
-
-from bfx_funding_bot.db.models import (
-    APIKey,
-    Base,
-    BillingRecord,
-    Execution,
-    FundingCandleRow,
-    FundingStatRow,
-    User,
-    UserConfig,
-)
-
-
-@pytest.mark.asyncio
-async def test_all_models_create_on_sqlite(sqlite_engine: AsyncEngine) -> None:
-    """Smoke: every ORM model is registered and DDL emits without errors.
-
-    Notes:
-    - Postgres-only types (UUID, JSONB, BYTEA via LargeBinary) translate to sqlite
-      generic types; this is a structural smoke only, not a precise type check.
-    - Real schema validation happens against Neon in Task 1.5 via Alembic
-      autogenerate-empty check.
-    """
-    async with sqlite_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    table_names = set(Base.metadata.tables.keys())
-    assert table_names == {
-        "users",
-        "api_keys",
-        "user_configs",
-        "executions",
-        "billing_records",
-        "funding_candles",
-        "funding_stats",
-    }
-    # Sanity: PK on funding_candles is the 4-col composite
-    pk_cols = [c.name for c in FundingCandleRow.__table__.primary_key.columns]
-    assert pk_cols == ["symbol", "timeframe", "period_agg", "mts"]
-```
-
-- [ ] **Step 3: Run test**
-
-```bash
-cd backend_py && uv run pytest tests/db/test_models.py -v
-```
-
-Expected: 1 passed. If JSONB / UUID raise errors on sqlite, switch the test to use a Postgres testcontainer (out of scope for Day 1 — instead, just mark `xfail` and rely on Task 1.5's autogenerate-empty check). For sqlite both JSONB and UUID typically work via dialect coercion, so this should pass directly.
+Expected: `['api_keys', 'billing_records', 'executions', 'funding_candles', 'funding_stats', 'user_configs', 'users']`.
 
 - [ ] **Step 4: Run mypy + ruff**
 
@@ -833,14 +882,13 @@ Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/core/models.py backend_py/tests/modules/candles/
-git commit -m "✨ Feat: ORM models for all 7 existing tables
+git add backend_py/src/bfx_funding_bot/modules/accounts/
+git commit -m "✨ Feat: modules/accounts/tables — Stage-2 placeholder ORM models
 
-Mirrors backend/schema/schema.hcl exactly. Uses SQLAlchemy 2.0 typed
-Mapped[] annotations + PG-specific UUID/JSONB types where applicable.
-
-This is the source-of-truth for the Alembic baseline-from-DB
-autogenerate check in the next task.
+Defines User, APIKey, UserConfig, Execution, BillingRecord matching
+backend/schema/schema.hcl exactly. Day-1 purpose: enable Alembic
+baseline-from-DB to see full live schema; not used by Day-3 critical
+path. No tests for these (Stage 2 will add when actually used).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -855,13 +903,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 - Create: `backend_py/alembic/script.py.mako`
 - Create: `backend_py/alembic/versions/.gitkeep`
 
-This task implements the Q2 decision §Atlas → Alembic transition: option (a) baseline-from-DB. Concrete procedure:
-
-1. Initialize Alembic with async template
-2. Configure `env.py` to read DATABASE_URL from settings + import `Base.metadata`
-3. Run autogenerate against current Neon schema → expect **empty** migration file (any non-empty content = ORM/schema drift, fix models in Task 1.4 first)
-4. `alembic stamp head` to mark current Neon state as the baseline
-5. Archive old Atlas migrations
+Implements Q2 decision §Atlas → Alembic transition: option (a) baseline-from-DB.
 
 - [ ] **Step 1: Initialize Alembic with async template**
 
@@ -870,21 +912,26 @@ cd backend_py
 uv run alembic init -t async alembic
 ```
 
-Expected: creates `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, `alembic/versions/`.
-
 - [ ] **Step 2: Edit `alembic.ini`**
 
-Open `backend_py/alembic.ini` and:
-1. Find the line `sqlalchemy.url = driver://user:pass@localhost/dbname`
-2. Replace with: `sqlalchemy.url =` (empty — env.py will populate from settings)
-3. Find the `[loggers]` section and ensure default logging is wired (template default is fine).
+Open `backend_py/alembic.ini`, find `sqlalchemy.url = driver://user:pass@localhost/dbname`, replace with:
 
-- [ ] **Step 3: Replace `alembic/env.py` with the async + settings-aware version**
+```
+sqlalchemy.url =
+```
+
+(empty — env.py will populate from settings.)
+
+- [ ] **Step 3: Replace `alembic/env.py`**
 
 Path: `backend_py/alembic/env.py`
 
 ```python
-"""Alembic environment — async, reads DATABASE_URL from bfx_funding_bot.core.settings."""
+"""Alembic environment — async, reads DATABASE_URL from bfx_funding_bot.core.settings.
+
+Imports tables from each module to populate Base.metadata for autogenerate.
+When adding a new module with tables.py, add the import here.
+"""
 import asyncio
 from logging.config import fileConfig
 
@@ -897,9 +944,12 @@ from alembic import context
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
 
+# Side-effect imports: register tables with Base.metadata
+import bfx_funding_bot.modules.candles.tables  # noqa: F401
+import bfx_funding_bot.modules.accounts.tables  # noqa: F401
+
 config = context.config
 
-# Inject DATABASE_URL from settings (overrides empty alembic.ini value)
 settings = Settings()  # type: ignore[call-arg]
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
@@ -959,12 +1009,8 @@ else:
 cd backend_py
 cp .env.example .env
 
-# Pull DATABASE_URL from project root, normalize to asyncpg scheme,
-# overwrite the placeholder line in backend_py/.env.
 ROOT_DB_URL=$(grep -E '^DATABASE_URL=' ../.env | sed 's/^DATABASE_URL=//')
 ASYNCPG_DB_URL=$(echo "$ROOT_DB_URL" | sed -E 's|^postgresql://|postgresql+asyncpg://|')
-# Strip any sslmode query (asyncpg uses ssl=true differently; Neon usually accepts no param)
-# If asyncpg complains about sslmode later, remove the query string entirely.
 python3 -c "
 import re, pathlib
 p = pathlib.Path('.env')
@@ -975,9 +1021,9 @@ p.write_text(content)
 grep '^DATABASE_URL=' .env
 ```
 
-Expected: prints `DATABASE_URL=postgresql+asyncpg://...neon.tech/...`. If the URL still starts with `postgresql://` (no `+asyncpg`), edit `.env` manually.
+Expected: prints `DATABASE_URL=postgresql+asyncpg://...neon.tech/...`. If it still starts with `postgresql://` (no `+asyncpg`), edit `.env` manually.
 
-If asyncpg throws `unexpected keyword argument 'sslmode'` at engine init in Step 5, strip the query string from DATABASE_URL: keep only `postgresql+asyncpg://user:pass@host/dbname` (Neon defaults to TLS).
+If asyncpg throws `unexpected keyword argument 'sslmode'` later, strip the query string from DATABASE_URL: keep only `postgresql+asyncpg://user:pass@host/dbname` (Neon defaults to TLS).
 
 - [ ] **Step 5: Run autogenerate against Neon — expect empty diff**
 
@@ -985,7 +1031,7 @@ If asyncpg throws `unexpected keyword argument 'sslmode'` at engine init in Step
 cd backend_py && uv run alembic revision --autogenerate -m "baseline from existing schema"
 ```
 
-Expected outcome: a new file under `alembic/versions/` is created. **Open it.** The body should look like:
+Open the generated file under `alembic/versions/`. Body must be:
 
 ```python
 def upgrade() -> None:
@@ -996,31 +1042,31 @@ def downgrade() -> None:
     pass
 ```
 
-If `upgrade()` contains any `op.create_table` / `op.add_column` / `op.create_index` / `op.create_foreign_key` calls, the ORM models in Task 1.4 do **not** match the live Neon schema. **Stop**, debug the diff, fix the models, delete the autogenerated file, re-run.
+If `upgrade()` contains any `op.create_table` / `op.add_column` / `op.create_index` / `op.create_foreign_key` calls, the ORM models drift from live schema. **Stop**, debug, fix the model in `modules/candles/tables.py` or `modules/accounts/tables.py`, delete the autogenerated file, re-run.
 
-Most common diff causes and fixes:
-- **Index name mismatch**: Atlas may have used a different naming convention. Adjust the `Index("name", ...)` in models to match what Postgres reports (run `\d table` on psql to see actual index names).
-- **`server_default` literal mismatch**: `text("'active'")` vs `text("active")`. Match Postgres's stored expression exactly.
-- **`PG_UUID` vs `UUID`**: must be `PG_UUID(as_uuid=True)` to match Postgres uuid type.
-- **`JSONB` mistakenly typed as `JSON`**: Postgres has both; Atlas uses `jsonb`.
+Most common diff causes:
+- **Index name mismatch** — adjust `Index("name", ...)` to match Postgres's actual name (`\d table` on psql to inspect).
+- **`server_default` literal mismatch** — `text("'active'")` vs `text("active")`. Match Postgres's stored expression exactly.
+- **`PG_UUID` vs `UUID`** — must be `PG_UUID(as_uuid=True)` to match Postgres uuid type.
+- **`JSONB` mistakenly typed as `JSON`** — Postgres uses `jsonb`.
 
-If irreconcilable within ~half a day → fall back to option (b) per Q2 spec: delete the autogenerated file, create an empty migration manually:
+If irreconcilable within ~half a day → fall back to option (b): delete the autogenerated file, create an empty migration manually:
 
 ```bash
 uv run alembic revision -m "baseline (empty, schema pre-exists)"
 ```
 
-Edit the generated file to leave both `upgrade()` and `downgrade()` as `pass`. Then proceed to Step 6.
+Edit it to leave both `upgrade()` and `downgrade()` as `pass`.
 
-- [ ] **Step 6: Stamp the baseline as applied**
+- [ ] **Step 6: Stamp the baseline**
 
 ```bash
 cd backend_py && uv run alembic stamp head
 ```
 
-Expected output: `INFO  [alembic.runtime.migration] Will assume non-transactional DDL.` followed by `INFO  [alembic.runtime.migration] Running stamp_revision  -> <revision_id>`.
+Expected: `Running stamp_revision  -> <revision_id>`.
 
-- [ ] **Step 7: Verify alembic current returns the baseline**
+- [ ] **Step 7: Verify alembic current**
 
 ```bash
 cd backend_py && uv run alembic current
@@ -1034,13 +1080,13 @@ Expected: shows the baseline revision id and `(head)`.
 cd backend_py && uv run alembic revision --autogenerate -m "drift check"
 ```
 
-Open the new file. It must again be empty (`upgrade: pass`). If empty, **delete the file** (it was only a verification):
+Open the new file. Must again be empty. If empty, **delete it**:
 
 ```bash
 rm backend_py/alembic/versions/*drift_check*.py
 ```
 
-If non-empty, the stamp didn't take or models still drift → debug.
+If non-empty, debug.
 
 - [ ] **Step 9: Archive Atlas migrations**
 
@@ -1067,13 +1113,12 @@ EOF
 git add backend_py/alembic.ini backend_py/alembic/ backend/schema/migrations.atlas-archived/ backend/migrations/
 git commit -m "🔧 Chore: Alembic baseline-from-DB; archive Atlas migrations
 
-backend_py/ now owns DB schema via Alembic (async, settings-aware
-env.py). Baseline stamped against existing Neon schema with empty
-migration file (autogenerate produced no diff = ORM models in
-db/models.py match live schema exactly).
+backend_py/ owns DB schema via Alembic (async, settings-aware env.py
+that imports tables from each module). Baseline stamped against
+existing Neon schema with empty migration file (autogenerate produced
+no diff = ORM models match live schema exactly).
 
-Old Atlas migrations moved to backend/schema/migrations.atlas-archived/
-as historical record per Q2 stack decision (option a, baseline-from-DB).
+Old Atlas migrations moved to backend/schema/migrations.atlas-archived/.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1130,13 +1175,20 @@ from bfx_funding_bot.core.settings import Settings
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings()  # type: ignore[call-arg]
     logging.basicConfig(level=settings.log_level)
-    engine = make_engine(settings)
-    app.state.engine = engine
-    app.state.session_factory = make_session_factory(engine)
+    try:
+        engine = make_engine(settings)
+        app.state.engine = engine
+        app.state.session_factory = make_session_factory(engine)
+    except Exception:
+        logging.exception("Engine init failed; /health remains available")
+        app.state.engine = None
+        app.state.session_factory = None
     try:
         yield
     finally:
-        await engine.dispose()
+        engine = getattr(app.state, "engine", None)
+        if engine is not None:
+            await engine.dispose()
 
 
 app = FastAPI(title="bfx-funding-bot", lifespan=lifespan)
@@ -1153,32 +1205,7 @@ async def health() -> dict[str, str]:
 cd backend_py && uv run pytest tests/test_health.py -v
 ```
 
-Expected: 1 passed. Note: `TestClient` triggers lifespan startup which creates the engine; this requires a valid DATABASE_URL in `.env`. If DATABASE_URL is missing, the test fails with `ValidationError` from pydantic-settings. Set `DATABASE_URL=postgresql+asyncpg://test:test@localhost/test` in `.env` for tests; the engine isn't actually called in `/health`, so a fake URL is fine for this test.
-
-Actually clean fix: make the lifespan tolerant. Update `main.py`:
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = Settings()  # type: ignore[call-arg]
-    logging.basicConfig(level=settings.log_level)
-    try:
-        engine = make_engine(settings)
-        app.state.engine = engine
-        app.state.session_factory = make_session_factory(engine)
-    except Exception:
-        logging.exception("Engine init failed; /health remains available")
-        app.state.engine = None
-        app.state.session_factory = None
-    try:
-        yield
-    finally:
-        engine = getattr(app.state, "engine", None)
-        if engine is not None:
-            await engine.dispose()
-```
-
-Re-run test, expect 1 passed.
+Expected: 1 passed. The test triggers lifespan startup; lifespan is tolerant of missing/invalid DATABASE_URL so the test passes even with a fake URL in `.env`.
 
 - [ ] **Step 5: Boot the app manually and curl /health**
 
@@ -1213,17 +1240,15 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 1.7: Phase 1 verification + smoke
+### Task 1.7: Phase 1 verification
 
-**Files:** none (verification only)
-
-- [ ] **Step 1: Run full test suite + lint + type check**
+- [ ] **Step 1: Full test suite + lint + type check**
 
 ```bash
-cd backend_py && uv run pytest -v && uv run mypy src/ && uv run ruff check && uv run ruff format --check
+cd backend_py && uv run pytest -v -m "not integration" && uv run mypy src/ && uv run ruff check && uv run ruff format --check
 ```
 
-Expected: all pass. If `ruff format --check` fails, run `uv run ruff format` and commit the format-only diff with `💄 Style: ruff format`.
+Expected: all pass. If `ruff format --check` fails, run `uv run ruff format` and commit format-only diff with `💄 Style: ruff format`.
 
 - [ ] **Step 2: Verify Alembic state**
 
@@ -1244,13 +1269,13 @@ kill %1
 
 Expected: `{"status":"ok"}`.
 
-**Phase 1 exit gate:** all 3 steps above pass. If any fail → debug before moving to Phase 2.
+**Phase 1 exit gate:** all 3 steps above pass.
 
 ---
 
 ## Phase 2 — Day 2: Bitfinex REST client (hand-rolled)
 
-**Phase exit criterion:** `infra/bitfinex/rest.py` provides `async def get_funding_candles(symbol, timeframe, start, end, limit)` returning `list[FundingCandle]`. Has aiolimiter rate limiting (30 req/min). Unit tests with `pytest-httpx` pass. One integration test against real Bitfinex pulls a single candle and verifies shape.
+**Phase exit criterion:** `external/bitfinex/rest.py` provides `async def get_funding_candles(...)` returning `list[FundingCandle]`. Has aiolimiter rate limiting. Unit tests with `pytest-httpx` pass. One integration test against real Bitfinex pulls a single candle and verifies shape.
 
 ### Task 2.1: Bitfinex error types
 
@@ -1258,8 +1283,8 @@ Expected: `{"status":"ok"}`.
 - Create: `backend_py/src/bfx_funding_bot/external/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/external/bitfinex/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/external/bitfinex/errors.py`
-- Test: `backend_py/tests/external/__init__.py`
-- Test: `backend_py/tests/external/bitfinex/__init__.py`
+- Create: `backend_py/tests/external/__init__.py`
+- Create: `backend_py/tests/external/bitfinex/__init__.py`
 
 - [ ] **Step 1: Create empty package files**
 
@@ -1303,13 +1328,13 @@ class BitfinexShapeError(BitfinexError):
     """Response parsed as JSON but didn't match expected shape."""
 ```
 
-No dedicated test for errors.py — exercised by `test_rest.py`.
+No dedicated test — exercised by `test_rest.py`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/external/ backend_py/tests/external/
-git commit -m "✨ Feat: Bitfinex error types
+git commit -m "✨ Feat: external/bitfinex/errors — typed exceptions
 
 BitfinexError base + APIError, RateLimited (429), ShapeError.
 
@@ -1318,24 +1343,15 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 2.2: FundingCandle Pydantic domain model
+### Task 2.2: FundingCandle Pydantic schema
 
 **Files:**
-- Create: `backend_py/src/bfx_funding_bot/modules/candles/__init__.py`
-- Create: `backend_py/src/bfx_funding_bot/domain/models.py`
-- Test: `backend_py/tests/modules/candles/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/candles/schemas.py`
 - Test: `backend_py/tests/modules/candles/test_schemas.py`
 
-- [ ] **Step 1: Create empty package files**
+The `modules/candles/` package was created in Task 1.4a; this task adds `schemas.py` next to the existing `tables.py`.
 
-```bash
-mkdir -p backend_py/src/bfx_funding_bot/domain
-mkdir -p backend_py/tests/domain
-touch backend_py/src/bfx_funding_bot/modules/candles/__init__.py
-touch backend_py/tests/modules/candles/__init__.py
-```
-
-- [ ] **Step 2: Write failing test**
+- [ ] **Step 1: Write failing test**
 
 Path: `backend_py/tests/modules/candles/test_schemas.py`
 
@@ -1373,7 +1389,6 @@ def test_funding_candle_decimal_precision() -> None:
     candle = FundingCandle.from_bitfinex(
         raw, symbol="fUST", timeframe="1h", period_agg="p2"
     )
-    # Decimal must preserve at least 10 significant digits of the float
     assert str(candle.open).startswith("0.000123456789")
 
 
@@ -1393,17 +1408,17 @@ def test_funding_candle_rejects_wrong_array_length() -> None:
         )
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/domain/test_models.py -v
+cd backend_py && uv run pytest tests/modules/candles/test_schemas.py -v
 ```
 
-Expected: `ModuleNotFoundError: No module named 'bfx_funding_bot.domain.models'`.
+Expected: `ModuleNotFoundError: No module named 'bfx_funding_bot.modules.candles.schemas'`.
 
-- [ ] **Step 4: Write `domain/models.py`**
+- [ ] **Step 3: Write `modules/candles/schemas.py`**
 
-Path: `backend_py/src/bfx_funding_bot/domain/models.py`
+Path: `backend_py/src/bfx_funding_bot/modules/candles/schemas.py`
 
 ```python
 from datetime import datetime, timezone
@@ -1416,7 +1431,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 def _to_decimal(value: float | int | str | Decimal | None) -> Decimal | None:
     if value is None:
         return None
-    # str() round-trip preserves repr precision better than Decimal(float)
     return Decimal(str(value))
 
 
@@ -1475,15 +1489,15 @@ class FundingCandle(BaseModel):
         )
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-cd backend_py && uv run pytest tests/domain/test_models.py -v
+cd backend_py && uv run pytest tests/modules/candles/test_schemas.py -v
 ```
 
 Expected: 4 passed.
 
-- [ ] **Step 6: Run mypy + ruff**
+- [ ] **Step 5: Run mypy + ruff**
 
 ```bash
 cd backend_py && uv run mypy src/ && uv run ruff check
@@ -1491,14 +1505,14 @@ cd backend_py && uv run mypy src/ && uv run ruff check
 
 Expected: no errors.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/domain/ backend_py/tests/modules/candles/
-git commit -m "✨ Feat: FundingCandle Pydantic domain model
+git add backend_py/src/bfx_funding_bot/modules/candles/schemas.py backend_py/tests/modules/candles/test_schemas.py
+git commit -m "✨ Feat: modules/candles/schemas — FundingCandle Pydantic
 
 Decimal-backed for financial precision. Parses Bitfinex's
-[mts, open, close, high, low, volume] array shape via from_bitfinex().
+[mts, open, close, high, low, volume] array via from_bitfinex().
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1531,7 +1545,6 @@ async def test_limiter_allows_burst_within_capacity() -> None:
         async with limiter.acquire():
             pass
     elapsed = asyncio.get_event_loop().time() - start
-    # 5 calls within capacity should be near-instant (<100ms)
     assert elapsed < 0.1
 
 
@@ -1543,14 +1556,13 @@ async def test_limiter_throttles_beyond_capacity() -> None:
         async with limiter.acquire():
             pass
     elapsed = asyncio.get_event_loop().time() - start
-    # 3rd call must wait at least until the window slides
     assert elapsed >= 0.5
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/infra/bitfinex/test_rate_limit.py -v
+cd backend_py && uv run pytest tests/external/bitfinex/test_rate_limit.py -v
 ```
 
 Expected: `ModuleNotFoundError`.
@@ -1569,8 +1581,7 @@ class FundingRateLimiter:
     """Wraps aiolimiter.AsyncLimiter with funding-endpoint defaults.
 
     Bitfinex public funding endpoints are rate-limited at ~30 req/min per IP
-    (per parent doc; the actual ceiling is higher, ~90 req/min, but we stay
-    conservative for Day-3 single-user use). Tune via constructor for tests.
+    (conservative estimate from parent doc; actual ceiling is ~90).
     """
 
     def __init__(self, max_rate: float = 30, time_period: float = 60.0) -> None:
@@ -1580,10 +1591,10 @@ class FundingRateLimiter:
         return self._limiter
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test**
 
 ```bash
-cd backend_py && uv run pytest tests/infra/bitfinex/test_rate_limit.py -v
+cd backend_py && uv run pytest tests/external/bitfinex/test_rate_limit.py -v
 ```
 
 Expected: 2 passed.
@@ -1592,10 +1603,9 @@ Expected: 2 passed.
 
 ```bash
 git add backend_py/src/bfx_funding_bot/external/bitfinex/rate_limit.py backend_py/tests/external/bitfinex/test_rate_limit.py
-git commit -m "✨ Feat: aiolimiter wrapper for Bitfinex funding endpoints
+git commit -m "✨ Feat: external/bitfinex/rate_limit — aiolimiter wrapper
 
-Default 30 req/min (conservative — Bitfinex actual ceiling is ~90).
-Constructor params allow tighter limits in tests.
+Default 30 req/min funding ceiling; tunable via constructor for tests.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1642,7 +1652,7 @@ async def test_get_funding_candles_happy_path(httpx_mock: HTTPXMock) -> None:
         client = BitfinexREST(
             http=http,
             base_url="https://api-pub.bitfinex.com",
-            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),  # disable in tests
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
         )
         candles = await client.get_funding_candles(
             symbol="fUST",
@@ -1742,12 +1752,43 @@ async def test_get_funding_candles_unexpected_shape_raises_shape_error(
                 end=0,
                 limit=10,
             )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_funding_candles_against_real_bitfinex() -> None:
+    """Pulls last-24h fUST 1h candles from real Bitfinex.
+
+    Skipped by default; run with: `uv run pytest -m integration`.
+    """
+    import time
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(),
+        )
+        end = int(time.time() * 1000)
+        start = end - 24 * 60 * 60 * 1000
+        candles = await client.get_funding_candles(
+            symbol="fUST",
+            timeframe="1h",
+            period_agg="p2",
+            start=start,
+            end=end,
+            limit=24,
+        )
+        assert len(candles) > 0, "Bitfinex returned no candles for last 24h fUST 1h"
+        assert all(c.symbol == "fUST" for c in candles)
+        assert all(c.timeframe == "1h" for c in candles)
+        assert all(c.mts > 0 for c in candles)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run unit tests to verify they fail**
 
 ```bash
-cd backend_py && uv run pytest tests/infra/bitfinex/test_rest.py -v
+cd backend_py && uv run pytest tests/external/bitfinex/test_rest.py -v -m "not integration"
 ```
 
 Expected: `ModuleNotFoundError`.
@@ -1759,17 +1800,16 @@ Path: `backend_py/src/bfx_funding_bot/external/bitfinex/rest.py`
 ```python
 import json
 import logging
-from typing import Any
 
 import httpx
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.external.bitfinex.errors import (
     BitfinexAPIError,
     BitfinexRateLimited,
     BitfinexShapeError,
 )
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 logger = logging.getLogger(__name__)
 
@@ -1777,7 +1817,7 @@ logger = logging.getLogger(__name__)
 class BitfinexREST:
     """Hand-rolled async REST client for Bitfinex public funding endpoints.
 
-    Day-3 scope is ONE endpoint: get_funding_candles. Add others on demand.
+    Day-3 scope: ONE endpoint (get_funding_candles). Add others on demand.
     """
 
     def __init__(
@@ -1802,21 +1842,19 @@ class BitfinexREST:
     ) -> list[FundingCandle]:
         """Pull funding-rate candles.
 
-        Bitfinex endpoint:
-          GET /v2/candles/trade:{tf}:f{symbol}:{period_agg}/hist
-            ?limit=N&start=MS&end=MS
+        Endpoint: GET /v2/candles/trade:{tf}:f{symbol}:{period_agg}/hist
+                  ?limit=N&start=MS&end=MS
 
         Returns candles in **descending** mts order (newest first), per Bitfinex.
-        Pagination: at most 10000 per call; default 125. start/end in **ms**.
+        Pagination: max 10000 per call; default 125. start/end in **ms**.
 
         Args:
-            symbol: e.g. "fUST", "fUSD", "fBTC". Pass without 'f' prefix; we add it.
-                    If callers pass "fUST" we tolerate it by stripping leading 'f'.
-            timeframe: "1m", "5m", "15m", "30m", "1h", "3h", "6h", "12h", "1D", "7D", "14D", "1M".
-            period_agg: aggregation key like "p2" (2-day), "a30" (avg of 30-day buckets).
+            symbol: e.g. "fUST", "fUSD". Tolerates leading "f".
+            timeframe: "1m", "5m", "1h", "1D", etc.
+            period_agg: aggregation key like "p2" (2-day), "a30" (avg of 30-day).
             start: ms timestamp inclusive lower bound.
             end: ms timestamp inclusive upper bound.
-            limit: max number of candles, max 10000.
+            limit: max candles, max 10000.
         """
         sym = symbol[1:] if symbol.startswith("f") else symbol
         path = f"/v2/candles/trade:{timeframe}:f{sym}:{period_agg}/hist"
@@ -1878,70 +1916,23 @@ class BitfinexREST:
         return candles
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run unit tests to verify they pass**
 
 ```bash
-cd backend_py && uv run pytest tests/infra/bitfinex/test_rest.py -v
+cd backend_py && uv run pytest tests/external/bitfinex/test_rest.py -v -m "not integration"
 ```
 
 Expected: 4 passed.
 
-- [ ] **Step 5: Add an integration test (real Bitfinex call, marked separately)**
-
-Path: append to `backend_py/tests/external/bitfinex/test_rest.py`:
-
-```python
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_get_funding_candles_against_real_bitfinex() -> None:
-    """Pulls a single 1h fUST candle from real Bitfinex.
-
-    Skipped by default; run with: `uv run pytest -m integration`.
-    Requires network. Validates Day-3 critical path against live API.
-    """
-    async with httpx.AsyncClient() as http:
-        client = BitfinexREST(
-            http=http,
-            base_url="https://api-pub.bitfinex.com",
-            limiter=FundingRateLimiter(),
-        )
-        # Pull last 24h of 1h fUST candles, p2 aggregation
-        import time
-        end = int(time.time() * 1000)
-        start = end - 24 * 60 * 60 * 1000
-        candles = await client.get_funding_candles(
-            symbol="fUST",
-            timeframe="1h",
-            period_agg="p2",
-            start=start,
-            end=end,
-            limit=24,
-        )
-        assert len(candles) > 0, "Bitfinex returned no candles for last 24h fUST 1h"
-        assert all(c.symbol == "fUST" for c in candles)
-        assert all(c.timeframe == "1h" for c in candles)
-        assert all(c.mts > 0 for c in candles)
-```
-
-Add to `pyproject.toml` under `[tool.pytest.ini_options]`:
-
-```toml
-markers = [
-    "integration: marks tests requiring network/live services (deselect with '-m \"not integration\"')",
-]
-```
-
-- [ ] **Step 6: Run integration test against real Bitfinex**
+- [ ] **Step 5: Run integration test against real Bitfinex**
 
 ```bash
-cd backend_py && uv run pytest tests/infra/bitfinex/test_rest.py -v -m integration
+cd backend_py && uv run pytest tests/external/bitfinex/test_rest.py -v -m integration
 ```
 
-Expected: 1 passed (the integration test). If Bitfinex is down or returns empty for fUST p2 1h, try `period_agg="a30"` or another timeframe — see Bitfinex's funding candles docs.
+Expected: 1 passed. If shape mismatches surface, update `FundingCandle.from_bitfinex` and add a regression unit test for the new shape — **do not** loosen length check without a corresponding test.
 
-If the integration test surfaces shape mismatches that the unit tests didn't catch (e.g., Bitfinex returns a 7-element array for some candles), update `FundingCandle.from_bitfinex` to handle them and add a regression unit test for the new shape — **do not** loosen the strict length check without a corresponding test.
-
-- [ ] **Step 7: Run mypy + ruff**
+- [ ] **Step 6: Run mypy + ruff**
 
 ```bash
 cd backend_py && uv run mypy src/ && uv run ruff check
@@ -1949,16 +1940,15 @@ cd backend_py && uv run mypy src/ && uv run ruff check
 
 Expected: no errors.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/external/bitfinex/rest.py backend_py/tests/external/bitfinex/test_rest.py backend_py/pyproject.toml
-git commit -m "✨ Feat: hand-rolled Bitfinex REST client + get_funding_candles
+git add backend_py/src/bfx_funding_bot/external/bitfinex/rest.py backend_py/tests/external/bitfinex/test_rest.py
+git commit -m "✨ Feat: external/bitfinex/rest — hand-rolled REST + get_funding_candles
 
 Async httpx + aiolimiter rate limiting. Returns Decimal-backed
-FundingCandle Pydantic models. 4 unit tests (happy path, 429,
-500, shape error) + 1 integration test against real Bitfinex
-(marked '-m integration', skipped by default).
+FundingCandle Pydantic models. 4 unit tests + 1 real-Bitfinex
+integration test (-m integration, skipped by default).
 
 Day-3 scope: ONE endpoint. Add others on demand.
 
@@ -1969,7 +1959,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ### Task 2.5: Phase 2 verification
 
-- [ ] **Step 1: Run full unit test suite + lint + type check**
+- [ ] **Step 1: Full unit test suite + lint + type check**
 
 ```bash
 cd backend_py && uv run pytest -v -m "not integration" && uv run mypy src/ && uv run ruff check
@@ -1977,13 +1967,13 @@ cd backend_py && uv run pytest -v -m "not integration" && uv run mypy src/ && uv
 
 Expected: all pass.
 
-- [ ] **Step 2: Run integration test against real Bitfinex**
+- [ ] **Step 2: Integration test against real Bitfinex**
 
 ```bash
 cd backend_py && uv run pytest -v -m integration
 ```
 
-Expected: 1 passed. **If failed: stop and triage.** Per parent doc Day-3 abort signal threshold, if hand-roll for the single endpoint takes more than half a day to make work against the real API, the broader Python rewrite assumption is at risk.
+Expected: 1 passed. **If failed: triage.** Per parent doc Day-3 abort signal threshold, if hand-roll for the single endpoint takes more than half a day to make work against real API, the broader Python rewrite assumption is at risk.
 
 **Phase 2 exit gate:** unit tests pass + integration test pulls real candles successfully.
 
@@ -1991,26 +1981,15 @@ Expected: 1 passed. **If failed: stop and triage.** Per parent doc Day-3 abort s
 
 ## Phase 3 — Day 3: Checkpoint 1 — End-to-end backfill
 
-**Phase exit criterion (= parent doc Checkpoint 1):** `scripts/backfill_candles.py` runs end-to-end on real Bitfinex + real Neon, writes a known time window of fUST 1h p2 candles, reads them back via SQLAlchemy, and the read-back numbers match the originally-fetched numbers exactly (no rounding drift). Spot-check at least one candle against Bitfinex web UI to confirm source-of-truth match.
+**Phase exit criterion (= parent doc Checkpoint 1):** `scripts/backfill_candles.py` runs end-to-end on real Bitfinex + real Neon, writes a known time window of fUST 1h p2 candles, reads them back via SQLAlchemy, and the read-back numbers match the originally-fetched numbers exactly. Spot-check at least one candle against Bitfinex web UI to confirm source-of-truth match.
 
 ### Task 3.1: Repository for funding_candles
 
 **Files:**
-- Create: `backend_py/src/bfx_funding_bot/modules/candles/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/modules/candles/repository.py`
-- Test: `backend_py/tests/modules/candles/__init__.py`
 - Test: `backend_py/tests/modules/candles/test_repository.py`
 
-- [ ] **Step 1: Create empty package files**
-
-```bash
-mkdir -p backend_py/src/bfx_funding_bot/repositories
-mkdir -p backend_py/tests/repositories
-touch backend_py/src/bfx_funding_bot/modules/candles/__init__.py
-touch backend_py/tests/modules/candles/__init__.py
-```
-
-- [ ] **Step 2: Write failing test**
+- [ ] **Step 1: Write failing test**
 
 Path: `backend_py/tests/modules/candles/test_repository.py`
 
@@ -2021,11 +2000,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
     upsert_candles,
 )
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 @pytest.fixture
@@ -2077,12 +2056,8 @@ async def test_upsert_then_get_round_trips_decimal(
     )
 
     assert len(fetched) == 2
-    # Returned in ascending mts order
     assert fetched[0].mts == 1704067200000
     assert fetched[1].mts == 1704070800000
-    # Decimal precision preserved through DB round-trip (sqlite uses float;
-    # for the Day-3 exact-match check on Postgres we expect bit-exact;
-    # on sqlite we accept tiny float-conversion drift — assert close).
     assert fetched[0].open is not None
     assert abs(fetched[0].open - Decimal("0.0001234567")) < Decimal("1e-12")
 
@@ -2140,15 +2115,15 @@ async def test_upsert_empty_list_is_noop(
     assert fetched == []
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/repositories/test_candles.py -v
+cd backend_py && uv run pytest tests/modules/candles/test_repository.py -v
 ```
 
 Expected: `ModuleNotFoundError`.
 
-- [ ] **Step 4: Write `repositories/candles.py`**
+- [ ] **Step 3: Write `repository.py`**
 
 Path: `backend_py/src/bfx_funding_bot/modules/candles/repository.py`
 
@@ -2160,8 +2135,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 
 
 def _to_float_or_none(d: Decimal | None) -> float | None:
@@ -2188,8 +2163,8 @@ async def upsert_candles(
 ) -> None:
     """Upsert candles by composite PK (symbol, timeframe, period_agg, mts).
 
-    Uses ON CONFLICT DO UPDATE on Postgres; on sqlite (test only) uses the
-    sqlite-specific INSERT OR REPLACE via the sqlite dialect's insert().
+    Postgres: ON CONFLICT DO UPDATE. Sqlite (test only): same semantics via
+    sqlite dialect's insert().on_conflict_do_update.
     """
     if not candles:
         return
@@ -2224,7 +2199,6 @@ async def upsert_candles(
             },
         )
     else:
-        # sqlite test path
         stmt = sqlite_insert(FundingCandleRow).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol", "timeframe", "period_agg", "mts"],
@@ -2265,27 +2239,19 @@ async def get_candles_in_range(
     return [_row_to_domain(row) for row in result.scalars().all()]
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 4: Run test**
 
 ```bash
-cd backend_py && uv run pytest tests/repositories/test_candles.py -v
+cd backend_py && uv run pytest tests/modules/candles/test_repository.py -v
 ```
 
 Expected: 3 passed.
 
-- [ ] **Step 6: Run mypy + ruff**
+- [ ] **Step 5: Commit**
 
 ```bash
-cd backend_py && uv run mypy src/ && uv run ruff check
-```
-
-Expected: no errors.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add backend_py/src/bfx_funding_bot/repositories/ backend_py/tests/modules/candles/
-git commit -m "✨ Feat: candles repository — upsert + get_in_range
+git add backend_py/src/bfx_funding_bot/modules/candles/repository.py backend_py/tests/modules/candles/test_repository.py
+git commit -m "✨ Feat: modules/candles/repository — upsert + get_in_range
 
 Postgres ON CONFLICT DO UPDATE (composite PK) for production;
 sqlite ON CONFLICT for unit tests. Returns Decimal-backed
@@ -2296,13 +2262,204 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 3.2: Backfill CLI script
+### Task 3.2: Service — backfill orchestration
+
+**Files:**
+- Create: `backend_py/src/bfx_funding_bot/modules/candles/service.py`
+- Test: `backend_py/tests/modules/candles/test_service.py`
+
+The service composes the BitfinexREST client + repository to do a backfill in one call. CLI scripts (Task 3.3) and future FastAPI handlers will call this; the service itself has no CLI/HTTP knowledge.
+
+- [ ] **Step 1: Write failing test**
+
+Path: `backend_py/tests/modules/candles/test_service.py`
+
+```python
+from decimal import Decimal
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import backfill_candles
+
+
+@pytest.fixture
+async def setup_schema(sqlite_engine: AsyncEngine) -> None:
+    async with sqlite_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+@pytest.mark.asyncio
+async def test_backfill_fetches_and_stores_then_returns_both(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    fake_candles = [
+        FundingCandle(
+            symbol="fUST",
+            timeframe="1h",
+            period_agg="p2",
+            mts=1704067200000,
+            open=Decimal("0.0001"),
+            close=Decimal("0.0002"),
+            high=Decimal("0.0003"),
+            low=Decimal("0.00005"),
+            volume=Decimal("100.0"),
+        )
+    ]
+    mock_client: Any = AsyncMock()
+    mock_client.get_funding_candles.return_value = fake_candles
+
+    fetched, stored = await backfill_candles(
+        bitfinex=mock_client,
+        session=sqlite_session,
+        symbol="fUST",
+        timeframe="1h",
+        period_agg="p2",
+        start_ms=1704067200000,
+        end_ms=1704067200000,
+        limit=125,
+    )
+
+    mock_client.get_funding_candles.assert_awaited_once_with(
+        symbol="fUST",
+        timeframe="1h",
+        period_agg="p2",
+        start=1704067200000,
+        end=1704067200000,
+        limit=125,
+    )
+    assert fetched == fake_candles
+    assert len(stored) == 1
+    assert stored[0].mts == 1704067200000
+    assert stored[0].close is not None
+    assert abs(stored[0].close - Decimal("0.0002")) < Decimal("1e-12")
+
+
+@pytest.mark.asyncio
+async def test_backfill_returns_empty_lists_when_bitfinex_returns_nothing(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    mock_client: Any = AsyncMock()
+    mock_client.get_funding_candles.return_value = []
+
+    fetched, stored = await backfill_candles(
+        bitfinex=mock_client,
+        session=sqlite_session,
+        symbol="fUST",
+        timeframe="1h",
+        period_agg="p2",
+        start_ms=0,
+        end_ms=0,
+        limit=10,
+    )
+
+    assert fetched == []
+    assert stored == []
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+cd backend_py && uv run pytest tests/modules/candles/test_service.py -v
+```
+
+Expected: `ModuleNotFoundError`.
+
+- [ ] **Step 3: Write `service.py`**
+
+Path: `backend_py/src/bfx_funding_bot/modules/candles/service.py`
+
+```python
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
+from bfx_funding_bot.modules.candles.repository import (
+    get_candles_in_range,
+    upsert_candles,
+)
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+
+
+async def backfill_candles(
+    *,
+    bitfinex: BitfinexREST,
+    session: AsyncSession,
+    symbol: str,
+    timeframe: str,
+    period_agg: str,
+    start_ms: int,
+    end_ms: int,
+    limit: int = 125,
+) -> tuple[list[FundingCandle], list[FundingCandle]]:
+    """Fetch candles from Bitfinex, upsert to DB, read back what was stored.
+
+    Returns (fetched, stored). Caller can compare them for round-trip integrity.
+    Does NOT commit the session; caller manages the transaction (so a CLI can
+    wrap multiple backfills in one tx if desired).
+    """
+    fetched = await bitfinex.get_funding_candles(
+        symbol=symbol,
+        timeframe=timeframe,
+        period_agg=period_agg,
+        start=start_ms,
+        end=end_ms,
+        limit=limit,
+    )
+    await upsert_candles(session, fetched)
+    stored = await get_candles_in_range(
+        session,
+        symbol=symbol,
+        timeframe=timeframe,
+        period_agg=period_agg,
+        start_mts=start_ms,
+        end_mts=end_ms,
+    )
+    return fetched, stored
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+cd backend_py && uv run pytest tests/modules/candles/test_service.py -v
+```
+
+Expected: 2 passed.
+
+- [ ] **Step 5: Run mypy + ruff**
+
+```bash
+cd backend_py && uv run mypy src/ && uv run ruff check
+```
+
+Expected: no errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend_py/src/bfx_funding_bot/modules/candles/service.py backend_py/tests/modules/candles/test_service.py
+git commit -m "✨ Feat: modules/candles/service — backfill orchestration
+
+Composes BitfinexREST + repository. Returns (fetched, stored) tuple
+so callers can verify round-trip integrity. Caller owns transaction.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 3.3: Backfill CLI script
 
 **Files:**
 - Create: `backend_py/scripts/__init__.py`
 - Create: `backend_py/scripts/backfill_candles.py`
 
-This is the Day-3 Checkpoint 1 driver. It exists to validate the end-to-end path against real Neon + real Bitfinex.
+This is the Day-3 Checkpoint 1 driver. Thin: parses args, builds dependencies, calls `service.backfill_candles`, runs the exact-match check.
 
 - [ ] **Step 1: Create script package marker**
 
@@ -2342,14 +2499,11 @@ from decimal import Decimal
 import httpx
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.modules.candles.repository import (
-    get_candles_in_range,
-    upsert_candles,
-)
-from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import backfill_candles
 
 logger = logging.getLogger("backfill_candles")
 
@@ -2388,10 +2542,7 @@ def _candles_match_exactly(
                 continue
             if fv is None or sv is None:
                 return False, f"mts={mts} field={field}: nullness mismatch f={fv} s={sv}"
-            # Postgres double precision IEEE-754 round-trip: should be bit-exact
-            # when written as float and read back as float, then both converted
-            # via str(). Allow a tiny epsilon to account for edge cases.
-            if abs(Decimal(fv) - Decimal(sv)) > Decimal("1e-15"):
+            if abs(fv - sv) > Decimal("1e-15"):
                 return False, f"mts={mts} field={field}: f={fv} != s={sv}"
     return True, "match"
 
@@ -2421,34 +2572,22 @@ async def _amain() -> int:
                 "fetching %s %s %s [%s, %s]",
                 args.symbol, args.timeframe, args.period_agg, start_ms, end_ms,
             )
-            fetched = await client.get_funding_candles(
-                symbol=args.symbol,
-                timeframe=args.timeframe,
-                period_agg=args.period_agg,
-                start=start_ms,
-                end=end_ms,
-                limit=10000,
-            )
-        logger.info("fetched %d candles", len(fetched))
+            async with session_scope(session_factory) as session:
+                fetched, stored = await backfill_candles(
+                    bitfinex=client,
+                    session=session,
+                    symbol=args.symbol,
+                    timeframe=args.timeframe,
+                    period_agg=args.period_agg,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    limit=10000,
+                )
+        logger.info("fetched %d, stored %d", len(fetched), len(stored))
 
         if not fetched:
             logger.error("Bitfinex returned 0 candles — cannot validate checkpoint")
             return 2
-
-        async with session_scope(session_factory) as session:
-            await upsert_candles(session, fetched)
-            logger.info("upserted %d candles", len(fetched))
-
-        async with session_scope(session_factory) as session:
-            stored = await get_candles_in_range(
-                session,
-                symbol=args.symbol,
-                timeframe=args.timeframe,
-                period_agg=args.period_agg,
-                start_mts=start_ms,
-                end_mts=end_ms,
-            )
-        logger.info("read back %d candles", len(stored))
 
         ok, reason = _candles_match_exactly(fetched, stored)
         if ok:
@@ -2496,19 +2635,17 @@ if __name__ == "__main__":
 cd backend_py && uv run python scripts/backfill_candles.py --hours-back 24
 ```
 
-Expected: exit code 0, log line `✅ Checkpoint 1 PASS: N candles round-tripped exactly` plus the spot-check sample with timestamp + values.
+Expected: exit code 0 + log line `✅ Checkpoint 1 PASS: N candles round-tripped exactly` + spot-check sample.
 
-If exit code 1 (drift) → triage the reason in the error log. Most likely cause: float→Decimal→float round-trip lost precision somewhere. Fix the conversion in `repositories/candles.py` (likely `_row_to_domain` or `_to_float_or_none`).
-
-If exit code 2 (no candles) → try `--period-agg a30` or `--symbol fUSD`; not all aggregations have data for all symbols.
-
-If exit code 3 → check DATABASE_URL (must be `postgresql+asyncpg://`), Neon connectivity, Bitfinex connectivity.
+If exit 1 (drift): triage. Most likely float→Decimal round-trip lost precision in `_row_to_domain` or `_to_float_or_none`.
+If exit 2 (no candles): try `--period-agg a30` or `--symbol fUSD`.
+If exit 3: check DATABASE_URL (`postgresql+asyncpg://`), Neon connectivity, Bitfinex connectivity.
 
 - [ ] **Step 4: Spot-check one candle against Bitfinex web UI**
 
-Open the URL printed in the log (e.g. https://www.bitfinex.com/funding/UST). Find a candle at the printed timestamp. Confirm open/close/high/low/volume match the printed sample. **Both the script's exit-code-0 AND this manual check must pass for Checkpoint 1.**
+Open the URL printed in the log (e.g. https://www.bitfinex.com/funding/UST). Find a candle at the printed timestamp. Confirm open/close/high/low/volume match the printed sample. **Both the script's exit-0 AND this manual check must pass for Checkpoint 1.**
 
-If the script reports PASS but the manual check disagrees, the round-trip is internally consistent but not matching source. Likely cause: wrong endpoint or wrong period_agg. Bitfinex's funding candle aggregation (`p2`, `a30`, etc.) is documented at https://docs.bitfinex.com/reference/rest-public-candles — re-confirm the chosen aggregation matches what the web UI shows.
+If script PASS but manual check disagrees, the round-trip is internally consistent but not matching source. Likely cause: wrong endpoint or wrong period_agg. Bitfinex's funding candle aggregation is documented at https://docs.bitfinex.com/reference/rest-public-candles.
 
 - [ ] **Step 5: Commit**
 
@@ -2516,24 +2653,21 @@ If the script reports PASS but the manual check disagrees, the round-trip is int
 git add backend_py/scripts/
 git commit -m "✨ Feat: Day-3 Checkpoint 1 backfill CLI
 
-scripts/backfill_candles.py: fetch from Bitfinex → upsert to Neon →
-read back → assert exact round-trip match. Exit codes distinguish
-checkpoint-fail (drift / no data) from operational error.
-
-Run: uv run python scripts/backfill_candles.py --hours-back 24
+scripts/backfill_candles.py: thin CLI driving modules.candles.service.
+Adds the exact-match round-trip verification + manual web-UI
+spot-check guidance. Exit codes distinguish checkpoint-fail (drift /
+no data) from operational error.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3.3: Phase 3 (Checkpoint 1) decision gate
+### Task 3.4: Phase 3 (Checkpoint 1) decision gate
 
 - [ ] **Step 1: Make the explicit go/no-go call**
 
-Document the Checkpoint 1 outcome in a new short note: `docs/superpowers/specs/2026-05-1X-checkpoint-1-result.md` (replace X with actual Day-3 calendar date).
-
-Template:
+Document the Checkpoint 1 outcome at `docs/superpowers/specs/2026-05-1X-checkpoint-1-result.md` (replace X with actual Day-3 calendar date):
 
 ```markdown
 # Checkpoint 1 Result — <date>
@@ -2546,15 +2680,15 @@ Template:
 - Sample candle web-UI verification: <match | mismatch | not-checked>
 
 **Decision**:
-- PASS → continue to Phase 4 (backtest engine + baseline strategy)
-- FAIL → abort Python rewrite, return to Go branch, document blocker below
-- PARTIAL → continue with explicit caveat:
+- PASS → continue to Phase 4
+- FAIL → abort Python rewrite, return to Go branch, document blocker
+- PARTIAL → continue with explicit caveat
 
 **Blocker (if FAIL or PARTIAL)**:
 <short description>
 
 **Time spent on Phases 1-3**: <hours/days>
-**Time vs P50 estimate (4 days for Phases 1-3)**: <on-track | over by N>
+**Time vs P50 estimate (~3 days)**: <on-track | over by N>
 ```
 
 - [ ] **Step 2: Commit the result note**
@@ -2566,7 +2700,7 @@ git commit -m "📝 Docs: Checkpoint 1 result"
 
 **Phase 3 exit gate (= parent doc Day-3 abort criteria):**
 - PASS → proceed to Phase 4
-- FAIL → STOP, do not start Phase 4. Switch back to Go branch and resume Stage 1.2.
+- FAIL → STOP. Switch back to Go branch and resume Stage 1.2.
 
 ---
 
@@ -2574,18 +2708,31 @@ git commit -m "📝 Docs: Checkpoint 1 result"
 
 **Phase exit criterion (= parent doc Checkpoint 2):** the backtest engine reads candles from Neon (already populated by Phase 3), runs one baseline strategy against them, and outputs a monthly return percentage + max drawdown percentage. The numbers don't need to be impressive — they need to be produced.
 
-### Task 4.1: BacktestResult domain model
+### Task 4.1: Backtest schemas — BacktestResult + LendDecision
 
 **Files:**
-- Modify: `backend_py/src/bfx_funding_bot/domain/models.py`
-- Test: append to `backend_py/tests/modules/candles/test_schemas.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/backtest/__init__.py`
+- Create: `backend_py/src/bfx_funding_bot/modules/backtest/schemas.py`
+- Create: `backend_py/tests/modules/backtest/__init__.py`
+- Test: `backend_py/tests/modules/backtest/test_schemas.py`
 
-- [ ] **Step 1: Append failing test**
+- [ ] **Step 1: Create empty package files**
 
-Append to `backend_py/tests/modules/candles/test_schemas.py`:
+```bash
+mkdir -p backend_py/src/bfx_funding_bot/modules/backtest
+mkdir -p backend_py/tests/modules/backtest
+touch backend_py/src/bfx_funding_bot/modules/backtest/__init__.py
+touch backend_py/tests/modules/backtest/__init__.py
+```
+
+- [ ] **Step 2: Write failing test**
+
+Path: `backend_py/tests/modules/backtest/test_schemas.py`
 
 ```python
-from bfx_funding_bot.modules.backtest.schemas import BacktestResult
+from decimal import Decimal
+
+from bfx_funding_bot.modules.backtest.schemas import BacktestResult, LendDecision
 
 
 def test_backtest_result_construction() -> None:
@@ -2602,21 +2749,47 @@ def test_backtest_result_construction() -> None:
     assert result.strategy_name == "always_frr"
     assert result.monthly_return_pct == Decimal("0.45")
     assert result.max_drawdown_pct == Decimal("0.05")
+
+
+def test_lend_decision_construction() -> None:
+    d = LendDecision(mts=1704067200000, rate=Decimal("0.000123"), period_days=2)
+    assert d.mts == 1704067200000
+    assert d.rate == Decimal("0.000123")
+    assert d.period_days == 2
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/domain/test_models.py::test_backtest_result_construction -v
+cd backend_py && uv run pytest tests/modules/backtest/test_schemas.py -v
 ```
 
-Expected: ImportError on `BacktestResult`.
+Expected: `ModuleNotFoundError`.
 
-- [ ] **Step 3: Append `BacktestResult` to `domain/models.py`**
+- [ ] **Step 4: Write `schemas.py`**
 
-Append to `backend_py/src/bfx_funding_bot/domain/models.py`:
+Path: `backend_py/src/bfx_funding_bot/modules/backtest/schemas.py`
 
 ```python
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class LendDecision(BaseModel):
+    """A simulated lending offer at a given candle.
+
+    Day-4 simplification: lend is treated as instantly filled at the close
+    rate of the candle. Real fill probability vs FRR is deferred to Stage 2.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mts: int  # candle mts when decision was made
+    rate: Decimal  # daily rate (matches Bitfinex funding rate semantics)
+    period_days: int  # 2 = minimum, up to 120
+
+
 class BacktestResult(BaseModel):
     """Output of a single backtest run."""
 
@@ -2632,19 +2805,24 @@ class BacktestResult(BaseModel):
     n_trades: int
 ```
 
-- [ ] **Step 4: Run test**
+- [ ] **Step 5: Run test**
 
 ```bash
-cd backend_py && uv run pytest tests/domain/test_models.py -v
+cd backend_py && uv run pytest tests/modules/backtest/test_schemas.py -v
 ```
 
-Expected: all pass (5 total tests now).
+Expected: 2 passed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/domain/models.py backend_py/tests/modules/candles/test_schemas.py
-git commit -m "✨ Feat: BacktestResult domain model"
+git add backend_py/src/bfx_funding_bot/modules/backtest/ backend_py/tests/modules/backtest/
+git commit -m "✨ Feat: modules/backtest/schemas — BacktestResult + LendDecision
+
+Pydantic, frozen, Decimal-backed. Used by Strategy ABC, engine, and
+CLI / future API.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
@@ -2652,7 +2830,6 @@ git commit -m "✨ Feat: BacktestResult domain model"
 ### Task 4.2: Strategy ABC
 
 **Files:**
-- Create: `backend_py/src/bfx_funding_bot/modules/backtest/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/modules/backtest/strategies/__init__.py`
 - Create: `backend_py/src/bfx_funding_bot/modules/backtest/strategies/base.py`
 
@@ -2660,7 +2837,6 @@ git commit -m "✨ Feat: BacktestResult domain model"
 
 ```bash
 mkdir -p backend_py/src/bfx_funding_bot/modules/backtest/strategies
-touch backend_py/src/bfx_funding_bot/modules/backtest/__init__.py
 touch backend_py/src/bfx_funding_bot/modules/backtest/strategies/__init__.py
 ```
 
@@ -2670,24 +2846,9 @@ Path: `backend_py/src/bfx_funding_bot/modules/backtest/strategies/base.py`
 
 ```python
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from decimal import Decimal
 
+from bfx_funding_bot.modules.backtest.schemas import LendDecision
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-
-
-@dataclass(frozen=True)
-class LendDecision:
-    """A simulated lending offer at a given candle.
-
-    Day-4 simplification: lend is treated as instantly filled at the close
-    rate of the candle. Real-world fill probability vs FRR is deferred
-    to Stage 2 (the lending engine port).
-    """
-
-    mts: int  # candle mts when decision was made
-    rate: Decimal  # daily rate (matches Bitfinex funding rate semantics)
-    period_days: int  # 2 = minimum, up to 120
 
 
 class Strategy(ABC):
@@ -2711,12 +2872,12 @@ No dedicated test for the ABC itself — exercised by `test_always_frr.py`.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/modules/backtest/
-git commit -m "✨ Feat: Strategy ABC + LendDecision
+git add backend_py/src/bfx_funding_bot/modules/backtest/strategies/
+git commit -m "✨ Feat: Strategy ABC
 
-Minimal contract: decide(candle) -> LendDecision | None. Day-4
-simplification: instant fill at candle close rate, no FRR-vs-rate
-fill-probability model (deferred to lending engine port).
+Minimal contract: decide(candle) -> LendDecision | None. LendDecision
+itself lives in modules/backtest/schemas.py (not co-located in base.py)
+so it can be reused by future strategy types and API responses.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -2727,15 +2888,13 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Create: `backend_py/src/bfx_funding_bot/modules/backtest/strategies/always_frr.py`
-- Test: `backend_py/tests/modules/backtest/__init__.py`
-- Test: `backend_py/tests/modules/backtest/strategies/__init__.py`
+- Create: `backend_py/tests/modules/backtest/strategies/__init__.py`
 - Test: `backend_py/tests/modules/backtest/strategies/test_always_frr.py`
 
 - [ ] **Step 1: Create empty package files**
 
 ```bash
 mkdir -p backend_py/tests/modules/backtest/strategies
-touch backend_py/tests/modules/backtest/__init__.py
 touch backend_py/tests/modules/backtest/strategies/__init__.py
 ```
 
@@ -2745,8 +2904,6 @@ Path: `backend_py/tests/modules/backtest/strategies/test_always_frr.py`
 
 ```python
 from decimal import Decimal
-
-import pytest
 
 from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -2795,7 +2952,7 @@ def test_always_frr_respects_period() -> None:
 - [ ] **Step 3: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/backtest/strategies/test_always_frr.py -v
+cd backend_py && uv run pytest tests/modules/backtest/strategies/test_always_frr.py -v
 ```
 
 Expected: `ModuleNotFoundError`.
@@ -2805,8 +2962,8 @@ Expected: `ModuleNotFoundError`.
 Path: `backend_py/src/bfx_funding_bot/modules/backtest/strategies/always_frr.py`
 
 ```python
-from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
+from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
@@ -2814,8 +2971,8 @@ class AlwaysFRRStrategy(Strategy):
     """Baseline: at every candle with a close rate, lend at that rate for
     `period_days`. Naive — no awareness of FRR vs offered rate, no order book.
 
-    This is the simplest possible strategy and exists ONLY to validate that
-    the backtest engine produces a number end-to-end (Checkpoint 2 pass).
+    Exists ONLY to validate that the backtest engine produces a number
+    end-to-end (Checkpoint 2 pass).
     """
 
     def __init__(self, period_days: int = 2) -> None:
@@ -2838,7 +2995,7 @@ class AlwaysFRRStrategy(Strategy):
 - [ ] **Step 5: Run test**
 
 ```bash
-cd backend_py && uv run pytest tests/backtest/strategies/test_always_frr.py -v
+cd backend_py && uv run pytest tests/modules/backtest/strategies/test_always_frr.py -v
 ```
 
 Expected: 4 passed.
@@ -2846,12 +3003,12 @@ Expected: 4 passed.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/modules/backtest/strategies/always_frr.py backend_py/tests/modules/backtest/
+git add backend_py/src/bfx_funding_bot/modules/backtest/strategies/always_frr.py backend_py/tests/modules/backtest/strategies/
 git commit -m "✨ Feat: AlwaysFRRStrategy baseline (Checkpoint 2 driver)
 
-Lend at every candle's close rate for configured period_days.
-Simplest possible strategy — exists to validate the backtest
-engine produces a number, not to be a useful strategy.
+Lend at every candle's close rate for configured period_days. Simplest
+possible strategy — exists to validate the backtest engine produces
+a number, not to be a useful strategy.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -2870,8 +3027,6 @@ Path: `backend_py/tests/modules/backtest/test_engine.py`
 
 ```python
 from decimal import Decimal
-
-import pytest
 
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
@@ -2897,11 +3052,8 @@ def _candles_constant_rate(rate: str, n: int = 720) -> list[FundingCandle]:
 
 
 def test_run_backtest_constant_rate_produces_expected_monthly_return() -> None:
-    """At a constant 0.0001 daily rate over 30 days lending continuously,
-    monthly return ≈ 30 days × 0.0001 = 0.003 = 0.3%.
-
-    Day-4 simplified accounting: equity grows by (rate * period_days) for
-    each LendDecision; we re-lend every period_days * 24 candles.
+    """At constant 0.0001 daily rate over 30 days lending continuously,
+    monthly return ≈ 30 days × 0.0001 = 0.003 = 0.3% (compounded slightly higher).
     """
     candles = _candles_constant_rate("0.0001", n=720)
     strategy = AlwaysFRRStrategy(period_days=2)
@@ -2911,11 +3063,9 @@ def test_run_backtest_constant_rate_produces_expected_monthly_return() -> None:
     assert result.strategy_name == "always_frr_p2"
     assert result.symbol == "fUST"
     assert result.n_candles == 720
-    # 720 hours = 30 days; period 2 days = 15 lends. Each lend earns rate*period.
-    # 15 * 0.0001 * 2 = 0.003 = 0.3% monthly return.
+    # 720 hours = 30 days; period 2 days = 15 lends. Compound: 1.0002^15 ≈ 1.003.
     assert abs(result.monthly_return_pct - Decimal("0.3")) < Decimal("0.01")
     assert result.n_trades == 15
-    # Constant rate → no drawdown
     assert result.max_drawdown_pct == Decimal("0")
 
 
@@ -2931,7 +3081,6 @@ def test_run_backtest_handles_empty_candles() -> None:
 
 def test_run_backtest_skips_candles_with_no_close() -> None:
     candles = _candles_constant_rate("0.0001", n=720)
-    # Punch a hole — set close=None on a few candles
     candles_with_holes = []
     for i, c in enumerate(candles):
         if i % 100 == 0:
@@ -2941,14 +3090,13 @@ def test_run_backtest_skips_candles_with_no_close() -> None:
     strategy = AlwaysFRRStrategy(period_days=2)
     result = run_backtest(candles_with_holes, strategy)
     assert result.n_candles == 720
-    # Should still produce some trades
     assert result.n_trades > 0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd backend_py && uv run pytest tests/backtest/test_engine.py -v
+cd backend_py && uv run pytest tests/modules/backtest/test_engine.py -v
 ```
 
 Expected: `ModuleNotFoundError`.
@@ -2960,8 +3108,9 @@ Path: `backend_py/src/bfx_funding_bot/modules/backtest/engine.py`
 ```python
 from decimal import Decimal
 
+from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
-from bfx_funding_bot.modules.backtest.schemas import BacktestResult, FundingCandle
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def run_backtest(
@@ -2973,13 +3122,12 @@ def run_backtest(
     Day-4 simplified accounting model:
       - Equity starts at 1.0 (treated as 1 unit of currency lent)
       - At each candle, ask the strategy for a LendDecision
-      - If a decision is returned AND we are not already mid-loan, "lend"
-        for `period_days` and credit `rate * period_days` to equity
-      - "Mid-loan" cooldown is `period_days * 24` candles (assuming 1h candles)
-      - At the end, monthly_return_pct = (final_equity - 1) / months_elapsed * 100
+      - If returned AND not mid-loan: lend for `period_days`, credit
+        `rate * period_days` to equity (compounded)
+      - Mid-loan cooldown is `period_days * 24` candles (assumes 1h candles)
+      - monthly_return_pct = (final_equity - 1) / months_elapsed * 100
         where months_elapsed = total_hours / (24*30)
-      - max_drawdown_pct = max((peak - trough) / peak * 100) seen in the equity curve
-        (constant-rate run = 0 drawdown)
+      - max_drawdown_pct = max((peak - trough) / peak * 100)
 
     Limitations (intentional for Checkpoint 2):
       - No partial fills / order book / FRR vs offered rate model
@@ -2999,7 +3147,6 @@ def run_backtest(
             n_trades=0,
         )
 
-    # Sort defensively — repository returns ASC but strategy may receive any input
     sorted_candles = sorted(candles, key=lambda c: c.mts)
     symbol = sorted_candles[0].symbol
     start_mts = sorted_candles[0].mts
@@ -3009,7 +3156,7 @@ def run_backtest(
     peak = equity
     max_dd = Decimal("0")
     n_trades = 0
-    cooldown_until_idx = -1  # exclusive index after which we can lend again
+    cooldown_until_idx = -1
 
     for i, candle in enumerate(sorted_candles):
         if i <= cooldown_until_idx:
@@ -3017,12 +3164,9 @@ def run_backtest(
         decision = strategy.decide(candle)
         if decision is None:
             continue
-        # Credit period earnings
         equity = equity * (Decimal("1") + decision.rate * Decimal(decision.period_days))
         n_trades += 1
-        # Cooldown: skip the next period_days * 24 candles (assuming 1h timeframe)
         cooldown_until_idx = i + decision.period_days * 24
-        # Update peak/drawdown
         if equity > peak:
             peak = equity
         dd = (peak - equity) / peak if peak > 0 else Decimal("0")
@@ -3057,10 +3201,10 @@ def run_backtest(
 - [ ] **Step 4: Run test**
 
 ```bash
-cd backend_py && uv run pytest tests/backtest/test_engine.py -v
+cd backend_py && uv run pytest tests/modules/backtest/test_engine.py -v
 ```
 
-Expected: 3 passed. The constant-rate test asserts `monthly_return_pct ≈ 0.3` within ±0.01 — if it's off, double-check the equity formula and the `period_days * 24` cooldown math.
+Expected: 3 passed. The constant-rate test asserts `monthly_return_pct ≈ 0.3` within ±0.01.
 
 - [ ] **Step 5: Run mypy + ruff**
 
@@ -3080,8 +3224,8 @@ Simplified accounting: instant-fill at close rate, period-based
 cooldown, equity-curve drawdown tracking. Hand-checkable monthly
 return = trades * rate * period for constant-rate inputs.
 
-Limitations intentional for Checkpoint 2 (lending engine port is
-out of scope — see parent doc).
+Limitations intentional for Checkpoint 2 (real lending engine port
+is out of scope).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -3121,11 +3265,11 @@ import logging
 import sys
 import time
 
+from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
+from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
-from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.core.settings import Settings
 
 logger = logging.getLogger("run_backtest")
 
@@ -3215,7 +3359,7 @@ Expected: Checkpoint-1-style PASS log; ~720 candles upserted.
 cd backend_py && uv run python scripts/run_backtest.py --days-back 30
 ```
 
-Expected: exit code 0, log lines:
+Expected: exit 0, log lines:
 
 ```
 === Checkpoint 2 backtest result ===
@@ -3227,7 +3371,7 @@ Expected: exit code 0, log lines:
   Max drawdown:       <some Decimal>%
 ```
 
-The numbers do not need to be impressive. Checkpoint 2 PASSES on the bar of "engine ran end-to-end and produced numbers."
+Numbers do not need to be impressive. Checkpoint 2 PASSES on the bar of "engine ran end-to-end and produced numbers."
 
 - [ ] **Step 4: Commit**
 
@@ -3235,10 +3379,10 @@ The numbers do not need to be impressive. Checkpoint 2 PASSES on the bar of "eng
 git add backend_py/scripts/run_backtest.py
 git commit -m "✨ Feat: Checkpoint 2 backtest CLI
 
-scripts/run_backtest.py: load candles from Neon → run AlwaysFRR
-baseline → print monthly return + drawdown. Bar for Checkpoint 2:
-'engine ran end-to-end, produced numbers'. Quality of strategy
-itself is irrelevant at this gate.
+scripts/run_backtest.py: load candles → AlwaysFRR → print monthly
+return + drawdown. Bar for Checkpoint 2: 'engine ran end-to-end,
+produced numbers'. Quality of strategy itself is irrelevant at
+this gate.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -3266,20 +3410,20 @@ Document Checkpoint 2 outcome at `docs/superpowers/specs/2026-05-1Y-checkpoint-2
 **Decision**:
 - PASS → Python rewrite commitment confirmed; enter Stage 1.4-1.5 strategy iteration phase per parent doc
 - FAIL → abort Python rewrite, return to Go branch (parent doc Week-1 abort criterion)
-- PARTIAL (engine runs but hand-rolled around library limits) → continue, document specific friction, re-evaluate at Week 2
+- PARTIAL → continue, document specific friction, re-evaluate at Week 2
 
 **Total time spent on Phases 1-4 (Day 1 to Day 5)**: <hours/days>
 **Time vs P50 estimate (5 days)**: <on-track | over by N>
-**Status of P90 ceiling (10 working days from start)**: <days remaining>
+**Status of P90 ceiling (10 working days)**: <days remaining>
 
-**Friction notes** (anything that surprised; informs the deferred 12 sub-decisions):
+**Friction notes** (informs the deferred 12 sub-decisions):
 - Driver / DB layer:
 - Bitfinex client:
 - Pydantic / Decimal handling:
 - Other:
 ```
 
-- [ ] **Step 2: Commit the result**
+- [ ] **Step 2: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-05-1Y-checkpoint-2-result.md
@@ -3287,8 +3431,8 @@ git commit -m "📝 Docs: Checkpoint 2 result"
 ```
 
 **Phase 4 exit gate (= parent doc Week-1 abort criteria):**
-- PASS → Python rewrite commitment confirmed. The 12 deferred sub-decisions can now be brainstormed (concurrency, real-money safety, observability, etc.). Begin lending engine port (out of scope of this plan).
-- FAIL → STOP. Switch back to Go branch. Document blocker. Per parent doc Week-2 hard abort line, no further extension.
+- PASS → Python rewrite commitment confirmed. The 12 deferred sub-decisions can now be brainstormed. Begin lending engine port (out of scope of this plan).
+- FAIL → STOP. Switch back to Go branch. Per parent doc Week-2 hard abort line, no further extension.
 
 ---
 
