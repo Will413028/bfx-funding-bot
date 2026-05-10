@@ -10,14 +10,14 @@ from bfx_funding_bot.core.settings import Settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = Settings()
-    logging.basicConfig(level=settings.log_level)
     try:
+        settings = Settings()  # type: ignore[call-arg]
+        logging.basicConfig(level=settings.log_level)
         engine = make_engine(settings)
         app.state.engine = engine
         app.state.session_factory = make_session_factory(engine)
     except Exception:
-        logging.exception("Engine init failed; /health remains available")
+        logging.exception("Startup failed; /health remains available")
         app.state.engine = None
         app.state.session_factory = None
     try:
