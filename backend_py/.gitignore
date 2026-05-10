@@ -1,0 +1,2 @@
+# Phase 3a research script output (re-derivable from DB; not source-of-truth)
+data/research/*.json
