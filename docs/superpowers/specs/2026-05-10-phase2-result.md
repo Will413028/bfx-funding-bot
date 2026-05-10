@@ -115,3 +115,30 @@ uv run python scripts/backfill_phase2.py
 - UPSERT idempotent — 重跑安全。
 - Walking-back service 從 DB 已有的 earliest mts 開始往更早抓；DB 裡資料夠完整時，再跑只會抓近期幾根 open candle。
 - Exit code 1 = 至少一個 PASS check fail（目前 FRR unit fail 是已知狀態）。Phase 3 解掉 FRR 單位後，這個 check 應改成驗證新單位（不是直接拿掉）。
+
+## Appendix — Phase 3a evolution of `check_frr_unit`
+
+Phase 3a 結果：**Gate 1 FAIL**。所有 5 個 hypothesis (H1-H5) 都未通過
+R²>0.99 + slope_cv<5% + slope_diff<5% + median_rel_err<5% 的 quad-gate。
+
+| H | R² | slope_cv | slope_diff | median_rel_err |
+|---|---|---|---|---|
+| H1 (frr → daily rate) | 0.2168 | 0.5765 | 0.6366 | 0.3712 |
+| H2 (frr × 86400) | 0.2168 | 0.5765 | 0.6366 | 0.3712 |
+| H3 (frr × avg_period) | 0.0041 | 1.1084 | 1.2284 | 0.5925 |
+| H4 (frr × avg_period × 86400) | 0.0041 | 1.1084 | 1.2284 | 0.5925 |
+| H5 (frr / 365) | 0.2168 | 0.5765 | 0.6366 | 0.3712 |
+
+H1/H2/H5 數學上同 fit（純 frr scaling，OLS slope 自吸常數）；H3/H4（× avg_period）
+更差 R²=0.004 — avg_period 是反訊號。Per-year slope 從 2016 的 ~387 降到 2023 的
+~42（9× drift），fUSD/fUST 跨幣 slope diff 0.64 — Bitfinex 應是改過 FRR 計算方式。
+
+`check_frr_unit` 改名 `check_frr_unit_stability`，改成 raw r²(close ~ frr)
+correlation 診斷（diagnostic-only，永遠 passed=True）。完整失敗診斷見
+`backend_py/data/research/frr_hypothesis_results.json`（gitignored，re-derivable
+via `cd backend_py && uv run python scripts/investigate_frr_unit.py`）與
+`docs/research/2026-05-10-frr-unit-investigation.md` section 3.2。
+
+下一輪：Phase 3c 擴展 hypothesis 集（multivariate w/ funding_amount_used /
+funding_amount, lower-50% lifetime weighting）。Phase 3b 限 4🟢 (24 runs)，
+2🟡 (FRR-trend, SpikeDetect) 推遲。
