@@ -138,16 +138,47 @@ ccxt does NOT parse FRR from the `/tickers` endpoint (only mentioned in comments
 
 ## 3. Stage 2 empirical results
 
-[FILL: after Stage 2 runs]
+**Sample**: 147528 rows, fUSD + fUST, year range 2016-2026.
+**Generated**: 2026-05-10T14:40:06.495002+00:00.
+
+### 3.1 Hypothesis comparison
+
+| ID | Predictor | R² | Per-year slope CV | Per-symbol slope diff | Median rel err | Pass |
+|---|---|---|---|---|---|---|
+| H1 | frr | 0.2168 | 0.5765 | 0.6366 | 0.3712 | ✗ |
+| H2 | frr × 86400 | 0.2168 | 0.5765 | 0.6366 | 0.3712 | ✗ |
+| H3 | frr × avg_period | 0.0041 | 1.1084 | 1.2284 | 0.5925 | ✗ |
+| H4 | frr × avg_period × 86400 | 0.0041 | 1.1084 | 1.2284 | 0.5925 | ✗ |
+| H5 | frr / 365 | 0.2168 | 0.5765 | 0.6366 | 0.3712 | ✗ |
+
+### 3.2 Verdict: Gate 1 FAIL
+
+No hypothesis met all 4 thresholds (R²>0.99, slope_cv<5%, slope_diff<5%,
+median_rel_err<5%).
+
+**Best candidate**: H1 with R²=0.2168 (failed on R²<0.99, slope_cv=0.5765≥0.05,
+slope_diff=0.6366≥0.05, median_rel_err=0.3712≥0.05 — all 4 thresholds).
+
+**Implication**: FRR is not a simple unit conversion of candle.close.
+Phase 3b proceeds with 4🟢 strategies only; 2🟡 (FRR-trend, SpikeDetect)
+推遲到 Phase 3c with extended hypothesis set (e.g. multivariate with
+funding_amount ratio).
 
 ## 4. Conversion factor with provenance
 
-[FILL: only if Gate 1 PASS]
+**Status**: not derived (Gate 1 FAIL). conversion code 不 commit；
+`market_rate_source="frr"` 引擎仍視為未通電。
 
 ## 5. Caveats
 
-[FILL: at note finalization]
+- Stage 1 reference 三 source 結果（PASS/silent/FAIL）：see sections 2.1-2.3
+- Stage 2 sample 限 fUSD + fUST × 1h × p2；其他 timeframe / period_agg 未驗證
+- 若有第三個 stablecoin（fEURT 等）上線，invariance 需重驗
+- Conversion factor 的精度由 Stage 2 OLS 決定；Decimal 化時用 str(float) 保留 ~15 位有效數字
+- FRR 的 amount-weighted average 定義（per Bitfinex Help Center）暗示樣本權重隨 funding amount 變化；invariance gate 對此不直接修正，靠長時間樣本攤銷
 
 ## 6. Next: Phase 3b
 
-[FILL: at note finalization]
+- Phase 3b 只跑 4🟢（24 runs，candle_close proxy）
+- 2🟡 推遲 Phase 3c：擴展 hypothesis 集（multivariate w/ funding_amount_used /
+  funding_amount，考慮 lower-50% lifetime weighting）
