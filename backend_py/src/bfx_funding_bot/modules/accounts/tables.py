@@ -39,9 +39,7 @@ class User(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
-    __table_args__ = (
-        Index("idx_users_email", "email", unique=True),
-    )
+    __table_args__ = (Index("idx_users_email", "email", unique=True),)
 
 
 class APIKey(Base):
@@ -70,9 +68,7 @@ class APIKey(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
-    __table_args__ = (
-        Index("idx_api_keys_user_id", "user_id", unique=True),
-    )
+    __table_args__ = (Index("idx_api_keys_user_id", "user_id", unique=True),)
 
 
 class UserConfig(Base):
@@ -96,9 +92,7 @@ class UserConfig(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
-    __table_args__ = (
-        Index("idx_user_configs_user_id", "user_id", unique=True),
-    )
+    __table_args__ = (Index("idx_user_configs_user_id", "user_id", unique=True),)
 
 
 class Execution(Base):
@@ -126,9 +120,7 @@ class Execution(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
-    __table_args__ = (
-        Index("idx_executions_user_created", "user_id", "created_at"),
-    )
+    __table_args__ = (Index("idx_executions_user_created", "user_id", "created_at"),)
 
 
 class BillingRecord(Base):
@@ -155,6 +147,4 @@ class BillingRecord(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
-    __table_args__ = (
-        Index("idx_billing_user_period", "user_id", "period_start"),
-    )
+    __table_args__ = (Index("idx_billing_user_period", "user_id", "period_start"),)

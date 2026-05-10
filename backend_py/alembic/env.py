@@ -3,6 +3,7 @@
 Imports tables from each module to populate Base.metadata for autogenerate.
 When adding a new module with tables.py, add the import here.
 """
+
 import asyncio
 from logging.config import fileConfig
 
