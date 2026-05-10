@@ -11,6 +11,7 @@ from bfx_funding_bot.external.bitfinex.errors import (
 )
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat  # noqa: F401
 
 
 @pytest.mark.asyncio
@@ -158,3 +159,119 @@ async def test_get_funding_candles_against_real_bitfinex() -> None:
         assert all(c.symbol == "fUST" for c in candles)
         assert all(c.timeframe == "1h" for c in candles)
         assert all(c.mts > 0 for c in candles)
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_happy_path(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=2&end=1715000000000",
+        json=[
+            [1715000000000, None, None, 5.8e-7, 2.3, None, None,
+             4.5e7, 2.1e7, None, None, 1.2e6],
+            [1714996400000, None, None, 5.7e-7, 2.4, None, None,
+             4.4e7, 2.0e7, None, None, 1.1e6],
+        ],
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        stats = await client.get_funding_stats(
+            symbol="fUSD", end=1715000000000, limit=2,
+        )
+
+    assert len(stats) == 2
+    assert stats[0].mts == 1715000000000
+    assert stats[0].frr == Decimal("5.8e-7")
+    assert stats[0].funding_amount == Decimal("45000000.0")
+    assert all(s.symbol == "fUSD" for s in stats)
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_strips_leading_f(httpx_mock: HTTPXMock) -> None:
+    """Symbol 'fUSD' becomes 'fUSD' in URL path (the leading 'f' stays).
+
+    Bitfinex's funding_stats path is /v2/funding/stats/{Symbol}/hist where
+    Symbol is the full funding symbol (with leading f). Verify call shape.
+    """
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=1&end=0",
+        json=[[
+            1715000000000, None, None, 5.8e-7, 2.3, None, None,
+            4.5e7, 2.1e7, None, None, 1.2e6,
+        ]],
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        stats = await client.get_funding_stats(symbol="fUSD", end=0, limit=1)
+    assert len(stats) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_429_raises_rate_limited(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=10&end=0",
+        status_code=429,
+        headers={"Retry-After": "8"},
+        text='["error", 11010, "ratelimit: error"]',
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        with pytest.raises(BitfinexRateLimited) as exc_info:
+            await client.get_funding_stats(symbol="fUSD", end=0, limit=10)
+        assert exc_info.value.retry_after_seconds == 8.0
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_500_raises_api_error(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=10&end=0",
+        status_code=500,
+        text="internal error",
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        with pytest.raises(BitfinexAPIError) as exc_info:
+            await client.get_funding_stats(symbol="fUSD", end=0, limit=10)
+        assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_get_funding_stats_unexpected_shape_raises_shape_error(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/funding/stats/fUSD/hist?limit=10&end=0",
+        json={"unexpected": "object instead of array"},
+    )
+
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        with pytest.raises(BitfinexShapeError):
+            await client.get_funding_stats(symbol="fUSD", end=0, limit=10)

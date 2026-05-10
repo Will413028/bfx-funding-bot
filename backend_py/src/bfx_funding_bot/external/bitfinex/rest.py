@@ -10,6 +10,7 @@ from bfx_funding_bot.external.bitfinex.errors import (
 )
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 logger = logging.getLogger(__name__)
 
@@ -114,3 +115,78 @@ class BitfinexREST:
                 raise BitfinexShapeError(f"candle parse failed: {e}; raw={entry!r}") from e
 
         return candles
+
+    async def get_funding_stats(
+        self,
+        *,
+        symbol: str,
+        end: int,
+        limit: int = 10000,
+    ) -> list[FundingStat]:
+        """Pull funding_stats rows.
+
+        Endpoint: GET /v2/funding/stats/{symbol}/hist?limit=N&end=MS
+
+        Returns rows in **descending** mts order (newest first), per Bitfinex.
+        Pagination: max 10000 per call. `end` in **ms**, inclusive upper bound.
+
+        Args:
+            symbol: e.g. "fUSD", "fUST". Tolerates leading "f" already in
+                place (path uses symbol as-is).
+            end: ms timestamp inclusive upper bound.
+            limit: max rows, max 10000.
+        """
+        sym = symbol if symbol.startswith("f") else f"f{symbol}"
+        path = f"/v2/funding/stats/{sym}/hist"
+        params = {"limit": limit, "end": end}
+
+        async with self._limiter.acquire():
+            try:
+                resp = await self._http.get(
+                    f"{self._base_url}{path}", params=params, timeout=30.0
+                )
+            except httpx.HTTPError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {e}", raw=None
+                ) from e
+
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after_seconds = None
+            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error",
+                raw=resp.text,
+            )
+
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON: {e}") from e
+
+        if not isinstance(payload, list):
+            raise BitfinexShapeError(
+                f"expected list of funding_stats rows, "
+                f"got {type(payload).__name__}: {payload!r}"
+            )
+
+        stats: list[FundingStat] = []
+        for entry in payload:
+            if not isinstance(entry, list):
+                raise BitfinexShapeError(
+                    f"expected each row to be a list, got {type(entry).__name__}"
+                )
+            try:
+                stats.append(FundingStat.from_bitfinex(entry, symbol=sym))
+            except (ValueError, TypeError) as e:
+                raise BitfinexShapeError(
+                    f"funding_stats parse failed: {e}; raw={entry!r}"
+                ) from e
+
+        return stats
