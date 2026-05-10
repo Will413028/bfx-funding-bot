@@ -84,18 +84,26 @@ async def test_row_counts_fails_for_empty_series(
 async def test_round_trip_passes_when_db_matches_fresh_fetch(
     sqlite_session: AsyncSession, setup_schema: None,
 ) -> None:
-    candle = FundingCandle(
+    # DB needs >= 7 days of history so the shifted sample endpoint
+    # (max_mts - 7d) is still >= min_mts. We insert an OLD candle (the
+    # one we'll sample) and a newer marker candle 8 days later.
+    eight_days_ms = 8 * 24 * 3_600_000
+    old_candle = FundingCandle(
         symbol="fUST", timeframe="1h", period_agg="p2",
         mts=1700000000000,
         open=Decimal("0.0001"), close=Decimal("0.0002"),
         high=Decimal("0.0003"), low=Decimal("0.00005"),
         volume=Decimal("100"),
     )
-    await upsert_candles(sqlite_session, [candle])
+    newer_marker = old_candle.model_copy(
+        update={"mts": 1700000000000 + eight_days_ms},
+    )
+    await upsert_candles(sqlite_session, [old_candle, newer_marker])
     await sqlite_session.commit()
 
+    # Bitfinex returns the OLD (immutable) candle when asked end=max-7d.
     mock_client: Any = AsyncMock()
-    mock_client.get_funding_candles.return_value = [candle]
+    mock_client.get_funding_candles.return_value = [old_candle]
     mock_client.get_funding_stats.return_value = []
 
     result = await check_round_trip(
@@ -108,23 +116,59 @@ async def test_round_trip_passes_when_db_matches_fresh_fetch(
 async def test_round_trip_fails_on_drift(
     sqlite_session: AsyncSession, setup_schema: None,
 ) -> None:
-    stored = FundingCandle(
+    eight_days_ms = 8 * 24 * 3_600_000
+    stored_old = FundingCandle(
         symbol="fUST", timeframe="1h", period_agg="p2", mts=1700000000000,
         open=Decimal("0.0001"), close=Decimal("0.0002"),
         high=Decimal("0.0003"), low=Decimal("0.00005"),
         volume=Decimal("100"),
     )
-    await upsert_candles(sqlite_session, [stored])
+    newer_marker = stored_old.model_copy(
+        update={"mts": 1700000000000 + eight_days_ms},
+    )
+    await upsert_candles(sqlite_session, [stored_old, newer_marker])
     await sqlite_session.commit()
 
-    drifted = stored.model_copy(update={"close": Decimal("0.0009")})
+    drifted_old = stored_old.model_copy(update={"close": Decimal("0.0009")})
     mock_client: Any = AsyncMock()
-    mock_client.get_funding_candles.return_value = [drifted]
+    mock_client.get_funding_candles.return_value = [drifted_old]
+    mock_client.get_funding_stats.return_value = []
 
     result = await check_round_trip(
         sqlite_session, mock_client, [_spec_candles("p2")],
     )
     assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_round_trip_skipped_when_history_too_recent(
+    sqlite_session: AsyncSession, setup_schema: None,
+) -> None:
+    """DB has < 7 days of history → sample endpoint precedes min_mts → skip
+    (treated as PASS) without calling Bitfinex."""
+    candle = FundingCandle(
+        symbol="fUST", timeframe="1h", period_agg="p2",
+        mts=1700000000000,
+        open=Decimal("0.0001"), close=Decimal("0.0002"),
+        high=Decimal("0.0003"), low=Decimal("0.00005"),
+        volume=Decimal("100"),
+    )
+    await upsert_candles(sqlite_session, [candle])
+    await sqlite_session.commit()
+
+    mock_client: Any = AsyncMock()
+    # If get_funding_candles is called, return drifted data — test would fail.
+    mock_client.get_funding_candles.return_value = [
+        candle.model_copy(update={"close": Decimal("9.9999")}),
+    ]
+    mock_client.get_funding_stats.return_value = []
+
+    result = await check_round_trip(
+        sqlite_session, mock_client, [_spec_candles("p2")],
+    )
+    assert result.passed is True
+    assert "skipped" in result.message.lower()
+    mock_client.get_funding_candles.assert_not_called()
 
 
 # ---------- check_frr_unit ----------
@@ -206,7 +250,8 @@ async def test_continuity_passes_for_dense_candles(
 async def test_continuity_fails_when_gap_too_big(
     sqlite_session: AsyncSession, setup_schema: None,
 ) -> None:
-    # 5 candles at hour 0,1,2 — then jumps to hour 100 (50% missing)
+    # 3 dense candles, then a 65-day jump (> 60-day candle threshold).
+    sixty_five_days_h = 65 * 24
     candles = [
         FundingCandle(
             symbol="fUST", timeframe="1h", period_agg="p2",
@@ -216,7 +261,7 @@ async def test_continuity_fails_when_gap_too_big(
             1700000000000,
             1700003600000,
             1700007200000,
-            1700000000000 + 100 * 3_600_000,
+            1700000000000 + sixty_five_days_h * 3_600_000,
         ]
     ]
     await upsert_candles(sqlite_session, candles)
@@ -224,3 +269,28 @@ async def test_continuity_fails_when_gap_too_big(
 
     result = await check_continuity(sqlite_session, [_spec_candles("p2")])
     assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_continuity_passes_for_sparse_p30_with_small_gaps(
+    sqlite_session: AsyncSession, setup_schema: None,
+) -> None:
+    """p30 (30-day funding) candles are inherently sparse — only 50% density
+    over the time window, but max gap is small. New max-gap rule accepts
+    this (would fail under old 95% count-ratio rule)."""
+    base = 1700000000000
+    # Pattern: every 2 hours for 100 hours → 50 rows, density 50%, max gap = 2h.
+    mts_values = [base + h * 3_600_000 for h in range(0, 100, 2)]
+    candles = [
+        FundingCandle(
+            symbol="fUST", timeframe="1h", period_agg="p30",
+            mts=mts, open=None, close=None, high=None, low=None, volume=None,
+        )
+        for mts in mts_values
+    ]
+    await upsert_candles(sqlite_session, candles)
+    await sqlite_session.commit()
+
+    # Sanity: 50 rows over ~100h window → < 95% (would fail old rule).
+    result = await check_continuity(sqlite_session, [_spec_candles("p30")])
+    assert result.passed is True
