@@ -1,25 +1,39 @@
 # Bitfinex 自動放貸 SaaS 平台：後端架構設計文件
 
+> ⚠️ **狀態說明（2026-05-10）**
+>
+> 後端已從 Go 重寫為 **Python 3.13**（`backend_py/`）。本文件原為 Go 版本撰寫，**多數內容仍是現行設計的 source of truth**：DB schema / API endpoints / 多租戶隔離規則 / 安全模型 / 業務分層思維（Transport → Application → Domain → Infrastructure）一律沿用。
+>
+> 不再適用的部分：
+> - **語法範例**（`gin.H{}` / `sqlc` 生成的 Go struct / `fx.Provide(...)`）只是歷史參考；實作細節以 `backend_py/` 現行 code 為準。
+> - **分層的目錄組織**：`backend_py/` 改用 module-per-feature（`modules/<feature>/{tables,schemas,repository,service}.py`），不同層的程式碼**水平共置在 feature 模組內**，而非全域分一個 `handler/`、一個 `service/`、一個 `repository/`。本文件第 2 節描述的「責任區分」概念仍適用（每個 module 內依然有 transport/application/domain/infra 對應的檔案），只是不再有跨 feature 的全域目錄。
+> - **Tooling**：見下方 Tech Stack 改寫；Atlas/sqlc/go test 已換成 Alembic/SQLAlchemy ORM/pytest。
+>
+> Phase 0 重寫的決策過程見 `docs/superpowers/specs/2026-05-10-python-rewrite-day3-stack-decisions.md`。
+
 ---
 
 ## 1. 技術棧總覽
 
 | 層級 | 技術 | 說明 |
 | :--- | :--- | :--- |
-| 語言 | Go 1.25+ | 單一二進位部署，goroutine 驅動 |
-| HTTP 框架 | Gin | handler + middleware |
+| 語言 | Python 3.13 | uv 管理（pyproject.toml + uv.lock）；strict mypy + ruff |
+| Web 框架 | FastAPI | async ASGI；OpenAPI 自動產生；Pydantic v2 模型 |
+| ORM / DB driver | SQLAlchemy 2.0 async + asyncpg | declarative `Base` + module-per-feature `tables.py` |
 | 資料庫 | PostgreSQL (Neon) | 多租戶持久化，WHERE user_id 隔離 |
 | 快取 | Redis (Upstash) | Session、MarketSnapshot 快取、Pub/Sub |
-| Bitfinex API | 自製 `bitfinex/` | HMAC-SHA384 REST client + WebSocket（公開+認證頻道）、Circuit Breaker (gobreaker) + Rate Limiter (token bucket) |
+| Bitfinex API | 自製 `external/bitfinex/` | httpx async REST client + aiolimiter rate limit；WebSocket（Phase 後段）|
 | 加密 | AES-256-GCM | API Key 加密儲存 |
 | 認證 | JWT (RS256) | Stateless Token |
-| 部署 | Koyeb (Docker) | Git 驅動自動部署，支援 WebSocket 長連線 |
+| 部署 | Koyeb (Docker) | Git 驅動自動部署 |
 | 資料庫託管 | Neon | Serverless PostgreSQL，自動擴縮 |
 | 快取託管 | Upstash | Serverless Redis，按用量計費 |
 | 監控 | Axiom | 集中式日誌收集 + 儀表板 + 告警（Phase H） |
-| DB Migration | Atlas | 宣告式 Schema + 版本化 Migration |
-| DB Query | sqlc | SQL → Type-Safe Go Code 生成 |
-| DI 框架 | go.uber.org/fx | 建構式依賴注入 + 生命週期管理 |
+| DB Migration | Alembic（async + autogenerate） | `backend_py/alembic/`；`alembic upgrade head` / `alembic check` 驗 drift |
+| Schema 定義 | SQLAlchemy declarative | 每個 feature 一份 `modules/<feature>/tables.py`，import 進 `alembic/env.py` 觸發 metadata 註冊 |
+| DI / lifecycle | FastAPI `Depends` + asynccontextmanager | 取代 Go 時代的 fx；session_scope 用 `core/db.py` 提供的 contextmanager |
+| 設定 | pydantic-settings | `core/settings.py` 從 `.env` 讀；`extra="ignore"` 容忍共用 .env 的 Go-era 殘留變數 |
+| 測試 | pytest + pytest-asyncio + pytest-httpx + aiosqlite | Unit 測用 in-memory sqlite；integration 標 `@pytest.mark.integration` 預設 skip |
 
 ---
 
