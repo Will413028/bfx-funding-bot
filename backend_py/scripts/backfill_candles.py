@@ -79,7 +79,7 @@ async def _amain() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    settings = Settings()  # type: ignore[call-arg]
+    settings = Settings()
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
 

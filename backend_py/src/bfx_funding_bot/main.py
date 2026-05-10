@@ -11,7 +11,7 @@ from bfx_funding_bot.core.settings import Settings
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
-        settings = Settings()  # type: ignore[call-arg]
+        settings = Settings()
         logging.basicConfig(level=settings.log_level)
         engine = make_engine(settings)
         app.state.engine = engine
