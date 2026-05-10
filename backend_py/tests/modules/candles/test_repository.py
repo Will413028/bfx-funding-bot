@@ -12,7 +12,7 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 @pytest.fixture
-async def setup_schema(sqlite_engine: AsyncEngine) -> None:
+async def setup_schema(sqlite_engine: AsyncEngine):
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
