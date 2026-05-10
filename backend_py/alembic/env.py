@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 import bfx_funding_bot.modules.accounts.tables
 
 # Side-effect imports: register tables with Base.metadata
-import bfx_funding_bot.modules.candles.tables  # noqa: F401
+import bfx_funding_bot.modules.candles.tables
+import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
 from alembic import context
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
