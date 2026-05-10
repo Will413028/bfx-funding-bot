@@ -96,3 +96,23 @@ async def get_candles_in_range(
     )
     result = await session.execute(stmt)
     return [_row_to_domain(row) for row in result.scalars().all()]
+
+
+async def get_min_mts(
+    session: AsyncSession,
+    *,
+    symbol: str,
+    timeframe: str,
+    period_agg: str,
+) -> int | None:
+    """Return smallest mts for the given (symbol, timeframe, period_agg) series,
+    or None if no rows exist."""
+    from sqlalchemy import func
+
+    stmt = select(func.min(FundingCandleRow.mts)).where(
+        FundingCandleRow.symbol == symbol,
+        FundingCandleRow.timeframe == timeframe,
+        FundingCandleRow.period_agg == period_agg,
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

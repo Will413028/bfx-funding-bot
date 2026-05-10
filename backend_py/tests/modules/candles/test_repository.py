@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
+    get_min_mts,
     upsert_candles,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -117,3 +118,45 @@ async def test_upsert_empty_list_is_noop(
         end_mts=10**13,
     )
     assert fetched == []
+
+
+@pytest.mark.asyncio
+async def test_get_min_mts_returns_none_for_empty(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    result = await get_min_mts(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_min_mts_returns_smallest(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    candles = [
+        FundingCandle(
+            symbol="fUST", timeframe="1h", period_agg="p2",
+            mts=mts, open=Decimal("0.0001"), close=Decimal("0.0001"),
+            high=Decimal("0.0001"), low=Decimal("0.0001"),
+            volume=Decimal("100"),
+        )
+        for mts in [1700003600000, 1700000000000, 1700007200000]
+    ]
+    # different (timeframe, period_agg) — must not contaminate min
+    candles.append(FundingCandle(
+        symbol="fUST", timeframe="1h", period_agg="p30",
+        mts=1500000000000, open=None, close=None, high=None, low=None, volume=None,
+    ))
+
+    await upsert_candles(sqlite_session, candles)
+    await sqlite_session.commit()
+
+    assert await get_min_mts(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+    ) == 1700000000000
+    assert await get_min_mts(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p30",
+    ) == 1500000000000
