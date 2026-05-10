@@ -173,3 +173,19 @@ async def test_get_frr_at_or_before_mts_isolated_per_symbol(
     )
     assert fs is not None
     assert fs.mts == 1700000000000  # 不會抓到 fUST 那筆
+
+
+@pytest.mark.asyncio
+async def test_upsert_funding_stats_chunks_large_input(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """5000 stats in one upsert call must succeed (forces chunking)."""
+    rows = [_make("fUSD", 1700000000000 + i * 3600000) for i in range(5000)]
+    await upsert_funding_stats(sqlite_session, rows)
+    await sqlite_session.commit()
+    fetched = await get_in_range(
+        sqlite_session, symbol="fUSD", start_mts=1700000000000,
+        end_mts=1700000000000 + 5000 * 3600000,
+    )
+    assert len(fetched) == 5000

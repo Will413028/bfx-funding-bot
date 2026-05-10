@@ -275,3 +275,36 @@ async def test_get_funding_stats_unexpected_shape_raises_shape_error(
         )
         with pytest.raises(BitfinexShapeError):
             await client.get_funding_stats(symbol="fUSD", end=0, limit=10)
+
+
+@pytest.mark.asyncio
+async def test_get_funding_candles_a30_uses_extended_path(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """period_agg='a30' must resolve to URL 'a30:p2:p30' (Bitfinex aggregate
+    candles need explicit period range; the short form returns empty)."""
+    httpx_mock.add_response(
+        url="https://api-pub.bitfinex.com/v2/candles/trade:1h:fUSD:a30:p2:p30/hist?limit=2&start=0&end=1715000000000",
+        json=[
+            [1715000000000, 0.00011, 0.00013, 0.00014, 0.00011, 3281.30],
+            [1714996400000, 0.00010, 0.00014, 0.00015, 0.00007, 1610647.43],
+        ],
+    )
+    async with httpx.AsyncClient() as http:
+        client = BitfinexREST(
+            http=http,
+            base_url="https://api-pub.bitfinex.com",
+            limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        )
+        candles = await client.get_funding_candles(
+            symbol="fUSD",
+            timeframe="1h",
+            period_agg="a30",
+            start=0,
+            end=1715000000000,
+            limit=2,
+        )
+    assert len(candles) == 2
+    # period_agg in the returned object stays as user-facing 'a30',
+    # not URL form 'a30:p2:p30'
+    assert all(c.period_agg == "a30" for c in candles)

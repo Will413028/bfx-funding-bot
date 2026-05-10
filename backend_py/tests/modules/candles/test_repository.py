@@ -160,3 +160,28 @@ async def test_get_min_mts_returns_smallest(
     assert await get_min_mts(
         sqlite_session, symbol="fUST", timeframe="1h", period_agg="p30",
     ) == 1500000000000
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_chunks_large_input(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """5000 candles in one upsert call must succeed (forces > _CANDLE_CHUNK chunking)."""
+    candles = [
+        FundingCandle(
+            symbol="fUST", timeframe="1h", period_agg="p2",
+            mts=1700000000000 + i * 3600000,
+            open=Decimal("0.0001"), close=Decimal("0.0002"),
+            high=Decimal("0.0003"), low=Decimal("0.00005"),
+            volume=Decimal("100"),
+        )
+        for i in range(5000)
+    ]
+    await upsert_candles(sqlite_session, candles)
+    await sqlite_session.commit()
+    fetched = await get_candles_in_range(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        start_mts=1700000000000, end_mts=1700000000000 + 5000 * 3600000,
+    )
+    assert len(fetched) == 5000

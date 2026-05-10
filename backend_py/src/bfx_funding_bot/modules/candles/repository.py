@@ -13,6 +13,11 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 _UPSERT_INDEX = ["symbol", "timeframe", "period_agg", "mts"]
 _UPSERT_SET_COLS = ["open", "close", "high", "low", "volume"]
 
+# asyncpg / PostgreSQL caps bind parameters per statement at 32767. With 9
+# columns per row, 3000 rows = 27000 placeholders — safely under the limit.
+# Bitfinex returns up to 10000 rows per page, so chunking is required.
+_CANDLE_CHUNK = 3000
+
 
 def _to_float_or_none(d: Decimal | None) -> float | None:
     return float(d) if d is not None else None
@@ -40,37 +45,43 @@ async def upsert_candles(
 
     Postgres: ON CONFLICT DO UPDATE. Sqlite (test only): same semantics via
     sqlite dialect's insert().on_conflict_do_update.
+
+    Chunked at _CANDLE_CHUNK rows per execute() to stay under asyncpg's
+    32767 bind-parameter limit.
     """
     if not candles:
         return
 
-    rows = [
-        {
-            "symbol": c.symbol,
-            "timeframe": c.timeframe,
-            "period_agg": c.period_agg,
-            "mts": c.mts,
-            "open": _to_float_or_none(c.open),
-            "close": _to_float_or_none(c.close),
-            "high": _to_float_or_none(c.high),
-            "low": _to_float_or_none(c.low),
-            "volume": _to_float_or_none(c.volume),
-        }
-        for c in candles
-    ]
-
     dialect_name = session.bind.dialect.name if session.bind else "postgresql"
-    stmt: PGInsert | SQLiteInsert
-    if dialect_name == "postgresql":
-        stmt = pg_insert(FundingCandleRow).values(rows)
-    else:
-        stmt = sqlite_insert(FundingCandleRow).values(rows)
 
-    stmt = stmt.on_conflict_do_update(
-        index_elements=_UPSERT_INDEX,
-        set_={col: getattr(stmt.excluded, col) for col in _UPSERT_SET_COLS},
-    )
-    await session.execute(stmt)
+    for i in range(0, len(candles), _CANDLE_CHUNK):
+        chunk = candles[i : i + _CANDLE_CHUNK]
+        rows = [
+            {
+                "symbol": c.symbol,
+                "timeframe": c.timeframe,
+                "period_agg": c.period_agg,
+                "mts": c.mts,
+                "open": _to_float_or_none(c.open),
+                "close": _to_float_or_none(c.close),
+                "high": _to_float_or_none(c.high),
+                "low": _to_float_or_none(c.low),
+                "volume": _to_float_or_none(c.volume),
+            }
+            for c in chunk
+        ]
+
+        stmt: PGInsert | SQLiteInsert
+        if dialect_name == "postgresql":
+            stmt = pg_insert(FundingCandleRow).values(rows)
+        else:
+            stmt = sqlite_insert(FundingCandleRow).values(rows)
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=_UPSERT_INDEX,
+            set_={col: getattr(stmt.excluded, col) for col in _UPSERT_SET_COLS},
+        )
+        await session.execute(stmt)
 
 
 async def get_candles_in_range(

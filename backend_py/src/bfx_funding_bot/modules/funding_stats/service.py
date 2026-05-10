@@ -16,12 +16,15 @@ async def backfill_funding_stats_to_earliest(
     client: BitfinexREST,
     session: AsyncSession,
     symbol: str,
-    page_limit: int = 10000,
+    page_limit: int = 250,
 ) -> BackfillStats:
     """Walking-back backfill of funding_stats until Bitfinex returns empty.
 
     Resume-aware: if DB already has rows for this symbol, starts from
     (min_mts - 1) instead of now_ms. Caller manages session commit/rollback.
+
+    Note: Bitfinex caps /v2/funding/stats/{Symbol}/hist at limit=250 (500+
+    returns HTTP 500), so page_limit defaults to 250 here.
     """
     db_min = await get_min_mts(session, symbol=symbol)
     end_ms = (db_min - 1) if db_min is not None else int(time.time() * 1000)
