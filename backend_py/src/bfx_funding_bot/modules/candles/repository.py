@@ -2,11 +2,16 @@ from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql.dml import Insert as PGInsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.sqlite.dml import Insert as SQLiteInsert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+
+_UPSERT_INDEX = ["symbol", "timeframe", "period_agg", "mts"]
+_UPSERT_SET_COLS = ["open", "close", "high", "low", "volume"]
 
 
 def _to_float_or_none(d: Decimal | None) -> float | None:
@@ -55,32 +60,16 @@ async def upsert_candles(
     ]
 
     dialect_name = session.bind.dialect.name if session.bind else "postgresql"
-
+    stmt: PGInsert | SQLiteInsert
     if dialect_name == "postgresql":
         stmt = pg_insert(FundingCandleRow).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["symbol", "timeframe", "period_agg", "mts"],
-            set_={
-                "open": stmt.excluded.open,
-                "close": stmt.excluded.close,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "volume": stmt.excluded.volume,
-            },
-        )
     else:
         stmt = sqlite_insert(FundingCandleRow).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["symbol", "timeframe", "period_agg", "mts"],
-            set_={
-                "open": stmt.excluded.open,
-                "close": stmt.excluded.close,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "volume": stmt.excluded.volume,
-            },
-        )
 
+    stmt = stmt.on_conflict_do_update(
+        index_elements=_UPSERT_INDEX,
+        set_={col: getattr(stmt.excluded, col) for col in _UPSERT_SET_COLS},
+    )
     await session.execute(stmt)
 
 
