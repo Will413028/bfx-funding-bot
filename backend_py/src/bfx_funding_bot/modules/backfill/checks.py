@@ -90,7 +90,10 @@ async def check_round_trip(
 
     if candle_specs:
         spec = candle_specs[0]
-        assert spec.timeframe is not None and spec.period_agg is not None
+        if spec.timeframe is None or spec.period_agg is None:
+            raise ValueError(
+                f"candles SeriesSpec missing timeframe/period_agg: {spec!r}"
+            )
         # Get newest + oldest mts in DB for this series. Shift the sample
         # endpoint back by 7 days so we sample stable (immutable) candles —
         # Bitfinex actively updates the latest candle as new ticks arrive.
@@ -274,15 +277,19 @@ async def check_continuity(
     session: AsyncSession, specs: list[SeriesSpec],
 ) -> CheckResult:
     """Max consecutive gap rule.
-    - Candles: < 7 days (sparse aggregations like p30 are accepted as long
-      as no chunk was missed; resume-from-DB middle-skip would create
-      multi-day contiguous gaps).
+    - Candles: < 60 days. The threshold is loose to accommodate sparse
+      aggregations (e.g. p30) and observed Bitfinex-side quiet periods
+      up to 47 days; resume-from-DB middle-skip bugs would create
+      multi-month contiguous gaps and still trip the 60-day threshold.
     - funding_stats: < 1 day."""
     failures: list[str] = []
 
     for spec in specs:
         if spec.kind == "candles":
-            assert spec.timeframe is not None and spec.period_agg is not None
+            if spec.timeframe is None or spec.period_agg is None:
+                raise ValueError(
+                    f"candles SeriesSpec missing timeframe/period_agg: {spec!r}"
+                )
             stmt = select(FundingCandleRow.mts).where(
                 FundingCandleRow.symbol == spec.symbol,
                 FundingCandleRow.timeframe == spec.timeframe,

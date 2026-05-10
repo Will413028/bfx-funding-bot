@@ -85,7 +85,10 @@ async def _backfill_one(
     try:
         async with session_scope(session_factory) as session:
             if spec.kind == "candles":
-                assert spec.timeframe is not None and spec.period_agg is not None
+                if spec.timeframe is None or spec.period_agg is None:
+                    raise ValueError(
+                        f"candles SeriesSpec missing timeframe/period_agg: {spec!r}"
+                    )
                 return await backfill_candles_to_earliest(
                     client=client, session=session,
                     symbol=spec.symbol,
