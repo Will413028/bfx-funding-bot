@@ -28,3 +28,16 @@ def test_lend_decision_construction() -> None:
     assert d.mts == 1704067200000
     assert d.rate == Decimal("0.000123")
     assert d.period_days == 2
+
+
+def test_backtest_result_has_sortino_field() -> None:
+    r = BacktestResult(
+        strategy_name="x", symbol="fUST", start_mts=0, end_mts=1,
+        n_candles=0,
+        gross_monthly_return_pct=Decimal("0"),
+        net_monthly_return_pct=Decimal("0"),
+        max_drawdown_pct=Decimal("0"),
+        n_trades=0, fill_rate=Decimal("0"),
+        sortino=Decimal("1.5"),
+    )
+    assert r.sortino == Decimal("1.5")
