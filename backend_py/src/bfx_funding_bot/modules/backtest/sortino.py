@@ -24,22 +24,31 @@ def monthly_returns_from_equity_curve(
     """Compute month-over-month returns from an equity curve.
 
     Args:
-        curve: list of (mts_ms, equity) tuples sampled at month-end timestamps,
-               sorted ascending by mts.
+        curve: list of (mts_ms, equity) tuples. Order doesn't matter — this
+               function sorts ascending by mts before computing returns.
 
     Returns:
-        List of returns r_i = equity[i+1] / equity[i] - 1 for adjacent pairs.
-        Empty list if fewer than 2 points.
+        List of returns r_i = equity[i+1] / equity[i] - 1 for adjacent pairs
+        (after sorting). Empty list if fewer than 2 points.
+
+    Raises:
+        ValueError if any equity value is 0 (degenerate input; in a real
+        backtest equity starts at 1.0 and can never reach 0 — zero indicates
+        a bug upstream, not a valid 'wiped portfolio' state since funding
+        lending cannot lose principal).
     """
     if len(curve) < 2:
         return []
     sorted_curve = sorted(curve, key=lambda p: p[0])
     out: list[Decimal] = []
-    for prev, cur in pairwise(sorted_curve):
+    for i, (prev, cur) in enumerate(pairwise(sorted_curve)):
         if prev[1] == 0:
-            out.append(Decimal("0"))
-        else:
-            out.append(cur[1] / prev[1] - Decimal("1"))
+            raise ValueError(
+                f"monthly_returns_from_equity_curve: zero equity at pair index {i} "
+                f"({prev}); equity in funding-lending backtests starts at 1.0 and "
+                f"cannot reach 0 — this indicates an upstream bug."
+            )
+        out.append(cur[1] / prev[1] - Decimal("1"))
     return out
 
 
@@ -49,6 +58,11 @@ def compute_sortino(returns: list[Decimal]) -> Decimal:
     Per spec edge-case ladder:
     - len(returns) < 3            -> 0       (untrustworthy sample)
     - no downside obs OR std==0   -> +inf    (sweep tie-broken by raw return)
+
+    Note: downside std uses population variance (ddof=0) of negative returns
+    centered on their own mean — NOT the classic MAR-based formula
+    sqrt(mean(min(r - MAR, 0)^2)) with MAR=0. The two variants give different
+    numerical results; this implementation matches the spec's definition.
     """
     if len(returns) < 3:
         return Decimal("0")
