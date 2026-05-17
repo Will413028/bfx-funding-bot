@@ -45,5 +45,7 @@ def test_compute_train_end_mts_handles_single_candle() -> None:
 
 def test_compute_train_end_mts_handles_two_candles() -> None:
     candles = _candles(2)
-    # split_idx = int(2 * 0.7) = 1 -> return candles[0].mts
+    # n=2 is too small for a real 70/30 split; int(2*0.7)=1 rounds down to 1 candle in train.
+    # Documents the floor-rounding behavior, NOT that this is a valid 70/30 use case.
+    # split_idx = int(2 * 0.7) = 1 -> train_last_idx = 0 -> return candles[0].mts.
     assert compute_train_end_mts(candles) == candles[0].mts
