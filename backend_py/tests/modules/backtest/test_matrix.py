@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.matrix import (
@@ -6,8 +7,13 @@ from bfx_funding_bot.modules.backtest.matrix import (
     evaluate_cell_qualification,
     evaluate_strategy_qualification,
     pick_sweep_winner,
+    run_cell_wfo,
 )
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
+from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
+from bfx_funding_bot.modules.backtest.strategies.rate_percentile import RatePercentileStrategy
+from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
 def _result(sortino: str, net: str, fill: str = "1.0", n_trades: int = 100) -> BacktestResult:
@@ -169,3 +175,80 @@ def test_evaluate_strategy_qualification_fail_when_3_of_6_cells_qualify() -> Non
     verdict = evaluate_strategy_qualification(cells)
     assert verdict.qualifies is False
     assert verdict.cells_qualifying == 3
+
+
+# ----- run_cell_wfo (integration test on synthetic data) -----
+
+
+def _synthetic_12_months_hourly() -> list[FundingCandle]:
+    start = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    return [
+        FundingCandle(
+            symbol="fUST", timeframe="1h", period_agg="p2",
+            mts=start + i * 3_600_000,
+            open=Decimal("0.0001"), close=Decimal("0.0001"),
+            high=Decimal("0.0001"), low=Decimal("0.0001"),
+            volume=Decimal("100"),
+        )
+        for i in range(12 * 30 * 24)
+    ]
+
+
+def test_run_cell_wfo_with_rate_percentile_produces_outcomes_per_window() -> None:
+    candles = _synthetic_12_months_hourly()
+    windows = compute_wfo_windows(candles, train_months=3, test_months=1, step_months=1)
+    assert len(windows) >= 8
+
+    eda_cell = {"acf_168h_pass": False}
+    outcomes, baselines = run_cell_wfo(
+        strategy_class=RatePercentileStrategy,
+        candles=candles,
+        eda_cell=eda_cell,
+        cell_key="fUST_p2",
+        wfo_windows=windows,
+    )
+    assert len(outcomes) == len(windows)
+    assert len(baselines) == len(windows)
+    for o in outcomes:
+        assert o.status in ("ok", "skipped:no_valid_candidate", "errored")
+        assert o.window_idx >= 0
+
+
+def test_run_cell_wfo_with_mean_reversion_produces_outcomes_per_window() -> None:
+    candles = _synthetic_12_months_hourly()
+    windows = compute_wfo_windows(candles, train_months=3, test_months=1, step_months=1)
+    eda_cell = {
+        "close_over_ema_sigma_24": Decimal("0.05"),
+        "close_over_ema_sigma_168": Decimal("0.10"),
+    }
+    outcomes, baselines = run_cell_wfo(
+        strategy_class=MeanReversionStrategy,
+        candles=candles,
+        eda_cell=eda_cell,
+        cell_key="fUST_p2",
+        wfo_windows=windows,
+    )
+    assert len(outcomes) == len(windows)
+    assert len(baselines) == len(windows)
+
+
+def test_run_cell_wfo_handles_empty_param_grid_gracefully() -> None:
+    """If a strategy's param_grid_for_cell returns [] (e.g. EDA drop), all
+    windows should be marked skipped:no_valid_candidate, not errored.
+    """
+    class _StubEmptyGridStrategy(RatePercentileStrategy):
+        @classmethod
+        def param_grid_for_cell(cls, symbol, period_agg, eda):
+            return []
+
+    candles = _synthetic_12_months_hourly()
+    windows = compute_wfo_windows(candles, train_months=3, test_months=1, step_months=1)
+    outcomes, _ = run_cell_wfo(
+        strategy_class=_StubEmptyGridStrategy,
+        candles=candles, eda_cell={}, cell_key="fUST_p2",
+        wfo_windows=windows,
+    )
+    for o in outcomes:
+        assert o.status == "skipped:no_valid_candidate"
+        assert o.best_params is None
+        assert o.oos_net is None
