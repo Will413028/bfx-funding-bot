@@ -101,7 +101,12 @@ async def _amain() -> int:
             print(f"- close/EMA(168h) sigma: {sigma168}")
             print(f"- ACF: {acf}")
             print(f"- Per-quarter regime drift: {drift}")
-            if drift >= Decimal("0.30"):
+            if drift is None:
+                print(
+                    "- NOTE: Drift undefined (insufficient quarters or zero"
+                    " min-quarter mean) - spec gate cannot be evaluated for this cell."
+                )
+            elif drift >= Decimal("0.30"):
                 print(
                     "- WARNING: Drift >= 30% - spec gate: Phase 3b conclusions"
                     " invalid; mandatory WFO upgrade required."

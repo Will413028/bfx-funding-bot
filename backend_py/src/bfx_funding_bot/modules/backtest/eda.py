@@ -76,9 +76,9 @@ def autocorrelation_at_lags(
             continue
         x = closes[:-lag]
         y = closes[lag:]
-        var_x = np.var(x)
-        var_y = np.var(y)
-        if var_x == 0 or var_y == 0:
+        var_x = float(np.var(x))
+        var_y = float(np.var(y))
+        if var_x < 1e-30 or var_y < 1e-30:
             out[lag] = None
         else:
             corr = float(np.corrcoef(x, y)[0, 1])
@@ -86,12 +86,19 @@ def autocorrelation_at_lags(
     return out
 
 
-def per_quarter_regime_drift(candles: list[FundingCandle]) -> Decimal:
+def per_quarter_regime_drift(candles: list[FundingCandle]) -> Decimal | None:
     """Returns (max_quarter_mean - min_quarter_mean) / min_quarter_mean.
 
     Quarters bucketed by candle UTC month (Jan-Mar=Q1 etc.).
     Spec gate: drift >= 0.30 -> mandatory WFO required, Phase 3b conclusions
     invalidated.
+
+    Returns:
+        Decimal drift value, or None when the metric is undefined:
+          - fewer than 2 distinct (year, quarter) buckets (sample too small)
+          - min quarter mean is zero (degenerate market state; drift undefined)
+        Callers (script) must distinguish None from a finite drift before
+        applying the >= 0.30 spec gate.
     """
     buckets: dict[tuple[int, int], list[Decimal]] = {}
     for c in candles:
@@ -101,14 +108,14 @@ def per_quarter_regime_drift(candles: list[FundingCandle]) -> Decimal:
         quarter = (dt.month - 1) // 3 + 1
         buckets.setdefault((dt.year, quarter), []).append(c.close)
     if len(buckets) < 2:
-        return Decimal("0")
+        return None
     means = [
         sum(vs, Decimal("0")) / Decimal(len(vs)) for vs in buckets.values() if vs
     ]
     if not means:
-        return Decimal("0")
+        return None
     lo = min(means)
     hi = max(means)
     if lo == 0:
-        return Decimal("0")
+        return None
     return (hi - lo) / lo
