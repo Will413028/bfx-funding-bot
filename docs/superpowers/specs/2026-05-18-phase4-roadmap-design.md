@@ -89,18 +89,122 @@ Phase 4 從 Phase 3b 候選池接手，跨 3 個 deployment stage：
 | SLO-driven（Google SRE）| 從 SLI/SLO 反推 metric | 大型 production；v0 過細 |
 | **Hybrid contract + inline**（**選**）| shared metric contract first；sub-spec specific inline | solo / 中小團隊實務派 |
 
-### Log Schema (skeleton — 具體欄位在 4.1 開工前訂死)
+### Log Schema (locked 2026-05-18)
 
-Structured log（JSON to Axiom）必填欄位：
+#### Schema lock scope decision
 
-- `timestamp` (ISO 8601 with timezone)
-- `level` (debug / info / warn / error / critical)
-- `phase` (paper / shadow / canary)
-- `strategy` (RatePercentile / MeanReversion)
-- `cell` (e.g. `fUSD_a30`)
-- `event_type` (signal / decision / safety_trigger / order_submit / order_fill / health_check)
-- `correlation_id` (UUID, 同一個 decision flow 跨 module 共用)
-- Event-specific payload（每 `event_type` 各自定義）
+**派別**: Envelope + 4.1 payload locked, 4.2/4.4 events 留 minimal contract
+
+| 派別 | 做法 | 為何不選 |
+|---|---|---|
+| Folded（只訂 4.1 三個 event_type 詳細 payload）| 4.2 開工再回頭改 roadmap | 4.2 brainstorm 時要分散注意力 |
+| **Envelope + 4.1 payload**（**選**）| 6 個 envelope 訂死 + 4.1 三個 payload 訂死 + 4.2/4.4 三個 minimal contract | 跨 sub-spec 防 drift 同時 avoid confabulation |
+| Wide（6 個全訂）| 一次訂死全部 payload | 4.2/4.4 還沒 design，confabulate safety trigger / order metadata 風險高 |
+
+#### Envelope (6 event_type 共用必填欄位)
+
+| 欄位 | 型別 | 必填 | Note |
+|---|---|---|---|
+| `timestamp` | ISO 8601 with TZ | ✓ | |
+| `level` | enum: `debug` / `info` / `warn` / `error` / `critical` | ✓ | |
+| `phase` | enum: `paper` / `shadow` / `canary` | ✓ | |
+| `strategy` | enum: `rate_percentile` / `mean_reversion` | conditional | `health_check` event nullable；其他 event 必填 |
+| `cell` | string (e.g. `fUSD_a30`, `fUST_a30`) | conditional | `health_check` event nullable；其他 event 必填 |
+| `event_type` | enum: `signal` / `decision` / `safety_trigger` / `order_submit` / `order_fill` / `health_check` | ✓ | |
+| `correlation_id` | UUID | ✓ | 同 decision flow 跨 event 共用 |
+| `payload` | object | ✓ | event_type-specific schema |
+
+#### 4.1 Event Payloads (訂死)
+
+##### `signal` payload
+
+**派別**: Common + extension（OpenTelemetry attributes 派）
+
+| 派別 | 做法 | 為何不選 |
+|---|---|---|
+| Strict typed per strategy | RatePercentile / MeanReversion 各一 typed schema | 加策略要改 schema doc 雙處；跨策略 dashboard 難 |
+| **Common + extension**（**選**）| Common fields + `strategy_attributes: {object}` 放策略獨有 | 跨策略 dashboard 可比；不限制策略創新 |
+| Free-form `signal_details` object | envelope 固定 + `signal_details: {}` 任策略塞 | cross-strategy 查詢 unfriendly |
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `signal_score` | float | ✓ | 跨策略可比的 signal strength normalized score |
+| `signal_direction` | enum: `post` / `skip` | ✓ | 策略建議的 action（純策略 raw output，未經 safety / cap 等 pipeline 過濾）|
+| `strategy_attributes` | object | ✓ | 策略獨有欄位（rate_percentile: `{percentile, threshold}`; mean_reversion: `{rate, mean, sigma}`） |
+
+Final action (pipeline 走完後實際下不下單) 由 `decision` event 負責（兩者用 `correlation_id` join），signal event 不重複記。4.1 paper phase 兩者必相等；4.2 safety logic 加入後可能 diverge。
+
+`strategy_attributes` 結構（per strategy）：
+- **rate_percentile**: `{ percentile: float, threshold: float }`
+- **mean_reversion**: `{ rate: float, mean: float, sigma: float }`
+- Phase 3c 新策略加入時 evolve common ground，先以兩策略 driven。
+
+##### `decision` payload
+
+策略無關，dry / shadow / canary 共用。
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `decision_outcome` | enum: `post` / `skip` | ✓ | 是否下單 |
+| `signal_correlation_id` | UUID | ✓ | 對應觸發此 decision 的 signal event |
+| `offer_rate` | float | post 必填 | Bitfinex funding rate (e.g. `0.0001` = 0.01% daily) |
+| `offer_amount_usdt` | float | post 必填 | 下單金額 |
+| `offer_duration_days` | int | post 必填 | 2-120 days |
+| `skip_reason` | enum: `below_threshold` / `max_position_cap` / `safety_block` / `insufficient_balance` / `other` | skip 必填 | 跳過原因 |
+| `skip_reason_detail` | string | optional | free-text 補充（特別給 `other`） |
+
+Note: `abort` / `retry` 不放這 — `abort` 屬 `safety_trigger`，`retry` 屬 `order_submit`。
+
+##### `health_check` payload
+
+Bitfinex WebSocket 健康指標（G2 M3: zero gap > 5min 對應）。
+
+| 欄位 | 型別 | 必填 | 說明 |
+|---|---|---|---|
+| `check_target` | enum: `bitfinex_ws` / `bitfinex_rest` / `db` / `redis` | ✓ | 健檢目標（4.1 主要用 `bitfinex_ws`；其他預留） |
+| `status` | enum: `healthy` / `degraded` / `down` | ✓ | 狀態 |
+| `last_msg_age_ms` | int | ws 必填 | 距上一筆 WebSocket message 毫秒（>300000 = 5min gap） |
+| `reconnect_count_last_hour` | int | ws 必填 | rolling 1hr reconnect 次數 |
+| `latency_ms` | int | rest/db 必填 | RTT 或 query latency |
+| `error_message` | string | degraded/down 必填 | 錯誤原因 |
+
+Emit 頻率：**狀態變化 emit + 每 5min 強制 heartbeat**（變化 driven 為主，heartbeat 確保「沒消息」也能查 down 狀態）— 4.1 implementation detail，schema 不訂死。
+
+#### 4.2/4.4 Event Minimal Contracts
+
+4.2/4.4 brainstorm 時 finalize 詳細 payload，roadmap 此處只訂 minimal contract（必含欄位），sub-spec 可加但不可移除。
+
+##### `safety_trigger` minimal contract (4.2 訂死)
+
+- 必含：`trigger_type` / `triggered_by_correlation_id` / `action_taken`
+- envelope `level` 強制 ≥ `error`
+- 預警類（e.g. cap_breach 80% 預警）走 `warn` level 另一個 event_type（4.2 brainstorm 訂）
+
+##### `order_submit` minimal contract (4.2 訂死，paper trade 也用 with `is_simulated=true`)
+
+- 必含：`offer_id` / `is_simulated` / `offer_rate` / `offer_amount_usdt` / `offer_duration_days` / `submit_status`
+- `offer_id`: real mode 用 Bitfinex 回的 ID；paper mode 自產 UUID
+- Lifecycle: order_submit → (eventual) order_fill；中間 status 變化（cancelled, expired）由 4.2 brainstorm 決定是否新增 `order_status_change` event_type
+
+##### `order_fill` minimal contract (4.2/4.4 訂死)
+
+- 必含：`offer_id` (join 用) / `is_simulated` / `fill_rate` / `fill_amount_usdt` / `fill_duration_days` / `fill_timestamp` / `pnl_realized`
+- 4.4 G3 M1 (P&L tracking error) 計算來源欄位
+
+#### Log Level Guideline
+
+| Level | 何時用 |
+|---|---|
+| `debug` | verbose tracing；只在 paper phase enable |
+| `info` | normal flow（signal / decision / order_* 正常都 info） |
+| `warn` | degraded but not blocking（health_check `degraded`、API retry 成功） |
+| `error` | operational failure 但 bot 繼續（order_submit failed、db query failed） |
+| `critical` | kill-switch / cannot continue（safety_trigger 強制 ≥ critical） |
+
+#### Retention + PII
+
+- **Retention**: Axiom default 30 day；canary phase 60 day（4-6 weeks 觀察期 + buffer）
+- **PII**: bfx 是 single-user bot（Will own funding），無 user PII。唯一敏感資料 = Bitfinex API key — **emit code 強制 redact**。API key 出現在 log 即 **schema violation**，CI / smoke test 要 catch。
 
 ### Metric Naming Convention
 
@@ -115,11 +219,13 @@ Cardinality bound: phase × strategy × cell ≤ 50 unique series；超過要 re
 
 ### Axiom Dashboard 約定
 
-每 sub-spec 至少含 1 個 dashboard：
-- 4.1: shadow signal volume + divergence trend
-- 4.2: safety trigger log + Bitfinex API latency
-- 4.3: G2 metric trend over rolling window
-- 4.4: live P&L + tracking error live chart
+每 sub-spec 至少含 1 個 dashboard。Roadmap 只訂 contract（命名 + focus），**具體 widget 列表 defer 到各 sub-spec brainstorm**（widget 需 real data shape driven，spec 級訂死容易 confabulate）。
+
+**命名規則**: `bfx-phase4-<sub-spec-number>-<purpose>`，例如：
+- 4.1: `bfx-phase4-4.1-shadow-signal` (shadow signal volume + divergence trend)
+- 4.2: `bfx-phase4-4.2-safety-trigger`、`bfx-phase4-4.2-bitfinex-api-latency`
+- 4.3: `bfx-phase4-4.3-g2-stability`
+- 4.4: `bfx-phase4-4.4-canary-pnl`
 
 ## Dependency + Sequencing
 
@@ -235,7 +341,8 @@ Real money 上線 multi-dimensional validation：
 | First canary 選哪個 strategy × cell（候選：MeanReversion × fUSD×a30 / MeanReversion × fUSD×p2 / RatePercentile × fUST×a30）| 4.4 |
 | Shadow 期具體長度（2 vs 4 weeks）+ G2 三個 threshold 具體數值 | 4.3 |
 | Canary 期長度（4 vs 6 weeks）+ G3 tracking error threshold + allocation cap 具體值 | 4.4 |
-| Observability log schema 具體欄位 + Axiom dashboard layout | 本 doc observability section / 4.1 開工前訂死 |
+| ~~Observability log schema 具體欄位~~ | ✅ Resolved 2026-05-18（roadmap observability section locked） |
+| Axiom dashboard 具體 widget 列表 | 各 sub-spec brainstorm（roadmap 只訂 naming + focus contract） |
 | Safety flag 具體實作（feature flag table vs env var vs config）| 4.2 |
 | Kill-switch trigger condition 具體定義 | 4.2 |
 
