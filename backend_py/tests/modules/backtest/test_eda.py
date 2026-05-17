@@ -44,22 +44,39 @@ def test_close_over_ema_sigma_with_constant_returns_zero() -> None:
     assert sigma < Decimal("0.001")  # essentially zero
 
 
-def test_autocorrelation_at_lags_constant_series_returns_none_or_one() -> None:
+def test_autocorrelation_at_lags_constant_series_returns_none() -> None:
+    """Constant series has var=0; ACF returns None per the var-guard."""
     candles = [_candle(i * 3_600_000, "0.0001") for i in range(200)]
-    # constant series: ACF undefined (var=0); we return None for undefined
     acf = autocorrelation_at_lags(candles, lags=[1, 24])
-    assert acf[1] is None or acf[1] == Decimal("1")
+    assert acf[1] is None
+    assert acf[24] is None
 
 
 def test_per_quarter_regime_drift_returns_max_min_ratio() -> None:
-    # 8 quarters with mean rates: 0.0001 (Q1-Q4), 0.0002 (Q5-Q8)
-    # max/min relative drift = (0.0002 - 0.0001) / 0.0001 = 1.0
+    """8 distinct calendar quarters with rates doubling in the second half:
+    Q1-Q4 2020 = 0.0001, Q1-Q4 2021 = 0.0002.
+    drift = (0.0002 - 0.0001) / 0.0001 = 1.0.
+
+    Uses explicit datetime-anchored timestamps (not Unix-epoch arithmetic)
+    to avoid the calendar-collision trap where 90-day blocks can map two
+    candles to the same calendar quarter (e.g. 1970-04-01 and 1970-06-30
+    both land in 1970-Q2).
+    """
+    from datetime import UTC, datetime
+
+    # One candle per quarter to make distinct buckets unambiguous
+    quarter_starts = [
+        (2020, 1, 1),  (2020, 4, 1),  (2020, 7, 1),  (2020, 10, 1),  # Q1-Q4 2020 → 0.0001
+        (2021, 1, 1),  (2021, 4, 1),  (2021, 7, 1),  (2021, 10, 1),  # Q1-Q4 2021 → 0.0002
+    ]
     candles = []
-    quarter_seconds = 90 * 24 * 3600
-    for q in range(8):
-        rate = "0.0001" if q < 4 else "0.0002"
-        for h in range(24):
-            ts = (q * quarter_seconds + h * 3600) * 1000
+    for i, (y, m, d) in enumerate(quarter_starts):
+        rate = "0.0001" if i < 4 else "0.0002"
+        # Two candles per quarter so buckets are non-trivial (mean of 2 values)
+        for hour_offset in (0, 1):
+            ts = int(datetime(y, m, d, hour_offset, tzinfo=UTC).timestamp() * 1000)
             candles.append(_candle(ts, rate))
+
     drift = per_quarter_regime_drift(candles)
+    assert drift is not None
     assert drift > Decimal("0.99")  # close to 1.0
