@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
+from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.base import Strategy
+from bfx_funding_bot.modules.backtest.wfo import WfoWindow
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 FILL_FLOOR = Decimal("0.3")
 MIN_TRADES_TRAIN = 10
@@ -159,3 +164,107 @@ def evaluate_strategy_qualification(
         cells_qualifying=cells_qualifying,
         cells_played=cells_played,
     )
+
+
+def run_cell_wfo(
+    strategy_class: type[Strategy],
+    candles: list[FundingCandle],
+    eda_cell: dict[str, Any],
+    cell_key: str,
+    wfo_windows: list[WfoWindow],
+) -> tuple[list[WindowOutcome], list[BacktestResult]]:
+    """Run sweep + OOS eval for one (strategy, cell) across all WFO windows.
+
+    For each window:
+      1. Run baseline (AlwaysFRR period=2) over the test segment.
+      2. Build the strategy's param grid via param_grid_for_cell(eda_cell).
+      3. Sweep each variant on the train segment; filter via pick_sweep_winner.
+      4. If a winner exists, run OOS on the test segment with the winning params.
+      5. Record WindowOutcome (status = "ok" | "skipped:no_valid_candidate" | "errored").
+
+    Returns (window_outcomes, baseline_per_window).
+    """
+    window_outcomes: list[WindowOutcome] = []
+    baseline_results: list[BacktestResult] = []
+
+    for w in wfo_windows:
+        baseline_result = run_backtest(
+            candles, AlwaysFRRStrategy(period_days=2),
+            record_start_mts=w.test_start_mts,
+            record_end_mts=w.test_end_mts,
+        )
+        baseline_results.append(baseline_result)
+
+        try:
+            grid = strategy_class.param_grid_for_cell(
+                symbol=candles[0].symbol, period_agg=candles[0].period_agg,
+                eda=eda_cell,
+            )
+            if not grid:
+                window_outcomes.append(WindowOutcome(
+                    window_idx=len(window_outcomes),
+                    train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
+                    test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
+                    status="skipped:no_valid_candidate",
+                    best_params=None,
+                    oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
+                    baseline_net=baseline_result.net_monthly_return_pct,
+                    baseline_sortino=baseline_result.sortino,
+                ))
+                continue
+
+            candidates = []
+            for params in grid:
+                train_result = run_backtest(
+                    candles, strategy_class(**params),
+                    record_start_mts=w.train_start_mts,
+                    record_end_mts=w.train_end_mts,
+                )
+                candidates.append((params, train_result))
+
+            winner = pick_sweep_winner(candidates)
+            if winner is None:
+                window_outcomes.append(WindowOutcome(
+                    window_idx=len(window_outcomes),
+                    train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
+                    test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
+                    status="skipped:no_valid_candidate",
+                    best_params=None,
+                    oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
+                    baseline_net=baseline_result.net_monthly_return_pct,
+                    baseline_sortino=baseline_result.sortino,
+                ))
+                continue
+
+            best_params, _ = winner
+            test_result = run_backtest(
+                candles, strategy_class(**best_params),
+                record_start_mts=w.test_start_mts,
+                record_end_mts=w.test_end_mts,
+            )
+            window_outcomes.append(WindowOutcome(
+                window_idx=len(window_outcomes),
+                train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
+                test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
+                status="ok",
+                best_params=best_params,
+                oos_net=test_result.net_monthly_return_pct,
+                oos_max_dd=test_result.max_drawdown_pct,
+                oos_fill_rate=test_result.fill_rate,
+                oos_sortino=test_result.sortino,
+                baseline_net=baseline_result.net_monthly_return_pct,
+                baseline_sortino=baseline_result.sortino,
+            ))
+        except Exception:
+            window_outcomes.append(WindowOutcome(
+                window_idx=len(window_outcomes),
+                train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
+                test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
+                status="errored",
+                best_params=None,
+                oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
+                baseline_net=baseline_result.net_monthly_return_pct,
+                baseline_sortino=baseline_result.sortino,
+            ))
+
+    return window_outcomes, baseline_results
