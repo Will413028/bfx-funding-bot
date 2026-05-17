@@ -148,6 +148,19 @@ def test_run_backtest_record_window_excludes_trades_outside() -> None:
 
     assert windowed.n_trades < full.n_trades
     assert windowed.n_trades > 0
+    # n_candles reflects the record window, not the total input series
+    assert windowed.n_candles == 240
+    assert full.n_candles == 720
+    # Net monthly rate is normalized to elapsed months in each window, so comparing
+    # absolute equity: windowed covers fewer trades -> lower total compounded equity.
+    # Cross-window monthly-rate comparison is invalid (different denominators).
+    # Instead verify gross_monthly * months_windowed < gross_monthly_full * months_full,
+    # i.e., proportional absolute gain is less in the restricted window.
+    windowed_months = Decimal(windowed.end_mts - windowed.start_mts) / Decimal(3_600_000) / Decimal(720)
+    full_months = Decimal(full.end_mts - full.start_mts) / Decimal(3_600_000) / Decimal(720)
+    windowed_abs_gross = windowed.gross_monthly_return_pct * windowed_months
+    full_abs_gross = full.gross_monthly_return_pct * full_months
+    assert windowed_abs_gross < full_abs_gross
 
 
 def test_run_backtest_sortino_populated_on_long_series() -> None:
@@ -155,7 +168,9 @@ def test_run_backtest_sortino_populated_on_long_series() -> None:
     monthly returns -> sortino should stay at 0 (n<3 floor)."""
     candles = _candles_constant_rate("0.0001", n=720)
     result = run_backtest(candles, AlwaysFRRStrategy(period_days=2))
-    # 30 days = single month, only 1 month-end -> 0 returns -> sortino=0
+    # 30 days starting 2024-01-01 ends at 2024-01-30 23:00 UTC.
+    # Jan-end (2024-01-31 23:59:59) is AFTER the series end, so month_end_timestamps_within
+    # returns [] -> early return Decimal("0").
     assert result.sortino == Decimal("0")
 
 
