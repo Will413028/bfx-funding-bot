@@ -17,9 +17,13 @@ class _AllowInfDecimal:
     def __get_pydantic_core_schema__(
         cls, source_type: object, handler: GetCoreSchemaHandler
     ) -> object:
-        return core_schema.no_info_plain_validator_function(
-            lambda v: v if isinstance(v, Decimal) else Decimal(str(v))
-        )
+        def _validate(v: object) -> Decimal:
+            d = v if isinstance(v, Decimal) else Decimal(str(v))
+            if d.is_nan():
+                raise ValueError(f"InfDecimal does not accept NaN, got {v!r}")
+            return d
+
+        return core_schema.no_info_plain_validator_function(_validate)
 
 
 InfDecimal = Annotated[Decimal, _AllowInfDecimal]

@@ -74,8 +74,10 @@ def run_backtest(
     peak = net_equity
     max_dd = Decimal("0")
     n_trades = 0
+    n_window_candles = 0  # candles inside [effective_start, effective_end] regardless of cooldown
     fill_prob_sum = Decimal("0")
     cooldown_until_idx = -1
+    # Assumes 1h candles: gap_minutes / 60 gives candle count. Other timeframes (5m, 1D) miscount.
     gap_candles = math.ceil(config.gap_minutes / 60)
     one_minus_fee = Decimal("1") - config.fee_rate
 
@@ -83,10 +85,13 @@ def run_backtest(
 
     for i, candle in enumerate(sorted_candles):
         strategy.observe(candle)
+        in_window = effective_start <= candle.mts <= effective_end
+        if in_window:
+            n_window_candles += 1
 
         if i <= cooldown_until_idx:
             continue
-        if candle.mts < effective_start or candle.mts > effective_end:
+        if not in_window:
             continue
 
         decision = strategy.decide(candle)
@@ -132,7 +137,7 @@ def run_backtest(
     return BacktestResult(
         strategy_name=strategy.name, symbol=symbol,
         start_mts=effective_start, end_mts=effective_end,
-        n_candles=len(sorted_candles),
+        n_candles=n_window_candles,
         gross_monthly_return_pct=gross_monthly,
         net_monthly_return_pct=net_monthly,
         max_drawdown_pct=max_dd * Decimal("100"),
@@ -158,7 +163,9 @@ def _compute_sortino_from_timeline(
     samples: list[tuple[int, Decimal]] = []
     cursor = 0
     last_equity = Decimal("1")
-    sorted_timeline = sorted(equity_timeline, key=lambda p: p[0])
+    # equity_timeline is already sorted by construction (loop iterates sorted_candles
+    # in mts ascending order; appends only on trade fires which preserve order).
+    sorted_timeline = equity_timeline
     for me in month_ends:
         while cursor < len(sorted_timeline) and sorted_timeline[cursor][0] <= me:
             last_equity = sorted_timeline[cursor][1]
