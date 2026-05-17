@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from bfx_funding_bot.modules.backtest.sortino import (
     compute_sortino,
     month_end_timestamps_within,
@@ -75,3 +77,31 @@ def test_month_end_timestamps_within_jan_to_march_2024() -> None:
 
 def test_month_end_timestamps_within_empty_when_start_after_end() -> None:
     assert month_end_timestamps_within(2000, 1000) == []
+
+
+def test_compute_sortino_with_multiple_equal_downside_returns_infinity() -> None:
+    """Two identical downside obs → variance still 0 → +inf via the std==0 guard."""
+    returns = [Decimal("0.05"), Decimal("-0.01"), Decimal("-0.01")]
+    sortino = compute_sortino(returns)
+    assert sortino == Decimal("Infinity")
+
+
+def test_monthly_returns_handles_unsorted_curve() -> None:
+    """Code sorts internally — passing reversed input must give same result."""
+    sorted_curve = [
+        (1706742000000, Decimal("1.00")),  # 2024-01-31 23:00
+        (1709247600000, Decimal("1.02")),  # 2024-02-29 23:00
+        (1711925999000, Decimal("1.05")),  # 2024-03-31 23:59:59
+    ]
+    reversed_curve = list(reversed(sorted_curve))
+    assert monthly_returns_from_equity_curve(reversed_curve) == monthly_returns_from_equity_curve(sorted_curve)
+
+
+def test_monthly_returns_raises_on_zero_equity() -> None:
+    curve = [
+        (1706742000000, Decimal("1.00")),
+        (1709247600000, Decimal("0")),
+        (1711925999000, Decimal("0.5")),
+    ]
+    with pytest.raises(ValueError, match="zero equity"):
+        monthly_returns_from_equity_curve(curve)
