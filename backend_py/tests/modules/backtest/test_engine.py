@@ -108,6 +108,70 @@ def test_run_backtest_gap_minutes_extends_cooldown() -> None:
     assert big_gap.net_monthly_return_pct < no_gap.net_monthly_return_pct
 
 
+def test_run_backtest_observe_called_for_every_candle_including_cooldown() -> None:
+    """observe() must be called on every candle, even during cooldown
+    (so stateful indicators stay fresh)."""
+    candles = _candles_constant_rate("0.0001", n=72)
+    observations: list[int] = []
+
+    class ObservingStrategy(Strategy):
+        @property
+        def name(self) -> str:
+            return "obs"
+
+        def observe(self, candle: FundingCandle) -> None:
+            observations.append(candle.mts)
+
+        def decide(self, candle: FundingCandle) -> LendDecision | None:
+            if candle.close is None:
+                return None
+            return LendDecision(mts=candle.mts, rate=candle.close, period_days=2)
+
+    run_backtest(candles, ObservingStrategy())
+    assert observations == [c.mts for c in candles]
+
+
+def test_run_backtest_record_window_excludes_trades_outside() -> None:
+    """Trades whose decision-candle.mts falls outside [record_start_mts,
+    record_end_mts] must not be counted in n_trades or contribute to equity."""
+    candles = _candles_constant_rate("0.0001", n=720)
+    # Restrict recording to last 240 candles (~10 days)
+    record_start_mts = candles[480].mts
+    record_end_mts = candles[-1].mts
+
+    full = run_backtest(candles, AlwaysFRRStrategy(period_days=2))
+    windowed = run_backtest(
+        candles, AlwaysFRRStrategy(period_days=2),
+        record_start_mts=record_start_mts,
+        record_end_mts=record_end_mts,
+    )
+
+    assert windowed.n_trades < full.n_trades
+    assert windowed.n_trades > 0
+
+
+def test_run_backtest_sortino_populated_on_long_series() -> None:
+    """720+ hourly candles spans ~1 month. Single-month series has no
+    monthly returns -> sortino should stay at 0 (n<3 floor)."""
+    candles = _candles_constant_rate("0.0001", n=720)
+    result = run_backtest(candles, AlwaysFRRStrategy(period_days=2))
+    # 30 days = single month, only 1 month-end -> 0 returns -> sortino=0
+    assert result.sortino == Decimal("0")
+
+
+def test_run_backtest_sortino_with_multi_month_series_positive_finite() -> None:
+    """5 months of constant-positive returns -> no downside -> sortino=+inf.
+
+    n=24*30*5 (3600 candles, ~150 days) starting 2024-01-01 spans through
+    2024-05-29, capturing 4 month-end samples (Jan/Feb/Mar/Apr) -> 3 monthly
+    returns. All returns are positive (constant 0.0001 rate) -> no downside
+    -> sortino = +inf.
+    """
+    candles = _candles_constant_rate("0.0001", n=24 * 30 * 5)  # ~5 months
+    result = run_backtest(candles, AlwaysFRRStrategy(period_days=2))
+    assert result.sortino == Decimal("Infinity")
+
+
 def test_run_backtest_spread_above_market_reduces_fill() -> None:
     """Strategy posts 10% above candle close -> spread_pct=0.10.
     With default fill_alpha=5: fill_prob = 1 - 5*0.10 = 0.5.
