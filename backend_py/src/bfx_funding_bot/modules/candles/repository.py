@@ -109,6 +109,36 @@ async def get_candles_in_range(
     return [_row_to_domain(row) for row in result.scalars().all()]
 
 
+async def get_up_to(
+    session: AsyncSession,
+    *,
+    symbol: str,
+    timeframe: str,
+    period_agg: str,
+    mts_inclusive: int,
+    lookback: int,
+) -> list[FundingCandle]:
+    """Fetch up to `lookback` candles with mts <= mts_inclusive, returned mts ASC.
+
+    Used by signal_engine for divergence replay: feed history[:-1] into a fresh
+    strategy, then extract on history[-1] to compare against the live signal.
+    """
+    stmt = (
+        select(FundingCandleRow)
+        .where(
+            FundingCandleRow.symbol == symbol,
+            FundingCandleRow.timeframe == timeframe,
+            FundingCandleRow.period_agg == period_agg,
+            FundingCandleRow.mts <= mts_inclusive,
+        )
+        .order_by(FundingCandleRow.mts.desc())
+        .limit(lookback)
+    )
+    result = await session.execute(stmt)
+    candles = [_row_to_domain(row) for row in result.scalars().all()]
+    return sorted(candles, key=lambda c: c.mts)
+
+
 async def get_min_mts(
     session: AsyncSession,
     *,
