@@ -9,27 +9,26 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     Envelope,
     EventType,
     HealthCheckPayload,
-    Level,
     Phase,
     SignalPayload,
 )
 
 
 def _envelope_dict(**overrides):
-    base = dict(
-        timestamp=datetime.now(UTC).isoformat(),
-        level="info",
-        phase="paper",
-        strategy="mean_reversion",
-        cell="fUSD_a30",
-        event_type="signal",
-        correlation_id=str(uuid4()),
-        payload={
+    base = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": "info",
+        "phase": "paper",
+        "strategy": "mean_reversion",
+        "cell": "fUSD_a30",
+        "event_type": "signal",
+        "correlation_id": str(uuid4()),
+        "payload": {
             "signal_score": 0.5,
             "signal_direction": "post",
             "strategy_attributes": {"rate": 0.0001, "mean": 0.00009, "sigma": 0.00002},
         },
-    )
+    }
     base.update(overrides)
     return base
 
