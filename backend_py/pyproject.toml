@@ -33,6 +33,7 @@ dev = [
     "freezegun>=1.5",
     "pytest-mock>=3.14",
     "types-pyyaml>=6.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [project.scripts]
