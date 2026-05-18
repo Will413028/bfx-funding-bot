@@ -107,21 +107,33 @@ class BitfinexWSClient:
         newest = max((s.last_msg_ts for s in self.channels.values()), default=time.monotonic())
         return int((time.monotonic() - newest) * 1000)
 
-    def _reset_backoff_if_stable(self) -> None:
+    def maybe_reset_backoff(self) -> None:
+        """Reset reconnect_attempts if connection has been stable for >= 5 minutes.
+
+        Called by daemon (Task 7) after successful reconnect to clear backoff history.
+        """
         if self._connected_at is None:
             return
         if time.monotonic() - self._connected_at >= 300:
             self.reconnect_attempts = 0
 
     def _fire_disconnect(self, reason: str) -> None:
+        # NOTE: reconnect_attempts / _reconnect_history are mutated here only.
+        # asyncio single-thread ensures no concurrent mutation today; if Task 7 daemon
+        # adds its own _fire_disconnect calls, audit for double-increment.
         self._reconnect_history.append(time.monotonic())
         self.reconnect_attempts += 1
         if self._on_disconnect is not None:
             self._on_disconnect(reason)
 
     async def _hb_watchdog(self) -> None:
+        """Poll for heartbeat staleness. On timeout: fires on_disconnect, closes ws, exits.
+
+        Reconnect is the caller's (daemon, Task 7) responsibility after on_disconnect fires.
+        """
         try:
             while not self._stop:
+                # poll at 2x Nyquist: detect stale within at most one timeout period
                 await asyncio.sleep(self.hb_timeout_s / 2)
                 stale = any(
                     time.monotonic() - s.last_msg_ts > self.hb_timeout_s
@@ -132,6 +144,7 @@ class BitfinexWSClient:
                     self._fire_disconnect("hb_timeout")
                     if self._ws is not None:
                         await self._ws.close()
+                        self._ws = None  # allow _ensure_connected to reconnect after on_disconnect
                     return
         except asyncio.CancelledError:
             return
