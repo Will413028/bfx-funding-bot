@@ -33,6 +33,13 @@ class _BitfinexProtocol(Protocol):
 
 @dataclass(frozen=True)
 class GapFillResult:
+    """Result of a gap-fill REST + upsert operation.
+
+    candles_fetched: count of candles returned by Bitfinex REST.
+    candles_upserted: count of candles passed to upsert_candles() — equals
+        candles_fetched, since upsert_candles uses ON CONFLICT DO UPDATE,
+        treating every input row as "written" (insert or update; no skip).
+    """
     candles_fetched: int
     candles_upserted: int
 

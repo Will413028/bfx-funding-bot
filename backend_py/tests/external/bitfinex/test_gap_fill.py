@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
@@ -50,3 +51,14 @@ async def test_fill_gap_fetches_and_upserts(sqlite_session: AsyncSession):
     )
 
     assert result.candles_fetched == 3
+    assert result.candles_upserted == 3
+
+
+async def test_fill_gap_raises_on_unknown_timeframe(sqlite_session: AsyncSession):
+    bfx = AsyncMock()
+    with pytest.raises(ValueError, match="unsupported timeframe"):
+        await fill_gap_from_rest(
+            bitfinex=bfx, session=sqlite_session,
+            symbol="fUSD", timeframe="2h", period_agg="a30",
+            last_known_mts=0, now_mts=999_999_999,
+        )
