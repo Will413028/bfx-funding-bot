@@ -54,6 +54,9 @@ class AxiomQueryClient:
         )
         if resp.status_code in (401, 403):
             raise SystemExit(2)
+        if resp.status_code >= 400:
+            print(f"[debug] APL: {apl!r}", flush=True)
+            print(f"[debug] response: {resp.text!r}", flush=True)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
