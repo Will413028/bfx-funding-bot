@@ -13,6 +13,9 @@ dependencies = [
     "aiolimiter>=1.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
+    "websockets>=14.0",
+    "tenacity>=9.0",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -26,7 +29,14 @@ dev = [
     "greenlet>=3.1",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
+    "hypothesis>=6.115",
+    "freezegun>=1.5",
+    "pytest-mock>=3.14",
+    "types-pyyaml>=6.0",
 ]
+
+[project.scripts]
+bfx-shadow = "bfx_funding_bot.modules.marketfeed.daemon:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -63,4 +73,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: marks tests requiring network/live services (deselect with '-m \"not integration\"')",
+    "property: hypothesis-based property tests; CI default 100 iter, nightly 1k, pre-ship manual 10k",
+    "live: requires real Bitfinex / Axiom credentials; never runs in CI",
 ]
