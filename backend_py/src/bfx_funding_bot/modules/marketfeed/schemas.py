@@ -1,13 +1,13 @@
 """Pydantic models for Phase 4 observability events.
 
 對應 phase4-roadmap-design.md line 92-227 lock 的 envelope + payload schema。
-Schema 改動 = 必須同步更新此 module；CP3 test 會 catch 違反。
+Schema 改動 = 必須同步更新此 module; CP3 test 會 catch 違反。
 """
 from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -115,11 +115,12 @@ class HealthCheckPayload(BaseModel):
 
     @model_validator(mode="after")
     def _conditional_required(self) -> HealthCheckPayload:
-        if self.check_target == HealthTarget.BITFINEX_WS:
-            if self.last_msg_age_ms is None or self.reconnect_count_last_hour is None:
-                raise ValueError(
-                    "bitfinex_ws check requires last_msg_age_ms + reconnect_count_last_hour"
-                )
+        if self.check_target == HealthTarget.BITFINEX_WS and (
+            self.last_msg_age_ms is None or self.reconnect_count_last_hour is None
+        ):
+            raise ValueError(
+                "bitfinex_ws check requires last_msg_age_ms + reconnect_count_last_hour"
+            )
         if (
             self.check_target in (HealthTarget.BITFINEX_REST, HealthTarget.DB)
             and self.latency_ms is None
@@ -128,6 +129,12 @@ class HealthCheckPayload(BaseModel):
         if self.status in (HealthStatus.DEGRADED, HealthStatus.DOWN) and not self.error_message:
             raise ValueError(f"status={self.status} requires error_message")
         return self
+
+
+PayloadModel = Annotated[
+    SignalPayload | DecisionPayload | HealthCheckPayload | dict[str, Any],
+    Field(union_mode="left_to_right"),
+]
 
 
 class Envelope(BaseModel):
@@ -143,11 +150,12 @@ class Envelope(BaseModel):
 
     @model_validator(mode="after")
     def _check_strategy_cell_conditional(self) -> Envelope:
-        if self.event_type != EventType.HEALTH_CHECK:
-            if self.strategy is None or self.cell is None:
-                raise ValueError(
-                    f"event_type={self.event_type} requires strategy and cell"
-                )
+        if self.event_type != EventType.HEALTH_CHECK and (
+            self.strategy is None or self.cell is None
+        ):
+            raise ValueError(
+                f"event_type={self.event_type} requires strategy and cell"
+            )
         return self
 
     @model_validator(mode="after")
