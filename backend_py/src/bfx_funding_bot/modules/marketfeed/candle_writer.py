@@ -57,5 +57,8 @@ class CandleWriter:
             session = await maybe
         else:
             session = maybe  # type: ignore[assignment]
-        await upsert_candles(session, [candle])
-        await session.commit()
+        try:
+            await upsert_candles(session, [candle])
+            await session.commit()
+        finally:
+            await session.close()
