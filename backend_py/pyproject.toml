@@ -75,4 +75,5 @@ markers = [
     "integration: marks tests requiring network/live services (deselect with '-m \"not integration\"')",
     "property: hypothesis-based property tests; CI default 100 iter, nightly 1k, pre-ship manual 10k",
     "live: requires real Bitfinex / Axiom credentials; never runs in CI",
+    "benchmark: performance gates (R4.1.1 replay budget) — run manually",
 ]
