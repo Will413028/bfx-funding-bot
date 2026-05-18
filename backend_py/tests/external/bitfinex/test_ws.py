@@ -61,7 +61,7 @@ async def test_connect_and_subscribe_yields_candle(unused_tcp_port: int):
         assert candles[0].mts == 1747584000000
 
 
-async def test_hb_timeout_triggers_disconnect_callback(unused_tcp_port: int, monkeypatch):
+async def test_hb_timeout_triggers_disconnect_callback(unused_tcp_port: int):
     server_state = FakeBitfinexWSServer()
     async with websockets.serve(server_state.handler, "127.0.0.1", unused_tcp_port):
         disconnects: list[str] = []
@@ -98,10 +98,10 @@ def test_backoff_schedule_caps_at_60s():
     assert compute_backoff_secs(20) == 60
 
 
-async def test_reconnect_attempts_resets_after_5min_alive(monkeypatch):
+def test_reconnect_attempts_resets_after_5min_alive():
     from bfx_funding_bot.external.bitfinex.ws import BitfinexWSClient
     client = BitfinexWSClient(channels=[], url="ws://invalid")
     client.reconnect_attempts = 3
     client._connected_at = time_module.monotonic() - 301
-    client._reset_backoff_if_stable()
+    client.maybe_reset_backoff()
     assert client.reconnect_attempts == 0
