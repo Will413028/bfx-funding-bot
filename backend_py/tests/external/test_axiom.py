@@ -93,9 +93,12 @@ async def test_emit_falls_back_to_stdout_after_persistent_failure(
     client._fallback_after_consecutive_fail = 2  # speed up test
     await client.start()
     await client.emit(_event())
-    await client.flush()  # try real then fallback
+    # Each flush() makes up to 3 HTTP attempts (tenacity retries).
+    # With _fallback_after_consecutive_fail=2, fallback mode entered after
+    # 2 batch-level failures (consuming 6 mock 503 responses).
+    await client.flush()  # batch 1: 3 retries fail → _consecutive_fail=1
     await client.emit(_event())
-    await client.flush()  # already in fallback mode
+    await client.flush()  # batch 2: 3 retries fail → _consecutive_fail=2 → fallback mode
     await client.stop()
 
     captured = capsys.readouterr()

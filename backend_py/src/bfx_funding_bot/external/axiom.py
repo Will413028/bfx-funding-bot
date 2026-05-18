@@ -88,8 +88,7 @@ class AxiomClient:
         try:
             while True:
                 await asyncio.sleep(self.cfg.flush_interval_s)
-                if self._queue.qsize() >= self.cfg.batch_size:
-                    await self.flush()
+                await self.flush()  # no-op if queue empty
         except asyncio.CancelledError:
             raise
 
