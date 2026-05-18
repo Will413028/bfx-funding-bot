@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as time_module
 from typing import Any
 
+import pytest
 import websockets
 
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -57,3 +59,49 @@ async def test_connect_and_subscribe_yields_candle(unused_tcp_port: int):
         assert candles[0].symbol == "fUSD"
         assert candles[0].period_agg == "a30"
         assert candles[0].mts == 1747584000000
+
+
+async def test_hb_timeout_triggers_disconnect_callback(unused_tcp_port: int, monkeypatch):
+    server_state = FakeBitfinexWSServer()
+    async with websockets.serve(server_state.handler, "127.0.0.1", unused_tcp_port):
+        disconnects: list[str] = []
+        client = BitfinexWSClient(
+            url=f"ws://127.0.0.1:{unused_tcp_port}",
+            channels=[ChannelSpec(symbol="fUSD", timeframe="1h", period_agg="a30")],
+            hb_timeout_s=0.3,
+            on_disconnect=lambda reason: disconnects.append(reason),
+        )
+        consumer = asyncio.create_task(_drain(client))
+        await asyncio.sleep(0.5)
+        await client.close()
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+    assert any("hb_timeout" in r for r in disconnects)
+
+
+async def _drain(client: BitfinexWSClient):
+    try:
+        async for _ in client.candles():
+            pass
+    except Exception:
+        pass
+
+
+def test_backoff_schedule_caps_at_60s():
+    from bfx_funding_bot.external.bitfinex.ws import compute_backoff_secs
+    assert compute_backoff_secs(1) == 1
+    assert compute_backoff_secs(2) == 2
+    assert compute_backoff_secs(6) == 32
+    assert compute_backoff_secs(7) == 60
+    assert compute_backoff_secs(20) == 60
+
+
+async def test_reconnect_attempts_resets_after_5min_alive(monkeypatch):
+    from bfx_funding_bot.external.bitfinex.ws import BitfinexWSClient
+    client = BitfinexWSClient(channels=[], url="ws://invalid")
+    client.reconnect_attempts = 3
+    client._connected_at = time_module.monotonic() - 301
+    client._reset_backoff_if_stable()
+    assert client.reconnect_attempts == 0

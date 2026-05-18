@@ -11,7 +11,7 @@ import json
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +21,13 @@ from websockets.asyncio.client import ClientConnection
 log = logging.getLogger(__name__)
 
 BITFINEX_WS_URL = "wss://api-pub.bitfinex.com/ws/2"
+
+
+def compute_backoff_secs(attempt: int) -> int:
+    """1, 2, 4, 8, 16, 32, 60, 60, ... capped at 60."""
+    if attempt < 1:
+        return 1
+    return min(60, int(2 ** (attempt - 1)))
 
 
 @dataclass(frozen=True)
@@ -69,16 +76,20 @@ class BitfinexWSClient:
         *,
         url: str = BITFINEX_WS_URL,
         hb_timeout_s: float = 30.0,
+        on_disconnect: Callable[[str], None] | None = None,
     ) -> None:
         self.url = url
         self.channels = {c.key: _ChannelState(spec=c) for c in channels}
         self.hb_timeout_s = hb_timeout_s
+        self._on_disconnect = on_disconnect
         self._ws: ClientConnection | None = None
         self._candle_q: asyncio.Queue[CandleMessage] = asyncio.Queue()
         self._stop = False
         self.reconnect_attempts = 0
         self._reconnect_history: deque[float] = deque(maxlen=1000)
         self._recv_task: asyncio.Task[None] | None = None
+        self._hb_task: asyncio.Task[None] | None = None
+        self._connected_at: float | None = None
 
     async def candles(self) -> AsyncIterator[CandleMessage]:
         await self._ensure_connected()
@@ -86,12 +97,54 @@ class BitfinexWSClient:
             msg = await self._candle_q.get()
             yield msg
 
+    def reconnect_count_last_hour(self) -> int:
+        cutoff = time.monotonic() - 3600
+        return sum(1 for t in self._reconnect_history if t >= cutoff)
+
+    def last_msg_age_ms(self) -> int:
+        if not self.channels:
+            return 0
+        newest = max((s.last_msg_ts for s in self.channels.values()), default=time.monotonic())
+        return int((time.monotonic() - newest) * 1000)
+
+    def _reset_backoff_if_stable(self) -> None:
+        if self._connected_at is None:
+            return
+        if time.monotonic() - self._connected_at >= 300:
+            self.reconnect_attempts = 0
+
+    def _fire_disconnect(self, reason: str) -> None:
+        self._reconnect_history.append(time.monotonic())
+        self.reconnect_attempts += 1
+        if self._on_disconnect is not None:
+            self._on_disconnect(reason)
+
+    async def _hb_watchdog(self) -> None:
+        try:
+            while not self._stop:
+                await asyncio.sleep(self.hb_timeout_s / 2)
+                stale = any(
+                    time.monotonic() - s.last_msg_ts > self.hb_timeout_s
+                    for s in self.channels.values()
+                    if s.chan_id is not None
+                )
+                if stale:
+                    self._fire_disconnect("hb_timeout")
+                    if self._ws is not None:
+                        await self._ws.close()
+                    return
+        except asyncio.CancelledError:
+            return
+
     async def close(self) -> None:
         self._stop = True
-        if self._recv_task is not None:
-            self._recv_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._recv_task
+        for task in (self._recv_task, self._hb_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._recv_task = None
+        self._hb_task = None
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
@@ -100,11 +153,13 @@ class BitfinexWSClient:
         if self._ws is not None:
             return
         self._ws = await websockets.connect(self.url, max_size=2**20)
+        self._connected_at = time.monotonic()
         for spec in [s.spec for s in self.channels.values()]:
             await self._ws.send(json.dumps({
                 "event": "subscribe", "channel": "candles", "key": spec.key,
             }))
         self._recv_task = asyncio.create_task(self._recv_loop())
+        self._hb_task = asyncio.create_task(self._hb_watchdog())
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
