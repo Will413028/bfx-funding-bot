@@ -16,6 +16,12 @@ dependencies = [
     "websockets>=14.0",
     "tenacity>=9.0",
     "pyyaml>=6.0",
+    # Runtime deps for backtest.strategies (imported by marketfeed.signal_engine
+    # via strategy_registry); pandas used by backtest.eda which is in the wheel
+    # tree even though not on daemon hot path. Moved from dev-group at Phase 4.1
+    # deploy time after container ModuleNotFoundError.
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
 ]
 
 [dependency-groups]
@@ -27,8 +33,6 @@ dev = [
     "mypy>=1.13",
     "aiosqlite>=0.20",
     "greenlet>=3.1",
-    "numpy>=2.4.4",
-    "pandas>=3.0.2",
     "hypothesis>=6.115",
     "freezegun>=1.5",
     "pytest-mock>=3.14",
