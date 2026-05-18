@@ -3,7 +3,7 @@
 # Update: any param change MUST sync to phase3b_wfo_results_ref doc.
 
 cells:
-  # -- MeanReversion (5 cells; fUST x p30 unqualified per Phase 3b)
+  # -- MeanReversion (5 cells; fUST x p30 excluded — unqualified per Phase 3b)
   - strategy: mean_reversion
     symbol: fUSD
     period_agg: p2

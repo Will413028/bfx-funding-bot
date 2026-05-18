@@ -19,6 +19,9 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 log = logging.getLogger(__name__)
 
+# Phase 3b WFO qualification result. Source of truth:
+# docs/research/2026-05-18-phase3b-wfo-results.md (Per-Cell Detail section).
+# Any edit here MUST be reconciled with that doc.
 UNQUALIFIED_PAIRS = {("mean_reversion", "fUST_p30")}
 QUALIFIED_PAIRS = {
     ("rate_percentile", "fUSD_p2"), ("rate_percentile", "fUSD_p30"),
@@ -102,10 +105,26 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         raise ValueError("DATABASE_URL required")
     redis_url = os.environ.get("REDIS_URL") or None
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
-    run_duration_h = int(run_duration) if run_duration else None
+    run_duration_h: int | None
+    if run_duration:
+        try:
+            run_duration_h = int(run_duration)
+        except ValueError as e:
+            raise ValueError(
+                f"BFX_RUN_DURATION_HOURS must be an integer, got {run_duration!r}"
+            ) from e
+    else:
+        run_duration_h = None
 
     if cells_yaml_path is None:
-        cells_yaml_path = Path(__file__).parents[4] / "configs" / "cells.yaml"
+        env_path = os.environ.get("BFX_CELLS_YAML")
+        if env_path:
+            cells_yaml_path = Path(env_path)
+        else:
+            # Dev-only fallback (editable install). Production callers (Task 15
+            # daemon.py) MUST pass cells_yaml_path explicitly or set BFX_CELLS_YAML
+            # env var — parents[4] resolution breaks inside site-packages.
+            cells_yaml_path = Path(__file__).parents[4] / "configs" / "cells.yaml"
     if not cells_yaml_path.exists():
         raise FileNotFoundError(f"cells.yaml not found at {cells_yaml_path}")
 
