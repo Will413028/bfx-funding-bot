@@ -4,6 +4,19 @@
 > 範圍：Phase 4.1。Phase 4.2 加入 real-money execution 後另寫 canary runbook。
 > Spec: [phase4.1-koyeb-deploy-design.md](../superpowers/specs/2026-05-18-phase4.1-koyeb-deploy-design.md)
 
+## TL;DR — `scripts/deploy-koyeb.sh`
+
+第一次以後的 deploy 不用看 Prerequisites / Koyeb Service 設定段。直接：
+
+```bash
+./scripts/deploy-koyeb.sh paper      # 起 paper 1hr smoke
+./scripts/deploy-koyeb.sh shadow     # 切到 shadow（無自動退時間）
+```
+
+Script 是 idempotent：app/service 缺則建、env vars 已存在則更新、每次都會 trigger 新一次 deploy。Koyeb 自動拉 main branch 最新 commit。
+
+**第一次** 部署需要的 manual 設定（dashboard 操作，script 不做）見下方 Prerequisites + Koyeb Service 設定。
+
 ## Prerequisites
 
 部署前確認以下都備齊：
