@@ -135,6 +135,8 @@ class SignalEngine:
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
     ) -> None:
         if sig.signal_direction == SignalDirection.POST and sig.lend_decision is not None:
+            # Decimal → float: DecisionPayload schema declares offer_rate: float | None.
+            # Funding rate precision (~6 dp) is well within double-precision range.
             payload: dict[str, Any] = {
                 "decision_outcome": DecisionOutcome.POST.value,
                 "signal_correlation_id": str(correlation_id),
