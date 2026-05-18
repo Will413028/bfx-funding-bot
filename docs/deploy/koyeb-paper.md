@@ -66,7 +66,7 @@ Neon 的 `channel_binding=require` 在某些 asyncpg 版本下可能不支援，
 | Dockerfile location | `backend_py/Dockerfile` |
 | Build context | `backend_py/` |
 | Instance type | `nano`（1hr paper 跑得動）或 `micro`（shadow 長跑可選） |
-| Region | `fra`（Frankfurt，與 Neon EU region 同區，減 RTT） |
+| Region | `sin`（Singapore，與 Neon `ap-southeast-1` 同區，RTT < 5ms；若 Neon project 在別區改對應 Koyeb region） |
 | Auto-deploy on push | ✅ enabled |
 | Health check | （worker 無 HTTP，跳過） |
 
