@@ -1,0 +1,85 @@
+# Phase 4.1 cells -- 11 strategy x cell pairs from Phase 3b WFO qualification.
+# Params per cell copied from Phase 3b WFO best-param table.
+# Update: any param change MUST sync to phase3b_wfo_results_ref doc.
+
+cells:
+  # -- MeanReversion (5 cells; fUST x p30 unqualified per Phase 3b)
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    reference_amount_usdt: 150.0
+
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p30
+    timeframe: 1h
+    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    reference_amount_usdt: 150.0
+
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    reference_amount_usdt: 150.0
+
+  - strategy: mean_reversion
+    symbol: fUST
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    reference_amount_usdt: 150.0
+
+  - strategy: mean_reversion
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    reference_amount_usdt: 150.0
+
+  # -- RatePercentile (6 cells, all qualified)
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: p30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+  - strategy: rate_percentile
+    symbol: fUST
+    period_agg: p2
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+  - strategy: rate_percentile
+    symbol: fUST
+    period_agg: p30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+  - strategy: rate_percentile
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+
+phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
