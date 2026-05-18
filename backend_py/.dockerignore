@@ -1,0 +1,31 @@
+# Python bytecode + caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Virtual env (uv 會在 image 內自己建)
+.venv/
+venv/
+
+# Local data / EDA artifacts
+data/
+*.db
+*.sqlite
+
+# Dev tooling
+tests/
+.env
+.env.example
+.python-version
+README.md
+
+# Git / IDE
+.git/
+.gitignore
+.vscode/
+.idea/
