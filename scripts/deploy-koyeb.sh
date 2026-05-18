@@ -117,7 +117,7 @@ else
     --git "$GIT_REPO" \
     --git-branch "$GIT_BRANCH" \
     --git-builder docker \
-    --git-docker-dockerfile backend_py/Dockerfile \
+    --git-docker-dockerfile Dockerfile \
     --git-workdir backend_py \
     --regions "$REGION" \
     --instance-type "$INSTANCE" \
