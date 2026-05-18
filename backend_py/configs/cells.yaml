@@ -1,42 +1,48 @@
 # Phase 4.1 cells -- 11 strategy x cell pairs from Phase 3b WFO qualification.
-# Params per cell copied from Phase 3b WFO best-param table.
-# Update: any param change MUST sync to phase3b_wfo_results_ref doc.
+#
+# Param sync (2026-05-18, deploy-ready):
+#   RP: percentile=75 (selective), lookback_hours=168 (all cells ACF_168h < 0.3 so grid produces {168} only)
+#   MR: ema_alpha=0.01183 (-> ema_span=168), threshold_sigma=1.0 (middle of grid)
+#   ratio_sigma per cell from EDA close_over_ema_sigma(ema_span=168) on train portion (2022-01 -> 2025-01)
+#
+# EDA values from `uv run python scripts/eda_phase3b.py` against Neon production DB.
+# Any param change MUST re-derive ratio_sigma from current EDA.
 
 cells:
-  # -- MeanReversion (5 cells; fUST x p30 excluded — unqualified per Phase 3b)
+  # -- MeanReversion (5 cells; fUST x p30 excluded -- 51.28% win-rate floor miss + thinnest 17732 candles)
   - strategy: mean_reversion
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUSD
     period_agg: p30
     timeframe: 1h
-    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.6019, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUSD
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4796, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.9543, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.5, ratio_sigma: 0.0042, ema_alpha: 0.02}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.9915, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   # -- RatePercentile (6 cells, all qualified)
