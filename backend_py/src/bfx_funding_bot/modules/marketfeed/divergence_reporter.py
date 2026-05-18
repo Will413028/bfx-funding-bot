@@ -35,6 +35,14 @@ class ExtractedSignal:
     def extract(
         cls, cell: CellConfig, strategy: Any, candle: FundingCandle
     ) -> ExtractedSignal:
+        """Observe + decide on candle, returning normalized signal.
+
+        SIDE EFFECT: calls `strategy.observe(candle)` then `strategy.decide(candle)`.
+        Caller MUST NOT have already observed `candle` on this strategy; doing so
+        would double-count it (rate_percentile deque corruption, MeanReversion
+        EMA over-update). The reporter's check() observes history[:-1] only and
+        relies on extract() to handle history[-1] exactly once.
+        """
         strategy.observe(candle)
         ld = strategy.decide(candle)
         direction = SignalDirection.POST if ld is not None else SignalDirection.SKIP
@@ -53,11 +61,12 @@ def _strategy_attributes(
 ) -> dict[str, Any]:
     """Per-strategy attribute extraction.
 
-    NOTE: 4.1 spec writer must adjust this to read the actual strategy
-    internals exposed by RatePercentileStrategy / MeanReversionStrategy.
-    For now, we read minimal informational attributes:
-    - rate_percentile: {percentile from config, last_close = candle.close}
-    - mean_reversion: {rate = candle.close, threshold_sigma from config}
+    TODO(phase-4.3): Current placeholder reads only static inputs (config + candle.close)
+    — cannot detect strategy *internal state* divergence (e.g., RP deque drift,
+    MR EMA accumulator off-by-one). For true silent-divergence detection, expose
+    strategy state via @property accessors on RatePercentileStrategy /
+    MeanReversionStrategy (e.g., `last_threshold`, `last_ema`) and include here.
+    This limits 4.1's divergence reporter to direction-flip detection only.
     """
     if cell.strategy == StrategyName.RATE_PERCENTILE:
         return {
@@ -77,11 +86,10 @@ def _normalize_signal_score(
 ) -> float:
     """Cross-strategy comparable normalized score.
 
-    NOTE: 4.3 G2 calibration may revise this formula for true cross-strategy
-    comparability. For 4.1 we use a placeholder:
-    - signal_direction=POST → +1.0, SKIP → -1.0
+    TODO(phase-4.3): G2 calibration formula. Current placeholder is direction-only.
     Future: read strategy internals (EMA distance, percentile rank).
     """
+    del strategy, candle  # placeholder intentionally ignores state
     return 1.0 if ld is not None else -1.0
 
 

@@ -45,23 +45,39 @@ def test_no_divergence_when_inputs_match():
     assert result is None  # no divergence
 
 
-def test_divergence_detected_when_state_mismatch():
+def test_divergence_detected_when_live_signal_differs_from_replay():
+    """Hard-trigger detection by constructing a live_signal that doesn't match replay.
+
+    Validates the detection branch (dict shape, diff_fields enumeration) which the
+    in-test natural-mismatch path can't reliably hit at the percentile boundary.
+    """
+    from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
+
     cell = _cell_rp()
     history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0001"))
                for i in range(10)]
-    live = build_strategy(cell)
-    # Forget to feed one candle -> state diverges from replay
-    for c in history[:-2]:
-        live.observe(c)
-    live_signal = ExtractedSignal.extract(cell, live, history[-1])
+
+    # Manually construct a live_signal that disagrees with what replay will compute.
+    # Uniform history (all 0.0001, lookback=8, percentile=75) → replay produces POST.
+    # Use SKIP + score=-999 to guarantee all three fields diverge from replay.
+    fake_live = ExtractedSignal(
+        signal_score=-999.0,
+        signal_direction=SignalDirection.SKIP,
+        strategy_attributes=(("fake_attr", "fake_value"),),
+        lend_decision=None,
+    )
 
     reporter = DivergenceReporter()
-    result = reporter.check(cell=cell, history=history, live_signal=live_signal)
-    # State mismatch may or may not produce divergent signal (depends on percentile boundary).
-    # If divergence is detected, verify the result structure; otherwise the test just verifies
-    # that the reporter doesn't crash on a state mismatch scenario.
-    if result is not None:
-        assert "live" in result and "replay" in result
+    result = reporter.check(cell=cell, history=history, live_signal=fake_live)
+
+    assert result is not None, "divergence MUST be detected when live differs from replay"
+    assert "live" in result
+    assert "replay" in result
+    assert "diff_fields" in result
+    diff = result["diff_fields"]
+    assert "signal_score" in diff
+    assert "signal_direction" in diff
+    assert "strategy_attributes" in diff
 
 
 @pytest.mark.property
