@@ -113,7 +113,11 @@ class BitfinexWSClient:
                 self._handle_raw(raw)
 
     def _handle_raw(self, raw: str | bytes) -> None:
-        msg = json.loads(raw)
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            log.warning("bitfinex_ws_bad_frame %r", raw[:200])
+            return
         if isinstance(msg, dict):
             self._handle_event(msg)
             return
@@ -150,9 +154,11 @@ class BitfinexWSClient:
         state: _ChannelState,
         payload: Any,
     ) -> None:
-        candles: list[list[float]] = payload if payload and isinstance(payload[0], list) else [payload]
+        if not payload:
+            return
+        candles: list[list[float]] = payload if isinstance(payload[0], list) else [payload]
         for c in candles:
-            if len(c) < 6:
+            if not c or len(c) < 6:
                 continue
             cmsg = CandleMessage(
                 symbol=state.spec.symbol,

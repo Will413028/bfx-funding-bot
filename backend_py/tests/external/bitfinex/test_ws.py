@@ -50,9 +50,8 @@ async def test_connect_and_subscribe_yields_candle(unused_tcp_port: int):
         async def collect():
             async for c in client.candles():
                 candles.append(c)
-                if candles:
-                    await client.close()
-                    break
+                await client.close()
+                break
 
         await asyncio.wait_for(collect(), timeout=2.0)
         assert candles[0].symbol == "fUSD"
