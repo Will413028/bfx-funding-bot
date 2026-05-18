@@ -49,22 +49,25 @@ Script 是 idempotent：app/service 缺則建、env vars 已存在則更新、�
 Neon dashboard 給的 connection string 預設長這樣：
 
 ```
-postgresql://user:pass@ep-xxx.eu-central-1.aws.neon.tech/dbname?sslmode=require&channel_binding=require
+postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/dbname?sslmode=require&channel_binding=require
 ```
 
-**手動把 `postgresql://` 改成 `postgresql+asyncpg://`** 再貼進 Koyeb：
+**三處要手動改**才能跟 asyncpg 相容：
+
+1. **Scheme**：`postgresql://` → `postgresql+asyncpg://`
+2. **`sslmode=require`** → `ssl=require`（asyncpg 用 `ssl=`，不認識 `sslmode=`）
+3. **移除** `&channel_binding=require`（asyncpg 不支援 channel binding 協商）
+4. **建議移除** `-pooler` 後綴：用 Neon direct endpoint 而非 pooler，避免 asyncpg prepared statements 與 PgBouncer transaction-mode 衝突（migrations 必走 direct）
+
+最終 URL：
 
 ```
-postgresql+asyncpg://user:pass@ep-xxx.eu-central-1.aws.neon.tech/dbname?sslmode=require&channel_binding=require
+postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
 ```
 
-**原因**：SQLAlchemy 看到 `postgresql://` 預設選 psycopg2 driver，但 image 內只裝 asyncpg（async 場景的正確 driver）。`postgresql+asyncpg://` 顯式告訴 SQLAlchemy 用 asyncpg。
+**為什麼這麼多手腳**：SQLAlchemy 的 asyncpg dialect 把 URL query params 當 keyword 傳給 `asyncpg.connect()`，但 asyncpg 的 API 與 libpq 不同（`ssl=` vs `sslmode=`，不支援 `channel_binding`）。Neon dashboard 給的是 libpq-style URL，asyncpg 看不懂。
 
-**Phase 4.2 修法**：`settings.py` 自動 transform scheme，到時這條 runbook 注意點可移除。
-
-### `channel_binding=require` query param 注意
-
-Neon 的 `channel_binding=require` 在某些 asyncpg 版本下可能不支援，若 daemon 報 `channel binding negotiation failed`，把這個 param 拿掉只留 `sslmode=require`。
+**Phase 4.2 修法**：`core/settings.py` 在 `database_url` accessor 自動做上述 4 處 transform，到時 user 可直接貼 Neon 原 URL，不用手改。詳見 spec [code-debt 段](../superpowers/specs/2026-05-18-phase4.1-koyeb-deploy-design.md)。
 
 ## Koyeb Service 設定
 
@@ -142,6 +145,9 @@ Shadow 預期跑 2-4 週累積數據，給 Phase 4.3 calibration 用。
 | Build fail：`Could not find a version that satisfies the requirement` | numpy/pandas py3.13 wheel 未發布 | 等 wheel 發布或暫降 Python 版本（最後手段） |
 | Build fail：`uv sync` lock mismatch | `uv.lock` 過時 | 本機 `cd backend_py && uv lock` 重產，commit, push |
 | Container 啟動 → `ModuleNotFoundError: psycopg2` | `DATABASE_URL` 用了 `postgresql://` scheme | 改成 `postgresql+asyncpg://`（見上方 DATABASE_URL 注意點） |
+| Container 啟動 → `TypeError: connect() got an unexpected keyword argument 'sslmode'` | `DATABASE_URL` 含 `sslmode=require`，asyncpg 不認識 | 改成 `?ssl=require`（見上方 DATABASE_URL 注意點） |
+| Container 啟動 → asyncpg 報 channel binding 相關錯 | `DATABASE_URL` 含 `&channel_binding=require` | 移除這個 query param |
+| Container 啟動 → 連 Neon 卡住或 prepared statement 錯 | `DATABASE_URL` hostname 帶 `-pooler` 後綴 | 用 Neon direct endpoint（移除 `-pooler`） |
 | Container 啟動 → `alembic upgrade head` fail（網路相關） | Neon 連線失敗 / DNS / IP allowlist | 本機 `cd backend_py && DATABASE_URL=<prod> uv run alembic upgrade head` 抓真實錯 |
 | Container 啟動 → `alembic upgrade head` fail（schema 相關） | migration conflict / 權限不足 | 看 alembic 訊息；常見 `ProgrammingError: permission denied` → Neon role 缺 `CREATE` 權限 |
 | `daemon_run_duration_reached` 在 shadow 也觸發 | 忘記刪 `BFX_RUN_DURATION_HOURS` | 回 Env vars 刪掉這個，save → redeploy |
