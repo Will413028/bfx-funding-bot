@@ -94,7 +94,7 @@ class HealthMonitor:
         while not self._stop.is_set():
             for target, state in self.probe.drain_dirty().items():
                 await self._emit(target, state)
-            loop_time = asyncio.get_event_loop().time()
+            loop_time = asyncio.get_running_loop().time()
             if loop_time - last_beat >= self.heartbeat_interval_s:
                 last_beat = loop_time
                 for target, state in self.probe.snapshot().items():

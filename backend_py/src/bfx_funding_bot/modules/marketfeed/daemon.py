@@ -16,25 +16,33 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from bfx_funding_bot.external.axiom import (
     AxiomAuthError,
     AxiomClient,
     AxiomConfig,
 )
+from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
     BitfinexWSClient,
     CandleMessage,
     ChannelSpec,
+    compute_backoff_secs,
 )
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
     get_up_to,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
@@ -75,7 +83,10 @@ class Daemon:
     ws_client: BitfinexWSClient | None
     writer: CandleWriter
     bitfinex_http: httpx.AsyncClient
+    bitfinex: BitfinexREST
+    session_factory: async_sessionmaker[AsyncSession]
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def startup(self) -> None:
         await self.axiom.start()
@@ -83,16 +94,128 @@ class Daemon:
         await self.scheduler.start()
         self._tasks.append(asyncio.create_task(self.writer.run()))
         if self.ws_client is not None:
-            self._tasks.append(asyncio.create_task(self._ws_consume()))
+            self._tasks.append(
+                asyncio.create_task(self._ws_consume_with_reconnect()),
+            )
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell)
 
-    async def _ws_consume(self) -> None:
+    async def _ws_consume_with_reconnect(self) -> None:
+        """WS recv + reconnect loop. Never exits unless daemon shuts down.
+
+        Spec: Flow 3 (WS disconnect → reconnect). Exponential backoff via
+        compute_backoff_secs; resets after 5min stable connection; emits
+        health_check transitions; runs REST gap-fill on reconnect success.
+        """
         assert self.ws_client is not None
-        async for msg in self.ws_client.candles():
-            await self.candle_q.put(msg)
+        consecutive_failures = 0
+        while not self._stop_event.is_set():
+            try:
+                async for msg in self.ws_client.candles():
+                    await self.candle_q.put(msg)
+                    # successful message → connection is alive; reset failure counter
+                    consecutive_failures = 0
+                    self.ws_client.maybe_reset_backoff()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("ws_recv_error_will_reconnect")
+
+            if self._stop_event.is_set():
+                return
+
+            # WS exited unexpectedly → enter reconnect loop
+            attempt = self.ws_client.reconnect_attempts
+            backoff = compute_backoff_secs(max(1, attempt))
+            log.info(
+                "ws_reconnect_attempt=%d backoff_s=%d", attempt, backoff,
+            )
+            self.probe.update(
+                HealthTarget.BITFINEX_WS,
+                HealthStatus.DEGRADED,
+                last_msg_age_ms=999_999,
+                reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
+                error_message="ws_reconnect_pending",
+            )
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=backoff,
+                )
+                return
+            except TimeoutError:
+                pass
+
+            # Recreate WS client (existing client may have _ws=None + closed state)
+            prev_attempts = attempt
+            try:
+                await self.ws_client.close()
+            except Exception:
+                log.exception("ws_reconnect_close_old_failed")
+            self.ws_client = BitfinexWSClient(
+                channels=[
+                    ChannelSpec(
+                        symbol=c.symbol,
+                        timeframe=c.timeframe,
+                        period_agg=c.period_agg,
+                    )
+                    for c in self.config.cells
+                ],
+                on_disconnect=lambda reason: self.probe.update(
+                    HealthTarget.BITFINEX_WS,
+                    HealthStatus.DEGRADED,
+                    last_msg_age_ms=999_999,
+                    reconnect_count_last_hour=0,
+                    error_message=f"ws_disconnect: {reason}",
+                ),
+            )
+            # carry over the attempt counter for backoff schedule continuity
+            self.ws_client.reconnect_attempts = prev_attempts + 1
+            consecutive_failures += 1
+
+            # Gap-fill what we missed during the outage
+            try:
+                async with self.session_factory() as session:
+                    for cell in self.config.cells:
+                        row = (
+                            await session.execute(
+                                select(FundingCandleRow.mts)
+                                .where(
+                                    FundingCandleRow.symbol == cell.symbol,
+                                    FundingCandleRow.timeframe == cell.timeframe,
+                                    FundingCandleRow.period_agg
+                                    == cell.period_agg,
+                                )
+                                .order_by(FundingCandleRow.mts.desc())
+                                .limit(1)
+                            )
+                        ).scalar_one_or_none()
+                        last_mts = int(row) if row is not None else 0
+                        if last_mts > 0:
+                            await fill_gap_from_rest(
+                                bitfinex=self.bitfinex,
+                                session=session,
+                                symbol=cell.symbol,
+                                timeframe=cell.timeframe,
+                                period_agg=cell.period_agg,
+                                last_known_mts=last_mts,
+                                now_mts=now_ms_utc(),
+                            )
+            except Exception:
+                log.exception("ws_reconnect_gap_fill_failed")
+
+            if consecutive_failures >= 5:
+                self.probe.update(
+                    HealthTarget.BITFINEX_WS,
+                    HealthStatus.DOWN,
+                    last_msg_age_ms=999_999,
+                    reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
+                    error_message="reconnect_failed_5_consecutive",
+                )
+
+            # Loop continues → tries `candles()` again with new client
 
     async def shutdown(self) -> None:
+        self._stop_event.set()
         if self.ws_client is not None:
             await self.ws_client.close()
         await self.scheduler.stop()
@@ -227,6 +350,8 @@ async def build_daemon(
         ws_client=ws_client,
         writer=writer,
         bitfinex_http=bitfinex_http,
+        bitfinex=bitfinex,
+        session_factory=session_factory,
     )
 
 
@@ -248,7 +373,7 @@ def main() -> None:
 async def _run() -> None:
     daemon = await build_daemon()
     stop = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     await daemon.startup()

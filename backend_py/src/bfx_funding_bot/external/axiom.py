@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import signal as _signal
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -68,7 +69,10 @@ class AxiomClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
             self._flush_task = None
-        await self.flush()
+        # auth already raised SIGTERM upstream; close cleanly so daemon
+        # shutdown can finish without aborting on the same error
+        with contextlib.suppress(AxiomAuthError):
+            await self.flush()
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -90,6 +94,15 @@ class AxiomClient:
                 await asyncio.sleep(self.cfg.flush_interval_s)
                 await self.flush()  # no-op if queue empty
         except asyncio.CancelledError:
+            raise
+        except AxiomAuthError:
+            # auth failure mid-run is fatal: signal the daemon to shut down
+            # gracefully (signal handler in _run() catches SIGTERM)
+            log.error(
+                "axiom_auth_fail_in_flush_loop — raising SIGTERM for graceful shutdown",
+            )
+            with contextlib.suppress(Exception):
+                _signal.raise_signal(_signal.SIGTERM)
             raise
 
     async def _send_batch(self, batch: list[dict[str, Any]]) -> None:
