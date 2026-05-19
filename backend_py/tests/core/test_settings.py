@@ -1,3 +1,4 @@
+import pytest
 from bfx_funding_bot.core.settings import Settings
 
 
@@ -22,3 +23,47 @@ def test_settings_defaults(monkeypatch):
 
     assert s.bitfinex_api_base_url == "https://api-pub.bitfinex.com"
     assert s.log_level == "INFO"
+
+
+def _s(url: str) -> Settings:
+    """Build Settings with given DATABASE_URL, ignoring .env."""
+    return Settings.model_construct(database_url=url)
+
+
+class TestDatabaseUrlSync:
+    """database_url_sync: for alembic (psycopg driver)."""
+
+    def test_scheme_rewritten_to_psycopg(self):
+        s = _s("postgresql://u:p@host.example/db")
+        assert s.database_url_sync.startswith("postgresql+psycopg://")
+
+    def test_legacy_postgres_scheme_also_handled(self):
+        s = _s("postgres://u:p@host.example/db")
+        assert s.database_url_sync.startswith("postgresql+psycopg://")
+
+    def test_sslmode_preserved(self):
+        s = _s("postgresql://u:p@host.example/db?sslmode=require")
+        assert "sslmode=require" in s.database_url_sync
+
+    def test_channel_binding_preserved(self):
+        s = _s("postgresql://u:p@host.example/db?sslmode=require&channel_binding=require")
+        assert "channel_binding=require" in s.database_url_sync
+
+    def test_pooler_suffix_stripped(self):
+        """Neon -pooler endpoint stripped — alembic must use direct endpoint."""
+        s = _s(
+            "postgresql://u:p@ep-foo-bar-123-pooler.ap-southeast-1.aws.neon.tech/db"
+            "?sslmode=require"
+        )
+        out = s.database_url_sync
+        assert "-pooler." not in out
+        assert "ep-foo-bar-123.ap-southeast-1.aws.neon.tech" in out
+
+    def test_no_pooler_no_change(self):
+        """Already-direct endpoint unchanged."""
+        s = _s(
+            "postgresql://u:p@ep-foo-bar-123.ap-southeast-1.aws.neon.tech/db"
+            "?sslmode=require"
+        )
+        out = s.database_url_sync
+        assert "ep-foo-bar-123.ap-southeast-1.aws.neon.tech" in out

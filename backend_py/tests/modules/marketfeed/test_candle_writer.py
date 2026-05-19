@@ -10,6 +10,7 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 
 async def test_candle_writer_upserts_from_queue(sqlite_engine: AsyncEngine):
@@ -19,7 +20,7 @@ async def test_candle_writer_upserts_from_queue(sqlite_engine: AsyncEngine):
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
 
     queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
-    writer = CandleWriter(queue=queue, session_factory=factory)
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
 
     await queue.put(CandleMessage(
         symbol="fUSD", timeframe="1h", period_agg="a30",
@@ -44,7 +45,7 @@ async def test_candle_writer_logs_and_continues_on_error(sqlite_engine: AsyncEng
 
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
     queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
-    writer = CandleWriter(queue=queue, session_factory=factory)
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
 
     bad = CandleMessage(
         symbol="fUSD", timeframe="1h", period_agg="a30",
@@ -81,3 +82,28 @@ async def test_candle_writer_logs_and_continues_on_error(sqlite_engine: AsyncEng
         rows = (await verify_session.execute(select(FundingCandleRow))).scalars().all()
         assert len(rows) == 1
         assert rows[0].mts == 1747584000000 + 3600_000
+
+
+import asyncpg  # noqa: E402
+import pytest  # noqa: E402
+
+from bfx_funding_bot.core.errors import FatalError, TransientError  # noqa: E402
+
+
+class TestCandleWriterErrorClassification:
+    def test_transient_tuple_includes_interface_error(self):
+        from bfx_funding_bot.modules.marketfeed.candle_writer import _DB_TRANSIENT
+        assert asyncpg.InterfaceError in _DB_TRANSIENT
+        assert asyncpg.ConnectionDoesNotExistError in _DB_TRANSIENT
+
+    def test_fatal_tuple_includes_auth_errors(self):
+        from bfx_funding_bot.modules.marketfeed.candle_writer import _DB_FATAL
+        assert asyncpg.InvalidPasswordError in _DB_FATAL
+        assert asyncpg.InvalidCatalogNameError in _DB_FATAL
+
+    def test_taxonomy_classes_imported_in_module(self):
+        """Verify candle_writer uses shared core/errors taxonomy."""
+        import bfx_funding_bot.modules.marketfeed.candle_writer as mod
+        src = open(mod.__file__).read()
+        assert "from bfx_funding_bot.core.errors import" in src
+        assert "FatalError" in src
