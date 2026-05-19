@@ -159,22 +159,62 @@ def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
 
 
 def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
-    """No env + cwd missing → importlib.resources fallback."""
+    """No env + cwd missing → importlib.resources fallback resolves real path."""
+    # Create a real cells.yaml in tmp_path; mock importlib to return a
+    # fake Traversable whose / "configs" / "cells.yaml" str-converts to it.
+    fake_cells = tmp_path / "fake_pkg_root" / "configs" / "cells.yaml"
+    fake_cells.parent.mkdir(parents=True)
+    fake_cells.write_text("cells: []\n")
+
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
 
-    empty = tmp_path / "empty"
+    empty = tmp_path / "empty_cwd"
     empty.mkdir()
     monkeypatch.chdir(empty)
 
+    import importlib.resources
+
+    class _FakeRoot:
+        def __init__(self, base):
+            self._base = base
+
+        def __truediv__(self, name):
+            child = self._base / name
+            if child.is_file():
+                return child
+            return _FakeRoot(child)
+
+        def __str__(self):
+            return str(self._base)
+
+    def fake_files(pkg):
+        return _FakeRoot(fake_cells.parent.parent)  # tmp_path/fake_pkg_root
+
+    monkeypatch.setattr(importlib.resources, "files", fake_files)
+
     from bfx_funding_bot.modules.marketfeed.config import load_config
-    try:
-        cfg = load_config()
-        assert isinstance(cfg.cells, list)
-    except FileNotFoundError as exc:
-        assert "tried:" in str(exc).lower()
+    cfg = load_config()
+    assert cfg.cells == []
+
+
+def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypatch, tmp_path):
+    """BFX_CELLS_YAML pointing at non-existent file → falls through to cwd."""
+    cwd_cfg = tmp_path / "configs" / "cells.yaml"
+    cwd_cfg.parent.mkdir()
+    cwd_cfg.write_text("cells: []\n")
+
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("BFX_CELLS_YAML", "/nonexistent/path/cells.yaml")
+    monkeypatch.chdir(tmp_path)
+
+    from bfx_funding_bot.modules.marketfeed.config import load_config
+    cfg = load_config()
+    assert cfg.cells == []
 
 
 def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):

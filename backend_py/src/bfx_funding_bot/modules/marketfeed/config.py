@@ -122,7 +122,10 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         env_path = os.environ.get("BFX_CELLS_YAML", "").strip()
         if env_path:
             cells_yaml_path = Path(env_path)
-            attempted.append(f"BFX_CELLS_YAML env ({env_path})")
+            if cells_yaml_path.exists():
+                attempted.append(f"BFX_CELLS_YAML env ({env_path}) [found]")
+            else:
+                attempted.append(f"BFX_CELLS_YAML env ({env_path}) [set but not found]")
         else:
             attempted.append("BFX_CELLS_YAML env (not set)")
 
@@ -134,6 +137,12 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
 
         if cells_yaml_path is None or not cells_yaml_path.exists():
             attempted.append("importlib package: bfx_funding_bot/configs/cells.yaml")
+            # Tier 3: importlib.resources (packaged resource)
+            # NOTE: configs/ is currently outside the Python package tree
+            # (lives at backend_py/configs/, not src/bfx_funding_bot/configs/),
+            # so this tier resolves nothing in current packaging. Retained
+            # per spec D1 intent — wire up when configs/ moves into the
+            # package tree or pyproject.toml package-data is configured.
             try:
                 import importlib.resources
                 pkg_root = importlib.resources.files("bfx_funding_bot")
