@@ -28,6 +28,9 @@ RUN uv sync --frozen --no-dev
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# BFX_CELLS_YAML — explicit image-baked default. D1 fix in 4.2.0 also
+# adds cwd / importlib fallback so this env is no longer strictly
+# required, but kept for explicit deploy-time lookup precedence.
 ENV PATH="/app/.venv/bin:$PATH" \
     BFX_CELLS_YAML=/app/configs/cells.yaml
 
