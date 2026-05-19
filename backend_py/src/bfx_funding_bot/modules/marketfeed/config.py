@@ -117,15 +117,38 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         run_duration_h = None
 
     if cells_yaml_path is None:
-        env_path = os.environ.get("BFX_CELLS_YAML")
+        attempted: list[str] = []
+
+        env_path = os.environ.get("BFX_CELLS_YAML", "").strip()
         if env_path:
             cells_yaml_path = Path(env_path)
+            attempted.append(f"BFX_CELLS_YAML env ({env_path})")
         else:
-            # Dev-only fallback (editable install). Production callers (Task 15
-            # daemon.py) MUST pass cells_yaml_path explicitly or set BFX_CELLS_YAML
-            # env var — parents[4] resolution breaks inside site-packages.
-            cells_yaml_path = Path(__file__).parents[4] / "configs" / "cells.yaml"
-    if not cells_yaml_path.exists():
+            attempted.append("BFX_CELLS_YAML env (not set)")
+
+        if cells_yaml_path is None or not cells_yaml_path.exists():
+            cwd_path = Path.cwd() / "configs" / "cells.yaml"
+            attempted.append(f"cwd: {cwd_path}")
+            if cwd_path.exists():
+                cells_yaml_path = cwd_path
+
+        if cells_yaml_path is None or not cells_yaml_path.exists():
+            attempted.append("importlib package: bfx_funding_bot/configs/cells.yaml")
+            try:
+                import importlib.resources
+                pkg_root = importlib.resources.files("bfx_funding_bot")
+                pkg_path = pkg_root / "configs" / "cells.yaml"
+                pkg_path_str = str(pkg_path)
+                if Path(pkg_path_str).is_file():
+                    cells_yaml_path = Path(pkg_path_str)
+            except (ImportError, ModuleNotFoundError, FileNotFoundError, AttributeError, TypeError):
+                pass
+
+        if cells_yaml_path is None or not cells_yaml_path.exists():
+            raise FileNotFoundError(
+                "cells.yaml not found. Tried: " + " ; ".join(attempted)
+            )
+    elif not cells_yaml_path.exists():
         raise FileNotFoundError(f"cells.yaml not found at {cells_yaml_path}")
 
     raw = yaml.safe_load(cells_yaml_path.read_text())

@@ -124,3 +124,84 @@ def test_mr_fust_p30_warn_but_not_fatal(tmp_path: Path, monkeypatch: pytest.Monk
     assert any("unqualified" in r.message.lower() or "fust" in r.message.lower()
                for r in caplog.records)
     assert len(cfg.cells) == 3  # warn but kept
+
+
+def test_load_config_uses_env_var_precedence(monkeypatch, tmp_path):
+    """BFX_CELLS_YAML env var takes precedence over cwd / importlib fallback."""
+    fake = tmp_path / "fake-cells.yaml"
+    fake.write_text("cells: []\n")
+
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setenv("BFX_CELLS_YAML", str(fake))
+
+    from bfx_funding_bot.modules.marketfeed.config import load_config
+    cfg = load_config()
+    assert cfg.cells == []
+
+
+def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
+    """No BFX_CELLS_YAML env → cwd / configs / cells.yaml is checked next."""
+    cwd_cfg = tmp_path / "configs" / "cells.yaml"
+    cwd_cfg.parent.mkdir()
+    cwd_cfg.write_text("cells: []\n")
+
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    from bfx_funding_bot.modules.marketfeed.config import load_config
+    cfg = load_config()
+    assert cfg.cells == []
+
+
+def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
+    """No env + cwd missing → importlib.resources fallback."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+
+    from bfx_funding_bot.modules.marketfeed.config import load_config
+    try:
+        cfg = load_config()
+        assert isinstance(cfg.cells, list)
+    except FileNotFoundError as exc:
+        assert "tried:" in str(exc).lower()
+
+
+def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
+    """All three tiers missing → FileNotFoundError lists attempted paths."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+
+    import importlib.resources
+    def fake_files(pkg):
+        class _FakeRoot:
+            def __truediv__(self, _name):
+                class _NoExist:
+                    def is_file(self_inner): return False
+                return _NoExist()
+        return _FakeRoot()
+    monkeypatch.setattr(importlib.resources, "files", fake_files)
+
+    from bfx_funding_bot.modules.marketfeed.config import load_config
+    with pytest.raises(FileNotFoundError) as exc:
+        load_config()
+    msg = str(exc.value).lower()
+    assert "bfx_cells_yaml" in msg
+    assert "configs/cells.yaml" in msg
+    assert "importlib" in msg or "package" in msg
