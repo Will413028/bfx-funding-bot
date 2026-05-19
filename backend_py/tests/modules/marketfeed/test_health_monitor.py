@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
+import pytest
+
+from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
+    SUB_TASK_THRESHOLDS,
     HealthMonitor,
     HealthProbe,
 )
@@ -51,23 +57,6 @@ async def test_heartbeat_emits_periodically():
     assert axiom.emit.call_count >= 2  # multiple heartbeats fired
 
 
-from datetime import UTC, datetime, timedelta
-
-import pytest
-
-from bfx_funding_bot.core.errors import FatalError
-from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    HealthMonitor,
-    HealthProbe,
-    SUB_TASK_THRESHOLDS,
-)
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    HealthStatus,
-    HealthTarget,
-    Phase,
-)
-
-
 class TestHeartbeatRegistry:
     def test_record_heartbeat_updates_last_active_ts(self):
         probe = HealthProbe()
@@ -81,7 +70,7 @@ class TestHeartbeatRegistry:
         probe = HealthProbe()
         probe.record_heartbeat("candle_writer")
         first = probe.last_active_ts["candle_writer"]
-        import time; time.sleep(0.01)
+        time.sleep(0.01)
         probe.record_heartbeat("candle_writer")
         second = probe.last_active_ts["candle_writer"]
         assert second > first
@@ -110,7 +99,13 @@ class TestStalenessScan:
         result = await monitor.scan_staleness()
         assert result == []  # no stale tasks
 
-    async def test_emit_degraded_when_over_threshold(self, monitor):
+    async def test_no_emit_when_empty_registry(self, monitor):
+        """scan_staleness on empty last_active_ts → returns [] without crashing."""
+        assert monitor.probe.last_active_ts == {}
+        result = await monitor.scan_staleness()
+        assert result == []
+
+    async def test_emit_degraded_when_over_threshold(self, monitor, fake_axiom):
         # Force last_active_ts to be 100s old (> 90s candle_writer threshold)
         monitor.probe.last_active_ts["candle_writer"] = (
             datetime.now(UTC) - timedelta(seconds=100)
@@ -120,6 +115,11 @@ class TestStalenessScan:
         rec = result[0]
         assert rec["sub_task"] == "candle_writer"
         assert rec["severity"] == "degraded"
+        assert len(fake_axiom.emitted) == 1
+        emitted = fake_axiom.emitted[0]
+        assert emitted["event_type"] == "health_check"
+        assert emitted["payload"]["check_target"] == "candle_writer"
+        assert emitted["payload"]["status"] == "degraded"
 
     async def test_emit_down_when_over_2x_threshold(self, monitor):
         # candle_writer threshold 90s → 2× = 180s
@@ -129,7 +129,7 @@ class TestStalenessScan:
         result = await monitor.scan_staleness()
         assert result[0]["severity"] == "down"
 
-    async def test_fatal_escalation_at_3x_threshold(self, monitor):
+    async def test_fatal_escalation_at_3x_threshold(self, monitor, fake_axiom):
         # candle_writer threshold 90s → 3× = 270s
         monitor.probe.last_active_ts["candle_writer"] = (
             datetime.now(UTC) - timedelta(seconds=280)
@@ -138,6 +138,10 @@ class TestStalenessScan:
             await monitor.scan_staleness()
         assert "candle_writer" in str(exc.value)
         assert "280" in str(exc.value) or "stale" in str(exc.value).lower()
+        # Verify emit happened before raise — axiom has the down event
+        assert len(fake_axiom.emitted) == 1
+        assert fake_axiom.emitted[0]["payload"]["check_target"] == "candle_writer"
+        assert fake_axiom.emitted[0]["payload"]["status"] == "down"  # 280s > 2×90s
 
     async def test_unknown_subtask_uses_default_threshold(self, monitor):
         """No registered threshold → treat as default (60s)."""

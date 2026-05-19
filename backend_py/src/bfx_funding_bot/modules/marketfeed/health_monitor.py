@@ -165,12 +165,6 @@ class HealthMonitor:
             if age_s <= threshold:
                 continue
 
-            if age_s > 3 * threshold:
-                raise FatalError(
-                    f"sub_task={sub_task} stale {age_s:.0f}s > "
-                    f"3× threshold ({3 * threshold}s) — escalating fatal"
-                )
-
             severity = "down" if age_s > 2 * threshold else "degraded"
             stale.append({
                 "sub_task": sub_task,
@@ -178,7 +172,7 @@ class HealthMonitor:
                 "age_s": age_s,
             })
 
-            # Emit axiom health_check event for the stale sub-task
+            # Emit BEFORE potential fatal escalation so axiom sees root cause
             level = Level.ERROR if severity == "down" else Level.WARN
             status = HealthStatus.DOWN if severity == "down" else HealthStatus.DEGRADED
             await self.axiom.emit({
@@ -195,4 +189,11 @@ class HealthMonitor:
                     "error_message": f"heartbeat stale {age_s:.0f}s > {threshold}s threshold",
                 },
             })
+
+            # Escalate to fatal AFTER emit, so axiom sees the root cause
+            if age_s > 3 * threshold:
+                raise FatalError(
+                    f"sub_task={sub_task} stale {age_s:.0f}s > "
+                    f"3× threshold ({3 * threshold}s) — escalating fatal"
+                )
         return stale
