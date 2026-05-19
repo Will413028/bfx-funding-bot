@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     next_candle_close_mts,
@@ -38,7 +39,7 @@ async def test_scheduler_fires_callback_after_timeframe_plus_buffer():
     async def cb(c: CellConfig, mts: int) -> None:
         callbacks.append(mts)
 
-    sched = Scheduler(callback=cb, buffer_s=0.05)
+    sched = Scheduler(callback=cb, probe=HealthProbe(), buffer_s=0.05)
     # Schedule fire at "now" — buffer 0.05s means it fires almost immediately
     sched.register(cell, fire_at_mts=now_ms_utc() - 100)
 

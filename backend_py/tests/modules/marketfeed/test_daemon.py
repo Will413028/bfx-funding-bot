@@ -9,11 +9,12 @@ from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
 
-async def test_daemon_starts_and_shuts_down_cleanly(
+async def test_daemon_builds_and_runs_briefly(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """Smoke: build_daemon() returns a Daemon with all components wired;
-    daemon.startup() and daemon.shutdown() complete without exception."""
+    daemon.run() starts all sub-tasks, responds to _stop_event, and exits
+    cleanly (TaskGroup pattern, Phase 4.2)."""
     yaml_path = tmp_path / "cells.yaml"
     yaml_path.write_text("""
 cells:
@@ -39,6 +40,10 @@ phase3b_wfo_results_ref: x
     daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
     assert daemon.config.phase == Phase.PAPER
 
-    await daemon.startup()
-    await asyncio.sleep(0.05)
-    await daemon.shutdown()
+    # Run briefly then signal stop — TaskGroup should drain all sub-tasks.
+    async def _stop_after_delay() -> None:
+        await asyncio.sleep(0.05)
+        daemon._stop_event.set()
+
+    asyncio.create_task(_stop_after_delay())
+    await daemon.run()  # should return cleanly after _stop_event is set

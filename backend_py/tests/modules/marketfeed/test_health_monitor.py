@@ -156,7 +156,7 @@ class TestStalenessScan:
 class TestSubTaskThresholds:
     def test_thresholds_defined_for_all_subtasks(self):
         """Per spec D4 heartbeat threshold table."""
-        for name in ("ws", "candle_writer", "scheduler", "axiom", "health_check"):
+        for name in ("ws", "candle_writer", "scheduler", "axiom", "health_check", "db_keepalive"):
             assert name in SUB_TASK_THRESHOLDS
 
     def test_threshold_values_match_spec(self):
@@ -165,3 +165,4 @@ class TestSubTaskThresholds:
         assert SUB_TASK_THRESHOLDS["scheduler"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["axiom"] == 60
         assert SUB_TASK_THRESHOLDS["health_check"] == 6 * 60
+        assert SUB_TASK_THRESHOLDS["db_keepalive"] == 7 * 60
