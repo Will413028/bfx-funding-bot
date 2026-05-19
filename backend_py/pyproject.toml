@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
+    "psycopg[binary]>=3.2",       # sync driver for alembic env.py (async runtime uses asyncpg)
     "alembic>=1.14",
     "httpx>=0.28",
     "aiolimiter>=1.2",
@@ -38,6 +39,7 @@ dev = [
     "pytest-mock>=3.14",
     "types-pyyaml>=6.0",
     "pytest-cov>=7.1.0",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [project.scripts]
