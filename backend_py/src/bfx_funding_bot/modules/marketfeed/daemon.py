@@ -489,10 +489,10 @@ async def _run() -> None:
             [type(e).__name__ for e in eg.exceptions],
         )
         raise
-
-    # Cleanup after TaskGroup completes (flush axiom, close http client)
-    await daemon.bitfinex_http.aclose()
-    log.info("daemon_shutdown_complete")
+    finally:
+        # Cleanup after TaskGroup completes (flush axiom, close http client)
+        log.info("daemon_shutdown_complete")
+        await daemon.bitfinex_http.aclose()
 
 
 if __name__ == "__main__":
