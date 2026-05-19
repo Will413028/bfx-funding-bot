@@ -67,3 +67,17 @@ class TestDatabaseUrlSync:
         )
         out = s.database_url_sync
         assert "ep-foo-bar-123.ap-southeast-1.aws.neon.tech" in out
+
+    def test_ssl_translated_to_sslmode(self):
+        """Phase 4.1 asyncpg-pre-transformed URL has `ssl=require` — psycopg
+        needs `sslmode=require`. Accessor translates."""
+        s = _s("postgresql+asyncpg://u:p@host.example/db?ssl=require")
+        out = s.database_url_sync
+        assert "ssl=require" not in out
+        assert "sslmode=require" in out
+
+    def test_asyncpg_scheme_replaced_by_psycopg(self):
+        """Phase 4.1 asyncpg URL should also become psycopg for alembic."""
+        s = _s("postgresql+asyncpg://u:p@host.example/db?ssl=require")
+        assert s.database_url_sync.startswith("postgresql+psycopg://")
+        assert "+asyncpg" not in s.database_url_sync

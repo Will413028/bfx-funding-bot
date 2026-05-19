@@ -1,7 +1,9 @@
 """Application settings.
 
-DATABASE_URL accepts Neon dashboard libpq-style URL (e.g.
-`postgresql://u:p@ep-xxx-pooler.<region>.aws.neon.tech/db?sslmode=require&channel_binding=require`).
+DATABASE_URL accepts EITHER form:
+- Raw Neon dashboard libpq URL: `postgresql://u:p@ep-xxx-pooler.<region>.aws.neon.tech/db?sslmode=require&channel_binding=require`
+- Phase 4.1 manually-transformed asyncpg URL: `postgresql+asyncpg://u:p@ep-xxx.<region>.aws.neon.tech/db?ssl=require`
+
 Two accessors transform it for the two SQLAlchemy drivers we use:
 
 - `database_url_sync` — psycopg, for alembic env.py
@@ -10,7 +12,7 @@ Two accessors transform it for the two SQLAlchemy drivers we use:
 Both strip the `-pooler` suffix from the host (PgBouncer transaction-mode
 breaks asyncpg prepared statements and alembic transactional DDL).
 """
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,9 +48,12 @@ class Settings(BaseSettings):
         """Sync URL for alembic (psycopg driver).
 
         Transforms:
-        - scheme: postgresql:// or postgres:// → postgresql+psycopg://
+        - scheme: postgresql:// or postgres:// or postgresql+<any> → postgresql+psycopg://
         - host: strip `-pooler` suffix from first label
-        - query params: sslmode + channel_binding preserved (psycopg supports both)
+        - query params:
+            - sslmode preserved (psycopg native)
+            - ssl=<x> → sslmode=<x> (Phase 4.1 asyncpg-style → psycopg-style)
+            - channel_binding preserved if present
         """
         raw = self.database_url
         # Scheme normalisation
@@ -60,7 +65,7 @@ class Settings(BaseSettings):
             head, _, tail = raw.partition("://")
             raw = "postgresql+psycopg://" + tail
 
-        # urlsplit then rebuild with cleaned host
+        # urlsplit then rebuild with cleaned host + normalised query
         parts = urlsplit(raw)
         new_host = _strip_pooler_from_host(parts.hostname)
         # Rebuild netloc preserving userinfo + port
@@ -72,4 +77,15 @@ class Settings(BaseSettings):
             userinfo += "@"
         port_suffix = f":{parts.port}" if parts.port is not None else ""
         netloc = f"{userinfo}{new_host or ''}{port_suffix}"
-        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+        # Translate ssl=<x> → sslmode=<x> for psycopg compatibility
+        # (Phase 4.1 manually-transformed URLs use asyncpg's `ssl=` keyword)
+        qs_pairs = parse_qsl(parts.query, keep_blank_values=True)
+        normalised: list[tuple[str, str]] = []
+        for k, v in qs_pairs:
+            if k == "ssl":
+                normalised.append(("sslmode", v))
+            else:
+                normalised.append((k, v))
+        new_query = urlencode(normalised)
+        return urlunsplit((parts.scheme, netloc, parts.path, new_query, parts.fragment))
