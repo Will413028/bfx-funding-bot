@@ -169,6 +169,12 @@ Shadow 預期跑 2-4 週累積數據，給 Phase 4.3 calibration 用。
 
 部署本 phase 過程中發現以下需在 Phase 4.2 治本的問題（runbook 已 workaround 但建議盡早消除）：
 
-1. **`daemon.py:374` 預設 cells.yaml 路徑損壞** — `build_daemon()` 無參數呼叫 → `parents[4]` 在 site-packages 場景解析錯誤。目前 Dockerfile `ENV BFX_CELLS_YAML=/app/configs/cells.yaml` 繞過。
+1. **`modules/marketfeed/config.py:127` 預設 cells.yaml 路徑** — `load_config()`
+   無 `cells_yaml_path` 參數 + 無 `BFX_CELLS_YAML` env → `Path(__file__).parents[4]`
+   在 site-packages 場景錯。
+   - Phase 4.1 workaround: image-baked `ENV BFX_CELLS_YAML=/app/configs/cells.yaml`
+   - **Fixed in Phase 4.2.0 D1**：lookup precedence chain (env / cwd / importlib.resources)。
+     image env 仍保留作為 explicit deploy-time default，但 cwd / importlib fallback
+     讓 local dev / packaged install 也 works。
 2. **DATABASE_URL scheme auto-transform** — `core/settings.py` 應自動把 `postgresql://` 轉成 `postgresql+asyncpg://`，免去 user 手動改 scheme。
 3. **numpy/pandas 分組** — 已於 deploy commit 修正（移到 `[project] dependencies`），但 Phase 4.1 22-task 階段未抓到此 layout 錯誤，需檢視 module boundary 是否還有類似情況。
