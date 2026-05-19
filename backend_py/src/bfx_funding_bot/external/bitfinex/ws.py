@@ -30,6 +30,23 @@ def compute_backoff_secs(attempt: int) -> int:
     return min(60, int(2 ** (attempt - 1)))
 
 
+def _bitfinex_ws_period_agg(period_agg: str) -> str:
+    """Translate user-facing period_agg → Bitfinex WS subscription key suffix.
+
+    For aggregate candles (e.g. "a30"), Bitfinex requires an explicit period
+    range: "a30:p2:p30". Sending bare "a30" subscribes silently but receives
+    no data (Phase 4.2.0 e1a1cb5 shadow run discovery: 0 a30 candles over 7hr).
+
+    Single-period values ("p2", "p30") pass through unchanged.
+
+    Mirrors REST helper `_bitfinex_period_agg_path` in rest.py — keep both
+    in sync; future refactor should consolidate into one module-level helper.
+    """
+    if period_agg.startswith("a") and ":" not in period_agg:
+        return f"{period_agg}:p2:p30"
+    return period_agg
+
+
 @dataclass(frozen=True)
 class ChannelSpec:
     symbol: str         # e.g. "fUSD" / "fUST"
@@ -38,7 +55,10 @@ class ChannelSpec:
 
     @property
     def key(self) -> str:
-        return f"trade:{self.timeframe}:{self.symbol}:{self.period_agg}"
+        return (
+            f"trade:{self.timeframe}:{self.symbol}:"
+            f"{_bitfinex_ws_period_agg(self.period_agg)}"
+        )
 
 
 @dataclass(frozen=True)
