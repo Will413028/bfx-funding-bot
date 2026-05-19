@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
+from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.modules.marketfeed.schemas import (
     EventType,
     HealthStatus,
@@ -20,6 +21,16 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+# Per spec D4 heartbeat threshold table — staleness threshold in seconds.
+SUB_TASK_THRESHOLDS: dict[str, int] = {
+    "ws": 30,                    # Bitfinex hb every 15-30s
+    "candle_writer": 90,         # 1m candle + buffer
+    "scheduler": 65 * 60,        # hourly boundary + buffer
+    "axiom": 60,                 # trading event cadence + 5min hb
+    "health_check": 6 * 60,      # 5min hb + buffer
+}
+_DEFAULT_THRESHOLD_S = 60
 
 
 class _AxiomProtocol(Protocol):
@@ -37,11 +48,20 @@ class _TargetState:
 
 
 class HealthProbe:
-    """In-process pub-sub for per-target state. Updates from WS / db / redis
-    callers; HealthMonitor consumes and emits to Axiom."""
+    """In-process pub-sub for per-target state + heartbeat registry.
+
+    Existing API: update() for HealthTarget state (WS / DB / Redis status).
+    Added (D4): record_heartbeat() for sub-task progress timestamps and
+    last_active_ts dict keyed by sub-task name.
+    """
 
     def __init__(self) -> None:
         self._state: dict[HealthTarget, _TargetState] = {}
+        self.last_active_ts: dict[str, datetime] = {}
+
+    def record_heartbeat(self, sub_task: str) -> None:
+        """Sub-task calls this each time it completes a progress unit."""
+        self.last_active_ts[sub_task] = datetime.now(UTC)
 
     def update(
         self, target: HealthTarget, status: HealthStatus, **fields: Any,
@@ -129,3 +149,50 @@ class HealthMonitor:
             "correlation_id": str(uuid4()),
             "payload": payload,
         })
+
+    async def scan_staleness(self) -> list[dict[str, Any]]:
+        """Check last_active_ts for each sub-task. Emit + return records for
+        any stale. Raises FatalError on 3× threshold breach.
+
+        Returns: list of {sub_task, severity, age_s} for stale tasks (for
+                 inspection / test). Tasks under threshold are not included.
+        """
+        now = datetime.now(UTC)
+        stale: list[dict[str, Any]] = []
+        for sub_task, last_ts in self.probe.last_active_ts.items():
+            threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
+            age_s = (now - last_ts).total_seconds()
+            if age_s <= threshold:
+                continue
+
+            if age_s > 3 * threshold:
+                raise FatalError(
+                    f"sub_task={sub_task} stale {age_s:.0f}s > "
+                    f"3× threshold ({3 * threshold}s) — escalating fatal"
+                )
+
+            severity = "down" if age_s > 2 * threshold else "degraded"
+            stale.append({
+                "sub_task": sub_task,
+                "severity": severity,
+                "age_s": age_s,
+            })
+
+            # Emit axiom health_check event for the stale sub-task
+            level = Level.ERROR if severity == "down" else Level.WARN
+            status = HealthStatus.DOWN if severity == "down" else HealthStatus.DEGRADED
+            await self.axiom.emit({
+                "timestamp": now.isoformat(),
+                "level": level.value,
+                "phase": self.phase.value,
+                "strategy": None, "cell": None,
+                "event_type": EventType.HEALTH_CHECK.value,
+                "correlation_id": str(uuid4()),
+                "payload": {
+                    "check_target": sub_task,
+                    "status": status.value,
+                    "last_msg_age_ms": int(age_s * 1000),
+                    "error_message": f"heartbeat stale {age_s:.0f}s > {threshold}s threshold",
+                },
+            })
+        return stale
