@@ -24,15 +24,17 @@ from tenacity import (
     wait_exponential,
 )
 
+from bfx_funding_bot.core.errors import FatalError, TransientError
+
 log = logging.getLogger(__name__)
 
 
-class AxiomAuthError(RuntimeError):
+class AxiomAuthError(FatalError):
     """Axiom returned 401/403 — daemon should exit 1 (env var likely wrong)."""
 
 
-class _TransientError(RuntimeError):
-    """Retryable Axiom error."""
+class _TransientError(TransientError):
+    """Retryable Axiom error — kept for backwards compat with module-internal usage."""
 
 
 @dataclass
