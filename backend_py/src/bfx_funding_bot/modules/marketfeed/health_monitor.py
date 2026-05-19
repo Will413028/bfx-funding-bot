@@ -24,8 +24,12 @@ log = logging.getLogger(__name__)
 
 # Per spec D4 heartbeat threshold table — staleness threshold in seconds.
 SUB_TASK_THRESHOLDS: dict[str, int] = {
-    "ws": 30,                    # Bitfinex hb every 15-30s
-    "candle_writer": 90,         # 1m candle + buffer
+    "ws": 60,                    # Bitfinex hb every 15-30s + buffer (any WS msg)
+    "candle_writer": 65 * 60,    # Phase 4.2.0 d90363fa lesson: 1h funding cells
+                                 # publish candle only on tick — can be silent
+                                 # >5min in quiet markets. WS heartbeat (60s)
+                                 # is the fast-zombie detector now; candle_writer
+                                 # only catches truly stuck queues (>3hr).
     "scheduler": 65 * 60,        # hourly boundary + buffer
     "axiom": 60,                 # trading event cadence + 5min hb
     "health_check": 6 * 60,      # 5min hb + buffer
