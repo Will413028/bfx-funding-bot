@@ -33,3 +33,19 @@ class TestAsyncUrlTransform:
             "postgresql://u:p@ep-foo-123.ap-southeast-1.aws.neon.tech/db?sslmode=require"
         )
         assert "ep-foo-123.ap-southeast-1.aws.neon.tech" in str(kw["url"])
+
+
+class TestEnginePoolConfig:
+    def test_engine_has_pool_pre_ping_enabled(self):
+        from bfx_funding_bot.core.db import make_engine
+        from bfx_funding_bot.core.settings import Settings
+        s = Settings.model_construct(database_url="postgresql://u:p@h/db")
+        engine = make_engine(s)
+        assert engine.pool._pre_ping is True
+
+    def test_engine_has_pool_recycle_set(self):
+        from bfx_funding_bot.core.db import make_engine
+        from bfx_funding_bot.core.settings import Settings
+        s = Settings.model_construct(database_url="postgresql://u:p@h/db")
+        engine = make_engine(s)
+        assert engine.pool._recycle == 600

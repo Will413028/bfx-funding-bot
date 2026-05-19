@@ -82,12 +82,20 @@ def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
 
 
 def make_engine(settings: Settings) -> AsyncEngine:
+    """Create async engine with serverless-Postgres-friendly pool config.
+
+    pool_pre_ping=True: health-check connection before handing to caller.
+    pool_recycle=600 (10 min): force recycle below Neon's ~15min idle cut.
+    Combined with daemon-level keepalive task (every 5min SELECT 1)
+    in core.keepalive (Task 7).
+    """
     kwargs = _prepare_engine_kwargs(settings.database_url)
     return create_async_engine(
         str(kwargs["url"]),
         connect_args=kwargs["connect_args"],
         echo=False,
         pool_pre_ping=True,
+        pool_recycle=600,
     )
 
 
