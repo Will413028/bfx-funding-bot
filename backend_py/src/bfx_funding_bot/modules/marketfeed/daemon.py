@@ -404,22 +404,36 @@ async def build_daemon(
     )
 
     async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
+        # Scheduler fires AT the period boundary T (e.g. 11:00 UTC), but
+        # Bitfinex's candle at mts=T is the OPEN of period [T, T+timeframe) —
+        # only the FIRST tick of the new period creates it, which may not
+        # arrive within the 5s buffer. The candle we actually want is the
+        # one that JUST CLOSED — by Bitfinex start-of-period convention,
+        # that has mts = T - timeframe.
+        # Discovered Phase 4.2.0 d90363fa shadow run: 56 degraded events,
+        # 0 signal events because query used mts=T (always empty).
+        from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
+        candle_mts = mts - _TIMEFRAME_MS[cell.timeframe]
         async with session_factory() as s:
             rows = await get_candles_in_range(
                 s,
                 symbol=cell.symbol,
                 timeframe=cell.timeframe,
                 period_agg=cell.period_agg,
-                start_mts=mts,
-                end_mts=mts,
+                start_mts=candle_mts,
+                end_mts=candle_mts,
             )
+        log.info(
+            "scheduler_tick cell=%s boundary_mts=%d candle_mts=%d rows=%d",
+            cell.pair_id, mts, candle_mts, len(rows),
+        )
         if not rows:
             probe.update(
                 HealthTarget.BITFINEX_WS,
                 HealthStatus.DEGRADED,
                 last_msg_age_ms=999_999,
                 reconnect_count_last_hour=0,
-                error_message="candle_missing_at_scheduled_observe",
+                error_message=f"candle_missing_at_scheduled_observe mts={candle_mts}",
             )
             return
         await signal_engine_obj.process_candle(
