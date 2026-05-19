@@ -25,11 +25,16 @@ class Base(DeclarativeBase):
 def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
     """Convert a plain postgresql:// URL (Go/psycopg2-style) to asyncpg kwargs.
 
-    The shared .env may contain psycopg2-style query params (sslmode,
-    channel_binding) that asyncpg does not understand.  We rewrite the
-    scheme and pass SSL via connect_args instead of a query parameter.
+    Transforms:
+    - scheme postgresql:// → postgresql+asyncpg://
+    - host: strip `-pooler` suffix (asyncpg prepared stmt vs PgBouncer
+      transaction-mode incompatibility)
+    - sslmode: extracted to SSL context in connect_args
+    - channel_binding: removed (asyncpg does not support)
     """
-    from urllib.parse import parse_qs, urlencode, urlparse
+    from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+
+    from bfx_funding_bot.core.settings import _strip_pooler_from_host
 
     # Normalise scheme.
     url = raw_url
@@ -38,17 +43,27 @@ def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
     elif url.startswith("postgres://"):
         url = "postgresql+asyncpg://" + url[len("postgres://"):]
 
-    # Parse out query string.
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
+    # Parse URL parts.
+    parts = urlsplit(url)
+    qs = parse_qs(parts.query, keep_blank_values=True)
 
-    # Detect whether SSL was requested.
+    # Detect SSL requirement.
     sslmode = qs.pop("sslmode", ["prefer"])[0]
     qs.pop("channel_binding", None)  # asyncpg does not accept this
 
-    # Rebuild URL without those params.
+    # Strip -pooler from host.
+    new_host = _strip_pooler_from_host(parts.hostname)
+    userinfo = ""
+    if parts.username is not None:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo += f":{parts.password}"
+        userinfo += "@"
+    port_suffix = f":{parts.port}" if parts.port is not None else ""
+    netloc = f"{userinfo}{new_host or ''}{port_suffix}"
+
     new_query = urlencode({k: v[0] for k, v in qs.items()})
-    clean_url = parsed._replace(query=new_query).geturl()
+    clean_url = urlunsplit((parts.scheme, netloc, parts.path, new_query, parts.fragment))
 
     connect_args: dict[str, object] = {}
     if sslmode in ("require", "verify-ca", "verify-full"):
@@ -67,12 +82,20 @@ def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
 
 
 def make_engine(settings: Settings) -> AsyncEngine:
+    """Create async engine with serverless-Postgres-friendly pool config.
+
+    pool_pre_ping=True: health-check connection before handing to caller.
+    pool_recycle=600 (10 min): force recycle below Neon's ~15min idle cut.
+    Combined with daemon-level keepalive task (every 5min SELECT 1)
+    in core.keepalive (Task 7).
+    """
     kwargs = _prepare_engine_kwargs(settings.database_url)
     return create_async_engine(
         str(kwargs["url"]),
         connect_args=kwargs["connect_args"],
         echo=False,
         pool_pre_ping=True,
+        pool_recycle=600,
     )
 
 

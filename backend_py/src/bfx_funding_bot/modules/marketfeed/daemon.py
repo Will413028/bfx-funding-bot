@@ -8,16 +8,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -79,26 +80,120 @@ class Daemon:
     probe: HealthProbe
     monitor: HealthMonitor
     scheduler: Scheduler
-    engine: SignalEngine
+    signal_engine: SignalEngine
+    db_engine: AsyncEngine
     ws_client: BitfinexWSClient | None
     writer: CandleWriter
     bitfinex_http: httpx.AsyncClient
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
-    _tasks: list[asyncio.Task[Any]] = field(default_factory=list)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
-    async def startup(self) -> None:
-        await self.axiom.start()
-        await self.monitor.start()
-        await self.scheduler.start()
-        self._tasks.append(asyncio.create_task(self.writer.run()))
-        if self.ws_client is not None:
-            self._tasks.append(
-                asyncio.create_task(self._ws_consume_with_reconnect()),
-            )
+    async def run(self) -> None:
+        """Main entry — sub-task supervision via TaskGroup.
+
+        Phase 4.1 used asyncio.gather + create_task with no propagation,
+        producing 4hr zombie when candle_writer silently died. Per spec
+        D4: any sub-task raise → TaskGroup cancel all → ExceptionGroup
+        propagates → _run handles cleanup + exit non-zero.
+        """
+        # Initial cell registration (was in startup)
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self._candle_writer_loop(), name="candle_writer")
+            tg.create_task(self._scheduler_loop(),     name="scheduler")
+            tg.create_task(self._axiom_loop(),         name="axiom")
+            tg.create_task(self._monitor_loop(),       name="monitor")
+            tg.create_task(self._heartbeat_scan_loop(), name="health_check")
+            tg.create_task(self._db_keepalive_loop(),  name="db_keepalive")
+            if self.ws_client is not None:
+                tg.create_task(self._ws_consume_with_reconnect(), name="ws")
+            # When _stop_event is set externally (SIGTERM), each sub-task's
+            # internal loop exits cleanly; TaskGroup waits for all to drain.
+
+    async def _candle_writer_loop(self) -> None:
+        """Plumbing wrapper for self.writer.run() with FatalError pass-through.
+        Heartbeat is recorded inside CandleWriter.run() after each successful upsert.
+        Sends None sentinel to unblock queue.get() on graceful stop."""
+        try:
+            # Run writer and a stop-sentinel task concurrently; cancel the
+            # sentinel if writer exits naturally (e.g. on CancelledError).
+            async def _drain_sentinel() -> None:
+                await self._stop_event.wait()
+                await self.candle_q.put(None)
+
+            writer_task = asyncio.create_task(self.writer.run(), name="candle_writer_inner")
+            sentinel_task = asyncio.create_task(_drain_sentinel(), name="candle_writer_sentinel")
+            try:
+                done, pending = await asyncio.wait(
+                    {writer_task, sentinel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await t
+                # Re-raise any exception from writer_task
+                for t in done:
+                    if t is writer_task and not t.cancelled():
+                        exc = t.exception()
+                        if exc is not None:
+                            raise exc
+            except asyncio.CancelledError:
+                writer_task.cancel()
+                sentinel_task.cancel()
+                raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("candle_writer_fatal")
+            from bfx_funding_bot.core.errors import FatalError
+            raise FatalError(f"candle_writer crashed: {e!r}") from e
+
+    async def _scheduler_loop(self) -> None:
+        await self.scheduler.start()
+        await self._stop_event.wait()
+        await self.scheduler.stop()
+
+    async def _axiom_loop(self) -> None:
+        """Run axiom's background emit loop.
+
+        AxiomClient has no on_flush hook, so axiom heartbeat is not wired
+        to record_heartbeat("axiom") — DONE_WITH_CONCERNS noted. Axiom
+        staleness is still surfaced by scan_staleness if a future heartbeat
+        call is added.
+        """
+        await self.axiom.start()
+        await self._stop_event.wait()
+        await self.axiom.stop()
+
+    async def _monitor_loop(self) -> None:
+        """State-change emission loop (was HealthMonitor.start() in Phase 4.1).
+        Polls probe.drain_dirty() every 50ms + periodic full heartbeat emit."""
+        await self.monitor.start()
+        await self._stop_event.wait()
+        await self.monitor.stop()
+
+    async def _heartbeat_scan_loop(self) -> None:
+        """Periodic staleness scan. Tick every 30s. FatalError → TaskGroup cancel."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
+                return  # stop requested
+            except TimeoutError:
+                pass
+            self.probe.record_heartbeat("health_check")
+            await self.monitor.scan_staleness()  # may raise FatalError
+
+    async def _db_keepalive_loop(self) -> None:
+        from bfx_funding_bot.core.keepalive import keepalive_loop
+        await keepalive_loop(
+            self.db_engine,
+            stop=self._stop_event,
+            on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
+        )
 
     async def _ws_consume_with_reconnect(self) -> None:
         """WS recv + reconnect loop. Never exits unless daemon shuts down.
@@ -214,18 +309,6 @@ class Daemon:
 
             # Loop continues → tries `candles()` again with new client
 
-    async def shutdown(self) -> None:
-        self._stop_event.set()
-        if self.ws_client is not None:
-            await self.ws_client.close()
-        await self.scheduler.stop()
-        await self.candle_q.put(None)
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        await self.monitor.stop()
-        await self.axiom.stop()
-        await self.bitfinex_http.aclose()
-
 
 async def build_daemon(
     *,
@@ -315,8 +398,8 @@ async def build_daemon(
             cell=cell, candle=rows[0], registry=registry,
         )
 
-    scheduler = Scheduler(callback=on_scheduler_tick)
-    writer = CandleWriter(queue=candle_q, session_factory=session_factory)
+    scheduler = Scheduler(callback=on_scheduler_tick, probe=probe)
+    writer = CandleWriter(queue=candle_q, session_factory=session_factory, probe=probe)
 
     ws_client: BitfinexWSClient | None = None
     if not skip_ws:
@@ -346,7 +429,8 @@ async def build_daemon(
         probe=probe,
         monitor=monitor,
         scheduler=scheduler,
-        engine=signal_engine_obj,
+        signal_engine=signal_engine_obj,
+        db_engine=db_engine,
         ws_client=ws_client,
         writer=writer,
         bitfinex_http=bitfinex_http,
@@ -372,28 +456,43 @@ def main() -> None:
 
 async def _run() -> None:
     daemon = await build_daemon()
-    stop = asyncio.Event()
+
+    stop = daemon._stop_event  # share with signal handler
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
-    await daemon.startup()
+
     log.info(
         "daemon_started phase=%s cells=%d",
         daemon.config.phase, len(daemon.config.cells),
     )
 
+    # Optional duration cap (used by paper smoke mode); shadow has no duration.
     duration = daemon.config.run_duration_hours
     if duration is not None:
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=duration * 3600)
-        except TimeoutError:
-            log.info("daemon_run_duration_reached hours=%d", duration)
-    else:
-        await stop.wait()
+        async def _duration_timer() -> None:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=duration * 3600)
+            except TimeoutError:
+                log.info("daemon_run_duration_reached hours=%d", duration)
+                stop.set()
+        _timer_task = asyncio.create_task(_duration_timer())  # noqa: RUF006
 
-    log.info("daemon_shutdown_begin")
-    await daemon.shutdown()
-    log.info("daemon_shutdown_complete")
+    try:
+        await daemon.run()
+        log.info("daemon_run_clean_exit")
+    except* asyncio.CancelledError:
+        log.info("daemon_cancelled_via_signal")
+    except* Exception as eg:
+        log.error(
+            "daemon_taskgroup_fatal exceptions=%s",
+            [type(e).__name__ for e in eg.exceptions],
+        )
+        raise
+    finally:
+        # Cleanup after TaskGroup completes (flush axiom, close http client)
+        log.info("daemon_shutdown_complete")
+        await daemon.bitfinex_http.aclose()
 
 
 if __name__ == "__main__":

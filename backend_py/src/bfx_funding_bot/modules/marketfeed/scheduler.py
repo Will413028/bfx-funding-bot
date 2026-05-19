@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 log = logging.getLogger(__name__)
 
@@ -40,9 +41,11 @@ class Scheduler:
         self,
         *,
         callback: Callable[[CellConfig, int], Awaitable[None]],
+        probe: HealthProbe,
         buffer_s: float = 5.0,
     ) -> None:
         self._cb = callback
+        self._probe = probe
         self._buffer_s = buffer_s
         self._entries: dict[str, _Entry] = {}
         self._task: asyncio.Task[None] | None = None
@@ -74,6 +77,7 @@ class Scheduler:
             for e in due:
                 try:
                     await self._cb(e.cell, e.next_fire_mts)
+                    self._probe.record_heartbeat("scheduler")
                 except Exception:
                     log.exception(
                         "scheduler_cb_exception cell=%s mts=%d",
