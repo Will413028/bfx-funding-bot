@@ -211,6 +211,7 @@ class Daemon:
                     # successful message → connection is alive; reset failure counter
                     consecutive_failures = 0
                     self.ws_client.maybe_reset_backoff()
+                    self.probe.record_heartbeat("ws")
             except asyncio.CancelledError:
                 raise
             except Exception:

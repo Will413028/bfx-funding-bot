@@ -106,42 +106,42 @@ class TestStalenessScan:
         assert result == []
 
     async def test_emit_degraded_when_over_threshold(self, monitor, fake_axiom):
-        # Force last_active_ts to be 100s old (> 90s candle_writer threshold)
-        monitor.probe.last_active_ts["candle_writer"] = (
-            datetime.now(UTC) - timedelta(seconds=100)
+        # axiom threshold 60s → 70s > threshold but < 2× = degraded
+        monitor.probe.last_active_ts["axiom"] = (
+            datetime.now(UTC) - timedelta(seconds=70)
         )
         result = await monitor.scan_staleness()
         assert len(result) == 1
         rec = result[0]
-        assert rec["sub_task"] == "candle_writer"
+        assert rec["sub_task"] == "axiom"
         assert rec["severity"] == "degraded"
         assert len(fake_axiom.emitted) == 1
         emitted = fake_axiom.emitted[0]
         assert emitted["event_type"] == "health_check"
-        assert emitted["payload"]["check_target"] == "candle_writer"
+        assert emitted["payload"]["check_target"] == "axiom"
         assert emitted["payload"]["status"] == "degraded"
 
     async def test_emit_down_when_over_2x_threshold(self, monitor):
-        # candle_writer threshold 90s → 2× = 180s
-        monitor.probe.last_active_ts["candle_writer"] = (
-            datetime.now(UTC) - timedelta(seconds=200)
+        # axiom threshold 60s → 130s > 2× (120s) but < 3× (180s) = down
+        monitor.probe.last_active_ts["axiom"] = (
+            datetime.now(UTC) - timedelta(seconds=130)
         )
         result = await monitor.scan_staleness()
         assert result[0]["severity"] == "down"
 
     async def test_fatal_escalation_at_3x_threshold(self, monitor, fake_axiom):
-        # candle_writer threshold 90s → 3× = 270s
-        monitor.probe.last_active_ts["candle_writer"] = (
-            datetime.now(UTC) - timedelta(seconds=280)
+        # axiom threshold 60s → 190s > 3× (180s) = fatal
+        monitor.probe.last_active_ts["axiom"] = (
+            datetime.now(UTC) - timedelta(seconds=190)
         )
         with pytest.raises(FatalError) as exc:
             await monitor.scan_staleness()
-        assert "candle_writer" in str(exc.value)
-        assert "280" in str(exc.value) or "stale" in str(exc.value).lower()
+        assert "axiom" in str(exc.value)
+        assert "190" in str(exc.value) or "stale" in str(exc.value).lower()
         # Verify emit happened before raise — axiom has the down event
         assert len(fake_axiom.emitted) == 1
-        assert fake_axiom.emitted[0]["payload"]["check_target"] == "candle_writer"
-        assert fake_axiom.emitted[0]["payload"]["status"] == "down"  # 280s > 2×90s
+        assert fake_axiom.emitted[0]["payload"]["check_target"] == "axiom"
+        assert fake_axiom.emitted[0]["payload"]["status"] == "down"  # 190s > 2×60s
 
     async def test_unknown_subtask_uses_default_threshold(self, monitor):
         """No registered threshold → treat as default (60s)."""
@@ -160,8 +160,11 @@ class TestSubTaskThresholds:
             assert name in SUB_TASK_THRESHOLDS
 
     def test_threshold_values_match_spec(self):
-        assert SUB_TASK_THRESHOLDS["ws"] == 30
-        assert SUB_TASK_THRESHOLDS["candle_writer"] == 90
+        # Post-shadow-run d90363fa adjustment: ws becomes fast-zombie detector
+        # (60s); candle_writer is 65min because 1h funding cells silently
+        # publish only on candle tick in quiet markets.
+        assert SUB_TASK_THRESHOLDS["ws"] == 60
+        assert SUB_TASK_THRESHOLDS["candle_writer"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["scheduler"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["axiom"] == 60
         assert SUB_TASK_THRESHOLDS["health_check"] == 6 * 60
