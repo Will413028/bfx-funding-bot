@@ -110,6 +110,7 @@ class Daemon:
             tg.create_task(self._db_keepalive_loop(),  name="db_keepalive")
             if self.ws_client is not None:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
+                tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
             # When _stop_event is set externally (SIGTERM), each sub-task's
             # internal loop exits cleanly; TaskGroup waits for all to drain.
 
@@ -195,6 +196,29 @@ class Daemon:
             on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
         )
 
+    async def _ws_heartbeat_poll_loop(self) -> None:
+        """Poll ws_client.last_msg_age_ms() and record heartbeat when fresh.
+
+        Bitfinex public WS sends `hb` frames every ~15s on subscribed channels
+        when idle (quiet markets). `_handle_raw` in ws.py updates
+        state.last_msg_ts on any frame (candle or hb), but candles() yields
+        only candle data — so the daemon's main WS loop sees long gaps in
+        quiet 1h funding markets even though the connection is alive.
+
+        Solution: poll every 15s and check ws_client.last_msg_age_ms(). If
+        < 60s, the connection is alive → record heartbeat for "ws" sub-task.
+        """
+        assert self.ws_client is not None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=15.0)
+                return  # stop requested
+            except TimeoutError:
+                pass
+            # Only record if WS is connected and recently saw any frame
+            if self.ws_client is not None and self.ws_client.last_msg_age_ms() < 60_000:
+                self.probe.record_heartbeat("ws")
+
     async def _ws_consume_with_reconnect(self) -> None:
         """WS recv + reconnect loop. Never exits unless daemon shuts down.
 
@@ -211,7 +235,10 @@ class Daemon:
                     # successful message → connection is alive; reset failure counter
                     consecutive_failures = 0
                     self.ws_client.maybe_reset_backoff()
-                    self.probe.record_heartbeat("ws")
+                    # ws heartbeat is recorded by _ws_heartbeat_poll_loop based on
+                    # ws_client.last_msg_age_ms() (which counts both candle frames
+                    # and Bitfinex `hb` frames), not here — yielded candles are
+                    # sparse on 1h cells.
             except asyncio.CancelledError:
                 raise
             except Exception:

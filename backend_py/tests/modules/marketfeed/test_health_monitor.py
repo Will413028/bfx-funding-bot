@@ -160,10 +160,13 @@ class TestSubTaskThresholds:
             assert name in SUB_TASK_THRESHOLDS
 
     def test_threshold_values_match_spec(self):
-        # Post-shadow-run d90363fa adjustment: ws becomes fast-zombie detector
-        # (60s); candle_writer is 65min because 1h funding cells silently
-        # publish only on candle tick in quiet markets.
-        assert SUB_TASK_THRESHOLDS["ws"] == 60
+        # Post-shadow-run lessons:
+        # - v1 (d90363fa): 1h funding cells silently publish only on tick →
+        #   raise candle_writer to 65min, ws stays as fast detector.
+        # - v2 (136fbd07): candle channel yield != ws frames (hb returns early
+        #   in _handle_raw). ws heartbeat now polled from ws_client.last_msg_age_ms()
+        #   every 15s; threshold 90s covers 4-5 missed hb frames.
+        assert SUB_TASK_THRESHOLDS["ws"] == 90
         assert SUB_TASK_THRESHOLDS["candle_writer"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["scheduler"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["axiom"] == 60
