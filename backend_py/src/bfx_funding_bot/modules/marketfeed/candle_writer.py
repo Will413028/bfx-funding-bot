@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 log = logging.getLogger(__name__)
 
@@ -24,9 +25,11 @@ class CandleWriter:
         *,
         queue: asyncio.Queue[CandleMessage | None],
         session_factory: Callable[[], AsyncSession] | Callable[[], Awaitable[AsyncSession]],
+        probe: HealthProbe,
     ) -> None:
         self._queue = queue
         self._session_factory = session_factory
+        self._probe = probe
 
     async def run(self) -> None:
         while True:
@@ -35,6 +38,7 @@ class CandleWriter:
                 return
             try:
                 await self._upsert(msg)
+                self._probe.record_heartbeat("candle_writer")
             except Exception:
                 log.exception("candle_writer_upsert_failed mts=%d", msg.mts)
                 # continue - error logged; health_monitor surfaces from daemon side

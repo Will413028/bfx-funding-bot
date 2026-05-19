@@ -10,6 +10,7 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 
 async def test_candle_writer_upserts_from_queue(sqlite_engine: AsyncEngine):
@@ -19,7 +20,7 @@ async def test_candle_writer_upserts_from_queue(sqlite_engine: AsyncEngine):
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
 
     queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
-    writer = CandleWriter(queue=queue, session_factory=factory)
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
 
     await queue.put(CandleMessage(
         symbol="fUSD", timeframe="1h", period_agg="a30",
@@ -44,7 +45,7 @@ async def test_candle_writer_logs_and_continues_on_error(sqlite_engine: AsyncEng
 
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
     queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
-    writer = CandleWriter(queue=queue, session_factory=factory)
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
 
     bad = CandleMessage(
         symbol="fUSD", timeframe="1h", period_agg="a30",
