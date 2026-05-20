@@ -140,8 +140,8 @@ async def run_c1_continuity(
     client: AxiomQueryClient,
     phase: str,
     hours: int,
-    cells: list[dict[str, Any]] | None = None,  # noqa: ARG001 — consumed in Task 3
-    now_fn: Callable[[], datetime] | None = None,  # noqa: ARG001 — consumed in Task 3
+    cells: list[dict[str, Any]] | None = None,  # consumed in Task 3
+    now_fn: Callable[[], datetime] | None = None,  # consumed in Task 3
 ) -> CheckResult:
     """C1 continuity check.
 
@@ -255,6 +255,7 @@ async def run_smoke_async(
     cells: list[dict[str, Any]],
     only: set[str] | None = None,
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+    json_output: bool = False,
 ) -> int:
     """Run G1 smoke checks. Returns exit code (0=pass, 1=fail, 2=auth, 3=config).
 
@@ -264,6 +265,7 @@ async def run_smoke_async(
         cells: cell config dicts (each with strategy, symbol, period_agg, timeframe).
         only: subset of check names to run (None = all).
         now_fn: injectable clock for C1 recency check (UTC aware).
+        json_output: if True, print results as JSON (daemon default: False).
     """
     axiom_api_key = os.environ.get("AXIOM_API_KEY", "")
     axiom_dataset = os.environ.get("AXIOM_DATASET", "")
@@ -299,14 +301,7 @@ async def run_smoke_async(
             detail="(4.1 V1 -- dashboard widget belongs to 4.4)",
         ))
 
-        # Print + decide exit code
-        all_passed = True
-        for r in results:
-            tag = "SKIP" if r.skipped else ("PASS" if r.passed else "FAIL")
-            print(f"[ {tag} ] {r.name:40s} {r.detail}")
-            if not r.skipped and not r.passed:
-                all_passed = False
-        return 0 if all_passed else 1
+        return _report(results, json_output=json_output)
     except SystemExit as e:
         return int(e.code) if e.code is not None else 2
     finally:
@@ -322,12 +317,15 @@ async def main_async(args: argparse.Namespace) -> int:
     cells_data = yaml.safe_load(cells_yaml.read_text())
     cells = cells_data["cells"]
     only = set((args.only or "").split(",")) if args.only else None
-    return await run_smoke_async(phase=phase, hours=args.hours, cells=cells, only=only)
+    return await run_smoke_async(
+        phase=phase, hours=args.hours, cells=cells, only=only,
+        json_output=args.json,
+    )
 
 
-def _report(results: list[CheckResult], args: argparse.Namespace) -> int:
+def _report(results: list[CheckResult], *, json_output: bool = False) -> int:
     failed = [r for r in results if not r.passed and not r.skipped]
-    if args.json:
+    if json_output:
         print(json.dumps({
             "checks": [r.__dict__ for r in results],
             "passed": len(failed) == 0,
