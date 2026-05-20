@@ -243,7 +243,7 @@ async def main_async(args: argparse.Namespace) -> int:
         return 3
 
     cells_yaml = Path(
-        args.cells_yaml or Path(__file__).parents[1] / "configs" / "cells.yaml",
+        args.cells_yaml or Path(__file__).parents[3] / "configs" / "cells.yaml",
     )
     cells_data = yaml.safe_load(cells_yaml.read_text())
     cells = cells_data["cells"]
