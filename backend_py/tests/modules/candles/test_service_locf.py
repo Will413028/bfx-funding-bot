@@ -57,3 +57,27 @@ def test_locf_ffills_within_budget() -> None:
         assert filled[i].candle == source, f"Slot {i} should ffill source candle"
         assert filled[i].is_stale is True
         assert filled[i].stale_seconds == i * 3600
+
+
+def test_locf_caps_at_budget() -> None:
+    """Source candle at T-24h, ref_mts=T, budget=12h.
+
+    Slots T-24h (source itself) is_stale=False; slots T-23h to T-12h (12 slots)
+    ffilled is_stale=True; slots T-11h to T-0 (12 slots) candle=None."""
+    start_mts = 1_700_000_000_000
+    source = _make_candle(start_mts, "0.0042")
+    ref_mts = start_mts + 24 * HOUR_MS
+
+    filled = reindex_and_ffill([source], ref_mts=ref_mts, max_gap_hours=12)
+
+    assert len(filled) == 25
+    assert filled[0].candle == source
+    assert filled[0].is_stale is False
+    for i in range(1, 13):
+        assert filled[i].candle == source, f"Slot {i} should ffill within budget"
+        assert filled[i].is_stale is True
+        assert filled[i].stale_seconds == i * 3600
+    for i in range(13, 25):
+        assert filled[i].candle is None, f"Slot {i} should be hard-tier None"
+        assert filled[i].is_stale is True
+        assert filled[i].stale_seconds == i * 3600
