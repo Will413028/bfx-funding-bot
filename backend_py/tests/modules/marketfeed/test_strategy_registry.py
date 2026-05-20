@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
@@ -8,10 +10,12 @@ from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
 from bfx_funding_bot.modules.backtest.strategies.rate_percentile import (
     RatePercentileStrategy,
 )
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
+    build_strategy_at_boundary,
 )
 
 
@@ -55,3 +59,103 @@ def test_registry_missing_raises():
     reg = StrategyRegistry()
     with pytest.raises(KeyError):
         reg.get(_cell_mr())
+
+
+def test_build_strategy_at_boundary_is_deterministic():
+    """Phase 4.3 LOCF SoT — given the same (history, ref_mts, budget_hours)
+    the function produces deterministically equal Strategy state. This is
+    the invariant warmup and divergence_reporter rely on for CP1
+    byte-equivalence."""
+    cell = CellConfig.model_validate({
+        "strategy": "rate_percentile", "symbol": "fUSD", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {"percentile": 75, "lookback_hours": 10},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
+    })
+    base_mts = 1747584000000
+    history = [
+        FundingCandle(
+            symbol="fUSD", timeframe="1h", period_agg="a30",
+            mts=base_mts + i * 3600_000,
+            open=Decimal(f"0.0001{i}"), close=Decimal(f"0.0001{i}"),
+            high=Decimal(f"0.0001{i}"), low=Decimal(f"0.0001{i}"),
+            volume=Decimal("100"),
+        )
+        for i in range(8)
+    ]
+    ref_mts = base_mts + 8 * 3600_000
+
+    r1 = build_strategy_at_boundary(
+        cell=cell, history=history, ref_mts=ref_mts, budget_hours=2,
+    )
+    r2 = build_strategy_at_boundary(
+        cell=cell, history=history, ref_mts=ref_mts, budget_hours=2,
+    )
+
+    # observed_count identical
+    assert r1.observed_count == r2.observed_count
+    # Strategy internal state identical (compare _window deque for RP).
+    assert list(r1.strategy._window) == list(r2.strategy._window)  # type: ignore[attr-defined]
+
+
+def test_build_strategy_at_boundary_sparse_locf_symmetry():
+    """Phase 4.3 LOCF SoT — sparse history (candles only at slots 0/3/6)
+    yields LOCF-filled state with 7 observations of the 3 source candles
+    (carry-forward), with the boundary slot dropped. This is the contract
+    warmup.warmup_cell and DivergenceReporter.check both depend on.
+    """
+    cell = CellConfig.model_validate({
+        "strategy": "rate_percentile", "symbol": "fUSD", "period_agg": "p30",
+        "timeframe": "1h",
+        "params": {"percentile": 75, "lookback_hours": 10},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 12,
+    })
+    base_mts = 1747584000000
+    sparse_history = [
+        FundingCandle(
+            symbol="fUSD", timeframe="1h", period_agg="p30",
+            mts=base_mts + i * 3600_000,
+            open=Decimal(f"0.001{i}"), close=Decimal(f"0.001{i}"),
+            high=Decimal(f"0.001{i}"), low=Decimal(f"0.001{i}"),
+            volume=Decimal("100"),
+        )
+        for i in (0, 3, 6)
+    ]
+    ref_mts = base_mts + 7 * 3600_000  # 8 slots (0..7), drop slot 7 boundary
+
+    result = build_strategy_at_boundary(
+        cell=cell, history=sparse_history, ref_mts=ref_mts, budget_hours=12,
+    )
+
+    # filled slots: 0..7 (8 total). Drop slot 7 (boundary). Slots 0..6 = 7 slots.
+    # Each within budget → all non-None → 7 observations.
+    assert result.observed_count == 7
+    # _window content traces LOCF carry-forward:
+    # slots 0,1,2: candle at slot 0 (0.0010)
+    # slots 3,4,5: candle at slot 3 (0.0013)
+    # slot 6: candle at slot 6 (0.0016)
+    expected = [
+        Decimal("0.0010"), Decimal("0.0010"), Decimal("0.0010"),
+        Decimal("0.0013"), Decimal("0.0013"), Decimal("0.0013"),
+        Decimal("0.0016"),
+    ]
+    assert list(result.strategy._window) == expected  # type: ignore[attr-defined]
+
+
+def test_build_strategy_at_boundary_empty_history():
+    """No DB candles → empty strategy state, observed_count=0."""
+    cell = CellConfig.model_validate({
+        "strategy": "rate_percentile", "symbol": "fUSD", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {"percentile": 75, "lookback_hours": 5},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
+    })
+    result = build_strategy_at_boundary(
+        cell=cell, history=[], ref_mts=1747584000000, budget_hours=2,
+    )
+    assert result.observed_count == 0
+    assert isinstance(result.strategy, RatePercentileStrategy)
+    assert list(result.strategy._window) == []  # type: ignore[attr-defined]

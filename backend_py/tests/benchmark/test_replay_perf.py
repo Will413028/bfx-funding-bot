@@ -43,6 +43,7 @@ def test_replay_under_500ms_for_11_cells_168_candles(strategy_name: str, params:
     cell = CellConfig.model_validate({
         "strategy": strategy_name, "symbol": "fUSD", "period_agg": "a30",
         "timeframe": "1h", "params": params, "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
     })
     history = _make_history(168)
     reporter = DivergenceReporter()
@@ -54,7 +55,10 @@ def test_replay_under_500ms_for_11_cells_168_candles(strategy_name: str, params:
 
     start = time.perf_counter()
     for _ in range(11):
-        reporter.check(cell=cell, history=history, live_signal=live_sig)
+        reporter.check(
+            cell=cell, raw_history=history, boundary_candle=history[-1],
+            budget_hours=2, live_signal=live_sig,
+        )
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     print(f"\n{strategy_name}: 11 cells x 168 candles = {elapsed_ms:.1f}ms")
