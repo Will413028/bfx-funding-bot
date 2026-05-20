@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
+from bfx_funding_bot.modules.marketfeed.self_smoke import (
+    SLEEP_BEFORE_SMOKE_SECONDS,
+    maybe_run_self_smoke,
+)
 
 
 @pytest.mark.asyncio
@@ -25,6 +28,7 @@ async def test_self_smoke_runs_when_gated():
 
     assert result == 0
     smoke_runner.assert_awaited_once_with(phase="paper", hours=1, cells=cells)
+    sleep_fn.assert_awaited_once_with(SLEEP_BEFORE_SMOKE_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -80,6 +84,7 @@ async def test_self_smoke_propagates_exit_code():
     )
 
     assert result == 1
+    sleep_fn.assert_awaited_once_with(SLEEP_BEFORE_SMOKE_SECONDS)
 
 
 @pytest.mark.asyncio
