@@ -27,6 +27,7 @@ def _envelope_dict(**overrides):
             "signal_score": 0.5,
             "signal_direction": "post",
             "strategy_attributes": {"rate": 0.0001, "mean": 0.00009, "sigma": 0.00002},
+            "budget_seconds": 43200,
         },
     }
     base.update(overrides)
@@ -136,3 +137,72 @@ def test_health_check_signal_pipeline_degraded_without_error_rejected():
             "check_target": "signal_pipeline",
             "status": "degraded",
         })
+
+
+def test_signal_event_payload_accepts_staleness_metadata() -> None:
+    """SignalPayload accepts new optional fields: is_stale, stale_seconds, budget_seconds.
+
+    Defaults: is_stale=False, stale_seconds=0.
+    budget_seconds is required: every signal carries its cell's budget.
+    Backward compat: existing payload with strategy_attributes still parses with budget_seconds.
+    """
+    from bfx_funding_bot.modules.marketfeed.schemas import SignalPayload
+
+    # Backward compat: parse existing shape, only budget_seconds added as required
+    payload_old = SignalPayload(
+        signal_score=0.5,
+        signal_direction="post",
+        strategy_attributes={"rate": 0.0001, "mean": 0.00009, "sigma": 0.00002},
+        budget_seconds=43200,  # 12h, required field
+    )
+    assert payload_old.is_stale is False
+    assert payload_old.stale_seconds == 0
+
+    # New shape: with stale metadata
+    payload_new = SignalPayload(
+        signal_score=0.5,
+        signal_direction="post",
+        strategy_attributes={"rate": 0.0001, "mean": 0.00009, "sigma": 0.00002},
+        is_stale=True,
+        stale_seconds=21600,  # 6h
+        budget_seconds=43200,
+    )
+    assert payload_new.is_stale is True
+    assert payload_new.stale_seconds == 21600
+    assert payload_new.budget_seconds == 43200
+
+
+def test_health_check_payload_accepts_reason_taxonomy() -> None:
+    """HealthCheckPayload accepts reason field + reason-specific optional fields.
+
+    Reasons in scope: stale_exceeded (SIGNAL_PIPELINE), connection_lost
+    (BITFINEX_WS/REST), db_unavailable (DB), task_hung (any task).
+    """
+    from bfx_funding_bot.modules.marketfeed.schemas import (
+        HealthCheckPayload,
+        HealthStatus,
+        HealthTarget,
+    )
+
+    # New shape: SIGNAL_PIPELINE stale_exceeded (degraded requires error_message)
+    p1 = HealthCheckPayload(
+        check_target=HealthTarget.SIGNAL_PIPELINE,
+        status=HealthStatus.DEGRADED,
+        error_message="stale_exceeded fUSD_p30_rate_percentile",
+        reason="stale_exceeded",
+        stale_seconds=46800,  # 13h
+        budget_seconds=43200,  # 12h
+    )
+    assert p1.reason == "stale_exceeded"
+    assert p1.stale_seconds == 46800
+
+    # Backward compat: existing BITFINEX_WS healthy payload without reason still parses
+    # BITFINEX_WS requires last_msg_age_ms + reconnect_count_last_hour
+    p2 = HealthCheckPayload(
+        check_target=HealthTarget.BITFINEX_WS,
+        status=HealthStatus.HEALTHY,
+        last_msg_age_ms=1000,
+        reconnect_count_last_hour=0,
+    )
+    assert p2.reason is None
+    assert p2.stale_seconds is None

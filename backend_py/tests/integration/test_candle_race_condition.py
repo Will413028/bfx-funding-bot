@@ -17,6 +17,7 @@ from bfx_funding_bot.external.bitfinex.ws import CandleMessage
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow  # noqa: F401
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 
 @pytest.mark.integration
@@ -43,7 +44,7 @@ async def test_late_revision_within_buffer_window(sqlite_engine: AsyncEngine) ->
     await queue.put(revision)
     await queue.put(None)
 
-    writer = CandleWriter(queue=queue, session_factory=factory)
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
     await writer.run()
 
     async with factory() as verify_session:

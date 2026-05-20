@@ -60,11 +60,31 @@ class HealthProbe:
     Existing API: update() for HealthTarget state (WS / DB / Redis status).
     Added (D4): record_heartbeat() for sub-task progress timestamps and
     last_active_ts dict keyed by sub-task name.
+    Added (Phase 4.3): cell_pipeline_status registry for per-cell
+    SIGNAL_PIPELINE state — readable by scan_staleness carve-out (Task 5).
     """
 
     def __init__(self) -> None:
         self._state: dict[HealthTarget, _TargetState] = {}
         self.last_active_ts: dict[str, datetime] = {}
+        # Per-cell SIGNAL_PIPELINE health state for sticky transition logic.
+        # Keyed by pair_id (strategy:cell_id) so two strategies on the same
+        # cell are independent state machines.
+        self.cell_pipeline_status: dict[str, HealthStatus] = {}
+
+    def get_cell_pipeline_status(self, pair_id: str) -> HealthStatus | None:
+        """Return current SIGNAL_PIPELINE status for a cell x strategy pair.
+
+        Used by scan_staleness carve-out (Task 5) — SIGNAL_PIPELINE DEGRADED
+        with reason=stale_exceeded never escalates to fatal. Keyed by pair_id
+        (strategy:cell_id format) since two strategies on same cell are
+        independent state machines.
+        """
+        return self.cell_pipeline_status.get(pair_id)
+
+    def set_cell_pipeline_status(self, pair_id: str, status: HealthStatus) -> None:
+        """Update per-cell pipeline status. Called by daemon LOCF emit path."""
+        self.cell_pipeline_status[pair_id] = status
 
     def record_heartbeat(self, sub_task: str) -> None:
         """Sub-task calls this each time it completes a progress unit."""
@@ -170,11 +190,29 @@ class HealthMonitor:
         """Check last_active_ts for each sub-task. Emit + return records for
         any stale. Raises FatalError on 3× threshold breach.
 
+        SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
+        Per-cell pipeline state is tracked separately in
+        probe.cell_pipeline_status (keyed by pair_id). These cells represent
+        expected sparseness (Bitfinex p30 channel physics), NOT system failure
+        — reason=stale_exceeded NEVER escalates to FatalError. The carve-out
+        is structural: SIGNAL_PIPELINE is never registered in last_active_ts,
+        so the fatal escalation path physically cannot touch it. Instead, a
+        separate read-only pass emits observability events for degraded cells
+        but always returns without raising.
+
         Returns: list of {sub_task, severity, age_s} for stale tasks (for
                  inspection / test). Tasks under threshold are not included.
+                 SIGNAL_PIPELINE cells appear as
+                 {sub_task: "SIGNAL_PIPELINE:<pair_id>", severity: "degraded"|"down",
+                  age_s: None} — never with severity "fatal".
         """
         now = datetime.now(UTC)
         stale: list[dict[str, Any]] = []
+
+        # ── Existing per-sub-task heartbeat scan ──────────────────────────────
+        # FatalError CAN be raised here for connection_lost / db_unavailable /
+        # task_hung reasons. SIGNAL_PIPELINE keys are never inserted into
+        # last_active_ts so they are physically excluded from this path.
         for sub_task, last_ts in self.probe.last_active_ts.items():
             threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
             age_s = (now - last_ts).total_seconds()
@@ -212,4 +250,36 @@ class HealthMonitor:
                     f"sub_task={sub_task} stale {age_s:.0f}s > "
                     f"3× threshold ({3 * threshold}s) — escalating fatal"
                 )
+
+        # ── SIGNAL_PIPELINE per-cell scan (carve-out: NEVER raises FatalError) ─
+        # Reads cell_pipeline_status populated by daemon LOCF emit path (Task 4).
+        # reason=stale_exceeded is expected sparseness — spec explicitly prohibits
+        # fatal escalation regardless of how long the cell has been DEGRADED.
+        # We emit a WARN for observability but always continue without escalating.
+        for pair_id, cell_status in self.probe.cell_pipeline_status.items():
+            if cell_status in (HealthStatus.DEGRADED, HealthStatus.DOWN):
+                severity = cell_status.value  # "degraded" or "down"
+                stale.append({
+                    "sub_task": f"SIGNAL_PIPELINE:{pair_id}",
+                    "severity": severity,
+                    "age_s": None,  # wall-clock age not tracked here; daemon owns TTL
+                })
+                await self.axiom.emit({
+                    "timestamp": now.isoformat(),
+                    "level": Level.WARN.value,
+                    "phase": self.phase.value,
+                    "strategy": None, "cell": pair_id,
+                    "event_type": EventType.HEALTH_CHECK.value,
+                    "correlation_id": str(uuid4()),
+                    "payload": {
+                        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+                        "status": severity,
+                        "error_message": (
+                            f"pair_id={pair_id} pipeline {cell_status.value.upper()} "
+                            "(stale_exceeded — expected sparseness, not escalating)"
+                        ),
+                    },
+                })
+                # NOTE: no FatalError here — spec carve-out for stale_exceeded
+
         return stale
