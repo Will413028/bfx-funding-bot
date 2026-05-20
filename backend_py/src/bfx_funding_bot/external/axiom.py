@@ -46,11 +46,23 @@ class AxiomConfig:
     batch_size: int = 100
     flush_interval_s: float = 1.0
     request_timeout_s: float = 10.0
-    # Bug B fix (5/20): hook fired after every non-empty flush (success or
-    # fallback). Daemon wires this to HealthProbe.record_heartbeat("axiom")
-    # so scan_staleness can detect axiom task hung (was DONE_WITH_CONCERNS
-    # in 4.2.0 D4 — task was in SUB_TASK_THRESHOLDS but never recorded).
-    # NOT called on AxiomAuthError (auth fail → daemon SIGTERM, no progress).
+    # LIVENESS heartbeat (Phase 4.2.1+ tuning): fired by AxiomClient after
+    # every _flush_loop iteration regardless of batch size. Daemon wires
+    # this to HealthProbe.record_heartbeat("axiom") so scan_staleness
+    # detects the loop task hung.
+    #
+    # Original 0f3dbe3 design fired on every non-empty flush (PROGRESS
+    # semantic). Bot emits axiom events in bursts at hourly scheduler ticks;
+    # queue is empty ~58min/hr → PROGRESS heartbeat decayed past the 60s
+    # threshold ~every 90s, generating ~36 false-positive degraded warns/hr
+    # (5/20 prod pattern). LIVENESS semantic aligns axiom with ws /
+    # scheduler / db_keepalive heartbeats — heartbeat means "task alive",
+    # not "task processed work". Real axiom HTTP failures still surface via
+    # _consecutive_fail → fallback_mode (stdout dump) separately.
+    #
+    # NOT called when _flush_loop dies (e.g. AxiomAuthError raised by
+    # flush() → loop task ends → no more iterations → heartbeat decays →
+    # scan_staleness escalates to FatalError correctly).
     on_flush: Callable[[], None] | None = field(default=None, repr=False)
 
 
@@ -96,16 +108,20 @@ class AxiomClient:
         if not batch:
             return
         await self._send_batch(batch)
-        # AxiomAuthError raised inside _send_batch propagates out before
-        # this point — heartbeat correctly skipped on auth fail.
-        if self.cfg.on_flush is not None:
-            self.cfg.on_flush()
+        # NOTE: on_flush is LIVENESS, not PROGRESS — fired by _flush_loop
+        # after each iteration, not here. See AxiomConfig.on_flush docstring.
 
     async def _flush_loop(self) -> None:
         try:
             while True:
                 await asyncio.sleep(self.cfg.flush_interval_s)
                 await self.flush()  # no-op if queue empty
+                # LIVENESS heartbeat: fires after every iteration regardless
+                # of batch size. AxiomAuthError raised by flush() above skips
+                # this and exits the loop via the outer except → no more
+                # heartbeats → scan_staleness escalates.
+                if self.cfg.on_flush is not None:
+                    self.cfg.on_flush()
         except asyncio.CancelledError:
             raise
         except AxiomAuthError:
