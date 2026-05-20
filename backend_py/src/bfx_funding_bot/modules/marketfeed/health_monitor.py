@@ -60,11 +60,31 @@ class HealthProbe:
     Existing API: update() for HealthTarget state (WS / DB / Redis status).
     Added (D4): record_heartbeat() for sub-task progress timestamps and
     last_active_ts dict keyed by sub-task name.
+    Added (Phase 4.3): cell_pipeline_status registry for per-cell
+    SIGNAL_PIPELINE state — readable by scan_staleness carve-out (Task 5).
     """
 
     def __init__(self) -> None:
         self._state: dict[HealthTarget, _TargetState] = {}
         self.last_active_ts: dict[str, datetime] = {}
+        # Per-cell SIGNAL_PIPELINE health state for sticky transition logic.
+        # Keyed by pair_id (strategy:cell_id) so two strategies on the same
+        # cell are independent state machines.
+        self.cell_pipeline_status: dict[str, HealthStatus] = {}
+
+    def get_cell_pipeline_status(self, pair_id: str) -> HealthStatus | None:
+        """Return current SIGNAL_PIPELINE status for a cell x strategy pair.
+
+        Used by scan_staleness carve-out (Task 5) — SIGNAL_PIPELINE DEGRADED
+        with reason=stale_exceeded never escalates to fatal. Keyed by pair_id
+        (strategy:cell_id format) since two strategies on same cell are
+        independent state machines.
+        """
+        return self.cell_pipeline_status.get(pair_id)
+
+    def set_cell_pipeline_status(self, pair_id: str, status: HealthStatus) -> None:
+        """Update per-cell pipeline status. Called by daemon LOCF emit path."""
+        self.cell_pipeline_status[pair_id] = status
 
     def record_heartbeat(self, sub_task: str) -> None:
         """Sub-task calls this each time it completes a progress unit."""

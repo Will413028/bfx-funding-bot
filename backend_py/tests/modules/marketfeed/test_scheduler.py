@@ -78,16 +78,19 @@ def _make_tick_handler(
     axiom: MagicMock,
     raw_candles_provider: list[FundingCandle],
     cell: CellConfig,
-) -> tuple[dict[str, Any], Any]:
+    probe: HealthProbe | None = None,
+) -> tuple[HealthProbe, Any]:
     """
     Build a minimal on_scheduler_tick closure that replicates daemon.py logic:
     - get_up_to returns raw_candles_provider
     - LOCF fill → tier check → emit
-    Returns (_cell_pipeline_status dict, tick coroutine function).
+    Returns (probe, tick coroutine function).
+    Cell pipeline status is stored in probe.cell_pipeline_status keyed by pair_id.
     """
     engine = _make_signal_engine(axiom, cell)
     registry = _make_registry(cell)
-    _cell_pipeline_status: dict[str, HealthStatus] = {}
+    if probe is None:
+        probe = HealthProbe()
 
     async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
         from datetime import UTC, datetime
@@ -106,9 +109,8 @@ def _make_tick_handler(
 
         if not filled:
             budget_seconds = budget_hours * 3600
-            prev = _cell_pipeline_status.get(cell.pair_id)
-            if prev != HealthStatus.DEGRADED:
-                _cell_pipeline_status[cell.pair_id] = HealthStatus.DEGRADED
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
                 await axiom.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
@@ -122,7 +124,7 @@ def _make_tick_handler(
                         "status": HealthStatus.DEGRADED.value,
                         "error_message": "stale_exceeded: no candles in lookback window",
                         "reason": "stale_exceeded",
-                        "stale_seconds": budget_seconds + 3600,
+                        "stale_seconds": None,  # no candles → no meaningful age
                         "budget_seconds": budget_seconds,
                     },
                 })
@@ -132,9 +134,8 @@ def _make_tick_handler(
 
         if latest.candle is None:
             budget_seconds = budget_hours * 3600
-            prev = _cell_pipeline_status.get(cell.pair_id)
-            if prev != HealthStatus.DEGRADED:
-                _cell_pipeline_status[cell.pair_id] = HealthStatus.DEGRADED
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
                 await axiom.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
@@ -154,9 +155,8 @@ def _make_tick_handler(
                 })
             return
 
-        prev = _cell_pipeline_status.get(cell.pair_id)
-        if prev == HealthStatus.DEGRADED:
-            _cell_pipeline_status[cell.pair_id] = HealthStatus.HEALTHY
+        if probe.get_cell_pipeline_status(cell.pair_id) == HealthStatus.DEGRADED:
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
             await axiom.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
@@ -171,7 +171,7 @@ def _make_tick_handler(
                 },
             })
         else:
-            _cell_pipeline_status[cell.pair_id] = HealthStatus.HEALTHY
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
 
         await engine.process_candle(
             cell=cell,
@@ -181,7 +181,7 @@ def _make_tick_handler(
             stale_seconds=latest.stale_seconds,
         )
 
-    return _cell_pipeline_status, on_scheduler_tick
+    return probe, on_scheduler_tick
 
 
 # ── existing scheduler tests ──────────────────────────────────────────────────
@@ -315,11 +315,11 @@ async def test_no_duplicate_degraded_on_subsequent_stale_ticks() -> None:
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
 
-    status_dict, tick = _make_tick_handler(axiom, raw, cell)
+    probe, tick = _make_tick_handler(axiom, raw, cell)
 
     # Tick 1 — transitions to DEGRADED
     await tick(cell, _TICK_MTS)
-    assert status_dict.get(cell.pair_id) == HealthStatus.DEGRADED
+    assert probe.cell_pipeline_status.get(cell.pair_id) == HealthStatus.DEGRADED
     health_after_tick1 = [e for e in captured if e["event_type"] == EventType.HEALTH_CHECK.value]
     assert len(health_after_tick1) == 1, "Tick 1 must emit exactly one DEGRADED"
 
@@ -342,64 +342,18 @@ async def test_emit_healthy_restore_on_transition_from_stale_exceeded() -> None:
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
 
-    status_dict, _ = _make_tick_handler(axiom, stale_raw, cell)
+    shared_probe, _ = _make_tick_handler(axiom, stale_raw, cell)
 
-    # We need two separate tick handlers sharing the same _cell_pipeline_status.
-    # Rebuild tick2 with fresh candle but same status_dict.
+    # We need two separate tick handlers sharing the same probe.cell_pipeline_status.
+    # Rebuild tick2 with fresh candle but same shared probe.
     candle_mts_tick2 = _TICK_MTS + _1H_MS - _1H_MS  # = _TICK_MTS
     fresh_raw = [_candle(candle_mts_tick2)]
 
-    engine2 = _make_signal_engine(axiom, cell)
-    registry2 = _make_registry(cell)
+    _, tick_fresh = _make_tick_handler(axiom, fresh_raw, cell, probe=shared_probe)
 
-    async def tick_fresh(cell: CellConfig, mts: int) -> None:
-        from datetime import UTC, datetime
-        from uuid import uuid4
-
-        from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
-
-        candle_mts = mts - _TIMEFRAME_MS[cell.timeframe]
-        budget_hours: int = cell.staleness_budget_hours
-        raw = fresh_raw
-        filled = reindex_and_ffill(raw, ref_mts=candle_mts, max_gap_hours=budget_hours)
-
-        if not filled:
-            return
-        latest = filled[-1]
-        if latest.candle is None:
-            return
-
-        prev = status_dict.get(cell.pair_id)
-        if prev == HealthStatus.DEGRADED:
-            status_dict[cell.pair_id] = HealthStatus.HEALTHY
-            await axiom.emit({
-                "timestamp": datetime.now(UTC).isoformat(),
-                "level": Level.INFO.value,
-                "phase": Phase.PAPER.value,
-                "strategy": None,
-                "cell": cell.cell_id,
-                "event_type": EventType.HEALTH_CHECK.value,
-                "correlation_id": str(uuid4()),
-                "payload": {
-                    "check_target": HealthTarget.SIGNAL_PIPELINE.value,
-                    "status": HealthStatus.HEALTHY.value,
-                },
-            })
-        else:
-            status_dict[cell.pair_id] = HealthStatus.HEALTHY
-
-        await engine2.process_candle(
-            cell=cell,
-            candle=latest.candle,
-            registry=registry2,
-            is_stale=latest.is_stale,
-            stale_seconds=latest.stale_seconds,
-        )
-
-    # Tick 1: stale tick — goes DEGRADED via stale_raw in status_dict
-    # We drive the status_dict directly (simpler than a full tick1 call that would
-    # use the tick handler above — they share different raw candle lists):
-    status_dict[cell.pair_id] = HealthStatus.DEGRADED
+    # Tick 1: stale tick — goes DEGRADED; drive probe state directly (simpler
+    # than a full tick1 call — shared_probe is the authority for both handlers):
+    shared_probe.cell_pipeline_status[cell.pair_id] = HealthStatus.DEGRADED
 
     # Tick 2: fresh candle — should emit HEALTHY restore + signal
     await tick_fresh(cell, _TICK_MTS + _1H_MS)
