@@ -234,6 +234,35 @@ class TestStalenessScan:
 
         assert "candle_writer" in str(exc.value)
 
+    async def test_signal_pipeline_down_also_emits_warn_no_fatal(
+        self, monitor, fake_axiom,
+    ) -> None:
+        """SIGNAL_PIPELINE DOWN (future-proofing) also emits without escalating fatal.
+
+        Today's daemon LOCF path only sets DEGRADED, but the guard accommodates DOWN
+        for forward-compat (cell permanent disqualification or similar).
+        """
+        pair_id = "rate_percentile:fUSD_p30_1h"
+        monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DOWN)
+
+        # No exception should be raised — spec carve-out covers both DEGRADED and DOWN
+        result = await monitor.scan_staleness()
+
+        assert len(result) == 1
+        rec = result[0]
+        assert rec["sub_task"] == f"SIGNAL_PIPELINE:{pair_id}"
+        assert rec["severity"] == "down"
+        assert rec["age_s"] is None
+
+        # Observability emit happened (WARN, not ERROR/FATAL)
+        assert len(fake_axiom.emitted) == 1
+        emitted = fake_axiom.emitted[0]
+        assert emitted["level"] == "warn"
+        assert emitted["payload"]["check_target"] == "SIGNAL_PIPELINE"
+        assert emitted["payload"]["status"] == "down"
+        assert pair_id in emitted["payload"]["error_message"]
+        assert "not escalating" in emitted["payload"]["error_message"]
+
 
 class TestSubTaskThresholds:
     def test_thresholds_defined_for_all_subtasks(self):
