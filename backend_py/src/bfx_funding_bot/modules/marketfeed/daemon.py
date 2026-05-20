@@ -352,6 +352,46 @@ class Daemon:
             # Loop continues → tries `candles()` again with new client
 
 
+async def _emit_locf_degraded(
+    axiom: AxiomClient,
+    config: MarketfeedConfig,
+    cell: CellConfig,
+    stale_seconds: int | None,
+    budget_seconds: int,
+) -> None:
+    """Emit HealthCheckPayload SIGNAL_PIPELINE DEGRADED reason=stale_exceeded.
+
+    Called from two paths: (a) no candles in lookback window (stale_seconds=None),
+    (b) source candle older than budget (stale_seconds = computed wall-clock gap).
+
+    # LOCF DEGRADED events carry cell_id in the "cell" envelope field (HealthMonitor._emit
+    # always writes "cell": None — intentional divergence to enable per-cell dashboards).
+    """
+    error_message = (
+        "stale_exceeded: no candles in lookback window"
+        if stale_seconds is None
+        else "stale_exceeded"
+    )
+    payload: dict[str, object] = {
+        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+        "status": HealthStatus.DEGRADED.value,
+        "error_message": error_message,
+        "reason": "stale_exceeded",
+        "stale_seconds": stale_seconds,
+        "budget_seconds": budget_seconds,
+    }
+    await axiom.emit({
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": Level.WARN.value,
+        "phase": config.phase.value,
+        "strategy": None,
+        "cell": cell.cell_id,
+        "event_type": EventType.HEALTH_CHECK.value,
+        "correlation_id": str(uuid4()),
+        "payload": payload,
+    })
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -423,10 +463,6 @@ async def build_daemon(
         phase=config.phase, axiom=axiom, candles_repo=_CandlesRepoBridge(),
     )
 
-    # Per-cell signal-pipeline health state for sticky transition logic.
-    # Phase 4.3 LOCF: prevents duplicate DEGRADED emits on consecutive stale ticks.
-    _cell_pipeline_status: dict[str, HealthStatus] = {}
-
     async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
         # Scheduler fires AT the period boundary T (e.g. 11:00 UTC), but
         # Bitfinex's candle at mts=T is the OPEN of period [T, T+timeframe) —
@@ -462,29 +498,19 @@ async def build_daemon(
             cell.pair_id, mts, candle_mts, len(raw_candles), len(filled),
         )
 
+        # pair_id = strategy + cell_id; used as state key so two strategies on
+        # the same cell are independent SIGNAL_PIPELINE state machines
+        # (e.g. RP can be DEGRADED while MR is HEALTHY).
         if not filled:
             # No candles at all in lookback window — treat as hard-tier DEGRADED.
             budget_seconds = budget_hours * 3600
-            prev_status = _cell_pipeline_status.get(cell.pair_id)
-            if prev_status != HealthStatus.DEGRADED:
-                _cell_pipeline_status[cell.pair_id] = HealthStatus.DEGRADED
-                await axiom.emit({
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "level": Level.WARN.value,
-                    "phase": config.phase.value,
-                    "strategy": None,
-                    "cell": cell.cell_id,
-                    "event_type": EventType.HEALTH_CHECK.value,
-                    "correlation_id": str(uuid4()),
-                    "payload": {
-                        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
-                        "status": HealthStatus.DEGRADED.value,
-                        "error_message": "stale_exceeded: no candles in lookback window",
-                        "reason": "stale_exceeded",
-                        "stale_seconds": budget_seconds + 3600,
-                        "budget_seconds": budget_seconds,
-                    },
-                })
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
+                await _emit_locf_degraded(
+                    axiom, config, cell,
+                    stale_seconds=None,  # no candles → no meaningful age
+                    budget_seconds=budget_seconds,
+                )
             return
 
         latest = filled[-1]
@@ -492,33 +518,19 @@ async def build_daemon(
         if latest.candle is None:
             # Hard tier: stale_seconds > budget — skip signal, emit DEGRADED once.
             budget_seconds = budget_hours * 3600
-            prev_status = _cell_pipeline_status.get(cell.pair_id)
-            if prev_status != HealthStatus.DEGRADED:
-                _cell_pipeline_status[cell.pair_id] = HealthStatus.DEGRADED
-                await axiom.emit({
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "level": Level.WARN.value,
-                    "phase": config.phase.value,
-                    "strategy": None,
-                    "cell": cell.cell_id,
-                    "event_type": EventType.HEALTH_CHECK.value,
-                    "correlation_id": str(uuid4()),
-                    "payload": {
-                        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
-                        "status": HealthStatus.DEGRADED.value,
-                        "error_message": "stale_exceeded",
-                        "reason": "stale_exceeded",
-                        "stale_seconds": latest.stale_seconds,
-                        "budget_seconds": budget_seconds,
-                    },
-                })
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
+                await _emit_locf_degraded(
+                    axiom, config, cell,
+                    stale_seconds=latest.stale_seconds,
+                    budget_seconds=budget_seconds,
+                )
             return
 
         # Soft tier or fresh — emit signal with staleness metadata.
-        prev_status = _cell_pipeline_status.get(cell.pair_id)
-        if prev_status == HealthStatus.DEGRADED:
+        if probe.get_cell_pipeline_status(cell.pair_id) == HealthStatus.DEGRADED:
             # HEALTHY restore transition
-            _cell_pipeline_status[cell.pair_id] = HealthStatus.HEALTHY
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
             await axiom.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
@@ -533,7 +545,7 @@ async def build_daemon(
                 },
             })
         else:
-            _cell_pipeline_status[cell.pair_id] = HealthStatus.HEALTHY
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
 
         # Unwrap LOCF-filled candles for strategy compute — strategies receive
         # FundingCandle objects with forward-filled rates (LOCF semantic).
