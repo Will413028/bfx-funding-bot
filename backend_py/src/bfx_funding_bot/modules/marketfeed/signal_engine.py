@@ -45,6 +45,24 @@ def _resolve_budget_seconds(cell: CellConfig) -> int:
     return cell.staleness_budget_hours * 3600
 
 
+def _resolve_staleness_budget_hours(cell: CellConfig) -> int:
+    """Resolve per-cell staleness_budget_hours assuming load_config() resolution.
+
+    Invariant: load_config() populates cell.staleness_budget_hours from
+    MarketfeedConfig.staleness_budget_hours_default before any signal processing.
+    None here = loader invariant violation = crash loud.
+
+    Parallel to _resolve_budget_seconds (which converts to seconds);
+    this returns raw hours for use as reindex_and_ffill max_gap_hours.
+    """
+    if cell.staleness_budget_hours is None:
+        raise AssertionError(
+            f"cell {cell.symbol}_{cell.period_agg}_{cell.strategy} "
+            "staleness_budget_hours not resolved; was load_config() called?"
+        )
+    return cell.staleness_budget_hours
+
+
 class _AxiomProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
@@ -108,14 +126,12 @@ class SignalEngine:
             # Apply LOCF to raw history so DivergenceReporter.check() rebuilds the
             # replay strategy on identical inputs → CP1 byte-equivalence holds on
             # sparse input.
-            budget_hours = cell.staleness_budget_hours or 2
-            locf_history = [
-                fc.candle
-                for fc in reindex_and_ffill(
-                    history, ref_mts=candle.mts, max_gap_hours=budget_hours,
-                )
-                if fc.candle is not None
-            ]
+            budget_hours = _resolve_staleness_budget_hours(cell)
+            # LOCF window is strategy-lookback-sized (not budget-sized) because replay only
+            # needs enough candles to rebuild strategy state. Daemon uses budget-sized
+            # window for staleness tier determination — different purpose, different size.
+            filled = reindex_and_ffill(history, ref_mts=candle.mts, max_gap_hours=budget_hours)
+            locf_history = [fc.candle for fc in filled if fc.candle is not None]
             divergence = self.reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
             if divergence is not None:
                 await self._emit_signal_divergence_warn(
