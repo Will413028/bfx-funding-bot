@@ -202,9 +202,9 @@ class HealthMonitor:
 
         Returns: list of {sub_task, severity, age_s} for stale tasks (for
                  inspection / test). Tasks under threshold are not included.
-                 SIGNAL_PIPELINE degraded cells appear as
-                 {sub_task: "SIGNAL_PIPELINE:<pair_id>", severity: "degraded",
-                  age_s: None} — never with severity "down" or "fatal".
+                 SIGNAL_PIPELINE cells appear as
+                 {sub_task: "SIGNAL_PIPELINE:<pair_id>", severity: "degraded"|"down",
+                  age_s: None} — never with severity "fatal".
         """
         now = datetime.now(UTC)
         stale: list[dict[str, Any]] = []
@@ -257,10 +257,11 @@ class HealthMonitor:
         # fatal escalation regardless of how long the cell has been DEGRADED.
         # We emit a WARN for observability but always continue without escalating.
         for pair_id, cell_status in self.probe.cell_pipeline_status.items():
-            if cell_status == HealthStatus.DEGRADED:
+            if cell_status in (HealthStatus.DEGRADED, HealthStatus.DOWN):
+                severity = cell_status.value  # "degraded" or "down"
                 stale.append({
                     "sub_task": f"SIGNAL_PIPELINE:{pair_id}",
-                    "severity": "degraded",
+                    "severity": severity,
                     "age_s": None,  # wall-clock age not tracked here; daemon owns TTL
                 })
                 await self.axiom.emit({
@@ -272,9 +273,9 @@ class HealthMonitor:
                     "correlation_id": str(uuid4()),
                     "payload": {
                         "check_target": "SIGNAL_PIPELINE",
-                        "status": HealthStatus.DEGRADED.value,
+                        "status": severity,
                         "error_message": (
-                            f"pair_id={pair_id} pipeline DEGRADED "
+                            f"pair_id={pair_id} pipeline {cell_status.value.upper()} "
                             "(stale_exceeded — expected sparseness, not escalating)"
                         ),
                     },
