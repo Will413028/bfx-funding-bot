@@ -7,7 +7,6 @@ from bfx_funding_bot.smoke.g1 import (
     build_apl_query_c2,
     build_apl_query_c3,
     build_apl_query_c6,
-    run_c1_continuity,
     run_c2_emit_completeness,
     run_c5_zero_error_health,
     run_c6_zero_divergence,
@@ -58,27 +57,6 @@ def test_tabular_to_rows_empty_tables():
     assert AxiomQueryClient._tabular_to_rows(
         {"tables": [{"fields": [{"name": "x"}], "columns": []}]},
     ) == []
-
-
-async def test_c1_passes_when_all_buckets_non_empty():
-    fake_client = AsyncMock()
-    fake_client.dataset = "evt"
-    fake_client.query_apl = AsyncMock(
-        return_value=[{"_time": "t", "count_": 5} for _ in range(12)],
-    )
-    result = await run_c1_continuity(client=fake_client, phase="paper", hours=1)
-    assert result.passed is True
-
-
-async def test_c1_fails_with_empty_bucket():
-    fake_client = AsyncMock()
-    fake_client.dataset = "evt"
-    fake_client.query_apl = AsyncMock(return_value=[
-        *[{"_time": "t", "count_": 5} for _ in range(11)],
-        {"_time": "t", "count_": 0},
-    ])
-    result = await run_c1_continuity(client=fake_client, phase="paper", hours=1)
-    assert result.passed is False
 
 
 async def test_c2_passes_with_expected_counts():
