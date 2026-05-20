@@ -272,7 +272,7 @@ class HealthMonitor:
                     "event_type": EventType.HEALTH_CHECK.value,
                     "correlation_id": str(uuid4()),
                     "payload": {
-                        "check_target": "SIGNAL_PIPELINE",
+                        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
                         "status": severity,
                         "error_message": (
                             f"pair_id={pair_id} pipeline {cell_status.value.upper()} "

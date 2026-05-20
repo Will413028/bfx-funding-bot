@@ -150,7 +150,7 @@ def build_f3_sparseness_rate(dataset: str, window_start: str, window_end: str) -
 ['{dataset}']
 | where _time >= datetime({window_start}) and _time <= datetime({window_end})
 | where event_type == "health_check"
-| where ['payload.check_target'] == "SIGNAL_PIPELINE"
+| where ['payload.check_target'] == "signal_pipeline"
 | where ['payload.reason'] == "stale_exceeded"
 | summarize stale_count_=count() by bin(_time, 1d), cell
 """.strip()
