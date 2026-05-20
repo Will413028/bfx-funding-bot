@@ -177,6 +177,63 @@ class TestStalenessScan:
         assert len(result) == 1
         assert result[0]["sub_task"] == "custom_task"
 
+    # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
+
+    async def test_no_fatal_escalation_for_signal_pipeline_stale_exceeded(
+        self, monitor, fake_axiom,
+    ) -> None:
+        """SIGNAL_PIPELINE DEGRADED (reason=stale_exceeded) never raises FatalError.
+
+        Simulates the case where a p30 cell has been marked DEGRADED by the
+        daemon LOCF emit path (Task 4) and scan_staleness is called. Per spec
+        Phase 4.3 carve-out, stale_exceeded is expected sparseness — the
+        monitor must stay DEGRADED and NEVER escalate to fatal, even if the
+        cell has been degraded for a long time.
+        """
+        pair_id = "rate_percentile:fUSD_p30_1h"
+        monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DEGRADED)
+
+        # No exception should be raised — even though DEGRADED is present
+        result = await monitor.scan_staleness()
+
+        # Record appears in stale list with SIGNAL_PIPELINE prefix, never "down"
+        assert len(result) == 1
+        rec = result[0]
+        assert rec["sub_task"] == f"SIGNAL_PIPELINE:{pair_id}"
+        assert rec["severity"] == "degraded"
+        assert rec["age_s"] is None
+
+        # Observability emit happened (WARN, not ERROR/FATAL)
+        assert len(fake_axiom.emitted) == 1
+        emitted = fake_axiom.emitted[0]
+        assert emitted["level"] == "warn"
+        assert emitted["payload"]["check_target"] == "SIGNAL_PIPELINE"
+        assert emitted["payload"]["status"] == "degraded"
+        assert pair_id in emitted["payload"]["error_message"]
+        assert "not escalating" in emitted["payload"]["error_message"]
+
+    async def test_fatal_escalation_for_other_reasons_unchanged(
+        self, monitor,
+    ) -> None:
+        """Phase 4.2.0 D4 behavior preserved: non-SIGNAL_PIPELINE targets still
+        raise FatalError at 3× threshold.
+
+        SIGNAL_PIPELINE DEGRADED is present simultaneously — it must NOT
+        prevent the fatal raise for the other sub-task (candle_writer here).
+        """
+        pair_id = "rate_percentile:fUSD_p30_1h"
+        monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DEGRADED)
+
+        # candle_writer threshold = 65*60 s; 3× = 195*60 s → use 200*60 s
+        monitor.probe.last_active_ts["candle_writer"] = (
+            datetime.now(UTC) - timedelta(seconds=200 * 60)
+        )
+
+        with pytest.raises(FatalError) as exc:
+            await monitor.scan_staleness()
+
+        assert "candle_writer" in str(exc.value)
+
 
 class TestSubTaskThresholds:
     def test_thresholds_defined_for_all_subtasks(self):
