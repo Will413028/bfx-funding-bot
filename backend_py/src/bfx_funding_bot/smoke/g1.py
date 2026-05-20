@@ -19,7 +19,9 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -133,7 +135,19 @@ def build_apl_query_c6(phase: str, dataset: str, hours: int) -> str:
 """.strip()
 
 
-async def run_c1_continuity(*, client: AxiomQueryClient, phase: str, hours: int) -> CheckResult:
+async def run_c1_continuity(
+    *,
+    client: AxiomQueryClient,
+    phase: str,
+    hours: int,
+    cells: list[dict[str, Any]] | None = None,  # noqa: ARG001 — consumed in Task 3
+    now_fn: Callable[[], datetime] | None = None,  # noqa: ARG001 — consumed in Task 3
+) -> CheckResult:
+    """C1 continuity check.
+
+    NOTE: This is the legacy bucket-based implementation. Task 3 replaces it with
+    per-cell max-gap + recency. `cells` and `now_fn` params accepted but unused here.
+    """
     apl = build_apl_query_c1(phase, client.dataset, hours)
     buckets = await client.query_apl(apl)
     expected = hours * 12
@@ -234,53 +248,81 @@ async def run_c6_zero_divergence(
     )
 
 
-async def main_async(args: argparse.Namespace) -> int:
-    phase = os.environ.get("BFX_PHASE", "paper")
+async def run_smoke_async(
+    *,
+    phase: str,
+    hours: int,
+    cells: list[dict[str, Any]],
+    only: set[str] | None = None,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> int:
+    """Run G1 smoke checks. Returns exit code (0=pass, 1=fail, 2=auth, 3=config).
+
+    Args:
+        phase: BFX phase (paper / shadow / canary).
+        hours: lookback window in hours.
+        cells: cell config dicts (each with strategy, symbol, period_agg, timeframe).
+        only: subset of check names to run (None = all).
+        now_fn: injectable clock for C1 recency check (UTC aware).
+    """
     axiom_api_key = os.environ.get("AXIOM_API_KEY", "")
     axiom_dataset = os.environ.get("AXIOM_DATASET", "")
     if not axiom_api_key or not axiom_dataset:
         print("ERROR: AXIOM_API_KEY and AXIOM_DATASET required", file=sys.stderr)
         return 3
 
-    cells_yaml = Path(
-        args.cells_yaml or Path(__file__).parents[3] / "configs" / "cells.yaml",
-    )
-    cells_data = yaml.safe_load(cells_yaml.read_text())
-    cells = cells_data["cells"]
-
-    only = set((args.only or "").split(",")) if args.only else None
     client = AxiomQueryClient(api_key=axiom_api_key, dataset=axiom_dataset)
-
     try:
         results: list[CheckResult] = []
         if only is None or "C1" in only:
-            results.append(await run_c1_continuity(client=client, phase=phase, hours=args.hours))
+            results.append(await run_c1_continuity(
+                client=client, phase=phase, hours=hours, cells=cells, now_fn=now_fn,
+            ))
         if only is None or "C2" in only:
             results.append(await run_c2_emit_completeness(
-                client=client, phase=phase, hours=args.hours, cells=cells,
+                client=client, phase=phase, hours=hours, cells=cells,
             ))
         if only is None or "C3" in only:
             results.append(await run_c3_range_conformance(
-                client=client, phase=phase, hours=args.hours, cells=cells,
+                client=client, phase=phase, hours=hours, cells=cells,
             ))
         if only is None or "C5" in only:
             results.append(await run_c5_zero_error_health(
-                client=client, phase=phase, hours=args.hours,
+                client=client, phase=phase, hours=hours,
             ))
         if only is None or "C6" in only:
             results.append(await run_c6_zero_divergence(
-                client=client, phase=phase, hours=args.hours,
+                client=client, phase=phase, hours=hours,
             ))
         results.append(CheckResult(
             "C4: dashboard liveness", True, skipped=True,
             detail="(4.1 V1 -- dashboard widget belongs to 4.4)",
         ))
-    except SystemExit:
-        return 2
+
+        # Print + decide exit code
+        all_passed = True
+        for r in results:
+            tag = "SKIP" if r.skipped else ("PASS" if r.passed else "FAIL")
+            print(f"[ {tag} ] {r.name:40s} {r.detail}")
+            if not r.skipped and not r.passed:
+                all_passed = False
+        return 0 if all_passed else 1
+    except SystemExit as e:
+        return int(e.code) if e.code is not None else 2
     finally:
         await client.aclose()
 
-    return _report(results, args)
+
+async def main_async(args: argparse.Namespace) -> int:
+    """CLI entrypoint: load yaml, parse env, call run_smoke_async."""
+    phase = os.environ.get("BFX_PHASE", "paper")
+    cells_yaml = Path(
+        args.cells_yaml or Path(__file__).parents[3] / "configs" / "cells.yaml",
+    )
+    cells_data = yaml.safe_load(cells_yaml.read_text())
+    cells = cells_data["cells"]
+    only = set((args.only or "").split(",")) if args.only else None
+    return await run_smoke_async(phase=phase, hours=args.hours, cells=cells, only=only)
 
 
 def _report(results: list[CheckResult], args: argparse.Namespace) -> int:
