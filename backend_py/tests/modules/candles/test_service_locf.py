@@ -83,7 +83,7 @@ def test_locf_caps_at_budget() -> None:
         assert filled[i].stale_seconds == i * 3600
 
 
-def test_locf_preserves_ref_mts_alignment() -> None:
+def test_locf_ffills_past_last_candle() -> None:
     """Output last slot mts must equal ref_mts (hourly grid aligned)."""
     start_mts = 1_700_000_000_000
     candles = [_make_candle(start_mts + i * HOUR_MS) for i in range(5)]
