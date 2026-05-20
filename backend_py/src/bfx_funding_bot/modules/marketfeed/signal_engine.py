@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
@@ -28,6 +29,38 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 
 log = logging.getLogger(__name__)
+
+def _resolve_budget_seconds(cell: CellConfig) -> int:
+    """Convert resolved per-cell staleness_budget_hours to seconds.
+
+    Invariant: load_config() must have populated cell.staleness_budget_hours
+    from MarketfeedConfig.staleness_budget_hours_default before emit time.
+    None here = loader invariant violation = crash loud.
+    """
+    if cell.staleness_budget_hours is None:
+        raise AssertionError(
+            f"cell {cell.symbol}_{cell.period_agg}_{cell.strategy} "
+            "staleness_budget_hours not resolved; was load_config() called?"
+        )
+    return cell.staleness_budget_hours * 3600
+
+
+def _resolve_staleness_budget_hours(cell: CellConfig) -> int:
+    """Resolve per-cell staleness_budget_hours assuming load_config() resolution.
+
+    Invariant: load_config() populates cell.staleness_budget_hours from
+    MarketfeedConfig.staleness_budget_hours_default before any signal processing.
+    None here = loader invariant violation = crash loud.
+
+    Parallel to _resolve_budget_seconds (which converts to seconds);
+    this returns raw hours for use as reindex_and_ffill max_gap_hours.
+    """
+    if cell.staleness_budget_hours is None:
+        raise AssertionError(
+            f"cell {cell.symbol}_{cell.period_agg}_{cell.strategy} "
+            "staleness_budget_hours not resolved; was load_config() called?"
+        )
+    return cell.staleness_budget_hours
 
 
 class _AxiomProtocol(Protocol):
@@ -61,6 +94,8 @@ class SignalEngine:
         cell: CellConfig,
         candle: FundingCandle,
         registry: StrategyRegistry,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
         correlation_id = uuid4()
         strategy = registry.get(cell)
@@ -76,17 +111,32 @@ class SignalEngine:
             )
             return
 
-        await self._emit_signal(correlation_id, cell, live_signal)
+        await self._emit_signal(
+            correlation_id, cell, live_signal,
+            is_stale=is_stale, stale_seconds=stale_seconds,
+        )
 
         try:
             history = await self.candles_repo.get_up_to(
                 symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
                 mts_inclusive=candle.mts, lookback=_lookback(cell) + 1,
             )
-            divergence = self.reporter.check(cell=cell, history=history, live_signal=live_signal)
+            # Phase 4.3 LOCF: replay path must see the same LOCF-processed candles
+            # as the live path (daemon applies reindex_and_ffill before calling here).
+            # Apply LOCF to raw history so DivergenceReporter.check() rebuilds the
+            # replay strategy on identical inputs → CP1 byte-equivalence holds on
+            # sparse input.
+            budget_hours = _resolve_staleness_budget_hours(cell)
+            # LOCF window is strategy-lookback-sized (not budget-sized) because replay only
+            # needs enough candles to rebuild strategy state. Daemon uses budget-sized
+            # window for staleness tier determination — different purpose, different size.
+            filled = reindex_and_ffill(history, ref_mts=candle.mts, max_gap_hours=budget_hours)
+            locf_history = [fc.candle for fc in filled if fc.candle is not None]
+            divergence = self.reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
             if divergence is not None:
                 await self._emit_signal_divergence_warn(
                     correlation_id, cell, live_signal, divergence,
+                    is_stale=is_stale, stale_seconds=stale_seconds,
                 )
         except Exception:
             log.exception("divergence_check_exception cell=%s", cell.pair_id)
@@ -94,8 +144,15 @@ class SignalEngine:
         await self._emit_decision(correlation_id, cell, live_signal)
 
     async def _emit_signal(
-        self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
+        self,
+        correlation_id: UUID,
+        cell: CellConfig,
+        sig: ExtractedSignal,
+        *,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
+        budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
@@ -108,13 +165,23 @@ class SignalEngine:
                 "signal_score": sig.signal_score,
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
+                "is_stale": is_stale,
+                "stale_seconds": stale_seconds,
+                "budget_seconds": budget_seconds,
             },
         })
 
     async def _emit_signal_divergence_warn(
-        self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
+        self,
+        correlation_id: UUID,
+        cell: CellConfig,
+        sig: ExtractedSignal,
         divergence: dict[str, Any],
+        *,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
+        budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,
@@ -128,6 +195,9 @@ class SignalEngine:
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
                 "divergence_detail": divergence,
+                "is_stale": is_stale,
+                "stale_seconds": stale_seconds,
+                "budget_seconds": budget_seconds,
             },
         })
 

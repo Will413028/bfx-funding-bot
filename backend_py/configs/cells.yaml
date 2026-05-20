@@ -23,6 +23,7 @@ cells:
     timeframe: 1h
     params: {threshold_sigma: 1.0, ratio_sigma: 0.6019, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
+    staleness_budget_hours: 12   # Phase 4.3 LOCF — p30 sparse override
 
   - strategy: mean_reversion
     symbol: fUSD
@@ -59,6 +60,7 @@ cells:
     timeframe: 1h
     params: {percentile: 75, lookback_hours: 168}
     reference_amount_usdt: 150.0
+    staleness_budget_hours: 12   # Phase 4.3 LOCF — p30 sparse override
 
   - strategy: rate_percentile
     symbol: fUSD
@@ -80,6 +82,7 @@ cells:
     timeframe: 1h
     params: {percentile: 75, lookback_hours: 168}
     reference_amount_usdt: 150.0
+    staleness_budget_hours: 12   # Phase 4.3 LOCF — p30 sparse override
 
   - strategy: rate_percentile
     symbol: fUST

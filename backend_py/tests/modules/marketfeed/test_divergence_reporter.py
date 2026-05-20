@@ -7,6 +7,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
@@ -78,6 +79,76 @@ def test_divergence_detected_when_live_signal_differs_from_replay():
     assert "signal_score" in diff
     assert "signal_direction" in diff
     assert "strategy_attributes" in diff
+
+
+def test_replay_byte_equivalent_with_locf_on_sparse_input():
+    """Sparse p30 candle fixture: daemon LOCF path + replay LOCF path produce
+    byte-equivalent SignalPayload (no divergence_detected emit).
+
+    Phase 4.1 CP1 invariant extends to LOCF: both live and replay paths must see
+    the same LOCF-filled candles (via reindex_and_ffill) → same ExtractedSignal.
+
+    Setup:
+    - 10 dense candles from base_mts, then 6h gap (sparse), then ref_mts
+    - budget=12h → gap < budget → LOCF soft-tier fills the gap with last known candle
+    - live strategy observes LOCF-processed candles (same as daemon path)
+    - replay path (what signal_engine now passes to reporter) also gets LOCF history
+    - DivergenceReporter.check() must return None (byte-equal)
+
+    Regression guard: without Phase 4.3 fix, reporter would receive raw candles
+    (gap slot missing), replay would see 10 candles while live saw 16 → mismatch.
+    """
+    base_mts = 1747584000000  # 2026-05-18 12:00 UTC
+    one_hour_ms = 3_600_000
+    budget_hours = 12
+
+    # Dense candles at T+0h … T+9h (10 candles), then a 6h gap, ref at T+15h.
+    dense_candles = [
+        _candle(base_mts + i * one_hour_ms, Decimal(f"0.000{(i % 5) + 1}"))
+        for i in range(10)
+    ]
+    last_dense_mts = base_mts + 9 * one_hour_ms
+    ref_mts = last_dense_mts + 6 * one_hour_ms  # T+15h; 6h gap in raw candles
+
+    # Simulate what signal_engine now does: apply LOCF to raw history.
+    locf_filled = reindex_and_ffill(
+        dense_candles, ref_mts=ref_mts, max_gap_hours=budget_hours,
+    )
+    # Soft-tier: gap (6h) < budget (12h) → all slots filled, no None entries.
+    assert all(fc.candle is not None for fc in locf_filled), (
+        "all slots should be soft-tier filled (gap < budget)"
+    )
+    # ref_mts slot is LOCF-filled from last dense candle.
+    assert locf_filled[-1].is_stale is True
+    assert locf_filled[-1].stale_seconds == 6 * 3600
+
+    locf_history = [fc.candle for fc in locf_filled if fc.candle is not None]
+    assert len(locf_history) == len(locf_filled)  # all slots populated (verify)
+    latest_candle = locf_history[-1]
+
+    # Cell with staleness_budget_hours resolved (simulates load_config()).
+    cell = CellConfig.model_validate({
+        "strategy": "rate_percentile", "symbol": "fUSD", "period_agg": "p30",
+        "timeframe": "1h",
+        "params": {"percentile": 75, "lookback_hours": 8},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": budget_hours,
+    })
+
+    # Live path: observe history[:-1] then extract at history[-1].
+    live = build_strategy(cell)
+    for c in locf_history[:-1]:
+        live.observe(c)
+    live_signal = ExtractedSignal.extract(cell, live, latest_candle)
+
+    # Replay path (mirrors what DivergenceReporter.check does internally).
+    # MUST use the same LOCF-processed locf_history — not raw dense_candles.
+    reporter = DivergenceReporter()
+    divergence = reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
+
+    assert divergence is None, (
+        f"CP1 byte-equivalence must hold with LOCF sparse input; got: {divergence}"
+    )
 
 
 @pytest.mark.property

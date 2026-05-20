@@ -13,7 +13,9 @@ import logging
 import signal
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import select
@@ -38,11 +40,9 @@ from bfx_funding_bot.external.bitfinex.ws import (
     ChannelSpec,
     compute_backoff_secs,
 )
-from bfx_funding_bot.modules.candles.repository import (
-    get_candles_in_range,
-    get_up_to,
-)
+from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
@@ -59,8 +59,10 @@ from bfx_funding_bot.modules.marketfeed.scheduler import (
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
+    EventType,
     HealthStatus,
     HealthTarget,
+    Level,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
@@ -350,6 +352,46 @@ class Daemon:
             # Loop continues → tries `candles()` again with new client
 
 
+async def _emit_locf_degraded(
+    axiom: AxiomClient,
+    config: MarketfeedConfig,
+    cell: CellConfig,
+    stale_seconds: int | None,
+    budget_seconds: int,
+) -> None:
+    """Emit HealthCheckPayload SIGNAL_PIPELINE DEGRADED reason=stale_exceeded.
+
+    Called from two paths: (a) no candles in lookback window (stale_seconds=None),
+    (b) source candle older than budget (stale_seconds = computed wall-clock gap).
+
+    # LOCF DEGRADED events carry cell_id in the "cell" envelope field (HealthMonitor._emit
+    # always writes "cell": None — intentional divergence to enable per-cell dashboards).
+    """
+    error_message = (
+        "stale_exceeded: no candles in lookback window"
+        if stale_seconds is None
+        else "stale_exceeded"
+    )
+    payload: dict[str, object] = {
+        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+        "status": HealthStatus.DEGRADED.value,
+        "error_message": error_message,
+        "reason": "stale_exceeded",
+        "stale_seconds": stale_seconds,
+        "budget_seconds": budget_seconds,
+    }
+    await axiom.emit({
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": Level.WARN.value,
+        "phase": config.phase.value,
+        "strategy": None,
+        "cell": cell.cell_id,
+        "event_type": EventType.HEALTH_CHECK.value,
+        "correlation_id": str(uuid4()),
+        "payload": payload,
+    })
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -432,33 +474,91 @@ async def build_daemon(
         # 0 signal events because query used mts=T (always empty).
         from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
         candle_mts = mts - _TIMEFRAME_MS[cell.timeframe]
+
+        # Phase 4.3 LOCF: fetch a lookback window and LOCF-fill gaps.
+        # staleness_budget_hours is guaranteed non-None after load_config().
+        budget_hours: int = cell.staleness_budget_hours  # type: ignore[assignment]
+        # lookback here is for staleness-tier determination only:
+        # reindex_and_ffill needs candles within `budget_hours` to decide hard vs soft
+        # tier. Strategy state itself lives in the pre-warmed StrategyRegistry which
+        # was fed during daemon startup — NOT re-fed from this small window.
+        lookback = budget_hours + 1  # +1 to ensure boundary candle is included
         async with session_factory() as s:
-            rows = await get_candles_in_range(
+            raw_candles = await get_up_to(
                 s,
                 symbol=cell.symbol,
                 timeframe=cell.timeframe,
                 period_agg=cell.period_agg,
-                start_mts=candle_mts,
-                end_mts=candle_mts,
+                mts_inclusive=candle_mts,
+                lookback=lookback,
             )
-        log.info(
-            "scheduler_tick cell=%s boundary_mts=%d candle_mts=%d rows=%d",
-            cell.pair_id, mts, candle_mts, len(rows),
+
+        filled = reindex_and_ffill(
+            raw_candles, ref_mts=candle_mts, max_gap_hours=budget_hours,
         )
-        if not rows:
-            # Bug A fix (5/20): candle_missing is a signal-pipeline / candle-
-            # freshness issue, not a WS health issue. The connection can be
-            # fully alive while p30 candles arrive after the scheduler buffer.
-            # Previously emitted as BITFINEX_WS degraded which (a) hid real WS
-            # health and (b) stuck sticky because nothing restores ws→healthy.
-            probe.update(
-                HealthTarget.SIGNAL_PIPELINE,
-                HealthStatus.DEGRADED,
-                error_message=f"candle_missing_at_scheduled_observe mts={candle_mts}",
-            )
+
+        log.info(
+            "scheduler_tick cell=%s boundary_mts=%d candle_mts=%d raw=%d filled=%d",
+            cell.pair_id, mts, candle_mts, len(raw_candles), len(filled),
+        )
+
+        # pair_id = strategy + cell_id; used as state key so two strategies on
+        # the same cell are independent SIGNAL_PIPELINE state machines
+        # (e.g. RP can be DEGRADED while MR is HEALTHY).
+        if not filled:
+            # No candles at all in lookback window — treat as hard-tier DEGRADED.
+            budget_seconds = budget_hours * 3600
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
+                await _emit_locf_degraded(
+                    axiom, config, cell,
+                    stale_seconds=None,  # no candles → no meaningful age
+                    budget_seconds=budget_seconds,
+                )
             return
+
+        latest = filled[-1]
+
+        if latest.candle is None:
+            # Hard tier: stale_seconds > budget — skip signal, emit DEGRADED once.
+            budget_seconds = budget_hours * 3600
+            if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
+                probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
+                await _emit_locf_degraded(
+                    axiom, config, cell,
+                    stale_seconds=latest.stale_seconds,
+                    budget_seconds=budget_seconds,
+                )
+            return
+
+        # Soft tier or fresh — emit signal with staleness metadata.
+        if probe.get_cell_pipeline_status(cell.pair_id) == HealthStatus.DEGRADED:
+            # HEALTHY restore transition
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
+            await axiom.emit({
+                "timestamp": datetime.now(UTC).isoformat(),
+                "level": Level.INFO.value,
+                "phase": config.phase.value,
+                "strategy": None,
+                "cell": cell.cell_id,
+                "event_type": EventType.HEALTH_CHECK.value,
+                "correlation_id": str(uuid4()),
+                "payload": {
+                    "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+                    "status": HealthStatus.HEALTHY.value,
+                },
+            })
+        else:
+            probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
+
+        # Unwrap LOCF-filled candles for strategy compute — strategies receive
+        # FundingCandle objects with forward-filled rates (LOCF semantic).
         await signal_engine_obj.process_candle(
-            cell=cell, candle=rows[0], registry=registry,
+            cell=cell,
+            candle=latest.candle,
+            registry=registry,
+            is_stale=latest.is_stale,
+            stale_seconds=latest.stale_seconds,
         )
 
     scheduler = Scheduler(

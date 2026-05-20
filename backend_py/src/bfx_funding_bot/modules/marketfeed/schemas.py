@@ -79,6 +79,10 @@ class SignalPayload(BaseModel):
     signal_direction: SignalDirection
     strategy_attributes: dict[str, Any] = Field(..., min_length=1)
     divergence_detail: dict[str, Any] | None = None
+    # ── NEW (Phase 4.3 LOCF) ──
+    is_stale: bool = False
+    stale_seconds: int = 0
+    budget_seconds: int  # required: every signal carries its cell's budget
 
 
 class DecisionPayload(BaseModel):
@@ -113,6 +117,10 @@ class HealthCheckPayload(BaseModel):
     reconnect_count_last_hour: int | None = None
     latency_ms: int | None = None
     error_message: str | None = None
+    # ── NEW (Phase 4.3 LOCF) ──
+    reason: str | None = None  # "stale_exceeded", "connection_lost", "db_unavailable", "task_hung"
+    stale_seconds: int | None = None  # populated when reason="stale_exceeded"
+    budget_seconds: int | None = None  # populated when reason="stale_exceeded"
 
     @model_validator(mode="after")
     def _conditional_required(self) -> HealthCheckPayload:

@@ -289,3 +289,162 @@ def test_scheduler_buffer_s_env_invalid_raises(
 
     with pytest.raises(ValueError, match="BFX_SCHEDULER_BUFFER_S"):
         load_config(cells_yaml_path=yaml_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3 LOCF — staleness_budget_hours tests
+# ---------------------------------------------------------------------------
+
+
+def test_staleness_budget_hours_global_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Entry without staleness_budget_hours field → falls back to global default 2h."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.delenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", raising=False)
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+"""
+    )
+    cfg = load_config(cells_yaml_path=cells_yaml)
+
+    assert len(cfg.cells) == 1
+    cell = cfg.cells[0]
+    assert cell.staleness_budget_hours == 2  # global default
+
+
+def test_staleness_budget_hours_per_cell_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """p30 entry with staleness_budget_hours: 12 → loaded as 12h; other cells fall back."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.delenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", raising=False)
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: p30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+    staleness_budget_hours: 12
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+"""
+    )
+    cfg = load_config(cells_yaml_path=cells_yaml)
+
+    assert cfg.cells[0].staleness_budget_hours == 12  # p30 override
+    assert cfg.cells[1].staleness_budget_hours == 2   # fallback to global
+
+
+def test_staleness_budget_hours_env_global_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BFX_STALENESS_BUDGET_HOURS_DEFAULT=4 → global default becomes 4h;
+    per-cell yaml override (12) still wins over env."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "4")
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: p30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 168}
+    reference_amount_usdt: 150.0
+    staleness_budget_hours: 12
+"""
+    )
+    cfg = load_config(cells_yaml_path=cells_yaml)
+
+    assert cfg.staleness_budget_hours_default == 4
+    assert cfg.cells[0].staleness_budget_hours == 4   # env default
+    assert cfg.cells[1].staleness_budget_hours == 12  # yaml override wins
+
+
+def test_staleness_budget_hours_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative / zero staleness_budget_hours → ValidationError at load time."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+    staleness_budget_hours: -1
+"""
+    )
+    with pytest.raises(ValidationError, match="staleness_budget_hours"):
+        load_config(cells_yaml_path=cells_yaml)
+
+
+def test_staleness_budget_hours_env_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-int BFX_STALENESS_BUDGET_HOURS_DEFAULT → descriptive ValueError, not raw int() error."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "abc")
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+"""
+    )
+
+    with pytest.raises(ValueError, match=r"BFX_STALENESS_BUDGET_HOURS_DEFAULT.*integer.*abc"):
+        load_config(cells_yaml_path=cells_yaml)
