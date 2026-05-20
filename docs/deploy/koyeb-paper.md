@@ -103,7 +103,31 @@ postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
    - https://app.axiom.co → `bfx-funding-bot` dataset → Live Stream
    - 應出現 `phase=paper` 的 candle / signal / health event
 
-## G1 Smoke 驗證（Paper 1hr 跑完後）
+## G1 Self-Smoke Trigger（自動）
+
+從 [Phase 4.1.x C1 redesign](../superpowers/specs/2026-05-21-g1-c1-continuity-redesign-design.md) 起，
+daemon 在 `BFX_PHASE=paper` + `BFX_RUN_DURATION_HOURS` 設定下，
+跑完 duration 後**自動執行 G1 smoke**：
+
+1. daemon `_run()` finally block 完成（Axiom flush + http client close）
+2. 等 30 秒讓 Axiom ingestion 完成 catch-up
+3. 跑完整 C1-C6 check
+4. Container exit code = G1 exit code
+
+Container exit code 行為：
+
+| Exit | 意義 | Koyeb 行為 |
+|---|---|---|
+| 0 | Daemon + G1 全 pass | Deploy 標 healthy，container 結束 |
+| 1 | G1 fail（某 check fail） | Deploy 標 unhealthy，預設 restart loop（**feature** — 強制查 log） |
+| 2 | Axiom auth/network fail | 同 1，cause 在 config 而非 daemon |
+| 3 | Config error（env vars 漏設 / EDA range mismatch） | 同 1，cause 在 config |
+
+⚠️ 若 G1 fail 進 restart loop，**先查 runtime log 找 fail 原因再放著 restart**，否則 burn quota 跑無效 cycle。
+
+## G1 Smoke 手動驗證（debug 用）
+
+> 通常**不需要手動跑** — 上方 Self-Smoke Trigger 已自動執行。本段用於：debug 失敗原因、重跑特定 check（`--only C1`）、或對歷史 window 跑 retroactive 檢查。
 
 等 paper container 因 `BFX_RUN_DURATION_HOURS=1` 自動退（Koyeb runtime log 看到 `daemon_run_duration_reached hours=1`）。
 
