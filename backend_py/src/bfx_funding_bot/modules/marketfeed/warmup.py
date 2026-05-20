@@ -13,14 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
-from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
-    build_strategy,
+    build_strategy_at_boundary,
 )
 
 log = logging.getLogger(__name__)
@@ -74,39 +72,29 @@ async def warmup_cell(
         start_mts=start_mts, end_mts=now_mts,
     )
 
-    # 4. Phase 4.3 LOCF symmetry: apply reindex_and_ffill before observing so
-    # warmup state matches what the divergence-reporter replay path will
-    # rebuild at every tick (signal_engine.py uses the same primitive). Without
-    # this, sparse cells (e.g. fUSD_p30 ~1/3 density) emit a CP1 divergence on
-    # the first post-deploy tick — raw warmup state vs LOCF replay state diverge
-    # and self-heal only after several LOCF observations accumulate via ticks.
-    #
-    # Boundary handling: drop the last filled slot. That slot corresponds to
-    # the upcoming first-tick candle which scheduler.daemon delivers to
-    # signal_engine.extract(); extract() has an observe side effect, so
-    # observing it here would double-count.
+    # 4. Phase 4.3 LOCF symmetry: delegate to build_strategy_at_boundary —
+    # single source of truth shared with divergence_reporter.py so the live
+    # state populated here is byte-equivalent to the reference state replay
+    # rebuilds per tick. See that function's docstring for full semantics
+    # (LOCF over hourly grid ending at ref_mts, drop boundary slot, observe
+    # non-None remainder).
     if cell.staleness_budget_hours is None:
         raise AssertionError(
             f"cell {cell.pair_id} staleness_budget_hours not resolved; "
             "was load_config() called?"
         )
-    budget_hours = cell.staleness_budget_hours
-
-    strategy = build_strategy(cell)
-    observed: list[FundingCandle] = []
-    if history:
-        filled = reindex_and_ffill(history, ref_mts=now_mts, max_gap_hours=budget_hours)
-        observed = [fc.candle for fc in filled[:-1] if fc.candle is not None]
-        for candle in observed:
-            strategy.observe(candle)
-    registry.put(cell, strategy)
+    result = build_strategy_at_boundary(
+        cell=cell, history=history,
+        ref_mts=now_mts, budget_hours=cell.staleness_budget_hours,
+    )
+    registry.put(cell, result.strategy)
     log.info(
         "warmup_complete cell=%s raw=%d locf_observed=%d gap_filled=%d",
-        cell.pair_id, len(history), len(observed), fill.candles_fetched,
+        cell.pair_id, len(history), result.observed_count, fill.candles_fetched,
     )
     return WarmupResult(
         cell_id=cell.pair_id,
-        observed_count=len(observed),
+        observed_count=result.observed_count,
         gap_filled=fill.candles_fetched,
     )
 

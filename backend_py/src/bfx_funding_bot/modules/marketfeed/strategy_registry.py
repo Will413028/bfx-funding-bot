@@ -9,6 +9,7 @@ Conversion: alpha = 2 / (span + 1)  ->  span = round(2 / alpha - 1).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
@@ -20,6 +21,7 @@ from bfx_funding_bot.modules.backtest.strategies.rate_percentile import (
     RatePercentileStrategy,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 
@@ -29,6 +31,12 @@ class _Strategy(Protocol):
     def name(self) -> str: ...
     def observe(self, candle: FundingCandle) -> None: ...
     def decide(self, candle: FundingCandle) -> LendDecision | None: ...
+
+
+@dataclass(frozen=True)
+class StrategyBuildResult:
+    strategy: _Strategy
+    observed_count: int
 
 
 def _ema_alpha_to_span(alpha: float) -> int:
@@ -56,6 +64,46 @@ def build_strategy(cell: CellConfig) -> _Strategy:
             lookback_hours=int(p["lookback_hours"]),
         )
     raise ValueError(f"unsupported strategy {cell.strategy!r}")
+
+
+def build_strategy_at_boundary(
+    *,
+    cell: CellConfig,
+    history: list[FundingCandle],
+    ref_mts: int,
+    budget_hours: int,
+) -> StrategyBuildResult:
+    """Phase 4.3 LOCF single source of truth — build a fresh strategy state by
+    applying reindex_and_ffill to `history` (LOCF over the hourly grid ending
+    at ref_mts) and observing every non-None filled slot EXCEPT the boundary
+    slot (the one at ref_mts).
+
+    The boundary slot is intentionally dropped: in the live (daemon) path the
+    scheduler delivers the boundary candle to signal_engine which calls
+    ExtractedSignal.extract — and extract has an observe side effect. Calling
+    this function to populate state, then extract on the boundary, produces
+    the same final state via the same sequence of observe() calls regardless
+    of which code path (warmup, divergence replay) invoked it.
+
+    Used by:
+    - warmup.py (warmup_cell): populate StrategyRegistry once at daemon start.
+    - divergence_reporter.py (DivergenceReporter.check): rebuild the
+      reference strategy each tick for CP1 byte-equivalence comparison.
+
+    Both call sites pass the same (history, ref_mts, budget_hours) — given
+    those, this function is deterministic and side-effect-free aside from
+    constructing a Strategy. That property is what guarantees CP1
+    byte-equivalence between live and replay across the warmup → tick →
+    replay sequence.
+    """
+    strategy = build_strategy(cell)
+    if not history:
+        return StrategyBuildResult(strategy=strategy, observed_count=0)
+    filled = reindex_and_ffill(history, ref_mts=ref_mts, max_gap_hours=budget_hours)
+    observed = [fc.candle for fc in filled[:-1] if fc.candle is not None]
+    for c in observed:
+        strategy.observe(c)
+    return StrategyBuildResult(strategy=strategy, observed_count=len(observed))
 
 
 class StrategyRegistry:

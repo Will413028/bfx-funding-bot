@@ -10,7 +10,6 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
@@ -117,22 +116,19 @@ class SignalEngine:
         )
 
         try:
-            history = await self.candles_repo.get_up_to(
+            raw_history = await self.candles_repo.get_up_to(
                 symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
                 mts_inclusive=candle.mts, lookback=_lookback(cell) + 1,
             )
-            # Phase 4.3 LOCF: replay path must see the same LOCF-processed candles
-            # as the live path (daemon applies reindex_and_ffill before calling here).
-            # Apply LOCF to raw history so DivergenceReporter.check() rebuilds the
-            # replay strategy on identical inputs → CP1 byte-equivalence holds on
-            # sparse input.
+            # Phase 4.3 LOCF symmetry: DivergenceReporter.check internally calls
+            # the shared build_strategy_at_boundary primitive (same one warmup
+            # uses) — passing raw_history + boundary_candle + budget_hours is
+            # sufficient. No LOCF / filter logic here.
             budget_hours = _resolve_staleness_budget_hours(cell)
-            # LOCF window is strategy-lookback-sized (not budget-sized) because replay only
-            # needs enough candles to rebuild strategy state. Daemon uses budget-sized
-            # window for staleness tier determination — different purpose, different size.
-            filled = reindex_and_ffill(history, ref_mts=candle.mts, max_gap_hours=budget_hours)
-            locf_history = [fc.candle for fc in filled if fc.candle is not None]
-            divergence = self.reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
+            divergence = self.reporter.check(
+                cell=cell, raw_history=raw_history, boundary_candle=candle,
+                budget_hours=budget_hours, live_signal=live_signal,
+            )
             if divergence is not None:
                 await self._emit_signal_divergence_warn(
                     correlation_id, cell, live_signal, divergence,

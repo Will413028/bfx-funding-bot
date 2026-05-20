@@ -17,7 +17,9 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     SignalDirection,
     StrategyName,
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+from bfx_funding_bot.modules.marketfeed.strategy_registry import (
+    build_strategy_at_boundary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,19 +100,31 @@ class DivergenceReporter:
         self,
         *,
         cell: CellConfig,
-        history: list[FundingCandle],
+        raw_history: list[FundingCandle],
+        boundary_candle: FundingCandle,
+        budget_hours: int,
         live_signal: ExtractedSignal,
     ) -> dict[str, Any] | None:
-        """Re-run backtest replay over the same history; compare to live_signal.
+        """Rebuild the reference strategy state via the shared
+        build_strategy_at_boundary primitive, extract on boundary_candle,
+        compare to live_signal.
 
         Returns None if byte-equal; dict with diff detail otherwise.
+
+        Phase 4.3 LOCF symmetry: this function and warmup.warmup_cell BOTH
+        call build_strategy_at_boundary with their respective (history,
+        ref_mts, budget_hours). That single function is the source of
+        truth — given the same inputs it produces deterministically equal
+        Strategy state, so live (warmup-derived) and replay (this
+        function) cannot drift by construction.
         """
-        if len(history) < 2:
+        if len(raw_history) < 2:
             return None
-        replay = build_strategy(cell)
-        for c in history[:-1]:
-            replay.observe(c)
-        replay_signal = ExtractedSignal.extract(cell, replay, history[-1])
+        result = build_strategy_at_boundary(
+            cell=cell, history=raw_history,
+            ref_mts=boundary_candle.mts, budget_hours=budget_hours,
+        )
+        replay_signal = ExtractedSignal.extract(cell, result.strategy, boundary_candle)
 
         if replay_signal == live_signal:
             return None

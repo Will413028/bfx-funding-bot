@@ -22,6 +22,7 @@ def _cell_rp() -> CellConfig:
         "timeframe": "1h",
         "params": {"percentile": 75, "lookback_hours": 8},
         "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
     })
 
 
@@ -42,7 +43,10 @@ def test_no_divergence_when_inputs_match():
     live_signal = ExtractedSignal.extract(cell, live, history[-1])
 
     reporter = DivergenceReporter()
-    result = reporter.check(cell=cell, history=history, live_signal=live_signal)
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=cell.staleness_budget_hours or 2, live_signal=live_signal,
+    )
     assert result is None  # no divergence
 
 
@@ -69,7 +73,10 @@ def test_divergence_detected_when_live_signal_differs_from_replay():
     )
 
     reporter = DivergenceReporter()
-    result = reporter.check(cell=cell, history=history, live_signal=fake_live)
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=cell.staleness_budget_hours or 2, live_signal=fake_live,
+    )
 
     assert result is not None, "divergence MUST be detected when live differs from replay"
     assert "live" in result
@@ -141,10 +148,17 @@ def test_replay_byte_equivalent_with_locf_on_sparse_input():
         live.observe(c)
     live_signal = ExtractedSignal.extract(cell, live, latest_candle)
 
-    # Replay path (mirrors what DivergenceReporter.check does internally).
-    # MUST use the same LOCF-processed locf_history — not raw dense_candles.
+    # Replay path: pass RAW dense_candles + boundary_candle + budget.
+    # reporter internally calls build_strategy_at_boundary which applies
+    # LOCF over raw_history with ref_mts=boundary_candle.mts. Live path
+    # above already observed LOCF-filled locf_history[:-1] + extract on
+    # latest_candle, so the live state matches what reporter will rebuild
+    # → no divergence.
     reporter = DivergenceReporter()
-    divergence = reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
+    divergence = reporter.check(
+        cell=cell, raw_history=dense_candles, boundary_candle=latest_candle,
+        budget_hours=budget_hours, live_signal=live_signal,
+    )
 
     assert divergence is None, (
         f"CP1 byte-equivalence must hold with LOCF sparse input; got: {divergence}"
