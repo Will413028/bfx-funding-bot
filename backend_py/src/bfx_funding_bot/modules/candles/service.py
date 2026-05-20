@@ -112,6 +112,9 @@ async def backfill_candles_to_earliest(
     )
 
 
+_MS_PER_HOUR = 3_600_000
+
+
 @dataclass(frozen=True)
 class FilledCandle:
     """Wrapper for a candle slot after LOCF reindexing.
@@ -127,7 +130,7 @@ class FilledCandle:
 def reindex_and_ffill(
     candles: list[FundingCandle],
     ref_mts: int,
-    freq_ms: int = 3_600_000,
+    freq_ms: int = _MS_PER_HOUR,
     max_gap_hours: int = 2,
 ) -> list[FilledCandle]:
     """Reindex sparse candle list to a full hourly grid ending at ref_mts.
@@ -151,7 +154,7 @@ def reindex_and_ffill(
 
     start_mts = sorted_candles[0].mts
     n_slots = ((ref_mts - start_mts) // freq_ms) + 1
-    max_gap_ms = max_gap_hours * 3_600_000
+    max_gap_ms = max_gap_hours * _MS_PER_HOUR
 
     output: list[FilledCandle] = []
     source_idx = 0
