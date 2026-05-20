@@ -421,3 +421,30 @@ cells:
     )
     with pytest.raises(ValidationError, match="staleness_budget_hours"):
         load_config(cells_yaml_path=cells_yaml)
+
+
+def test_staleness_budget_hours_env_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-int BFX_STALENESS_BUDGET_HOURS_DEFAULT → descriptive ValueError, not raw int() error."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "abc")
+
+    cells_yaml = tmp_path / "cells.yaml"
+    cells_yaml.write_text(
+        """
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+"""
+    )
+
+    with pytest.raises(ValueError, match=r"BFX_STALENESS_BUDGET_HOURS_DEFAULT.*integer.*abc"):
+        load_config(cells_yaml_path=cells_yaml)
