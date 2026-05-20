@@ -81,3 +81,18 @@ def test_locf_caps_at_budget() -> None:
         assert filled[i].candle is None, f"Slot {i} should be hard-tier None"
         assert filled[i].is_stale is True
         assert filled[i].stale_seconds == i * 3600
+
+
+def test_locf_preserves_ref_mts_alignment() -> None:
+    """Output last slot mts must equal ref_mts (hourly grid aligned)."""
+    start_mts = 1_700_000_000_000
+    candles = [_make_candle(start_mts + i * HOUR_MS) for i in range(5)]
+    ref_mts = candles[-1].mts + 3 * HOUR_MS  # ref is 3h after last candle
+
+    filled = reindex_and_ffill(candles, ref_mts=ref_mts, max_gap_hours=12)
+
+    assert len(filled) == 8  # 5 source + 3 ffilled to align ref
+    last = filled[-1]
+    assert last.candle is not None
+    assert filled[-1].candle == candles[-1]  # ffilled from last source
+    assert filled[-1].stale_seconds == 3 * 3600
