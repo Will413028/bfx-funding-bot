@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -155,8 +156,6 @@ async def run_c1_continuity(
 
     Spec: 2026-05-21-g1-c1-continuity-redesign-design.md
     """
-    from collections import defaultdict
-
     apl = build_apl_query_c1(phase, client.dataset, hours)
     events = await client.query_apl(apl)
 
