@@ -13,7 +13,8 @@ import json
 import logging
 import signal as _signal
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -45,6 +46,12 @@ class AxiomConfig:
     batch_size: int = 100
     flush_interval_s: float = 1.0
     request_timeout_s: float = 10.0
+    # Bug B fix (5/20): hook fired after every non-empty flush (success or
+    # fallback). Daemon wires this to HealthProbe.record_heartbeat("axiom")
+    # so scan_staleness can detect axiom task hung (was DONE_WITH_CONCERNS
+    # in 4.2.0 D4 — task was in SUB_TASK_THRESHOLDS but never recorded).
+    # NOT called on AxiomAuthError (auth fail → daemon SIGTERM, no progress).
+    on_flush: Callable[[], None] | None = field(default=None, repr=False)
 
 
 class AxiomClient:
@@ -89,6 +96,10 @@ class AxiomClient:
         if not batch:
             return
         await self._send_batch(batch)
+        # AxiomAuthError raised inside _send_batch propagates out before
+        # this point — heartbeat correctly skipped on auth fail.
+        if self.cfg.on_flush is not None:
+            self.cfg.on_flush()
 
     async def _flush_loop(self) -> None:
         try:

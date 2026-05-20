@@ -161,10 +161,9 @@ class Daemon:
     async def _axiom_loop(self) -> None:
         """Run axiom's background emit loop.
 
-        AxiomClient has no on_flush hook, so axiom heartbeat is not wired
-        to record_heartbeat("axiom") — DONE_WITH_CONCERNS noted. Axiom
-        staleness is still surfaced by scan_staleness if a future heartbeat
-        call is added.
+        Bug B fix (5/20): AxiomConfig.on_flush is wired in build_daemon to
+        probe.record_heartbeat("axiom"), so scan_staleness can detect axiom
+        task hung (threshold 60s in SUB_TASK_THRESHOLDS).
         """
         await self.axiom.start()
         await self._stop_event.wait()
@@ -360,8 +359,15 @@ async def build_daemon(
     db_engine = create_async_engine(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
+    probe = HealthProbe()
     axiom = AxiomClient(
-        AxiomConfig(api_key=config.axiom_api_key, dataset=config.axiom_dataset),
+        AxiomConfig(
+            api_key=config.axiom_api_key,
+            dataset=config.axiom_dataset,
+            # Bug B fix (5/20): wire axiom flush → heartbeat so scan_staleness
+            # can detect axiom task hung (4.2.0 D4 DONE_WITH_CONCERNS).
+            on_flush=lambda: probe.record_heartbeat("axiom"),
+        ),
     )
     bitfinex_http = httpx.AsyncClient()
     bitfinex = BitfinexREST(
@@ -370,7 +376,6 @@ async def build_daemon(
         limiter=FundingRateLimiter(),
     )
     registry = StrategyRegistry()
-    probe = HealthProbe()
     monitor = HealthMonitor(phase=config.phase, axiom=axiom, probe=probe)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
