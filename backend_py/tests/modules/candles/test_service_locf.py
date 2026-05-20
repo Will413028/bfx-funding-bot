@@ -96,3 +96,12 @@ def test_locf_preserves_ref_mts_alignment() -> None:
     assert last.candle is not None
     assert filled[-1].candle == candles[-1]  # ffilled from last source
     assert filled[-1].stale_seconds == 3 * 3600
+
+
+def test_locf_empty_input() -> None:
+    """No source candles → empty output list (caller treats as full hard-tier)."""
+    ref_mts = 1_700_000_000_000
+
+    filled = reindex_and_ffill([], ref_mts=ref_mts, max_gap_hours=12)
+
+    assert filled == []
