@@ -75,6 +75,8 @@ class SignalEngine:
         cell: CellConfig,
         candle: FundingCandle,
         registry: StrategyRegistry,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
         correlation_id = uuid4()
         strategy = registry.get(cell)
@@ -90,7 +92,10 @@ class SignalEngine:
             )
             return
 
-        await self._emit_signal(correlation_id, cell, live_signal)
+        await self._emit_signal(
+            correlation_id, cell, live_signal,
+            is_stale=is_stale, stale_seconds=stale_seconds,
+        )
 
         try:
             history = await self.candles_repo.get_up_to(
@@ -101,6 +106,7 @@ class SignalEngine:
             if divergence is not None:
                 await self._emit_signal_divergence_warn(
                     correlation_id, cell, live_signal, divergence,
+                    is_stale=is_stale, stale_seconds=stale_seconds,
                 )
         except Exception:
             log.exception("divergence_check_exception cell=%s", cell.pair_id)
@@ -108,7 +114,13 @@ class SignalEngine:
         await self._emit_decision(correlation_id, cell, live_signal)
 
     async def _emit_signal(
-        self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
+        self,
+        correlation_id: UUID,
+        cell: CellConfig,
+        sig: ExtractedSignal,
+        *,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
         budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
@@ -123,13 +135,21 @@ class SignalEngine:
                 "signal_score": sig.signal_score,
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
+                "is_stale": is_stale,
+                "stale_seconds": stale_seconds,
                 "budget_seconds": budget_seconds,
             },
         })
 
     async def _emit_signal_divergence_warn(
-        self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
+        self,
+        correlation_id: UUID,
+        cell: CellConfig,
+        sig: ExtractedSignal,
         divergence: dict[str, Any],
+        *,
+        is_stale: bool = False,
+        stale_seconds: int = 0,
     ) -> None:
         budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
@@ -145,6 +165,8 @@ class SignalEngine:
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
                 "divergence_detail": divergence,
+                "is_stale": is_stale,
+                "stale_seconds": stale_seconds,
                 "budget_seconds": budget_seconds,
             },
         })
