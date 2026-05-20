@@ -190,11 +190,29 @@ class HealthMonitor:
         """Check last_active_ts for each sub-task. Emit + return records for
         any stale. Raises FatalError on 3× threshold breach.
 
+        SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
+        Per-cell pipeline state is tracked separately in
+        probe.cell_pipeline_status (keyed by pair_id). These cells represent
+        expected sparseness (Bitfinex p30 channel physics), NOT system failure
+        — reason=stale_exceeded NEVER escalates to FatalError. The carve-out
+        is structural: SIGNAL_PIPELINE is never registered in last_active_ts,
+        so the fatal escalation path physically cannot touch it. Instead, a
+        separate read-only pass emits observability events for degraded cells
+        but always returns without raising.
+
         Returns: list of {sub_task, severity, age_s} for stale tasks (for
                  inspection / test). Tasks under threshold are not included.
+                 SIGNAL_PIPELINE degraded cells appear as
+                 {sub_task: "SIGNAL_PIPELINE:<pair_id>", severity: "degraded",
+                  age_s: None} — never with severity "down" or "fatal".
         """
         now = datetime.now(UTC)
         stale: list[dict[str, Any]] = []
+
+        # ── Existing per-sub-task heartbeat scan ──────────────────────────────
+        # FatalError CAN be raised here for connection_lost / db_unavailable /
+        # task_hung reasons. SIGNAL_PIPELINE keys are never inserted into
+        # last_active_ts so they are physically excluded from this path.
         for sub_task, last_ts in self.probe.last_active_ts.items():
             threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
             age_s = (now - last_ts).total_seconds()
@@ -232,4 +250,35 @@ class HealthMonitor:
                     f"sub_task={sub_task} stale {age_s:.0f}s > "
                     f"3× threshold ({3 * threshold}s) — escalating fatal"
                 )
+
+        # ── SIGNAL_PIPELINE per-cell scan (carve-out: NEVER raises FatalError) ─
+        # Reads cell_pipeline_status populated by daemon LOCF emit path (Task 4).
+        # reason=stale_exceeded is expected sparseness — spec explicitly prohibits
+        # fatal escalation regardless of how long the cell has been DEGRADED.
+        # We emit a WARN for observability but always continue without escalating.
+        for pair_id, cell_status in self.probe.cell_pipeline_status.items():
+            if cell_status == HealthStatus.DEGRADED:
+                stale.append({
+                    "sub_task": f"SIGNAL_PIPELINE:{pair_id}",
+                    "severity": "degraded",
+                    "age_s": None,  # wall-clock age not tracked here; daemon owns TTL
+                })
+                await self.axiom.emit({
+                    "timestamp": now.isoformat(),
+                    "level": Level.WARN.value,
+                    "phase": self.phase.value,
+                    "strategy": None, "cell": pair_id,
+                    "event_type": EventType.HEALTH_CHECK.value,
+                    "correlation_id": str(uuid4()),
+                    "payload": {
+                        "check_target": "SIGNAL_PIPELINE",
+                        "status": HealthStatus.DEGRADED.value,
+                        "error_message": (
+                            f"pair_id={pair_id} pipeline DEGRADED "
+                            "(stale_exceeded — expected sparseness, not escalating)"
+                        ),
+                    },
+                })
+                # NOTE: no FatalError here — spec carve-out for stale_exceeded
+
         return stale
