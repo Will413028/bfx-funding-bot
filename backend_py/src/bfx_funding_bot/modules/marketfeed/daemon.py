@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import (
     HealthMonitor,
     HealthProbe,
 )
+from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     now_ms_utc,
@@ -89,6 +91,8 @@ class Daemon:
     bitfinex_http: httpx.AsyncClient
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
+    healthz_host: str = "0.0.0.0"
+    healthz_port: int = 8080
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self) -> None:
@@ -110,6 +114,7 @@ class Daemon:
             tg.create_task(self._monitor_loop(),       name="monitor")
             tg.create_task(self._heartbeat_scan_loop(), name="health_check")
             tg.create_task(self._db_keepalive_loop(),  name="db_keepalive")
+            tg.create_task(self._healthz_server_loop(), name="healthz")
             if self.ws_client is not None:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
                 tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
@@ -195,6 +200,21 @@ class Daemon:
             self.db_engine,
             stop=self._stop_event,
             on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
+        )
+
+    async def _healthz_server_loop(self) -> None:
+        """Container-level liveness HTTP endpoint for Koyeb / k8s probes.
+
+        Independent of in-process scan_staleness (which can't catch
+        daemon-wide event-loop deadlock — if asyncio is blocked,
+        scan_staleness itself doesn't run). External HTTP probe sees no
+        response → platform restarts container.
+        """
+        await run_healthz_server(
+            probe=self.probe,
+            host=self.healthz_host,
+            port=self.healthz_port,
+            stop_event=self._stop_event,
         )
 
     async def _ws_heartbeat_poll_loop(self) -> None:
@@ -588,6 +608,10 @@ async def build_daemon(
             ),
         )
 
+    healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
+    healthz_port = int(healthz_port_env) if healthz_port_env else 8080
+    healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
     return Daemon(
         config=config,
         registry=registry,
@@ -603,6 +627,8 @@ async def build_daemon(
         bitfinex_http=bitfinex_http,
         bitfinex=bitfinex,
         session_factory=session_factory,
+        healthz_host=healthz_host,
+        healthz_port=healthz_port,
     )
 
 
