@@ -170,3 +170,41 @@ def test_resolve_budget_seconds_correct_value() -> None:
         staleness_budget_hours=12,
     )
     assert _resolve_budget_seconds(cell) == 12 * 3600
+
+
+def test_resolve_staleness_budget_hours_raises_if_not_resolved() -> None:
+    """Loader invariant: cell.staleness_budget_hours must be set before processing.
+
+    None at signal_engine.process_candle time = loader bypassed = AssertionError
+    (parallel to test_resolve_budget_seconds_raises_if_staleness_not_resolved).
+    """
+    import pytest
+    from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_staleness_budget_hours
+
+    cell = CellConfig(
+        strategy="mean_reversion",
+        symbol="fUSD",
+        period_agg="p30",
+        timeframe="1h",
+        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_alpha": 0.01},
+        reference_amount_usdt=150.0,
+        staleness_budget_hours=None,
+    )
+    with pytest.raises(AssertionError, match="staleness_budget_hours not resolved"):
+        _resolve_staleness_budget_hours(cell)
+
+
+def test_resolve_staleness_budget_hours_correct_value() -> None:
+    """Resolved cell returns hours value as-is."""
+    from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_staleness_budget_hours
+
+    cell = CellConfig(
+        strategy="rate_percentile",
+        symbol="fUSD",
+        period_agg="p30",
+        timeframe="1h",
+        params={"percentile": 75, "lookback_hours": 168},
+        reference_amount_usdt=150.0,
+        staleness_budget_hours=12,
+    )
+    assert _resolve_staleness_budget_hours(cell) == 12

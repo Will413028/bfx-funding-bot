@@ -122,7 +122,8 @@ def test_replay_byte_equivalent_with_locf_on_sparse_input():
     assert locf_filled[-1].is_stale is True
     assert locf_filled[-1].stale_seconds == 6 * 3600
 
-    locf_history: list[FundingCandle] = [fc.candle for fc in locf_filled]  # type: ignore[misc]
+    locf_history = [fc.candle for fc in locf_filled if fc.candle is not None]
+    assert len(locf_history) == len(locf_filled)  # all slots populated (verify)
     latest_candle = locf_history[-1]
 
     # Cell with staleness_budget_hours resolved (simulates load_config()).
