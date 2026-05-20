@@ -30,6 +30,8 @@ phase3b_wfo_results_ref: x
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    # OS-assigned port to avoid 8080 conflicts during parallel runs / dev boxes.
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
     # Axiom flush during shutdown — accept any POST to ingest endpoint.
     httpx_mock.add_response(
         url="https://api.axiom.co/v1/datasets/x/ingest",
