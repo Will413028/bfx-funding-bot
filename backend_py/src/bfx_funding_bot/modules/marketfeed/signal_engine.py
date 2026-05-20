@@ -29,7 +29,19 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistr
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_BUDGET_HOURS: int = 2  # mirrors MarketfeedConfig.staleness_budget_hours_default
+def _resolve_budget_seconds(cell: CellConfig) -> int:
+    """Convert resolved per-cell staleness_budget_hours to seconds.
+
+    Invariant: load_config() must have populated cell.staleness_budget_hours
+    from MarketfeedConfig.staleness_budget_hours_default before emit time.
+    None here = loader invariant violation = crash loud.
+    """
+    if cell.staleness_budget_hours is None:
+        raise AssertionError(
+            f"cell {cell.symbol}_{cell.period_agg}_{cell.strategy} "
+            "staleness_budget_hours not resolved; was load_config() called?"
+        )
+    return cell.staleness_budget_hours * 3600
 
 
 class _AxiomProtocol(Protocol):
@@ -98,7 +110,7 @@ class SignalEngine:
     async def _emit_signal(
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
     ) -> None:
-        budget_seconds = (cell.staleness_budget_hours or _DEFAULT_BUDGET_HOURS) * 3600
+        budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
@@ -119,7 +131,7 @@ class SignalEngine:
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
         divergence: dict[str, Any],
     ) -> None:
-        budget_seconds = (cell.staleness_budget_hours or _DEFAULT_BUDGET_HOURS) * 3600
+        budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,

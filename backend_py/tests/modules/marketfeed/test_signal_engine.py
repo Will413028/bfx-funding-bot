@@ -14,12 +14,14 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import (
 
 
 def _cell() -> CellConfig:
-    return CellConfig.model_validate({
+    cell = CellConfig.model_validate({
         "strategy": "rate_percentile", "symbol": "fUSD", "period_agg": "a30",
         "timeframe": "1h",
         "params": {"percentile": 75, "lookback_hours": 5},
         "reference_amount_usdt": 150.0,
     })
+    cell.staleness_budget_hours = 2  # simulate load_config() resolution
+    return cell
 
 
 def _history(n: int) -> list[FundingCandle]:
@@ -131,3 +133,40 @@ async def test_cp3_divergence_path_also_passes_schema():
                     if e["event_type"] == "signal" and e["level"] == "warn"]
     assert len(warn_signals) == 1
     assert warn_signals[0]["payload"]["divergence_detail"] is not None
+
+
+def test_resolve_budget_seconds_raises_if_staleness_not_resolved() -> None:
+    """Loader invariant: cell.staleness_budget_hours must be set before emit.
+
+    None at emit time = loader bypassed = AssertionError to surface the bug.
+    """
+    import pytest
+    from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_budget_seconds
+
+    cell = CellConfig(
+        strategy="mean_reversion",
+        symbol="fUSD",
+        period_agg="p30",
+        timeframe="1h",
+        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_alpha": 0.01},
+        reference_amount_usdt=150.0,
+        staleness_budget_hours=None,  # simulate loader bypass
+    )
+    with pytest.raises(AssertionError, match="staleness_budget_hours not resolved"):
+        _resolve_budget_seconds(cell)
+
+
+def test_resolve_budget_seconds_correct_value() -> None:
+    """Resolved cell returns hours * 3600."""
+    from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_budget_seconds
+
+    cell = CellConfig(
+        strategy="rate_percentile",
+        symbol="fUSD",
+        period_agg="p30",
+        timeframe="1h",
+        params={"percentile": 75, "lookback_hours": 168},
+        reference_amount_usdt=150.0,
+        staleness_budget_hours=12,
+    )
+    assert _resolve_budget_seconds(cell) == 12 * 3600
