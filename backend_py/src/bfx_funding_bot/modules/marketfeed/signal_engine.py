@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
@@ -102,7 +103,20 @@ class SignalEngine:
                 symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
                 mts_inclusive=candle.mts, lookback=_lookback(cell) + 1,
             )
-            divergence = self.reporter.check(cell=cell, history=history, live_signal=live_signal)
+            # Phase 4.3 LOCF: replay path must see the same LOCF-processed candles
+            # as the live path (daemon applies reindex_and_ffill before calling here).
+            # Apply LOCF to raw history so DivergenceReporter.check() rebuilds the
+            # replay strategy on identical inputs → CP1 byte-equivalence holds on
+            # sparse input.
+            budget_hours = cell.staleness_budget_hours or 2
+            locf_history = [
+                fc.candle
+                for fc in reindex_and_ffill(
+                    history, ref_mts=candle.mts, max_gap_hours=budget_hours,
+                )
+                if fc.candle is not None
+            ]
+            divergence = self.reporter.check(cell=cell, history=locf_history, live_signal=live_signal)
             if divergence is not None:
                 await self._emit_signal_divergence_warn(
                     correlation_id, cell, live_signal, divergence,
