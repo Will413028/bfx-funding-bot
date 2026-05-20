@@ -102,3 +102,37 @@ def test_health_check_degraded_requires_error_message():
             "latency_ms": 1000,
             # missing error_message
         })
+
+
+def test_health_check_signal_pipeline_degraded_minimal_ok():
+    """SIGNAL_PIPELINE target accepts degraded with only error_message —
+    no last_msg_age_ms / latency_ms / reconnect_count_last_hour required.
+
+    Bug A fix: candle_missing was previously emitted as BITFINEX_WS degraded,
+    which forced bogus last_msg_age_ms=999_999. Now lives under its own
+    target with a leaner contract.
+    """
+    payload = HealthCheckPayload.model_validate({
+        "check_target": "signal_pipeline",
+        "status": "degraded",
+        "error_message": "candle_missing_at_scheduled_observe mts=1747584000000",
+    })
+    assert payload.check_target.value == "signal_pipeline"
+    assert payload.status.value == "degraded"
+
+
+def test_health_check_signal_pipeline_healthy_no_error_required():
+    payload = HealthCheckPayload.model_validate({
+        "check_target": "signal_pipeline",
+        "status": "healthy",
+    })
+    assert payload.check_target.value == "signal_pipeline"
+
+
+def test_health_check_signal_pipeline_degraded_without_error_rejected():
+    """Generic degraded-requires-error_message rule still applies."""
+    with pytest.raises(ValidationError):
+        HealthCheckPayload.model_validate({
+            "check_target": "signal_pipeline",
+            "status": "degraded",
+        })

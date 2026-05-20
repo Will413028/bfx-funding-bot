@@ -206,7 +206,10 @@ class Daemon:
         quiet 1h funding markets even though the connection is alive.
 
         Solution: poll every 15s and check ws_client.last_msg_age_ms(). If
-        < 60s, the connection is alive → record heartbeat for "ws" sub-task.
+        < 60s, the connection is alive → record heartbeat for "ws" sub-task,
+        and restore BITFINEX_WS state to HEALTHY (Bug B fix 5/20: nothing
+        else flips ws→healthy after a disconnect set DEGRADED, so the state
+        was sticky and health_monitor kept emitting warn every 5min).
         """
         assert self.ws_client is not None
         while not self._stop_event.is_set():
@@ -218,6 +221,16 @@ class Daemon:
             # Only record if WS is connected and recently saw any frame
             if self.ws_client is not None and self.ws_client.last_msg_age_ms() < 60_000:
                 self.probe.record_heartbeat("ws")
+                # Bug B fix: only emit transition (degraded/down → healthy
+                # or first-ever set) — don't spam every 15s with new
+                # last_msg_age_ms values.
+                if self.probe.current_status(HealthTarget.BITFINEX_WS) != HealthStatus.HEALTHY:
+                    self.probe.update(
+                        HealthTarget.BITFINEX_WS,
+                        HealthStatus.HEALTHY,
+                        last_msg_age_ms=self.ws_client.last_msg_age_ms(),
+                        reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
+                    )
 
     async def _ws_consume_with_reconnect(self) -> None:
         """WS recv + reconnect loop. Never exits unless daemon shuts down.
@@ -428,11 +441,14 @@ async def build_daemon(
             cell.pair_id, mts, candle_mts, len(rows),
         )
         if not rows:
+            # Bug A fix (5/20): candle_missing is a signal-pipeline / candle-
+            # freshness issue, not a WS health issue. The connection can be
+            # fully alive while p30 candles arrive after the scheduler buffer.
+            # Previously emitted as BITFINEX_WS degraded which (a) hid real WS
+            # health and (b) stuck sticky because nothing restores ws→healthy.
             probe.update(
-                HealthTarget.BITFINEX_WS,
+                HealthTarget.SIGNAL_PIPELINE,
                 HealthStatus.DEGRADED,
-                last_msg_age_ms=999_999,
-                reconnect_count_last_hour=0,
                 error_message=f"candle_missing_at_scheduled_observe mts={candle_mts}",
             )
             return
@@ -440,7 +456,11 @@ async def build_daemon(
             cell=cell, candle=rows[0], registry=registry,
         )
 
-    scheduler = Scheduler(callback=on_scheduler_tick, probe=probe)
+    scheduler = Scheduler(
+        callback=on_scheduler_tick,
+        probe=probe,
+        buffer_s=config.scheduler_buffer_s,
+    )
     writer = CandleWriter(queue=candle_q, session_factory=session_factory, probe=probe)
 
     ws_client: BitfinexWSClient | None = None

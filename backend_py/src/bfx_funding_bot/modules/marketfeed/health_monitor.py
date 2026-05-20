@@ -70,6 +70,15 @@ class HealthProbe:
         """Sub-task calls this each time it completes a progress unit."""
         self.last_active_ts[sub_task] = datetime.now(UTC)
 
+    def current_status(self, target: HealthTarget) -> HealthStatus | None:
+        """Return last-set status for a target, or None if never set.
+
+        Used by daemon code to detect transitions (avoid update spam when
+        target stays HEALTHY across many polling ticks).
+        """
+        state = self._state.get(target)
+        return state.status if state is not None else None
+
     def update(
         self, target: HealthTarget, status: HealthStatus, **fields: Any,
     ) -> None:

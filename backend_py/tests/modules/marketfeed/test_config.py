@@ -245,3 +245,47 @@ def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
     assert "bfx_cells_yaml" in msg
     assert "configs/cells.yaml" in msg
     assert "importlib" in msg or "package" in msg
+
+
+def test_scheduler_buffer_s_defaults_to_30(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Bug C fix (5/20): scheduler buffer default 30s (was 5s) so p30
+    candles have time to land in DB before scheduler reads."""
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.delenv("BFX_SCHEDULER_BUFFER_S", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    cfg = load_config(cells_yaml_path=yaml_path)
+    assert cfg.scheduler_buffer_s == 30.0
+
+
+def test_scheduler_buffer_s_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_SCHEDULER_BUFFER_S", "15.5")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    cfg = load_config(cells_yaml_path=yaml_path)
+    assert cfg.scheduler_buffer_s == 15.5
+
+
+def test_scheduler_buffer_s_env_invalid_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_SCHEDULER_BUFFER_S", "not-a-number")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_SCHEDULER_BUFFER_S"):
+        load_config(cells_yaml_path=yaml_path)
