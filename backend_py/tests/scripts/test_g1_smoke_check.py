@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import AsyncMock
 
-sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
-
-from g1_smoke_check import (  # type: ignore[import-not-found]
+from bfx_funding_bot.smoke.g1 import (
     AxiomQueryClient,
     build_apl_query_c2,
     build_apl_query_c3,
