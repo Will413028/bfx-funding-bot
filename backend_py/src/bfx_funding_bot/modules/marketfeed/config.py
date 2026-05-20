@@ -54,6 +54,7 @@ class CellConfig(BaseModel):
     timeframe: Literal["15m", "30m", "1h"] = "1h"
     params: dict[str, Any]
     reference_amount_usdt: float = Field(gt=0, default=150.0)
+    staleness_budget_hours: int | None = None  # None = use global default
 
     @property
     def cell_id(self) -> str:
@@ -73,6 +74,13 @@ class CellConfig(BaseModel):
             RatePercentileParams.model_validate(v)
         return v
 
+    @field_validator("staleness_budget_hours")
+    @classmethod
+    def _validate_budget(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("staleness_budget_hours must be positive")
+        return v
+
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,6 +97,10 @@ class MarketfeedConfig(BaseModel):
     # 30s is the new default; calibration period (Phase 4.3) tunes via
     # BFX_SCHEDULER_BUFFER_S env override.
     scheduler_buffer_s: float = Field(default=30.0, gt=0)
+    # Phase 4.3 LOCF: global default staleness budget for LOCF fill.
+    # p30 sparse cells override per-entry in cells.yaml (12h).
+    # Override via BFX_STALENESS_BUDGET_HOURS_DEFAULT env var.
+    staleness_budget_hours_default: int = Field(default=2, ge=1)
 
 
 def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
@@ -131,6 +143,8 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             raise ValueError(
                 f"BFX_SCHEDULER_BUFFER_S must be a number, got {scheduler_buffer_env!r}"
             ) from e
+
+    staleness_budget_default = int(os.getenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "2"))
 
     if cells_yaml_path is None:
         attempted: list[str] = []
@@ -200,7 +214,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if not any((c.strategy.value, c.cell_id) in QUALIFIED_PAIRS for c in cells):
         log.warning("cells.yaml has no Phase 3b qualified pair -- all entries are exploratory")
 
-    return MarketfeedConfig(
+    config = MarketfeedConfig(
         phase=Phase(phase_str),
         cells=cells,
         axiom_api_key=axiom_api_key,
@@ -209,4 +223,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         redis_url=redis_url,
         run_duration_hours=run_duration_h,
         scheduler_buffer_s=scheduler_buffer_s,
+        staleness_budget_hours_default=staleness_budget_default,
     )
+    for cell in config.cells:
+        if cell.staleness_budget_hours is None:
+            cell.staleness_budget_hours = config.staleness_budget_hours_default
+    return config
