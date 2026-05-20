@@ -83,6 +83,12 @@ class MarketfeedConfig(BaseModel):
     database_url: str
     redis_url: str | None = None
     run_duration_hours: int | None = None
+    # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
+    # default — but Bitfinex p30 candles sometimes land in DB > 5s after
+    # hh:00 → scheduler reads 0 rows → mis-emits health degraded (Bug A).
+    # 30s is the new default; calibration period (Phase 4.3) tunes via
+    # BFX_SCHEDULER_BUFFER_S env override.
+    scheduler_buffer_s: float = Field(default=30.0, gt=0)
 
 
 def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
@@ -115,6 +121,16 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             ) from e
     else:
         run_duration_h = None
+
+    scheduler_buffer_env = os.environ.get("BFX_SCHEDULER_BUFFER_S", "").strip()
+    scheduler_buffer_s = 30.0
+    if scheduler_buffer_env:
+        try:
+            scheduler_buffer_s = float(scheduler_buffer_env)
+        except ValueError as e:
+            raise ValueError(
+                f"BFX_SCHEDULER_BUFFER_S must be a number, got {scheduler_buffer_env!r}"
+            ) from e
 
     if cells_yaml_path is None:
         attempted: list[str] = []
@@ -192,4 +208,5 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         database_url=database_url,
         redis_url=redis_url,
         run_duration_hours=run_duration_h,
+        scheduler_buffer_s=scheduler_buffer_s,
     )

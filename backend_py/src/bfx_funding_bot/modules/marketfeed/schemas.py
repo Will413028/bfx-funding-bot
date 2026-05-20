@@ -64,6 +64,7 @@ class HealthTarget(StrEnum):
     BITFINEX_REST = "bitfinex_rest"
     DB = "db"
     REDIS = "redis"
+    SIGNAL_PIPELINE = "signal_pipeline"
 
 
 class HealthStatus(StrEnum):

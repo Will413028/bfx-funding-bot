@@ -76,6 +76,31 @@ class TestHeartbeatRegistry:
         assert second > first
 
 
+class TestCurrentStatus:
+    """Bug B fix (5/20): daemon needs to detect HEALTHY transitions without
+    spamming update() every poll tick."""
+
+    def test_returns_none_when_target_never_set(self):
+        probe = HealthProbe()
+        assert probe.current_status(HealthTarget.BITFINEX_WS) is None
+
+    def test_returns_status_after_update(self):
+        probe = HealthProbe()
+        probe.update(HealthTarget.BITFINEX_WS, HealthStatus.DEGRADED,
+                     last_msg_age_ms=999_999, reconnect_count_last_hour=1,
+                     error_message="ws_disconnect")
+        assert probe.current_status(HealthTarget.BITFINEX_WS) == HealthStatus.DEGRADED
+
+    def test_reflects_last_transition(self):
+        probe = HealthProbe()
+        probe.update(HealthTarget.BITFINEX_WS, HealthStatus.DEGRADED,
+                     last_msg_age_ms=999_999, reconnect_count_last_hour=1,
+                     error_message="ws_disconnect")
+        probe.update(HealthTarget.BITFINEX_WS, HealthStatus.HEALTHY,
+                     last_msg_age_ms=200, reconnect_count_last_hour=1)
+        assert probe.current_status(HealthTarget.BITFINEX_WS) == HealthStatus.HEALTHY
+
+
 class TestStalenessScan:
     @pytest.fixture
     def fake_axiom(self):
