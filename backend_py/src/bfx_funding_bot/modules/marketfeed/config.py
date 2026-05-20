@@ -90,7 +90,7 @@ class MarketfeedConfig(BaseModel):
     axiom_dataset: str
     database_url: str
     redis_url: str | None = None
-    run_duration_hours: int | None = None
+    run_duration_hours: int | None = Field(default=None, gt=0)
     # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
     # default — but Bitfinex p30 candles sometimes land in DB > 5s after
     # hh:00 → scheduler reads 0 rows → mis-emits health degraded (Bug A).

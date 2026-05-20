@@ -693,9 +693,9 @@ async def _run() -> None:
     # Gated by phase=paper + duration set; exception path is structurally unreachable here
     # (except* Exception: raise above propagates past finally, skipping this code).
     # CellConfig is Pydantic — convert to dict for the helper's expected list[dict[str, Any]] contract.
-    log.info("g1_smoke_starting phase=%s duration=%s", daemon.config.phase, duration)
+    log.info("g1_smoke_starting phase=%s duration=%s", daemon.config.phase.value, duration)
     smoke_exit_code = await maybe_run_self_smoke(
-        phase=daemon.config.phase,
+        phase=daemon.config.phase.value,
         duration=duration,
         cells=[c.model_dump() for c in daemon.config.cells],
         smoke_runner=run_smoke_async,
