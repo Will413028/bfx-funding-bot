@@ -21,6 +21,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import yaml
@@ -47,7 +48,23 @@ class AxiomQueryClient:
         )
         self.dataset = dataset
 
-    async def query_apl(self, apl: str) -> dict:  # type: ignore[type-arg]
+    @staticmethod
+    def _tabular_to_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        tables = payload.get("tables") or []
+        if not tables:
+            return []
+        t = tables[0]
+        fields = [f["name"] for f in t.get("fields", [])]
+        cols = t.get("columns") or []
+        if not fields or not cols:
+            return []
+        n_rows = len(cols[0])
+        return [
+            {fields[i]: cols[i][r] for i in range(len(fields))}
+            for r in range(n_rows)
+        ]
+
+    async def query_apl(self, apl: str) -> list[dict[str, Any]]:
         resp = await self._http.post(
             "/v1/datasets/_apl?format=tabular",
             json={"apl": apl},
@@ -58,7 +75,7 @@ class AxiomQueryClient:
             print(f"[debug] APL: {apl!r}", flush=True)
             print(f"[debug] response: {resp.text!r}", flush=True)
         resp.raise_for_status()
-        return resp.json()  # type: ignore[no-any-return]
+        return self._tabular_to_rows(resp.json())
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -94,7 +111,7 @@ def build_apl_query_c3(
 ['{dataset}']
 | where ['event_type'] == 'signal' and phase == '{phase}' and _time > ago({hours}h)
   and strategy == '{strategy}' and cell == '{cell}'
-  and (toreal(payload.signal_score) < {lo} or toreal(payload.signal_score) > {hi})
+  and (toreal(['payload.signal_score']) < {lo} or toreal(['payload.signal_score']) > {hi})
 | count
 """.strip()
 
@@ -112,17 +129,16 @@ def build_apl_query_c6(phase: str, dataset: str, hours: int) -> str:
     return f"""
 ['{dataset}']
 | where ['event_type'] == 'signal' and ['level'] == 'warn' and _time > ago({hours}h)
-  and phase == '{phase}' and isnotnull(payload.divergence_detail)
+  and phase == '{phase}' and isnotnull(['payload.divergence_detail.diff_fields'])
 | count
 """.strip()
 
 
 async def run_c1_continuity(*, client: AxiomQueryClient, phase: str, hours: int) -> CheckResult:
     apl = build_apl_query_c1(phase, client.dataset, hours)
-    data = await client.query_apl(apl)
-    buckets = data.get("buckets") or data.get("rows") or []
+    buckets = await client.query_apl(apl)
     expected = hours * 12
-    empty = [b for b in buckets if b.get("count", 0) == 0]
+    empty = [b for b in buckets if b.get("count_", 0) == 0]
     if len(buckets) >= expected and not empty:
         return CheckResult(
             "C1: continuity", True,
@@ -138,9 +154,8 @@ async def run_c2_emit_completeness(
     *, client: AxiomQueryClient, phase: str, hours: int, cells: list[dict],  # type: ignore[type-arg]
 ) -> CheckResult:
     apl = build_apl_query_c2(phase, client.dataset, hours)
-    data = await client.query_apl(apl)
-    rows = data.get("rows") or []
-    actual = {(r.get("strategy"), r.get("cell")): r.get("count", 0) for r in rows}
+    rows = await client.query_apl(apl)
+    actual = {(r.get("strategy"), r.get("cell")): r.get("count_", 0) for r in rows}
 
     failures: list[str] = []
     total_expected = 0
@@ -182,9 +197,8 @@ async def run_c3_range_conformance(
             phase, client.dataset, hours, strat, cell_id,
             rng["signal_score_min"], rng["signal_score_max"],
         )
-        data = await client.query_apl(apl)
-        rows = data.get("rows") or [{}]
-        n_outliers = int(rows[0].get("count", 0))
+        rows = await client.query_apl(apl)
+        n_outliers = int(rows[0].get("count_", 0)) if rows else 0
         total_checked += 1
         if n_outliers > 0:
             failures.append(f"{strat}:{cell_id} {n_outliers} outliers")
@@ -200,9 +214,8 @@ async def run_c5_zero_error_health(
     *, client: AxiomQueryClient, phase: str, hours: int,
 ) -> CheckResult:
     apl = build_apl_query_c5(phase, client.dataset, hours)
-    data = await client.query_apl(apl)
-    rows = data.get("rows") or [{}]
-    count = int(rows[0].get("count", 0))
+    rows = await client.query_apl(apl)
+    count = int(rows[0].get("count_", 0)) if rows else 0
     if count == 0:
         return CheckResult("C5: zero error/critical health_check", True, detail="0 events")
     return CheckResult("C5: zero error/critical health_check", False, detail=f"{count} events")
@@ -212,9 +225,8 @@ async def run_c6_zero_divergence(
     *, client: AxiomQueryClient, phase: str, hours: int,
 ) -> CheckResult:
     apl = build_apl_query_c6(phase, client.dataset, hours)
-    data = await client.query_apl(apl)
-    rows = data.get("rows") or [{}]
-    count = int(rows[0].get("count", 0))
+    rows = await client.query_apl(apl)
+    count = int(rows[0].get("count_", 0)) if rows else 0
     if count == 0:
         return CheckResult("C6: zero divergence warn", True, detail="0 events")
     return CheckResult(
