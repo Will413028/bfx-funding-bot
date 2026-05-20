@@ -144,7 +144,16 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
                 f"BFX_SCHEDULER_BUFFER_S must be a number, got {scheduler_buffer_env!r}"
             ) from e
 
-    staleness_budget_default = int(os.getenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "2"))
+    raw_staleness_budget_env = os.environ.get("BFX_STALENESS_BUDGET_HOURS_DEFAULT")
+    staleness_budget_default: int | None = None
+    if raw_staleness_budget_env is not None:
+        try:
+            staleness_budget_default = int(raw_staleness_budget_env)
+        except ValueError as e:
+            raise ValueError(
+                f"BFX_STALENESS_BUDGET_HOURS_DEFAULT must be an integer, got "
+                f"{raw_staleness_budget_env!r}"
+            ) from e
 
     if cells_yaml_path is None:
         attempted: list[str] = []
@@ -214,17 +223,19 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if not any((c.strategy.value, c.cell_id) in QUALIFIED_PAIRS for c in cells):
         log.warning("cells.yaml has no Phase 3b qualified pair -- all entries are exploratory")
 
-    config = MarketfeedConfig(
-        phase=Phase(phase_str),
-        cells=cells,
-        axiom_api_key=axiom_api_key,
-        axiom_dataset=axiom_dataset,
-        database_url=database_url,
-        redis_url=redis_url,
-        run_duration_hours=run_duration_h,
-        scheduler_buffer_s=scheduler_buffer_s,
-        staleness_budget_hours_default=staleness_budget_default,
-    )
+    config_kwargs: dict[str, object] = {
+        "phase": Phase(phase_str),
+        "cells": cells,
+        "axiom_api_key": axiom_api_key,
+        "axiom_dataset": axiom_dataset,
+        "database_url": database_url,
+        "redis_url": redis_url,
+        "run_duration_hours": run_duration_h,
+        "scheduler_buffer_s": scheduler_buffer_s,
+    }
+    if staleness_budget_default is not None:
+        config_kwargs["staleness_budget_hours_default"] = staleness_budget_default
+    config = MarketfeedConfig(**config_kwargs)
     for cell in config.cells:
         if cell.staleness_budget_hours is None:
             cell.staleness_budget_hours = config.staleness_budget_hours_default
