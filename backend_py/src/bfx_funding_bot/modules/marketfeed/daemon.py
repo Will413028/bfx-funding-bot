@@ -478,7 +478,11 @@ async def build_daemon(
         # Phase 4.3 LOCF: fetch a lookback window and LOCF-fill gaps.
         # staleness_budget_hours is guaranteed non-None after load_config().
         budget_hours: int = cell.staleness_budget_hours  # type: ignore[assignment]
-        lookback = budget_hours + 1  # enough candles to cover one budget window
+        # lookback here is for staleness-tier determination only:
+        # reindex_and_ffill needs candles within `budget_hours` to decide hard vs soft
+        # tier. Strategy state itself lives in the pre-warmed StrategyRegistry which
+        # was fed during daemon startup — NOT re-fed from this small window.
+        lookback = budget_hours + 1  # +1 to ensure boundary candle is included
         async with session_factory() as s:
             raw_candles = await get_up_to(
                 s,

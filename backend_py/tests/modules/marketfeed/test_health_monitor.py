@@ -190,7 +190,7 @@ class TestStalenessScan:
         monitor must stay DEGRADED and NEVER escalate to fatal, even if the
         cell has been degraded for a long time.
         """
-        pair_id = "rate_percentile:fUSD_p30_1h"
+        pair_id = "rate_percentile:fUSD_p30"
         monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DEGRADED)
 
         # No exception should be raised — even though DEGRADED is present
@@ -207,7 +207,7 @@ class TestStalenessScan:
         assert len(fake_axiom.emitted) == 1
         emitted = fake_axiom.emitted[0]
         assert emitted["level"] == "warn"
-        assert emitted["payload"]["check_target"] == "SIGNAL_PIPELINE"
+        assert emitted["payload"]["check_target"] == "signal_pipeline"
         assert emitted["payload"]["status"] == "degraded"
         assert pair_id in emitted["payload"]["error_message"]
         assert "not escalating" in emitted["payload"]["error_message"]
@@ -221,7 +221,7 @@ class TestStalenessScan:
         SIGNAL_PIPELINE DEGRADED is present simultaneously — it must NOT
         prevent the fatal raise for the other sub-task (candle_writer here).
         """
-        pair_id = "rate_percentile:fUSD_p30_1h"
+        pair_id = "rate_percentile:fUSD_p30"
         monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DEGRADED)
 
         # candle_writer threshold = 65*60 s; 3× = 195*60 s → use 200*60 s
@@ -242,7 +242,7 @@ class TestStalenessScan:
         Today's daemon LOCF path only sets DEGRADED, but the guard accommodates DOWN
         for forward-compat (cell permanent disqualification or similar).
         """
-        pair_id = "rate_percentile:fUSD_p30_1h"
+        pair_id = "rate_percentile:fUSD_p30"
         monitor.probe.set_cell_pipeline_status(pair_id, HealthStatus.DOWN)
 
         # No exception should be raised — spec carve-out covers both DEGRADED and DOWN
@@ -258,7 +258,7 @@ class TestStalenessScan:
         assert len(fake_axiom.emitted) == 1
         emitted = fake_axiom.emitted[0]
         assert emitted["level"] == "warn"
-        assert emitted["payload"]["check_target"] == "SIGNAL_PIPELINE"
+        assert emitted["payload"]["check_target"] == "signal_pipeline"
         assert emitted["payload"]["status"] == "down"
         assert pair_id in emitted["payload"]["error_message"]
         assert "not escalating" in emitted["payload"]["error_message"]
