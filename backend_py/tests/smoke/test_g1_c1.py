@@ -225,3 +225,63 @@ async def test_c1_boundary_at_exact_tolerance():
         now_fn=lambda: frozen_now,
     )
     assert result.passed is False
+
+    # C1b recency boundary: single signal at exactly 90min before now — pass
+    events_recency_pass = [
+        {
+            "_time": _iso(frozen_now - timedelta(minutes=90)),
+            "strategy": "mean_reversion", "cell": "fUSD_p2",
+        },
+    ]
+    fake_client.query_apl = AsyncMock(return_value=events_recency_pass)
+    result = await run_c1_continuity(
+        client=fake_client, phase="paper", hours=2, cells=cells,
+        now_fn=lambda: frozen_now,
+    )
+    assert result.passed is True, result.detail
+
+    # C1b recency boundary: single signal at 90min 1s before now — fail
+    events_recency_fail = [
+        {
+            "_time": _iso(frozen_now - timedelta(minutes=90, seconds=1)),
+            "strategy": "mean_reversion", "cell": "fUSD_p2",
+        },
+    ]
+    fake_client.query_apl = AsyncMock(return_value=events_recency_fail)
+    result = await run_c1_continuity(
+        client=fake_client, phase="paper", hours=2, cells=cells,
+        now_fn=lambda: frozen_now,
+    )
+    assert result.passed is False
+    assert "recency" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_c1_fail_multi_cell_partial():
+    """2 cells, one passes one fails — detail names only the failing cell."""
+    frozen_now = datetime(2026, 5, 21, 14, 0, 0, tzinfo=UTC)
+    cells = [
+        _cell(strategy="mean_reversion", symbol="fUSD", period_agg="p2"),     # will pass
+        _cell(strategy="rate_percentile", symbol="fUST", period_agg="a30"),    # will fail (0 signals)
+    ]
+    # Only emit signal for the first cell
+    events = [
+        {
+            "_time": _iso(frozen_now - timedelta(minutes=30)),
+            "strategy": "mean_reversion", "cell": "fUSD_p2",
+        },
+    ]
+
+    fake_client = AsyncMock()
+    fake_client.dataset = "evt"
+    fake_client.query_apl = AsyncMock(return_value=events)
+
+    result = await run_c1_continuity(
+        client=fake_client, phase="paper", hours=1, cells=cells,
+        now_fn=lambda: frozen_now,
+    )
+    assert result.passed is False
+    # Failing cell named in detail
+    assert "rate_percentile:fUST_a30" in result.detail
+    # Passing cell NOT named (no contamination)
+    assert "mean_reversion:fUSD_p2" not in result.detail
