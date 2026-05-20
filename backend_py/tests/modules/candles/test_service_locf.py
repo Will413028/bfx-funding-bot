@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.candles.service import FilledCandle, reindex_and_ffill
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 
 
 def _make_candle(mts: int, close: str = "0.0001") -> FundingCandle:
@@ -105,3 +105,16 @@ def test_locf_empty_input() -> None:
     filled = reindex_and_ffill([], ref_mts=ref_mts, max_gap_hours=12)
 
     assert filled == []
+
+
+def test_locf_stale_seconds_correctness() -> None:
+    """For a ffilled slot at slot_mts, stale_seconds == (slot_mts - source.mts) / 1000."""
+    start_mts = 1_700_000_000_000
+    source = _make_candle(start_mts)
+    ref_mts = start_mts + HOUR_MS  # T + 60 min
+
+    filled = reindex_and_ffill([source], ref_mts=ref_mts, max_gap_hours=12)
+
+    assert len(filled) == 2
+    assert filled[0].stale_seconds == 0
+    assert filled[1].stale_seconds == 3600
