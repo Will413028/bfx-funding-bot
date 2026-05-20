@@ -29,6 +29,8 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistr
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_BUDGET_HOURS: int = 2  # mirrors MarketfeedConfig.staleness_budget_hours_default
+
 
 class _AxiomProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
@@ -96,6 +98,7 @@ class SignalEngine:
     async def _emit_signal(
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
     ) -> None:
+        budget_seconds = (cell.staleness_budget_hours or _DEFAULT_BUDGET_HOURS) * 3600
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
@@ -108,6 +111,7 @@ class SignalEngine:
                 "signal_score": sig.signal_score,
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
+                "budget_seconds": budget_seconds,
             },
         })
 
@@ -115,6 +119,7 @@ class SignalEngine:
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
         divergence: dict[str, Any],
     ) -> None:
+        budget_seconds = (cell.staleness_budget_hours or _DEFAULT_BUDGET_HOURS) * 3600
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,
@@ -128,6 +133,7 @@ class SignalEngine:
                 "signal_direction": sig.signal_direction.value,
                 "strategy_attributes": dict(sig.strategy_attributes),
                 "divergence_detail": divergence,
+                "budget_seconds": budget_seconds,
             },
         })
 

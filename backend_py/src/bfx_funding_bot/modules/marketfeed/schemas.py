@@ -82,7 +82,7 @@ class SignalPayload(BaseModel):
     # ── NEW (Phase 4.3 LOCF) ──
     is_stale: bool = False
     stale_seconds: int = 0
-    budget_seconds: int = 0  # 0 = not populated yet; Task 4 always sets explicitly
+    budget_seconds: int  # required: every signal carries its cell's budget
 
 
 class DecisionPayload(BaseModel):

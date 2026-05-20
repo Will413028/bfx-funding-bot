@@ -27,6 +27,7 @@ def _envelope_dict(**overrides):
             "signal_score": 0.5,
             "signal_direction": "post",
             "strategy_attributes": {"rate": 0.0001, "mean": 0.00009, "sigma": 0.00002},
+            "budget_seconds": 43200,
         },
     }
     base.update(overrides)
@@ -138,7 +139,7 @@ def test_health_check_signal_pipeline_degraded_without_error_rejected():
         })
 
 
-def test_signal_payload_accepts_staleness_metadata() -> None:
+def test_signal_event_payload_accepts_staleness_metadata() -> None:
     """SignalPayload accepts new optional fields: is_stale, stale_seconds, budget_seconds.
 
     Defaults: is_stale=False, stale_seconds=0.
