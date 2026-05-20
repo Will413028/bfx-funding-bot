@@ -24,6 +24,7 @@ def _cell() -> CellConfig:
         "timeframe": "1h",
         "params": {"percentile": 75, "lookback_hours": 5},
         "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
     })
 
 

@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
@@ -72,18 +74,39 @@ async def warmup_cell(
         start_mts=start_mts, end_mts=now_mts,
     )
 
-    # 4. Build strategy, replay observe in mts order
+    # 4. Phase 4.3 LOCF symmetry: apply reindex_and_ffill before observing so
+    # warmup state matches what the divergence-reporter replay path will
+    # rebuild at every tick (signal_engine.py uses the same primitive). Without
+    # this, sparse cells (e.g. fUSD_p30 ~1/3 density) emit a CP1 divergence on
+    # the first post-deploy tick — raw warmup state vs LOCF replay state diverge
+    # and self-heal only after several LOCF observations accumulate via ticks.
+    #
+    # Boundary handling: drop the last filled slot. That slot corresponds to
+    # the upcoming first-tick candle which scheduler.daemon delivers to
+    # signal_engine.extract(); extract() has an observe side effect, so
+    # observing it here would double-count.
+    if cell.staleness_budget_hours is None:
+        raise AssertionError(
+            f"cell {cell.pair_id} staleness_budget_hours not resolved; "
+            "was load_config() called?"
+        )
+    budget_hours = cell.staleness_budget_hours
+
     strategy = build_strategy(cell)
-    for candle in sorted(history, key=lambda c: c.mts):
-        strategy.observe(candle)
+    observed: list[FundingCandle] = []
+    if history:
+        filled = reindex_and_ffill(history, ref_mts=now_mts, max_gap_hours=budget_hours)
+        observed = [fc.candle for fc in filled[:-1] if fc.candle is not None]
+        for candle in observed:
+            strategy.observe(candle)
     registry.put(cell, strategy)
     log.info(
-        "warmup_complete cell=%s observed=%d gap_filled=%d",
-        cell.pair_id, len(history), fill.candles_fetched,
+        "warmup_complete cell=%s raw=%d locf_observed=%d gap_filled=%d",
+        cell.pair_id, len(history), len(observed), fill.candles_fetched,
     )
     return WarmupResult(
         cell_id=cell.pair_id,
-        observed_count=len(history),
+        observed_count=len(observed),
         gap_filled=fill.candles_fetched,
     )
 
