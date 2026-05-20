@@ -30,6 +30,14 @@ import yaml
 
 from bfx_funding_bot.smoke.eda_ranges import EDA_RANGES
 
+TF_TO_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600}
+TOLERANCE = 1.5
+
+
+def _parse_iso_utc(s: str) -> datetime:
+    """Parse Axiom ISO8601 (handles 'Z' suffix)."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
 
 @dataclass
 class CheckResult:
@@ -86,8 +94,8 @@ def build_apl_query_c1(phase: str, dataset: str, hours: int) -> str:
     return f"""
 ['{dataset}']
 | where ['event_type'] == 'signal' and phase == '{phase}' and _time > ago({hours}h)
-| summarize count() by bin(_time, 5m)
-| order by _time asc
+| project _time, strategy, cell
+| order by strategy asc, cell asc, _time asc
 """.strip()
 
 
@@ -140,27 +148,58 @@ async def run_c1_continuity(
     client: AxiomQueryClient,
     phase: str,
     hours: int,
-    cells: list[dict[str, Any]] | None = None,  # consumed in Task 3
-    now_fn: Callable[[], datetime] | None = None,  # consumed in Task 3
+    cells: list[dict[str, Any]],
+    now_fn: Callable[[], datetime],
 ) -> CheckResult:
-    """C1 continuity check.
+    """C1 continuity check — per-cell max-gap + recency.
 
-    NOTE: This is the legacy bucket-based implementation. Task 3 replaces it with
-    per-cell max-gap + recency. `cells` and `now_fn` params accepted but unused here.
+    Spec: 2026-05-21-g1-c1-continuity-redesign-design.md
     """
+    from collections import defaultdict
+
     apl = build_apl_query_c1(phase, client.dataset, hours)
-    buckets = await client.query_apl(apl)
-    expected = hours * 12
-    empty = [b for b in buckets if b.get("count_", 0) == 0]
-    if len(buckets) >= expected and not empty:
+    events = await client.query_apl(apl)
+
+    by_cell: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+    for e in events:
+        ts_raw = e.get("_time")
+        if not ts_raw:
+            continue
+        by_cell[(e["strategy"], e["cell"])].append(_parse_iso_utc(ts_raw))
+
+    window_end = now_fn()
+    failures: list[str] = []
+    for c in cells:
+        key = (c["strategy"], f"{c['symbol']}_{c['period_agg']}")
+        bound = TF_TO_SECONDS[c.get("timeframe", "1h")] * TOLERANCE
+        ts = sorted(by_cell.get(key, []))
+
+        if not ts:
+            failures.append(f"{key[0]}:{key[1]} 0 signals")
+            continue
+
+        # C1a max-gap (skip if only 1 signal)
+        if len(ts) >= 2:
+            gaps = [(ts[i + 1] - ts[i]).total_seconds() for i in range(len(ts) - 1)]
+            max_gap = max(gaps)
+            if max_gap > bound:
+                failures.append(
+                    f"{key[0]}:{key[1]} max_gap={max_gap:.0f}s > {bound:.0f}s",
+                )
+
+        # C1b recency
+        age = (window_end - ts[-1]).total_seconds()
+        if age > bound:
+            failures.append(
+                f"{key[0]}:{key[1]} recency={age:.0f}s > {bound:.0f}s",
+            )
+
+    if not failures:
         return CheckResult(
             "C1: continuity", True,
-            detail=f"{len(buckets)}/{expected} 5min buckets non-empty",
+            detail=f"{len(cells)} cells all within 1.5x cadence",
         )
-    return CheckResult(
-        "C1: continuity", False,
-        detail=f"got {len(buckets)} buckets, {len(empty)} empty (expected {expected} all non-empty)",
-    )
+    return CheckResult("C1: continuity", False, detail="; ".join(failures))
 
 
 async def run_c2_emit_completeness(
