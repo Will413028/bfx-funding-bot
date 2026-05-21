@@ -274,15 +274,47 @@ class Daemon:
         consecutive_failures = 0
         while not self._stop_event.is_set():
             try:
-                async for msg in self.ws_client.candles():
-                    await self.candle_q.put(msg)
-                    # successful message → connection is alive; reset failure counter
-                    consecutive_failures = 0
-                    self.ws_client.maybe_reset_backoff()
-                    # ws heartbeat is recorded by _ws_heartbeat_poll_loop based on
-                    # ws_client.last_msg_age_ms() (which counts both candle frames
-                    # and Bitfinex `hb` frames), not here — yielded candles are
-                    # sparse on 1h cells.
+                # async for would block in ws_client.candles() recv() between
+                # yields without checking stop_event — paper exit cycle 2026-05-21
+                # hung daemon TaskGroup drain because ws never noticed stop.
+                # Manual __anext__() race with stop_event each iteration ensures
+                # cancellation arrives within the recv window, not the next yield.
+                candles_iter = self.ws_client.candles().__aiter__()
+                try:
+                    while not self._stop_event.is_set():
+                        # ensure_future accepts Awaitable (anext returns Awaitable[T]
+                        # not Coroutine, so create_task fails mypy strict).
+                        msg_task = asyncio.ensure_future(candles_iter.__anext__())
+                        stop_task = asyncio.create_task(self._stop_event.wait())
+                        done, _ = await asyncio.wait(
+                            {msg_task, stop_task}, return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if stop_task in done:
+                            msg_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
+                                await msg_task
+                            log.info("sub_task_exit name=ws path=stop_during_recv")
+                            return
+                        stop_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await stop_task
+                        try:
+                            msg = msg_task.result()
+                        except StopAsyncIteration:
+                            break  # generator exhausted → reconnect path below
+                        await self.candle_q.put(msg)
+                        # successful message → connection is alive; reset failure counter
+                        consecutive_failures = 0
+                        self.ws_client.maybe_reset_backoff()
+                        # ws heartbeat is recorded by _ws_heartbeat_poll_loop based on
+                        # ws_client.last_msg_age_ms() (which counts both candle frames
+                        # and Bitfinex `hb` frames), not here — yielded candles are
+                        # sparse on 1h cells.
+                finally:
+                    # aclose only on async generators (not plain AsyncIterator).
+                    # AttributeError suppressed if candles() returns the latter.
+                    with contextlib.suppress(Exception):
+                        await candles_iter.aclose()  # type: ignore[attr-defined]
             except asyncio.CancelledError:
                 raise
             except Exception:
