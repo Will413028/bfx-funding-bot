@@ -3,13 +3,25 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    Credentials,
+    SubmittedOrder,
+)
 from bfx_funding_bot.modules.execution.registry import ExecutorConfigError
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+from bfx_funding_bot.modules.marketfeed.daemon import _LedgerWrappedExecutor
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    DecisionPayload,
+)
 
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
@@ -86,3 +98,52 @@ async def test_build_daemon_invalid_executor_combo_raises(
         await build_daemon(
             cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
         )
+
+
+class _FailedSubmitExecutor:
+    """Stub: always returns status='failed'. Mirrors what 4.4 bitfinex_live
+    will produce on venue rejection (insufficient balance / API error / etc).
+    """
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        return SubmittedOrder(
+            cid=12345,
+            venue_offer_id=None,
+            status="failed",
+            raw_response={"error": "stub failure"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_skips_failed_status() -> None:
+    """Regression: failed submit must NOT inflate ledger exposure.
+
+    Latent bug fixed in Phase 4.2 review — EchoPaperExecutor (4.2) always
+    returns status='filled' so the bug doesn't fire today, but 4.4
+    bitfinex_live can return 'failed' on venue rejection. Without the
+    status guard, AllocationCapGuard would wrongly block subsequent POST
+    decisions.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    wrapped = _LedgerWrappedExecutor(_FailedSubmitExecutor(), ledger)
+
+    ctx = AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=Decimal("500"),
+    )
+    decision = DecisionPayload(
+        decision_outcome=DecisionOutcome.POST,
+        signal_correlation_id=uuid4(),
+        offer_rate=0.0005,
+        offer_amount_usdt=150.0,
+        offer_duration_days=2,
+    )
+
+    result = await wrapped.submit(decision, ctx)
+
+    assert result.status == "failed"
+    # Exposure unchanged — failed submit did not call on_order_fill.
+    assert ledger.current_exposure() == Decimal("0")
