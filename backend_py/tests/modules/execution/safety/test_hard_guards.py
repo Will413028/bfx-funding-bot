@@ -12,6 +12,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
+    AllocationCapGuard,
     AuthHealthGuard,
     HeartbeatGuard,
     ManualKillGuard,
@@ -129,3 +130,56 @@ async def test_heartbeat_edge_at_exactly_threshold() -> None:
     r = await g.evaluate(_post(), _ctx())
     # Exactly at threshold = still allowed; strictly greater blocks.
     assert r.allowed is True
+
+
+class _FakeLedger:
+    def __init__(self, exposure: Decimal) -> None:
+        self._exposure = exposure
+
+    def current_exposure(self) -> Decimal:
+        return self._exposure
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_allows_under_cap() -> None:
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
+    ledger = _FakeLedger(Decimal("100"))
+    g = AllocationCapGuard(ledger=ledger)
+    decision = _post()  # offer_amount_usdt=100
+    r = await g.evaluate(decision, ctx)
+    assert r.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_blocks_over_cap() -> None:
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
+    ledger = _FakeLedger(Decimal("450"))
+    g = AllocationCapGuard(ledger=ledger)
+    decision = _post()  # 100 → 450+100=550 > 500
+    r = await g.evaluate(decision, ctx)
+    assert r.allowed is False
+    assert "cap" in (r.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_edge_at_exactly_cap() -> None:
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
+    ledger = _FakeLedger(Decimal("400"))  # 400 + 100 = 500 (exactly)
+    g = AllocationCapGuard(ledger=ledger)
+    r = await g.evaluate(_post(), ctx)
+    # Exactly at cap = allowed; strictly over blocks.
+    assert r.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_skip_decision_always_allowed() -> None:
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("100"))
+    ledger = _FakeLedger(Decimal("99999"))
+    g = AllocationCapGuard(ledger=ledger)
+    skip = DecisionPayload(
+        decision_outcome=DecisionOutcome.SKIP,
+        signal_correlation_id=uuid4(),
+        skip_reason="below_threshold",
+    )
+    r = await g.evaluate(skip, ctx)
+    assert r.allowed is True  # SKIP decisions never consume cap
