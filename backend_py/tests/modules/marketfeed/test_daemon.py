@@ -32,6 +32,11 @@ phase3b_wfo_results_ref: x
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     # OS-assigned port to avoid 8080 conflicts during parallel runs / dev boxes.
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    # Phase 4.2 Task 20 execution wiring requires these env vars.
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     # Axiom flush during shutdown — accept any POST to ingest endpoint.
     httpx_mock.add_response(
         url="https://api.axiom.co/v1/datasets/x/ingest",

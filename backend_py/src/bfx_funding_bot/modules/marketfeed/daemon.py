@@ -14,8 +14,10 @@ import os
 import signal
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -27,6 +29,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED, ExecutorAuthError
 from bfx_funding_bot.external.axiom import (
     AxiomAuthError,
     AxiomClient,
@@ -45,6 +48,30 @@ from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.execution.fill_tracker import (
+    RestPollingFillTracker,
+)
+from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    Credentials,
+    ExecutorPort,
+    GuardRule,
+)
+from bfx_funding_bot.modules.execution.registry import build_executor
+from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
+    DivergenceRateGuard,
+    DrawdownGuard,
+    RealizedLossGuard,
+)
+from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+from bfx_funding_bot.modules.execution.safety.config import load_safety_config
+from bfx_funding_bot.modules.execution.safety.hard_guards import (
+    AllocationCapGuard,
+    AuthHealthGuard,
+    HeartbeatGuard,
+    ManualKillGuard,
+)
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
@@ -65,6 +92,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     HealthStatus,
     HealthTarget,
     Level,
+    OrderFillPayload,
 )
 from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
@@ -93,6 +121,12 @@ class Daemon:
     bitfinex_http: httpx.AsyncClient
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
+    # Phase 4.2 Task 20: execution + safety wiring.
+    executor: ExecutorPort
+    safety_chain: SafetyGuardChain
+    account_ctx: AccountContext
+    ledger: PaperPositionLedger
+    fill_tracker: RestPollingFillTracker | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -120,6 +154,14 @@ class Daemon:
             if self.ws_client is not None:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
                 tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
+            # Phase 4.2 Task 20: fill_tracker sub-task only runs when
+            # build_executor enabled it (live executor + flag). Paper +
+            # tracker is rejected at startup by registry CC4 invariant.
+            if self.fill_tracker is not None:
+                tg.create_task(
+                    self.fill_tracker.poll_loop(self._stop_event),
+                    name="fill_tracker",
+                )
             # When _stop_event is set externally (SIGTERM), each sub-task's
             # internal loop exits cleanly; TaskGroup waits for all to drain.
 
@@ -456,6 +498,83 @@ async def _emit_locf_degraded(
     })
 
 
+class _AxiomQueryAdapter:
+    """4.2 stub — returns no historical fills.
+
+    AxiomClient (`external/axiom.py`) only exposes emit/flush/start/stop, not
+    query. Real Axiom APL (POST /v1/datasets/{ds}/_apl) replay lands in 4.3
+    when accumulated paper fills make replay meaningful. For 4.2 ship:
+    paper phase starts with a fresh ledger each boot; AllocationCap still
+    works because the in-process `_LedgerWrappedExecutor` updates the same
+    ledger instance on every order_fill (live updates flow without round-tripping
+    through Axiom).
+    """
+
+    def __init__(self, axiom_client: AxiomClient, dataset: str) -> None:
+        self._client = axiom_client
+        self._dataset = dataset
+
+    async def query_order_fills(
+        self, account_id: str, since: datetime,
+    ) -> list[dict[str, Any]]:
+        log.info(
+            "axiom_query_stub_returning_empty account=%s dataset=%s "
+            "since=%s (real query lands in 4.3)",
+            account_id, self._dataset, since.isoformat(),
+        )
+        return []
+
+
+class _LedgerWrappedExecutor:
+    """Wraps an inner executor so paper fills update the in-memory ledger
+    immediately (no need to wait for Axiom round-trip).
+
+    Live updates: every successful submit() emits an OrderFillPayload back
+    into the shared PaperPositionLedger so AllocationCapGuard sees up-to-date
+    exposure on the next decision tick.
+    """
+
+    def __init__(
+        self, inner: ExecutorPort, ledger: PaperPositionLedger,
+    ) -> None:
+        self._inner = inner
+        self._ledger = ledger
+
+    async def submit(
+        self, decision: Any, ctx: AccountContext,
+    ) -> Any:
+        result = await self._inner.submit(decision, ctx)
+        self._ledger.on_order_fill(OrderFillPayload(
+            cid=result.cid,
+            offer_id=result.venue_offer_id or "",
+            signal_correlation_id=decision.signal_correlation_id,
+            fill_size_usdt=decision.offer_amount_usdt or 0.0,
+            fill_price=decision.offer_rate or 0.0,
+            is_simulated=True,
+        ))
+        return result
+
+
+class _StubPnLSource:
+    """4.2 stub — disabled L2 guards never reach this (enabled=False short-circuits).
+    4.4 wires real PnLLedger that aggregates realized P&L from order_fill events.
+    """
+
+    def realized_loss_24h(self) -> Decimal:
+        return Decimal("0")
+
+    def drawdown_pct(self) -> float:
+        return 0.0
+
+
+class _StubDivergenceSource:
+    """4.2 stub — disabled DivergenceRateGuard never reaches this.
+    4.4 wires a real source backed by `signal_divergence_warn` event counts."""
+
+    def divergence_rate_pct(self, window_minutes: int) -> float:
+        return 0.0
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -523,8 +642,119 @@ async def build_daemon(
                     lookback=lookback,
                 )
 
+    # ── Phase 4.2 Task 20 wiring ─────────────────────────────────────────
+    # AccountContext: 4.2 single hardcoded account from env. Phase 5+ SaaS
+    # extends to per-tenant context loaded from vault.
+    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
+    credentials = Credentials(
+        api_key=os.environ["BFX_API_KEY"],
+        api_secret=os.environ["BFX_API_SECRET"],
+    )
+    allocation_cap = Decimal(
+        os.environ.get("BFX_ALLOCATION_CAP_USDT", "500"),
+    )
+    account_ctx = AccountContext(
+        account_id=account_id,
+        credentials=credentials,
+        allocation_cap_usdt=allocation_cap,
+    )
+
+    # PaperPositionLedger replay — Axiom is SoT; fast-fail on unreachable
+    # (LedgerReplayError → daemon never starts; empty-ledger fallback would
+    # let AllocationCap permit over-cap exposure). 4.2 uses the stub adapter
+    # that returns [] immediately, so this is a no-op for now.
+    ledger_window_days = int(os.environ.get("BFX_LEDGER_REPLAY_DAYS", "30"))
+    axiom_query = _AxiomQueryAdapter(axiom, config.axiom_dataset)
+    ledger = await PaperPositionLedger.replay_from_axiom(
+        account_id=account_id,
+        since=datetime.now(UTC) - timedelta(days=ledger_window_days),
+        axiom_query=axiom_query,
+    )
+
+    # Safety config — immutable for daemon lifetime. Config change = redeploy.
+    safety_cfg_path = Path(
+        os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
+    )
+    safety_cfg = load_safety_config(safety_cfg_path)
+
+    pnl_source = _StubPnLSource()
+    div_source = _StubDivergenceSource()
+
+    # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
+    # 4.2 is single-cell paper / shadow; multi-cell uniform-policy refinement
+    # tracked in Phase 4.4. AllocationCap is account-scoped (not per-cell),
+    # so the envelope labels are informational only.
+    first_cell = config.cells[0]
+
+    guards: list[GuardRule] = [
+        ManualKillGuard(),
+        AuthHealthGuard(probe=probe),
+        HeartbeatGuard(
+            probe=probe,
+            threshold_seconds=safety_cfg.hard_guards.heartbeat.sub_task_stale_threshold_seconds,
+            watched_sub_tasks=["safety_chain", "executor"],
+        ),
+        AllocationCapGuard(ledger=ledger),
+        RealizedLossGuard(
+            enabled=safety_cfg.calibrated_guards.realized_loss_24h.enabled,
+            threshold_usdt=safety_cfg.calibrated_guards.realized_loss_24h.threshold_usdt,
+            source=pnl_source,
+        ),
+        DrawdownGuard(
+            enabled=safety_cfg.calibrated_guards.drawdown_from_peak.enabled,
+            threshold_pct=safety_cfg.calibrated_guards.drawdown_from_peak.threshold_pct,
+            source=pnl_source,
+        ),
+        DivergenceRateGuard(
+            enabled=safety_cfg.calibrated_guards.divergence_rate.enabled,
+            threshold_pct=safety_cfg.calibrated_guards.divergence_rate.threshold_pct,
+            window_minutes=safety_cfg.calibrated_guards.divergence_rate.window_minutes,
+            source=div_source,
+        ),
+    ]
+
+    safety_chain = SafetyGuardChain(
+        guards=guards,
+        probe=probe,
+        axiom=axiom,
+        phase=config.phase,
+        strategy=first_cell.strategy,
+        cell=first_cell.cell_id,
+        account_id=account_id,
+    )
+
+    # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
+    # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
+    spec = build_executor(
+        axiom=axiom,
+        phase=config.phase,
+        strategy=first_cell.strategy,
+        cell=first_cell.cell_id,
+    )
+    executor: ExecutorPort = spec.executor
+
+    fill_tracker: RestPollingFillTracker | None = None
+    if spec.fill_tracker_enabled:
+        fill_tracker = RestPollingFillTracker(
+            http=bitfinex_http,
+            axiom=axiom,
+            probe=probe,
+            phase=config.phase,
+            strategy=first_cell.strategy,
+            cell=first_cell.cell_id,
+            account_id=account_id,
+        )
+
+    # Wrap inner executor so paper fills update the in-memory ledger live.
+    wrapped_executor = _LedgerWrappedExecutor(executor, ledger)
+
     signal_engine_obj = SignalEngine(
-        phase=config.phase, axiom=axiom, candles_repo=_CandlesRepoBridge(),
+        phase=config.phase,
+        axiom=axiom,
+        candles_repo=_CandlesRepoBridge(),
+        safety_chain=safety_chain,
+        executor=wrapped_executor,
+        account_ctx=account_ctx,
     )
 
     async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
@@ -671,6 +901,11 @@ async def build_daemon(
         bitfinex_http=bitfinex_http,
         bitfinex=bitfinex,
         session_factory=session_factory,
+        executor=executor,
+        safety_chain=safety_chain,
+        account_ctx=account_ctx,
+        ledger=ledger,
+        fill_tracker=fill_tracker,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
     )
@@ -720,6 +955,18 @@ async def _run() -> None:
         log.info("daemon_run_clean_exit")
     except* asyncio.CancelledError:
         log.info("daemon_cancelled_via_signal")
+    except* ExecutorAuthError:
+        # Auth failure means credentials are wrong / revoked — operator must
+        # intervene. Avoid auto-retry loop (Google SRE Book ch. 22 — auth
+        # crash-loop-backoff via sysexits EX_CONFIG 78 lets Koyeb stagger
+        # restarts instead of tight crash-on-boot retries.) Flush axiom so
+        # the safety_trigger event survives the exit.
+        log.critical(
+            "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
+        )
+        with contextlib.suppress(Exception):
+            await daemon.axiom.flush()
+        sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
             "daemon_taskgroup_fatal exceptions=%s",
