@@ -57,6 +57,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     ExecutorPort,
     GuardRule,
+    SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
@@ -88,6 +89,7 @@ from bfx_funding_bot.modules.marketfeed.scheduler import (
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionPayload,
     EventType,
     HealthStatus,
     HealthTarget,
@@ -103,6 +105,19 @@ from bfx_funding_bot.smoke.g1 import run_smoke_async
 log = logging.getLogger(__name__)
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
+
+
+def _require_env(name: str) -> str:
+    """Return non-empty env var or raise ValueError with the var name.
+
+    Matches the pattern in `marketfeed/config.py:load_config` so missing env
+    surfaces as `config_fatal <name> env var required — exit 1` via main()'s
+    ValueError handler, instead of a bare KeyError traceback.
+    """
+    val = os.environ.get(name)
+    if not val:
+        raise ValueError(f"{name} env var required")
+    return val
 
 
 @dataclass
@@ -541,17 +556,23 @@ class _LedgerWrappedExecutor:
         self._ledger = ledger
 
     async def submit(
-        self, decision: Any, ctx: AccountContext,
-    ) -> Any:
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
         result = await self._inner.submit(decision, ctx)
-        self._ledger.on_order_fill(OrderFillPayload(
-            cid=result.cid,
-            offer_id=result.venue_offer_id or "",
-            signal_correlation_id=decision.signal_correlation_id,
-            fill_size_usdt=decision.offer_amount_usdt or 0.0,
-            fill_price=decision.offer_rate or 0.0,
-            is_simulated=True,
-        ))
+        # Only update ledger when submit succeeded (status in {"submitted",
+        # "filled"}). 4.2 EchoPaperExecutor always returns "filled" but
+        # 4.4 bitfinex_live will return "failed" on venue rejection — without
+        # this guard, failed submits would inflate ledger exposure and
+        # AllocationCapGuard would wrongly block subsequent POST decisions.
+        if result.status in ("submitted", "filled"):
+            self._ledger.on_order_fill(OrderFillPayload(
+                cid=result.cid,
+                offer_id=result.venue_offer_id or "",
+                signal_correlation_id=decision.signal_correlation_id,
+                fill_size_usdt=decision.offer_amount_usdt or 0.0,
+                fill_price=decision.offer_rate or 0.0,
+                is_simulated=True,
+            ))
         return result
 
 
@@ -647,8 +668,8 @@ async def build_daemon(
     # extends to per-tenant context loaded from vault.
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
     credentials = Credentials(
-        api_key=os.environ["BFX_API_KEY"],
-        api_secret=os.environ["BFX_API_SECRET"],
+        api_key=_require_env("BFX_API_KEY"),
+        api_secret=_require_env("BFX_API_SECRET"),
     )
     allocation_cap = Decimal(
         os.environ.get("BFX_ALLOCATION_CAP_USDT", "500"),
