@@ -7,9 +7,10 @@ defaults), but enabled=True requires non-null threshold (validator below).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _ManualKillCfg(BaseModel):
@@ -25,7 +26,7 @@ class _AuthHealthCfg(BaseModel):
 class _HeartbeatCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    sub_task_stale_threshold_seconds: int
+    sub_task_stale_threshold_seconds: Annotated[int, Field(gt=0)]
 
 
 class _AllocationCapCfg(BaseModel):
@@ -44,7 +45,7 @@ class HardGuardsCfg(BaseModel):
 class _RealizedLossCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    threshold_usdt: float | None
+    threshold_usdt: Annotated[float, Field(gt=0)] | None
 
     @model_validator(mode="after")
     def _check(self) -> _RealizedLossCfg:
@@ -56,7 +57,7 @@ class _RealizedLossCfg(BaseModel):
 class _DrawdownCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    threshold_pct: float | None
+    threshold_pct: Annotated[float, Field(gt=0)] | None
 
     @model_validator(mode="after")
     def _check(self) -> _DrawdownCfg:
@@ -68,8 +69,8 @@ class _DrawdownCfg(BaseModel):
 class _DivergenceCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    threshold_pct: float | None
-    window_minutes: int | None
+    threshold_pct: Annotated[float, Field(gt=0)] | None
+    window_minutes: Annotated[int, Field(gt=0)] | None
 
     @model_validator(mode="after")
     def _check(self) -> _DivergenceCfg:
