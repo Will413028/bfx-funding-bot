@@ -23,8 +23,8 @@ async def test_decision_emitted_once_when_allowed_then_executor_called(
     capture_engine: Any,
 ) -> None:
     """Sanity: decision event count = 1 per cycle (not 2), executor called once."""
-    engine, axiom, executor, _chain, cell, candle = capture_engine
-    await engine.process_candle(cell=cell, candle=candle, registry=engine._test_registry)
+    engine, axiom, executor, _chain, cell, candle, registry = capture_engine
+    await engine.process_candle(cell=cell, candle=candle, registry=registry)
     decisions = [e for e in axiom.events if e["event_type"] == EventType.DECISION.value]
     assert len(decisions) == 1
     assert decisions[0]["payload"]["decision_outcome"] == DecisionOutcome.POST.value
@@ -35,8 +35,8 @@ async def test_decision_emitted_once_when_allowed_then_executor_called(
 async def test_decision_emitted_once_when_blocked_executor_not_called(
     capture_engine_blocked: Any,
 ) -> None:
-    engine, axiom, executor, _chain, cell, candle = capture_engine_blocked
-    await engine.process_candle(cell=cell, candle=candle, registry=engine._test_registry)
+    engine, axiom, executor, _chain, cell, candle, registry = capture_engine_blocked
+    await engine.process_candle(cell=cell, candle=candle, registry=registry)
     decisions = [e for e in axiom.events if e["event_type"] == EventType.DECISION.value]
     assert len(decisions) == 1
     assert decisions[0]["payload"]["decision_outcome"] == DecisionOutcome.SKIP.value
