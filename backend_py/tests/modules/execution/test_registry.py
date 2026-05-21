@@ -47,3 +47,12 @@ def test_bitfinex_live_executor_not_yet_implemented(
             axiom=_NullAxiom(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         )
+
+
+def test_unknown_executor_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BFX_EXECUTOR", "foo")
+    with pytest.raises(ExecutorConfigError, match="unknown"):
+        build_executor(
+            axiom=_NullAxiom(), phase=Phase.PAPER,
+            strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        )
