@@ -39,6 +39,7 @@ class EventType(StrEnum):
     SAFETY_TRIGGER = "safety_trigger"
     ORDER_SUBMIT = "order_submit"
     ORDER_FILL = "order_fill"
+    ORDER_STATUS_CHANGE = "order_status_change"
     HEALTH_CHECK = "health_check"
 
 
@@ -66,6 +67,9 @@ class HealthTarget(StrEnum):
     DB = "db"
     REDIS = "redis"
     SIGNAL_PIPELINE = "signal_pipeline"
+    EXECUTOR = "executor"
+    SAFETY_CHAIN = "safety_chain"
+    FILL_TRACKER = "fill_tracker"
 
 
 class HealthStatus(StrEnum):
@@ -141,8 +145,59 @@ class HealthCheckPayload(BaseModel):
         return self
 
 
+class OrderSubmitPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cid: int
+    offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None on failed submit
+    signal_correlation_id: UUID
+    offer_rate: float
+    offer_amount_usdt: float
+    offer_duration_days: int
+    is_simulated: bool
+    status: str  # "submitted" / "failed"
+    failure_reason: str | None = None
+    attempts: int = 1
+    retry_total_ms: int | None = None
+
+    @model_validator(mode="after")
+    def _check_failed(self) -> OrderSubmitPayload:
+        if self.status == "failed" and not self.failure_reason:
+            raise ValueError("status=failed requires failure_reason")
+        return self
+
+
+class OrderFillPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cid: int
+    offer_id: str
+    signal_correlation_id: UUID
+    fill_size_usdt: float
+    fill_price: float
+    is_simulated: bool
+
+
+class OrderStatusChangePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cid: int
+    offer_id: str
+    signal_correlation_id: UUID
+    status: str  # "cancelled" / "expired" / "partially_filled"
+    reason: str | None = None
+    filled_size_delta_usdt: float | None = None
+    is_simulated: bool
+
+
+class SafetyTriggerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    guard_name: str
+    reason: str
+    decision_snapshot: dict[str, Any]
+
+
 PayloadModel = Annotated[
-    SignalPayload | DecisionPayload | HealthCheckPayload | dict[str, Any],
+    SignalPayload | DecisionPayload | HealthCheckPayload
+    | OrderSubmitPayload | OrderFillPayload | OrderStatusChangePayload
+    | SafetyTriggerPayload | dict[str, Any],
     Field(union_mode="left_to_right"),
 ]
 
@@ -156,6 +211,7 @@ class Envelope(BaseModel):
     cell: str | None = None
     event_type: EventType
     correlation_id: UUID
+    account_id: str = "default"
     payload: dict[str, Any]
 
     @model_validator(mode="after")
@@ -176,5 +232,12 @@ class Envelope(BaseModel):
             DecisionPayload.model_validate(self.payload)
         elif self.event_type == EventType.HEALTH_CHECK:
             HealthCheckPayload.model_validate(self.payload)
-        # 4.1 不 emit safety_trigger / order_submit / order_fill — 4.2 spec writer 加 validator
+        elif self.event_type == EventType.ORDER_SUBMIT:
+            OrderSubmitPayload.model_validate(self.payload)
+        elif self.event_type == EventType.ORDER_FILL:
+            OrderFillPayload.model_validate(self.payload)
+        elif self.event_type == EventType.ORDER_STATUS_CHANGE:
+            OrderStatusChangePayload.model_validate(self.payload)
+        elif self.event_type == EventType.SAFETY_TRIGGER:
+            SafetyTriggerPayload.model_validate(self.payload)
         return self
