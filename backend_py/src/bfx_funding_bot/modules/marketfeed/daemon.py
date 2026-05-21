@@ -550,15 +550,24 @@ class _LedgerWrappedExecutor:
     """
 
     def __init__(
-        self, inner: ExecutorPort, ledger: PaperPositionLedger,
+        self,
+        inner: ExecutorPort,
+        ledger: PaperPositionLedger,
+        probe: HealthProbe,
     ) -> None:
         self._inner = inner
         self._ledger = ledger
+        self._probe = probe
 
     async def submit(
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> SubmittedOrder:
         result = await self._inner.submit(decision, ctx)
+        # I1 follow-up: record executor heartbeat after the inner submit
+        # returns, regardless of business outcome. HeartbeatGuard watches
+        # ["safety_chain", "executor"]; before this nothing recorded the
+        # "executor" key so the watchdog was half-blind.
+        self._probe.record_heartbeat("executor")
         # Only update ledger when submit succeeded (status in {"submitted",
         # "filled"}). 4.2 EchoPaperExecutor always returns "filled" but
         # 4.4 bitfinex_live will return "failed" on venue rejection — without
@@ -767,7 +776,7 @@ async def build_daemon(
         )
 
     # Wrap inner executor so paper fills update the in-memory ledger live.
-    wrapped_executor = _LedgerWrappedExecutor(executor, ledger)
+    wrapped_executor = _LedgerWrappedExecutor(executor, ledger, probe)
 
     signal_engine_obj = SignalEngine(
         phase=config.phase,
