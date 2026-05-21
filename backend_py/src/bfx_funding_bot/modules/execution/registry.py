@@ -26,7 +26,7 @@ class ExecutorConfigError(RuntimeError):
     """Inconsistent env config — daemon should not start."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExecutorSpec:
     executor: ExecutorPort
     fill_tracker_enabled: bool
@@ -46,7 +46,8 @@ def build_executor(
     strategy: StrategyName,
     cell: str,
 ) -> ExecutorSpec:
-    executor_kind = os.environ.get("BFX_EXECUTOR", "paper").lower()
+    executor_raw = os.environ.get("BFX_EXECUTOR", "paper")
+    executor_kind = executor_raw.lower()
     fill_tracker_enabled = _env_bool("BFX_FILL_TRACKER_ENABLED", False)
 
     if executor_kind == "paper" and fill_tracker_enabled:
@@ -71,4 +72,4 @@ def build_executor(
             "BitfinexLiveExecutor. Until then use BFX_EXECUTOR=paper."
         )
 
-    raise ExecutorConfigError(f"unknown BFX_EXECUTOR={executor_kind}")
+    raise ExecutorConfigError(f"unknown BFX_EXECUTOR={executor_raw!r}")
