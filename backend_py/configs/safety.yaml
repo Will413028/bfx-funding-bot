@@ -1,0 +1,29 @@
+# Phase 4.2 default safety config. Loaded by build_daemon at startup.
+# CalibratedGuard threshold values come from 4.3 G2 calibration; all
+# disabled in 4.2. Enable in 4.4 once thresholds are validated against
+# shadow data.
+#
+# No hot reload — change here = redeploy.
+
+hard_guards:
+  manual_kill:
+    enabled: true            # always-on; flip BFX_KILL_SWITCH=true env to trip
+  auth_health:
+    enabled: true
+  heartbeat:
+    enabled: true
+    sub_task_stale_threshold_seconds: 300  # 5-minute watchdog
+  allocation_cap:
+    enabled: true            # cap_usdt sourced from AccountContext, not yaml
+
+calibrated_guards:
+  realized_loss_24h:
+    enabled: false           # 4.3 calibrate threshold; 4.4 enable
+    threshold_usdt: null
+  drawdown_from_peak:
+    enabled: false
+    threshold_pct: null
+  divergence_rate:
+    enabled: false
+    threshold_pct: null
+    window_minutes: null
