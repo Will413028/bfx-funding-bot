@@ -146,6 +146,15 @@ def build_apl_query_c6(phase: str, dataset: str, hours: int) -> str:
 """.strip()
 
 
+def build_apl_query_c7(phase: str, dataset: str, hours: int) -> str:
+    return f"""
+['{dataset}']
+| where ['event_type'] == 'order_submit' and phase == '{phase}'
+  and _time > ago({hours}h) and ['payload.is_simulated'] == true
+| count
+""".strip()
+
+
 async def run_c1_continuity(
     *,
     client: AxiomQueryClient,
@@ -288,6 +297,26 @@ async def run_c6_zero_divergence(
     )
 
 
+async def run_c7_paper_order_submit(
+    *, client: AxiomQueryClient, phase: str, hours: int, min_count: int = 1,
+) -> CheckResult:
+    """Phase 4.2 ship gate: in last N hours there must be ≥min_count
+    order_submit events with is_simulated=true. Verifies paper executor
+    actually fires in shadow mode."""
+    apl = build_apl_query_c7(phase, client.dataset, hours)
+    rows = await client.query_apl(apl)
+    count = int(rows[0].get("count_", 0)) if rows else 0
+    if count >= min_count:
+        return CheckResult(
+            "C7: paper order_submit count", True,
+            detail=f"{count} >= {min_count} events",
+        )
+    return CheckResult(
+        "C7: paper order_submit count", False,
+        detail=f"{count} < {min_count} order_submit events -- paper executor not firing",
+    )
+
+
 async def run_smoke_async(
     *,
     phase: str,
@@ -334,6 +363,10 @@ async def run_smoke_async(
             ))
         if only is None or "C6" in only:
             results.append(await run_c6_zero_divergence(
+                client=client, phase=phase, hours=hours,
+            ))
+        if only is None or "C7" in only:
+            results.append(await run_c7_paper_order_submit(
                 client=client, phase=phase, hours=hours,
             ))
         results.append(CheckResult(
