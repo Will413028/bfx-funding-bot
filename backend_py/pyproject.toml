@@ -23,7 +23,6 @@ dependencies = [
     # deploy time after container ModuleNotFoundError.
     "numpy>=2.4.4",
     "pandas>=3.0.2",
-    "jsonschema>=4.26.0",
 ]
 
 [dependency-groups]
@@ -41,6 +40,8 @@ dev = [
     "types-pyyaml>=6.0",
     "pytest-cov>=7.1.0",
     "testcontainers[postgres]>=4.8",
+    "jsonschema>=4.26.0",
+    "types-jsonschema",
 ]
 
 [project.scripts]

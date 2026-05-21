@@ -4,6 +4,7 @@ Acts as drift detector for mock responses used by FillTracker tests.
 """
 import json
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -12,8 +13,9 @@ SCHEMA_PATH = Path(__file__).parent / "bitfinex_funding_api_schema.json"
 
 
 @pytest.fixture(scope="module")
-def schema() -> dict:
-    return json.loads(SCHEMA_PATH.read_text())
+def schema() -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(SCHEMA_PATH.read_text())
+    return data
 
 
 # Canned response samples (representative shapes from Bitfinex docs).
@@ -39,7 +41,7 @@ CREDITS_SAMPLE = [
 ]
 
 
-def test_offers_sample_matches_schema(schema: dict) -> None:
+def test_offers_sample_matches_schema(schema: dict[str, Any]) -> None:
     validator = jsonschema.Draft202012Validator(
         {"$ref": "#/definitions/FundingOffersResponse", **schema}
     )
@@ -47,7 +49,7 @@ def test_offers_sample_matches_schema(schema: dict) -> None:
     assert not errors, f"schema drift: {errors}"
 
 
-def test_credits_sample_matches_schema(schema: dict) -> None:
+def test_credits_sample_matches_schema(schema: dict[str, Any]) -> None:
     validator = jsonschema.Draft202012Validator(
         {"$ref": "#/definitions/FundingCreditsResponse", **schema}
     )
@@ -55,7 +57,7 @@ def test_credits_sample_matches_schema(schema: dict) -> None:
     assert not errors, f"schema drift: {errors}"
 
 
-def test_malformed_offer_rejected(schema: dict) -> None:
+def test_malformed_offer_rejected(schema: dict[str, Any]) -> None:
     bad = [["not_an_int"]]
     validator = jsonschema.Draft202012Validator(
         {"$ref": "#/definitions/FundingOffersResponse", **schema}
