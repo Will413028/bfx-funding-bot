@@ -1,6 +1,7 @@
-"""Hard guards: ManualKill + AuthHealth (first 2 of 4)."""
+"""Hard guards: ManualKill + AuthHealth + Heartbeat (first 3 of 4)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AuthHealthGuard,
+    HeartbeatGuard,
     ManualKillGuard,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
@@ -82,4 +84,48 @@ async def test_auth_health_allows_when_target_never_set() -> None:
     probe = HealthProbe()
     g = AuthHealthGuard(probe=probe)
     r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_allows_when_all_fresh() -> None:
+    probe = HealthProbe()
+    probe.record_heartbeat("safety_chain")
+    probe.record_heartbeat("executor")
+    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
+                       watched_sub_tasks=["safety_chain", "executor"])
+    r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_blocks_when_any_stale() -> None:
+    probe = HealthProbe()
+    probe.last_active_ts["safety_chain"] = datetime.now(UTC)
+    probe.last_active_ts["executor"] = datetime.now(UTC) - timedelta(seconds=400)
+    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
+                       watched_sub_tasks=["safety_chain", "executor"])
+    r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is False
+    assert "executor" in (r.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_allows_when_target_never_recorded() -> None:
+    # Day-1 boot: heartbeat dict may not have the key yet.
+    probe = HealthProbe()
+    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
+                       watched_sub_tasks=["safety_chain"])
+    r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_edge_at_exactly_threshold() -> None:
+    probe = HealthProbe()
+    probe.last_active_ts["x"] = datetime.now(UTC) - timedelta(seconds=300)
+    g = HeartbeatGuard(probe=probe, threshold_seconds=300,
+                       watched_sub_tasks=["x"])
+    r = await g.evaluate(_post(), _ctx())
+    # Exactly at threshold = still allowed; strictly greater blocks.
     assert r.allowed is True
