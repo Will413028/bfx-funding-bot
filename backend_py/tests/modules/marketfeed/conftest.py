@@ -122,8 +122,8 @@ def capture_engine() -> tuple:
         phase=Phase.PAPER, axiom=axiom, candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )
-    engine._test_registry = _make_registry(cell)  # type: ignore[attr-defined]
-    return engine, axiom, executor, chain, cell, _candle()
+    registry = _make_registry(cell)
+    return engine, axiom, executor, chain, cell, _candle(), registry
 
 
 @pytest.fixture
@@ -137,5 +137,5 @@ def capture_engine_blocked() -> tuple:
         phase=Phase.PAPER, axiom=axiom, candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )
-    engine._test_registry = _make_registry(cell)  # type: ignore[attr-defined]
-    return engine, axiom, executor, chain, cell, _candle()
+    registry = _make_registry(cell)
+    return engine, axiom, executor, chain, cell, _candle(), registry

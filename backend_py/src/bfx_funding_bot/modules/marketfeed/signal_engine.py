@@ -10,6 +10,11 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    ExecutorPort,
+    GuardResult,
+)
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
@@ -74,6 +79,12 @@ class _CandlesRepoProtocol(Protocol):
     ) -> list[FundingCandle]: ...
 
 
+class _SafetyChainProtocol(Protocol):
+    async def evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> GuardResult: ...
+
+
 class SignalEngine:
     def __init__(
         self,
@@ -82,9 +93,9 @@ class SignalEngine:
         axiom: _AxiomProtocol,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
-        safety_chain: Any | None = None,
-        executor: Any | None = None,
-        account_ctx: Any | None = None,
+        safety_chain: _SafetyChainProtocol | None = None,
+        executor: ExecutorPort | None = None,
+        account_ctx: AccountContext | None = None,
     ) -> None:
         self.phase = phase
         self.axiom = axiom
@@ -273,7 +284,9 @@ class SignalEngine:
     ) -> None:
         """Single immutable DECISION emit per cycle (event-sourcing best practice).
 
-        Same envelope shape as the previous _emit_decision, sourced from the
+        Envelope: standard event fields (timestamp/level/phase/strategy/cell/
+        event_type/correlation_id) + account_id (Task 1 schema addition,
+        sourced from account_ctx or 'default' fallback) + payload from the
         post-safety-eval DecisionPayload model_dump.
         """
         await self.axiom.emit({
