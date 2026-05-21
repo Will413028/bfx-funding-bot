@@ -6,6 +6,7 @@ allocation cap). Chain short-circuits on first block.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -59,4 +60,42 @@ class AuthHealthGuard:
                 allowed=False, guard_name=self.name,
                 reason="executor health DOWN",
             )
+        return GuardResult(allowed=True, guard_name=self.name)
+
+
+class HeartbeatGuard:
+    """Block when any watched sub-task heartbeat is older than threshold.
+
+    Day-1 / never-recorded sub-tasks allow by default (booting state).
+    Threshold strictly greater (> threshold) blocks; exactly equal allows.
+    """
+
+    name = "heartbeat"
+    is_calibrated = False
+
+    def __init__(
+        self, *, probe: HealthProbe, threshold_seconds: int,
+        watched_sub_tasks: list[str],
+    ) -> None:
+        self.probe = probe
+        self.threshold_seconds = threshold_seconds
+        self.watched = watched_sub_tasks
+
+    async def evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> GuardResult:
+        now = datetime.now(UTC)
+        for sub_task in self.watched:
+            last = self.probe.last_active_ts.get(sub_task)
+            if last is None:
+                continue
+            # Truncate to integer seconds so "exactly at threshold" semantics
+            # are deterministic — microsecond drift from datetime.now() between
+            # heartbeat record and evaluate must not flip the boundary case.
+            age = int((now - last).total_seconds())
+            if age > self.threshold_seconds:
+                return GuardResult(
+                    allowed=False, guard_name=self.name,
+                    reason=f"sub_task={sub_task} stale {age}s > {self.threshold_seconds}s",
+                )
         return GuardResult(allowed=True, guard_name=self.name)
