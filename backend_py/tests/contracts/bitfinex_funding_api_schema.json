@@ -5,6 +5,7 @@
     "FundingOffer": {
       "type": "array",
       "minItems": 21,
+      "items": false,
       "prefixItems": [
         {"type": "integer", "description": "ID"},
         {"type": "string", "description": "SYMBOL e.g. fUSD"},
@@ -32,6 +33,7 @@
     "FundingCredit": {
       "type": "array",
       "minItems": 22,
+      "items": false,
       "prefixItems": [
         {"type": "integer", "description": "ID"},
         {"type": "string",  "description": "SYMBOL"},
