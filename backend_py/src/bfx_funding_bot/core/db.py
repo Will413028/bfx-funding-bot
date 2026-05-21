@@ -81,22 +81,43 @@ def _prepare_engine_kwargs(raw_url: str) -> dict[str, object]:
     return {"url": clean_url, "connect_args": connect_args}
 
 
-def make_engine(settings: Settings) -> AsyncEngine:
-    """Create async engine with serverless-Postgres-friendly pool config.
+def make_async_engine_from_url(raw_url: str) -> AsyncEngine:
+    """Async engine + serverless-Postgres pool config + URL transform.
 
-    pool_pre_ping=True: health-check connection before handing to caller.
-    pool_recycle=600 (10 min): force recycle below Neon's ~15min idle cut.
-    Combined with daemon-level keepalive task (every 5min SELECT 1)
-    in core.keepalive (Task 7).
+    Single source of truth shared by `make_engine` (Settings-driven) and
+    `marketfeed.daemon.build_daemon` (MarketfeedConfig-driven). Both paths
+    now apply `_prepare_engine_kwargs` (D2 URL transform: scheme rewrite,
+    sslmode/channel_binding stripping, -pooler removal, SSL context lift)
+    and the D3 pool config (`pool_pre_ping=True`, `pool_recycle=600`).
+
+    Before unification daemon.py:614 was a raw `create_async_engine(url)`
+    call from Phase 4.1 (`26b059d`); 5/21 chaos recovery rebuilt the Koyeb
+    DATABASE_URL from Neon dashboard libpq form and asyncpg crashed at
+    connect time with `TypeError(sslmode)`.
+
+    Non-Postgres URLs (e.g. `sqlite+aiosqlite://` used by tests) bypass the
+    transform — `_prepare_engine_kwargs` is Postgres-specific and would
+    corrupt a sqlite URL's netloc/path round-trip via urlunsplit.
     """
-    kwargs = _prepare_engine_kwargs(settings.database_url)
-    return create_async_engine(
-        str(kwargs["url"]),
-        connect_args=kwargs["connect_args"],
-        echo=False,
-        pool_pre_ping=True,
-        pool_recycle=600,
+    is_postgres = (
+        raw_url.startswith("postgresql://")
+        or raw_url.startswith("postgres://")
+        or raw_url.startswith("postgresql+")
     )
+    if is_postgres:
+        kwargs = _prepare_engine_kwargs(raw_url)
+        return create_async_engine(
+            str(kwargs["url"]),
+            connect_args=kwargs["connect_args"],
+            echo=False,
+            pool_pre_ping=True,
+            pool_recycle=600,
+        )
+    return create_async_engine(raw_url, echo=False)
+
+
+def make_engine(settings: Settings) -> AsyncEngine:
+    return make_async_engine_from_url(settings.database_url)
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

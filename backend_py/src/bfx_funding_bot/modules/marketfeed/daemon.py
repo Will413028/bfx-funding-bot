@@ -26,9 +26,9 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
+from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED, ExecutorAuthError
 from bfx_funding_bot.external.axiom import (
     AxiomAuthError,
@@ -611,7 +611,7 @@ async def build_daemon(
     skip_ws: bool = False,
 ) -> Daemon:
     config = load_config(cells_yaml_path=cells_yaml_path)
-    db_engine = create_async_engine(config.database_url)
+    db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     probe = HealthProbe()
