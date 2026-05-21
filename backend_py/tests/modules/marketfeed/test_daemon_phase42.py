@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.registry import ExecutorConfigError
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.marketfeed.daemon import _LedgerWrappedExecutor
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -116,19 +117,21 @@ class _FailedSubmitExecutor:
         )
 
 
-@pytest.mark.asyncio
-async def test_ledger_wrapped_executor_skips_failed_status() -> None:
-    """Regression: failed submit must NOT inflate ledger exposure.
+class _SuccessSubmitExecutor:
+    """Stub: returns status='filled'. Mirrors EchoPaperExecutor happy path."""
 
-    Latent bug fixed in Phase 4.2 review — EchoPaperExecutor (4.2) always
-    returns status='filled' so the bug doesn't fire today, but 4.4
-    bitfinex_live can return 'failed' on venue rejection. Without the
-    status guard, AllocationCapGuard would wrongly block subsequent POST
-    decisions.
-    """
-    ledger = PaperPositionLedger(account_id="default")
-    wrapped = _LedgerWrappedExecutor(_FailedSubmitExecutor(), ledger)
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        return SubmittedOrder(
+            cid=54321,
+            venue_offer_id="venue-xyz",
+            status="filled",
+            raw_response={},
+        )
 
+
+def _make_decision_ctx() -> tuple[DecisionPayload, AccountContext]:
     ctx = AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
@@ -141,9 +144,50 @@ async def test_ledger_wrapped_executor_skips_failed_status() -> None:
         offer_amount_usdt=150.0,
         offer_duration_days=2,
     )
+    return decision, ctx
 
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_skips_failed_status() -> None:
+    """Regression: failed submit must NOT inflate ledger exposure.
+
+    Latent bug fixed in Phase 4.2 review — EchoPaperExecutor (4.2) always
+    returns status='filled' so the bug doesn't fire today, but 4.4
+    bitfinex_live can return 'failed' on venue rejection. Without the
+    status guard, AllocationCapGuard would wrongly block subsequent POST
+    decisions.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    probe = HealthProbe()
+    wrapped = _LedgerWrappedExecutor(_FailedSubmitExecutor(), ledger, probe)
+
+    decision, ctx = _make_decision_ctx()
     result = await wrapped.submit(decision, ctx)
 
     assert result.status == "failed"
     # Exposure unchanged — failed submit did not call on_order_fill.
     assert ledger.current_exposure() == Decimal("0")
+    # Heartbeat still fires even on failed submit — liveness signal is
+    # independent of business outcome (the wrapper completed its work).
+    assert "executor" in probe.last_active_ts
+
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_records_executor_heartbeat() -> None:
+    """I1 follow-up: _LedgerWrappedExecutor.submit must record executor
+    heartbeat after the inner submit returns.
+
+    HeartbeatGuard watches ["safety_chain", "executor"]; before this fix
+    nothing recorded the "executor" key so the watchdog was half-blind.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    probe = HealthProbe()
+    wrapped = _LedgerWrappedExecutor(_SuccessSubmitExecutor(), ledger, probe)
+
+    assert "executor" not in probe.last_active_ts
+
+    decision, ctx = _make_decision_ctx()
+    result = await wrapped.submit(decision, ctx)
+
+    assert result.status == "filled"
+    assert "executor" in probe.last_active_ts
