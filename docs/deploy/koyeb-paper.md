@@ -75,7 +75,7 @@ postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
 
 | 欄位 | 值 |
 |---|---|
-| Service type | **Worker**（不是 Web Service — daemon 無 HTTP port） |
+| Service type | **Web**（自 2026-05-21 起：daemon 內建 healthz uvicorn 於 port 8080；Koyeb worker 不支援 health check，故走 web 但 port 設 TCP 維持 mesh-internal） |
 | GitHub repo | `<your-account>/bfx-funding-bot` |
 | Branch | `main` |
 | Build method | **Dockerfile** |
@@ -84,9 +84,24 @@ postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
 | Instance type | `nano`（1hr paper 跑得動）或 `micro`（shadow 長跑可選） |
 | Region | `sin`（Singapore，與 Neon `ap-southeast-1` 同區，RTT < 5ms；若 Neon project 在別區改對應 Koyeb region） |
 | Auto-deploy on push | ✅ enabled |
-| Health check | （worker 無 HTTP，跳過） |
+| Port | `8080:tcp`（TCP protocol → 不會被 auto-create public route，mesh-internal only） |
+| Health check | HTTP `:8080/healthz`，grace period 90s（daemon 跑 alembic upgrade + warmup 約需 60s，多留 buffer） |
+| Routes | 無（明確刪：`--routes '!/'`）。若用 `port:http` 會被 Koyeb auto-create 公開 route → 暴露 `/healthz` 到 public URL `<app>-<user>-<hash>.koyeb.app/healthz` |
 
 按 **Deploy** 觸發第一次 build。
+
+> **2026-05-21 transition note**：原 service type 為 Worker（Phase 4.1 daemon 無 HTTP）。Phase 4.2.0 加入 healthz uvicorn 後，Worker 改 Web 並走「TCP port + HTTP health check + no route」組合（Koyeb 支援 HTTP probe on TCP port）。CLI 切換命令：
+>
+> ```bash
+> koyeb service update bfx-funding-bot/marketfeed \
+>   --type web \
+>   --ports 8080:tcp \
+>   --checks 8080:http:/healthz \
+>   --checks-grace-period 8080=90 \
+>   --routes '!/'
+> ```
+>
+> 注意：若把 `--type web` 跟 `--routes '!/'` 同 command 跑，第一次切 web type 時 Koyeb 還沒 auto-create route，`!/` flag 被 ignore → 切完 type 後 Koyeb 才補建 route → 中間有 window 暴露 `/healthz`。建議直接用 `--ports 8080:tcp` 避開 auto-route 機制。
 
 ## 部署流程
 

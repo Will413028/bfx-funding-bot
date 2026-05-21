@@ -111,9 +111,17 @@ if koyeb service get "$SERVICE" --app "$APP" >/dev/null 2>&1; then
   koyeb service update "$APP/$SERVICE" "${ENV_ARGS[@]}" >/dev/null
 else
   ok "service missing — creating fresh"
+  # type=web + port=tcp + HTTP healthz: Koyeb workers don't support health
+  # checks, so use web type with TCP port (no auto-route, mesh-internal only)
+  # and HTTP health check on /healthz. See docs/deploy/koyeb-paper.md
+  # "2026-05-21 transition note" for rationale.
   koyeb service create "$SERVICE" \
     --app "$APP" \
-    --type worker \
+    --type web \
+    --ports 8080:tcp \
+    --checks 8080:http:/healthz \
+    --checks-grace-period 8080=90 \
+    --routes '!/' \
     --git "$GIT_REPO" \
     --git-branch "$GIT_BRANCH" \
     --git-builder docker \
