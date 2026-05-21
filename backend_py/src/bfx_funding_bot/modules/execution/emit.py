@@ -7,7 +7,7 @@ BEFORE network — catches bad shapes at the call site, not in Axiom.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.protocols import (
@@ -160,7 +160,7 @@ async def emit_safety_trigger(
     cell: str | None,
     correlation_id: UUID,
     account_id: str,
-    level: str,                        # "warn" | "critical"
+    level: Literal["warn", "critical"],
     guard_name: str,
     reason: str,
     decision_snapshot: dict[str, Any],
