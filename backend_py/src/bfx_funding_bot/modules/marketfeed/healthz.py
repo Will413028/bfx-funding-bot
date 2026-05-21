@@ -22,7 +22,6 @@ Responses:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime
 
@@ -88,6 +87,10 @@ async def run_healthz_server(
         app=app, host=host, port=port,
         log_level="warning", access_log=False,
         loop="asyncio",
+        # uvicorn default is None = wait forever for in-flight connections.
+        # In paper-exit cycle this hung daemon TaskGroup drain indefinitely
+        # (2026-05-21 finding) — bound it so cleanup is guaranteed to make progress.
+        timeout_graceful_shutdown=5,
     )
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve(), name="healthz_uvicorn")
@@ -101,5 +104,17 @@ async def run_healthz_server(
         for t in (serve_task, stop_task):
             if not t.done():
                 t.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await asyncio.gather(serve_task, stop_task, return_exceptions=True)
+        # Outer timeout 10s = uvicorn's 5s graceful + 5s safety margin.
+        # If uvicorn ignores both should_exit and cancel, daemon must still exit.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(serve_task, stop_task, return_exceptions=True),
+                timeout=10.0,
+            )
+        except TimeoutError:
+            log.warning(
+                "healthz_shutdown_timeout — uvicorn did not exit within 10s; "
+                "daemon cleanup proceeding (serve_task may leak briefly)",
+            )
+        except (asyncio.CancelledError, Exception):
+            pass
