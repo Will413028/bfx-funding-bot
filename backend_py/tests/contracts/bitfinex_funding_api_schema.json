@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bitfinex Funding API responses (subset used by FillTracker)",
+  "definitions": {
+    "FundingOffer": {
+      "type": "array",
+      "minItems": 21,
+      "prefixItems": [
+        {"type": "integer", "description": "ID"},
+        {"type": "string", "description": "SYMBOL e.g. fUSD"},
+        {"type": "integer", "description": "MTS_CREATE"},
+        {"type": "integer", "description": "MTS_UPDATE"},
+        {"type": "number",  "description": "AMOUNT (remaining)"},
+        {"type": "number",  "description": "AMOUNT_ORIG"},
+        {"type": "string",  "description": "OFFER_TYPE"},
+        {"type": ["string", "null"], "description": "placeholder1"},
+        {"type": ["string", "null"], "description": "placeholder2"},
+        {"type": ["string", "null"], "description": "FLAGS"},
+        {"type": "string",  "description": "STATUS"},
+        {"type": ["string", "null"], "description": "placeholder3"},
+        {"type": ["string", "null"], "description": "placeholder4"},
+        {"type": ["string", "null"], "description": "placeholder5"},
+        {"type": "number",  "description": "RATE"},
+        {"type": "integer", "description": "PERIOD"},
+        {"type": "integer", "description": "NOTIFY"},
+        {"type": "integer", "description": "HIDDEN"},
+        {"type": ["string", "null"], "description": "placeholder6"},
+        {"type": "integer", "description": "RENEW"},
+        {"type": ["integer", "null"], "description": "CID"}
+      ]
+    },
+    "FundingCredit": {
+      "type": "array",
+      "minItems": 22,
+      "prefixItems": [
+        {"type": "integer", "description": "ID"},
+        {"type": "string",  "description": "SYMBOL"},
+        {"type": "string",  "description": "SIDE"},
+        {"type": "integer", "description": "MTS_CREATE"},
+        {"type": "integer", "description": "MTS_UPDATE"},
+        {"type": "number",  "description": "AMOUNT"},
+        {"type": ["string", "null"], "description": "FLAGS"},
+        {"type": "string",  "description": "STATUS"},
+        {"type": "number",  "description": "RATE_TYPE"},
+        {"type": ["string", "null"], "description": "placeholder1"},
+        {"type": ["string", "null"], "description": "placeholder2"},
+        {"type": "number",  "description": "RATE"},
+        {"type": "integer", "description": "PERIOD"},
+        {"type": "integer", "description": "MTS_OPENING"},
+        {"type": "integer", "description": "MTS_LAST_PAYOUT"},
+        {"type": "integer", "description": "NOTIFY"},
+        {"type": "integer", "description": "HIDDEN"},
+        {"type": ["integer", "null"], "description": "placeholder3"},
+        {"type": "integer", "description": "RENEW"},
+        {"type": ["number", "null"], "description": "RATE_REAL"},
+        {"type": "integer", "description": "NO_CLOSE"},
+        {"type": "string",  "description": "POSITION_PAIR"}
+      ]
+    },
+    "FundingOffersResponse": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/FundingOffer"}
+    },
+    "FundingCreditsResponse": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/FundingCredit"}
+    }
+  }
+}
