@@ -177,6 +177,10 @@ class SignalEngine:
         is_stale: bool = False,
         stale_seconds: int = 0,
     ) -> None:
+        # event_type=signal_divergence (not signal) so queries that count
+        # strategy emissions by event_type='signal' don't over-count this
+        # quality-check side event. Shares correlation_id with the base
+        # signal emit (same cycle / trace).
         budget_seconds = _resolve_budget_seconds(cell)
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
@@ -184,7 +188,7 @@ class SignalEngine:
             "phase": self.phase.value,
             "strategy": cell.strategy.value,
             "cell": cell.cell_id,
-            "event_type": EventType.SIGNAL.value,
+            "event_type": EventType.SIGNAL_DIVERGENCE.value,
             "correlation_id": str(correlation_id),
             "payload": {
                 "signal_score": sig.signal_score,

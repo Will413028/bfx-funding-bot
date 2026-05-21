@@ -110,7 +110,7 @@ Phase 4 從 Phase 3b 候選池接手，跨 3 個 deployment stage：
 | `phase` | enum: `paper` / `shadow` / `canary` | ✓ | |
 | `strategy` | enum: `rate_percentile` / `mean_reversion` | conditional | `health_check` event nullable；其他 event 必填 |
 | `cell` | string (e.g. `fUSD_a30`, `fUST_a30`) | conditional | `health_check` event nullable；其他 event 必填 |
-| `event_type` | enum: `signal` / `decision` / `safety_trigger` / `order_submit` / `order_fill` / `health_check` | ✓ | |
+| `event_type` | enum: `signal` / `signal_divergence` / `decision` / `safety_trigger` / `order_submit` / `order_fill` / `health_check` | ✓ | `signal_divergence` added 2026-05-21 — divergence reports use distinct event_type (orthogonal to severity) so counts of strategy emissions don't double |
 | `correlation_id` | UUID | ✓ | 同 decision flow 跨 event 共用 |
 | `payload` | object | ✓ | event_type-specific schema |
 

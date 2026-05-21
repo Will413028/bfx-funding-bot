@@ -136,10 +136,12 @@ def build_apl_query_c5(phase: str, dataset: str, hours: int) -> str:
 
 
 def build_apl_query_c6(phase: str, dataset: str, hours: int) -> str:
+    # Divergence has its own event_type (orthogonal to severity), so no level
+    # filter / payload-existence check needed — event_type alone identifies.
     return f"""
 ['{dataset}']
-| where ['event_type'] == 'signal' and ['level'] == 'warn' and _time > ago({hours}h)
-  and phase == '{phase}' and isnotnull(['payload.divergence_detail.diff_fields'])
+| where ['event_type'] == 'signal_divergence' and _time > ago({hours}h)
+  and phase == '{phase}'
 | count
 """.strip()
 

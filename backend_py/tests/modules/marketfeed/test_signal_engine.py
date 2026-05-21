@@ -86,8 +86,15 @@ async def test_cp3_every_emit_passes_schema_validation():
 
 
 async def test_cp3_divergence_path_also_passes_schema():
-    """CP3 (divergence variant): when reporter detects divergence, the warn-level
-    signal event with divergence_detail must also validate against schema."""
+    """CP3 (divergence variant): when reporter detects drift, divergence emit
+    uses distinct event_type='signal_divergence' (orthogonal to severity), and
+    both the base signal + the divergence event must validate against schema.
+
+    Why distinct event_type (not level=warn discrimination):
+    - level (info/warn) = severity, event_type = semantic identity (orthogonal)
+    - Avoids over-counting in queries that filter by event_type='signal' (C2 etc.)
+    - Matches OTel / CloudEvents / DDD conventions
+    """
     captured: list[dict] = []
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
@@ -117,22 +124,28 @@ async def test_cp3_divergence_path_also_passes_schema():
 
     await engine.process_candle(cell=cell, candle=_history(8)[-1], registry=reg)
 
-    # Divergent path: 3 events (signal info + signal warn + decision)
+    # Divergent path: 3 events (signal + signal_divergence + decision)
     assert len(captured) == 3
     types_and_levels = [(e["event_type"], e["level"]) for e in captured]
     assert ("signal", "info") in types_and_levels
-    assert ("signal", "warn") in types_and_levels
+    assert ("signal_divergence", "warn") in types_and_levels
     assert ("decision", "info") in types_and_levels
+
+    # Exactly one real signal per cycle (not two) — fixes C2 over-count bug
+    signal_events = [e for e in captured if e["event_type"] == "signal"]
+    assert len(signal_events) == 1
 
     # All must validate
     for event in captured:
         Envelope.model_validate(event)
 
-    # Warn-level signal must carry divergence_detail
-    warn_signals = [e for e in captured
-                    if e["event_type"] == "signal" and e["level"] == "warn"]
-    assert len(warn_signals) == 1
-    assert warn_signals[0]["payload"]["divergence_detail"] is not None
+    # Divergence event must carry divergence_detail
+    div_events = [e for e in captured if e["event_type"] == "signal_divergence"]
+    assert len(div_events) == 1
+    assert div_events[0]["payload"]["divergence_detail"] is not None
+    # Shares correlation_id with the base signal (same trace / cycle)
+    sig_corr = signal_events[0]["correlation_id"]
+    assert div_events[0]["correlation_id"] == sig_corr
 
 
 def test_resolve_budget_seconds_raises_if_staleness_not_resolved() -> None:
