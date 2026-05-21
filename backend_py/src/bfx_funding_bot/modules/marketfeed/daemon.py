@@ -155,6 +155,7 @@ class Daemon:
                 writer_task.cancel()
                 sentinel_task.cancel()
                 raise
+            log.info("sub_task_exit name=candle_writer")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -166,6 +167,7 @@ class Daemon:
         await self.scheduler.start()
         await self._stop_event.wait()
         await self.scheduler.stop()
+        log.info("sub_task_exit name=scheduler")
 
     async def _axiom_loop(self) -> None:
         """Run axiom's background emit loop.
@@ -177,6 +179,7 @@ class Daemon:
         await self.axiom.start()
         await self._stop_event.wait()
         await self.axiom.stop()
+        log.info("sub_task_exit name=axiom")
 
     async def _monitor_loop(self) -> None:
         """State-change emission loop (was HealthMonitor.start() in Phase 4.1).
@@ -184,12 +187,14 @@ class Daemon:
         await self.monitor.start()
         await self._stop_event.wait()
         await self.monitor.stop()
+        log.info("sub_task_exit name=monitor")
 
     async def _heartbeat_scan_loop(self) -> None:
         """Periodic staleness scan. Tick every 30s. FatalError → TaskGroup cancel."""
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
+                log.info("sub_task_exit name=health_check")
                 return  # stop requested
             except TimeoutError:
                 pass
@@ -203,6 +208,7 @@ class Daemon:
             stop=self._stop_event,
             on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
         )
+        log.info("sub_task_exit name=db_keepalive")
 
     async def _healthz_server_loop(self) -> None:
         """Container-level liveness HTTP endpoint for Koyeb / k8s probes.
@@ -218,6 +224,7 @@ class Daemon:
             port=self.healthz_port,
             stop_event=self._stop_event,
         )
+        log.info("sub_task_exit name=healthz")
 
     async def _ws_heartbeat_poll_loop(self) -> None:
         """Poll ws_client.last_msg_age_ms() and record heartbeat when fresh.
@@ -238,6 +245,7 @@ class Daemon:
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=15.0)
+                log.info("sub_task_exit name=ws_heartbeat")
                 return  # stop requested
             except TimeoutError:
                 pass
@@ -281,6 +289,7 @@ class Daemon:
                 log.exception("ws_recv_error_will_reconnect")
 
             if self._stop_event.is_set():
+                log.info("sub_task_exit name=ws path=stop_after_recv_exit")
                 return
 
             # WS exited unexpectedly → enter reconnect loop
@@ -300,6 +309,7 @@ class Daemon:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=backoff,
                 )
+                log.info("sub_task_exit name=ws path=stop_during_backoff")
                 return
             except TimeoutError:
                 pass
