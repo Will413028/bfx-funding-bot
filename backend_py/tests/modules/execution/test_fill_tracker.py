@@ -65,9 +65,8 @@ def _credit(venue_id: int, amount: float = 100.0) -> list:
     ]
 
 
-def _make_tracker(axiom: _CaptureAxiom, *, transport: httpx.MockTransport) -> RestPollingFillTracker:
+def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom) -> RestPollingFillTracker:
     probe = HealthProbe()
-    client = httpx.AsyncClient(transport=transport, base_url="https://api.bitfinex.com")
     return RestPollingFillTracker(
         http=client, axiom=axiom, probe=probe,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
@@ -86,15 +85,18 @@ async def test_atomic_poll_aborts_on_credits_failure() -> None:
             return httpx.Response(200, json=[_offer(venue_id=111, cid=1)])
         return httpx.Response(500)  # credits fails
 
-    tracker = _make_tracker(axiom, transport=httpx.MockTransport(handler))
-    # Seed last_state so disappearance would otherwise emit cancelled.
-    tracker._last_state = {"222": {"cid": 2, "status": "ACTIVE"}}  # type: ignore[attr-defined]
-    stop = asyncio.Event()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
+    ) as client:
+        tracker = _build_tracker(client, axiom)
+        # Seed last_state so disappearance would otherwise emit cancelled.
+        tracker._last_state = {"222": {"cid": 2, "status": "ACTIVE"}}  # type: ignore[attr-defined]
+        stop = asyncio.Event()
 
-    task = asyncio.create_task(tracker.poll_loop(stop))
-    await asyncio.sleep(0.05)
-    stop.set()
-    await task
+        task = asyncio.create_task(tracker.poll_loop(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await task
 
     order_events = [e for e in axiom.events
                     if e["event_type"] in (
@@ -114,14 +116,17 @@ async def test_consecutive_failure_emits_degraded() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(500)
 
-    tracker = _make_tracker(axiom, transport=httpx.MockTransport(handler))
-    stop = asyncio.Event()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
+    ) as client:
+        tracker = _build_tracker(client, axiom)
+        stop = asyncio.Event()
 
-    task = asyncio.create_task(tracker.poll_loop(stop))
-    # Enough ticks to exceed CONSECUTIVE_FAIL_THRESHOLD (poll_interval_s=0.01).
-    await asyncio.sleep(0.1)
-    stop.set()
-    await task
+        task = asyncio.create_task(tracker.poll_loop(stop))
+        # Enough ticks to exceed CONSECUTIVE_FAIL_THRESHOLD (poll_interval_s=0.01).
+        await asyncio.sleep(0.1)
+        stop.set()
+        await task
 
     assert CONSECUTIVE_FAIL_THRESHOLD >= 1  # sanity import use
     hc = [e for e in axiom.events
@@ -147,13 +152,16 @@ async def test_offer_disappearance_emits_status_change() -> None:
             return httpx.Response(200, json=[])
         return httpx.Response(200, json=[])  # credits always empty
 
-    tracker = _make_tracker(axiom, transport=httpx.MockTransport(handler))
-    stop = asyncio.Event()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
+    ) as client:
+        tracker = _build_tracker(client, axiom)
+        stop = asyncio.Event()
 
-    task = asyncio.create_task(tracker.poll_loop(stop))
-    await asyncio.sleep(0.05)  # allow at least 2 ticks
-    stop.set()
-    await task
+        task = asyncio.create_task(tracker.poll_loop(stop))
+        await asyncio.sleep(0.05)  # allow at least 2 ticks
+        stop.set()
+        await task
 
     status_changes = [e for e in axiom.events
                       if e["event_type"] == EventType.ORDER_STATUS_CHANGE.value]
@@ -177,17 +185,20 @@ async def test_paper_offer_id_invariant_at_emit_time() -> None:
             return httpx.Response(200, json=[])  # paper_abc has disappeared
         return httpx.Response(200, json=[])
 
-    tracker = _make_tracker(axiom, transport=httpx.MockTransport(handler))
-    # Seed with a paper_ offer_id — simulates wiring bug where paper executor's
-    # state leaked into a tracker that thinks it's polling real venue.
-    tracker._last_state = {"paper_abc": {"cid": 1, "status": "ACTIVE"}}  # type: ignore[attr-defined]
-    stop = asyncio.Event()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
+    ) as client:
+        tracker = _build_tracker(client, axiom)
+        # Seed with a paper_ offer_id — simulates wiring bug where paper executor's
+        # state leaked into a tracker that thinks it's polling real venue.
+        tracker._last_state = {"paper_abc": {"cid": 1, "status": "ACTIVE"}}  # type: ignore[attr-defined]
+        stop = asyncio.Event()
 
-    task = asyncio.create_task(tracker.poll_loop(stop))
-    await asyncio.sleep(0.05)
-    stop.set()
-    with pytest.raises(InvariantError):
-        await task
+        task = asyncio.create_task(tracker.poll_loop(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        with pytest.raises(InvariantError):
+            await task
 
 
 def test_schema_offer_sample_validates() -> None:

@@ -99,11 +99,19 @@ class RestPollingFillTracker:
                 continue
 
     async def _tick(self) -> None:
+        current: dict[str, dict[str, Any]] = {}
         try:
+            # return_exceptions=True matches healthz.py sibling pattern — if one GET
+            # raises, the other still drains cleanly instead of being cancelled mid-flight.
             offers_resp, credits_resp = await asyncio.gather(
                 self.http.get(_OFFERS_ENDPOINT),
                 self.http.get(_CREDITS_ENDPOINT),
+                return_exceptions=True,
             )
+            if isinstance(offers_resp, BaseException):
+                raise RuntimeError(f"offers_get_failed: {offers_resp!r}") from offers_resp
+            if isinstance(credits_resp, BaseException):
+                raise RuntimeError(f"credits_get_failed: {credits_resp!r}") from credits_resp
             if offers_resp.status_code != 200 or credits_resp.status_code != 200:
                 raise RuntimeError(
                     f"non_200 offers={offers_resp.status_code} "
@@ -111,6 +119,19 @@ class RestPollingFillTracker:
                 )
             offers = offers_resp.json()
             _credits = credits_resp.json()  # fetched for atomicity; not used as diff bridge in 4.2
+            # Build current state inside the try — malformed venue responses
+            # (non-list, rows shorter than 21 elements) must fail the tick cleanly,
+            # not kill poll_loop with an IndexError / TypeError.
+            if not isinstance(offers, list):
+                raise RuntimeError(f"offers_not_list: type={type(offers).__name__}")
+            for o in offers:
+                if not isinstance(o, list) or len(o) < 21:
+                    raise RuntimeError(f"offer_row_malformed: {o!r}")
+                venue_id = str(o[0])
+                cid = o[20]
+                if cid is None:
+                    continue
+                current[venue_id] = {"cid": cid, "status": "ACTIVE"}
         except InvariantError:
             raise
         except Exception as exc:
@@ -122,14 +143,6 @@ class RestPollingFillTracker:
             return  # last_state preserved; next tick retries
 
         self._consecutive_failures = 0
-
-        current: dict[str, dict[str, Any]] = {}
-        for o in offers:
-            venue_id = str(o[0])
-            cid = o[20]
-            if cid is None:
-                continue
-            current[venue_id] = {"cid": cid, "status": "ACTIVE"}
 
         await self._diff_and_emit(current)
         self._last_state = current
