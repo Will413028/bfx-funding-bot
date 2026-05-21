@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
+    DecisionPayload,
     EventType,
     HealthStatus,
     HealthTarget,
@@ -81,11 +82,17 @@ class SignalEngine:
         axiom: _AxiomProtocol,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
+        safety_chain: Any | None = None,
+        executor: Any | None = None,
+        account_ctx: Any | None = None,
     ) -> None:
         self.phase = phase
         self.axiom = axiom
         self.candles_repo = candles_repo
         self.reporter = reporter or DivergenceReporter()
+        self.safety_chain = safety_chain
+        self.executor = executor
+        self.account_ctx = account_ctx
 
     async def process_candle(
         self,
@@ -137,7 +144,24 @@ class SignalEngine:
         except Exception:
             log.exception("divergence_check_exception cell=%s", cell.pair_id)
 
-        await self._emit_decision(correlation_id, cell, live_signal)
+        # Phase 4.2 Task 19: defer DECISION emit until post-safety-eval.
+        # Build tentative decision (post-strategy, pre-safety).
+        tentative = self._build_tentative_decision(correlation_id, cell, live_signal)
+
+        final = await self._apply_safety_eval(tentative)
+
+        await self._emit_decision_final(correlation_id, cell, final)
+
+        if (
+            final.decision_outcome == DecisionOutcome.POST
+            and self.executor is not None
+            and self.account_ctx is not None
+        ):
+            try:
+                await self.executor.submit(final, self.account_ctx)
+            except Exception:
+                log.exception("executor_submit_exception cell=%s", cell.pair_id)
+                raise
 
     async def _emit_signal(
         self,
@@ -201,25 +225,57 @@ class SignalEngine:
             },
         })
 
-    async def _emit_decision(
+    def _build_tentative_decision(
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
-    ) -> None:
+    ) -> DecisionPayload:
+        """Pre-safety DecisionPayload built from strategy output.
+
+        Decimal → float: DecisionPayload schema declares offer_rate: float | None.
+        Funding rate precision (~6 dp) is well within double-precision range.
+        """
         if sig.signal_direction == SignalDirection.POST and sig.lend_decision is not None:
-            # Decimal → float: DecisionPayload schema declares offer_rate: float | None.
-            # Funding rate precision (~6 dp) is well within double-precision range.
-            payload: dict[str, Any] = {
-                "decision_outcome": DecisionOutcome.POST.value,
-                "signal_correlation_id": str(correlation_id),
-                "offer_rate": float(sig.lend_decision.rate),
-                "offer_amount_usdt": cell.reference_amount_usdt,
-                "offer_duration_days": int(sig.lend_decision.period_days),
-            }
-        else:
-            payload = {
-                "decision_outcome": DecisionOutcome.SKIP.value,
-                "signal_correlation_id": str(correlation_id),
-                "skip_reason": SkipReason.BELOW_THRESHOLD.value,
-            }
+            return DecisionPayload(
+                decision_outcome=DecisionOutcome.POST,
+                signal_correlation_id=correlation_id,
+                offer_rate=float(sig.lend_decision.rate),
+                offer_amount_usdt=cell.reference_amount_usdt,
+                offer_duration_days=int(sig.lend_decision.period_days),
+            )
+        return DecisionPayload(
+            decision_outcome=DecisionOutcome.SKIP,
+            signal_correlation_id=correlation_id,
+            skip_reason=SkipReason.BELOW_THRESHOLD,
+        )
+
+    async def _apply_safety_eval(self, tentative: DecisionPayload) -> DecisionPayload:
+        """Run safety_chain.evaluate; downgrade POST→SKIP/safety_block if denied.
+
+        No-op (returns tentative) when:
+        - safety_chain or account_ctx is not wired (4.1 fallback / fixture-less tests)
+        - tentative is already SKIP (strategy didn't post — nothing to block)
+        """
+        if self.safety_chain is None or self.account_ctx is None:
+            return tentative
+        if tentative.decision_outcome != DecisionOutcome.POST:
+            return tentative
+        result = await self.safety_chain.evaluate(tentative, self.account_ctx)
+        if result.allowed:
+            return tentative
+        return DecisionPayload(
+            decision_outcome=DecisionOutcome.SKIP,
+            signal_correlation_id=tentative.signal_correlation_id,
+            skip_reason=SkipReason.SAFETY_BLOCK,
+            skip_reason_detail=result.reason,
+        )
+
+    async def _emit_decision_final(
+        self, correlation_id: UUID, cell: CellConfig, decision: DecisionPayload,
+    ) -> None:
+        """Single immutable DECISION emit per cycle (event-sourcing best practice).
+
+        Same envelope shape as the previous _emit_decision, sourced from the
+        post-safety-eval DecisionPayload model_dump.
+        """
         await self.axiom.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
@@ -228,7 +284,8 @@ class SignalEngine:
             "cell": cell.cell_id,
             "event_type": EventType.DECISION.value,
             "correlation_id": str(correlation_id),
-            "payload": payload,
+            "account_id": getattr(self.account_ctx, "account_id", "default"),
+            "payload": decision.model_dump(mode="json"),
         })
 
     async def _emit_health(
