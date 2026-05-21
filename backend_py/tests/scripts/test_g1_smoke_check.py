@@ -28,9 +28,22 @@ def test_apl_query_c3_uses_bracket_quoted_payload_field():
     assert "payload.signal_score)" not in q
 
 
-def test_apl_query_c6_uses_bracket_quoted_divergence_field():
+def test_apl_query_c6_filters_signal_divergence_event_type():
+    """C6 identifies divergences via dedicated event_type (orthogonal to severity),
+    not by overloading level + payload existence."""
     q = build_apl_query_c6(phase="paper", dataset="evt", hours=1)
-    assert "['payload.divergence_detail.diff_fields']" in q
+    assert "['event_type'] == 'signal_divergence'" in q
+    assert "['level'] == 'warn'" not in q
+    assert "isnotnull" not in q
+
+
+def test_apl_query_c2_counts_signal_event_type_only():
+    """C2 emit completeness: divergence events use distinct event_type, so
+    filtering by event_type='signal' alone already excludes them — no level
+    filter needed."""
+    q = build_apl_query_c2(phase="paper", dataset="evt", hours=1)
+    assert "['event_type'] == 'signal'" in q
+    assert "signal_divergence" not in q
 
 
 def test_tabular_to_rows_basic():

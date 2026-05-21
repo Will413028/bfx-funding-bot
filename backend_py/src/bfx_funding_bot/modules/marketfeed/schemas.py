@@ -34,6 +34,7 @@ class StrategyName(StrEnum):
 
 class EventType(StrEnum):
     SIGNAL = "signal"
+    SIGNAL_DIVERGENCE = "signal_divergence"
     DECISION = "decision"
     SAFETY_TRIGGER = "safety_trigger"
     ORDER_SUBMIT = "order_submit"
@@ -169,7 +170,7 @@ class Envelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_payload(self) -> Envelope:
-        if self.event_type == EventType.SIGNAL:
+        if self.event_type in (EventType.SIGNAL, EventType.SIGNAL_DIVERGENCE):
             SignalPayload.model_validate(self.payload)
         elif self.event_type == EventType.DECISION:
             DecisionPayload.model_validate(self.payload)
