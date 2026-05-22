@@ -24,6 +24,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
+    EventType,
     Phase,
     StrategyName,
 )
@@ -142,3 +143,73 @@ async def test_run_l2_single_flight_serializes() -> None:
     r1, r2 = await asyncio.gather(runner.run_l2(), runner.run_l2())
     assert r1.status == "pass"
     assert r2.status == "pass"
+
+
+def _make_axiom_row(event_type: str) -> dict[str, Any]:
+    return {
+        "_time": "2026-05-22T10:00:00Z",
+        "event_type": event_type,
+        "account_id": SMOKE_ACCOUNT_ID,
+        "payload": {"size_usdt": 1.0},
+    }
+
+
+async def test_run_l3_happy_returns_pass() -> None:
+    axiom_query = _FakeAxiomQuery([
+        _make_axiom_row(EventType.RESERVATION_CLAIMED.value),
+        _make_axiom_row(EventType.ORDER_FILL.value),
+    ])
+    runner = _make_runner(axiom_query=axiom_query)
+
+    result = await runner.run_l3()
+
+    assert result.status == "pass"
+    assert result.level == "L3"
+    assert result.checks["l2_passed"] is True
+    assert result.checks["axiom_events_seen"] == 2
+    assert len(axiom_query.calls) >= 1
+    assert axiom_query.calls[0][0] == SMOKE_ACCOUNT_ID
+
+
+async def test_run_l3_axiom_returns_empty_fails_after_poll_timeout() -> None:
+    """L2 passes but Axiom never returns events → L3 fail."""
+    axiom_query = _FakeAxiomQuery([])  # always empty
+    runner = _make_runner(axiom_query=axiom_query)
+
+    # Override poll budget for speed (test does not wait 15s)
+    result = await runner._run_l3_unlocked(
+        poll_attempts=2, poll_interval_s=0.01,
+    )
+
+    assert result.status == "fail"
+    assert result.level == "L3"
+    assert result.checks["l2_passed"] is True
+    assert "round-trip" in (result.error or "").lower() or \
+           "axiom" in (result.error or "").lower()
+
+
+async def test_run_l3_axiom_returns_only_one_event_type_fails() -> None:
+    axiom_query = _FakeAxiomQuery([
+        _make_axiom_row(EventType.RESERVATION_CLAIMED.value),
+        # missing ORDER_FILL
+    ])
+    runner = _make_runner(axiom_query=axiom_query)
+    result = await runner._run_l3_unlocked(poll_attempts=2, poll_interval_s=0.01)
+
+    assert result.status == "fail"
+    assert result.level == "L3"
+
+
+async def test_run_l3_with_failing_l2_short_circuits() -> None:
+    """If L2 fails, L3 should return immediately without polling Axiom."""
+    class _RaisingExecutor:
+        async def submit(self, decision, ctx):
+            raise RuntimeError("boom")
+
+    axiom_query = _FakeAxiomQuery([])
+    runner = _make_runner(executor=_RaisingExecutor(), axiom_query=axiom_query)
+    result = await runner.run_l3()
+
+    assert result.status == "fail"
+    assert result.level == "L2"  # L3 short-circuited; result reflects L2 failure
+    assert axiom_query.calls == []  # no Axiom poll happened
