@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -58,3 +59,20 @@ class DomainEventBus:
                     type(event).__name__, getattr(handler, "__qualname__", handler),
                     result,
                 )
+
+    @asynccontextmanager
+    async def subscription(
+        self, event_type: type, handler: EventHandler,
+    ) -> AsyncIterator[None]:
+        """Scoped subscription — auto-unsubscribe on exit (incl. exception path).
+
+        Use for ephemeral subscribers (smoke recorder, test spies). Permanent
+        wirings (ledger, axiom_sink) keep using subscribe().
+        """
+        self.subscribe(event_type, handler)
+        try:
+            yield
+        finally:
+            handlers = self._handlers.get(event_type, [])
+            if handler in handlers:
+                handlers.remove(handler)

@@ -108,3 +108,64 @@ async def test_release_event_routes_separately() -> None:
     )
     await bus.publish(rel)
     assert received == [rel]
+
+
+async def test_subscription_context_subscribes_on_enter_unsubscribes_on_exit() -> None:
+    bus = DomainEventBus()
+    seen: list[ReservationClaimed] = []
+
+    async def h(event: ReservationClaimed) -> None:
+        seen.append(event)
+
+    async with bus.subscription(ReservationClaimed, h):
+        await bus.publish(_make_claim())
+    # After context exit, handler must be removed
+    await bus.publish(_make_claim())
+    assert len(seen) == 1
+
+
+async def test_subscription_unsubscribes_on_exception_in_body() -> None:
+    bus = DomainEventBus()
+    seen: list[ReservationClaimed] = []
+
+    async def h(event: ReservationClaimed) -> None:
+        seen.append(event)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with bus.subscription(ReservationClaimed, h):
+            await bus.publish(_make_claim())
+            raise RuntimeError("boom")
+    # Even on exception, unsubscribe ran
+    await bus.publish(_make_claim())
+    assert len(seen) == 1
+
+
+async def test_subscription_allows_resubscribe_after_exit() -> None:
+    bus = DomainEventBus()
+
+    async def h(event: ReservationClaimed) -> None: ...
+
+    async with bus.subscription(ReservationClaimed, h):
+        pass
+    # Should not raise — handler already removed
+    async with bus.subscription(ReservationClaimed, h):
+        pass
+
+
+async def test_subscription_nested_with_existing_subscribe_coexists() -> None:
+    bus = DomainEventBus()
+    permanent: list[ReservationClaimed] = []
+    scoped: list[ReservationClaimed] = []
+
+    async def p_handler(e: ReservationClaimed) -> None:
+        permanent.append(e)
+
+    async def s_handler(e: ReservationClaimed) -> None:
+        scoped.append(e)
+
+    bus.subscribe(ReservationClaimed, p_handler)
+    async with bus.subscription(ReservationClaimed, s_handler):
+        await bus.publish(_make_claim())
+    await bus.publish(_make_claim())
+    assert len(permanent) == 2
+    assert len(scoped) == 1
