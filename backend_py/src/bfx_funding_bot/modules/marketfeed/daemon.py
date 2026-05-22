@@ -48,10 +48,22 @@ from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.events import (
+    OrderFilled,
+    ReservationClaimed,
+    ReservationReleased,
+)
 from bfx_funding_bot.modules.execution.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.middleware import (
+    HeartbeatMiddleware,
+    ReservationEmittingMiddleware,
+    TransientRetryMiddleware,
+)
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -60,7 +72,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
-from bfx_funding_bot.modules.execution.retry import transient_retry
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -96,6 +107,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     HealthTarget,
     Level,
     OrderFillPayload,
+    StrategyName,
 )
 from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
@@ -537,54 +549,9 @@ class _AxiomQueryAdapter:
         return []
 
 
-class _LedgerWrappedExecutor:
-    """Wraps an inner executor so paper fills update the in-memory ledger
-    immediately (no need to wait for Axiom round-trip).
-
-    Live updates: every successful submit() emits an OrderFillPayload back
-    into the shared PaperPositionLedger so AllocationCapGuard sees up-to-date
-    exposure on the next decision tick.
-    """
-
-    def __init__(
-        self,
-        inner: ExecutorPort,
-        ledger: PaperPositionLedger,
-        probe: HealthProbe,
-    ) -> None:
-        self._inner = inner
-        self._ledger = ledger
-        self._probe = probe
-        # I2 follow-up: wrap inner.submit with transient_retry so transient
-        # failures (network / 5xx) retry 1/2/4s before propagating instead
-        # of immediately killing the daemon. Fatal/Auth errors still
-        # propagate on first attempt (retry_if_exception_type=Transient only).
-        self._submit_inner = transient_retry(inner.submit)
-
-    async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
-    ) -> SubmittedOrder:
-        result = await self._submit_inner(decision, ctx)
-        # I1 follow-up: record executor heartbeat after the inner submit
-        # returns, regardless of business outcome. HeartbeatGuard watches
-        # ["safety_chain", "executor"]; before this nothing recorded the
-        # "executor" key so the watchdog was half-blind.
-        self._probe.record_heartbeat("executor")
-        # Only update ledger when submit succeeded (status in {"submitted",
-        # "filled"}). 4.2 EchoPaperExecutor always returns "filled" but
-        # 4.4 bitfinex_live will return "failed" on venue rejection — without
-        # this guard, failed submits would inflate ledger exposure and
-        # AllocationCapGuard would wrongly block subsequent POST decisions.
-        if result.status in ("submitted", "filled"):
-            self._ledger.on_order_fill(OrderFillPayload(
-                cid=result.cid,
-                offer_id=result.venue_offer_id or "",
-                signal_correlation_id=decision.signal_correlation_id,
-                fill_size_usdt=decision.offer_amount_usdt or 0.0,
-                fill_price=decision.offer_rate or 0.0,
-                is_simulated=True,
-            ))
-        return result
+# _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
+# Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
+# Ledger + AxiomEventSink subscribe to DomainEventBus in build_daemon.
 
 
 class _StubPnLSource:
@@ -790,8 +757,48 @@ async def build_daemon(
             account_id=account_id,
         )
 
-    # Wrap inner executor so paper fills update the in-memory ledger live.
-    wrapped_executor = _LedgerWrappedExecutor(executor, ledger, probe)
+    # ---- Phase 4.3 executor middleware chain wiring ----
+    bus = DomainEventBus()
+    axiom_sink = AxiomEventSink(
+        axiom_client=axiom,
+        phase=config.phase,
+        strategy=StrategyName.RATE_PERCENTILE,  # 4.3 single-strategy; multi-strategy = Phase 5+
+        cell="bfx_USDT",                         # 4.3 single-cell wiring
+    )
+    bus.subscribe(ReservationClaimed,  ledger.on_reservation_claimed)
+    bus.subscribe(OrderFilled,         ledger.on_order_filled)
+    bus.subscribe(ReservationReleased, ledger.on_reservation_released)
+    bus.subscribe(ReservationClaimed,  axiom_sink.on_reservation_claimed)
+    bus.subscribe(OrderFilled,         axiom_sink.on_order_filled)
+    bus.subscribe(ReservationReleased, axiom_sink.on_reservation_released)
+
+    wrapped_executor = HeartbeatMiddleware(
+        ReservationEmittingMiddleware(
+            TransientRetryMiddleware(executor),
+            bus=bus,
+        ),
+        probe=probe,
+    )
+
+    # ---- Phase 4.3 replay invariant report ----
+    if ledger.replay_floor_hit_count > 0:
+        probe.update(
+            HealthTarget.LEDGER, HealthStatus.DEGRADED,
+            error_message=f"{ledger.replay_floor_hit_count} floor hits during replay",
+        )
+        await axiom.emit({
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": Level.WARN.value,
+            "phase": config.phase.value,
+            "strategy": None, "cell": None,
+            "event_type": EventType.HEALTH_CHECK.value,
+            "correlation_id": str(uuid4()),
+            "payload": {
+                "check_target": HealthTarget.LEDGER.value,
+                "status": HealthStatus.DEGRADED.value,
+                "error_message": f"replay_floor_hit_count={ledger.replay_floor_hit_count}",
+            },
+        })
 
     signal_engine_obj = SignalEngine(
         phase=config.phase,
