@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -112,6 +112,9 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistr
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.smoke.g1 import run_smoke_async
 
+if TYPE_CHECKING:
+    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
+
 log = logging.getLogger(__name__)
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
@@ -151,9 +154,11 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     ledger: PaperPositionLedger
+    smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
+    admin_token: str | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self) -> None:
@@ -290,6 +295,8 @@ class Daemon:
             host=self.healthz_host,
             port=self.healthz_port,
             stop_event=self._stop_event,
+            smoke_runner=self.smoke_runner,
+            admin_token=self.admin_token,
         )
         log.info("sub_task_exit name=healthz")
 
@@ -779,6 +786,24 @@ async def build_daemon(
         probe=probe,
     )
 
+    # ---- Phase 4.4 prework: SmokeRunner ----
+    from bfx_funding_bot.modules.admin.axiom_query import AxiomEventQueryAdapter
+    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
+
+    smoke_axiom_query = AxiomEventQueryAdapter(
+        api_key=config.axiom_api_key,
+        dataset=config.axiom_dataset,
+    )
+    smoke_runner = SmokeRunner(
+        executor=wrapped_executor,
+        bus=bus,
+        axiom_client=axiom,
+        axiom_query=smoke_axiom_query,
+        phase=config.phase,
+        strategy=first_cell.strategy,
+        cell=first_cell.cell_id,
+    )
+
     # ---- Phase 4.3 replay invariant report ----
     if ledger.replay_floor_hit_count > 0:
         probe.update(
@@ -936,6 +961,7 @@ async def build_daemon(
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
     healthz_port = int(healthz_port_env) if healthz_port_env else 8080
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
 
     return Daemon(
         config=config,
@@ -956,9 +982,11 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         ledger=ledger,
+        smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
+        admin_token=admin_token,
     )
 
 
@@ -1028,6 +1056,11 @@ async def _run() -> None:
         # Cleanup after TaskGroup completes (flush axiom, close http client)
         log.info("daemon_shutdown_complete")
         await daemon.bitfinex_http.aclose()
+        # SmokeRunner's AxiomEventQueryAdapter holds its own httpx.AsyncClient;
+        # close it on shutdown to avoid leaking the connection pool.
+        if daemon.smoke_runner is not None:
+            with contextlib.suppress(Exception):
+                await daemon.smoke_runner._axiom_query.aclose()  # type: ignore[attr-defined]
 
     # Self-smoke trigger (Phase 4.1.x — see specs/2026-05-21-g1-c1-continuity-redesign-design.md)
     # Gated by phase=paper + duration set; exception path is structurally unreachable here
