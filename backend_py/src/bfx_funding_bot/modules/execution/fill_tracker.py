@@ -29,12 +29,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
 
-from bfx_funding_bot.modules.execution.emit import emit_order_status_change
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.events import ReservationReleased
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     EventType,
@@ -68,6 +70,7 @@ class RestPollingFillTracker:
         http: httpx.AsyncClient,
         axiom: _AxiomProtocol,
         probe: HealthProbe,
+        bus: DomainEventBus,
         phase: Phase,
         strategy: StrategyName,
         cell: str,
@@ -77,12 +80,13 @@ class RestPollingFillTracker:
         self.http = http
         self.axiom = axiom
         self.probe = probe
+        self._bus = bus
         self.phase = phase
         self.strategy = strategy
         self.cell = cell
         self.account_id = account_id
         self.poll_interval_s = poll_interval_s
-        # venue_offer_id (str) → {cid: int, status: str}
+        # venue_offer_id (str) → {cid: int, status: str, size: float}
         self._last_state: dict[str, dict[str, Any]] = {}
         self._consecutive_failures = 0
 
@@ -131,7 +135,7 @@ class RestPollingFillTracker:
                 cid = o[20]
                 if cid is None:
                     continue
-                current[venue_id] = {"cid": cid, "status": "ACTIVE"}
+                current[venue_id] = {"cid": cid, "status": "ACTIVE", "size": abs(float(o[5]))}
         except InvariantError:
             raise
         except Exception as exc:
@@ -148,7 +152,7 @@ class RestPollingFillTracker:
         self._last_state = current
 
     async def _diff_and_emit(self, current: dict[str, dict[str, Any]]) -> None:
-        """Disappearance = present in last_state, absent from current → status changed."""
+        """Disappearance = present in last_state, absent from current → reservation released."""
         for venue_offer_id, prev in self._last_state.items():
             if venue_offer_id in current:
                 continue
@@ -159,17 +163,19 @@ class RestPollingFillTracker:
                     f"{venue_offer_id} — registry CC4 should have prevented this; "
                     "check BFX_EXECUTOR / BFX_FILL_TRACKER_ENABLED wiring."
                 )
-            await emit_order_status_change(
-                axiom=self.axiom,
-                phase=self.phase, strategy=self.strategy, cell=self.cell,
+            await self._bus.publish(ReservationReleased(
+                cid=prev["cid"],
+                venue_offer_id=venue_offer_id,
+                size_usdt=Decimal(str(prev.get("size", 0.0))),
+                # 4.3 coarse reason — Phase 4.4 WS handler will refine to
+                # venue_cancel / user_cancel / expired / filled (via fcn event).
+                reason="missing_from_venue",
                 # tracker cannot recover original signal correlation; 4.4 will
                 # restore via cid→correlation_id map kept by signal_engine.
-                correlation_id=uuid4(),
+                signal_correlation_id=uuid4(),
                 account_id=self.account_id,
-                cid=prev["cid"], offer_id=venue_offer_id,
-                status="filled_or_cancelled", reason="missing_from_venue",
                 is_simulated=False,
-            )
+            ))
 
     async def _emit_degraded(self, reason: str) -> None:
         self.probe.update(

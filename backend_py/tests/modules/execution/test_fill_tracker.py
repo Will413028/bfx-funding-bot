@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ import httpx
 import jsonschema
 import pytest
 
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.events import ReservationReleased
 from bfx_funding_bot.modules.execution.fill_tracker import (
     CONSECUTIVE_FAIL_THRESHOLD,
     InvariantError,
@@ -65,10 +68,11 @@ def _credit(venue_id: int, amount: float = 100.0) -> list:
     ]
 
 
-def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom) -> RestPollingFillTracker:
+def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom,
+                   bus: DomainEventBus | None = None) -> RestPollingFillTracker:
     probe = HealthProbe()
     return RestPollingFillTracker(
-        http=client, axiom=axiom, probe=probe,
+        http=client, axiom=axiom, probe=probe, bus=bus or DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default", poll_interval_s=0.01,
     )
@@ -136,10 +140,18 @@ async def test_consecutive_failure_emits_degraded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_offer_disappearance_emits_status_change() -> None:
-    """Core diff: offer present in last tick, absent this tick → emit order_status_change
-    status=filled_or_cancelled, reason=missing_from_venue. Tracker uses venue_offer_id as bridge."""
+async def test_offer_disappearance_emits_reservation_released() -> None:
+    """Core diff: offer present in last tick, absent this tick → emit ReservationReleased
+    via bus. Tracker uses venue_offer_id as bridge."""
     axiom = _CaptureAxiom()
+    bus = DomainEventBus()
+    released: list[ReservationReleased] = []
+
+    async def capture(e: ReservationReleased) -> None:
+        released.append(e)
+
+    bus.subscribe(ReservationReleased, capture)
+
     tick_count = 0
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -155,7 +167,7 @@ async def test_offer_disappearance_emits_status_change() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
     ) as client:
-        tracker = _build_tracker(client, axiom)
+        tracker = _build_tracker(client, axiom, bus=bus)
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))
@@ -163,14 +175,13 @@ async def test_offer_disappearance_emits_status_change() -> None:
         stop.set()
         await task
 
-    status_changes = [e for e in axiom.events
-                      if e["event_type"] == EventType.ORDER_STATUS_CHANGE.value]
-    assert len(status_changes) >= 1
-    payload = status_changes[0]["payload"]
-    assert payload["offer_id"] == "111"
-    assert payload["cid"] == 42
-    assert payload["status"] == "filled_or_cancelled"
-    assert payload["reason"] == "missing_from_venue"
+    assert len(released) >= 1
+    ev = released[0]
+    assert ev.cid == 42
+    assert ev.venue_offer_id == "111"
+    assert ev.reason == "missing_from_venue"
+    assert ev.size_usdt == Decimal("100.0")  # from offer row[5] = AMOUNT_ORIG
+    assert not ev.is_simulated
 
 
 @pytest.mark.asyncio
