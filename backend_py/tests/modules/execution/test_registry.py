@@ -38,11 +38,13 @@ def test_paper_executor_with_fill_tracker_enabled_raises(
         )
 
 
-def test_bitfinex_live_executor_not_yet_implemented(
+def test_bitfinex_live_without_credentials_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
-    with pytest.raises(ExecutorConfigError, match=r"4\.4"):
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    # No BFX_API_KEY / BFX_API_SECRET set → should raise
+    with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
         build_executor(
             axiom=_NullAxiom(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
