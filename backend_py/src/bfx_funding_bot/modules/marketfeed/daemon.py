@@ -1131,7 +1131,7 @@ async def _run() -> None:
         # close it on shutdown to avoid leaking the connection pool.
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
-                await daemon.smoke_runner._axiom_query.aclose()  # type: ignore[attr-defined]
+                await daemon.smoke_runner.aclose()
 
     # Self-smoke trigger (Phase 4.1.x — see specs/2026-05-21-g1-c1-continuity-redesign-design.md)
     # Gated by phase=paper + duration set; exception path is structurally unreachable here
