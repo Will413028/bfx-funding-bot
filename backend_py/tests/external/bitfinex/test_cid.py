@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from bfx_funding_bot.modules.execution.cid import (
+from bfx_funding_bot.external.bitfinex.cid import (
     BITFINEX_CID_MAX,
     generate_cid,
 )
