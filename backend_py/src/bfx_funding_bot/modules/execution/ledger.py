@@ -31,7 +31,12 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import EventType, OrderFillPayload
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    EventType,
+    OrderFillPayload,
+    ReservationClaimedPayload,
+    ReservationReleasedPayload,
+)
 
 log = logging.getLogger(__name__)
 
@@ -122,22 +127,52 @@ class PaperPositionLedger:
             )
 
         ledger = cls(account_id=account_id)
-        # NOTE: Task 5 will refactor to event-type dispatch (CLAIMED / FILL / RELEASED).
-        # Task 4 keeps single-event-type (ORDER_FILL) replay for daemon compat.
-        for ev in events:
-            if ev.get("event_type") != EventType.ORDER_FILL.value:
-                continue
+        # Defensive sort (trust upstream contract + verify): protocol docstring
+        # says "should return chronological", consumer sorts to tolerate regression.
+        events_sorted = sorted(events, key=lambda e: e.get("_time", ""))
+        for ev in events_sorted:
+            event_type = ev.get("event_type")
             if ev.get("account_id") != account_id:
                 continue
             try:
-                payload = OrderFillPayload.model_validate(ev["payload"])
-            except Exception:
-                log.warning("ledger_replay_skip_malformed payload=%r", ev.get("payload"))
-                continue
-            ledger._realized += Decimal(str(payload.fill_size_usdt))
+                if event_type == EventType.RESERVATION_CLAIMED.value:
+                    payload_c = ReservationClaimedPayload.model_validate(ev["payload"])
+                    await ledger.on_reservation_claimed(ReservationClaimed(
+                        cid=payload_c.cid, venue_offer_id=payload_c.venue_offer_id,
+                        size_usdt=Decimal(str(payload_c.size_usdt)),
+                        signal_correlation_id=payload_c.signal_correlation_id,
+                        account_id=account_id, is_simulated=payload_c.is_simulated,
+                    ))
+                elif event_type == EventType.ORDER_FILL.value:
+                    payload_f = OrderFillPayload.model_validate(ev["payload"])
+                    await ledger.on_order_filled(OrderFilled(
+                        cid=payload_f.cid, venue_offer_id=payload_f.offer_id,
+                        credit_id=None,
+                        size_usdt=Decimal(str(payload_f.fill_size_usdt)),
+                        fill_rate=payload_f.fill_price,
+                        signal_correlation_id=payload_f.signal_correlation_id,
+                        account_id=account_id, is_simulated=payload_f.is_simulated,
+                    ))
+                elif event_type == EventType.RESERVATION_RELEASED.value:
+                    payload_r = ReservationReleasedPayload.model_validate(ev["payload"])
+                    await ledger.on_reservation_released(ReservationReleased(
+                        cid=payload_r.cid, venue_offer_id=payload_r.venue_offer_id,
+                        size_usdt=Decimal(str(payload_r.size_usdt)),
+                        reason=payload_r.reason,
+                        signal_correlation_id=payload_r.signal_correlation_id,
+                        account_id=account_id, is_simulated=payload_r.is_simulated,
+                    ))
+                # else: any other event_type (DECISION, SAFETY_TRIGGER, etc.) is
+                # not a ledger event — skip silently.
+            except Exception as exc:
+                log.warning(
+                    "ledger_replay_skip_malformed event_type=%s err=%r payload=%r",
+                    event_type, exc, ev.get("payload"),
+                )
         log.info(
-            "ledger_replay_complete account=%s events=%d reserved=%s realized=%s",
-            account_id, len(events), ledger._reserved, ledger._realized,
+            "ledger_replay_complete account=%s events=%d reserved=%s realized=%s floor_hits=%d",
+            account_id, len(events_sorted), ledger._reserved, ledger._realized,
+            ledger.replay_floor_hit_count,
         )
         return ledger
 
