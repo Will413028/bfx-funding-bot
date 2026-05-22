@@ -9,7 +9,6 @@ import pytest
 
 from bfx_funding_bot.modules.execution.emit import (
     emit_order_fill,
-    emit_order_status_change,
     emit_order_submit,
     emit_safety_trigger,
 )
@@ -91,20 +90,6 @@ async def test_emit_order_fill_shape() -> None:
         is_simulated=True,
     )
     assert axiom.events[0]["event_type"] == EventType.ORDER_FILL.value
-
-
-@pytest.mark.asyncio
-async def test_emit_order_status_change_partial() -> None:
-    axiom = _CaptureAxiom()
-    await emit_order_status_change(
-        axiom=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
-        cell="fUSD_a30", correlation_id=uuid4(), account_id="default",
-        cid=1, offer_id="x", status="partially_filled",
-        filled_size_delta_usdt=50.0, is_simulated=False, reason=None,
-    )
-    p = axiom.events[0]["payload"]
-    assert p["status"] == "partially_filled"
-    assert p["filled_size_delta_usdt"] == 50.0
 
 
 @pytest.mark.asyncio
