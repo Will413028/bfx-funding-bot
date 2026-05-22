@@ -56,6 +56,8 @@ class PaperPositionLedger:
         self._reserved = Decimal("0")
         self._realized = Decimal("0")
         self.replay_floor_hit_count = 0
+        self._processed_fills: set[tuple[str, int | None]] = set()
+        self._processed_releases: set[tuple[str, int | None]] = set()
 
     # ---------- live update handlers (DomainEventBus subscribers) ----------
 
@@ -67,6 +69,11 @@ class PaperPositionLedger:
     async def on_order_filled(self, event: OrderFilled) -> None:
         if event.account_id != self.account_id:
             return
+        key = (event.venue_offer_id, event.venue_seq)
+        if key in self._processed_fills:
+            log.debug("ledger_dedup filled %s", key)
+            return
+        self._processed_fills.add(key)
         delta = min(self._reserved, event.size_usdt)
         self._reserved -= delta
         if delta < event.size_usdt:
@@ -81,6 +88,11 @@ class PaperPositionLedger:
     async def on_reservation_released(self, event: ReservationReleased) -> None:
         if event.account_id != self.account_id:
             return
+        key = (event.venue_offer_id, event.venue_seq)
+        if key in self._processed_releases:
+            log.debug("ledger_dedup released %s", key)
+            return
+        self._processed_releases.add(key)
         delta = min(self._reserved, event.size_usdt)
         self._reserved -= delta
         if delta < event.size_usdt:

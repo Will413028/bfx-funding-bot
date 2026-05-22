@@ -30,12 +30,12 @@ class _FakeAxiomQuery:
         return self._events
 
 
-def _fill_event(size: float) -> dict[str, Any]:
+def _fill_event(size: float, offer_id: str | None = None) -> dict[str, Any]:
     return {
         "event_type": EventType.ORDER_FILL.value,
         "account_id": "default",
         "payload": {
-            "cid": 1, "offer_id": "x",
+            "cid": 1, "offer_id": offer_id or str(uuid4()),
             "signal_correlation_id": str(uuid4()),
             "fill_size_usdt": size, "fill_price": 0.0001,
             "is_simulated": True,
