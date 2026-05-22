@@ -28,7 +28,7 @@ from uuid import uuid4
 
 import httpx
 
-from bfx_funding_bot.modules.execution.cid import generate_cid
+from bfx_funding_bot.external.bitfinex.cid import generate_cid
 
 BFX_BASE = "https://api.bitfinex.com"
 

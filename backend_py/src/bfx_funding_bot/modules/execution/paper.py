@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
-from bfx_funding_bot.modules.execution.cid import generate_cid
+from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.emit import (
     emit_order_fill,
     emit_order_submit,
