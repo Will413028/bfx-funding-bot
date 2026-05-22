@@ -69,7 +69,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     ExecutorPort,
     GuardRule,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
@@ -101,12 +100,10 @@ from bfx_funding_bot.modules.marketfeed.scheduler import (
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
     EventType,
     HealthStatus,
     HealthTarget,
     Level,
-    OrderFillPayload,
     StrategyName,
 )
 from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
