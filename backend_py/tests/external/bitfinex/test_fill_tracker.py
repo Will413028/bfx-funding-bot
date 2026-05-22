@@ -6,6 +6,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import jsonschema
@@ -17,7 +18,8 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.events import ReservationReleased
+from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
+from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     EventType,
@@ -30,6 +32,11 @@ _SCHEMA = json.loads(
     (Path(__file__).parent.parent.parent / "contracts" / "bitfinex_funding_api_schema.json")
     .read_text()
 )
+
+
+class _StubAxiomQuery:
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
 
 
 class _CaptureAxiom:
@@ -69,12 +76,15 @@ def _credit(venue_id: int, amount: float = 100.0) -> list:
 
 
 def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom,
-                   bus: DomainEventBus | None = None) -> RestPollingFillTracker:
+                   bus: DomainEventBus | None = None,
+                   registry: OfferRegistry | None = None) -> RestPollingFillTracker:
     probe = HealthProbe()
+    if registry is None:
+        registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
     return RestPollingFillTracker(
         http=client, axiom=axiom, probe=probe, bus=bus or DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
-        account_id="default", poll_interval_s=0.01,
+        account_id="default", registry=registry, poll_interval_s=0.01,
     )
 
 
@@ -142,7 +152,8 @@ async def test_consecutive_failure_emits_degraded() -> None:
 @pytest.mark.asyncio
 async def test_offer_disappearance_emits_reservation_released() -> None:
     """Core diff: offer present in last tick, absent this tick → emit ReservationReleased
-    via bus. Tracker uses venue_offer_id as bridge."""
+    via bus. Tracker uses venue_offer_id as bridge.
+    Registry seeded with claim for voi=111 to satisfy new registry-aware contract."""
     axiom = _CaptureAxiom()
     bus = DomainEventBus()
     released: list[ReservationReleased] = []
@@ -151,6 +162,16 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
         released.append(e)
 
     bus.subscribe(ReservationReleased, capture)
+
+    # Seed registry with claim for voi="111" (option a: seed to satisfy new contract)
+    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    sig_id = uuid4()
+    bus.subscribe(ReservationClaimed, registry.handle)
+    await bus.publish(ReservationClaimed(
+        cid=42, venue_offer_id="111", size_usdt=Decimal("100.0"),
+        signal_correlation_id=sig_id, account_id="default", is_simulated=False,
+        occurred_at_ms=1000,
+    ))
 
     tick_count = 0
 
@@ -167,7 +188,7 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="https://api.bitfinex.com",
     ) as client:
-        tracker = _build_tracker(client, axiom, bus=bus)
+        tracker = _build_tracker(client, axiom, bus=bus, registry=registry)
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))

@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.events import ReservationReleased
+from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
+from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     Phase,
@@ -17,6 +20,11 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+class _StubAxiomQuery:
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
 
 
 class _CaptureAxiom:
@@ -41,6 +49,7 @@ def _offer(venue_id: int, cid: int) -> list[Any]:
 async def test_fill_tracker_ticks_emit_status_changes() -> None:
     """Tick 1: offers=[venue 111 cid 1].
     Tick 2+: offers=[] — venue 111 disappeared → ReservationReleased via bus.
+    Registry seeded with claim for voi=111 to satisfy new registry-aware contract.
     """
     tick_seen = 0
 
@@ -62,6 +71,16 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
 
     bus.subscribe(ReservationReleased, capture)
 
+    # Seed registry with claim for voi="111" (option a: seed to satisfy new contract)
+    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    sig_id = uuid4()
+    bus.subscribe(ReservationClaimed, registry.handle)
+    await bus.publish(ReservationClaimed(
+        cid=1, venue_offer_id="111", size_usdt=Decimal("100.0"),
+        signal_correlation_id=sig_id, account_id="default", is_simulated=False,
+        occurred_at_ms=1000,
+    ))
+
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="https://api.bitfinex.com",
@@ -76,6 +95,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
             strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30",
             account_id="default",
+            registry=registry,
             poll_interval_s=0.01,
         )
         stop = asyncio.Event()

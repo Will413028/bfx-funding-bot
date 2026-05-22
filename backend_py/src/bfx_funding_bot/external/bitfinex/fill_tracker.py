@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -37,6 +37,10 @@ import httpx
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import ReservationReleased
+from bfx_funding_bot.modules.execution.registry_offers import (
+    OfferRegistry,
+    RegistryState,
+)
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     EventType,
@@ -75,6 +79,7 @@ class RestPollingFillTracker:
         strategy: StrategyName,
         cell: str,
         account_id: str,
+        registry: OfferRegistry,
         poll_interval_s: float = 30.0,
     ) -> None:
         self.http = http
@@ -85,6 +90,7 @@ class RestPollingFillTracker:
         self.strategy = strategy
         self.cell = cell
         self.account_id = account_id
+        self._registry = registry
         self.poll_interval_s = poll_interval_s
         # venue_offer_id (str) → {cid: int, status: str, size: float}
         self._last_state: dict[str, dict[str, Any]] = {}
@@ -152,8 +158,15 @@ class RestPollingFillTracker:
         self._last_state = current
 
     async def _diff_and_emit(self, current: dict[str, dict[str, Any]]) -> None:
-        """Disappearance = present in last_state, absent from current → reservation released."""
-        for venue_offer_id, prev in self._last_state.items():
+        """Disappearance = present in last_state, absent from current → reservation released.
+
+        Registry-aware dedup (4.4a):
+        - If voi not in registry: boot-before-claim race — skip silently.
+        - If registry state == RELEASED: WS already handled it — skip (dedup).
+        - If registry state == CLAIMED: emit with registry's correlation_id (G3 fix).
+        """
+        snapshot = self._registry.snapshot()
+        for venue_offer_id, _prev in self._last_state.items():
             if venue_offer_id in current:
                 continue
             # CC4 defense-in-depth: paper_ should never reach here.
@@ -163,18 +176,30 @@ class RestPollingFillTracker:
                     f"{venue_offer_id} — registry CC4 should have prevented this; "
                     "check BFX_EXECUTOR / BFX_FILL_TRACKER_ENABLED wiring."
                 )
+            claim = snapshot.get(venue_offer_id)
+            if claim is None:
+                log.warning(
+                    "fill_tracker_venue_gone_unknown voi=%s"
+                    " — not in registry (boot-before-claim or already cleaned)",
+                    venue_offer_id,
+                )
+                continue
+            if claim.state == RegistryState.RELEASED:
+                log.debug(
+                    "fill_tracker_dedup voi=%s — registry RELEASED",
+                    venue_offer_id,
+                )
+                continue
+            # CLAIMED: emit with registry-sourced fields (G3 deterministic correlation_id)
             await self._bus.publish(ReservationReleased(
-                cid=prev["cid"],
+                cid=claim.cid,
                 venue_offer_id=venue_offer_id,
-                size_usdt=Decimal(str(prev.get("size", 0.0))),
-                # 4.3 coarse reason — Phase 4.4 WS handler will refine to
-                # venue_cancel / user_cancel / expired / filled (via fcn event).
+                size_usdt=claim.size_usdt,
                 reason="missing_from_venue",
-                # tracker cannot recover original signal correlation; 4.4 will
-                # restore via cid→correlation_id map kept by signal_engine.
-                signal_correlation_id=uuid4(),
+                signal_correlation_id=claim.signal_correlation_id,
                 account_id=self.account_id,
                 is_simulated=False,
+                occurred_at_ms=int(time.time() * 1000),
             ))
 
     async def _emit_degraded(self, reason: str) -> None:
