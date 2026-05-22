@@ -12,6 +12,8 @@ Event taxonomy:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 from dataclasses import dataclass, field
@@ -207,3 +209,43 @@ def _parse_foc(d: list[Any], raw_seq: int | None) -> FocEvent:
         raw_seq=raw_seq,
         raw=d,
     )
+
+
+def build_auth_payload(*, api_key: str, api_secret: str, nonce_ms: int) -> dict[str, Any]:
+    """Build Bitfinex WS auth subscribe payload.
+
+    Per https://docs.bitfinex.com/reference/ws-auth — HMAC-SHA384 signature
+    over "AUTH" + nonce string, using api_secret as key.
+    """
+    nonce_str = str(nonce_ms)
+    auth_payload = f"AUTH{nonce_str}"
+    sig = hmac.new(
+        api_secret.encode("utf-8"),
+        auth_payload.encode("utf-8"),
+        hashlib.sha384,
+    ).hexdigest()
+    return {
+        "event": "auth",
+        "apiKey": api_key,
+        "authSig": sig,
+        "authNonce": nonce_ms,
+        "authPayload": auth_payload,
+    }
+
+
+def sign_request(*, body: bytes, nonce: int, api_secret: str, path: str) -> dict[str, str]:
+    """Build Bitfinex REST auth headers for a private endpoint.
+
+    Per https://docs.bitfinex.com/docs/rest-auth — HMAC-SHA384 over
+    "/api/" + path + nonce + body, using api_secret as key.
+    """
+    payload = f"/api/{path}{nonce}".encode() + body
+    sig = hmac.new(
+        api_secret.encode("utf-8"),
+        payload,
+        hashlib.sha384,
+    ).hexdigest()
+    return {
+        "bfx-nonce": str(nonce),
+        "bfx-signature": sig,
+    }
