@@ -104,6 +104,16 @@ class SmokeRunner:
         self._strategy = strategy
         self._cell = cell
 
+    async def aclose(self) -> None:
+        """Clean up internal axiom query adapter & handles.
+
+        Replaces daemon `_run()` direct access to `self._axiom_query` (which
+        required `# type: ignore[attr-defined]` — adapter shape not on
+        SmokeRunner public surface). Phase 4.4 prework Followup (a).
+        """
+        if self._axiom_query is not None and hasattr(self._axiom_query, "aclose"):
+            await self._axiom_query.aclose()
+
     async def run_l2(self) -> SmokeResult:
         async with _SMOKE_LOCK:
             return await self._run_l2_unlocked()
