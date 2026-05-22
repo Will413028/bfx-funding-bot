@@ -716,32 +716,45 @@ async def build_daemon(
     # so the envelope labels are informational only.
     first_cell = config.cells[0]
 
-    guards: list[GuardRule] = [
-        ManualKillGuard(),
-        AuthHealthGuard(probe=probe),
-        HeartbeatGuard(
+    # M2: SafetyConfig.<guard>.enabled is honoured at build time — disabled
+    # guards are not constructed (cleaner than relying on internal no-op).
+    # `BFX_PHASE=canary` is rejected upstream in load_config so allowing
+    # operators to disable hard guards in paper/shadow is bounded; 4.4 canary
+    # spec will need an additional invariant requiring all hard guards on.
+    hg = safety_cfg.hard_guards
+    cg = safety_cfg.calibrated_guards
+    guards: list[GuardRule] = []
+    if hg.manual_kill.enabled:
+        guards.append(ManualKillGuard())
+    if hg.auth_health.enabled:
+        guards.append(AuthHealthGuard(probe=probe))
+    if hg.heartbeat.enabled:
+        guards.append(HeartbeatGuard(
             probe=probe,
-            threshold_seconds=safety_cfg.hard_guards.heartbeat.sub_task_stale_threshold_seconds,
+            threshold_seconds=hg.heartbeat.sub_task_stale_threshold_seconds,
             watched_sub_tasks=["safety_chain", "executor"],
-        ),
-        AllocationCapGuard(ledger=ledger),
-        RealizedLossGuard(
-            enabled=safety_cfg.calibrated_guards.realized_loss_24h.enabled,
-            threshold_usdt=safety_cfg.calibrated_guards.realized_loss_24h.threshold_usdt,
+        ))
+    if hg.allocation_cap.enabled:
+        guards.append(AllocationCapGuard(ledger=ledger))
+    if cg.realized_loss_24h.enabled:
+        guards.append(RealizedLossGuard(
+            enabled=True,
+            threshold_usdt=cg.realized_loss_24h.threshold_usdt,
             source=pnl_source,
-        ),
-        DrawdownGuard(
-            enabled=safety_cfg.calibrated_guards.drawdown_from_peak.enabled,
-            threshold_pct=safety_cfg.calibrated_guards.drawdown_from_peak.threshold_pct,
+        ))
+    if cg.drawdown_from_peak.enabled:
+        guards.append(DrawdownGuard(
+            enabled=True,
+            threshold_pct=cg.drawdown_from_peak.threshold_pct,
             source=pnl_source,
-        ),
-        DivergenceRateGuard(
-            enabled=safety_cfg.calibrated_guards.divergence_rate.enabled,
-            threshold_pct=safety_cfg.calibrated_guards.divergence_rate.threshold_pct,
-            window_minutes=safety_cfg.calibrated_guards.divergence_rate.window_minutes,
+        ))
+    if cg.divergence_rate.enabled:
+        guards.append(DivergenceRateGuard(
+            enabled=True,
+            threshold_pct=cg.divergence_rate.threshold_pct,
+            window_minutes=cg.divergence_rate.window_minutes,
             source=div_source,
-        ),
-    ]
+        ))
 
     safety_chain = SafetyGuardChain(
         guards=guards,
