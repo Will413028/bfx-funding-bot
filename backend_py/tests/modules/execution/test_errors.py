@@ -9,18 +9,18 @@ from bfx_funding_bot.modules.execution.errors import (
 )
 
 
-def test_taxonomy_inheritance():
+def test_taxonomy_inheritance() -> None:
     assert issubclass(TransientError, ExecutionError)
     assert issubclass(PermanentError, ExecutionError)
     assert issubclass(InvariantViolation, ExecutionError)
     assert issubclass(AuthError, ExecutionError)
 
 
-def test_each_class_distinct():
+def test_each_class_distinct() -> None:
     classes = {TransientError, PermanentError, InvariantViolation, AuthError}
     assert len(classes) == 4
 
 
-def test_raise_with_message():
+def test_raise_with_message() -> None:
     with pytest.raises(TransientError, match="upstream timeout"):
         raise TransientError("upstream timeout")
