@@ -1,0 +1,1 @@
+{"event":"auth","status":"OK","chanId":0,"userId":1234,"auth_id":"abc","caps":{"orders":{"read":1,"write":1},"account":{"read":1,"write":0},"funding":{"read":1,"write":1},"history":{"read":1,"write":0},"wallets":{"read":1,"write":0},"withdraw":{"read":0,"write":0},"positions":{"read":1,"write":0}}}
