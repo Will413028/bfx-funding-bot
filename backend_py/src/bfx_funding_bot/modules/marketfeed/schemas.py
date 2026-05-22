@@ -39,7 +39,9 @@ class EventType(StrEnum):
     SAFETY_TRIGGER = "safety_trigger"
     ORDER_SUBMIT = "order_submit"
     ORDER_FILL = "order_fill"
-    ORDER_STATUS_CHANGE = "order_status_change"
+    ORDER_STATUS_CHANGE = "order_status_change"  # deprecated, removed in 4.4
+    RESERVATION_CLAIMED = "reservation_claimed"
+    RESERVATION_RELEASED = "reservation_released"
     HEALTH_CHECK = "health_check"
 
 
@@ -70,6 +72,7 @@ class HealthTarget(StrEnum):
     EXECUTOR = "executor"
     SAFETY_CHAIN = "safety_chain"
     FILL_TRACKER = "fill_tracker"
+    LEDGER = "ledger"
 
 
 class HealthStatus(StrEnum):
@@ -187,6 +190,25 @@ class OrderStatusChangePayload(BaseModel):
     is_simulated: bool
 
 
+class ReservationClaimedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cid: int
+    venue_offer_id: str
+    size_usdt: float
+    signal_correlation_id: UUID
+    is_simulated: bool
+
+
+class ReservationReleasedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cid: int
+    venue_offer_id: str
+    size_usdt: float
+    reason: str  # "venue_cancel" / "user_cancel" / "expired" / "missing_from_venue"
+    signal_correlation_id: UUID
+    is_simulated: bool
+
+
 class SafetyTriggerPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     guard_name: str
@@ -197,6 +219,7 @@ class SafetyTriggerPayload(BaseModel):
 PayloadModel = Annotated[
     SignalPayload | DecisionPayload | HealthCheckPayload
     | OrderSubmitPayload | OrderFillPayload | OrderStatusChangePayload
+    | ReservationClaimedPayload | ReservationReleasedPayload
     | SafetyTriggerPayload | dict[str, Any],
     Field(union_mode="left_to_right"),
 ]
