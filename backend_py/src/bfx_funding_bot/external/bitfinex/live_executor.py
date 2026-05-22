@@ -9,10 +9,36 @@ Per spec §6.3:
 """
 from __future__ import annotations
 
-from typing import Any
+import json
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import date
+from typing import Any, Protocol
+from uuid import UUID
 
+import httpx
+
+from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
+from bfx_funding_bot.external.bitfinex.cid import generate_cid
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
-from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+from bfx_funding_bot.modules.execution.events import CancelRequested
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    SubmittedOrder,
+)
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionPayload,
+    Phase,
+    StrategyName,
+)
+
+log = logging.getLogger(__name__)
+
+BITFINEX_REST_BASE = "https://api.bitfinex.com"
+_OFFER_SUBMIT_PATH = "v2/auth/w/funding/offer/submit"
 
 
 def build_offer_payload(
@@ -74,3 +100,93 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
         status="failed",
         raw_response={"raw": raw, "error_text": raw[8] if len(raw) > 8 else None},
     )
+
+
+class _AxiomProtocol(Protocol):
+    async def emit(self, event: dict[str, Any]) -> None: ...
+
+
+class BitfinexLiveExecutor:
+    """Bitfinex REST funding offer executor.
+
+    Pure REST — no WS, no Registry dependency. submit returns status="submitted";
+    WS fcn (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
+
+    cancel publishes CancelRequested event (first-class) — replaces former
+    _pending_cancels dict pattern.
+    """
+
+    def __init__(
+        self,
+        *,
+        http: httpx.AsyncClient,
+        axiom: _AxiomProtocol,
+        bus: DomainEventBus,
+        phase: Phase,
+        strategy: StrategyName,
+        cell: str,
+        nonce_provider: Callable[[], int] | None = None,
+        date_provider: Callable[[], date] | None = None,
+        base_url: str = BITFINEX_REST_BASE,
+    ) -> None:
+        self._http = http
+        self._axiom = axiom
+        self._bus = bus
+        self._phase = phase
+        self._strategy = strategy
+        self._cell = cell
+        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
+        self._date_provider = date_provider or (lambda: date.today())
+        self._base_url = base_url
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        cid = generate_cid(decision.signal_correlation_id, self._date_provider())
+        payload = build_offer_payload(
+            symbol="fUSD",
+            amount_usdt=decision.offer_amount_usdt or 0.0,
+            rate=decision.offer_rate or 0.0,
+            period_days=decision.offer_duration_days or 2,
+            cid=cid,
+        )
+        body_bytes = json.dumps(payload).encode("utf-8")
+
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret,
+            path=_OFFER_SUBMIT_PATH,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{_OFFER_SUBMIT_PATH}",
+                content=body_bytes, headers=headers,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            log.warning("bitfinex_submit_http_error err=%r", e)
+            return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None)
+
+        parsed = parse_offer_response(resp.json())
+        return replace(parsed, cid=cid)
+
+    async def cancel(
+        self, *, venue_offer_id: str,
+        signal_correlation_id: UUID, account_id: str,
+    ) -> None:
+        """Publish CancelRequested event.
+
+        Per spec §6.3: REST cancel call deferred to follow-up wire-up; for 4.4a
+        the primary goal is bus.publish(CancelRequested) — making cancel
+        auditable + replay-able as a first-class event.
+        """
+        await self._bus.publish(CancelRequested(
+            venue_offer_id=venue_offer_id,
+            requested_at_ms=int(time.time() * 1000),
+            signal_correlation_id=signal_correlation_id,
+            account_id=account_id,
+        ))
