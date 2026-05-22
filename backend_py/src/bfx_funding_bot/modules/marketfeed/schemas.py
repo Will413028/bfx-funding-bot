@@ -261,6 +261,10 @@ class Envelope(BaseModel):
             OrderFillPayload.model_validate(self.payload)
         elif self.event_type == EventType.ORDER_STATUS_CHANGE:
             OrderStatusChangePayload.model_validate(self.payload)
+        elif self.event_type == EventType.RESERVATION_CLAIMED:
+            ReservationClaimedPayload.model_validate(self.payload)
+        elif self.event_type == EventType.RESERVATION_RELEASED:
+            ReservationReleasedPayload.model_validate(self.payload)
         elif self.event_type == EventType.SAFETY_TRIGGER:
             SafetyTriggerPayload.model_validate(self.payload)
         return self
