@@ -515,27 +515,23 @@ async def _emit_locf_degraded(
 
 
 class _AxiomQueryAdapter:
-    """4.2 stub — returns no historical fills.
+    """4.3 stub — returns no historical events.
 
     AxiomClient (`external/axiom.py`) only exposes emit/flush/start/stop, not
     query. Real Axiom APL (POST /v1/datasets/{ds}/_apl) replay lands in 4.3
-    when accumulated paper fills make replay meaningful. For 4.2 ship:
-    paper phase starts with a fresh ledger each boot; AllocationCap still
-    works because the in-process `_LedgerWrappedExecutor` updates the same
-    ledger instance on every order_fill (live updates flow without round-tripping
-    through Axiom).
+    when accumulated paper events make replay meaningful. For 4.3.executor-middleware:
+    paper phase starts with a fresh ledger each boot.
     """
 
     def __init__(self, axiom_client: AxiomClient, dataset: str) -> None:
         self._client = axiom_client
         self._dataset = dataset
 
-    async def query_order_fills(
+    async def query_order_events(
         self, account_id: str, since: datetime,
     ) -> list[dict[str, Any]]:
         log.info(
-            "axiom_query_stub_returning_empty account=%s dataset=%s "
-            "since=%s (real query lands in 4.3)",
+            "axiom_query_stub_returning_empty account=%s dataset=%s since=%s",
             account_id, self._dataset, since.isoformat(),
         )
         return []
