@@ -1,4 +1,4 @@
-"""PaperPositionLedger: event-sourcing replay + on_order_fill listener."""
+"""PaperPositionLedger: event-sourcing replay tests."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -10,17 +10,14 @@ import pytest
 
 from bfx_funding_bot.core.errors import LedgerReplayError
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
-    OrderFillPayload,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import EventType
 
 
 class _FakeAxiomQuery:
     def __init__(self, events: list[dict[str, Any]] | Exception) -> None:
         self._events = events
 
-    async def query_order_fills(
+    async def query_order_events(
         self, account_id: str, since: datetime,
     ) -> list[dict[str, Any]]:
         if isinstance(self._events, Exception):
@@ -51,27 +48,18 @@ async def test_replay_empty_returns_zero_exposure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_sums_fills() -> None:
+async def test_replay_order_fills_only_with_floor() -> None:
+    """Legacy ORDER_FILL events without prior CLAIMED → realized += size,
+    reserved floor-at-0 (Phase 4.3 dual counter semantics).
+    """
     events = [_fill_event(100.0), _fill_event(50.0), _fill_event(25.5)]
     ledger = await PaperPositionLedger.replay_from_axiom(
         account_id="default", since=datetime.now(UTC) - timedelta(days=30),
         axiom_query=_FakeAxiomQuery(events),
     )
     assert ledger.current_exposure() == Decimal("175.5")
-
-
-@pytest.mark.asyncio
-async def test_on_order_fill_mutates_exposure() -> None:
-    ledger = await PaperPositionLedger.replay_from_axiom(
-        account_id="default", since=datetime.now(UTC) - timedelta(days=30),
-        axiom_query=_FakeAxiomQuery([]),
-    )
-    payload = OrderFillPayload(
-        cid=1, offer_id="x", signal_correlation_id=uuid4(),
-        fill_size_usdt=200.0, fill_price=0.0001, is_simulated=True,
-    )
-    ledger.on_order_fill(payload)
-    assert ledger.current_exposure() == Decimal("200")
+    assert ledger.realized_exposure() == Decimal("175.5")
+    assert ledger.replay_floor_hit_count == 3  # all 3 fills hit reserved floor
 
 
 @pytest.mark.asyncio

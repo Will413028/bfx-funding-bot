@@ -45,7 +45,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     probe = HealthProbe()
 
     class _FakeQuery:
-        async def query_order_fills(
+        async def query_order_events(
             self, account_id: str, since: Any,
         ) -> list[dict[str, Any]]:
             return [{
