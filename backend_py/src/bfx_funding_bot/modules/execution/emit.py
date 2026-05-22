@@ -19,7 +19,6 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     EventType,
     Level,
     OrderFillPayload,
-    OrderStatusChangePayload,
     OrderSubmitPayload,
     Phase,
     SafetyTriggerPayload,
@@ -109,44 +108,6 @@ async def emit_order_fill(
         event_type=EventType.ORDER_FILL,
         correlation_id=decision.signal_correlation_id,
         account_id=ctx.account_id,
-        payload=payload.model_dump(mode="json"),
-    )
-    await axiom.emit(env.model_dump(mode="json"))
-
-
-async def emit_order_status_change(
-    *,
-    axiom: _AxiomProtocol,
-    phase: Phase,
-    strategy: StrategyName,
-    cell: str,
-    correlation_id: UUID,
-    account_id: str,
-    cid: int,
-    offer_id: str,
-    status: str,
-    is_simulated: bool,
-    reason: str | None,
-    filled_size_delta_usdt: float | None = None,
-) -> None:
-    payload = OrderStatusChangePayload(
-        cid=cid,
-        offer_id=offer_id,
-        signal_correlation_id=correlation_id,
-        status=status,
-        reason=reason,
-        filled_size_delta_usdt=filled_size_delta_usdt,
-        is_simulated=is_simulated,
-    )
-    env = Envelope(
-        timestamp=_now_iso(),
-        level=Level.INFO,
-        phase=phase,
-        strategy=strategy,
-        cell=cell,
-        event_type=EventType.ORDER_STATUS_CHANGE,
-        correlation_id=correlation_id,
-        account_id=account_id,
         payload=payload.model_dump(mode="json"),
     )
     await axiom.emit(env.model_dump(mode="json"))

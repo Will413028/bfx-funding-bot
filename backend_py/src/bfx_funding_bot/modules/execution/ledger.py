@@ -176,10 +176,3 @@ class PaperPositionLedger:
         )
         return ledger
 
-    # ---------- legacy API (remove in Task 12) ----------
-
-    def on_order_fill(self, payload: Any) -> None:
-        """DEPRECATED — kept for daemon.py compat until Task 10 rewires.
-        Task 12 removes this method completely.
-        """
-        self._realized += Decimal(str(payload.fill_size_usdt))
