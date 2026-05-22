@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.event_upcasters import upcast_row
@@ -179,9 +179,9 @@ def transition(
 # Imperative shell — OfferRegistry
 # ---------------------------------------------------------------------------
 
-class _AxiomQueryProtocol:
+class _AxiomQueryProtocol(Protocol):
     """Structural protocol for the Axiom query adapter."""
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]: ...  # type: ignore[empty-body]
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]: ...
 
 
 class OfferRegistry:

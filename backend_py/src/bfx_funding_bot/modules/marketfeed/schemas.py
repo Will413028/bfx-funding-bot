@@ -42,6 +42,7 @@ class EventType(StrEnum):
     ORDER_STATUS_CHANGE = "order_status_change"  # deprecated, removed in 4.4
     RESERVATION_CLAIMED = "reservation_claimed"
     RESERVATION_RELEASED = "reservation_released"
+    CANCEL_REQUESTED = "cancel_requested"
     HEALTH_CHECK = "health_check"
 
 

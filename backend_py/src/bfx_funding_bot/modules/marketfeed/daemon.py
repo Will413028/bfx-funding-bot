@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -35,6 +36,7 @@ from bfx_funding_bot.external.axiom import (
     AxiomClient,
     AxiomConfig,
 )
+from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
@@ -47,6 +49,7 @@ from bfx_funding_bot.external.bitfinex.ws import (
     ChannelSpec,
     compute_backoff_secs,
 )
+from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
@@ -54,6 +57,7 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
+    CancelRequested,
     OrderFilled,
     ReservationClaimed,
     ReservationReleased,
@@ -71,6 +75,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardRule,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
+from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -156,6 +161,9 @@ class Daemon:
     ledger: PaperPositionLedger
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
+    offer_registry: OfferRegistry | None = None
+    auth_ws: BitfinexAuthWSClient | None = None
+    ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
@@ -191,6 +199,13 @@ class Daemon:
                 tg.create_task(
                     self.fill_tracker.poll_loop(self._stop_event),
                     name="fill_tracker",
+                )
+            # Phase 4.4a Task 19: WS dispatcher sub-task only runs when
+            # build_executor enabled it (live executor + BFX_WS_CLIENT_ENABLED).
+            if self.ws_dispatcher is not None:
+                tg.create_task(
+                    self.ws_dispatcher.run(self._stop_event),
+                    name="ws_dispatcher",
                 )
             # When _stop_event is set externally (SIGTERM), each sub-task's
             # internal loop exits cleanly; TaskGroup waits for all to drain.
@@ -553,6 +568,18 @@ class _AxiomQueryAdapter:
         return []
 
 
+class _OfferRegistryQueryStub:
+    """4.4a stub — OfferRegistry replay protocol bridge.
+
+    OfferRegistry.replay_from_axiom() calls fetch_events(**kwargs).
+    4.4a returns [] (same as ledger stub); real APL adapter in 4.4b ADR.
+    """
+
+    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
+        log.info("offer_registry_query_stub_returning_empty kwargs=%s", kwargs)
+        return []
+
+
 # _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
 # Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
 # Ledger + AxiomEventSink subscribe to DomainEventBus in build_daemon.
@@ -674,6 +701,15 @@ async def build_daemon(
         axiom_query=axiom_query,
     )
 
+    # OfferRegistry cold-start replay — 4.4a stub returns []; real APL adapter
+    # ships in 4.4b ADR. cleanup_terminal removes stale RELEASED records > 24h.
+    offer_registry = OfferRegistry(
+        axiom_query=_OfferRegistryQueryStub(),
+        clock=lambda: int(time.time() * 1000),
+    )
+    await offer_registry.replay_from_axiom()
+    offer_registry.cleanup_terminal(older_than_ms=24 * 3600 * 1000)
+
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
     safety_cfg_path = Path(
         os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
@@ -739,6 +775,10 @@ async def build_daemon(
         account_id=account_id,
     )
 
+    # ---- Phase 4.3/4.4a executor middleware chain wiring ----
+    # bus created before build_executor so live executor gets it at construction.
+    bus = DomainEventBus()
+
     # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
     # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
     spec = build_executor(
@@ -746,12 +786,10 @@ async def build_daemon(
         phase=config.phase,
         strategy=first_cell.strategy,
         cell=first_cell.cell_id,
+        http=bitfinex_http,
+        bus=bus,
     )
     executor: ExecutorPort = spec.executor
-
-    # ---- Phase 4.3 executor middleware chain wiring ----
-    # bus created before fill_tracker so it can be passed to its constructor.
-    bus = DomainEventBus()
 
     fill_tracker: RestPollingFillTracker | None = None
     if spec.fill_tracker_enabled:
@@ -764,6 +802,7 @@ async def build_daemon(
             strategy=first_cell.strategy,
             cell=first_cell.cell_id,
             account_id=account_id,
+            registry=offer_registry,
         )
     axiom_sink = AxiomEventSink(
         axiom_client=axiom,
@@ -777,6 +816,12 @@ async def build_daemon(
     bus.subscribe(ReservationClaimed,  axiom_sink.on_reservation_claimed)
     bus.subscribe(OrderFilled,         axiom_sink.on_order_filled)
     bus.subscribe(ReservationReleased, axiom_sink.on_reservation_released)
+    # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
+    bus.subscribe(ReservationClaimed,  offer_registry.handle)
+    bus.subscribe(OrderFilled,         offer_registry.handle)
+    bus.subscribe(ReservationReleased, offer_registry.handle)
+    # CancelRequested → axiom (audit trail; replay-able cancel decisions).
+    bus.subscribe(CancelRequested,     axiom_sink.handle_cancel_requested)
 
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
@@ -963,6 +1008,25 @@ async def build_daemon(
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
     admin_token = os.environ.get("BFX_ADMIN_TOKEN", "").strip() or None
 
+    # Phase 4.4a Task 19: WS dispatcher — only wired when live executor +
+    # BFX_WS_CLIENT_ENABLED=true. Paper path: spec.ws_client_enabled=False
+    # → these remain None → run() TaskGroup skips the ws_dispatcher task.
+    auth_ws: BitfinexAuthWSClient | None = None
+    ws_dispatcher: BitfinexLiveWSDispatcher | None = None
+    if spec.ws_client_enabled:
+        creds = Credentials(
+            api_key=_require_env("BFX_API_KEY"),
+            api_secret=_require_env("BFX_API_SECRET"),
+        )
+        auth_ws = BitfinexAuthWSClient(creds=creds)
+        ws_dispatcher = BitfinexLiveWSDispatcher(
+            ws_client=auth_ws,
+            registry=offer_registry,
+            bus=bus,
+            axiom=axiom,
+        )
+        bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
+
     return Daemon(
         config=config,
         registry=registry,
@@ -984,6 +1048,9 @@ async def build_daemon(
         ledger=ledger,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
+        offer_registry=offer_registry,
+        auth_ws=auth_ws,
+        ws_dispatcher=ws_dispatcher,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
