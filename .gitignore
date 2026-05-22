@@ -13,6 +13,7 @@ tmp/
 .env
 .env.local
 .env.*.local
+.env.chaos-bak*
 
 # Keys
 *.pem
@@ -29,6 +30,11 @@ Thumbs.db
 
 # Claude Code local state (scheduled tasks, session locks, etc.)
 .claude/
+
+# Other agent tool local state (not part of repo)
+.agents/
+.codex/
+AGENTS.md
 
 # Go
 backend/server
