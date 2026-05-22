@@ -36,7 +36,13 @@ async def test_single_subscriber_receives_event() -> None:
     bus.subscribe(ReservationClaimed, handler)
     claim = _make_claim()
     await bus.publish(claim)
-    assert received == [claim]
+    # Bus attaches event_seq and recorded_at_ms; verify core fields match.
+    assert len(received) == 1
+    assert received[0].cid == claim.cid
+    assert received[0].venue_offer_id == claim.venue_offer_id
+    assert received[0].size_usdt == claim.size_usdt
+    assert received[0].event_seq == 1  # Bus attaches monotonic seq
+    assert received[0].recorded_at_ms is not None  # Bus attaches clock time
 
 
 @pytest.mark.asyncio
@@ -107,7 +113,13 @@ async def test_release_event_routes_separately() -> None:
         account_id="default", is_simulated=True,
     )
     await bus.publish(rel)
-    assert received == [rel]
+    # Bus attaches event_seq and recorded_at_ms; verify core fields match.
+    assert len(received) == 1
+    assert received[0].cid == rel.cid
+    assert received[0].venue_offer_id == rel.venue_offer_id
+    assert received[0].reason == rel.reason
+    assert received[0].event_seq == 1  # Bus attaches monotonic seq
+    assert received[0].recorded_at_ms is not None  # Bus attaches clock time
 
 
 async def test_subscription_context_subscribes_on_enter_unsubscribes_on_exit() -> None:
