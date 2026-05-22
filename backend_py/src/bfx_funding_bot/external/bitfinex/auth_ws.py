@@ -12,13 +12,23 @@ Event taxonomy:
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
+import time
+from collections import deque
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+
+import websockets
+from websockets.asyncio.client import ClientConnection
+
+from bfx_funding_bot.modules.execution.protocols import Credentials
 
 log = logging.getLogger(__name__)
 
@@ -249,3 +259,104 @@ def sign_request(*, body: bytes, nonce: int, api_secret: str, path: str) -> dict
         "bfx-nonce": str(nonce),
         "bfx-signature": sig,
     }
+
+
+BITFINEX_AUTH_WS_URL = "wss://api.bitfinex.com/ws/2"
+
+
+class BitfinexAuthWSClient:
+    """Authenticated Bitfinex WS user channel client.
+
+    Phase 4.4a: pure I/O. Subscribes user stream → emits typed BfxWSEvent.
+    Does NOT know about OfferRegistry, DomainEventBus, or domain semantics.
+
+    Reconnect: exponential backoff 1, 2, 4, ..., 60s cap.
+    Heartbeat watchdog: hb_timeout_s default 30s (advisory; reconnect on disconnect).
+    """
+
+    def __init__(
+        self,
+        *,
+        creds: Credentials,
+        url: str = BITFINEX_AUTH_WS_URL,
+        hb_timeout_s: float = 30.0,
+        nonce_provider: Callable[[], int] | None = None,
+        on_disconnect: Callable[[str], None] | None = None,
+    ) -> None:
+        self._creds = creds
+        self._url = url
+        self._hb_timeout_s = hb_timeout_s
+        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1000))
+        self._on_disconnect = on_disconnect
+        self._ws: ClientConnection | None = None
+        self._stop = False
+        self.reconnect_attempts = 0
+        self._reconnect_history: deque[float] = deque(maxlen=1000)
+        self._last_msg_ts: float = time.monotonic()
+
+    def reconnect_count_last_hour(self) -> int:
+        cutoff = time.monotonic() - 3600
+        return sum(1 for t in self._reconnect_history if t >= cutoff)
+
+    def last_msg_age_ms(self) -> int:
+        return int((time.monotonic() - self._last_msg_ts) * 1000)
+
+    async def events(self) -> AsyncIterator[BfxWSEvent]:
+        """Connect + auth + yield typed events. Yields forever until close()."""
+        while not self._stop:
+            clean_close = False
+            try:
+                async for ev in self._connect_and_stream():
+                    self._last_msg_ts = time.monotonic()
+                    yield ev
+                # Stream ended without exception — server closed the connection cleanly
+                clean_close = True
+            except (websockets.ConnectionClosed, OSError, TimeoutError) as e:
+                if self._stop:
+                    return
+                self._reconnect_history.append(time.monotonic())
+                self.reconnect_attempts += 1
+                if self._on_disconnect is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_disconnect(str(type(e).__name__))
+                backoff = min(60, 2 ** max(0, self.reconnect_attempts - 1))
+                log.warning(
+                    "bfx_auth_ws_reconnect attempt=%d backoff_s=%d err=%r",
+                    self.reconnect_attempts, backoff, e,
+                )
+                await asyncio.sleep(backoff)
+            else:
+                if clean_close and not self._stop:
+                    # Server initiated close: count as disconnect, apply backoff
+                    self._reconnect_history.append(time.monotonic())
+                    self.reconnect_attempts += 1
+                    backoff = min(60, 2 ** max(0, self.reconnect_attempts - 1))
+                    log.warning(
+                        "bfx_auth_ws_reconnect attempt=%d backoff_s=%d err=ConnectionClosed(clean)",
+                        self.reconnect_attempts, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+
+    async def _connect_and_stream(self) -> AsyncIterator[BfxWSEvent]:
+        async with websockets.connect(self._url, max_size=2**20) as ws:
+            self._ws = ws
+            auth = build_auth_payload(
+                api_key=self._creds.api_key,
+                api_secret=self._creds.api_secret,
+                nonce_ms=self._nonce_provider(),
+            )
+            await ws.send(json.dumps(auth))
+
+            async for raw in ws:
+                event = parse_frame(raw)
+                if event is not None:
+                    yield event
+                if self._stop:
+                    return
+
+    async def close(self) -> None:
+        self._stop = True
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+            self._ws = None
