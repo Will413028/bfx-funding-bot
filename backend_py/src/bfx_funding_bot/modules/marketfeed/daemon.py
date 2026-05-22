@@ -1008,6 +1008,10 @@ def main() -> None:
 async def _run() -> None:
     daemon = await build_daemon()
 
+    # Phase 4.4 prework: boot smoke (pre-TaskGroup) — see daemon_smoke_boot.py
+    from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
+    await run_boot_smoke(daemon)
+
     stop = daemon._stop_event  # share with signal handler
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
