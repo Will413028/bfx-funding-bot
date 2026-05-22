@@ -1,0 +1,143 @@
+from decimal import Decimal
+from uuid import uuid4
+
+from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent, FcuEvent, FocEvent
+from bfx_funding_bot.external.bitfinex.ws_dispatcher import translate_bfx_event
+from bfx_funding_bot.modules.execution.events import (
+    OrderFilled,
+    ReservationReleased,
+)
+from bfx_funding_bot.modules.execution.registry_offers import (
+    ClaimRecord,
+    RegistryState,
+)
+
+
+def _claim_record(voi: str = "v1", state: RegistryState = RegistryState.CLAIMED) -> ClaimRecord:
+    return ClaimRecord(
+        venue_offer_id=voi, cid=42, signal_correlation_id=uuid4(),
+        size_usdt=Decimal("100"), account_id="default",
+        state=state, occurred_at_ms=1000, last_updated_ms=1000,
+    )
+
+
+def _fcn(voi: str = "v1", credit_id: int = 999, raw_seq: int = 5) -> FcnEvent:
+    return FcnEvent(
+        credit_id=credit_id, symbol="fUSD", side=1,
+        mts_create=2000, mts_update=2000,
+        amount=Decimal("100"), rate=0.0005, period_days=2,
+        offer_id_meta=int(voi.replace("v", "0")),
+        raw_seq=raw_seq, raw=[],
+    )
+
+
+def _foc(voi: str = "v1", status: str = "CANCELED") -> FocEvent:
+    return FocEvent(
+        venue_offer_id=voi, symbol="fUSD",
+        mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), status=status,
+        rate=0.0005, period_days=2, raw_seq=7, raw=[],
+    )
+
+
+def test_fcn_on_claimed_emits_orderfilled_and_release_mutation() -> None:
+    # offer_id_meta = int("v1".replace("v","0")) = int("01") = 1
+    # dispatcher does str(fcn.offer_id_meta) = "1"
+    snapshot = {"1": _claim_record("1")}
+    events, mutations, _diags = translate_bfx_event(
+        _fcn("v1", credit_id=999), snapshot, recent_cancels={}, now_ms=2500,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], OrderFilled)
+    assert events[0].credit_id == "999"
+    assert events[0].venue_seq == 5
+    assert events[0].occurred_at_ms == 2000
+    assert len(mutations) == 1
+    assert mutations[0].new_state == RegistryState.RELEASED
+
+
+def test_fcn_on_empty_emits_no_event_with_diag() -> None:
+    """OOO race: fcn before ReservationClaimed → diag (dispatcher stages)."""
+    events, mutations, diags = translate_bfx_event(
+        _fcn("v1"), snapshot={}, recent_cancels={}, now_ms=2500,
+    )
+    assert events == []
+    assert mutations == []
+    assert len(diags) >= 1
+    assert "stage" in diags[0].message.lower() or "not in registry" in diags[0].message.lower()
+
+
+def test_foc_canceled_with_recent_cancel_emits_user_cancel() -> None:
+    snapshot = {"v1": _claim_record("v1")}
+    recent_cancels = {"v1": 2000}
+    events, _mutations, _ = translate_bfx_event(
+        _foc("v1", status="CANCELED"), snapshot, recent_cancels, now_ms=2300,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], ReservationReleased)
+    assert events[0].reason == "user_cancel"
+
+
+def test_foc_canceled_without_recent_cancel_emits_venue_cancel() -> None:
+    snapshot = {"v1": _claim_record("v1")}
+    events, _, _ = translate_bfx_event(
+        _foc("v1", status="CANCELED"), snapshot, recent_cancels={}, now_ms=2500,
+    )
+    assert events[0].reason == "venue_cancel"
+
+
+def test_foc_canceled_with_stale_cancel_emits_venue_cancel() -> None:
+    """If cancel was > 5s ago, treat as venue-side cancel."""
+    snapshot = {"v1": _claim_record("v1")}
+    recent_cancels = {"v1": 1000}  # 6s ago
+    events, _, _ = translate_bfx_event(
+        _foc("v1", status="CANCELED"), snapshot, recent_cancels, now_ms=7001,
+    )
+    assert events[0].reason == "venue_cancel"
+
+
+def test_foc_expired_emits_expired_reason() -> None:
+    snapshot = {"v1": _claim_record("v1")}
+    events, _, _ = translate_bfx_event(
+        _foc("v1", status="EXPIRED"), snapshot, recent_cancels={}, now_ms=2500,
+    )
+    assert events[0].reason == "expired"
+
+
+def test_foc_executed_on_claimed_is_no_op_with_diag() -> None:
+    """foc EXECUTED is redundant with fcn — handled there. dispatcher emits diag."""
+    snapshot = {"v1": _claim_record("v1")}
+    events, mutations, diags = translate_bfx_event(
+        _foc("v1", status="EXECUTED @ 0.0005 (100)"), snapshot, {}, now_ms=2500,
+    )
+    assert events == []
+    assert mutations == []
+    assert len(diags) >= 1
+
+
+def test_any_event_on_released_state_is_idempotent_no_op() -> None:
+    snapshot = {"v1": _claim_record("v1", state=RegistryState.RELEASED)}
+    events, mutations, _ = translate_bfx_event(
+        _foc("v1", status="CANCELED"), snapshot, {}, now_ms=2500,
+    )
+    assert events == []
+    assert mutations == []
+
+
+def test_translate_is_pure_no_random_no_clock() -> None:
+    snapshot = {"1": _claim_record("1")}
+    out1 = translate_bfx_event(_fcn("v1"), snapshot, {}, now_ms=2000)
+    out2 = translate_bfx_event(_fcn("v1"), snapshot, {}, now_ms=2000)
+    assert out1 == out2
+
+
+def test_fcu_event_is_no_op() -> None:
+    """4.4a: FcuEvent (credit rate update) not modeled."""
+    snapshot = {"v1": _claim_record("v1", state=RegistryState.RELEASED)}
+    fcu = FcuEvent(
+        credit_id=999, symbol="fUSD", mts_update=3000,
+        amount=Decimal("100"), rate=0.0006, raw_seq=10, raw=[],
+    )
+    events, mutations, _ = translate_bfx_event(fcu, snapshot, {}, now_ms=3500)
+    assert events == []
+    assert mutations == []
