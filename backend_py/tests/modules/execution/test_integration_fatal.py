@@ -1,4 +1,8 @@
-"""Path E — ExecutorAuthError propagates → daemon._run sys.exit(78)."""
+"""Path E — ExecutorAuthError propagates → daemon._run sys.exit(78).
+
+Subprocess end-to-end coverage lives in
+tests/integration/test_path_e_subprocess.py (needs testcontainer Postgres).
+"""
 from __future__ import annotations
 
 from decimal import Decimal
