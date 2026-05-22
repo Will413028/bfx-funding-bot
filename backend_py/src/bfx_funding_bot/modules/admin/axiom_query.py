@@ -53,7 +53,7 @@ class AxiomEventQueryAdapter:
             f"\n| where ['event_type'] in ('reservation_claimed', 'order_fill', 'reservation_released')"
             f"\n  and ['account_id'] == '{account_id}'"
             f"\n  and _time > datetime({since.isoformat()})"
-            f"\n| project _time, ['event_type'], ['account_id'], ['payload']"
+            f"\n| project _time, ['event_type'], ['account_id']"
             f"\n| order by _time asc"
         )
 
