@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import uvicorn
 from fastapi import FastAPI
@@ -35,11 +36,25 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import (
     HealthProbe,
 )
 
+if TYPE_CHECKING:
+    from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
+
 log = logging.getLogger(__name__)
 
 
-def make_app(probe: HealthProbe) -> FastAPI:
-    """Build the FastAPI app bound to a given HealthProbe instance."""
+def make_app(
+    probe: HealthProbe,
+    *,
+    smoke_runner: SmokeRunner | None = None,
+    admin_token: str | None = None,
+) -> FastAPI:
+    """Build the FastAPI app bound to a given HealthProbe instance.
+
+    If both `smoke_runner` and `admin_token` are provided (truthy), the admin
+    router (POST /admin/smoke-test) is mounted alongside /healthz. If either
+    is missing, the admin endpoint is not exposed (defaults preserve the
+    pre-Phase-4.4 behaviour of healthz-only).
+    """
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
@@ -64,6 +79,18 @@ def make_app(probe: HealthProbe) -> FastAPI:
             content={"status": "ok", "tasks": len(last_active)},
         )
 
+    if smoke_runner is not None and admin_token:
+        from bfx_funding_bot.modules.admin.router import build_router
+        app.include_router(build_router(
+            smoke_runner=smoke_runner, admin_token=admin_token,
+        ))
+        log.info("admin_router_mounted endpoint=/admin/smoke-test")
+    else:
+        log.info(
+            "admin_router_skipped smoke_runner=%s admin_token_set=%s",
+            smoke_runner is not None, bool(admin_token),
+        )
+
     return app
 
 
@@ -73,6 +100,8 @@ async def run_healthz_server(
     host: str,
     port: int,
     stop_event: asyncio.Event,
+    smoke_runner: SmokeRunner | None = None,
+    admin_token: str | None = None,
 ) -> None:
     """Run uvicorn until stop_event fires; cancellation safe.
 
@@ -82,7 +111,7 @@ async def run_healthz_server(
     cancels all sibling tasks (same supervision contract as other
     sub-tasks per D4 spec).
     """
-    app = make_app(probe)
+    app = make_app(probe, smoke_runner=smoke_runner, admin_token=admin_token)
     config = uvicorn.Config(
         app=app, host=host, port=port,
         log_level="warning", access_log=False,
