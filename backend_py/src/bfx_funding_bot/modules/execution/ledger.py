@@ -60,9 +60,13 @@ class PaperPositionLedger:
     # ---------- live update handlers (DomainEventBus subscribers) ----------
 
     async def on_reservation_claimed(self, event: ReservationClaimed) -> None:
+        if event.account_id != self.account_id:
+            return
         self._reserved += event.size_usdt
 
     async def on_order_filled(self, event: OrderFilled) -> None:
+        if event.account_id != self.account_id:
+            return
         delta = min(self._reserved, event.size_usdt)
         self._reserved -= delta
         if delta < event.size_usdt:
@@ -75,6 +79,8 @@ class PaperPositionLedger:
         self._realized += event.size_usdt
 
     async def on_reservation_released(self, event: ReservationReleased) -> None:
+        if event.account_id != self.account_id:
+            return
         delta = min(self._reserved, event.size_usdt)
         self._reserved -= delta
         if delta < event.size_usdt:
