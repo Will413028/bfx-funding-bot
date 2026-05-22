@@ -60,6 +60,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
+from bfx_funding_bot.modules.execution.retry import transient_retry
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -558,11 +559,16 @@ class _LedgerWrappedExecutor:
         self._inner = inner
         self._ledger = ledger
         self._probe = probe
+        # I2 follow-up: wrap inner.submit with transient_retry so transient
+        # failures (network / 5xx) retry 1/2/4s before propagating instead
+        # of immediately killing the daemon. Fatal/Auth errors still
+        # propagate on first attempt (retry_if_exception_type=Transient only).
+        self._submit_inner = transient_retry(inner.submit)
 
     async def submit(
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> SubmittedOrder:
-        result = await self._inner.submit(decision, ctx)
+        result = await self._submit_inner(decision, ctx)
         # I1 follow-up: record executor heartbeat after the inner submit
         # returns, regardless of business outcome. HeartbeatGuard watches
         # ["safety_chain", "executor"]; before this nothing recorded the

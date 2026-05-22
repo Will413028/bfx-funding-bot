@@ -8,6 +8,10 @@ from uuid import uuid4
 import pytest
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.core.errors import (
+    ExecutorAuthError,
+    ExecutorTransientError,
+)
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import (
@@ -342,3 +346,122 @@ async def test_ledger_wrapped_executor_records_executor_heartbeat() -> None:
 
     assert result.status == "filled"
     assert "executor" in probe.last_active_ts
+
+
+class _TransientThenSuccessExecutor:
+    """Stub: raises ExecutorTransientError fail_count times, then returns
+    a filled order. Used to prove that _LedgerWrappedExecutor retries
+    transient errors instead of letting them propagate and kill the daemon.
+    """
+
+    def __init__(self, fail_count: int = 2) -> None:
+        self._fail_count = fail_count
+        self.calls = 0
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        self.calls += 1
+        if self.calls <= self._fail_count:
+            raise ExecutorTransientError(f"flake #{self.calls}")
+        return SubmittedOrder(
+            cid=99999,
+            venue_offer_id="venue-after-retry",
+            status="filled",
+            raw_response={},
+        )
+
+
+class _AlwaysTransientExecutor:
+    """Stub: every submit raises ExecutorTransientError."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        self.calls += 1
+        raise ExecutorTransientError("persistent")
+
+
+class _AlwaysFatalExecutor:
+    """Stub: every submit raises ExecutorAuthError (fatal, must NOT retry)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> SubmittedOrder:
+        self.calls += 1
+        raise ExecutorAuthError("401")
+
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_retries_transient_then_succeeds() -> None:
+    """I2 follow-up: ExecutorTransientError must trigger transient_retry,
+    not propagate up and kill the daemon.
+
+    Before the fix, executor.submit was unwrapped — any exception from the
+    inner submit (including transient httpx network errors) would bubble
+    out of SignalEngine and tear down the daemon TaskGroup. After wrapping
+    with transient_retry, transient failures retry 3 times before re-raising.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    probe = HealthProbe()
+    inner = _TransientThenSuccessExecutor(fail_count=2)
+    wrapped = _LedgerWrappedExecutor(inner, ledger, probe)
+
+    decision, ctx = _make_decision_ctx()
+    result = await wrapped.submit(decision, ctx)
+
+    assert inner.calls == 3  # 2 transient failures + 1 success
+    assert result.status == "filled"
+    # Ledger updates once with the final successful fill (not 3 times).
+    assert ledger.current_exposure() == Decimal("150")
+    # Heartbeat fires once after the eventual success.
+    assert "executor" in probe.last_active_ts
+
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_does_not_retry_fatal() -> None:
+    """I2 follow-up: ExecutorAuthError (and other fatals) must propagate
+    immediately without triggering retries. Auth failures need to escalate
+    to sys.exit(78) — silently retrying would mask credential rot.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    probe = HealthProbe()
+    inner = _AlwaysFatalExecutor()
+    wrapped = _LedgerWrappedExecutor(inner, ledger, probe)
+
+    decision, ctx = _make_decision_ctx()
+    with pytest.raises(ExecutorAuthError):
+        await wrapped.submit(decision, ctx)
+
+    assert inner.calls == 1  # no retry
+    # Failed submit must not update ledger or fire heartbeat.
+    assert ledger.current_exposure() == Decimal("0")
+    assert "executor" not in probe.last_active_ts
+
+
+@pytest.mark.asyncio
+async def test_ledger_wrapped_executor_reraises_after_transient_exhausted() -> None:
+    """I2 follow-up: after N transient retries fail, the final
+    ExecutorTransientError must re-raise so the daemon can decide to
+    escalate (sustained outage = not a paper-safe situation).
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    probe = HealthProbe()
+    inner = _AlwaysTransientExecutor()
+    wrapped = _LedgerWrappedExecutor(inner, ledger, probe)
+
+    decision, ctx = _make_decision_ctx()
+    with pytest.raises(ExecutorTransientError):
+        await wrapped.submit(decision, ctx)
+
+    # transient_retry caps at RETRY_ATTEMPTS (3).
+    assert inner.calls == 3
+    # Ledger NOT updated; heartbeat NOT fired (no successful inner submit).
+    assert ledger.current_exposure() == Decimal("0")
+    assert "executor" not in probe.last_active_ts
