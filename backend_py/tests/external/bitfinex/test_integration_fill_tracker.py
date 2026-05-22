@@ -7,9 +7,9 @@ from typing import Any
 import httpx
 import pytest
 
+from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import ReservationReleased
-from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     Phase,

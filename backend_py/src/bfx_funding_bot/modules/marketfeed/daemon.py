@@ -35,6 +35,9 @@ from bfx_funding_bot.external.axiom import (
     AxiomClient,
     AxiomConfig,
 )
+from bfx_funding_bot.external.bitfinex.fill_tracker import (
+    RestPollingFillTracker,
+)
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -54,9 +57,6 @@ from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
     ReservationReleased,
-)
-from bfx_funding_bot.modules.execution.fill_tracker import (
-    RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
