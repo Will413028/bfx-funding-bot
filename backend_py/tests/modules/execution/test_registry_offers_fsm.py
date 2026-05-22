@@ -118,3 +118,27 @@ def test_transition_is_pure_no_clock_dependence() -> None:
     out2, _ = transition(dict(snap), _claim(), now_ms=9999)
     assert out1["v1"].state == out2["v1"].state
     assert out1["v1"].venue_offer_id == out2["v1"].venue_offer_id
+
+
+def test_unknown_event_type_emits_info_diag_no_mutation() -> None:
+    class Bogus:
+        venue_offer_id = "v1"
+
+    snap: dict[str, ClaimRecord] = {}
+    new_snap, diags = transition(snap, Bogus(), now_ms=1000)
+    assert new_snap == snap
+    assert len(diags) == 1
+    assert diags[0].level == "info"
+    assert "unknown event type" in diags[0].message.lower()
+
+
+def test_event_missing_venue_offer_id_emits_warn_diag_no_mutation() -> None:
+    class NoVOI:
+        pass
+
+    snap: dict[str, ClaimRecord] = {}
+    new_snap, diags = transition(snap, NoVOI(), now_ms=1000)
+    assert new_snap == snap
+    assert len(diags) == 1
+    assert diags[0].level == "warn"
+    assert "venue_offer_id" in diags[0].message
