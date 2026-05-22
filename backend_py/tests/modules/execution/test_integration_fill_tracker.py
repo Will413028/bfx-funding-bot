@@ -7,10 +7,11 @@ from typing import Any
 import httpx
 import pytest
 
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.events import ReservationReleased
 from bfx_funding_bot.modules.execution.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
     Phase,
     StrategyName,
 )
@@ -39,7 +40,7 @@ def _offer(venue_id: int, cid: int) -> list[Any]:
 @pytest.mark.asyncio
 async def test_fill_tracker_ticks_emit_status_changes() -> None:
     """Tick 1: offers=[venue 111 cid 1].
-    Tick 2+: offers=[] — venue 111 disappeared → status_change.
+    Tick 2+: offers=[] — venue 111 disappeared → ReservationReleased via bus.
     """
     tick_seen = 0
 
@@ -53,6 +54,14 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
         return httpx.Response(200, json=[])
 
     axiom = _CaptureAxiom()
+    bus = DomainEventBus()
+    released: list[ReservationReleased] = []
+
+    async def capture(e: ReservationReleased) -> None:
+        released.append(e)
+
+    bus.subscribe(ReservationReleased, capture)
+
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         base_url="https://api.bitfinex.com",
@@ -62,6 +71,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
             http=client,
             axiom=axiom,
             probe=probe,
+            bus=bus,
             phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30",
@@ -74,9 +84,6 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
         stop.set()
         await task
 
-    status_changes = [
-        e for e in axiom.events
-        if e["event_type"] == EventType.ORDER_STATUS_CHANGE.value
-    ]
-    statuses = [e["payload"]["status"] for e in status_changes]
-    assert "filled_or_cancelled" in statuses
+    assert len(released) >= 1
+    reasons = [e.reason for e in released]
+    assert "missing_from_venue" in reasons

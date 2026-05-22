@@ -742,20 +742,22 @@ async def build_daemon(
     )
     executor: ExecutorPort = spec.executor
 
+    # ---- Phase 4.3 executor middleware chain wiring ----
+    # bus created before fill_tracker so it can be passed to its constructor.
+    bus = DomainEventBus()
+
     fill_tracker: RestPollingFillTracker | None = None
     if spec.fill_tracker_enabled:
         fill_tracker = RestPollingFillTracker(
             http=bitfinex_http,
             axiom=axiom,
             probe=probe,
+            bus=bus,
             phase=config.phase,
             strategy=first_cell.strategy,
             cell=first_cell.cell_id,
             account_id=account_id,
         )
-
-    # ---- Phase 4.3 executor middleware chain wiring ----
-    bus = DomainEventBus()
     axiom_sink = AxiomEventSink(
         axiom_client=axiom,
         phase=config.phase,
