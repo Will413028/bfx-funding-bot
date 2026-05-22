@@ -206,3 +206,106 @@ class SmokeRunner:
                 f"(got {e0.account_id!r}/{e1.account_id!r}, expected {SMOKE_ACCOUNT_ID!r})",
             )
         checks["l2_passed"] = True
+
+    async def run_l3(self) -> SmokeResult:
+        async with _SMOKE_LOCK:
+            return await self._run_l3_unlocked()
+
+    async def _run_l3_unlocked(
+        self,
+        *,
+        poll_attempts: int = 5,
+        poll_interval_s: float = 3.0,
+    ) -> SmokeResult:
+        """L2 + Axiom round-trip verification.
+
+        After L2 passes (chain published to bus + axiom_sink emitted to Axiom),
+        poll Axiom APL up to `poll_attempts x poll_interval_s` seconds for the
+        events to appear. Tests override poll parameters for speed.
+        """
+        start = time.monotonic()
+        checks: dict[str, Any] = {}
+        recorder = EventRecorder(account_id=SMOKE_ACCOUNT_ID)
+        # ── L2 phase ──
+        try:
+            before_ts, result = await self._run_chain(recorder)
+            self._assert_l2(result, recorder, checks)
+        except SmokeAssertionError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.warning("smoke_l3_l2_failed reason=%r", exc)
+            return SmokeResult(
+                status="fail", level="L2", checks=checks,
+                duration_ms=duration_ms, error=str(exc),
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.exception("smoke_l3_l2_unexpected_error")
+            return SmokeResult(
+                status="fail", level="L2", checks=checks,
+                duration_ms=duration_ms, error=f"unexpected: {exc!r}",
+            )
+
+        # ── L3 phase (round-trip Axiom query poll) ──
+        try:
+            await self._poll_axiom_round_trip(
+                before_ts, checks,
+                poll_attempts=poll_attempts, poll_interval_s=poll_interval_s,
+            )
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.info("smoke_l3_passed duration_ms=%d", duration_ms)
+            return SmokeResult(
+                status="pass", level="L3", checks=checks, duration_ms=duration_ms,
+            )
+        except SmokeAssertionError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.warning("smoke_l3_failed reason=%r", exc)
+            return SmokeResult(
+                status="fail", level="L3", checks=checks,
+                duration_ms=duration_ms, error=str(exc),
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.exception("smoke_l3_unexpected_error")
+            return SmokeResult(
+                status="fail", level="L3", checks=checks,
+                duration_ms=duration_ms, error=f"unexpected: {exc!r}",
+            )
+
+    async def _poll_axiom_round_trip(
+        self,
+        since: datetime,
+        checks: dict[str, Any],
+        *,
+        poll_attempts: int,
+        poll_interval_s: float,
+    ) -> None:
+        from bfx_funding_bot.modules.marketfeed.schemas import EventType
+
+        required_types = {
+            EventType.RESERVATION_CLAIMED.value,
+            EventType.ORDER_FILL.value,
+        }
+        last_seen = 0
+        last_types: set[str] = set()
+        for attempt in range(1, poll_attempts + 1):
+            events = await self._axiom_query.query_order_events(
+                SMOKE_ACCOUNT_ID, since,
+            )
+            last_seen = len(events)
+            last_types = {
+                et for e in events
+                if isinstance(et := e.get("event_type"), str)
+            }
+            if last_seen >= 2 and required_types.issubset(last_types):
+                checks["axiom_events_seen"] = last_seen
+                checks["axiom_event_types"] = sorted(last_types)
+                return
+            if attempt < poll_attempts:
+                await asyncio.sleep(poll_interval_s)
+        # Exhausted attempts
+        checks["axiom_events_seen"] = last_seen
+        checks["axiom_event_types"] = sorted(last_types)
+        raise SmokeAssertionError(
+            f"axiom round-trip timeout: seen={last_seen} types={sorted(last_types)} "
+            f"required={sorted(required_types)}",
+        )
