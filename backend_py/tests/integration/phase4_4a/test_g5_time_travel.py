@@ -28,12 +28,12 @@ async def test_replay_up_to_ms_returns_historical_state() -> None:
     sig_id = uuid4()
     rows = [
         # Event 1 at t=1000
-        {"event_type": "RESERVATION_CLAIMED", "occurred_at_ms": 1000, "event_seq": 1,
+        {"event_type": "reservation_claimed", "occurred_at_ms": 1000, "event_seq": 1,
          "payload": {"cid": 1, "venue_offer_id": "v1", "size_usdt": "100",
                      "signal_correlation_id": str(sig_id), "account_id": "default",
                      "is_simulated": False, "occurred_at_ms": 1000}},
         # Event 2 at t=2000
-        {"event_type": "RESERVATION_CLAIMED", "occurred_at_ms": 2000, "event_seq": 2,
+        {"event_type": "reservation_claimed", "occurred_at_ms": 2000, "event_seq": 2,
          "payload": {"cid": 2, "venue_offer_id": "v2", "size_usdt": "50",
                      "signal_correlation_id": str(uuid4()), "account_id": "default",
                      "is_simulated": False, "occurred_at_ms": 2000}},

@@ -35,7 +35,7 @@ async def test_cold_start_replay_rebuilds_registry_from_axiom_rows() -> None:
     voi = "42"
     rows = [
         {
-            "event_type": "RESERVATION_CLAIMED",
+            "event_type": "reservation_claimed",
             "occurred_at_ms": 1000, "event_seq": 1,
             "payload": {
                 "cid": 42, "venue_offer_id": voi,

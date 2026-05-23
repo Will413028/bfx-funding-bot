@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
+from bfx_funding_bot.modules.marketfeed.schemas import EventType
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ class OfferRegistry:
         Real query adapter ships in separate ADR before 4.4b cutover.
         """
         raw_rows = await self._axiom_query.fetch_events(
-            event_types=["RESERVATION_CLAIMED", "ORDER_FILL", "RESERVATION_RELEASED"],
+            event_types=[EventType.RESERVATION_CLAIMED.value, EventType.ORDER_FILL.value, EventType.RESERVATION_RELEASED.value],
             up_to_ms=up_to_ms,
         )
         rows = [upcast_row(r) for r in raw_rows]
@@ -262,8 +263,6 @@ class OfferRegistry:
 
         account_id source order: row root → payload → "" (empty fallback).
         """
-        from bfx_funding_bot.modules.marketfeed.schemas import EventType
-
         et = row.get("event_type")
         payload = row.get("payload") or {}
 
