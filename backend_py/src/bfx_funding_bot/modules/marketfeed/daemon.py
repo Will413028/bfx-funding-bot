@@ -512,6 +512,19 @@ class Daemon:
             # Loop continues → tries `candles()` again with new client
 
 
+def _resolve_event_replay_days() -> int:
+    """Resolve event replay window days with backward-compat fallback.
+
+    Preferred: BFX_EVENT_REPLAY_DAYS (Phase 4.4b D4)
+    Fallback: BFX_LEDGER_REPLAY_DAYS (pre-4.4b — transition for 1 deploy cycle)
+    Default: 30
+    """
+    return int(
+        os.environ.get("BFX_EVENT_REPLAY_DAYS")
+        or os.environ.get("BFX_LEDGER_REPLAY_DAYS", "30"),
+    )
+
+
 async def _emit_locf_degraded(
     axiom: AxiomClient,
     config: MarketfeedConfig,
@@ -672,7 +685,7 @@ async def build_daemon(
     # AxiomReplayQueryAdapter replaces the 4.3 `_AxiomQueryAdapter` stub; a
     # single instance also feeds OfferRegistry below (port-per-consumer duck
     # typing — same adapter satisfies both ledger and registry protocols).
-    ledger_window_days = int(os.environ.get("BFX_LEDGER_REPLAY_DAYS", "30"))
+    ledger_window_days = _resolve_event_replay_days()
     axiom_query = AxiomReplayQueryAdapter(
         api_key=config.axiom_api_key,
         dataset=config.axiom_dataset,
