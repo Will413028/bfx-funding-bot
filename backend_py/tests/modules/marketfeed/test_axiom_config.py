@@ -51,10 +51,18 @@ class TestFromEnv:
         ):
             AxiomConfig.from_env()
 
+    def test_missing_dataset_raises(self, base_env: dict[str, str]) -> None:
+        env = {k: v for k, v in base_env.items() if k != "AXIOM_DATASET"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(KeyError, match="AXIOM_DATASET"),
+        ):
+            AxiomConfig.from_env()
+
     def test_invalid_deployment_env_raises(self, base_env: dict[str, str]) -> None:
         env = {**base_env, "BFX_DEPLOYMENT_ENV": "staging"}
         with (
             patch.dict(os.environ, env, clear=True),
-            pytest.raises(ValueError),
+            pytest.raises(ValueError, match="not a valid DeploymentEnvironment"),
         ):
             AxiomConfig.from_env()
