@@ -23,7 +23,10 @@ import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.errors import LedgerReplayError
 from bfx_funding_bot.modules.execution.events import (
@@ -58,6 +61,35 @@ class PaperPositionLedger:
         self.replay_floor_hit_count = 0
         self._processed_fills: set[tuple[str, int | None]] = set()
         self._processed_releases: set[tuple[str, int | None]] = set()
+
+    # ---------- cold-start loader (PostgreSQL snapshot) ----------
+
+    @classmethod
+    async def from_snapshot(
+        cls,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        deployment_environment: str,
+    ) -> PaperPositionLedger:
+        """Load ledger counters from the position_state snapshot table (no replay)."""
+        from sqlalchemy import select
+
+        from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
+
+        ledger = cls(account_id=account_id)
+        row = (
+            await session.execute(
+                select(PositionStateRow).where(
+                    PositionStateRow.account_id == account_id,
+                    PositionStateRow.deployment_environment == deployment_environment,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            ledger._reserved = Decimal(str(row.reserved_usdt))
+            ledger._realized = Decimal(str(row.realized_usdt))
+        return ledger
 
     # ---------- live update handlers (DomainEventBus subscribers) ----------
 
