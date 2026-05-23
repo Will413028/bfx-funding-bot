@@ -96,3 +96,27 @@ class CancelRequested:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CancelAcknowledged:
+    """Bitfinex REST cancel API returned (success OR already-terminal).
+
+    Audit-only event — ledger/registry NOT subscribers. Single SoT for
+    state mutation remains ws_dispatcher (publishes ReservationReleased
+    on WS foc). Provides REST-leg debug breadcrumb separable from intent
+    (CancelRequested) and outcome (ReservationReleased).
+
+    Ledger effect: none (audit).
+    Registry effect: none (audit).
+    """
+    venue_offer_id: str
+    acknowledged_at_ms: int
+    signal_correlation_id: UUID
+    account_id: str
+    rest_status: str  # "success" | "already_terminal"
+    venue_response_text: str | None = None  # Bitfinex 9th element TEXT field
+    venue_seq: int | None = None  # always None — not WS-sourced
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None

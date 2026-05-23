@@ -43,6 +43,7 @@ class EventType(StrEnum):
     RESERVATION_CLAIMED = "reservation_claimed"
     RESERVATION_RELEASED = "reservation_released"
     CANCEL_REQUESTED = "cancel_requested"
+    CANCEL_ACKNOWLEDGED = "cancel_acknowledged"  # NEW — Phase 4.4b prework D2
     HEALTH_CHECK = "health_check"
 
 
