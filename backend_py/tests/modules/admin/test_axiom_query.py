@@ -1,4 +1,4 @@
-"""AxiomEventQueryAdapter — APL query for L3 round-trip verification."""
+"""AxiomSmokeQueryAdapter — APL query for L3 round-trip verification."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
-from bfx_funding_bot.modules.admin.axiom_query import AxiomEventQueryAdapter
+from bfx_funding_bot.modules.admin.axiom_query import AxiomSmokeQueryAdapter
 
 
 def _tabular_response(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -37,7 +37,7 @@ async def test_query_returns_parsed_rows() -> None:
         ]))
 
     transport = httpx.MockTransport(handler)
-    adapter = AxiomEventQueryAdapter(
+    adapter = AxiomSmokeQueryAdapter(
         api_key="key", dataset="ds", base_url="https://api.axiom.co",
     )
     adapter._http = httpx.AsyncClient(transport=transport, base_url="https://api.axiom.co",
@@ -61,7 +61,7 @@ async def test_query_empty_returns_empty_list() -> None:
         return httpx.Response(200, json={"tables": []})
 
     transport = httpx.MockTransport(handler)
-    adapter = AxiomEventQueryAdapter(api_key="key", dataset="ds")
+    adapter = AxiomSmokeQueryAdapter(api_key="key", dataset="ds")
     adapter._http = httpx.AsyncClient(transport=transport, base_url="https://api.axiom.co",
                                        headers={"Authorization": "Bearer key"})
     rows = await adapter.query_order_events("smoke_test", datetime.now(UTC))
@@ -74,7 +74,7 @@ async def test_query_raises_on_auth_error() -> None:
         return httpx.Response(401, json={"error": "unauthorized"})
 
     transport = httpx.MockTransport(handler)
-    adapter = AxiomEventQueryAdapter(api_key="bad", dataset="ds")
+    adapter = AxiomSmokeQueryAdapter(api_key="bad", dataset="ds")
     adapter._http = httpx.AsyncClient(transport=transport, base_url="https://api.axiom.co",
                                        headers={"Authorization": "Bearer bad"})
     with pytest.raises(httpx.HTTPStatusError):

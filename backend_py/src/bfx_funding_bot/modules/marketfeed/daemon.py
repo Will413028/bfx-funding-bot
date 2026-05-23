@@ -832,10 +832,10 @@ async def build_daemon(
     )
 
     # ---- Phase 4.4 prework: SmokeRunner ----
-    from bfx_funding_bot.modules.admin.axiom_query import AxiomEventQueryAdapter
+    from bfx_funding_bot.modules.admin.axiom_query import AxiomSmokeQueryAdapter
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 
-    smoke_axiom_query = AxiomEventQueryAdapter(
+    smoke_axiom_query = AxiomSmokeQueryAdapter(
         api_key=config.axiom_api_key,
         dataset=config.axiom_dataset,
     )
@@ -1127,7 +1127,7 @@ async def _run() -> None:
         # Cleanup after TaskGroup completes (flush axiom, close http client)
         log.info("daemon_shutdown_complete")
         await daemon.bitfinex_http.aclose()
-        # SmokeRunner's AxiomEventQueryAdapter holds its own httpx.AsyncClient;
+        # SmokeRunner's AxiomSmokeQueryAdapter holds its own httpx.AsyncClient;
         # close it on shutdown to avoid leaking the connection pool.
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
