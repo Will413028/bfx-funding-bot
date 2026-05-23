@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.events import (
+    CancelAcknowledged,
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
@@ -72,6 +73,53 @@ def test_cancel_requested_minimal() -> None:
     assert e.event_seq is None
     assert e.occurred_at_ms is None
     assert e.recorded_at_ms is None
+
+
+def test_cancel_acknowledged_constructs_with_required_fields() -> None:
+    cid = uuid4()
+    event = CancelAcknowledged(
+        venue_offer_id="123",
+        acknowledged_at_ms=1700000000000,
+        signal_correlation_id=cid,
+        account_id="default",
+        rest_status="success",
+    )
+    assert event.venue_offer_id == "123"
+    assert event.rest_status == "success"
+    assert event.venue_response_text is None  # default
+    assert event.venue_seq is None  # default (never WS-sourced)
+    assert event.event_seq is None
+    assert event.occurred_at_ms is None
+    assert event.recorded_at_ms is None
+
+
+def test_cancel_acknowledged_already_terminal_status() -> None:
+    event = CancelAcknowledged(
+        venue_offer_id="456",
+        acknowledged_at_ms=1700000000000,
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        rest_status="already_terminal",
+        venue_response_text="Offer not found",
+    )
+    assert event.rest_status == "already_terminal"
+    assert event.venue_response_text == "Offer not found"
+
+
+def test_cancel_acknowledged_is_frozen() -> None:
+    import dataclasses
+    event = CancelAcknowledged(
+        venue_offer_id="123",
+        acknowledged_at_ms=1700000000000,
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        rest_status="success",
+    )
+    try:
+        event.venue_offer_id = "999"  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("CancelAcknowledged should be frozen")
 
 
 def test_events_are_frozen() -> None:
