@@ -37,6 +37,44 @@ class AxiomReplayQueryAdapter:
             headers={"Authorization": f"Bearer {api_key}"},
         )
 
+    async def query_order_events(
+        self, account_id: str, since: datetime,
+    ) -> list[dict[str, Any]]:
+        """Ledger replay protocol — events for one account from time anchor."""
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        apl = self._build_ledger_apl(
+            dataset=self._dataset, account_id=account_id, since=since,
+        )
+        return await self._query_apl(apl)
+
+    async def fetch_events(
+        self,
+        *,
+        event_types: list[str],
+        up_to_ms: int | None = None,
+        account_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Registry replay protocol — events filtered by type and upper bound."""
+        apl = self._build_registry_apl(
+            dataset=self._dataset,
+            event_types=event_types,
+            up_to_ms=up_to_ms,
+            account_id=account_id,
+        )
+        return await self._query_apl(apl)
+
+    async def _query_apl(self, apl: str) -> list[dict[str, Any]]:
+        resp = await self._http.post(
+            "/v1/datasets/_apl?format=tabular",
+            json={"apl": apl},
+        )
+        resp.raise_for_status()
+        return self._tabular_to_rows(resp.json())
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
     @staticmethod
     def _build_ledger_apl(
         *, dataset: str, account_id: str, since: datetime,
