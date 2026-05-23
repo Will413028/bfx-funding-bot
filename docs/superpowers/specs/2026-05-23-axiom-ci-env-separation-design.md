@@ -55,6 +55,20 @@ Trigger 是 T12，但解的是更廣的 problem：**emitter-side env separation 
 
 OpenTelemetry SDK 完整採用是 Pending #4 L3 phase（~2-3 day）。本 spec 走 **OTEL-inspired Resource layer**：建立 `EventResource` dataclass + semantic convention 對齊欄位名，未來 OTEL migration 是 1-1 mapping、不需動 schema / dashboard / alert query。
 
+## Goals
+
+Measurable success criteria — ship 後 30 天內可逐項勾選驗證：
+
+1. **G1：Wire-level bug catch rate**：T12 跑通後，未來 `AxiomReplayQueryAdapter` 寫法改動 PR 階段就 catch、不再上 prod surface（5/23 兩個 bug 是基準線 0%；目標 100%）
+2. **G2：CI feedback latency**：PR push → `backend_py_integration` 結果 ≤ 90s（unit ~30s + integration ~30-60s 含 Axiom indexing polling）
+3. **G3：Cross-run isolation**：並行 CI run（PR re-push + main push 同時跑）零 cross-pollution，每 run 只 query 到自己 emit 的 events
+4. **G4：Env separation 完整性**：Phase 4.4 canary 啟動後，`bfx-funding-bot` prod dataset 100% 純淨（無 shadow / ci event mix）— Axiom query `where deployment_environment != "prod"` 0 rows
+5. **G5：OTEL migration readiness**：未來啟動 OTEL adoption phase 時，`EventResource.to_otel_resource()` 直接呼叫產出標準 OTEL Resource，dashboard / alert query 零改動
+6. **G6：Schema evolution readiness**：未來改 envelope schema（加 field / rename）時，`schema_version` discriminator 讓 replay 走 version-aware parser dispatch、不破舊 events
+7. **G7：CI workflow 安全性**：通過 OpenSSF Scorecard `Pinned-Dependencies` + `Token-Permissions` 基本檢查（permissions block + timeout-minutes + Actions pin-by-SHA via Dependabot）
+
+每個 Goal 在 Acceptance Criteria 對應具體勾選項。
+
 ## Decision Summary
 
 | # | Decision | Why |
@@ -76,6 +90,10 @@ OpenTelemetry SDK 完整採用是 Pending #4 L3 phase（~2-3 day）。本 spec �
 | D15 | **5 個 pre-existing integration failure 用 `xfail(strict=False)` 標** | 不混 yak shave；意外 pass 會 warn 暴露「修好沒人發現」case |
 | D16 | **Axiom CI dataset retention 3-7d（非預設 30d）** | CI 量小 + lifecycle 短；省 quota；不影響 wire-level bug catch |
 | D17 | **Pre-cutover 舊 shadow events 留 prod dataset，靠 30d retention 自清** | 不 backfill / 不刪；Axiom schemaless 自然兼容；30d 後 prod dataset 100% 純淨 |
+| D18 | **EventResource 加 `schema_version: int = 1` 第 4 個 envelope field** | Event-sourcing 標準（EventStore / Kafka schema registry / AWS EventBridge）；未來 envelope schema migration 不破舊 replay；零 runtime cost；4.4 canary 前 ship 是最低成本時機 |
+| D19 | **EventResource 加 `host_name: str | None` Optional 欄位** | Pending I3 chaos log 已顯示 Koyeb instance ID 對 debug 重要；零 runtime cost；多 instance canary/control 平行跑時直接可用 |
+| D20 | **EventResource 提供 `to_otel_resource()` migration helper** | 未來 OTEL adoption phase 直接呼叫產出標準 `opentelemetry.sdk.resources.Resource`，無 schema 翻譯成本 |
+| D21 | **CI workflow `permissions: contents: read` + `timeout-minutes: 10` per job + Actions SHA pin via Dependabot** | OpenSSF Scorecard 對齊；real-money repo 安全 hardening；least-privilege GITHUB_TOKEN；防 runaway CI |
 
 ## Architecture
 
@@ -113,9 +131,11 @@ OpenTelemetry SDK 完整採用是 Pending #4 L3 phase（~2-3 day）。本 spec �
 {
   "_time": 1716480000000,                          # existing
   "type": "order_fill",                            # existing
-  "deployment_environment": "ci",                  # NEW (OTEL: deployment.environment.name)
-  "service_name": "bfx-funding-bot",               # NEW (OTEL: service.name)
-  "service_version": "0447e29a",                   # NEW (OTEL: service.version, $GIT_SHA)
+  "schema_version": 1,                             # NEW D18 — event-sourcing standard, version-aware replay future-proof
+  "deployment_environment": "ci",                  # NEW D3 (OTEL: deployment.environment.name)
+  "service_name": "bfx-funding-bot",               # NEW D3 (OTEL: service.name)
+  "service_version": "0447e29a",                   # NEW D3 (OTEL: service.version, $GIT_SHA)
+  "host_name": "marketfeed-abc123",                # NEW D19 Optional (OTEL: host.name, Koyeb $HOSTNAME)
   "payload": { ...unchanged... },                  # existing
 }
 ```
@@ -127,8 +147,12 @@ Payload schemas（`OrderFillPayload` / `ReservationClaimedPayload` / `Reservatio
 ### 1. New module: `src/bfx_funding_bot/modules/observability/resource.py`
 
 ```python
+import os, subprocess
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
+
+ENVELOPE_SCHEMA_VERSION: int = 1  # bump on breaking envelope shape change
 
 class DeploymentEnvironment(StrEnum):
     PROD = "prod"
@@ -141,7 +165,6 @@ def _resolve_service_version() -> str:
     Build: Dockerfile ARG GIT_SHA → ENV BFX_SERVICE_VERSION
     Local dev: git rev-parse HEAD fallback
     """
-    import os, subprocess
     v = os.environ.get("BFX_SERVICE_VERSION")
     if v:
         return v
@@ -149,6 +172,10 @@ def _resolve_service_version() -> str:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
     except Exception:
         return "unknown"
+
+def _resolve_host_name() -> str | None:
+    """Koyeb sets HOSTNAME to the instance ID; None locally is fine."""
+    return os.environ.get("HOSTNAME")
 
 @dataclass(frozen=True)
 class EventResource:
@@ -158,18 +185,43 @@ class EventResource:
     - deployment.environment.name → deployment_environment
     - service.name → service_name
     - service.version → service_version
+    - host.name → host_name (Optional, Koyeb instance ID)
     """
     deployment_environment: DeploymentEnvironment
     service_name: str = "bfx-funding-bot"
     service_version: str = field(default_factory=_resolve_service_version)
+    host_name: str | None = field(default_factory=_resolve_host_name)
+    schema_version: int = ENVELOPE_SCHEMA_VERSION
 
-    def envelope_fields(self) -> dict[str, str]:
-        return {
+    def envelope_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "schema_version": self.schema_version,
             "deployment_environment": self.deployment_environment.value,
             "service_name": self.service_name,
             "service_version": self.service_version,
         }
+        if self.host_name is not None:
+            fields["host_name"] = self.host_name
+        return fields
+
+    def to_otel_resource(self) -> Any:
+        """D20 migration helper — produces opentelemetry.sdk.resources.Resource.
+
+        Only imported when called (lazy) — no OTEL SDK runtime dependency until adoption phase.
+        """
+        from opentelemetry.sdk.resources import Resource  # type: ignore[import-not-found]
+
+        attrs: dict[str, Any] = {
+            "deployment.environment.name": self.deployment_environment.value,
+            "service.name": self.service_name,
+            "service.version": self.service_version,
+        }
+        if self.host_name is not None:
+            attrs["host.name"] = self.host_name
+        return Resource.create(attrs)
 ```
+
+`to_otel_resource()` 是 D20 migration helper：未來 OTEL adoption phase 啟動時，emitter 從 Axiom HTTP 改 OTEL Exporter，這個 method 直接呼叫產出標準 OTEL Resource，semantic convention 對應一致、零 schema 翻譯成本。Import 走 lazy（method 內），不需要現在加 OTEL SDK 依賴。
 
 ### 2. `modules/marketfeed/config.py` — `AxiomConfig` 加 deployment_env
 
@@ -303,7 +355,10 @@ async def test_axiom_replay_round_trip():
     # Assertions
     types = {r["type"] for r in rows}
     assert types == {"reservation_claimed", "order_fill", "reservation_released"}
-    assert all(r["deployment_environment"] == "ci" for r in rows)  # NEW
+    assert all(r["deployment_environment"] == "ci" for r in rows)  # D3
+    assert all(r["schema_version"] == 1 for r in rows)             # D18
+    assert all(r["service_name"] == "bfx-funding-bot" for r in rows)  # D3
+    assert all(r["service_version"] for r in rows)                 # D3 — non-empty (GitHub sha)
     rc = next(r for r in rows if r["type"] == "reservation_claimed")
     assert rc["payload"]["cid"] == 1
 
@@ -346,22 +401,33 @@ def test_daemon_shutdown_clean(): ...
 
 ## CI Workflow
 
-完整 `.github/workflows/ci.yml` 增量（既有 `backend` / `frontend` job 不動）：
+完整 `.github/workflows/ci.yml` 增量（既有 `backend` / `frontend` job 不動）。Hardening 對齊 OpenSSF Scorecard / GitHub Actions security guide：
 
 ```yaml
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Workflow-level default — narrowed per-job if needed
+permissions:
+  contents: read
+
 jobs:
   # existing: backend (Go, archived), frontend (Next.js) — unchanged
 
   backend_py_unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: backend_py
     steps:
+      # NOTE: Actions pinned to commit SHA via Dependabot (D21).
+      # During plan execution use latest SHA + add to .github/dependabot.yml
+      # for auto-bump PR. Until first Dependabot scan, version tags
+      # (@v4 / @v3) are acceptable per OpenSSF Scorecard transitional guidance.
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
         with:
@@ -373,6 +439,9 @@ jobs:
 
   backend_py_integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     needs: backend_py_unit
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
     defaults:
@@ -393,6 +462,28 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run pytest -m integration -q --maxfail=3
 ```
+
+### `.github/dependabot.yml` 增量
+
+啟用 Dependabot 自動管理 Actions SHA pin（D21）：
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+```
+
+第一次 Dependabot scan 跑完後，Actions 自動 PR 升 SHA pin（例 `actions/checkout@<40-char-sha>`），人類 review 後 merge。Maintenance burden 由 Dependabot 承擔。
+
+### Security 決策說明
+
+- **GitHub Environments scope**：本 spec 用 **repo-level secrets**（非 environment-scoped）。CI dataset 風險低（無 prod data write 權限、retention 3-7d 自清），不需 environment required reviewer / branch protection。未來若 secret rotation 流程涉及多人 approval，再升 GitHub Environments
+- **GITHUB_TOKEN permissions**：workflow-level `permissions: contents: read` + per-job 明示 `permissions: contents: read`。Job 不需 `write`（不 push tag / 不 comment PR / 不 release）
+- **timeout-minutes: 10**：unit ~1min、integration ~2-3min 含 Axiom indexing polling 30s upper bound，10min 是 ~3x headroom 防 runaway
+- **Axiom OIDC token federation**：Axiom 目前不支援 OIDC（最後 verify 在 2026-05），long-lived dataset-scoped token 是 only option。Open Question 追蹤未來 Axiom 是否新增 OIDC 支援
 
 ### GitHub Actions repo secrets
 
@@ -429,6 +520,36 @@ GitHub Settings → Branches → Add rule → `main` branch protection → requi
 | Step 4 Koyeb env 切換後 shadow daemon 寫不進新 dataset | Koyeb console 還原 env vars | ~5 min |
 | Step 6 CI 啟用後 T12 持續 fail（Axiom CI dataset wire issue） | Workflow yaml 改 `if: false` 暫關 integration job、PR 仍可 merge unit job pass 即可 | 即時 |
 
+## Risks & Failure Modes
+
+| # | Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|---|
+| R1 | Axiom indexing latency spike（>30s polling timeout） | LOW | T12 false negative，PR 階段 block | Polling timeout 設 30s = ~2x 觀察到的 worst case；timeout 時 fail message 帶 partial rows for debug；可調 timeout via env var |
+| R2 | 並行 CI run cross-pollution（D12 isolation 漏網） | LOW | T12 false positive（看到別 run 的 events） | account_id 含 `GITHUB_RUN_ID` + commit SHA、每 event 獨立 `signal_correlation_id` UUID；assert 用嚴格 set 比較 |
+| R3 | Koyeb shadow service Step 4 env 切換 → daemon 啟不來（misconfig） | MED | Shadow run 中斷直到 fix | Koyeb 切換前先在 Koyeb console preview env diff；切換後 5 min 內監看 deploy log；自動 rollback via Koyeb console UI |
+| R4 | Pre-cutover prod dataset 內舊 events 沒 `deployment_environment` field，replay 拿不到 | MED | Phase 4.4 cutover 前期 ledger replay 部分跳掉舊 events | 4.4 canary 啟動前等 prod dataset 30d retention 自然清完（cutover 日 + 30 day = canary 啟動最早日期）；spec 明示在 Phase 4.4 cutover prework checklist |
+| R5 | Axiom CI dataset retention 3-7d 導致 debug 時舊 CI fail run 已清 | LOW | 重現 CI bug 困難 | Failed CI run log 保留 GitHub Actions artifact 90d；Axiom dataset 只是 sample data 不是 source of truth |
+| R6 | OTEL SDK 未安裝時 `to_otel_resource()` 被誤呼叫 | LOW | Runtime ImportError | Lazy import + method docstring 明示「OTEL adoption phase 後才呼叫」；unit test 用 mock module |
+| R7 | Dependabot SHA-pin PR 量太大壓垮 review queue | LOW | Maintenance burden 上升 | Dependabot config 設 weekly + 限 max 5 open PR；group by ecosystem |
+| R8 | T12 emit fail（Axiom CI dataset 滿 quota / network outage）誤判 wire-level bug | LOW | False alarm | Polling fail message 區分 "emit failed" vs "query timeout" vs "0 events returned"；Axiom quota alert 設在 Axiom console |
+| R9 | `schema_version=1` ship 後未來真改 envelope schema 時，replay 沒寫 dispatch 邏輯 | MED | 改 schema 時忘記 bump version + 加 version-aware parser | 加 docstring + ADR 後續 follow-up「envelope schema change checklist」；本 spec 不加 dispatch 邏輯（明示 non-goal） |
+
+對應 mitigation 在 plan 階段分配到具體 task。
+
+## Open Questions
+
+不阻塞 plan，impl 階段或 ship 後 30d 內 clarify：
+
+| # | Question | 影響 | 何時解 |
+|---|---|---|---|
+| OQ1 | `AxiomConfig` 既有實作是 BaseModel 還是 BaseSettings？ | 決定 Shape A vs Shape B（Source Code Changes section 2 已列兩 acceptable shape） | Plan 第 1 task 開檔即知 |
+| OQ2 | `AxiomClient._build_event` 確切 method name + signature？ | 決定 Resource 注入點具體 patch shape | Plan 第 2 task 開檔即知 |
+| OQ3 | 既有 Koyeb shadow service Axiom dataset secret 是手動設還是 CI 自動同步？ | 決定 Migration Step 4 操作模式 | Cutover day 前 Koyeb console 查 |
+| OQ4 | Axiom 未來是否新增 OIDC token federation 支援？ | 影響 D2 long-lived token vs short-lived token rotation 策略 | 6-12 month 持續追蹤 Axiom changelog；Spec ship 後 30d 內 file Axiom support ticket 問 roadmap |
+| OQ5 | Phase 4.4 canary 啟動後是否需要 `host_name` 區分 instance？ | 決定 `service.instance.id` 何時加入 EventResource | 4.4 canary 啟動後第 1 週實際觀察 |
+| OQ6 | `--build-arg GIT_SHA` 在 Koyeb build pipeline 怎麼 propagate？ | 決定 Dockerfile + Koyeb config 改動範圍 | Plan Dockerfile task 前 Koyeb docs 確認 |
+| OQ7 | 5 個 pre-existing integration failure xfail 後若意外 pass，CI policy 是 warn 還是 fail？ | 影響 `strict=False` vs `strict=True` 選擇 | 本 spec 暫定 `strict=False`，ship 後 30d 內若意外 pass case 出現再決策 |
+
 ## Testing Strategy
 
 ### Test pyramid
@@ -456,7 +577,7 @@ GitHub Settings → Branches → Add rule → `main` branch protection → requi
 
 | Test file | 鎖什麼契約 |
 |---|---|
-| `tests/unit/observability/test_event_resource.py`（new） | `EventResource` immutability（frozen=True 違反 raise）/ `envelope_fields()` 鍵名對齊 OTEL semantic conventions / `DeploymentEnvironment` enum exhaustive / `_resolve_service_version` build-env 優先 / git fallback / unknown fallback |
+| `tests/unit/observability/test_event_resource.py`（new） | `EventResource` immutability（frozen=True 違反 raise）/ `envelope_fields()` 鍵名對齊 OTEL semantic conventions / 含 `schema_version=1` / `host_name` 出現 iff non-None / `DeploymentEnvironment` enum exhaustive / `_resolve_service_version` build-env 優先 / git fallback / unknown fallback / `_resolve_host_name` 拿 `HOSTNAME` env 或 None / `to_otel_resource()` 產出對應 OTEL semantic convention key（mock OTEL SDK if not installed） |
 | `tests/unit/marketfeed/test_axiom_config.py`（new 或擴充） | `AxiomConfig` 缺 `BFX_DEPLOYMENT_ENV` env 時 fail-loud（Pydantic ValidationError）/ 三種 env value 都 accept / 其他 string raise |
 | `tests/unit/observability/test_axiom_client_resource.py`（new） | AxiomClient `_build_envelope` 注入 resource fields 在 top-level（非 payload 內） / 既有 payload schema 不被污染 / `type` + `_time` 仍存在 |
 | `tests/unit/execution/test_axiom_event_query.py`（擴充既有） | APL string 包含 `where deployment_environment == "{env}"` clause / Adapter `__init__` accepts deployment_environment + propagates 進 `_build_apl` / mock response 解析正確 |
@@ -473,20 +594,41 @@ GitHub Settings → Branches → Add rule → `main` branch protection → requi
 
 ## Spec Acceptance Criteria
 
-- [ ] 3 個 Axiom dataset 存在 + 3 個 dataset-scoped API key 配置
-- [ ] `EventResource` + `DeploymentEnvironment` StrEnum + `_resolve_service_version` 實作，unit test 100% pass + mypy strict clean
-- [ ] `AxiomConfig` 加 `deployment_env` field（或新 settings class），unit test 100% pass
-- [ ] `AxiomClient.resource` injection + `AxiomReplayQueryAdapter.deployment_environment` filter 實作，unit test 100% pass
-- [ ] `daemon.py build_daemon` 兩端對稱 wire（emit env == query filter env），unit test 鎖契約
-- [ ] T12 升級 polling-based + run-scoped account_id + deployment_environment filter，CI 第一次 PR push 跑通
+每項對應 Goals section 1-7 中 1 個或多個 G：
+
+**Infrastructure**
+- [ ] [G4] 3 個 Axiom dataset 存在 + 3 個 dataset-scoped API key 配置（prod / shadow / ci）
+- [ ] [G4] CI dataset retention 設 3-7d（不是預設 30d）
+
+**Source code（EventResource + envelope）**
+- [ ] [G5][G6] `EventResource` + `DeploymentEnvironment` StrEnum + `_resolve_service_version` + `_resolve_host_name` + `to_otel_resource()` + `schema_version=1` 實作，unit test 100% pass + mypy strict clean
+- [ ] [G5] `AxiomConfig` 加 `deployment_env` field（Shape A 或 B），unit test 100% pass + 缺 env fail-loud
+- [ ] [G1][G5] `AxiomClient.resource` injection + `AxiomReplayQueryAdapter.deployment_environment` filter 實作，unit test 100% pass
+- [ ] [G1] `daemon.py build_daemon` 兩端對稱 wire（emit env == query filter env），unit test 鎖契約
+- [ ] [G6] envelope 含 `schema_version: 1` field，unit test 鎖 + T12 assert
+
+**Tests**
+- [ ] [G1][G2][G3] T12 升級 polling-based + run-scoped account_id + deployment_environment + schema_version assertion，CI 第一次 PR push 跑通在 90s 內
 - [ ] 5 個 pre-existing integration failure 加 `xfail(strict=False)` marker + reason
-- [ ] CI workflow `backend_py_unit` + `backend_py_integration` jobs 加入 `.github/workflows/ci.yml` + concurrency / needs / fork PR skip 對齊
+
+**CI**
+- [ ] [G7] `backend_py_unit` + `backend_py_integration` jobs 加入 `.github/workflows/ci.yml` + concurrency / needs / fork PR skip 對齊
+- [ ] [G7] Workflow + per-job `permissions: contents: read` + `timeout-minutes: 10`
+- [ ] [G7] `.github/dependabot.yml` 加入 github-actions ecosystem
 - [ ] GitHub Actions repo secrets 配置完成（`AXIOM_CI_API_KEY` + `AXIOM_CI_DATASET`）
+
+**Build / deploy**
 - [ ] Dockerfile `ARG GIT_SHA` + `ENV BFX_SERVICE_VERSION` 加好，Koyeb build 命令 propagate
-- [ ] Koyeb shadow service env 切到 shadow dataset，paper run 連續 24h healthy 驗證
-- [ ] 本機 dev `.env` runbook + `backend_py/docs/runbooks/` 更新
+- [ ] [G4] Koyeb shadow service env 切到 shadow dataset + `BFX_DEPLOYMENT_ENV=shadow`，paper run 連續 24h healthy 驗證
+
+**Docs**
+- [ ] 本機 dev `.env` runbook + `backend_py/docs/runbooks/` 更新（含三 env 的 `.env` 範本）
 - [ ] ADR 寫好（在 second-brain repo `wiki/projects/bfx-funding-bot/decisions/`，檔名格式 `YYYY-MM-DD-observability-env-separation.md`，日期 = 本 spec ship 那天；ship 後跑 `/project-decision-log` workflow compress 本 spec 進 ADR）
-- [ ] Phase 4.4 cutover prework checklist 加 `backend_py_integration` required check 升級項
+- [ ] Phase 4.4 cutover prework checklist 加項：(a) `backend_py_integration` required check 升級、(b) 確認 prod dataset 過 30d 已純淨
+
+**Post-ship verification (G1/G4 measurable)**
+- [ ] [G1] Ship 後 30d 內，AxiomReplayQueryAdapter 相關 PR 至少 1 次 catch wire-level issue 在 PR 階段（或 30d 無相關 PR 也可，spec attendant note）
+- [ ] [G4] Phase 4.4 canary 啟動當日，Axiom prod dataset query `where deployment_environment != "prod"` 回 0 rows
 
 ## Non-goals（防 scope creep）
 
@@ -499,10 +641,27 @@ GitHub Settings → Branches → Add rule → `main` branch protection → requi
 - ❌ Axiom dataset retention 自動化管理（Terraform / IaC）→ **手動 Axiom console 設一次完事，IaC 是未來分項**
 - ❌ T12 以外的 integration test 新加 → **本 spec 只 enable infrastructure，新增 test 是 PR-by-PR follow-up**
 - ❌ CI 內跑 `pytest -m live`（real Bitfinex credentials）→ **`live` marker 既有定義 "never runs in CI"，本 spec 不動該邊界**
+- ❌ **Envelope schema version-aware parser dispatch（D18 deferred logic）** → 本 spec 只加 `schema_version=1` field，未來真改 schema 時才寫 dispatch（避免 YAGNI），那時新 ADR 記 envelope schema change checklist
+- ❌ GitHub Environments scope（vs repo-level secrets） → CI dataset 風險低，repo-level 足夠；未來若 secret rotation 涉及多人 approval 再升級
+- ❌ Axiom OIDC token federation → Axiom 目前不支援，Open Question OQ4 追蹤
+- ❌ OpenSSF Scorecard 全綠 → 本 spec 只動 `Pinned-Dependencies` + `Token-Permissions` 兩項；其他項（signed releases / branch protection / fuzz testing）是未來分項
 
 ## References
 
-- OpenTelemetry semantic conventions: https://opentelemetry.io/docs/specs/semconv/resource/deployment-environment/
-- Axiom dataset-scoped tokens: https://axiom.co/docs/reference/tokens
+### Industry best practice references
+- OpenTelemetry semantic conventions — deployment environment: https://opentelemetry.io/docs/specs/semconv/resource/deployment-environment/
+- OpenTelemetry semantic conventions — service: https://opentelemetry.io/docs/specs/semconv/resource/#service
+- OpenTelemetry Resource SDK: https://opentelemetry.io/docs/specs/otel/resource/sdk/
+- OpenSSF Scorecard checks: https://github.com/ossf/scorecard/blob/main/docs/checks.md
+- GitHub Actions security hardening: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
 - GitHub Actions concurrency: https://docs.github.com/en/actions/using-jobs/using-concurrency
-- Industry parallel — Stripe webhook integration test pattern：retry polling vs fixed sleep
+- Axiom dataset-scoped tokens: https://axiom.co/docs/reference/tokens
+- Axiom retention policy: https://axiom.co/docs/reference/datasets
+
+### Industry parallel patterns
+- Stripe `req_*` request ID for sandbox test isolation
+- Plaid sandbox access_token per-run isolation
+- Stripe webhook integration test retry-polling pattern (vs fixed sleep)
+- Datadog `env` tag + per-env dataset separation
+- Honeycomb `environment` field + dataset-per-env
+- EventStore / Kafka schema registry / AWS EventBridge schema versioning
