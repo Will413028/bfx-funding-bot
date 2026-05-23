@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
@@ -54,9 +54,13 @@ from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.execution.axiom_event_query import (
+    AxiomReplayQueryAdapter,
+)
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
+    CancelAcknowledged,
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
@@ -159,6 +163,9 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     ledger: PaperPositionLedger
+    # Phase 4.4b D1: AxiomReplayQueryAdapter owns its own httpx.AsyncClient
+    # for ledger + registry replay; teardown must aclose() to release the pool.
+    axiom_query: AxiomReplayQueryAdapter
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
     offer_registry: OfferRegistry | None = None
@@ -545,40 +552,10 @@ async def _emit_locf_degraded(
     })
 
 
-class _AxiomQueryAdapter:
-    """4.3 stub — returns no historical events.
-
-    AxiomClient (`external/axiom.py`) only exposes emit/flush/start/stop, not
-    query. Real Axiom APL (POST /v1/datasets/{ds}/_apl) replay lands in 4.3
-    when accumulated paper events make replay meaningful. For 4.3.executor-middleware:
-    paper phase starts with a fresh ledger each boot.
-    """
-
-    def __init__(self, axiom_client: AxiomClient, dataset: str) -> None:
-        self._client = axiom_client
-        self._dataset = dataset
-
-    async def query_order_events(
-        self, account_id: str, since: datetime,
-    ) -> list[dict[str, Any]]:
-        log.info(
-            "axiom_query_stub_returning_empty account=%s dataset=%s since=%s",
-            account_id, self._dataset, since.isoformat(),
-        )
-        return []
-
-
-class _OfferRegistryQueryStub:
-    """4.4a stub — OfferRegistry replay protocol bridge.
-
-    OfferRegistry.replay_from_axiom() calls fetch_events(**kwargs).
-    4.4a returns [] (same as ledger stub); real APL adapter in 4.4b ADR.
-    """
-
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        log.info("offer_registry_query_stub_returning_empty kwargs=%s", kwargs)
-        return []
-
+# Phase 4.4b D1: `_AxiomQueryAdapter` (4.3 ledger stub returning []) and
+# `_OfferRegistryQueryStub` (4.4a registry stub returning []) deleted. Both
+# replay paths now go through `AxiomReplayQueryAdapter` (axiom_event_query.py),
+# a single instance that satisfies both consumer protocols via duck typing.
 
 # _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
 # Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
@@ -691,20 +668,26 @@ async def build_daemon(
 
     # PaperPositionLedger replay — Axiom is SoT; fast-fail on unreachable
     # (LedgerReplayError → daemon never starts; empty-ledger fallback would
-    # let AllocationCap permit over-cap exposure). 4.2 uses the stub adapter
-    # that returns [] immediately, so this is a no-op for now.
+    # let AllocationCap permit over-cap exposure). Phase 4.4b D1: real
+    # AxiomReplayQueryAdapter replaces the 4.3 `_AxiomQueryAdapter` stub; a
+    # single instance also feeds OfferRegistry below (port-per-consumer duck
+    # typing — same adapter satisfies both ledger and registry protocols).
     ledger_window_days = int(os.environ.get("BFX_LEDGER_REPLAY_DAYS", "30"))
-    axiom_query = _AxiomQueryAdapter(axiom, config.axiom_dataset)
+    axiom_query = AxiomReplayQueryAdapter(
+        api_key=config.axiom_api_key,
+        dataset=config.axiom_dataset,
+    )
     ledger = await PaperPositionLedger.replay_from_axiom(
         account_id=account_id,
         since=datetime.now(UTC) - timedelta(days=ledger_window_days),
         axiom_query=axiom_query,
     )
 
-    # OfferRegistry cold-start replay — 4.4a stub returns []; real APL adapter
-    # ships in 4.4b ADR. cleanup_terminal removes stale RELEASED records > 24h.
+    # OfferRegistry cold-start replay — Phase 4.4b D1: reuses the single
+    # AxiomReplayQueryAdapter instance above. cleanup_terminal removes stale
+    # RELEASED records > 24h.
     offer_registry = OfferRegistry(
-        axiom_query=_OfferRegistryQueryStub(),
+        axiom_query=axiom_query,
         clock=lambda: int(time.time() * 1000),
     )
     await offer_registry.replay_from_axiom()
@@ -822,6 +805,9 @@ async def build_daemon(
     bus.subscribe(ReservationReleased, offer_registry.handle)
     # CancelRequested → axiom (audit trail; replay-able cancel decisions).
     bus.subscribe(CancelRequested,     axiom_sink.handle_cancel_requested)
+    # Phase 4.4b D1: CancelAcknowledged → axiom (cancel ACK from BFX WS or
+    # REST path; pairs with CancelRequested for cancel-lifecycle audit).
+    bus.subscribe(CancelAcknowledged,  axiom_sink.handle_cancel_acknowledged)
 
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
@@ -1046,6 +1032,7 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         ledger=ledger,
+        axiom_query=axiom_query,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
         offer_registry=offer_registry,
@@ -1132,6 +1119,10 @@ async def _run() -> None:
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
                 await daemon.smoke_runner.aclose()
+        # Phase 4.4b D1: AxiomReplayQueryAdapter holds its own httpx.AsyncClient
+        # for ledger + registry replay; release the pool on shutdown.
+        with contextlib.suppress(Exception):
+            await daemon.axiom_query.aclose()
 
     # Self-smoke trigger (Phase 4.1.x — see specs/2026-05-21-g1-c1-continuity-redesign-design.md)
     # Gated by phase=paper + duration set; exception path is structurally unreachable here
