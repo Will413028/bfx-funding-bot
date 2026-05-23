@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, cast
+from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     event_type_of,
     serialize_event,
 )
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, OfferClaimRow
+from bfx_funding_bot.modules.execution.registry_offers import ClaimRecord, RegistryState, transition
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
@@ -51,7 +56,8 @@ class PostgresEventStore:
             payload=payload,
             occurred_at_ms=occurred_at_ms,
         ))
-        # Snapshot maintenance is added in later tasks (offer_claims, then position_state).
+        # Snapshot maintenance — offer_claims projection (Task 5).
+        await self._project_offer_claims(session, event, account_id, venue_offer_id)
         return True
 
     async def _already_logged(
@@ -70,3 +76,67 @@ class PostgresEventStore:
             .limit(1)
         )
         return (await session.execute(stmt)).first() is not None
+
+    async def _project_offer_claims(
+        self,
+        session: AsyncSession,
+        event: object,
+        account_id: str,
+        venue_offer_id: str | None,
+    ) -> None:
+        if venue_offer_id is None:
+            return  # PENDING intents have no voi (Plan 3); nothing to project here.
+        existing = (
+            await session.execute(
+                select(OfferClaimRow).where(OfferClaimRow.venue_offer_id == venue_offer_id)
+            )
+        ).scalars().all()
+        before: dict[str, ClaimRecord] = {
+            r.venue_offer_id: _row_to_claim(r) for r in existing if r.venue_offer_id is not None
+        }
+        now_ms: int = cast(Any, event).occurred_at_ms or 0
+        after, _diags = transition(before, event, now_ms)
+        rec = after.get(venue_offer_id)
+        if rec is None:
+            return
+        await self._upsert_claim(session, rec)
+
+    async def _upsert_claim(self, session: AsyncSession, rec: ClaimRecord) -> None:
+        dialect = session.bind.dialect.name if session.bind else "postgresql"
+        ins = pg_insert if dialect == "postgresql" else sqlite_insert
+        values: dict[str, Any] = {
+            "cid": rec.cid,
+            "account_id": rec.account_id,
+            "deployment_environment": self._env,
+            "state": rec.state.value,
+            "venue_offer_id": rec.venue_offer_id,
+            "size_usdt": rec.size_usdt,
+            "signal_correlation_id": str(rec.signal_correlation_id),
+            "occurred_at_ms": rec.occurred_at_ms,
+            "last_updated_ms": rec.last_updated_ms,
+            "last_event_seq": 0,  # FSM state is the SoT for claims; position_state carries the high-water mark (Task 6)
+        }
+        stmt = ins(OfferClaimRow).values(values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cid"],
+            set_={k: values[k] for k in ("state", "venue_offer_id", "last_updated_ms")},
+        )
+        await session.execute(stmt)
+        # Expire the identity-map entry for this cid so any subsequent select() in the
+        # same session re-fetches from the DB rather than returning a stale cached object.
+        cached = session.identity_map.get((OfferClaimRow, (rec.cid,), None))
+        if cached is not None:
+            session.expire(cached)
+
+
+def _row_to_claim(row: OfferClaimRow) -> ClaimRecord:
+    return ClaimRecord(
+        venue_offer_id=row.venue_offer_id or "",
+        cid=row.cid,
+        signal_correlation_id=UUID(row.signal_correlation_id),
+        size_usdt=Decimal(str(row.size_usdt)),
+        account_id=row.account_id,
+        state=RegistryState(row.state),
+        occurred_at_ms=row.occurred_at_ms,
+        last_updated_ms=row.last_updated_ms,
+    )

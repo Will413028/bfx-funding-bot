@@ -7,8 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
-from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, OfferClaimRow
+from bfx_funding_bot.modules.execution.events import (
+    OrderFilled,
+    ReservationClaimed,
+    ReservationReleased,
+)
 
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -37,6 +41,25 @@ async def test_append_inserts_event_row(sqlite_session: AsyncSession) -> None:
     assert rows[0].cid == 101
     assert rows[0].deployment_environment == "ci"
     assert rows[0].payload["size_usdt"] == "5"
+
+
+async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSession) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, _claimed(5))           # cid 105, v5
+    await sqlite_session.flush()
+    row = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 105))).scalar_one()
+    assert row.state == "claimed"
+    assert row.venue_offer_id == "v5"
+
+    await store.append(sqlite_session, ReservationReleased(cid=105, venue_offer_id="v5",
+        size_usdt=Decimal("5"), reason="venue_cancel", signal_correlation_id=_SCID,
+        account_id="acct", is_simulated=True, venue_seq=6, occurred_at_ms=2000))
+    await sqlite_session.flush()
+    row2 = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 105))).scalar_one()
+    assert row2.state == "released"
 
 
 async def test_append_fill_dedup_skips_duplicate(sqlite_session: AsyncSession) -> None:
