@@ -15,6 +15,8 @@ from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
 )
+from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry, RegistryState
 
 pytestmark = pytest.mark.integration
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
@@ -101,3 +103,31 @@ async def test_fill_redelivery_does_not_double_count(pg_session_factory) -> None
             )
         ).scalar_one()
         assert row.realized_usdt == Decimal("3")  # not 6
+
+
+async def test_ledger_from_snapshot(pg_session_factory) -> None:
+    store = PostgresEventStore(deployment_environment="ci")
+    async with pg_session_factory() as s:
+        await store.append(s, ReservationClaimed(cid=10, venue_offer_id="v10",
+            size_usdt=Decimal("7"), signal_correlation_id=_SCID, account_id="snapA",
+            is_simulated=True, venue_seq=1, occurred_at_ms=1000))
+        await s.commit()
+    async with pg_session_factory() as s:
+        ledger = await PaperPositionLedger.from_snapshot(s, account_id="snapA",
+                                                         deployment_environment="ci")
+    assert ledger.current_exposure() == Decimal("7")
+
+
+async def test_registry_from_snapshot(pg_session_factory) -> None:
+    store = PostgresEventStore(deployment_environment="ci")
+    async with pg_session_factory() as s:
+        await store.append(s, ReservationClaimed(cid=11, venue_offer_id="v11",
+            size_usdt=Decimal("1"), signal_correlation_id=_SCID, account_id="snapB",
+            is_simulated=True, venue_seq=1, occurred_at_ms=1000))
+        await s.commit()
+    async with pg_session_factory() as s:
+        reg = await OfferRegistry.from_snapshot(s, account_id="snapB",
+                                                deployment_environment="ci")
+    snap = reg.snapshot()
+    assert "v11" in snap
+    assert snap["v11"].state is RegistryState.CLAIMED

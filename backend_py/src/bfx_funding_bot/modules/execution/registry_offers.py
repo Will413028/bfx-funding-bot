@@ -35,8 +35,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_upcasters import upcast_row
 from bfx_funding_bot.modules.execution.events import (
@@ -247,6 +250,53 @@ class OfferRegistry:
             event = self._parse_event(row)
             if event is not None:
                 await self.handle(event)
+
+    # ---------- cold-start loader (PostgreSQL snapshot) ----------
+
+    @classmethod
+    async def from_snapshot(
+        cls,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        deployment_environment: str,
+        clock: Callable[[], int] | None = None,
+    ) -> OfferRegistry:
+        """Load registry from the offer_claims snapshot table (no replay).
+
+        Uses __new__ + manual attribute assignment as a transition shim; a later
+        plan will remove the mandatory axiom_query parameter from __init__.
+        """
+        from sqlalchemy import select
+
+        from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+
+        reg = cls.__new__(cls)
+        reg._axiom_query = None  # type: ignore[assignment]
+        reg._clock = clock or (lambda: int(time.time() * 1000))
+        reg._snapshot = {}
+        rows = (
+            await session.execute(
+                select(OfferClaimRow).where(
+                    OfferClaimRow.account_id == account_id,
+                    OfferClaimRow.deployment_environment == deployment_environment,
+                    OfferClaimRow.venue_offer_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+        for r in rows:
+            assert r.venue_offer_id is not None
+            reg._snapshot[r.venue_offer_id] = ClaimRecord(
+                venue_offer_id=r.venue_offer_id,
+                cid=r.cid,
+                signal_correlation_id=UUID(r.signal_correlation_id),
+                size_usdt=Decimal(str(r.size_usdt)),
+                account_id=r.account_id,
+                state=RegistryState(r.state),
+                occurred_at_ms=r.occurred_at_ms,
+                last_updated_ms=r.last_updated_ms,
+            )
+        return reg
 
     def cleanup_terminal(self, older_than_ms: int) -> None:
         """Remove RELEASED records whose last_updated_ms is older than threshold.
