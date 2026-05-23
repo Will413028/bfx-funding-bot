@@ -119,6 +119,7 @@ from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.smoke.g1 import run_smoke_async
 
 if TYPE_CHECKING:
@@ -605,15 +606,19 @@ async def build_daemon(
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     probe = HealthProbe()
-    axiom = AxiomClient(
-        AxiomConfig(
-            api_key=config.axiom_api_key,
-            dataset=config.axiom_dataset,
-            # Bug B fix (5/20): wire axiom flush → heartbeat so scan_staleness
-            # can detect axiom task hung (4.2.0 D4 DONE_WITH_CONCERNS).
-            on_flush=lambda: probe.record_heartbeat("axiom"),
-        ),
+    # from_env() reads the SAME AXIOM_API_KEY/AXIOM_DATASET that load_config
+    # validated, plus BFX_DEPLOYMENT_ENV. A single axiom_cfg.deployment_env
+    # feeds BOTH the emit client (resource envelope) and the replay query
+    # adapter below — making emit/query env drift structurally impossible.
+    axiom_cfg = AxiomConfig.from_env()
+    # on_flush isn't an env-derived field; wire the heartbeat callback after.
+    # Bug B fix (5/20): wire axiom flush → heartbeat so scan_staleness can
+    # detect axiom task hung (4.2.0 D4 DONE_WITH_CONCERNS).
+    axiom_cfg.on_flush = lambda: probe.record_heartbeat("axiom")
+    event_resource = EventResource(
+        deployment_environment=axiom_cfg.deployment_env,
     )
+    axiom = AxiomClient(cfg=axiom_cfg, resource=event_resource)
     bitfinex_http = httpx.AsyncClient()
     bitfinex = BitfinexREST(
         http=bitfinex_http,
@@ -686,9 +691,13 @@ async def build_daemon(
     # single instance also feeds OfferRegistry below (port-per-consumer duck
     # typing — same adapter satisfies both ledger and registry protocols).
     ledger_window_days = _resolve_event_replay_days()
+    # Thread the SAME deployment env into the replay/query path: emit tags
+    # events with axiom_cfg.deployment_env, query filters by the same enum
+    # member → no silent replay miss across env boundaries.
     axiom_query = AxiomReplayQueryAdapter(
-        api_key=config.axiom_api_key,
-        dataset=config.axiom_dataset,
+        api_key=axiom_cfg.api_key,
+        dataset=axiom_cfg.dataset,
+        deployment_environment=axiom_cfg.deployment_env,
     )
     ledger = await PaperPositionLedger.replay_from_axiom(
         account_id=account_id,

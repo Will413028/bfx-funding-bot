@@ -29,6 +29,7 @@ phase3b_wfo_results_ref: x
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     # OS-assigned port to avoid 8080 conflicts during parallel runs / dev boxes.
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
@@ -92,6 +93,7 @@ cells:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     # Asyncpg-scheme URL that still carries libpq query params — the form
     # chaos recovery accidentally produced. Engine creation would currently
     # succeed but connect() would crash with TypeError(sslmode).
