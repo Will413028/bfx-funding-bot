@@ -61,7 +61,7 @@ class TestResolveHostName:
 class TestEventResource:
     def test_immutability(self) -> None:
         r = EventResource(deployment_environment=DeploymentEnvironment.CI)
-        with pytest.raises((AttributeError, Exception)):
+        with pytest.raises(AttributeError):
             r.service_name = "hijacked"  # type: ignore[misc]
 
     def test_envelope_fields_otel_aligned_keys(self) -> None:
