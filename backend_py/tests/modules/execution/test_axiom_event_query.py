@@ -12,6 +12,7 @@ from httpx import Response
 from bfx_funding_bot.modules.execution.axiom_event_query import (
     AxiomReplayQueryAdapter,
 )
+from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 
 def test_build_ledger_apl_includes_event_types_and_account_and_since() -> None:
@@ -19,6 +20,7 @@ def test_build_ledger_apl_includes_event_types_and_account_and_since() -> None:
         dataset="bfx-events",
         account_id="default",
         since=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        deployment_environment="ci",
     )
     assert "['bfx-events']" in apl
     assert "['account_id'] == 'default'" in apl
@@ -39,6 +41,7 @@ def test_build_registry_apl_no_account_filter_when_none() -> None:
         event_types=["reservation_claimed", "order_fill"],
         up_to_ms=None,
         account_id=None,
+        deployment_environment="ci",
     )
     assert "['bfx-events']" in apl
     assert "['account_id']" not in apl  # no filter
@@ -53,6 +56,7 @@ def test_build_registry_apl_with_up_to_ms_and_account() -> None:
         event_types=["reservation_claimed"],
         up_to_ms=1700000000000,  # 2023-11-14T22:13:20Z
         account_id="acct-1",
+        deployment_environment="ci",
     )
     assert "['account_id'] == 'acct-1'" in apl
     assert "_time <= datetime(2023-11-14T22:13:20+00:00)" in apl
@@ -67,6 +71,7 @@ def test_build_apl_escapes_quote_in_account_id_via_replacement() -> None:
             dataset="bfx-events",
             account_id="bad'id",
             since=datetime(2026, 5, 1, tzinfo=UTC),
+            deployment_environment="ci",
         )
 
 
@@ -238,7 +243,11 @@ def fake_axiom_response() -> dict[str, Any]:
 async def test_query_order_events_posts_apl_and_returns_rows(
     fake_axiom_response: dict[str, Any],
 ) -> None:
-    adapter = AxiomReplayQueryAdapter(api_key="test-key", dataset="bfx-events")
+    adapter = AxiomReplayQueryAdapter(
+        api_key="test-key",
+        dataset="bfx-events",
+        deployment_environment=DeploymentEnvironment.CI,
+    )
     try:
         with respx.mock(base_url="https://api.axiom.co") as router:
             route = router.post("/v1/datasets/_apl").mock(
@@ -261,7 +270,11 @@ async def test_query_order_events_posts_apl_and_returns_rows(
 async def test_fetch_events_with_filters(
     fake_axiom_response: dict[str, Any],
 ) -> None:
-    adapter = AxiomReplayQueryAdapter(api_key="test-key", dataset="bfx-events")
+    adapter = AxiomReplayQueryAdapter(
+        api_key="test-key",
+        dataset="bfx-events",
+        deployment_environment=DeploymentEnvironment.CI,
+    )
     try:
         with respx.mock(base_url="https://api.axiom.co") as router:
             router.post("/v1/datasets/_apl").mock(
@@ -279,7 +292,11 @@ async def test_fetch_events_with_filters(
 
 @pytest.mark.asyncio
 async def test_query_raises_on_axiom_4xx() -> None:
-    adapter = AxiomReplayQueryAdapter(api_key="bad-key", dataset="bfx-events")
+    adapter = AxiomReplayQueryAdapter(
+        api_key="bad-key",
+        dataset="bfx-events",
+        deployment_environment=DeploymentEnvironment.CI,
+    )
     try:
         with respx.mock(base_url="https://api.axiom.co") as router:
             router.post("/v1/datasets/_apl").mock(
@@ -289,3 +306,61 @@ async def test_query_raises_on_axiom_4xx() -> None:
                 await adapter.query_order_events("default", datetime.now(UTC))
     finally:
         await adapter.aclose()
+
+
+class TestDeploymentEnvironmentFilter:
+    def test_init_accepts_deployment_environment(self) -> None:
+        adapter = AxiomReplayQueryAdapter(
+            api_key="axk_test",
+            dataset="bfx-funding-bot-ci",
+            deployment_environment=DeploymentEnvironment.CI,
+        )
+        assert adapter._deployment_environment is DeploymentEnvironment.CI
+
+    @pytest.mark.asyncio
+    async def test_query_order_events_apl_includes_env_filter(self) -> None:
+        captured: dict[str, str] = {}
+
+        def _capture(request: httpx.Request) -> httpx.Response:
+            import json
+            body = json.loads(request.content)
+            captured["apl"] = body.get("apl", "")
+            return httpx.Response(200, json={"tables": []})
+
+        adapter = AxiomReplayQueryAdapter(
+            api_key="axk_test",
+            dataset="bfx-funding-bot-ci",
+            deployment_environment=DeploymentEnvironment.CI,
+        )
+        try:
+            with respx.mock(base_url="https://api.axiom.co") as router:
+                router.post("/v1/datasets/_apl").mock(side_effect=_capture)
+                await adapter.query_order_events(
+                    "ci-run-1", datetime(2026, 5, 23, tzinfo=UTC),
+                )
+        finally:
+            await adapter.aclose()
+        assert 'deployment_environment == "ci"' in captured["apl"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_events_apl_includes_env_filter(self) -> None:
+        captured: dict[str, str] = {}
+
+        def _capture(request: httpx.Request) -> httpx.Response:
+            import json
+            body = json.loads(request.content)
+            captured["apl"] = body.get("apl", "")
+            return httpx.Response(200, json={"tables": []})
+
+        adapter = AxiomReplayQueryAdapter(
+            api_key="axk_test",
+            dataset="bfx-funding-bot-shadow",
+            deployment_environment=DeploymentEnvironment.SHADOW,
+        )
+        try:
+            with respx.mock(base_url="https://api.axiom.co") as router:
+                router.post("/v1/datasets/_apl").mock(side_effect=_capture)
+                await adapter.fetch_events(event_types=["order_fill"])
+        finally:
+            await adapter.aclose()
+        assert 'deployment_environment == "shadow"' in captured["apl"]

@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
+
 log = logging.getLogger(__name__)
 
 _REPLAY_EVENT_TYPES = ("reservation_claimed", "order_fill", "reservation_released")
@@ -27,10 +29,12 @@ class AxiomReplayQueryAdapter:
         *,
         api_key: str,
         dataset: str,
+        deployment_environment: DeploymentEnvironment,
         base_url: str = "https://api.axiom.co",
         timeout: float = 30.0,
     ) -> None:
         self._dataset = dataset
+        self._deployment_environment = deployment_environment
         self._http = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
@@ -44,7 +48,10 @@ class AxiomReplayQueryAdapter:
         if since.tzinfo is None:
             since = since.replace(tzinfo=UTC)
         apl = self._build_ledger_apl(
-            dataset=self._dataset, account_id=account_id, since=since,
+            dataset=self._dataset,
+            account_id=account_id,
+            since=since,
+            deployment_environment=self._deployment_environment.value,
         )
         return await self._query_apl(apl)
 
@@ -61,6 +68,7 @@ class AxiomReplayQueryAdapter:
             event_types=event_types,
             up_to_ms=up_to_ms,
             account_id=account_id,
+            deployment_environment=self._deployment_environment.value,
         )
         return await self._query_apl(apl)
 
@@ -77,7 +85,11 @@ class AxiomReplayQueryAdapter:
 
     @staticmethod
     def _build_ledger_apl(
-        *, dataset: str, account_id: str, since: datetime,
+        *,
+        dataset: str,
+        account_id: str,
+        since: datetime,
+        deployment_environment: str,
     ) -> str:
         # No `project` clause: Axiom flattens nested `payload` dict into
         # dot-notation columns (`payload.cid`, etc) on emit (4.4 prework
@@ -87,11 +99,16 @@ class AxiomReplayQueryAdapter:
         if "'" in account_id:
             raise ValueError(f"account_id contains illegal quote: {account_id!r}")
         types_list = ", ".join(f"'{t}'" for t in _REPLAY_EVENT_TYPES)
+        # NOTE: deployment_environment uses a BARE column name + DOUBLE-quoted
+        # value (differs from the bracketed/single-quoted clauses above) —
+        # this exact rendering is asserted by a downstream substring check.
+        # Value is a controlled enum (prod/shadow/ci), so no quote-escape needed.
         return (
             f"['{dataset}']"
             f"\n| where ['event_type'] in ({types_list})"
             f"\n  and ['account_id'] == '{account_id}'"
             f"\n  and _time > datetime({since.isoformat()})"
+            f'\n  and deployment_environment == "{deployment_environment}"'
             f"\n| order by _time asc"
         )
 
@@ -102,6 +119,7 @@ class AxiomReplayQueryAdapter:
         event_types: list[str],
         up_to_ms: int | None,
         account_id: str | None,
+        deployment_environment: str,
     ) -> str:
         # See _build_ledger_apl note: no `project` clause due to Axiom payload
         # flattening (commit 9261f3f).
@@ -115,6 +133,10 @@ class AxiomReplayQueryAdapter:
             f"['{dataset}']",
             f"| where ['event_type'] in ({types_list})",
         ]
+        # BARE column + DOUBLE-quoted value: matches the downstream substring
+        # assertion exactly (intentionally differs from bracketed clauses).
+        # Controlled enum value, so no quote-escape check needed.
+        lines.append(f'  and deployment_environment == "{deployment_environment}"')
         if account_id is not None:
             lines.append(f"  and ['account_id'] == '{account_id}'")
         if up_to_ms is not None:
