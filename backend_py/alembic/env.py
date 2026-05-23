@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection
 # Side-effect imports: register tables with Base.metadata
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.candles.tables
+import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
 from alembic import context
 from bfx_funding_bot.core.db import Base
