@@ -28,10 +28,17 @@ RUN uv sync --frozen --no-dev
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# GIT_SHA → BFX_SERVICE_VERSION: build arg surfaces the deployed commit as
+# the EventResource service.version envelope field. Declared here (late) so a
+# per-commit SHA change doesn't invalidate the apt / uv sync layer cache.
+# Koyeb build pipeline must pass --build-arg GIT_SHA=$KOYEB_GIT_COMMIT.
+ARG GIT_SHA=unknown
+
 # BFX_CELLS_YAML — explicit image-baked default. D1 fix in 4.2.0 also
 # adds cwd / importlib fallback so this env is no longer strictly
 # required, but kept for explicit deploy-time lookup precedence.
 ENV PATH="/app/.venv/bin:$PATH" \
-    BFX_CELLS_YAML=/app/configs/cells.yaml
+    BFX_CELLS_YAML=/app/configs/cells.yaml \
+    BFX_SERVICE_VERSION=${GIT_SHA}
 
 CMD ["sh", "-c", "alembic upgrade head && exec bfx-shadow"]
