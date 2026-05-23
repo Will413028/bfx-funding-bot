@@ -1,6 +1,7 @@
 """Unit tests for AxiomReplayQueryAdapter pure functions + I/O shell."""
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -322,7 +323,6 @@ class TestDeploymentEnvironmentFilter:
         captured: dict[str, str] = {}
 
         def _capture(request: httpx.Request) -> httpx.Response:
-            import json
             body = json.loads(request.content)
             captured["apl"] = body.get("apl", "")
             return httpx.Response(200, json={"tables": []})
@@ -347,7 +347,6 @@ class TestDeploymentEnvironmentFilter:
         captured: dict[str, str] = {}
 
         def _capture(request: httpx.Request) -> httpx.Response:
-            import json
             body = json.loads(request.content)
             captured["apl"] = body.get("apl", "")
             return httpx.Response(200, json={"tables": []})
