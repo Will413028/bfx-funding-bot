@@ -102,6 +102,33 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     )
 
 
+def classify_cancel_response(raw: Any) -> tuple[str, str | None]:
+    """Classify Bitfinex cancel REST response → (rest_status, text).
+
+    rest_status:
+      - "success": real cancel (raw[6] == "SUCCESS")
+      - "already_terminal": offer was already filled/cancelled — caller treats
+        as success (Stripe-style state-convergence semantics). Detected by
+        ERROR status with text containing "not found" or "not active".
+      - "other": any other ERROR / FAILURE — caller logs warn + does not raise.
+
+    Raises InvariantViolation if response shape is malformed.
+    """
+    if not isinstance(raw, list) or len(raw) < 7:
+        raise InvariantViolation(
+            f"unexpected Bitfinex cancel response shape: type={type(raw).__name__}",
+        )
+    status_field = raw[6]
+    text = raw[8] if len(raw) > 8 else None
+    if status_field == "SUCCESS":
+        return "success", text
+    if status_field == "ERROR" and isinstance(text, str):
+        text_lower = text.lower()
+        if "not found" in text_lower or "not active" in text_lower:
+            return "already_terminal", text
+    return "other", text
+
+
 class _AxiomProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
