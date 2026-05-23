@@ -3,7 +3,6 @@
 Smoke runner has 3 outcomes; this tests the counter/decision logic
 in isolation. Real subprocess run is post-deploy chaos (Gate 1).
 """
-import pytest
 
 
 class TestSmokeRunnerDecision:

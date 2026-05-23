@@ -85,9 +85,6 @@ async def test_candle_writer_logs_and_continues_on_error(sqlite_engine: AsyncEng
 
 
 import asyncpg  # noqa: E402
-import pytest  # noqa: E402
-
-from bfx_funding_bot.core.errors import FatalError, TransientError  # noqa: E402
 
 
 class TestCandleWriterErrorClassification:
@@ -104,6 +101,7 @@ class TestCandleWriterErrorClassification:
     def test_taxonomy_classes_imported_in_module(self):
         """Verify candle_writer uses shared core/errors taxonomy."""
         import bfx_funding_bot.modules.marketfeed.candle_writer as mod
-        src = open(mod.__file__).read()
+        with open(mod.__file__) as f:
+            src = f.read()
         assert "from bfx_funding_bot.core.errors import" in src
         assert "FatalError" in src

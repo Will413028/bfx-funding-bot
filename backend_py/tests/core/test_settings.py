@@ -1,4 +1,3 @@
-import pytest
 from bfx_funding_bot.core.settings import Settings
 
 
