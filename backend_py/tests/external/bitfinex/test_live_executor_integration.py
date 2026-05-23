@@ -90,8 +90,14 @@ async def test_submit_returns_failed_on_http_error() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_publishes_cancel_requested() -> None:
+    # Bitfinex cancel SUCCESS shape (10 elements; raw[6]="SUCCESS")
+    cancel_success_resp = [
+        1700000000000, "foc-req", None, None,
+        ["42", "fUSD", "rate", "amount"],
+        "0", "SUCCESS", None, "Submitting cancel request",
+    ]
     http = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda req: httpx.Response(200, json=[])
+        lambda req: httpx.Response(200, json=cancel_success_resp)
     ))
     bus = DomainEventBus(clock=lambda: 5000)
     captured: list = []
@@ -109,7 +115,10 @@ async def test_cancel_publishes_cancel_requested() -> None:
 
     sig_id = uuid4()
     await executor.cancel(
-        venue_offer_id="42", signal_correlation_id=sig_id, account_id="default",
+        venue_offer_id="42",
+        signal_correlation_id=sig_id,
+        account_id="default",
+        ctx=_make_ctx(),
     )
 
     assert len(captured) == 1

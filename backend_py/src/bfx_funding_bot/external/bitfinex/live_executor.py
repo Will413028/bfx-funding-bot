@@ -20,14 +20,27 @@ from uuid import UUID
 
 import httpx
 
+from bfx_funding_bot.core.errors import (
+    ExecutorAuthError,
+    ExecutorFatalError,
+    ExecutorTransientError,
+)
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
-from bfx_funding_bot.modules.execution.events import CancelRequested
+from bfx_funding_bot.modules.execution.events import (
+    CancelAcknowledged,
+    CancelRequested,
+)
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     SubmittedOrder,
+)
+from bfx_funding_bot.modules.execution.retry import (
+    classify_httpx_exception,
+    classify_httpx_response,
+    transient_retry,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionPayload,
@@ -39,6 +52,7 @@ log = logging.getLogger(__name__)
 
 BITFINEX_REST_BASE = "https://api.bitfinex.com"
 _OFFER_SUBMIT_PATH = "v2/auth/w/funding/offer/submit"
+_OFFER_CANCEL_PATH = "v2/auth/w/funding/offer/cancel"
 
 
 def build_offer_payload(
@@ -202,18 +216,108 @@ class BitfinexLiveExecutor:
         return replace(parsed, cid=cid)
 
     async def cancel(
-        self, *, venue_offer_id: str,
-        signal_correlation_id: UUID, account_id: str,
+        self,
+        *,
+        venue_offer_id: str,
+        signal_correlation_id: UUID,
+        account_id: str,
+        ctx: AccountContext,
     ) -> None:
-        """Publish CancelRequested event.
+        """Cancel an offer at Bitfinex.
 
-        Per spec §6.3: REST cancel call deferred to follow-up wire-up; for 4.4a
-        the primary goal is bus.publish(CancelRequested) — making cancel
-        auditable + replay-able as a first-class event.
+        Event flow (3-event audit model — Phase 4.4b prework):
+          1. publish CancelRequested (intent audit)
+          2. POST /v2/auth/w/funding/offer/cancel with HMAC-SHA384 sign
+          3. publish CancelAcknowledged (REST ack audit) on success or already-terminal
+             — ledger/registry do NOT subscribe to this (audit-only)
+          4. ws_dispatcher publishes ReservationReleased on WS `foc` (state mutation,
+             owned by ws_dispatcher per single-SoT invariant — see spec §D2.5)
+
+        Errors:
+          - 401/403 → raise ExecutorAuthError → daemon exit 78
+          - 5xx / network → transient_retry 3x (1s/2s/4s); exhaust → log warn + return
+          - 200 ERROR "not found" / "not active" → already_terminal, log info +
+            publish CancelAcknowledged(rest_status="already_terminal")
+          - 200 ERROR other → log warn + do not publish CancelAcknowledged
+          - other 4xx (ExecutorFatalError from classify_httpx_response) → log warn + return
         """
+        # 1. Publish CancelRequested (intent audit)
         await self._bus.publish(CancelRequested(
             venue_offer_id=venue_offer_id,
             requested_at_ms=int(time.time() * 1000),
             signal_correlation_id=signal_correlation_id,
             account_id=account_id,
         ))
+
+        # 2. POST cancel with transient retry
+        wrapped = transient_retry(self._cancel_http_call)
+        try:
+            response_json = await wrapped(venue_offer_id, ctx)
+        except ExecutorAuthError:
+            raise  # propagate to daemon → exit 78
+        except ExecutorTransientError as e:
+            log.warning(
+                "bitfinex_cancel_transient_exhausted voi=%s err=%r",
+                venue_offer_id, e,
+            )
+            return
+        except ExecutorFatalError as e:
+            log.warning(
+                "bitfinex_cancel_fatal voi=%s err=%r",
+                venue_offer_id, e,
+            )
+            return
+
+        # 3. Classify and publish CancelAcknowledged
+        rest_status, text = classify_cancel_response(response_json)
+        if rest_status in ("success", "already_terminal"):
+            await self._bus.publish(CancelAcknowledged(
+                venue_offer_id=venue_offer_id,
+                acknowledged_at_ms=int(time.time() * 1000),
+                signal_correlation_id=signal_correlation_id,
+                account_id=account_id,
+                rest_status=rest_status,
+                venue_response_text=text,
+            ))
+        else:
+            log.warning(
+                "bitfinex_cancel_other_error voi=%s text=%s",
+                venue_offer_id, text,
+            )
+
+    async def _cancel_http_call(
+        self,
+        venue_offer_id: str,
+        ctx: AccountContext,
+    ) -> Any:
+        """Pure I/O — HTTP POST + classify response into typed exception.
+
+        Returns Bitfinex response JSON on 2xx; raises ExecutorAuthError /
+        ExecutorFatalError / ExecutorTransientError on 4xx/5xx/network.
+        """
+        try:
+            voi_int = int(venue_offer_id)
+        except ValueError as e:
+            raise ExecutorFatalError(
+                f"venue_offer_id not numeric: {venue_offer_id!r}",
+            ) from e
+        body = {"id": voi_int}
+        body_bytes = json.dumps(body).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret,
+            path=_OFFER_CANCEL_PATH,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{_OFFER_CANCEL_PATH}",
+                content=body_bytes, headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise classify_httpx_exception(exc) from exc
+        if resp.status_code >= 400:
+            raise classify_httpx_response(resp)
+        return resp.json()
