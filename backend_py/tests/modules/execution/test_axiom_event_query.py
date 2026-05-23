@@ -27,9 +27,10 @@ def test_build_ledger_apl_includes_event_types_and_account_and_since() -> None:
     assert "order_fill" in apl
     assert "reservation_released" in apl
     assert "order by _time asc" in apl
-    # Project all fields
-    assert "['payload']" in apl
-    assert "['correlation_id']" in apl
+    # No `project` clause — Axiom flattens `payload` dict into dot-notation
+    # columns; projecting `['payload']` returns HTTP 400 (4.4 prework lesson
+    # commit 9261f3f). Parser handles dot-notation re-nest.
+    assert "| project" not in apl
 
 
 def test_build_registry_apl_no_account_filter_when_none() -> None:

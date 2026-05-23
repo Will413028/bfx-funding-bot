@@ -79,6 +79,11 @@ class AxiomReplayQueryAdapter:
     def _build_ledger_apl(
         *, dataset: str, account_id: str, since: datetime,
     ) -> str:
+        # No `project` clause: Axiom flattens nested `payload` dict into
+        # dot-notation columns (`payload.cid`, etc) on emit (4.4 prework
+        # commit 9261f3f). `['payload']` is NOT a real column → projecting it
+        # returns HTTP 400. Returning all columns lets `_tabular_to_rows`
+        # re-nest the dot-notation columns into a `payload` dict.
         if "'" in account_id:
             raise ValueError(f"account_id contains illegal quote: {account_id!r}")
         types_list = ", ".join(f"'{t}'" for t in _REPLAY_EVENT_TYPES)
@@ -87,8 +92,6 @@ class AxiomReplayQueryAdapter:
             f"\n| where ['event_type'] in ({types_list})"
             f"\n  and ['account_id'] == '{account_id}'"
             f"\n  and _time > datetime({since.isoformat()})"
-            f"\n| project _time, ['event_type'], ['account_id'],"
-            f" ['correlation_id'], ['payload']"
             f"\n| order by _time asc"
         )
 
@@ -100,6 +103,8 @@ class AxiomReplayQueryAdapter:
         up_to_ms: int | None,
         account_id: str | None,
     ) -> str:
+        # See _build_ledger_apl note: no `project` clause due to Axiom payload
+        # flattening (commit 9261f3f).
         if account_id is not None and "'" in account_id:
             raise ValueError(f"account_id contains illegal quote: {account_id!r}")
         for t in event_types:
@@ -115,10 +120,7 @@ class AxiomReplayQueryAdapter:
         if up_to_ms is not None:
             iso = datetime.fromtimestamp(up_to_ms / 1000, tz=UTC).isoformat()
             lines.append(f"  and _time <= datetime({iso})")
-        lines.extend([
-            "| project _time, ['event_type'], ['correlation_id'], ['payload']",
-            "| order by _time asc",
-        ])
+        lines.append("| order by _time asc")
         return "\n".join(lines)
 
     @staticmethod
