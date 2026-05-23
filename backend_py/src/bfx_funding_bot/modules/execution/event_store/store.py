@@ -4,12 +4,13 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_store.serialization import (
+    deserialize_event,
     event_type_of,
     serialize_event,
 )
@@ -177,6 +178,30 @@ class PostgresEventStore:
         ps.reserved_usdt = reserved
         ps.realized_usdt = realized
         ps.last_event_seq = event_seq
+
+    async def rebuild_snapshot_from_log(
+        self, session: AsyncSession, *, account_id: str, deployment_environment: str
+    ) -> None:
+        """Delete + recompute snapshot rows for (account, env) by folding event_log."""
+        await session.execute(delete(OfferClaimRow).where(
+            OfferClaimRow.account_id == account_id,
+            OfferClaimRow.deployment_environment == deployment_environment))
+        await session.execute(delete(PositionStateRow).where(
+            PositionStateRow.account_id == account_id,
+            PositionStateRow.deployment_environment == deployment_environment))
+        await session.flush()
+        rows = (await session.execute(
+            select(EventLogRow).where(
+                EventLogRow.account_id == account_id,
+                EventLogRow.deployment_environment == deployment_environment,
+            ).order_by(EventLogRow.event_seq.asc())
+        )).scalars().all()
+        for r in rows:
+            event = deserialize_event(r.event_type, r.payload)
+            await self._project_offer_claims(session, event, account_id, r.venue_offer_id)
+            await self._project_position_state(
+                session, r.event_type, account_id,
+                getattr(event, "size_usdt", None), r.event_seq)
 
 
 def _row_to_claim(row: OfferClaimRow) -> ClaimRecord:
