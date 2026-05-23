@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column(
             "recorded_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.func.current_timestamp(),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("event_seq"),
@@ -89,7 +89,7 @@ def upgrade() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.func.current_timestamp(),
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("account_id", "deployment_environment"),
