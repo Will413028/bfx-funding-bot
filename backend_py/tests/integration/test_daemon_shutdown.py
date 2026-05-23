@@ -18,6 +18,10 @@ def _set_daemon_env(monkeypatch, pg_engine) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("AXIOM_API_KEY", "test")
     monkeypatch.setenv("AXIOM_DATASET", "test")
+    # build_daemon → AxiomConfig.from_env() requires this. Harmless while these
+    # tests xfail on the pre-existing JSONB/SQLite CompileError (which trips in
+    # the DB fixture first); needed once that's fixed and the xfail removed.
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", _CELLS_YAML)
     # pg_engine.url is already postgresql+asyncpg://..., which build_daemon
     # passes directly to create_async_engine — no further transformation needed.
