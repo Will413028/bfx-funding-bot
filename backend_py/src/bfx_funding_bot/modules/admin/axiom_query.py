@@ -1,9 +1,8 @@
-"""AxiomEventQueryAdapter — APL query for smoke L3 round-trip verification.
+"""AxiomSmokeQueryAdapter — APL query for smoke L3 round-trip verification.
 
-Conforms to _AxiomQueryProtocol shape (modules/execution/ledger.py). Borrows
-the httpx + APL pattern from smoke/g1.py:AxiomQueryClient. Stays separate
-from daemon._AxiomQueryAdapter (4.3 stub used by ledger replay) — see spec
-§9 Q1; merging happens when ledger replay switches to real query (future ADR).
+Lightweight (3-column projection: _time, event_type, account_id) — proves
+events surfaced, not for state reconstruction. Distinct from
+modules/execution/axiom_event_query.py:AxiomReplayQueryAdapter (full payload).
 """
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ from typing import Any
 import httpx
 
 
-class AxiomEventQueryAdapter:
+class AxiomSmokeQueryAdapter:
     def __init__(
         self,
         *,
