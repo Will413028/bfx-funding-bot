@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any  # noqa: F401
+from typing import Any
 
 import httpx
 
@@ -82,3 +82,48 @@ class AxiomReplayQueryAdapter:
             "| order by _time asc",
         ])
         return "\n".join(lines)
+
+    @staticmethod
+    def _tabular_to_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Convert Axiom tabular response to row dicts.
+
+        Re-nests dot-notation payload columns (e.g. `payload.cid`) into a
+        single `payload` dict, since Axiom flattens nested objects on emit
+        (4.4 prework commit 9261f3f).
+        """
+        tables = payload.get("tables") or []
+        if not tables:
+            return []
+        t = tables[0]
+        fields = [f["name"] for f in t.get("fields", [])]
+        cols = t.get("columns") or []
+        if not fields or not cols:
+            return []
+        n_rows = len(cols[0])
+        rows: list[dict[str, Any]] = []
+        for ri in range(n_rows):
+            row: dict[str, Any] = {}
+            payload_nested: dict[str, Any] = {}
+            payload_object_value: Any = None
+            payload_object_seen = False
+            for ci, field in enumerate(fields):
+                value = cols[ci][ri]
+                if field == "payload":
+                    payload_object_value = value
+                    payload_object_seen = True
+                elif field.startswith("payload."):
+                    key = field[len("payload."):]
+                    payload_nested[key] = value
+                else:
+                    row[field] = value
+            if payload_object_seen:
+                # If Axiom returned `payload` as nested obj column, prefer it
+                # but layer dot-notation keys on top (defensive merge).
+                if isinstance(payload_object_value, dict):
+                    row["payload"] = {**payload_object_value, **payload_nested}
+                else:
+                    row["payload"] = payload_nested or payload_object_value
+            elif payload_nested:
+                row["payload"] = payload_nested
+            rows.append(row)
+        return rows
