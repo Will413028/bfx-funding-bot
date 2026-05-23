@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from bfx_funding_bot.modules.execution.events import (
+    CancelAcknowledged,
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
@@ -98,6 +99,25 @@ class AxiomEventSink:
             "payload": {
                 "venue_offer_id": event.venue_offer_id,
                 "requested_at_ms": event.requested_at_ms,
+                "signal_correlation_id": str(event.signal_correlation_id),
+            },
+        })
+
+    async def handle_cancel_acknowledged(self, event: CancelAcknowledged) -> None:
+        await self._axiom.emit({
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": Level.INFO.value,
+            "phase": self._phase.value,
+            "strategy": self._strategy.value,
+            "cell": self._cell,
+            "event_type": EventType.CANCEL_ACKNOWLEDGED.value,
+            "correlation_id": str(event.signal_correlation_id),
+            "account_id": event.account_id,
+            "payload": {
+                "venue_offer_id": event.venue_offer_id,
+                "acknowledged_at_ms": event.acknowledged_at_ms,
+                "rest_status": event.rest_status,
+                "venue_response_text": event.venue_response_text,
                 "signal_correlation_id": str(event.signal_correlation_id),
             },
         })
