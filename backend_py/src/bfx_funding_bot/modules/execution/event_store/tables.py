@@ -8,9 +8,11 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     Index,
+    Integer,
     Numeric,
     PrimaryKeyConstraint,
     Text,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -21,13 +23,20 @@ from bfx_funding_bot.core.db import Base
 # JSONB on Postgres, generic JSON on sqlite (unit tests).
 _JSON = JSON().with_variant(JSONB, "postgresql")
 
+# now() on Postgres, CURRENT_TIMESTAMP on sqlite (unit tests).
+# func.current_timestamp() is ANSI SQL and works on both dialects.
+_NOW = func.current_timestamp()
+
+# SQLite requires INTEGER (not BIGINT) for autoincrement PKs.
+_BIG_PK = BigInteger().with_variant(Integer(), "sqlite")
+
 
 class EventLogRow(Base):
     """Append-only domain-event log. SoT. No UPDATE/DELETE."""
 
     __tablename__ = "event_log"
 
-    event_seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_seq: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
@@ -37,7 +46,7 @@ class EventLogRow(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
+        DateTime(timezone=True), nullable=False, server_default=_NOW
     )
 
     __table_args__ = (
@@ -85,7 +94,7 @@ class PositionStateRow(Base):
     realized_usdt: Mapped[float] = mapped_column(Numeric, nullable=False, server_default=text("0"))
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
+        DateTime(timezone=True), nullable=False, server_default=_NOW
     )
 
     __table_args__ = (PrimaryKeyConstraint("account_id", "deployment_environment"),)
