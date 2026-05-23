@@ -43,6 +43,13 @@ phase3b_wfo_results_ref: x
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
+    # Phase 4.4b D1: AxiomReplayQueryAdapter ledger + registry replay POST
+    # to the APL endpoint during build_daemon — empty tables → empty replay.
+    httpx_mock.add_response(
+        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
+        method="POST", status_code=200, json={"tables": []},
+        is_reusable=True, is_optional=True,
+    )
 
     daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
     assert daemon.config.phase == Phase.PAPER
@@ -101,6 +108,12 @@ cells:
     httpx_mock.add_response(
         url="https://api.axiom.co/v1/datasets/x/ingest",
         method="POST", status_code=200, json={"ingested": 1},
+        is_reusable=True, is_optional=True,
+    )
+    # Phase 4.4b D1: replay APL endpoint mocked (empty tables).
+    httpx_mock.add_response(
+        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
+        method="POST", status_code=200, json={"tables": []},
         is_reusable=True, is_optional=True,
     )
 

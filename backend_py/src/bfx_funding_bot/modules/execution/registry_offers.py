@@ -181,8 +181,20 @@ def transition(
 # ---------------------------------------------------------------------------
 
 class _AxiomQueryProtocol(Protocol):
-    """Structural protocol for the Axiom query adapter."""
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]: ...
+    """Structural protocol for the Axiom query adapter.
+
+    Phase 4.4b D1: signature now mirrors `AxiomReplayQueryAdapter.fetch_events`
+    (keyword-only `event_types` / `up_to_ms` / `account_id`) so the real adapter
+    type-checks against this protocol. The stub `_OfferRegistryQueryStub` that
+    used `**kwargs` was deleted with the wiring switch.
+    """
+    async def fetch_events(
+        self,
+        *,
+        event_types: list[str],
+        up_to_ms: int | None = None,
+        account_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
 
 
 class OfferRegistry:
