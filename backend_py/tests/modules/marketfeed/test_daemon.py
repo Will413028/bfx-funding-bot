@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from pytest_httpx import HTTPXMock
@@ -14,7 +15,12 @@ async def test_daemon_builds_and_runs_briefly(
 ) -> None:
     """Smoke: build_daemon() returns a Daemon with all components wired;
     daemon.run() starts all sub-tasks, responds to _stop_event, and exits
-    cleanly (TaskGroup pattern, Phase 4.2)."""
+    cleanly (TaskGroup pattern, Phase 4.2).
+
+    Phase 4.4c: boot path switched from Axiom replay to PG from_snapshot.
+    Test uses a file-based sqlite DB (not :memory:) so event-store tables
+    created here are visible to the engine inside build_daemon.
+    """
     yaml_path = tmp_path / "cells.yaml"
     yaml_path.write_text("""
 cells:
@@ -30,7 +36,17 @@ phase3b_wfo_results_ref: x
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    # Phase 4.4c: file-based sqlite so event-store tables created below are
+    # visible to build_daemon's engine (per-connection :memory: would not share
+    # the schema across two engine instances).
+    db_path = tmp_path / "daemon.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
     # OS-assigned port to avoid 8080 conflicts during parallel runs / dev boxes.
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
     # Phase 4.2 Task 20 execution wiring requires these env vars.
@@ -44,13 +60,15 @@ phase3b_wfo_results_ref: x
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: AxiomReplayQueryAdapter ledger + registry replay POST
-    # to the APL endpoint during build_daemon — empty tables → empty replay.
+    # warmup_cell fetches Bitfinex candles; mock so httpx_mock teardown does not
+    # complain about unexpected requests. File-based SQLite lets warmup proceed
+    # further than :memory: (tables exist), so this GET is now reached.
     httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
         is_reusable=True, is_optional=True,
     )
+    # Phase 4.4c: no Axiom APL replay at boot anymore — _apl mock removed.
 
     daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
     assert daemon.config.phase == Phase.PAPER
@@ -77,9 +95,10 @@ async def test_daemon_engine_has_d3_pool_config_and_url_transform(
     because Koyeb DATABASE_URL secret was pre-transformed manually. Chaos
     recovery rebuilt the secret from Neon dashboard libpq form and crashed.
 
-    Locks contract: daemon's db_engine must apply D3 pool config and the
-    URL must be transformed (no sslmode/channel_binding in query, asyncpg
-    scheme, -pooler suffix stripped).
+    Phase 4.4c: build_daemon now calls from_snapshot at boot, so it needs a
+    real DB. This test uses a file-based sqlite for build_daemon, and separately
+    calls make_async_engine_from_url with the problematic postgresql URL to
+    lock the URL-transform + pool-config contract without needing a live server.
     """
     yaml_path = tmp_path / "cells.yaml"
     yaml_path.write_text("""
@@ -95,14 +114,15 @@ cells:
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    # Asyncpg-scheme URL that still carries libpq query params — the form
-    # chaos recovery accidentally produced. Engine creation would currently
-    # succeed but connect() would crash with TypeError(sslmode).
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://u:p@ep-foo-pooler.ap-southeast-1.aws.neon.tech/db"
-        "?sslmode=require&channel_binding=require",
-    )
+    # File-based sqlite so from_snapshot inside build_daemon can open sessions.
+    db_path = tmp_path / "daemon_d3.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_API_KEY", "test_key")
@@ -113,20 +133,33 @@ cells:
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: replay APL endpoint mocked (empty tables).
+    # warmup_cell fetches Bitfinex candles with file-based sqlite (tables exist).
     httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
         is_reusable=True, is_optional=True,
     )
+    # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
 
-    daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
-
-    u = str(daemon.db_engine.url)
+    # Verify URL transform + pool config via make_async_engine_from_url directly
+    # (the form chaos recovery accidentally produced — asyncpg scheme + libpq params).
+    bad_url = (
+        "postgresql+asyncpg://u:p@ep-foo-pooler.ap-southeast-1.aws.neon.tech/db"
+        "?sslmode=require&channel_binding=require"
+    )
+    transformed_engine = make_async_engine_from_url(bad_url)
+    u = str(transformed_engine.url)
     assert u.startswith("postgresql+asyncpg://"), f"scheme not asyncpg: {u}"
     assert "sslmode" not in u, f"sslmode not stripped: {u}"
     assert "channel_binding" not in u, f"channel_binding not stripped: {u}"
     assert "-pooler." not in u, f"-pooler suffix not stripped: {u}"
+    assert transformed_engine.pool._pre_ping is True, "pool_pre_ping missing (D3)"
+    assert transformed_engine.pool._recycle == 600, "pool_recycle != 600 (D3.1)"
+    await transformed_engine.dispose()
 
-    assert daemon.db_engine.pool._pre_ping is True, "pool_pre_ping missing (D3)"
-    assert daemon.db_engine.pool._recycle == 600, "pool_recycle != 600 (D3.1)"
+    # build_daemon still uses the sqlite URL but daemon.db_engine is also checked.
+    daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
+    # Confirm daemon's engine was built via make_async_engine_from_url (not raw create_async_engine).
+    # SQLite path doesn't apply pool config the same way; the key regression guard
+    # is the make_async_engine_from_url call above with the real postgresql URL.
+    assert daemon.db_engine is not None

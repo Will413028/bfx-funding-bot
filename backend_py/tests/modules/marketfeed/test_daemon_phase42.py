@@ -1,6 +1,7 @@
 """build_daemon: AccountContext + executor + chain + conditional fill_tracker."""
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,21 +28,42 @@ phase3b_wfo_results_ref: x
     return yaml_path
 
 
-def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirror the env baseline used by existing test_daemon.py."""
+async def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Mirror the env baseline used by existing test_daemon.py.
+
+    Phase 4.4c: switched to file-based sqlite so event-store tables are
+    visible to build_daemon's session_factory (from_snapshot at boot).
+    """
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    db_path = tmp_path / "daemon_p42.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
+
+
+def _add_bitfinex_mock(httpx_mock: HTTPXMock) -> None:
+    """warmup_cell fetches Bitfinex candles with file-based sqlite (tables exist)."""
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
+        is_reusable=True, is_optional=True,
+    )
 
 
 @pytest.mark.asyncio
 async def test_build_daemon_wires_paper_executor_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
-    _base_env(monkeypatch)
+    await _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
@@ -53,12 +75,8 @@ async def test_build_daemon_wires_paper_executor_by_default(
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: AxiomReplayQueryAdapter replay APL endpoint mocked.
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
-        is_reusable=True, is_optional=True,
-    )
+    _add_bitfinex_mock(httpx_mock)
+    # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
@@ -75,7 +93,7 @@ async def test_build_daemon_wires_paper_executor_by_default(
 async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
-    _base_env(monkeypatch)
+    await _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_API_KEY", "k")
     monkeypatch.setenv("BFX_API_SECRET", "s")
@@ -87,12 +105,8 @@ async def test_build_daemon_invalid_executor_combo_raises(
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: AxiomReplayQueryAdapter replay APL endpoint mocked.
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
-        is_reusable=True, is_optional=True,
-    )
+    _add_bitfinex_mock(httpx_mock)
+    # Phase 4.4c: _apl mock removed.
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     with pytest.raises(ExecutorConfigError):
@@ -146,7 +160,7 @@ async def test_build_daemon_filters_disabled_hard_guards(
     """M2 regression: SafetyConfig.<guard>.enabled flag was Pydantic-parsed
     but build_daemon ignored it — 7 guards always constructed regardless of
     yaml. Lock the contract: build_daemon must filter guards by enabled."""
-    _base_env(monkeypatch)
+    await _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
@@ -165,12 +179,8 @@ async def test_build_daemon_filters_disabled_hard_guards(
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: AxiomReplayQueryAdapter replay APL endpoint mocked.
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
-        is_reusable=True, is_optional=True,
-    )
+    _add_bitfinex_mock(httpx_mock)
+    # Phase 4.4c: _apl mock removed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DivergenceRateGuard,
@@ -209,7 +219,7 @@ async def test_build_daemon_includes_enabled_calibrated_guard(
 ) -> None:
     """M2: an enabled calibrated guard (with a valid threshold) appears in
     the chain. Pairs with the disabled-default safety.yaml fixture."""
-    _base_env(monkeypatch)
+    await _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
@@ -243,12 +253,8 @@ calibrated_guards:
         method="POST", status_code=200, json={"ingested": 1},
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4b D1: AxiomReplayQueryAdapter replay APL endpoint mocked.
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/_apl?format=tabular",
-        method="POST", status_code=200, json={"tables": []},
-        is_reusable=True, is_optional=True,
-    )
+    _add_bitfinex_mock(httpx_mock)
+    # Phase 4.4c: _apl mock removed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DrawdownGuard,
@@ -262,5 +268,3 @@ calibrated_guards:
     types = {type(g) for g in daemon.safety_chain.guards}
     assert RealizedLossGuard in types  # enabled
     assert DrawdownGuard not in types  # disabled
-
-

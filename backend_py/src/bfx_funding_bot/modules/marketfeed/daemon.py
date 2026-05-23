@@ -15,7 +15,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,11 +54,10 @@ from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
-from bfx_funding_bot.modules.execution.axiom_event_query import (
-    AxiomReplayQueryAdapter,
-)
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.sink import PostgresEventSink
+from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -164,9 +163,6 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     ledger: PaperPositionLedger
-    # Phase 4.4b D1: AxiomReplayQueryAdapter owns its own httpx.AsyncClient
-    # for ledger + registry replay; teardown must aclose() to release the pool.
-    axiom_query: AxiomReplayQueryAdapter
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
     offer_registry: OfferRegistry | None = None
@@ -684,36 +680,22 @@ async def build_daemon(
         allocation_cap_usdt=allocation_cap,
     )
 
-    # PaperPositionLedger replay — Axiom is SoT; fast-fail on unreachable
-    # (LedgerReplayError → daemon never starts; empty-ledger fallback would
-    # let AllocationCap permit over-cap exposure). Phase 4.4b D1: real
-    # AxiomReplayQueryAdapter replaces the 4.3 `_AxiomQueryAdapter` stub; a
-    # single instance also feeds OfferRegistry below (port-per-consumer duck
-    # typing — same adapter satisfies both ledger and registry protocols).
-    ledger_window_days = _resolve_event_replay_days()
-    # Thread the SAME deployment env into the replay/query path: emit tags
-    # events with axiom_cfg.deployment_env, query filters by the same enum
-    # member → no silent replay miss across env boundaries.
-    axiom_query = AxiomReplayQueryAdapter(
-        api_key=axiom_cfg.api_key,
-        dataset=axiom_cfg.dataset,
-        deployment_environment=axiom_cfg.deployment_env,
-    )
-    ledger = await PaperPositionLedger.replay_from_axiom(
-        account_id=account_id,
-        since=datetime.now(UTC) - timedelta(days=ledger_window_days),
-        axiom_query=axiom_query,
-    )
-
-    # OfferRegistry cold-start replay — Phase 4.4b D1: reuses the single
-    # AxiomReplayQueryAdapter instance above. cleanup_terminal removes stale
-    # RELEASED records > 24h.
-    offer_registry = OfferRegistry(
-        axiom_query=axiom_query,
-        clock=lambda: int(time.time() * 1000),
-    )
-    await offer_registry.replay_from_axiom()
-    offer_registry.cleanup_terminal(older_than_ms=24 * 3600 * 1000)
+    # Phase 4.4c: PG event-store replaces Axiom replay at boot.
+    # from_snapshot reads position_state + offer_claims from Postgres (written
+    # by PostgresEventSink at runtime); avoids 400 errors from Axiom APL
+    # endpoint on cold-start and removes external dependency from the boot path.
+    env_str = axiom_cfg.deployment_env.value
+    event_store = PostgresEventStore(deployment_environment=env_str)
+    async with session_factory() as snap_session:
+        ledger = await PaperPositionLedger.from_snapshot(
+            snap_session, account_id=account_id, deployment_environment=env_str
+        )
+        offer_registry = await OfferRegistry.from_snapshot(
+            snap_session,
+            account_id=account_id,
+            deployment_environment=env_str,
+            clock=lambda: int(time.time() * 1000),
+        )
 
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
     safety_cfg_path = Path(
@@ -821,6 +803,10 @@ async def build_daemon(
     bus.subscribe(ReservationClaimed,  axiom_sink.on_reservation_claimed)
     bus.subscribe(OrderFilled,         axiom_sink.on_order_filled)
     bus.subscribe(ReservationReleased, axiom_sink.on_reservation_released)
+    pg_sink = PostgresEventSink(store=event_store, session_factory=session_factory)
+    bus.subscribe(ReservationClaimed,  pg_sink.on_reservation_claimed)
+    bus.subscribe(OrderFilled,         pg_sink.on_order_filled)
+    bus.subscribe(ReservationReleased, pg_sink.on_reservation_released)
     # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
     bus.subscribe(ReservationClaimed,  offer_registry.handle)
     bus.subscribe(OrderFilled,         offer_registry.handle)
@@ -1054,7 +1040,6 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         ledger=ledger,
-        axiom_query=axiom_query,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
         offer_registry=offer_registry,
@@ -1141,10 +1126,6 @@ async def _run() -> None:
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
                 await daemon.smoke_runner.aclose()
-        # Phase 4.4b D1: AxiomReplayQueryAdapter holds its own httpx.AsyncClient
-        # for ledger + registry replay; release the pool on shutdown.
-        with contextlib.suppress(Exception):
-            await daemon.axiom_query.aclose()
 
     # Self-smoke trigger (Phase 4.1.x — see specs/2026-05-21-g1-c1-continuity-redesign-design.md)
     # Gated by phase=paper + duration set; exception path is structurally unreachable here
