@@ -130,6 +130,13 @@ class AxiomReplayQueryAdapter:
         Re-nests dot-notation payload columns (e.g. `payload.cid`) into a
         single `payload` dict, since Axiom flattens nested objects on emit
         (4.4 prework commit 9261f3f).
+
+        Axiom's columnar schema is the UNION of all event types' fields. So
+        a row for `order_fill` includes `payload.X` columns from OTHER event
+        types (e.g. `payload.divergence_detail.replay.signal_direction` from
+        `signal_divergence`) with value `None`. Filter `None` values during
+        re-nest, otherwise downstream Pydantic models with `extra='forbid'`
+        reject the row (e.g. OrderFillPayload at ledger.py:165).
         """
         tables = payload.get("tables") or []
         if not tables:
@@ -152,6 +159,8 @@ class AxiomReplayQueryAdapter:
                     payload_object_value = value
                     payload_object_seen = True
                 elif field.startswith("payload."):
+                    if value is None:
+                        continue  # union-schema noise from other event types
                     key = field[len("payload."):]
                     payload_nested[key] = value
                 else:

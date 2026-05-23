@@ -143,6 +143,48 @@ def test_tabular_to_rows_re_nests_dot_notation_payload_columns() -> None:
     assert row["account_id"] == "default"
 
 
+def test_tabular_to_rows_filters_none_payload_columns_from_union_schema() -> None:
+    """Axiom's columnar schema is the UNION of all event types' payload fields.
+    A row for order_fill includes `payload.X` columns from OTHER event types
+    (e.g. signal_divergence's `payload.divergence_detail.replay.X`) with None
+    value. These must be filtered, else downstream Pydantic `extra='forbid'`
+    models reject the row.
+    """
+    response = {
+        "tables": [{
+            "fields": [
+                {"name": "_time"}, {"name": "event_type"},
+                {"name": "payload.cid"},
+                {"name": "payload.offer_id"},
+                {"name": "payload.fill_size_usdt"},
+                # Bleed-through from signal_divergence event_type's schema:
+                {"name": "payload.divergence_detail.replay.signal_direction"},
+                {"name": "payload.divergence_detail.replay.signal_score"},
+                {"name": "payload.signal_score"},
+            ],
+            "columns": [
+                ["2026-05-23T10:00:00Z"],
+                ["order_fill"],
+                [1],
+                ["v1"],
+                [100.0],
+                [None],  # null — order_fill doesn't have divergence_detail
+                [None],
+                [None],
+            ],
+        }],
+    }
+    rows = AxiomReplayQueryAdapter._tabular_to_rows(response)
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    # Real fields kept
+    assert payload == {"cid": 1, "offer_id": "v1", "fill_size_usdt": 100.0}
+    # Null-bleed fields filtered (would crash OrderFillPayload `extra='forbid'`)
+    assert "divergence_detail.replay.signal_direction" not in payload
+    assert "divergence_detail.replay.signal_score" not in payload
+    assert "signal_score" not in payload
+
+
 def test_tabular_to_rows_empty_response_returns_empty_list() -> None:
     assert AxiomReplayQueryAdapter._tabular_to_rows({"tables": []}) == []
     assert AxiomReplayQueryAdapter._tabular_to_rows({}) == []
