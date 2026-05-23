@@ -15,6 +15,7 @@ from bfx_funding_bot.external.axiom import (
     AxiomClient,
     AxiomConfig,
 )
+from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 
 def _event() -> dict:
@@ -36,6 +37,7 @@ def cfg() -> AxiomConfig:
     return AxiomConfig(
         api_key="test-key",
         dataset="bfx-funding-bot-events",
+        deployment_env=DeploymentEnvironment.CI,
         base_url="https://api.axiom.example",
         batch_size=2,
         flush_interval_s=0.05,
@@ -122,7 +124,9 @@ async def test_on_flush_fires_per_loop_iteration_with_events(
     )
     calls: list[None] = []
     cfg2 = AxiomConfig(
-        api_key=cfg.api_key, dataset=cfg.dataset, base_url=cfg.base_url,
+        api_key=cfg.api_key, dataset=cfg.dataset,
+        deployment_env=DeploymentEnvironment.CI,
+        base_url=cfg.base_url,
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
@@ -150,7 +154,9 @@ async def test_on_flush_fires_per_loop_iteration_even_with_empty_queue(
     """
     calls: list[None] = []
     cfg2 = AxiomConfig(
-        api_key=cfg.api_key, dataset=cfg.dataset, base_url=cfg.base_url,
+        api_key=cfg.api_key, dataset=cfg.dataset,
+        deployment_env=DeploymentEnvironment.CI,
+        base_url=cfg.base_url,
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
@@ -176,7 +182,9 @@ async def test_on_flush_fires_in_fallback_mode(
     timing dominates the test window otherwise.)"""
     calls: list[None] = []
     cfg2 = AxiomConfig(
-        api_key=cfg.api_key, dataset=cfg.dataset, base_url=cfg.base_url,
+        api_key=cfg.api_key, dataset=cfg.dataset,
+        deployment_env=DeploymentEnvironment.CI,
+        base_url=cfg.base_url,
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
@@ -207,7 +215,9 @@ async def test_on_flush_stops_after_auth_error_kills_flush_loop(
     )
     calls: list[None] = []
     cfg2 = AxiomConfig(
-        api_key=cfg.api_key, dataset=cfg.dataset, base_url=cfg.base_url,
+        api_key=cfg.api_key, dataset=cfg.dataset,
+        deployment_env=DeploymentEnvironment.CI,
+        base_url=cfg.base_url,
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )

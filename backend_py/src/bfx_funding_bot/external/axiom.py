@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import signal as _signal
 import sys
 from collections.abc import Callable
@@ -26,6 +27,7 @@ from tenacity import (
 )
 
 from bfx_funding_bot.core.errors import FatalError, TransientError
+from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class _TransientError(TransientError):
 class AxiomConfig:
     api_key: str
     dataset: str
+    deployment_env: DeploymentEnvironment
     base_url: str = "https://api.axiom.co"
     batch_size: int = 100
     flush_interval_s: float = 1.0
@@ -64,6 +67,19 @@ class AxiomConfig:
     # flush() → loop task ends → no more iterations → heartbeat decays →
     # scan_staleness escalates to FatalError correctly).
     on_flush: Callable[[], None] | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_env(cls) -> AxiomConfig:
+        env_val = os.environ.get("BFX_DEPLOYMENT_ENV")
+        if not env_val:
+            raise ValueError(
+                "BFX_DEPLOYMENT_ENV required (one of: prod, shadow, ci)"
+            )
+        return cls(
+            api_key=os.environ["AXIOM_API_KEY"],
+            dataset=os.environ["AXIOM_DATASET"],
+            deployment_env=DeploymentEnvironment(env_val),
+        )
 
 
 class AxiomClient:
