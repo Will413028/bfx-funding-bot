@@ -60,8 +60,9 @@ phase3b_wfo_results_ref: x
         await asyncio.sleep(0.05)
         daemon._stop_event.set()
 
-    asyncio.create_task(_stop_after_delay())
+    stop_task = asyncio.create_task(_stop_after_delay())
     await daemon.run()  # should return cleanly after _stop_event is set
+    await stop_task
 
 
 async def test_daemon_engine_has_d3_pool_config_and_url_transform(
