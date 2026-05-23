@@ -27,7 +27,10 @@ from tenacity import (
 )
 
 from bfx_funding_bot.core.errors import FatalError, TransientError
-from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
+from bfx_funding_bot.modules.observability.resource import (
+    DeploymentEnvironment,
+    EventResource,
+)
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +86,17 @@ class AxiomConfig:
 
 
 class AxiomClient:
-    def __init__(self, cfg: AxiomConfig) -> None:
+    _RESERVED_ENVELOPE_FIELDS = frozenset({
+        "schema_version",
+        "deployment_environment",
+        "service_name",
+        "service_version",
+        "host_name",
+    })
+
+    def __init__(self, cfg: AxiomConfig, resource: EventResource) -> None:
         self.cfg = cfg
+        self._resource = resource
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._http: httpx.AsyncClient | None = None
         self._flush_task: asyncio.Task[None] | None = None
@@ -115,7 +127,14 @@ class AxiomClient:
             self._http = None
 
     async def emit(self, event: dict[str, Any]) -> None:
-        await self._queue.put(event)
+        collisions = self._RESERVED_ENVELOPE_FIELDS & event.keys()
+        if collisions:
+            raise ValueError(
+                f"emit() got reserved resource field(s) in event: {sorted(collisions)}. "
+                f"Resource fields are injected by AxiomClient; do not set them in callers."
+            )
+        enriched = {**event, **self._resource.envelope_fields()}
+        await self._queue.put(enriched)
 
     async def flush(self) -> None:
         batch: list[dict[str, Any]] = []

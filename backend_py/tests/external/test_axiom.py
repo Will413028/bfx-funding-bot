@@ -15,7 +15,16 @@ from bfx_funding_bot.external.axiom import (
     AxiomClient,
     AxiomConfig,
 )
-from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
+from bfx_funding_bot.modules.observability.resource import (
+    DeploymentEnvironment,
+    EventResource,
+)
+
+_TEST_RESOURCE = EventResource(
+    deployment_environment=DeploymentEnvironment.CI,
+    service_version="test",
+    host_name=None,
+)
 
 
 def _event() -> dict:
@@ -49,7 +58,7 @@ async def test_emit_batches_to_ingest_endpoint(httpx_mock: HTTPXMock, cfg: Axiom
         url="https://api.axiom.example/v1/datasets/bfx-funding-bot-events/ingest",
         method="POST", status_code=200, json={"ingested": 2},
     )
-    client = AxiomClient(cfg)
+    client = AxiomClient(cfg, resource=_TEST_RESOURCE)
     await client.start()
     await client.emit(_event())
     await client.emit(_event())
@@ -67,7 +76,7 @@ async def test_emit_retries_on_500(httpx_mock: HTTPXMock, cfg: AxiomConfig):
     httpx_mock.add_response(status_code=500)
     httpx_mock.add_response(status_code=200, json={"ingested": 1})
 
-    client = AxiomClient(cfg)
+    client = AxiomClient(cfg, resource=_TEST_RESOURCE)
     await client.start()
     await client.emit(_event())
     await client.flush()
@@ -79,7 +88,7 @@ async def test_emit_retries_on_500(httpx_mock: HTTPXMock, cfg: AxiomConfig):
 async def test_emit_401_raises_auth_error(httpx_mock: HTTPXMock, cfg: AxiomConfig):
     httpx_mock.add_response(status_code=401, json={"error": "unauthorized"})
 
-    client = AxiomClient(cfg)
+    client = AxiomClient(cfg, resource=_TEST_RESOURCE)
     await client.start()
     await client.emit(_event())
     with pytest.raises(AxiomAuthError):
@@ -94,7 +103,7 @@ async def test_emit_falls_back_to_stdout_after_persistent_failure(
     for _ in range(10):
         httpx_mock.add_response(status_code=503)
 
-    client = AxiomClient(cfg)
+    client = AxiomClient(cfg, resource=_TEST_RESOURCE)
     client._fallback_after_consecutive_fail = 2  # speed up test
     await client.start()
     await client.emit(_event())
@@ -130,7 +139,7 @@ async def test_on_flush_fires_per_loop_iteration_with_events(
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
-    client = AxiomClient(cfg2)
+    client = AxiomClient(cfg2, resource=_TEST_RESOURCE)
     await client.start()
     await client.emit(_event())
     # Wait long enough for the loop to wake at least twice (cfg.flush_interval_s
@@ -160,7 +169,7 @@ async def test_on_flush_fires_per_loop_iteration_even_with_empty_queue(
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
-    client = AxiomClient(cfg2)
+    client = AxiomClient(cfg2, resource=_TEST_RESOURCE)
     await client.start()
     # No emit. Loop iterates with empty queue.
     await asyncio.sleep(0.2)
@@ -188,7 +197,7 @@ async def test_on_flush_fires_in_fallback_mode(
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
-    client = AxiomClient(cfg2)
+    client = AxiomClient(cfg2, resource=_TEST_RESOURCE)
     client._fallback_mode = True  # short-circuit; _send_batch goes stdout-only
     await client.start()
     await client.emit(_event())
@@ -221,7 +230,7 @@ async def test_on_flush_stops_after_auth_error_kills_flush_loop(
         batch_size=cfg.batch_size, flush_interval_s=cfg.flush_interval_s,
         on_flush=lambda: calls.append(None),
     )
-    client = AxiomClient(cfg2)
+    client = AxiomClient(cfg2, resource=_TEST_RESOURCE)
     await client.start()
     await client.emit(_event())
     # Loop wakes, calls flush() which raises AxiomAuthError → _flush_loop
