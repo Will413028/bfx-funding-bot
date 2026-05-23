@@ -86,6 +86,9 @@ class AxiomConfig:
 
 
 class AxiomClient:
+    # Must mirror every key EventResource.envelope_fields() can emit (incl. the
+    # optional host_name). Kept in sync by hand — if you add a field there, add
+    # it here too, or a caller could set it and have it silently overwritten.
     _RESERVED_ENVELOPE_FIELDS = frozenset({
         "schema_version",
         "deployment_environment",
