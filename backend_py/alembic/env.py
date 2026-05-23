@@ -14,10 +14,9 @@ from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 
 # Side-effect imports: register tables with Base.metadata
-import bfx_funding_bot.modules.accounts.tables  # noqa: F401
-import bfx_funding_bot.modules.candles.tables  # noqa: F401
+import bfx_funding_bot.modules.accounts.tables
+import bfx_funding_bot.modules.candles.tables
 import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
-
 from alembic import context
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings

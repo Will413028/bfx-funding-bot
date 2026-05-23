@@ -1,8 +1,9 @@
 """D3 — DB pool reconnect under chaos."""
 import asyncio
-from sqlalchemy import text
+import contextlib
 
 import pytest
+from sqlalchemy import text
 
 pytestmark = pytest.mark.integration
 
@@ -18,13 +19,11 @@ async def test_pool_pre_ping_recovers_killed_connection(pg_engine):
     # Kill the connection from a separate connection
     # (terminating a connection closes it, so we can't use the pool conn that was just terminated)
     async with pg_engine.connect() as killer:
-        try:
+        # pg_terminate_backend may fail if the connection is already gone, or
+        # the connection doing the terminating may get caught up. Either way,
+        # the target pid should be dead.
+        with contextlib.suppress(Exception):
             await killer.execute(text(f"SELECT pg_terminate_backend({pid})"))
-        except Exception:
-            # pg_terminate_backend may fail if the connection is already gone,
-            # or the connection doing the terminating may get caught up.
-            # Either way, the target pid should be dead.
-            pass
 
     # Next acquire should rebuild connection with pool_pre_ping detecting the dead one
     async with pg_engine.connect() as conn2:

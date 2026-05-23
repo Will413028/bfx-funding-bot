@@ -61,7 +61,11 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
-ignore = ["E501"]
+# E501: line length handled by formatter intent, not enforced.
+# RUF001/002/003: ambiguous-unicode checks target homoglyph attacks in
+# English-only code; this codebase intentionally uses CJK punctuation
+# (Chinese docstrings/comments), so they are pure false positives here.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 strict = true

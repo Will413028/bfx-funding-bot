@@ -154,6 +154,7 @@ def test_resolve_budget_seconds_raises_if_staleness_not_resolved() -> None:
     None at emit time = loader bypassed = AssertionError to surface the bug.
     """
     import pytest
+
     from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_budget_seconds
 
     cell = CellConfig(
@@ -192,6 +193,7 @@ def test_resolve_staleness_budget_hours_raises_if_not_resolved() -> None:
     (parallel to test_resolve_budget_seconds_raises_if_staleness_not_resolved).
     """
     import pytest
+
     from bfx_funding_bot.modules.marketfeed.signal_engine import _resolve_staleness_budget_hours
 
     cell = CellConfig(

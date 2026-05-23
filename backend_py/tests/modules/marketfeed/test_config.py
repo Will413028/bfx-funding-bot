@@ -132,7 +132,8 @@ def test_load_config_uses_env_var_precedence(monkeypatch, tmp_path):
     fake.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("AXIOM_API_KEY", "k")
+    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_CELLS_YAML", str(fake))
 
@@ -148,7 +149,8 @@ def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
     cwd_cfg.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("AXIOM_API_KEY", "k")
+    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -167,7 +169,8 @@ def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
     fake_cells.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("AXIOM_API_KEY", "k")
+    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
 
@@ -207,7 +210,8 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
     cwd_cfg.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("AXIOM_API_KEY", "k")
+    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_CELLS_YAML", "/nonexistent/path/cells.yaml")
     monkeypatch.chdir(tmp_path)
@@ -220,7 +224,8 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
 def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
     """All three tiers missing → FileNotFoundError lists attempted paths."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k"); monkeypatch.setenv("AXIOM_DATASET", "d")
+    monkeypatch.setenv("AXIOM_API_KEY", "k")
+    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
 
@@ -233,7 +238,7 @@ def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
         class _FakeRoot:
             def __truediv__(self, _name):
                 class _NoExist:
-                    def is_file(self_inner): return False
+                    def is_file(self): return False
                 return _NoExist()
         return _FakeRoot()
     monkeypatch.setattr(importlib.resources, "files", fake_files)

@@ -31,11 +31,11 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(async_url, pool_pre_ping=True, pool_recycle=600)
 
     # Create tables via Base.metadata (faster than alembic for tests)
-    from bfx_funding_bot.core.db import Base
     # Side-effect imports to populate Base.metadata
-    import bfx_funding_bot.modules.accounts.tables  # noqa: F401
-    import bfx_funding_bot.modules.candles.tables  # noqa: F401
+    import bfx_funding_bot.modules.accounts.tables
+    import bfx_funding_bot.modules.candles.tables
     import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

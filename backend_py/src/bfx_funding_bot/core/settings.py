@@ -62,7 +62,7 @@ class Settings(BaseSettings):
         elif raw.startswith("postgres://"):
             raw = "postgresql+psycopg://" + raw[len("postgres://"):]
         elif raw.startswith("postgresql+"):
-            head, _, tail = raw.partition("://")
+            _head, _, tail = raw.partition("://")
             raw = "postgresql+psycopg://" + tail
 
         # urlsplit then rebuild with cleaned host + normalised query
