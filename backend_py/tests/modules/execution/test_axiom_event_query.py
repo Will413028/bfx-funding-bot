@@ -61,3 +61,100 @@ def test_build_apl_escapes_quote_in_account_id_via_replacement() -> None:
             account_id="bad'id",
             since=datetime(2026, 5, 1, tzinfo=UTC),
         )
+
+
+def test_tabular_to_rows_handles_flat_payload_object_column() -> None:
+    """Best case: Axiom returned `payload` as one nested object column."""
+    payload_obj = {
+        "cid": 1, "venue_offer_id": "v1", "size_usdt": 100.0,
+        "signal_correlation_id": "uuid-1", "account_id": "default",
+        "is_simulated": False,
+    }
+    response = {
+        "tables": [{
+            "fields": [
+                {"name": "_time"}, {"name": "event_type"},
+                {"name": "account_id"}, {"name": "correlation_id"},
+                {"name": "payload"},
+            ],
+            "columns": [
+                ["2026-05-23T10:00:00Z"],
+                ["reservation_claimed"],
+                ["default"],
+                ["uuid-1"],
+                [payload_obj],
+            ],
+        }],
+    }
+    rows = AxiomReplayQueryAdapter._tabular_to_rows(response)
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "reservation_claimed"
+    assert rows[0]["payload"] == payload_obj
+
+
+def test_tabular_to_rows_re_nests_dot_notation_payload_columns() -> None:
+    """Axiom flattens nested objects — `payload.cid` becomes a column.
+    Adapter must re-nest these back into `payload` dict.
+
+    Lesson source: 4.4 prework commit 9261f3f.
+    """
+    response = {
+        "tables": [{
+            "fields": [
+                {"name": "_time"}, {"name": "event_type"},
+                {"name": "account_id"}, {"name": "correlation_id"},
+                {"name": "payload.cid"},
+                {"name": "payload.venue_offer_id"},
+                {"name": "payload.size_usdt"},
+                {"name": "payload.signal_correlation_id"},
+                {"name": "payload.account_id"},
+                {"name": "payload.is_simulated"},
+            ],
+            "columns": [
+                ["2026-05-23T10:00:00Z"],
+                ["reservation_claimed"],
+                ["default"],
+                ["uuid-1"],
+                [1],
+                ["v1"],
+                [100.0],
+                ["uuid-1"],
+                ["default"],
+                [False],
+            ],
+        }],
+    }
+    rows = AxiomReplayQueryAdapter._tabular_to_rows(response)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event_type"] == "reservation_claimed"
+    assert row["payload"]["cid"] == 1
+    assert row["payload"]["venue_offer_id"] == "v1"
+    assert row["payload"]["size_usdt"] == 100.0
+    assert row["payload"]["is_simulated"] is False
+    # Top-level fields preserved
+    assert row["account_id"] == "default"
+
+
+def test_tabular_to_rows_empty_response_returns_empty_list() -> None:
+    assert AxiomReplayQueryAdapter._tabular_to_rows({"tables": []}) == []
+    assert AxiomReplayQueryAdapter._tabular_to_rows({}) == []
+    assert AxiomReplayQueryAdapter._tabular_to_rows({
+        "tables": [{"fields": [], "columns": []}],
+    }) == []
+
+
+def test_tabular_to_rows_multiple_rows() -> None:
+    response = {
+        "tables": [{
+            "fields": [{"name": "_time"}, {"name": "event_type"}],
+            "columns": [
+                ["2026-05-23T10:00:00Z", "2026-05-23T11:00:00Z"],
+                ["reservation_claimed", "order_fill"],
+            ],
+        }],
+    }
+    rows = AxiomReplayQueryAdapter._tabular_to_rows(response)
+    assert len(rows) == 2
+    assert rows[0]["event_type"] == "reservation_claimed"
+    assert rows[1]["event_type"] == "order_fill"
