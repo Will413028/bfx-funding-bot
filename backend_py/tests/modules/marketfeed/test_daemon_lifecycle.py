@@ -1,19 +1,12 @@
 """Phase 4.4b D1 — daemon wires real AxiomReplayQueryAdapter.
 
-The 4.3/4.4a placeholder stubs (`_AxiomQueryAdapter` for ledger,
-`_OfferRegistryQueryStub` for registry) must be deleted; a single
-`AxiomReplayQueryAdapter` instance now satisfies both consumer protocols
-via duck typing (Hexagonal port-per-consumer).
-
-The smoke `AxiomSmokeQueryAdapter` (renamed from `AxiomEventQueryAdapter`
-in T5) is a separate concern for L3 verification and stays wired.
+Phase 4.4c update: AxiomReplayQueryAdapter removed from daemon boot path
+(replaced by PG from_snapshot). The import and Daemon.axiom_query field are
+removed. Tests adjusted accordingly.
 """
 from __future__ import annotations
 
 import bfx_funding_bot.modules.marketfeed.daemon as daemon_mod
-from bfx_funding_bot.modules.execution.axiom_event_query import (
-    AxiomReplayQueryAdapter,
-)
 
 
 def test_axiom_query_stub_deleted() -> None:
@@ -30,9 +23,13 @@ def test_offer_registry_query_stub_deleted() -> None:
     )
 
 
-def test_axiom_replay_adapter_imported_in_daemon() -> None:
-    """Real `AxiomReplayQueryAdapter` is imported by daemon for replay wiring."""
-    assert getattr(daemon_mod, "AxiomReplayQueryAdapter", None) is AxiomReplayQueryAdapter
+def test_axiom_replay_adapter_not_in_daemon_boot() -> None:
+    """Phase 4.4c: AxiomReplayQueryAdapter removed from daemon boot path.
+    Daemon no longer imports it (PG from_snapshot is the boot replay source).
+    """
+    assert not hasattr(daemon_mod, "AxiomReplayQueryAdapter"), (
+        "AxiomReplayQueryAdapter should be removed from daemon (Phase 4.4c)"
+    )
 
 
 import pytest  # noqa: E402
@@ -43,7 +40,8 @@ async def test_daemon_reads_new_env_event_replay_days_with_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """4.4b D4: BFX_EVENT_REPLAY_DAYS preferred; BFX_LEDGER_REPLAY_DAYS fallback
-    for 1 deploy cycle transition."""
+    for 1 deploy cycle transition. _resolve_event_replay_days() is kept in daemon
+    for reference; boot path no longer calls it (Phase 4.4c)."""
     monkeypatch.setenv("BFX_EVENT_REPLAY_DAYS", "45")
     monkeypatch.delenv("BFX_LEDGER_REPLAY_DAYS", raising=False)
     from bfx_funding_bot.modules.marketfeed.daemon import _resolve_event_replay_days
