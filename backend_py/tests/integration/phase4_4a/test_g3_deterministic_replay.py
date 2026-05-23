@@ -23,7 +23,7 @@ async def test_replay_same_log_twice_same_state() -> None:
     sig_id = uuid4()
     rows = [
         {
-            "event_type": "RESERVATION_CLAIMED",
+            "event_type": "reservation_claimed",
             "occurred_at_ms": 1000, "event_seq": 1,
             "payload": {
                 "cid": 42, "venue_offer_id": "42",
@@ -59,7 +59,7 @@ async def test_replay_with_shuffled_input_sorts_by_occurred_at_ms_and_event_seq(
         "is_simulated": False,
     }
     rows_a = [
-        {"event_type": "RESERVATION_CLAIMED", "occurred_at_ms": 1000, "event_seq": 1,
+        {"event_type": "reservation_claimed", "occurred_at_ms": 1000, "event_seq": 1,
          "payload": {**base_payload, "occurred_at_ms": 1000}},
     ]
     rows_b = list(reversed(rows_a))
