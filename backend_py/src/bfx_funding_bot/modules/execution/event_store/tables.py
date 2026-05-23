@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -71,7 +72,7 @@ class OfferClaimRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    size_usdt: Mapped[float] = mapped_column(Numeric, nullable=False)
+    size_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     signal_correlation_id: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_updated_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -90,8 +91,8 @@ class PositionStateRow(Base):
 
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
-    reserved_usdt: Mapped[float] = mapped_column(Numeric, nullable=False, server_default=text("0"))
-    realized_usdt: Mapped[float] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    realized_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_NOW

@@ -13,7 +13,11 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
     event_type_of,
     serialize_event,
 )
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, OfferClaimRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    OfferClaimRow,
+    PositionStateRow,
+)
 from bfx_funding_bot.modules.execution.registry_offers import ClaimRecord, RegistryState, transition
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
@@ -46,7 +50,7 @@ class PostgresEventStore:
             return False
 
         payload: dict[str, Any] = serialize_event(event)
-        session.add(EventLogRow(
+        row = EventLogRow(
             account_id=account_id,
             deployment_environment=self._env,
             event_type=etype,
@@ -55,9 +59,14 @@ class PostgresEventStore:
             venue_seq=venue_seq,
             payload=payload,
             occurred_at_ms=occurred_at_ms,
-        ))
-        # Snapshot maintenance — offer_claims projection (Task 5).
+        )
+        session.add(row)
+        await session.flush()  # assigns row.event_seq
+        # Snapshot maintenance (same txn).
         await self._project_offer_claims(session, event, account_id, venue_offer_id)
+        await self._project_position_state(
+            session, etype, account_id, getattr(_ev, "size_usdt", None), row.event_seq
+        )
         return True
 
     async def _already_logged(
@@ -127,6 +136,47 @@ class PostgresEventStore:
         cached = session.identity_map.get((OfferClaimRow, (rec.cid,), None))
         if cached is not None:
             session.expire(cached)
+
+
+    async def _project_position_state(
+        self,
+        session: AsyncSession,
+        etype: str,
+        account_id: str,
+        size_usdt: Any,
+        event_seq: int,
+    ) -> None:
+        size = Decimal(str(size_usdt)) if size_usdt is not None else Decimal("0")
+        ps = (
+            await session.execute(
+                select(PositionStateRow).where(
+                    PositionStateRow.account_id == account_id,
+                    PositionStateRow.deployment_environment == self._env,
+                )
+            )
+        ).scalar_one_or_none()
+        if ps is None:
+            ps = PositionStateRow(
+                account_id=account_id,
+                deployment_environment=self._env,
+                reserved_usdt=Decimal("0"),
+                realized_usdt=Decimal("0"),
+                last_event_seq=0,
+            )
+            session.add(ps)
+        reserved = Decimal(str(ps.reserved_usdt))
+        realized = Decimal(str(ps.realized_usdt))
+        if etype == "RESERVATION_CLAIMED":
+            reserved += size
+        elif etype == "ORDER_FILL":
+            delta = min(reserved, size)
+            reserved -= delta
+            realized += size
+        elif etype == "RESERVATION_RELEASED":
+            reserved -= min(reserved, size)
+        ps.reserved_usdt = reserved
+        ps.realized_usdt = realized
+        ps.last_event_seq = event_seq
 
 
 def _row_to_claim(row: OfferClaimRow) -> ClaimRecord:
