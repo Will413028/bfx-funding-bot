@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+import pytest
+import respx
+from httpx import Response
 
 from bfx_funding_bot.modules.execution.axiom_event_query import (
     AxiomReplayQueryAdapter,
@@ -158,3 +164,85 @@ def test_tabular_to_rows_multiple_rows() -> None:
     assert len(rows) == 2
     assert rows[0]["event_type"] == "reservation_claimed"
     assert rows[1]["event_type"] == "order_fill"
+
+
+@pytest.fixture
+def fake_axiom_response() -> dict[str, Any]:
+    return {
+        "tables": [{
+            "fields": [
+                {"name": "_time"}, {"name": "event_type"},
+                {"name": "account_id"}, {"name": "correlation_id"},
+                {"name": "payload.cid"},
+                {"name": "payload.venue_offer_id"},
+                {"name": "payload.size_usdt"},
+                {"name": "payload.signal_correlation_id"},
+                {"name": "payload.account_id"},
+                {"name": "payload.is_simulated"},
+            ],
+            "columns": [
+                ["2026-05-23T10:00:00Z"],
+                ["reservation_claimed"],
+                ["default"],
+                ["uuid-1"],
+                [1], ["v1"], [100.0], ["uuid-1"], ["default"], [False],
+            ],
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_order_events_posts_apl_and_returns_rows(
+    fake_axiom_response: dict[str, Any],
+) -> None:
+    adapter = AxiomReplayQueryAdapter(api_key="test-key", dataset="bfx-events")
+    try:
+        with respx.mock(base_url="https://api.axiom.co") as router:
+            route = router.post("/v1/datasets/_apl").mock(
+                return_value=Response(200, json=fake_axiom_response),
+            )
+            rows = await adapter.query_order_events(
+                "default", datetime(2026, 5, 1, tzinfo=UTC),
+            )
+        assert route.called
+        request_body = route.calls.last.request.read().decode("utf-8")
+        assert "reservation_claimed" in request_body
+        assert "['account_id'] == 'default'" in request_body
+        assert len(rows) == 1
+        assert rows[0]["payload"]["cid"] == 1
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fetch_events_with_filters(
+    fake_axiom_response: dict[str, Any],
+) -> None:
+    adapter = AxiomReplayQueryAdapter(api_key="test-key", dataset="bfx-events")
+    try:
+        with respx.mock(base_url="https://api.axiom.co") as router:
+            router.post("/v1/datasets/_apl").mock(
+                return_value=Response(200, json=fake_axiom_response),
+            )
+            rows = await adapter.fetch_events(
+                event_types=["reservation_claimed"],
+                up_to_ms=1700000000000,
+                account_id="default",
+            )
+        assert len(rows) == 1
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_query_raises_on_axiom_4xx() -> None:
+    adapter = AxiomReplayQueryAdapter(api_key="bad-key", dataset="bfx-events")
+    try:
+        with respx.mock(base_url="https://api.axiom.co") as router:
+            router.post("/v1/datasets/_apl").mock(
+                return_value=Response(401, json={"error": "auth"}),
+            )
+            with pytest.raises(httpx.HTTPStatusError):
+                await adapter.query_order_events("default", datetime.now(UTC))
+    finally:
+        await adapter.aclose()
