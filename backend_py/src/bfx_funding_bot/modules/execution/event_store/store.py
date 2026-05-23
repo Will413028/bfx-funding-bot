@@ -22,6 +22,9 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 from bfx_funding_bot.modules.execution.registry_offers import ClaimRecord, RegistryState, transition
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
+# NOTE: dedup for events with venue_seq IS NULL is app-level only — the
+# uq_event_log_dedup unique index does not constrain NULLs (PG treats them as
+# distinct). WS-sourced fills/releases carry venue_seq, so this gap is narrow.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
 
@@ -98,7 +101,11 @@ class PostgresEventStore:
             return  # PENDING intents have no voi (Plan 3); nothing to project here.
         existing = (
             await session.execute(
-                select(OfferClaimRow).where(OfferClaimRow.venue_offer_id == venue_offer_id)
+                select(OfferClaimRow).where(
+                    OfferClaimRow.venue_offer_id == venue_offer_id,
+                    OfferClaimRow.account_id == account_id,
+                    OfferClaimRow.deployment_environment == self._env,
+                )
             )
         ).scalars().all()
         before: dict[str, ClaimRecord] = {
