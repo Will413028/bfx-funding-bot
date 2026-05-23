@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.events import (
+    CancelAcknowledged,
     OrderFilled,
     ReservationClaimed,
     ReservationReleased,
@@ -93,3 +94,40 @@ async def test_axiom_emit_failure_propagates() -> None:
                           strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT")
     with pytest.raises(RuntimeError):
         await sink.on_reservation_claimed(_claim())
+
+
+@pytest.mark.asyncio
+async def test_handle_cancel_acknowledged_emits_to_axiom() -> None:
+    captured: list[dict[str, Any]] = []
+
+    class _FakeAxiom:
+        async def emit(self, event: dict[str, Any]) -> None:
+            captured.append(event)
+
+    sink = AxiomEventSink(
+        axiom_client=_FakeAxiom(),
+        phase=Phase.PAPER,
+        strategy=StrategyName.RATE_PERCENTILE,
+        cell="fUSD_p2",
+    )
+    corr_id = uuid4()
+    event = CancelAcknowledged(
+        venue_offer_id="v1",
+        acknowledged_at_ms=1700000000000,
+        signal_correlation_id=corr_id,
+        account_id="default",
+        rest_status="success",
+        venue_response_text="Submitting cancel request",
+    )
+    await sink.handle_cancel_acknowledged(event)
+
+    assert len(captured) == 1
+    emitted = captured[0]
+    assert emitted["event_type"] == EventType.CANCEL_ACKNOWLEDGED.value
+    assert emitted["correlation_id"] == str(corr_id)
+    assert emitted["account_id"] == "default"
+    payload = emitted["payload"]
+    assert payload["venue_offer_id"] == "v1"
+    assert payload["acknowledged_at_ms"] == 1700000000000
+    assert payload["rest_status"] == "success"
+    assert payload["venue_response_text"] == "Submitting cancel request"
