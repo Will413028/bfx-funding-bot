@@ -16,9 +16,6 @@ _CELLS_YAML = os.path.abspath(
 def _set_daemon_env(monkeypatch, pg_engine) -> None:
     """Set required env vars for build_daemon using testcontainer DB."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
-    monkeypatch.setenv("AXIOM_API_KEY", "test")
-    monkeypatch.setenv("AXIOM_DATASET", "test")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", _CELLS_YAML)
     # pg_engine.url is already postgresql+asyncpg://..., which build_daemon

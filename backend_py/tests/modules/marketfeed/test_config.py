@@ -42,8 +42,6 @@ def _valid_yaml() -> dict:
 
 def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS", raising=False)
@@ -59,8 +57,6 @@ def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_load_config_rejects_canary_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "canary")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
@@ -71,8 +67,6 @@ def test_load_config_rejects_canary_phase(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_bfx_cells_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "shadow")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS", "mean_reversion:fUSD_a30")
@@ -85,8 +79,6 @@ def test_bfx_cells_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_bfx_cells_filter_unknown_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "shadow")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS", "mean_reversion:fNotExist_a30")
@@ -98,8 +90,6 @@ def test_bfx_cells_filter_unknown_fails(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_invalid_strategy_in_yaml_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "shadow")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     bad = _valid_yaml()
@@ -112,8 +102,6 @@ def test_invalid_strategy_in_yaml_fails(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_mr_fust_p30_warn_but_not_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog):
     monkeypatch.setenv("BFX_PHASE", "shadow")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     bad = _valid_yaml()
@@ -139,8 +127,6 @@ def test_load_config_uses_env_var_precedence(monkeypatch, tmp_path):
     fake.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k")
-    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", str(fake))
@@ -157,8 +143,6 @@ def test_load_config_uses_cwd_fallback(monkeypatch, tmp_path):
     cwd_cfg.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k")
-    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
@@ -178,8 +162,6 @@ def test_load_config_uses_importlib_resources_fallback(monkeypatch, tmp_path):
     fake_cells.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k")
-    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
@@ -220,8 +202,6 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
     cwd_cfg.write_text("cells: []\n")
 
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k")
-    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", "/nonexistent/path/cells.yaml")
@@ -235,8 +215,6 @@ def test_load_config_env_var_set_but_path_missing_falls_through_to_cwd(monkeypat
 def test_load_config_raises_with_attempted_paths(monkeypatch, tmp_path):
     """All three tiers missing → FileNotFoundError lists attempted paths."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "k")
-    monkeypatch.setenv("AXIOM_DATASET", "d")
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_CELLS_YAML", raising=False)
@@ -270,8 +248,6 @@ def test_scheduler_buffer_s_defaults_to_30(
     """Bug C fix (5/20): scheduler buffer default 30s (was 5s) so p30
     candles have time to land in DB before scheduler reads."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_SCHEDULER_BUFFER_S", raising=False)
@@ -285,8 +261,6 @@ def test_scheduler_buffer_s_env_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_SCHEDULER_BUFFER_S", "15.5")
@@ -300,8 +274,6 @@ def test_scheduler_buffer_s_env_invalid_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_SCHEDULER_BUFFER_S", "not-a-number")
@@ -321,8 +293,6 @@ def test_staleness_budget_hours_global_default(
 ) -> None:
     """Entry without staleness_budget_hours field → falls back to global default 2h."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", raising=False)
@@ -351,8 +321,6 @@ def test_staleness_budget_hours_per_cell_override(
 ) -> None:
     """p30 entry with staleness_budget_hours: 12 → loaded as 12h; other cells fall back."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.delenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", raising=False)
@@ -388,8 +356,6 @@ def test_staleness_budget_hours_env_global_override(
     """BFX_STALENESS_BUDGET_HOURS_DEFAULT=4 → global default becomes 4h;
     per-cell yaml override (12) still wins over env."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "4")
@@ -425,8 +391,6 @@ def test_staleness_budget_hours_invalid_value(
 ) -> None:
     """Negative / zero staleness_budget_hours → ValidationError at load time."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
 
@@ -452,8 +416,6 @@ def test_staleness_budget_hours_env_invalid_value(
 ) -> None:
     """Non-int BFX_STALENESS_BUDGET_HOURS_DEFAULT → descriptive ValueError, not raw int() error."""
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_STALENESS_BUDGET_HOURS_DEFAULT", "abc")
@@ -479,8 +441,6 @@ def test_load_config_reads_deployment_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "shadow")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
     monkeypatch.delenv("BFX_CELLS", raising=False)
@@ -495,8 +455,6 @@ def test_load_config_missing_deployment_environment_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
     monkeypatch.delenv("BFX_CELLS", raising=False)
@@ -510,8 +468,6 @@ def test_load_config_invalid_deployment_environment_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "staging")
     monkeypatch.delenv("BFX_CELLS", raising=False)

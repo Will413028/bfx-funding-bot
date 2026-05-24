@@ -105,14 +105,12 @@ jobs:
       contents: read
     needs: backend_py_unit
     # Fork PRs cannot read secrets (GitHub security model); skip them. Same-repo
-    # PRs and main pushes run the real Axiom round-trip.
+    # PRs and main pushes run the PG event_log read-your-writes integration tests.
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
     defaults:
       run:
         working-directory: backend_py
     env:
-      AXIOM_API_KEY: ${{ secrets.AXIOM_CI_API_KEY }}
-      AXIOM_DATASET: ${{ secrets.AXIOM_CI_DATASET }}
       BFX_DEPLOYMENT_ENV: ci
       BFX_SERVICE_VERSION: ${{ github.sha }}
       GITHUB_RUN_ID: ${{ github.run_id }}

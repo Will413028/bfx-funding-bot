@@ -87,8 +87,6 @@ class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phase: Annotated[Phase, Field(description="paper / shadow only -- canary rejected by daemon")]
     cells: list[CellConfig]
-    axiom_api_key: str
-    axiom_dataset: str
     database_url: str
     deployment_environment: DeploymentEnvironment
     redis_url: str | None = None
@@ -114,12 +112,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if phase_str not in {"paper", "shadow"}:
         raise ValueError(f"BFX_PHASE must be paper or shadow, got {phase_str!r}")
 
-    axiom_api_key = os.environ.get("AXIOM_API_KEY", "")
-    if not axiom_api_key:
-        raise ValueError("AXIOM_API_KEY required")
-    axiom_dataset = os.environ.get("AXIOM_DATASET", "")
-    if not axiom_dataset:
-        raise ValueError("AXIOM_DATASET required")
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         raise ValueError("DATABASE_URL required")
@@ -240,8 +232,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     config_kwargs: dict[str, object] = {
         "phase": Phase(phase_str),
         "cells": cells,
-        "axiom_api_key": axiom_api_key,
-        "axiom_dataset": axiom_dataset,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
         "redis_url": redis_url,

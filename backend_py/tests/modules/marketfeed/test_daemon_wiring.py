@@ -41,9 +41,6 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     httpx_mock: HTTPXMock,
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
-    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", env_value)
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
     # Phase 4.4c: file-based sqlite so event-store tables created below are
