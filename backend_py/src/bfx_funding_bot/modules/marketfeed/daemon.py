@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
@@ -150,6 +151,7 @@ class Daemon:
     registry: StrategyRegistry
     candle_q: asyncio.Queue[CandleMessage | None]
     axiom: AxiomClient
+    diagnostics: DiagnosticsSink
     probe: HealthProbe
     monitor: HealthMonitor
     scheduler: Scheduler
@@ -695,6 +697,9 @@ async def build_daemon(
     env_str = axiom_cfg.deployment_env.value
     event_store = PostgresEventStore(deployment_environment=env_str)
     persister = EventStorePersister(store=event_store, session_factory=session_factory)
+    diagnostics = DiagnosticsSink(
+        session_factory=session_factory, deployment_environment=env_str,
+    )
     async with session_factory() as snap_session:
         ledger = await PaperPositionLedger.from_snapshot(
             snap_session, account_id=account_id, deployment_environment=env_str
@@ -833,11 +838,10 @@ async def build_daemon(
     bus.subscribe(ReservationClaimed,  offer_registry.handle)
     bus.subscribe(OrderFilled,         offer_registry.handle)
     bus.subscribe(ReservationReleased, offer_registry.handle)
-    # CancelRequested → axiom (audit trail; replay-able cancel decisions).
-    bus.subscribe(CancelRequested,     axiom_sink.handle_cancel_requested)
-    # Phase 4.4b D1: CancelAcknowledged → axiom (cancel ACK from BFX WS or
-    # REST path; pairs with CancelRequested for cancel-lifecycle audit).
-    bus.subscribe(CancelAcknowledged,  axiom_sink.handle_cancel_acknowledged)
+    # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
+    # (axiom_sink keeps its redundant SoT emits until 3c.)
+    bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
+    bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
 
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
@@ -1051,6 +1055,7 @@ async def build_daemon(
         registry=registry,
         candle_q=candle_q,
         axiom=axiom,
+        diagnostics=diagnostics,
         probe=probe,
         monitor=monitor,
         scheduler=scheduler,
