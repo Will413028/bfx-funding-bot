@@ -66,6 +66,7 @@ class _StubDiv:
 async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     probe = HealthProbe()
     probe.record_heartbeat("safety_chain")
     probe.record_heartbeat("executor")
@@ -105,7 +106,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
             ),
         ],
         probe=probe,
-        axiom=axiom,
+        diagnostics=diagnostics,
         phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
