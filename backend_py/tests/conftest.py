@@ -60,6 +60,7 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
 
     import bfx_funding_bot.modules.accounts.tables
     import bfx_funding_bot.modules.candles.tables
+    import bfx_funding_bot.modules.execution.diagnostics.tables
     import bfx_funding_bot.modules.execution.event_store.tables
     import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base
