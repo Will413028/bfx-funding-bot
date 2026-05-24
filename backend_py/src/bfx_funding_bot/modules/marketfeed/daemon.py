@@ -110,13 +110,11 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     HealthTarget,
     Level,
 )
-from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
-from bfx_funding_bot.smoke.g1 import run_smoke_async
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
@@ -1111,21 +1109,6 @@ async def _run() -> None:
             with contextlib.suppress(Exception):
                 await daemon.smoke_runner.aclose()
 
-    # Self-smoke trigger (Phase 4.1.x — see specs/2026-05-21-g1-c1-continuity-redesign-design.md)
-    # Gated by phase=paper + duration set; exception path is structurally unreachable here
-    # (except* Exception: raise above propagates past finally, skipping this code).
-    # CellConfig is Pydantic — convert to dict for the helper's expected list[dict[str, Any]] contract.
-    log.info("g1_smoke_starting phase=%s duration=%s", daemon.config.phase.value, duration)
-    smoke_exit_code = await maybe_run_self_smoke(
-        phase=daemon.config.phase.value,
-        duration=duration,
-        cells=[c.model_dump() for c in daemon.config.cells],
-        smoke_runner=run_smoke_async,
-        sleep_fn=asyncio.sleep,
-    )
-    log.info("g1_smoke_done exit_code=%d", smoke_exit_code)
-    if smoke_exit_code != 0:
-        sys.exit(smoke_exit_code)
 
 
 if __name__ == "__main__":
