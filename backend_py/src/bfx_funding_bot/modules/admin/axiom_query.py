@@ -1,8 +1,7 @@
 """AxiomSmokeQueryAdapter — APL query for smoke L3 round-trip verification.
 
 Lightweight (3-column projection: _time, event_type, account_id) — proves
-events surfaced, not for state reconstruction. Distinct from
-modules/execution/axiom_event_query.py:AxiomReplayQueryAdapter (full payload).
+events surfaced in Axiom. Not for state reconstruction (boot uses PG from_snapshot).
 """
 from __future__ import annotations
 

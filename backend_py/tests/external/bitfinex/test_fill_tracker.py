@@ -34,11 +34,6 @@ _SCHEMA = json.loads(
 )
 
 
-class _StubAxiomQuery:
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-
 class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -80,7 +75,7 @@ def _build_tracker(client: httpx.AsyncClient, axiom: _EventCapture,
                    registry: OfferRegistry | None = None) -> RestPollingFillTracker:
     probe = HealthProbe()
     if registry is None:
-        registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+        registry = OfferRegistry(clock=lambda: 5000)
     return RestPollingFillTracker(
         http=client, event_sink=axiom, probe=probe, bus=bus or DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
@@ -164,7 +159,7 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     # Seed registry with claim for voi="111" (option a: seed to satisfy new contract)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     sig_id = uuid4()
     bus.subscribe(ReservationClaimed, registry.handle)
     await bus.publish(ReservationClaimed(

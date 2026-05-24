@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.events import OrderFilled
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -44,29 +45,13 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     diagnostics = _EventCapture()
     probe = HealthProbe()
 
-    class _FakeQuery:
-        async def query_order_events(
-            self, account_id: str, since: Any,
-        ) -> list[dict[str, Any]]:
-            return [{
-                "event_type": EventType.ORDER_FILL.value,
-                "account_id": "default",
-                "payload": {
-                    "cid": 1,
-                    "offer_id": "paper_x",
-                    "signal_correlation_id": str(uuid4()),
-                    "fill_size_usdt": 600.0,
-                    "fill_price": 0.0001,
-                    "is_simulated": True,
-                },
-            }]
-
-    from datetime import UTC, datetime, timedelta
-    ledger = await PaperPositionLedger.replay_from_axiom(
-        account_id="default",
-        since=datetime.now(UTC) - timedelta(days=30),
-        axiom_query=_FakeQuery(),
-    )
+    # Pre-load ledger with 600 USDT realized so AllocationCap (cap=500) fires
+    ledger = PaperPositionLedger(account_id="default")
+    await ledger.on_order_filled(OrderFilled(
+        cid=1, venue_offer_id="paper_x", credit_id=None,
+        size_usdt=Decimal("600"), fill_rate=0.0001,
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
+    ))
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     chain = SafetyGuardChain(

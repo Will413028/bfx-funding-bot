@@ -572,10 +572,8 @@ async def _emit_locf_degraded(
     })
 
 
-# Phase 4.4b D1: `_AxiomQueryAdapter` (4.3 ledger stub returning []) and
-# `_OfferRegistryQueryStub` (4.4a registry stub returning []) deleted. Both
-# replay paths now go through `AxiomReplayQueryAdapter` (axiom_event_query.py),
-# a single instance that satisfies both consumer protocols via duck typing.
+# 3c: `AxiomReplayQueryAdapter` + `replay_from_axiom()` deleted — boot now uses
+# PG from_snapshot (ledger reads position_state; registry reads offer_claims).
 
 # _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
 # Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
