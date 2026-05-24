@@ -33,6 +33,8 @@ cells:
 phase3b_wfo_results_ref: x
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
+    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
+    # AxiomClient (T10) is gone, but config validation still enforces these fields.
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -54,12 +56,6 @@ phase3b_wfo_results_ref: x
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
-    # Axiom flush during shutdown — accept any POST to ingest endpoint.
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     # warmup_cell fetches Bitfinex candles; mock so httpx_mock teardown does not
     # complain about unexpected requests. File-based SQLite lets warmup proceed
     # further than :memory: (tables exist), so this GET is now reached.
@@ -69,6 +65,7 @@ phase3b_wfo_results_ref: x
         is_reusable=True, is_optional=True,
     )
     # Phase 4.4c: no Axiom APL replay at boot anymore — _apl mock removed.
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
     assert daemon.config.phase == Phase.PAPER
@@ -111,6 +108,7 @@ cells:
     reference_amount_usdt: 150.0
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
+    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -128,11 +126,6 @@ cells:
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     # warmup_cell fetches Bitfinex candles with file-based sqlite (tables exist).
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
@@ -140,6 +133,7 @@ cells:
         is_reusable=True, is_optional=True,
     )
     # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     # Verify URL transform + pool config via make_async_engine_from_url directly
     # (the form chaos recovery accidentally produced — asyncpg scheme + libpq params).

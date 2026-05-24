@@ -84,11 +84,13 @@ def test_healthz_returns_503_when_no_sub_tasks_registered() -> None:
 
 def test_healthz_uses_per_task_threshold_from_sub_task_thresholds() -> None:
     """candle_writer has 65*60s threshold (1h+); 30min stale should be FRESH
-    for candle_writer but DEGRADED for axiom (60s threshold)."""
+    for candle_writer but DEGRADED for a 60s-threshold task.
+    Phase 3c T10: "axiom" no longer in SUB_TASK_THRESHOLDS, but unknown tasks
+    fall back to _DEFAULT_THRESHOLD_S (60s), so behaviour is unchanged."""
     probe = HealthProbe()
     now = datetime.now(UTC)
     probe.last_active_ts["candle_writer"] = now - timedelta(minutes=30)  # ok for 1h+ threshold
-    probe.last_active_ts["axiom"] = now - timedelta(minutes=30)          # bad for 60s threshold
+    probe.last_active_ts["axiom"] = now - timedelta(minutes=30)          # bad for default 60s threshold
     probe.last_active_ts["scheduler"] = now  # fresh
 
     client = TestClient(make_app(probe))

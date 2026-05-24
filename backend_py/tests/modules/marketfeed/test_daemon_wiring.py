@@ -1,11 +1,12 @@
-"""build_daemon wires the SAME deployment_env into emit + PG-store paths.
+"""build_daemon wires the SAME deployment_env into the emit + PG-store paths.
 
-Phase 4.4c: AxiomReplayQueryAdapter removed from boot path (replaced by
-PG from_snapshot). The emit-env invariant is now:
-  AxiomClient._resource.deployment_environment.value == BFX_DEPLOYMENT_ENV
+Phase 4.4c: AxiomReplayQueryAdapter removed from boot path (replaced by PG
+from_snapshot). The emit-env invariant is now checked via StdoutEventSink:
+  StdoutEventSink._resource.deployment_environment.value == BFX_DEPLOYMENT_ENV
 
-The old adapter_env == client_env assertion is removed; the PG-store env is
-thread-checked via PostgresEventStore at unit level instead.
+Phase 3c T10: AxiomClient removed; invariant migrated to stdout_sink path,
+accessed via daemon.monitor._events._resource (StdoutEventSink injected into
+HealthMonitor which is a Daemon field).
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     httpx_mock: HTTPXMock,
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
+    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", env_value)
@@ -63,26 +65,24 @@ async def test_build_daemon_emit_and_query_env_symmetric(
         await _c.run_sync(Base.metadata.create_all)
     await _eng.dispose()
 
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     # warmup_cell fetches Bitfinex candles with file-based sqlite.
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
         method="GET", status_code=200, json=[],
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4c: _apl mock removed (AxiomReplayQueryAdapter no longer used at boot).
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
 
-    # Invariant: AxiomClient emit env must match BFX_DEPLOYMENT_ENV.
-    # Phase 4.4c: adapter_env assertion removed (AxiomReplayQueryAdapter no longer
-    # in the boot path; PG-store env correctness covered by unit tests on build_daemon).
-    client_env = daemon.axiom._resource.deployment_environment
-    assert client_env.value == env_value
+    # Invariant: StdoutEventSink (the live emit path) must be wired with the
+    # EventResource that carries BFX_DEPLOYMENT_ENV. Accessed via the
+    # HealthMonitor's injected event_sink (both monitor + signal_engine share
+    # the same stdout_sink instance, so one check suffices).
+    # Phase 4.4c: PG-store env correctness covered by unit tests on build_daemon.
+    from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
+    sink = daemon.monitor._events
+    assert isinstance(sink, StdoutEventSink)
+    assert sink._resource.deployment_environment.value == env_value
