@@ -22,7 +22,7 @@ class ActiveFundingOffer:
     venue_offer_id: str
     symbol: str
     amount: Decimal     # absolute size (offers are negative-signed at venue)
-    rate: float
+    rate: float  # display/audit-only; never used in financial arithmetic (float precision acceptable)
     period_days: int
     mts_created: int
     status: str
