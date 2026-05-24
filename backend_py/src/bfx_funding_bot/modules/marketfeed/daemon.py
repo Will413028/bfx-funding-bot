@@ -769,7 +769,7 @@ async def build_daemon(
     safety_chain = SafetyGuardChain(
         guards=guards,
         probe=probe,
-        axiom=axiom,
+        diagnostics=diagnostics,
         phase=config.phase,
         strategy=first_cell.strategy,
         cell=first_cell.cell_id,

@@ -41,7 +41,7 @@ class SafetyGuardChain:
         *,
         guards: list[GuardRule],
         probe: HealthProbe,
-        axiom: _AxiomProtocol,
+        diagnostics: _AxiomProtocol,
         phase: Phase,
         strategy: StrategyName,
         cell: str,
@@ -49,7 +49,7 @@ class SafetyGuardChain:
     ) -> None:
         self.guards = guards
         self.probe = probe
-        self.axiom = axiom
+        self.diagnostics = diagnostics
         self.phase = phase
         self.strategy = strategy
         self.cell = cell
@@ -112,7 +112,7 @@ class SafetyGuardChain:
         self, result: GuardResult, decision: DecisionPayload,
     ) -> None:
         await emit_safety_trigger(
-            axiom=self.axiom,
+            diagnostics=self.diagnostics,
             phase=self.phase, strategy=self.strategy, cell=self.cell,
             correlation_id=decision.signal_correlation_id,
             account_id=self.account_id,
@@ -126,7 +126,7 @@ class SafetyGuardChain:
         self, result: GuardResult, decision: DecisionPayload,
     ) -> None:
         await emit_safety_trigger(
-            axiom=self.axiom,
+            diagnostics=self.diagnostics,
             phase=self.phase, strategy=self.strategy, cell=self.cell,
             correlation_id=decision.signal_correlation_id,
             account_id=self.account_id,

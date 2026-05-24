@@ -90,7 +90,7 @@ async def test_chain_short_circuits_on_first_block() -> None:
     g2 = _BlockGuard("g2")
     g3 = _AllowGuard("g3")
     chain = SafetyGuardChain(
-        guards=[g1, g2, g3], probe=HealthProbe(), axiom=_CaptureAxiom(),
+        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -105,7 +105,7 @@ async def test_chain_short_circuits_on_first_block() -> None:
 async def test_chain_all_run_when_all_pass() -> None:
     g1, g2, g3 = _AllowGuard("a"), _AllowGuard("b"), _AllowGuard("c")
     chain = SafetyGuardChain(
-        guards=[g1, g2, g3], probe=HealthProbe(), axiom=_CaptureAxiom(),
+        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -118,7 +118,7 @@ async def test_chain_all_run_when_all_pass() -> None:
 async def test_chain_heartbeat_recorded_on_eval() -> None:
     probe = HealthProbe()
     chain = SafetyGuardChain(
-        guards=[_AllowGuard("a")], probe=probe, axiom=_CaptureAxiom(),
+        guards=[_AllowGuard("a")], probe=probe, diagnostics=_CaptureAxiom(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -128,16 +128,16 @@ async def test_chain_heartbeat_recorded_on_eval() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_internal_exception_fail_closed() -> None:
-    axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     chain = SafetyGuardChain(
-        guards=[_CrashGuard()], probe=HealthProbe(), axiom=axiom,
+        guards=[_CrashGuard()], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
     r = await chain.evaluate(_post(), _ctx())
     assert r.allowed is False
     # safety_trigger emitted with critical level + guard_internal_error reason
-    triggers = [e for e in axiom.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
+    triggers = [e for e in diagnostics.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
     assert len(triggers) == 1
     assert triggers[0]["level"] == "critical"
     assert "guard_internal_error" in triggers[0]["payload"]["reason"]
@@ -145,15 +145,15 @@ async def test_chain_internal_exception_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_eval_timeout_fail_closed() -> None:
-    axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     chain = SafetyGuardChain(
-        guards=[_HangGuard()], probe=HealthProbe(), axiom=axiom,
+        guards=[_HangGuard()], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
     r = await chain.evaluate(_post(), _ctx())
     assert r.allowed is False
-    triggers = [e for e in axiom.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
+    triggers = [e for e in diagnostics.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
     assert len(triggers) == 1
     assert "eval_timeout" in triggers[0]["payload"]["reason"]
 
@@ -161,7 +161,7 @@ async def test_chain_eval_timeout_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_chain_empty_guards_allows() -> None:
     chain = SafetyGuardChain(
-        guards=[], probe=HealthProbe(), axiom=_CaptureAxiom(),
+        guards=[], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -171,14 +171,14 @@ async def test_chain_empty_guards_allows() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_block_emits_safety_trigger() -> None:
-    axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     chain = SafetyGuardChain(
-        guards=[_BlockGuard("cap")], probe=HealthProbe(), axiom=axiom,
+        guards=[_BlockGuard("cap")], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
     await chain.evaluate(_post(), _ctx())
-    triggers = [e for e in axiom.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
+    triggers = [e for e in diagnostics.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
     assert len(triggers) == 1
     assert triggers[0]["payload"]["guard_name"] == "cap"
     assert triggers[0]["level"] == "warn"  # hard block = warn; critical only for internal error

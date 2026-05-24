@@ -94,16 +94,16 @@ async def test_emit_order_fill_shape() -> None:
 
 @pytest.mark.asyncio
 async def test_emit_safety_trigger_shape() -> None:
-    axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     corr = uuid4()
     await emit_safety_trigger(
-        axiom=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        diagnostics=diagnostics, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30", correlation_id=corr, account_id="default",
         level="warn", guard_name="allocation_cap",
         reason="cap=500+offer=200>500",
         decision_snapshot={"outcome": "post"},
     )
-    ev = axiom.events[0]
+    ev = diagnostics.events[0]
     assert ev["event_type"] == EventType.SAFETY_TRIGGER.value
     assert ev["level"] == "warn"
     assert ev["payload"]["guard_name"] == "allocation_cap"

@@ -115,7 +115,7 @@ async def emit_order_fill(
 
 async def emit_safety_trigger(
     *,
-    axiom: _AxiomProtocol,
+    diagnostics: _AxiomProtocol,
     phase: Phase,
     strategy: StrategyName | None,
     cell: str | None,
@@ -142,4 +142,4 @@ async def emit_safety_trigger(
         account_id=account_id,
         payload=payload.model_dump(mode="json"),
     )
-    await axiom.emit(env.model_dump(mode="json"))
+    await diagnostics.emit(env.model_dump(mode="json"))
