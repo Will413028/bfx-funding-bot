@@ -46,8 +46,6 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import EventType
-
 log = logging.getLogger(__name__)
 
 
@@ -269,65 +267,3 @@ class OfferRegistry:
             if rec.state != RegistryState.RELEASED or rec.last_updated_ms >= threshold
         }
 
-    @staticmethod
-    def _parse_event(row: dict[str, Any]) -> Any | None:
-        """Parse upcast row dict to domain event. Returns None for unknown types.
-
-        Schema bridge:
-          - RESERVATION_CLAIMED: v2-aligned payload field names
-          - ORDER_FILL: legacy OrderFillPayload field names (offer_id, fill_size_usdt,
-            fill_price) — schema asymmetry documented in spec Out-of-scope
-          - RESERVATION_RELEASED: v2-aligned payload field names
-
-        account_id source order: row root → payload → "" (empty fallback).
-        """
-        et = row.get("event_type")
-        payload = row.get("payload") or {}
-
-        if et == EventType.RESERVATION_CLAIMED.value:
-            return ReservationClaimed(
-                cid=payload["cid"],
-                venue_offer_id=payload["venue_offer_id"],
-                size_usdt=Decimal(str(payload["size_usdt"])),
-                signal_correlation_id=UUID(payload["signal_correlation_id"]),
-                account_id=row.get("account_id") or payload.get("account_id", ""),
-                is_simulated=payload.get("is_simulated", False),
-                venue_seq=payload.get("venue_seq"),
-                event_seq=payload.get("event_seq"),
-                occurred_at_ms=payload.get("occurred_at_ms"),
-                recorded_at_ms=payload.get("recorded_at_ms"),
-            )
-
-        if et == EventType.ORDER_FILL.value:
-            # Legacy OrderFillPayload schema bridge (field mapping: offer_id → venue_offer_id, fill_size_usdt → size_usdt, fill_price → fill_rate)
-            return OrderFilled(
-                cid=payload["cid"],
-                venue_offer_id=payload["offer_id"],         # legacy field name
-                credit_id=None,                              # not in legacy schema
-                size_usdt=Decimal(str(payload["fill_size_usdt"])),
-                fill_rate=payload["fill_price"],
-                signal_correlation_id=UUID(payload["signal_correlation_id"]),
-                account_id=row.get("account_id") or payload.get("account_id", ""),
-                is_simulated=payload.get("is_simulated", False),
-                venue_seq=payload.get("venue_seq"),
-                event_seq=payload.get("event_seq"),
-                occurred_at_ms=payload.get("occurred_at_ms"),
-                recorded_at_ms=payload.get("recorded_at_ms"),
-            )
-
-        if et == EventType.RESERVATION_RELEASED.value:
-            return ReservationReleased(
-                cid=payload["cid"],
-                venue_offer_id=payload["venue_offer_id"],
-                size_usdt=Decimal(str(payload["size_usdt"])),
-                reason=payload["reason"],
-                signal_correlation_id=UUID(payload["signal_correlation_id"]),
-                account_id=row.get("account_id") or payload.get("account_id", ""),
-                is_simulated=payload.get("is_simulated", False),
-                venue_seq=payload.get("venue_seq"),
-                event_seq=payload.get("event_seq"),
-                occurred_at_ms=payload.get("occurred_at_ms"),
-                recorded_at_ms=payload.get("recorded_at_ms"),
-            )
-
-        return None
