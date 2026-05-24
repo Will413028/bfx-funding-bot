@@ -21,7 +21,6 @@ from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
     Phase,
     StrategyName,
 )
@@ -35,24 +34,22 @@ class _FakeAxiomClient:
         self.emits.append(event)
 
 
-class _FakeAxiomQuery:
-    """Returns one ReservationClaimed + one ORDER_FILL row immediately."""
+class _StubEventLogQuery:
+    """Returns RESERVATION_CLAIMED + ORDER_FILL rows immediately (UPPERCASE — PG style)."""
 
     async def query_order_events(
         self, account_id: str, since: datetime,
     ) -> list[dict[str, Any]]:
         return [
             {
-                "_time": datetime.now().isoformat(),
-                "event_type": EventType.RESERVATION_CLAIMED.value,
+                "event_type": "RESERVATION_CLAIMED",  # UPPERCASE — matches PG event_log
                 "account_id": account_id,
-                "payload": {"size_usdt": 1.0},
+                "occurred_at_ms": 1716374400000,
             },
             {
-                "_time": datetime.now().isoformat(),
-                "event_type": EventType.ORDER_FILL.value,
+                "event_type": "ORDER_FILL",  # UPPERCASE — matches PG event_log
                 "account_id": account_id,
-                "payload": {"fill_size_usdt": 1.0},
+                "occurred_at_ms": 1716374400001,
             },
         ]
 
@@ -73,8 +70,8 @@ def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
-        executor=wrapped, bus=bus, axiom_client=axiom,
-        axiom_query=_FakeAxiomQuery(),
+        executor=wrapped, bus=bus,
+        pg_query=_StubEventLogQuery(),
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         cell="bfx_USDT",
@@ -95,7 +92,7 @@ def test_http_smoke_l3_pass_end_to_end() -> None:
     assert body["status"] == "pass"
     assert body["level"] == "L3"
     assert body["checks"]["l2_passed"] is True
-    assert body["checks"]["axiom_events_seen"] >= 2
+    assert body["checks"]["pg_events_seen"] >= 2
 
 
 def test_http_smoke_l2_query_param() -> None:
@@ -119,8 +116,8 @@ def test_http_no_token_means_admin_router_not_mounted() -> None:
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
-        executor=wrapped, bus=bus, axiom_client=axiom,
-        axiom_query=_FakeAxiomQuery(),
+        executor=wrapped, bus=bus,
+        pg_query=_StubEventLogQuery(),
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         cell="bfx_USDT",

@@ -1,4 +1,4 @@
-"""SmokeRunner L2 (in-process verification) tests."""
+"""SmokeRunner L2 (in-process verification) and L3 (PG event_log read-your-writes) tests."""
 from __future__ import annotations
 
 import asyncio
@@ -25,14 +25,13 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    EventType,
     Phase,
     StrategyName,
 )
 
 
 class _FakeAxiomClient:
-    """Records all emit() calls in-memory. Conforms to _AxiomProtocol."""
+    """Records all emit() calls in-memory. Used by EchoPaperExecutor."""
 
     def __init__(self) -> None:
         self.emits: list[dict[str, Any]] = []
@@ -41,7 +40,9 @@ class _FakeAxiomClient:
         self.emits.append(event)
 
 
-class _FakeAxiomQuery:
+class _StubEventLogQuery:
+    """Stub for _EventLogQueryProtocol — returns pre-configured rows (UPPERCASE event_type)."""
+
     def __init__(self, events: list[dict[str, Any]]) -> None:
         self.events = events
         self.calls: list[tuple[str, datetime]] = []
@@ -62,14 +63,13 @@ def _build_chain(bus: DomainEventBus, axiom: _FakeAxiomClient):
     return ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
 
 
-def _make_runner(executor=None, bus=None, axiom=None, axiom_query=None) -> SmokeRunner:
+def _make_runner(executor=None, bus=None, axiom=None, pg_query=None) -> SmokeRunner:
     bus = bus or DomainEventBus()
     axiom = axiom or _FakeAxiomClient()
     return SmokeRunner(
         executor=executor or _build_chain(bus, axiom),
         bus=bus,
-        axiom_client=axiom,
-        axiom_query=axiom_query or _FakeAxiomQuery([]),
+        pg_query=pg_query or _StubEventLogQuery([]),
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         cell="bfx_USDT",
@@ -146,36 +146,37 @@ async def test_run_l2_single_flight_serializes() -> None:
     assert r2.status == "pass"
 
 
-def _make_axiom_row(event_type: str) -> dict[str, Any]:
+def _make_pg_row(event_type: str) -> dict[str, Any]:
+    """Build a row dict matching PostgresEventLogQueryAdapter output (UPPERCASE event_type)."""
     return {
-        "_time": "2026-05-22T10:00:00Z",
-        "event_type": event_type,
+        "event_type": event_type,   # UPPERCASE — matches PG event_log storage
         "account_id": SMOKE_ACCOUNT_ID,
-        "payload": {"size_usdt": 1.0},
+        "occurred_at_ms": 1716374400000,
     }
 
 
 async def test_run_l3_happy_returns_pass() -> None:
-    axiom_query = _FakeAxiomQuery([
-        _make_axiom_row(EventType.RESERVATION_CLAIMED.value),
-        _make_axiom_row(EventType.ORDER_FILL.value),
+    # UPPERCASE event_type — exactly what PostgresEventLogQueryAdapter returns
+    pg_query = _StubEventLogQuery([
+        _make_pg_row("RESERVATION_CLAIMED"),
+        _make_pg_row("ORDER_FILL"),
     ])
-    runner = _make_runner(axiom_query=axiom_query)
+    runner = _make_runner(pg_query=pg_query)
 
     result = await runner.run_l3()
 
     assert result.status == "pass"
     assert result.level == "L3"
     assert result.checks["l2_passed"] is True
-    assert result.checks["axiom_events_seen"] == 2
-    assert len(axiom_query.calls) >= 1
-    assert axiom_query.calls[0][0] == SMOKE_ACCOUNT_ID
+    assert result.checks["pg_events_seen"] == 2
+    assert len(pg_query.calls) >= 1
+    assert pg_query.calls[0][0] == SMOKE_ACCOUNT_ID
 
 
-async def test_run_l3_axiom_returns_empty_fails_after_poll_timeout() -> None:
-    """L2 passes but Axiom never returns events → L3 fail."""
-    axiom_query = _FakeAxiomQuery([])  # always empty
-    runner = _make_runner(axiom_query=axiom_query)
+async def test_run_l3_pg_returns_empty_fails_after_poll_timeout() -> None:
+    """L2 passes but PG event_log never returns events → L3 fail."""
+    pg_query = _StubEventLogQuery([])  # always empty
+    runner = _make_runner(pg_query=pg_query)
 
     # Override poll budget for speed (test does not wait 15s)
     result = await runner._run_l3_unlocked(
@@ -185,16 +186,15 @@ async def test_run_l3_axiom_returns_empty_fails_after_poll_timeout() -> None:
     assert result.status == "fail"
     assert result.level == "L3"
     assert result.checks["l2_passed"] is True
-    assert "round-trip" in (result.error or "").lower() or \
-           "axiom" in (result.error or "").lower()
+    assert "round-trip" in (result.error or "").lower()
 
 
-async def test_run_l3_axiom_returns_only_one_event_type_fails() -> None:
-    axiom_query = _FakeAxiomQuery([
-        _make_axiom_row(EventType.RESERVATION_CLAIMED.value),
+async def test_run_l3_pg_returns_only_one_event_type_fails() -> None:
+    pg_query = _StubEventLogQuery([
+        _make_pg_row("RESERVATION_CLAIMED"),
         # missing ORDER_FILL
     ])
-    runner = _make_runner(axiom_query=axiom_query)
+    runner = _make_runner(pg_query=pg_query)
     result = await runner._run_l3_unlocked(poll_attempts=2, poll_interval_s=0.01)
 
     assert result.status == "fail"
@@ -202,15 +202,15 @@ async def test_run_l3_axiom_returns_only_one_event_type_fails() -> None:
 
 
 async def test_run_l3_with_failing_l2_short_circuits() -> None:
-    """If L2 fails, L3 should return immediately without polling Axiom."""
+    """If L2 fails, L3 should return immediately without polling PG."""
     class _RaisingExecutor:
         async def submit(self, decision, ctx):
             raise RuntimeError("boom")
 
-    axiom_query = _FakeAxiomQuery([])
-    runner = _make_runner(executor=_RaisingExecutor(), axiom_query=axiom_query)
+    pg_query = _StubEventLogQuery([])
+    runner = _make_runner(executor=_RaisingExecutor(), pg_query=pg_query)
     result = await runner.run_l3()
 
     assert result.status == "fail"
     assert result.level == "L2"  # L3 short-circuited; result reflects L2 failure
-    assert axiom_query.calls == []  # no Axiom poll happened
+    assert pg_query.calls == []  # no PG poll happened
