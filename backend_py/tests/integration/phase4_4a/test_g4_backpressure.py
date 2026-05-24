@@ -62,7 +62,7 @@ class _ObservingDispatcher(BitfinexLiveWSDispatcher):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_dispatcher_queue_full_pauses_producer(
-    domain_chain: dict[str, Any], axiom_sink: Any,
+    domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
     bus = domain_chain["bus"]
     registry = domain_chain["registry"]

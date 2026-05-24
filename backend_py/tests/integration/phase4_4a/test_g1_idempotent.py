@@ -26,7 +26,7 @@ class _EventCapture:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_duplicate_fcn_does_not_double_realize(
-    domain_chain: dict[str, Any], axiom_sink: Any,
+    domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
     """G1 invariant: same fcn emitted twice → _realized +100 ONCE."""
     bus = domain_chain["bus"]

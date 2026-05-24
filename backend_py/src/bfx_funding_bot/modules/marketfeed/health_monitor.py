@@ -229,7 +229,7 @@ class HealthMonitor:
                 "age_s": age_s,
             })
 
-            # Emit BEFORE potential fatal escalation so axiom sees root cause
+            # Emit BEFORE potential fatal escalation so the event is persisted before raise
             level = Level.ERROR if severity == "down" else Level.WARN
             status = HealthStatus.DOWN if severity == "down" else HealthStatus.DEGRADED
             await self._events.emit({
@@ -247,7 +247,7 @@ class HealthMonitor:
                 },
             })
 
-            # Escalate to fatal AFTER emit, so axiom sees the root cause
+            # Escalate to fatal AFTER emit, so the event is persisted before raise
             if age_s > 3 * threshold:
                 raise FatalError(
                     f"sub_task={sub_task} stale {age_s:.0f}s > "

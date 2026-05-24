@@ -1,8 +1,8 @@
 """Event emit helpers for order/safety events.
 
 All helpers build a fully-validated Envelope (Pydantic) and pass the dict
-representation to the axiom emit protocol. Validation failure raises ValueError
-BEFORE network — catches bad shapes at the call site, not in Axiom.
+representation to the event_sink emit port. Validation failure raises ValueError
+before emit — catches bad shapes at the call site.
 """
 from __future__ import annotations
 

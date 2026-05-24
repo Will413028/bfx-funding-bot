@@ -39,7 +39,7 @@ def _success_response(venue_offer_id: str = "42") -> list[Any]:
 @pytest.mark.asyncio
 async def test_submit_then_fcn_completes_orderfilled_chain(
     domain_chain: dict[str, Any],
-    axiom_sink: Any,
+    event_sink_stub: Any,
 ) -> None:
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]
@@ -118,12 +118,12 @@ async def test_submit_then_fcn_completes_orderfilled_chain(
         task.cancel()
     await fake_ws.close()
 
-    # 4. Assertions: ledger / registry / axiom rows
+    # 4. Assertions: ledger / registry / event rows
     assert ledger.realized_exposure() == Decimal("100")
     assert ledger.current_exposure() == Decimal("100")  # 0 reserved + 100 realized
     assert registry.snapshot()[voi].state.value == "released"
 
-    fill_rows = [r for r in axiom_sink.rows if r["event_type"] == "OrderFilled"]
+    fill_rows = [r for r in event_sink_stub.rows if r["event_type"] == "OrderFilled"]
     assert len(fill_rows) == 1
     assert fill_rows[0]["credit_id"] == "999"
     assert fill_rows[0]["event_seq"] is not None

@@ -17,7 +17,7 @@ async def test_daemon_builds_and_runs_briefly(
     daemon.run() starts all sub-tasks, responds to _stop_event, and exits
     cleanly (TaskGroup pattern, Phase 4.2).
 
-    Phase 4.4c: boot path switched from Axiom replay to PG from_snapshot.
+    Boot path uses PG from_snapshot (4.4c).
     Test uses a file-based sqlite DB (not :memory:) so event-store tables
     created here are visible to the engine inside build_daemon.
     """
@@ -60,9 +60,6 @@ phase3b_wfo_results_ref: x
         method="GET", status_code=200, json=[],
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4c: no Axiom APL replay at boot anymore — _apl mock removed.
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
-
     daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
     assert daemon.config.phase == Phase.PAPER
 
@@ -125,9 +122,6 @@ cells:
         method="GET", status_code=200, json=[],
         is_reusable=True, is_optional=True,
     )
-    # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
-
     # Verify URL transform + pool config via make_async_engine_from_url directly
     # (the form chaos recovery accidentally produced — asyncpg scheme + libpq params).
     bad_url = (
