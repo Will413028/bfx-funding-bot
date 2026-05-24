@@ -1,0 +1,33 @@
+# Phase 4.4 canary safety config -- ALL required guards enabled for real money.
+#
+# build_daemon's canary invariant (assert_canary_guard_invariant) refuses to
+# start under BFX_PHASE=canary unless the 4 hard guards + the 2 loss-limiters
+# (realized_loss_24h, drawdown_from_peak) are all enabled. divergence_rate stays
+# optional/off (no validated threshold yet).
+#
+# Select at deploy time: BFX_SAFETY_CONFIG=configs/safety.canary.yaml
+# Thresholds match the conservative $150 canary profile (~10% loss / 15% drawdown).
+# No hot reload -- change here = redeploy.
+
+hard_guards:
+  manual_kill:
+    enabled: true            # flip BFX_KILL_SWITCH=true env to halt all
+  auth_health:
+    enabled: true
+  heartbeat:
+    enabled: true
+    sub_task_stale_threshold_seconds: 300
+  allocation_cap:
+    enabled: true            # cap from BFX_ALLOCATION_CAP_USDT (set 150)
+
+calibrated_guards:
+  realized_loss_24h:
+    enabled: true
+    threshold_usdt: 15.0     # halt if 24h realized loss exceeds ~10% of $150 cap
+  drawdown_from_peak:
+    enabled: true
+    threshold_pct: 15.0      # halt at 15% peak-to-trough drawdown
+  divergence_rate:
+    enabled: false           # optional; no validated threshold yet
+    threshold_pct: null
+    window_minutes: null
