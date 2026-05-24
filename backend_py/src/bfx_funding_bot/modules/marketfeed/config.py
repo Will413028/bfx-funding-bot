@@ -128,7 +128,13 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
     if not deployment_env_str:
         raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, shadow, ci)")
-    deployment_environment = DeploymentEnvironment(deployment_env_str)
+    try:
+        deployment_environment = DeploymentEnvironment(deployment_env_str)
+    except ValueError:
+        valid = ", ".join(e.value for e in DeploymentEnvironment)
+        raise ValueError(
+            f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
+        ) from None
 
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
     run_duration_h: int | None
