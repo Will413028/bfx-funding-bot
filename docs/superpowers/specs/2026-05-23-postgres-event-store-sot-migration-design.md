@@ -325,6 +325,27 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
    ReservationReleased(...))` 的時機;WS `foc` / fill_tracker 偵測到 release 時同理需走同步持久化(沿用
    3a-write 的 `EventStorePersister`,不要復活 bus-subscriber sink)。
 
+8. **3a-recovery shipped(2026-05-24)。** Resolves items 5 & 7。實作前 map 簽章 + 查 Bitfinex docs 發現
+   **§6 step 3 的核心前提不成立**:Bitfinex funding offer **submit 不收 cid、active-offers 回應也無 cid 欄**
+   (index 20 是未文件化 placeholder,舊 `fill_tracker.py` 的 `o[20]=cid` 是錯誤臆測;`build_offer_payload`
+   本來也沒把 cid 放進 body)。我們的 cid 從未送達 venue → 無法「對 PENDING cid 向 venue 查」。
+   **決策(pre-launch best practice,業界 Reconciliation pattern)**:recovery 改以 **`venue_offer_id` 為唯一
+   可靠 key** 對帳(venue 是 offers 的 ultimate truth):
+     - orphan(venue 有、本地無 CLAIMED)→ `ReservationClaimed`,合成 cid(`-int(voi)`,**負數命名空間**
+       與真實 `generate_cid` 正整數零碰撞),`reserved += size`;
+     - missing(本地 CLAIMED、venue 已無)→ `ReservationReleased(reason="missing_from_venue")`,`reserved -= size`
+       —— 這即 item 7 的 release-side 持久化;
+     - 無法比對的 PENDING(crash-mid-flight)→ grace 後收斂 `ReservationFailed(reason="unresolved_at_boot")`,
+       **capital-neutral**(真正的 offer 若存在,已由 orphan-claim 獨立認領)。
+   皆 idempotent:terminal state 在下次 boot 的 `from_snapshot` diff 中自然排除。
+   signed query 放在新的專屬 `BitfinexAuthREST`(api.bitfinex.com + HMAC),**不掛在 public 的 `BitfinexREST`**
+   (api-pub host)。item 7 同時擴及 **live WS `fcn` → OrderFilled**(同一 sink-retirement gap):
+   `ws_dispatcher` / `fill_tracker` 改為**在來源端 persist-then-publish**(沿用 `EventStorePersister`,fill_tracker
+   persist 失敗會保留 voi 於 last_state 下個 tick 重試)。recovery 在 `Daemon.run()` 開頭執行(live-gated
+   `not spec.is_simulated`),venue fetch 失敗 fail-safe(daemon 不啟動)。**無 schema migration**(只讀寫既有
+   `event_log`/`offer_claims`/`position_state`)。§6 step 3 的 cid-match 機制由本 reconciliation model 取代。
+   Plan:`docs/superpowers/plans/2026-05-24-pg-event-store-a2-recovery.md`。
+
 **3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入,**done 2026-05-24**)→ `3a-recovery`(signed offers-query +
-boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**)→ `3b`(diagnostics)→
-`3c`(Axiom 全移除)。
+boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**,**done 2026-05-24**)→
+`3b`(diagnostics)→ `3c`(Axiom 全移除)。
