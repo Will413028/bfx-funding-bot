@@ -1,6 +1,8 @@
 """StdoutEventSink: operational telemetry → structured stdout (3c)."""
 import json
 import logging
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -29,7 +31,7 @@ async def test_emit_writes_single_json_line_with_envelope_fields(caplog) -> None
 
 
 @pytest.mark.asyncio
-async def test_event_fields_win_over_resource(caplog) -> None:
+async def test_resource_fields_win_over_event_on_collision(caplog) -> None:
     # AxiomClient merge direction: {**event, **resource_fields} → resource wins.
     # StdoutEventSink must mirror this: resource fields overwrite event-supplied keys.
     sink = StdoutEventSink(resource=_resource())
@@ -43,9 +45,6 @@ async def test_event_fields_win_over_resource(caplog) -> None:
 @pytest.mark.asyncio
 async def test_emit_is_lossless_and_json_safe(caplog) -> None:
     # 含 Decimal/datetime 等非原生 JSON 型別不可炸（default=str）
-    from datetime import UTC, datetime
-    from decimal import Decimal
-
     sink = StdoutEventSink(resource=_resource())
     with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
         await sink.emit({"amt": Decimal("1.5"), "ts": datetime(2026, 5, 24, tzinfo=UTC)})

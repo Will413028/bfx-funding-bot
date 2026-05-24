@@ -20,6 +20,7 @@ from typing import Any
 
 from bfx_funding_bot.modules.observability.resource import EventResource
 
+# Named (not __name__) so Koyeb can route this stream separately from app logs.
 log = logging.getLogger("bfx_funding_bot.events")
 
 
@@ -30,7 +31,5 @@ class StdoutEventSink:
         self._resource = resource
 
     async def emit(self, event: dict[str, Any]) -> None:
-        # resource envelope fields win over event-supplied keys, mirroring
-        # AxiomClient's merge: {**event, **self._resource.envelope_fields()}
         enriched = {**event, **self._resource.envelope_fields()}
         log.info(json.dumps(enriched, default=str))
