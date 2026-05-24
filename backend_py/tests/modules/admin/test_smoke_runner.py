@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _FakeAxiomClient:
+class _FakeEventSink:
     """Records all emit() calls in-memory. Used by EchoPaperExecutor."""
 
     def __init__(self) -> None:
@@ -54,7 +54,7 @@ class _StubEventLogQuery:
         return self.events
 
 
-def _build_chain(bus: DomainEventBus, axiom: _FakeAxiomClient):
+def _build_chain(bus: DomainEventBus, axiom: _FakeEventSink):
     """Build wrapped chain with paper executor + ReservationEmittingMiddleware."""
     paper = EchoPaperExecutor(
         event_sink=axiom, phase=Phase.PAPER,
@@ -65,7 +65,7 @@ def _build_chain(bus: DomainEventBus, axiom: _FakeAxiomClient):
 
 def _make_runner(executor=None, bus=None, axiom=None, pg_query=None) -> SmokeRunner:
     bus = bus or DomainEventBus()
-    axiom = axiom or _FakeAxiomClient()
+    axiom = axiom or _FakeEventSink()
     return SmokeRunner(
         executor=executor or _build_chain(bus, axiom),
         bus=bus,
@@ -78,7 +78,7 @@ def _make_runner(executor=None, bus=None, axiom=None, pg_query=None) -> SmokeRun
 
 async def test_run_l2_happy_path_returns_pass() -> None:
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     runner = _make_runner(bus=bus, axiom=axiom)
 
     result = await runner.run_l2()
@@ -119,7 +119,7 @@ async def test_run_l2_with_non_filled_executor_returns_fail() -> None:
 async def test_run_l2_emits_smoke_account_id_events() -> None:
     """L2 should produce events tagged with smoke_test account_id."""
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     captured: list[Any] = []
 
     async def spy(e):
@@ -169,6 +169,7 @@ async def test_run_l3_happy_returns_pass() -> None:
     assert result.level == "L3"
     assert result.checks["l2_passed"] is True
     assert result.checks["pg_events_seen"] == 2
+    assert set(result.checks["pg_event_types"]) == {"RESERVATION_CLAIMED", "ORDER_FILL"}
     assert len(pg_query.calls) >= 1
     assert pg_query.calls[0][0] == SMOKE_ACCOUNT_ID
 
