@@ -5,7 +5,6 @@ from bfx_funding_bot.core.errors import (
     ExecutorFatalError,
     ExecutorTransientError,
     FatalError,
-    LedgerReplayError,
     TransientError,
 )
 
@@ -20,10 +19,6 @@ def test_executor_fatal_is_fatal() -> None:
 
 def test_executor_auth_is_fatal_subclass() -> None:
     assert issubclass(ExecutorAuthError, ExecutorFatalError)
-
-
-def test_ledger_replay_is_fatal() -> None:
-    assert issubclass(LedgerReplayError, FatalError)
 
 
 def test_exit_code_auth_failed_is_sysexits_78() -> None:

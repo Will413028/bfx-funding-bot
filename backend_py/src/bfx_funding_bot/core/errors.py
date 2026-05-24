@@ -5,9 +5,6 @@ stop_after_attempt cap → escalates to FatalError handling by TaskGroup.
 
 FatalError: daemon should exit non-zero → Koyeb container restart.
 Authentication, config, schema, and similar root-cause-elsewhere errors.
-
-External modules may define their own subclasses (e.g.
-AxiomTransientError(TransientError)).
 """
 
 
@@ -33,14 +30,6 @@ class ExecutorAuthError(ExecutorFatalError):
     daemon._run catches this distinctly → flush + sys.exit(EXIT_CODE_AUTH_FAILED)
     so Koyeb restart policy enters crash-loop-backoff instead of tight retry.
     See spec Path E + Google SRE Book ch. 22.
-    """
-
-
-class LedgerReplayError(FatalError):
-    """PaperPositionLedger replay from Axiom failed at startup.
-
-    Fast-fail rather than silent empty-ledger fallback: empty ledger lets
-    AllocationCap permit over-cap exposure, which is a real safety hole.
     """
 
 
