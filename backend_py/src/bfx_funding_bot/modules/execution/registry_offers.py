@@ -53,9 +53,10 @@ log = logging.getLogger(__name__)
 
 
 class RegistryState(Enum):
-    PENDING = "pending"   # reserved for 4.4b; not used in 4.4a
+    PENDING = "pending"   # A2 write-ahead intent — durable, voi unknown
     CLAIMED = "claimed"
     RELEASED = "released"
+    FAILED = "failed"     # A2 submit-failed terminal
 
 
 @dataclass(frozen=True, slots=True)
