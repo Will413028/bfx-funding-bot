@@ -3,6 +3,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     DateTime,
     Float,
@@ -84,7 +85,11 @@ class UserConfig(Base):
         ForeignKey("users.id", ondelete="CASCADE", name="fk_user_configs_user"),
         nullable=False,
     )
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # JSONB on Postgres, generic JSON on sqlite (so Base.metadata builds under
+    # sqlite-based unit tests; mirrors event_store/tables.py). Postgres DDL unchanged.
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
