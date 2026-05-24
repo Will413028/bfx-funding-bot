@@ -36,6 +36,7 @@ from bfx_funding_bot.external.axiom import (
     AxiomClient,
     AxiomConfig,
 )
+from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
@@ -55,6 +56,7 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
+from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -168,6 +170,7 @@ class Daemon:
     offer_registry: OfferRegistry | None = None
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
+    boot_recovery: BootRecovery | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
@@ -184,6 +187,12 @@ class Daemon:
         # Initial cell registration (was in startup)
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell)
+
+        # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
+        # BEFORE any sub-task starts (live only; paper leaves this None). A venue
+        # fetch failure raises here -> daemon fails to start (fail-safe).
+        if self.boot_recovery is not None:
+            await self.boot_recovery.run()
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
@@ -685,6 +694,7 @@ async def build_daemon(
     # synchronously by ReservationEmittingMiddleware in the command txn — A2).
     env_str = axiom_cfg.deployment_env.value
     event_store = PostgresEventStore(deployment_environment=env_str)
+    persister = EventStorePersister(store=event_store, session_factory=session_factory)
     async with session_factory() as snap_session:
         ledger = await PaperPositionLedger.from_snapshot(
             snap_session, account_id=account_id, deployment_environment=env_str
@@ -777,6 +787,22 @@ async def build_daemon(
     )
     executor: ExecutorPort = spec.executor
 
+    # 3a-recovery: live-only venue reconciliation. Paper/shadow have no real
+    # venue offers (BFX_FILL_TRACKER/WS gated off) -> boot_recovery stays None
+    # and Daemon.run() skips it.
+    boot_recovery: BootRecovery | None = None
+    if not spec.is_simulated:
+        auth_rest = BitfinexAuthREST(http=bitfinex_http)
+        boot_recovery = BootRecovery(
+            store=event_store,
+            session_factory=session_factory,
+            auth_rest=auth_rest,
+            account_ctx=account_ctx,
+            deployment_environment=env_str,
+            bus=bus,
+            is_simulated=spec.is_simulated,
+        )
+
     fill_tracker: RestPollingFillTracker | None = None
     if spec.fill_tracker_enabled:
         fill_tracker = RestPollingFillTracker(
@@ -789,6 +815,7 @@ async def build_daemon(
             cell=first_cell.cell_id,
             account_id=account_id,
             registry=offer_registry,
+            persister=persister,
         )
     axiom_sink = AxiomEventSink(
         axiom_client=axiom,
@@ -812,7 +839,6 @@ async def build_daemon(
     # REST path; pairs with CancelRequested for cancel-lifecycle audit).
     bus.subscribe(CancelAcknowledged,  axiom_sink.handle_cancel_acknowledged)
 
-    persister = EventStorePersister(store=event_store, session_factory=session_factory)
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             TransientRetryMiddleware(executor),
@@ -1016,6 +1042,7 @@ async def build_daemon(
             registry=offer_registry,
             bus=bus,
             axiom=axiom,
+            persister=persister,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
 
@@ -1043,6 +1070,7 @@ async def build_daemon(
         offer_registry=offer_registry,
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
+        boot_recovery=boot_recovery,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
