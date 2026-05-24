@@ -1,17 +1,17 @@
 """OfferRegistry pure types and FSM transition function.
 
-§6.1 — OfferRegistry state machine (Phase 4.4a).
+§6.1 — OfferRegistry state machine.
 
 Tracks the lifecycle of a venue offer from the moment it is claimed
 (capital reserved at Bitfinex) through to its terminal state (filled or
 released).  This module is deliberately free of I/O, clock calls, and
-side-effects so that the transition logic can be tested deterministically
-and composed freely by the shell class introduced in Task 9.
+side-effects so that the transition logic can be tested deterministically.
 
-State graph (4.4a subset):
-  PENDING  — reserved for 4.4b multi-step pre-submission; not used here
+State graph:
+  PENDING  — reserved for write-ahead intent; durable, voi unknown
   CLAIMED  — ReservationClaimed received; offer live at venue
   RELEASED — OrderFilled or ReservationReleased received; terminal state
+  FAILED   — submit-failed terminal
 
 Transition rules:
   ReservationClaimed  + voi not in snapshot  → add CLAIMED record
@@ -35,13 +35,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.event_upcasters import upcast_row
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -184,38 +183,18 @@ def transition(
 # Imperative shell — OfferRegistry
 # ---------------------------------------------------------------------------
 
-class _AxiomQueryProtocol(Protocol):
-    """Structural protocol for the Axiom query adapter.
-
-    Phase 4.4b D1: signature now mirrors `AxiomReplayQueryAdapter.fetch_events`
-    (keyword-only `event_types` / `up_to_ms` / `account_id`) so the real adapter
-    type-checks against this protocol. The stub `_OfferRegistryQueryStub` that
-    used `**kwargs` was deleted with the wiring switch.
-    """
-    async def fetch_events(
-        self,
-        *,
-        event_types: list[str],
-        up_to_ms: int | None = None,
-        account_id: str | None = None,
-    ) -> list[dict[str, Any]]: ...
-
-
 class OfferRegistry:
     """In-memory FSM projection of ReservationClaimed/OrderFilled/ReservationReleased.
 
     Subscribe to bus → handle each event → atomic snapshot swap.
-    Cold-start: replay_from_axiom rebuilds from event log (Phase 4.3 _AxiomQuery stub
-    returns []; real adapter ships in separate ADR before 4.4b cutover).
+    Cold-start: from_snapshot loads state from PostgreSQL offer_claims table (no replay).
     """
 
     def __init__(
         self,
         *,
-        axiom_query: _AxiomQueryProtocol,
         clock: Callable[[], int] | None = None,
     ) -> None:
-        self._axiom_query = axiom_query
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._snapshot: dict[str, ClaimRecord] = {}
 
@@ -235,23 +214,6 @@ class OfferRegistry:
             )
         self._snapshot = new_snapshot
 
-    async def replay_from_axiom(self, up_to_ms: int | None = None) -> None:
-        """Cold-start projection rebuild from Axiom event log.
-
-        Phase 4.4a: _AxiomQueryAdapter stub returns [] → no-op rebuild.
-        Real query adapter ships in separate ADR before 4.4b cutover.
-        """
-        raw_rows = await self._axiom_query.fetch_events(
-            event_types=[EventType.RESERVATION_CLAIMED.value, EventType.ORDER_FILL.value, EventType.RESERVATION_RELEASED.value],
-            up_to_ms=up_to_ms,
-        )
-        rows = [upcast_row(r) for r in raw_rows]
-        rows.sort(key=lambda r: (r.get("occurred_at_ms") or 0, r.get("event_seq") or 0))
-        for row in rows:
-            event = self._parse_event(row)
-            if event is not None:
-                await self.handle(event)
-
     # ---------- cold-start loader (PostgreSQL snapshot) ----------
 
     @classmethod
@@ -263,19 +225,12 @@ class OfferRegistry:
         deployment_environment: str,
         clock: Callable[[], int] | None = None,
     ) -> OfferRegistry:
-        """Load registry from the offer_claims snapshot table (no replay).
-
-        Uses __new__ + manual attribute assignment as a transition shim; a later
-        plan will remove the mandatory axiom_query parameter from __init__.
-        """
+        """Load registry from the offer_claims snapshot table (no replay)."""
         from sqlalchemy import select
 
         from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 
-        reg = cls.__new__(cls)
-        reg._axiom_query = None  # type: ignore[assignment]
-        reg._clock = clock or (lambda: int(time.time() * 1000))
-        reg._snapshot = {}
+        reg = cls(clock=clock)
         rows = (
             await session.execute(
                 select(OfferClaimRow).where(
@@ -318,7 +273,7 @@ class OfferRegistry:
     def _parse_event(row: dict[str, Any]) -> Any | None:
         """Parse upcast row dict to domain event. Returns None for unknown types.
 
-        Schema bridge mirrors PaperPositionLedger.replay_from_axiom (ledger.py:164-182):
+        Schema bridge:
           - RESERVATION_CLAIMED: v2-aligned payload field names
           - ORDER_FILL: legacy OrderFillPayload field names (offer_id, fill_size_usdt,
             fill_price) — schema asymmetry documented in spec Out-of-scope

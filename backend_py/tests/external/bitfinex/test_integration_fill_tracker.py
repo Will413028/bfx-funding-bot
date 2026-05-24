@@ -22,11 +22,6 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 pytestmark = pytest.mark.integration
 
 
-class _StubAxiomQuery:
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-
 class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -72,7 +67,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     # Seed registry with claim for voi="111" (option a: seed to satisfy new contract)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     sig_id = uuid4()
     bus.subscribe(ReservationClaimed, registry.handle)
     await bus.publish(ReservationClaimed(

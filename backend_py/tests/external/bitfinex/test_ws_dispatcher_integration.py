@@ -32,11 +32,6 @@ class _FakeWSClient:
             await asyncio.sleep(0.1)
 
 
-class _StubAxiomQuery:
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-
 class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
@@ -45,7 +40,7 @@ class _EventCapture:
 @pytest.mark.asyncio
 async def test_dispatcher_publishes_orderfilled_on_fcn() -> None:
     bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     bus.subscribe(ReservationClaimed, registry.handle)
     bus.subscribe(OrderFilled, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
@@ -92,7 +87,7 @@ async def test_dispatcher_publishes_orderfilled_on_fcn() -> None:
 @pytest.mark.asyncio
 async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() -> None:
     bus = DomainEventBus(clock=lambda: 2200)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 2200)
+    registry = OfferRegistry(clock=lambda: 2200)
     bus.subscribe(ReservationClaimed, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
 

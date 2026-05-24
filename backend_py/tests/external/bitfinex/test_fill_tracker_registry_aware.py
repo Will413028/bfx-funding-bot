@@ -16,11 +16,6 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 
-class _StubAxiomQuery:
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-
 class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
@@ -30,7 +25,7 @@ class _EventCapture:
 async def test_fill_tracker_skips_emit_when_registry_already_released() -> None:
     """G1: registry already RELEASED → fill_tracker dedup."""
     bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     bus.subscribe(ReservationClaimed, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
 
@@ -75,7 +70,7 @@ async def test_fill_tracker_skips_emit_when_registry_already_released() -> None:
 async def test_fill_tracker_emits_with_claim_correlation_id_not_uuid4() -> None:
     """G3 fix: signal_correlation_id from registry lookup, not uuid4()."""
     bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     bus.subscribe(ReservationClaimed, registry.handle)
 
     sig_id = uuid4()
@@ -112,7 +107,7 @@ async def test_fill_tracker_emits_with_claim_correlation_id_not_uuid4() -> None:
 async def test_fill_tracker_skips_when_voi_not_in_registry() -> None:
     """voi disappeared but never had claim in registry (boot-before-claim) → skip emit + log."""
     bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
 
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json=[])),

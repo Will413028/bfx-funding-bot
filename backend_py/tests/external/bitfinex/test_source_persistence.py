@@ -45,9 +45,7 @@ class _EventCapture:
 
 
 def _registry_with_claim(voi, cid, scid, size, account_id=_ACC):
-    reg = OfferRegistry.__new__(OfferRegistry)
-    reg._axiom_query = None  # type: ignore[attr-defined]
-    reg._clock = lambda: 0
+    reg = OfferRegistry(clock=lambda: 0)
     reg._snapshot = {voi: ClaimRecord(
         venue_offer_id=voi, cid=cid, signal_correlation_id=scid,
         size_usdt=Decimal(str(size)), account_id=account_id, state=RegistryState.CLAIMED,

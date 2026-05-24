@@ -71,18 +71,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
     probe.record_heartbeat("safety_chain")
     probe.record_heartbeat("executor")
 
-    class _FakeQuery:
-        async def query_order_events(
-            self, account_id: str, since: Any,
-        ) -> list[dict[str, Any]]:
-            return []
-
-    from datetime import UTC, datetime, timedelta
-    ledger = await PaperPositionLedger.replay_from_axiom(
-        account_id="default",
-        since=datetime.now(UTC) - timedelta(days=30),
-        axiom_query=_FakeQuery(),
-    )
+    ledger = PaperPositionLedger(account_id="default")
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     pnl, div = _StubPnL(), _StubDiv()
 

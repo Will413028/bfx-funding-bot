@@ -23,12 +23,6 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 
 
-class StubAxiomQuery:
-    """No-op axiom query — 4.4a stub returns empty list."""
-    async def fetch_events(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
-
-
 class StubAxiomSink:
     """Captures every domain event as a row for assertion."""
     def __init__(self) -> None:
@@ -80,7 +74,7 @@ def domain_chain(axiom_sink: StubAxiomSink) -> dict[str, Any]:
     Returns: {"bus", "ledger", "registry", "axiom_sink"}
     """
     bus = DomainEventBus(clock=lambda: 5000)
-    registry = OfferRegistry(axiom_query=StubAxiomQuery(), clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
     ledger = PaperPositionLedger(account_id="default")
 
     bus.subscribe(ReservationClaimed, registry.handle)
