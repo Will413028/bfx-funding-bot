@@ -32,6 +32,10 @@ class DiagnosticsRow(Base):
 
     Non-SoT, prunable (30-90d). Best-effort writes — a failure here NEVER
     blocks trading (spec §240-241). SoT lives in event_log, not here.
+
+    occurred_at uses a real TIMESTAMPTZ datetime for forensic readability,
+    intentionally NOT the epoch-millisecond BigInteger (*_ms) convention used
+    by event_log (which needs ms precision for strict event sequencing).
     """
 
     __tablename__ = "diagnostics"
