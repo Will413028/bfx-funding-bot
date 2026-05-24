@@ -56,7 +56,7 @@ from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.event_store.sink import PostgresEventSink
+from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -680,10 +680,9 @@ async def build_daemon(
         allocation_cap_usdt=allocation_cap,
     )
 
-    # Phase 4.4c: PG event-store replaces Axiom replay at boot.
+    # Phase 4.4c / 3a: PG event-store replaces Axiom replay at boot.
     # from_snapshot reads position_state + offer_claims from Postgres (written
-    # by PostgresEventSink at runtime); avoids 400 errors from Axiom APL
-    # endpoint on cold-start and removes external dependency from the boot path.
+    # synchronously by ReservationEmittingMiddleware in the command txn — A2).
     env_str = axiom_cfg.deployment_env.value
     event_store = PostgresEventStore(deployment_environment=env_str)
     async with session_factory() as snap_session:
@@ -803,10 +802,6 @@ async def build_daemon(
     bus.subscribe(ReservationClaimed,  axiom_sink.on_reservation_claimed)
     bus.subscribe(OrderFilled,         axiom_sink.on_order_filled)
     bus.subscribe(ReservationReleased, axiom_sink.on_reservation_released)
-    pg_sink = PostgresEventSink(store=event_store, session_factory=session_factory)
-    bus.subscribe(ReservationClaimed,  pg_sink.on_reservation_claimed)
-    bus.subscribe(OrderFilled,         pg_sink.on_order_filled)
-    bus.subscribe(ReservationReleased, pg_sink.on_reservation_released)
     # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
     bus.subscribe(ReservationClaimed,  offer_registry.handle)
     bus.subscribe(OrderFilled,         offer_registry.handle)
@@ -817,10 +812,13 @@ async def build_daemon(
     # REST path; pairs with CancelRequested for cancel-lifecycle audit).
     bus.subscribe(CancelAcknowledged,  axiom_sink.handle_cancel_acknowledged)
 
+    persister = EventStorePersister(store=event_store, session_factory=session_factory)
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             TransientRetryMiddleware(executor),
             bus=bus,
+            persister=persister,
+            is_simulated=spec.is_simulated,
         ),
         probe=probe,
     )

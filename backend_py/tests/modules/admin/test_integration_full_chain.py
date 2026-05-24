@@ -15,6 +15,7 @@ from bfx_funding_bot.modules.admin.smoke_runner import (
 )
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -67,7 +68,7 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
         axiom=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
-    wrapped = ReservationEmittingMiddleware(paper, bus=bus)
+    wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
         executor=wrapped, bus=bus, axiom_client=axiom,
         axiom_query=_FakeAxiomQuery(),
@@ -102,7 +103,7 @@ async def test_smoke_axiom_sink_emits_with_smoke_account_id() -> None:
         axiom=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
-    wrapped = ReservationEmittingMiddleware(paper, bus=bus)
+    wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
         executor=wrapped, bus=bus, axiom_client=axiom,
         axiom_query=_FakeAxiomQuery(),

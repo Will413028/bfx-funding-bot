@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -70,7 +71,7 @@ def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
         axiom=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
-    wrapped = ReservationEmittingMiddleware(paper, bus=bus)
+    wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
         executor=wrapped, bus=bus, axiom_client=axiom,
         axiom_query=_FakeAxiomQuery(),
@@ -116,7 +117,7 @@ def test_http_no_token_means_admin_router_not_mounted() -> None:
         axiom=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
-    wrapped = ReservationEmittingMiddleware(paper, bus=bus)
+    wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
         executor=wrapped, bus=bus, axiom_client=axiom,
         axiom_query=_FakeAxiomQuery(),

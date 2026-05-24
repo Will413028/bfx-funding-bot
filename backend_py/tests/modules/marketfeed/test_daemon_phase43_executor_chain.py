@@ -11,6 +11,7 @@ import pytest
 
 from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -95,6 +96,7 @@ def _build_chain(
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             TransientRetryMiddleware(_PaperInner()), bus=bus,
+            persister=NoopEventPersister(),
         ),
         probe=probe,
     )
@@ -183,6 +185,7 @@ async def test_sad_path_axiom_failure_does_not_break_ledger() -> None:
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             TransientRetryMiddleware(_PaperInner()), bus=bus,
+            persister=NoopEventPersister(),
         ),
         probe=probe,
     )
