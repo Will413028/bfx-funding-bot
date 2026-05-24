@@ -15,19 +15,34 @@ submit reached the venue) is captured independently by orphan-claim.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any, Protocol
 from uuid import UUID, uuid5
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationFailed,
     ReservationReleased,
 )
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+
+log = logging.getLogger(__name__)
 
 RecoveryAction = ReservationClaimed | ReservationReleased | ReservationFailed
 
@@ -116,3 +131,129 @@ def compute_recovery_actions(
             ))
 
     return actions
+
+
+class _ActiveOffersQuery(Protocol):
+    async def get_active_funding_offers(
+        self, *, ctx: AccountContext, symbol: str = "fUSD",
+    ) -> list[ActiveFundingOffer]: ...
+
+
+class _Bus(Protocol):
+    async def publish(self, event: Any) -> None: ...
+
+
+class BootRecovery:
+    """Boot orchestration: venue reconcile + resolve crash-mid-flight PENDING.
+
+    Runs once at the start of Daemon.run(), live only. Fetches venue offers
+    (with retry -> fail-safe), then persists corrections in ONE txn (no REST
+    call held inside the txn). After commit, publishes CLAIMED/RELEASED to the
+    bus for in-memory projections (FAILED is not published -- no subscriber,
+    reserved untouched). Idempotent across boots: terminal states are excluded
+    from the next boot's diff.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: PostgresEventStore,
+        session_factory: async_sessionmaker[AsyncSession],
+        auth_rest: _ActiveOffersQuery,
+        account_ctx: AccountContext,
+        deployment_environment: str,
+        bus: _Bus,
+        is_simulated: bool = False,
+        symbol: str = "fUSD",
+        grace_ms: int = 120_000,
+        max_attempts: int = 3,
+        backoff_base_s: float = 1.0,
+        clock: Callable[[], int] | None = None,
+    ) -> None:
+        self._store = store
+        self._session_factory = session_factory
+        self._auth_rest = auth_rest
+        self._ctx = account_ctx
+        self._env = deployment_environment
+        self._bus = bus
+        self._is_simulated = is_simulated
+        self._symbol = symbol
+        self._grace_ms = grace_ms
+        self._max_attempts = max_attempts
+        self._backoff_base_s = backoff_base_s
+        self._clock = clock or (lambda: int(time.time() * 1000))
+
+    async def run(self) -> None:
+        venue_offers = await self._fetch_offers()  # may raise -> daemon fail-safe (no trade w/o venue truth)
+        async with session_scope(self._session_factory) as session:
+            local_claims = await self._load_local_claims(session)
+            actions = compute_recovery_actions(
+                venue_offers=venue_offers, local_claims=local_claims,
+                account_id=self._ctx.account_id, is_simulated=self._is_simulated,
+                now_ms=self._clock(), grace_ms=self._grace_ms,
+            )
+            for ev in actions:
+                await self._store.append(session, ev)
+        # publish in-memory projection events AFTER durable commit
+        n_claim = n_release = n_fail = 0
+        for ev in actions:
+            if isinstance(ev, ReservationClaimed):
+                n_claim += 1
+                await self._safe_publish(ev)
+            elif isinstance(ev, ReservationReleased):
+                n_release += 1
+                await self._safe_publish(ev)
+            elif isinstance(ev, ReservationFailed):
+                n_fail += 1
+        log.info(
+            "boot_recovery_complete venue_offers=%d orphans_claimed=%d released=%d pending_failed=%d",
+            len(venue_offers), n_claim, n_release, n_fail,
+        )
+
+    async def _fetch_offers(self) -> list[ActiveFundingOffer]:
+        """Fetch venue offers with bounded retry. Exhaustion re-raises so the
+        daemon fails to start (fail-safe: never trade without venue truth)."""
+        last_exc: BitfinexAPIError | None = None
+        for attempt in range(self._max_attempts):
+            try:
+                return await self._auth_rest.get_active_funding_offers(
+                    ctx=self._ctx, symbol=self._symbol,
+                )
+            except BitfinexAPIError as e:
+                last_exc = e
+                if attempt + 1 < self._max_attempts:
+                    backoff = self._backoff_base_s * (2 ** attempt)
+                    log.warning(
+                        "boot_recovery_venue_fetch_failed attempt=%d/%d err=%r backoff=%.1fs",
+                        attempt + 1, self._max_attempts, e, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+        log.error("boot_recovery_venue_unreachable after %d attempts — failing startup", self._max_attempts)
+        assert last_exc is not None
+        raise last_exc
+
+    async def _load_local_claims(self, session: AsyncSession) -> list[LocalClaim]:
+        rows = (await session.execute(
+            select(OfferClaimRow).where(
+                OfferClaimRow.account_id == self._ctx.account_id,
+                OfferClaimRow.deployment_environment == self._env,
+            )
+        )).scalars().all()
+        return [
+            LocalClaim(
+                cid=r.cid, venue_offer_id=r.venue_offer_id,
+                state=RegistryState(r.state), size_usdt=Decimal(str(r.size_usdt)),
+                signal_correlation_id=UUID(r.signal_correlation_id),
+                occurred_at_ms=r.occurred_at_ms,
+            )
+            for r in rows
+        ]
+
+    async def _safe_publish(self, event: object) -> None:
+        try:
+            await self._bus.publish(event)
+        except Exception as exc:
+            log.critical(
+                "boot_recovery_publish_failed event=%s err=%r — projection lost, SoT persisted",
+                type(event).__name__, exc,
+            )
