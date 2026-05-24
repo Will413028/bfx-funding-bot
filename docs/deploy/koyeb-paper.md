@@ -1,6 +1,6 @@
 # Koyeb Paper/Shadow Deploy Runbook (Phase 4.1)
 
-> 用途：BFX_PHASE=paper 1hr smoke → G1 PASS → BFX_PHASE=shadow 2-4 週 run。
+> 用途：BFX_PHASE=paper 1hr smoke → L3 smoke PASS → BFX_PHASE=shadow 2-4 週 run。
 > 範圍：Phase 4.1。Phase 4.2 加入 real-money execution 後另寫 canary runbook。
 > Spec: [phase4.1-koyeb-deploy-design.md](../superpowers/specs/2026-05-18-phase4.1-koyeb-deploy-design.md)
 
@@ -26,8 +26,6 @@ Script 是 idempotent：app/service 缺則建、env vars 已存在則更新、�
 | Koyeb account + GitHub repo connected | https://app.koyeb.com → Apps → 看到 `bfx-funding-bot` 或可建立新 app 連 GitHub repo |
 | Neon Postgres project + DATABASE_URL | https://console.neon.tech → 你的 project → Connection Details → 複製 connection string |
 | Upstash Redis (optional) | https://console.upstash.com → Database → 複製 `rediss://...` URL |
-| Axiom dataset `bfx-funding-bot` 已建 | https://app.axiom.co → Datasets → 看到 `bfx-funding-bot` |
-| Axiom API token（ingest + query scope） | Axiom Settings → API Tokens → 新建一把（**只記在密碼管理器 / Koyeb，不貼進 chat / git**） |
 
 ## Env Vars
 
@@ -36,8 +34,6 @@ Script 是 idempotent：app/service 缺則建、env vars 已存在則更新、�
 | Env Var | Required | Paper 值 | Shadow 值 | 備註 |
 |---|---|---|---|---|
 | `BFX_PHASE` | ✅ | `paper` | `shadow` | 字面值。`canary` 會被 daemon reject |
-| `AXIOM_API_KEY` | ✅ | `xaat-...` | 同 paper | 直接貼進 Koyeb dashboard，不經 chat / repo |
-| `AXIOM_DATASET` | ✅ | `bfx-funding-bot` | 同 paper | Axiom dashboard 上實際 dataset 名 |
 | `DATABASE_URL` | ✅ | `postgresql+asyncpg://...?sslmode=require` | 同 paper（共用 schema） | ⚠️ **必須用 `postgresql+asyncpg://` scheme，不是 Neon 預設給的 `postgresql://`**。詳見下方注意點 |
 | `REDIS_URL` | optional | `rediss://default:...@host:6379` | 同 paper | Upstash。可暫不設 |
 | `BFX_RUN_DURATION_HOURS` | optional | `1` | **不設 / 刪除** | Paper 1hr 自動退；Shadow flip 必須刪掉這個 var |
@@ -114,59 +110,38 @@ postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
 4. **首 30s 預期看到**：
    - `alembic upgrade head` output（已 up to date 或套用 migration）
    - `daemon_started phase=paper cells=11`（或 shadow）
-5. **5 分鐘內預期 Axiom 看到 event**：
-   - https://app.axiom.co → `bfx-funding-bot` dataset → Live Stream
-   - 應出現 `phase=paper` 的 candle / signal / health event
+5. **5 分鐘內預期在 Koyeb Runtime logs 看到 structured stdout event**：
+   - 應出現 `phase=paper` 的 candle / signal / health 結構化 JSON 行（signal events 直接寫 stdout，無 Axiom）
 
-## G1 Self-Smoke Trigger（自動）
+## Deploy Verification（L3 Smoke Endpoint）
 
-從 [Phase 4.1.x C1 redesign](../superpowers/specs/2026-05-21-g1-c1-continuity-redesign-design.md) 起，
-daemon 在 `BFX_PHASE=paper` + `BFX_RUN_DURATION_HOURS` 設定下，
-跑完 duration 後**自動執行 G1 smoke**：
+Paper 跑完（Koyeb runtime log 看到 `daemon_run_duration_reached hours=1`）後，在切 shadow 前執行 L3 smoke 驗證。
 
-1. daemon `_run()` finally block 完成（Axiom flush + http client close）
-2. 等 30 秒讓 Axiom ingestion 完成 catch-up
-3. 跑完整 C1-C6 check
-4. Container exit code = G1 exit code
+**Signal events 現在直接寫 structured stdout**（Koyeb Runtime logs 可查），無需外部 Axiom。
+
+### L3 Smoke 執行方式
+
+```bash
+curl -X POST "https://<your-service-url>/smoke-test?level=L3" \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+L3 smoke 會在 PG event_log 上執行 read-your-writes 驗證，確認完整執行鏈（execution chain）正常：
+- `RESERVATION_CLAIMED` event 已落地
+- `ORDER_FILL` event 已落地
+
+回傳 `{"status": "ok", "level": "L3"}` 代表 PASS；任何非 2xx 或 `"status": "fail"` 代表失敗。
 
 Container exit code 行為：
 
 | Exit | 意義 | Koyeb 行為 |
 |---|---|---|
-| 0 | Daemon + G1 全 pass | Deploy 標 healthy，container 結束 |
-| 1 | G1 fail（某 check fail） | Deploy 標 unhealthy，預設 restart loop（**feature** — 強制查 log） |
-| 2 | Axiom auth/network fail | 同 1，cause 在 config 而非 daemon |
-| 3 | Config error（env vars 漏設 / EDA range mismatch） | 同 1，cause 在 config |
+| 0 | Daemon 正常退（paper duration 到） | Container 結束 |
+| 1 | Config / runtime fatal | Deploy 標 unhealthy，預設 restart loop — **先查 runtime log 找 fail 原因** |
 
-⚠️ 若 G1 fail 進 restart loop，**先查 runtime log 找 fail 原因再放著 restart**，否則 burn quota 跑無效 cycle。
+⚠️ **L3 smoke 不 PASS 不要切 shadow**。先排 issue 再重跑 1hr paper。
 
-## G1 Smoke 手動驗證（debug 用）
-
-> 通常**不需要手動跑** — 上方 Self-Smoke Trigger 已自動執行。本段用於：debug 失敗原因、重跑特定 check（`--only C1`）、或對歷史 window 跑 retroactive 檢查。
-
-等 paper container 因 `BFX_RUN_DURATION_HOURS=1` 自動退（Koyeb runtime log 看到 `daemon_run_duration_reached hours=1`）。
-
-本機跑：
-
-```bash
-cd /Users/will/second-brain/projects/startup/bfx-funding-bot/backend_py
-export AXIOM_API_KEY=<your-token>  # 同 Koyeb 那把
-export AXIOM_DATASET=bfx-funding-bot
-uv run python scripts/g1_smoke_check.py --hours 1
-```
-
-Exit code 解讀：
-
-| Exit | 意義 | 處置 |
-|---|---|---|
-| 0 | All G1 checks PASS | 可進 shadow flip |
-| 1 | 某 check fail | 看 stderr 訊息，常見 C1 continuity / C2 emit completeness / C3 range conformance fail — 通常是 cells.yaml 參數或 daemon 邏輯問題 |
-| 2 | Axiom 連不上 | `AXIOM_API_KEY` 錯 / network / API quota |
-| 3 | Config error | EDA range / cells.yaml 不符 — 看 `scripts/g1_smoke_eda_ranges.py` 與當前 cells.yaml 是否一致 |
-
-⚠️ **G1 不 PASS 不要切 shadow**。先在 paper 排 issue 再重跑 1hr smoke。
-
-## Shadow Flip（G1 PASS 後）
+## Shadow Flip（L3 PASS 後）
 
 1. Koyeb dashboard → service Settings → Environment
 2. **改** `BFX_PHASE` 從 `paper` → `shadow`
@@ -190,8 +165,7 @@ Shadow 預期跑 2-4 週累積數據，給 Phase 4.3 calibration 用。
 | Container 啟動 → `alembic upgrade head` fail（網路相關） | Neon 連線失敗 / DNS / IP allowlist | 本機 `cd backend_py && DATABASE_URL=<prod> uv run alembic upgrade head` 抓真實錯 |
 | Container 啟動 → `alembic upgrade head` fail（schema 相關） | migration conflict / 權限不足 | 看 alembic 訊息；常見 `ProgrammingError: permission denied` → Neon role 缺 `CREATE` 權限 |
 | `daemon_run_duration_reached` 在 shadow 也觸發 | 忘記刪 `BFX_RUN_DURATION_HOURS` | 回 Env vars 刪掉這個，save → redeploy |
-| Axiom 沒收到 event | `AXIOM_API_KEY` typo / token scope 不夠 / dataset 不存在 / quota 滿 | dashboard 重產 token（勾 ingest + query），重貼 Koyeb |
-| Daemon exit code 1 with `axiom_auth_fail` | `AXIOM_API_KEY` 錯 | 同上 |
+| L3 smoke 回 `{"status": "fail"}` 或非 2xx | PG event_log 缺少 RESERVATION_CLAIMED / ORDER_FILL event，execution chain 斷 | 查 Koyeb runtime logs 的 structured stdout，找對應 signal / fill log 行；確認 `DATABASE_URL` 正確且 migration 已套用 |
 | Daemon exit code 1 with `config_fatal` | env var 漏設 / 值錯 | 看 log message，補設 |
 | Koyeb worker SIGTERM 後沒退 | grace period 不夠 / daemon hang | Koyeb default 60s 通常夠，若不夠加大 Koyeb instance `Graceful Shutdown` 設定 |
 | Daemon 啟動報 `channel binding negotiation failed` | Neon `channel_binding=require` 與 asyncpg 版本不相容 | 從 DATABASE_URL 拿掉 `channel_binding=require`，只留 `sslmode=require` |
