@@ -55,13 +55,26 @@ def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert cfg.cells[0].cell_id == "fUSD_a30"
 
 
-def test_load_config_rejects_canary_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_load_config_accepts_canary_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    cfg = load_config(cells_yaml_path=yaml_path)
+
+    assert cfg.phase == "canary"
+
+
+def test_load_config_rejects_unknown_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BFX_PHASE", "bogus")
     monkeypatch.setenv("DATABASE_URL", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match="canary"):
+    with pytest.raises(ValueError, match="must be paper"):
         load_config(cells_yaml_path=yaml_path)
 
 
