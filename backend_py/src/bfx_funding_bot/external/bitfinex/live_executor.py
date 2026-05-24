@@ -181,9 +181,12 @@ class BitfinexLiveExecutor:
         self._base_url = base_url
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
-        cid = generate_cid(decision.signal_correlation_id, self._date_provider())
+        # cid centralized by ReservationEmittingMiddleware (A2); direct callers
+        # fall back to deterministic generation (CC2 capture-once date).
+        if cid is None:
+            cid = generate_cid(decision.signal_correlation_id, self._date_provider())
         payload = build_offer_payload(
             symbol="fUSD",
             amount_usdt=decision.offer_amount_usdt or 0.0,

@@ -56,13 +56,14 @@ class EchoPaperExecutor:
         self._date_provider = date_provider or _default_date
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
-        # CC2: capture date once at submit entry — immune to midnight race
-        # (paper executor is synchronous so no real retry needed, but keep
-        # contract identical to BitfinexLiveExecutor 4.4).
-        submit_date = self._date_provider()
-        cid = generate_cid(decision.signal_correlation_id, submit_date)
+        # cid is centralized by ReservationEmittingMiddleware (A2). Direct callers
+        # (tests) omit it -> fall back to deterministic generation. CC2: capture
+        # date once at submit entry (midnight-race immune).
+        if cid is None:
+            submit_date = self._date_provider()
+            cid = generate_cid(decision.signal_correlation_id, submit_date)
         # CC4: "paper_" prefix is invariant relied on by fill_tracker to skip
         # venue polling for simulated offers.
         offer_id = f"paper_{uuid.uuid4().hex[:12]}"

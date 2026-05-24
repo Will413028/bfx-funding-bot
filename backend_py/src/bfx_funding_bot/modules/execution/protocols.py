@@ -60,9 +60,14 @@ class GuardRule(Protocol):
 
 
 class ExecutorPort(Protocol):
-    """Venue executor (Echo paper / Bitfinex live)."""
+    """Venue executor (Echo paper / Bitfinex live).
+
+    cid is centralized by ReservationEmittingMiddleware (A2: same cid for INTENT
+    + outcome). It is threaded down through the chain; executors use it when
+    provided and fall back to deterministic generation only for direct callers.
+    """
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder: ...
 
 
