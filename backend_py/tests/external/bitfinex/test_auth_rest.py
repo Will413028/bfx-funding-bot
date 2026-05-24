@@ -93,3 +93,15 @@ async def test_get_active_funding_offers_raises_on_http_error():
         client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
         with pytest.raises(BitfinexAPIError):
             await client.get_active_funding_offers(ctx=_ctx())
+
+
+@pytest.mark.asyncio
+async def test_fetch_funding_offers_raw_returns_unparsed_body():
+    rows = [_row(offer_id=1), _row(offer_id=2)]
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=rows))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        raw = await client.fetch_funding_offers_raw(ctx=_ctx(), symbol="fUSD")
+    # raw is the positional-array body, NOT parsed ActiveFundingOffer objects
+    assert raw == rows
+    assert isinstance(raw, list) and isinstance(raw[0], list)

@@ -75,13 +75,18 @@ class BitfinexAuthREST:
         self._base_url = base_url.rstrip("/")
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
 
-    async def get_active_funding_offers(
+    async def fetch_funding_offers_raw(
         self, *, ctx: AccountContext, symbol: str = "fUSD",
-    ) -> list[ActiveFundingOffer]:
-        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns active offers.
+    ) -> Any:
+        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns the raw
+        decoded JSON body (list of positional arrays), before parsing.
+
+        Separated from get_active_funding_offers so callers that need the raw
+        wire payload (e.g. the live contract test capturing a fixture) still go
+        through the real HMAC-signed transport.
 
         Raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
-        malformed body.
+        invalid JSON.
         """
         path = f"{_FUNDING_OFFERS_PATH}/{symbol}"
         body_bytes = json.dumps({}).encode("utf-8")
@@ -105,7 +110,14 @@ class BitfinexAuthREST:
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
         try:
-            body = resp.json()
+            return resp.json()
         except json.JSONDecodeError as e:
             raise BitfinexShapeError(f"invalid JSON in funding-offers response: {e}") from e
-        return parse_active_funding_offers(body)
+
+    async def get_active_funding_offers(
+        self, *, ctx: AccountContext, symbol: str = "fUSD",
+    ) -> list[ActiveFundingOffer]:
+        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
+        active offers. Raises BitfinexAPIError / BitfinexShapeError."""
+        raw = await self.fetch_funding_offers_raw(ctx=ctx, symbol=symbol)
+        return parse_active_funding_offers(raw)
