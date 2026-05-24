@@ -11,11 +11,21 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.execution.event_store.serialization import _CLASS_BY_TYPE
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 
 # Matches the event_type values stored UPPERCASE in event_log (see serialization.py).
 # Aligns with AxiomSmokeQueryAdapter's APL filter (which lowercases for Axiom).
 _ORDER_EVENT_TYPES = ("RESERVATION_CLAIMED", "ORDER_FILL", "RESERVATION_RELEASED")
+
+# Guard: keep _ORDER_EVENT_TYPES in sync with the authoritative event_type strings.
+# If an event type is renamed in serialization.py, fail loudly at import rather than
+# silently returning no rows.
+_ALL_EVENT_TYPES: frozenset[str] = frozenset(_CLASS_BY_TYPE)
+assert set(_ORDER_EVENT_TYPES) <= _ALL_EVENT_TYPES, (
+    f"_ORDER_EVENT_TYPES drifted from serialization: "
+    f"{set(_ORDER_EVENT_TYPES) - _ALL_EVENT_TYPES}"
+)
 
 
 class PostgresEventLogQueryAdapter:
@@ -54,6 +64,8 @@ class PostgresEventLogQueryAdapter:
                 EventLogRow.account_id == account_id,
                 EventLogRow.deployment_environment == self._env,
                 EventLogRow.event_type.in_(_ORDER_EVENT_TYPES),
+                # Non-indexed range filter: acceptable for smoke's small/short-window
+                # use. Add an index on occurred_at_ms if event_log grows large.
                 EventLogRow.occurred_at_ms >= since_ms,
             )
             .order_by(EventLogRow.occurred_at_ms.asc())
