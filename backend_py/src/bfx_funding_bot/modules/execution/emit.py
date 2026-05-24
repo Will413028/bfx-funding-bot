@@ -30,6 +30,10 @@ class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
+class _DiagnosticsProtocol(Protocol):
+    async def emit(self, event: dict[str, Any]) -> None: ...
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -115,7 +119,7 @@ async def emit_order_fill(
 
 async def emit_safety_trigger(
     *,
-    diagnostics: _EventSink,
+    diagnostics: _DiagnosticsProtocol,
     phase: Phase,
     strategy: StrategyName | None,
     cell: str | None,
