@@ -1,5 +1,5 @@
 """Phase 4.3 executor-middleware integration: chain composition + end-to-end
-ledger / axiom emit / sad path subscriber isolation.
+ledger / sad path subscriber isolation.
 """
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
@@ -32,17 +31,14 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
-    Phase,
-    StrategyName,
 )
 
 
-class _CapturingAxiom:
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
+class _FailingSubscriber:
+    """Stub subscriber that always raises — used to verify bus.gather isolation."""
 
-    async def emit(self, event: dict[str, Any]) -> None:
-        self.events.append(event)
+    async def handle(self, event: Any) -> None:
+        raise RuntimeError("subscriber always fails")
 
 
 class _PaperInner:
@@ -76,23 +72,13 @@ def _ctx() -> AccountContext:
 
 
 def _build_chain(
-    axiom: _CapturingAxiom,
     ledger: PaperPositionLedger,
 ) -> tuple[HeartbeatMiddleware, HealthProbe, DomainEventBus]:
     bus = DomainEventBus()
     probe = HealthProbe()
-    sink = AxiomEventSink(
-        axiom_client=axiom,
-        phase=Phase.PAPER,
-        strategy=StrategyName.RATE_PERCENTILE,
-        cell="bfx_USDT",
-    )
     bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled, ledger.on_order_filled)
     bus.subscribe(ReservationReleased, ledger.on_reservation_released)
-    bus.subscribe(ReservationClaimed, sink.on_reservation_claimed)
-    bus.subscribe(OrderFilled, sink.on_order_filled)
-    bus.subscribe(ReservationReleased, sink.on_reservation_released)
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             TransientRetryMiddleware(_PaperInner()), bus=bus,
@@ -106,8 +92,7 @@ def _build_chain(
 @pytest.mark.asyncio
 async def test_wired_chain_types() -> None:
     ledger = PaperPositionLedger(account_id="default")
-    axiom = _CapturingAxiom()
-    executor, _probe, _bus = _build_chain(axiom, ledger)
+    executor, _probe, _bus = _build_chain(ledger)
     assert isinstance(executor, HeartbeatMiddleware)
     inner1 = executor._inner  # type: ignore[attr-defined]
     assert isinstance(inner1, ReservationEmittingMiddleware)
@@ -116,11 +101,10 @@ async def test_wired_chain_types() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paper_end_to_end_ledger_axiom_heartbeat() -> None:
-    """Happy path: submit one paper order, verify ledger / axiom / heartbeat."""
+async def test_paper_end_to_end_ledger_heartbeat() -> None:
+    """Happy path: submit one paper order, verify ledger / heartbeat."""
     ledger = PaperPositionLedger(account_id="default")
-    axiom = _CapturingAxiom()
-    executor, probe, _bus = _build_chain(axiom, ledger)
+    executor, probe, _bus = _build_chain(ledger)
 
     result = await executor.submit(_decision(), _ctx())
 
@@ -128,9 +112,6 @@ async def test_paper_end_to_end_ledger_axiom_heartbeat() -> None:
     # Ledger: paper CLAIMED + FILLED back-to-back → reserved=0, realized=100
     assert ledger.current_exposure() == Decimal("100")
     assert ledger.realized_exposure() == Decimal("100")
-    # Axiom: 2 events (CLAIMED, FILL)
-    event_types = [e["event_type"] for e in axiom.events]
-    assert event_types == ["reservation_claimed", "order_fill"]
     # Heartbeat fired
     assert probe.last_active_ts.get("executor") is not None
 
@@ -139,8 +120,7 @@ async def test_paper_end_to_end_ledger_axiom_heartbeat() -> None:
 async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
     """fill_tracker emit ReservationReleased → ledger reserved -=."""
     ledger = PaperPositionLedger(account_id="default")
-    axiom = _CapturingAxiom()
-    executor, _probe, bus = _build_chain(axiom, ledger)
+    executor, _probe, bus = _build_chain(ledger)
 
     # Submit once to create the paper sync claim+fill (reserved goes to 0, realized 100)
     await executor.submit(_decision(), _ctx())
@@ -161,26 +141,21 @@ async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sad_path_axiom_failure_does_not_break_ledger() -> None:
-    """I4-EM + I6-Bus: axiom_sink failure 不影響 ledger subscriber."""
-    ledger = PaperPositionLedger(account_id="default")
+async def test_sad_path_failing_subscriber_does_not_break_ledger() -> None:
+    """I4-EM + I6-Bus: a throwing bus subscriber does NOT break the ledger path.
 
-    class _BrokenAxiom:
-        async def emit(self, event: dict[str, Any]) -> None:
-            raise RuntimeError("axiom client final give-up")
+    bus.gather() isolates subscriber exceptions — one failing subscriber must
+    not prevent other subscribers (ledger) from running correctly.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    failing = _FailingSubscriber()
 
     bus = DomainEventBus()
     probe = HealthProbe()
-    sink = AxiomEventSink(
-        axiom_client=_BrokenAxiom(),
-        phase=Phase.PAPER,
-        strategy=StrategyName.RATE_PERCENTILE,
-        cell="bfx_USDT",
-    )
     bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled, ledger.on_order_filled)
-    bus.subscribe(ReservationClaimed, sink.on_reservation_claimed)
-    bus.subscribe(OrderFilled, sink.on_order_filled)
+    bus.subscribe(ReservationClaimed, failing.handle)
+    bus.subscribe(OrderFilled, failing.handle)
 
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
@@ -192,5 +167,5 @@ async def test_sad_path_axiom_failure_does_not_break_ledger() -> None:
 
     result = await executor.submit(_decision(), _ctx())  # 不 raise
     assert result.status == "filled"
-    # Ledger 仍正確 (axiom 失敗不影響 — bus.gather isolates subscribers)
+    # Ledger 仍正確 (failing subscriber 不影響 — bus.gather isolates subscribers)
     assert ledger.realized_exposure() == Decimal("100")

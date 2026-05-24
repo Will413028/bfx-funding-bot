@@ -7,13 +7,8 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
-from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
-from bfx_funding_bot.modules.execution.events import (
-    OrderFilled,
-    ReservationClaimed,
-)
 from bfx_funding_bot.modules.execution.middleware import (
     ReservationEmittingMiddleware,
 )
@@ -57,12 +52,6 @@ class _StubEventLogQuery:
 def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     bus = DomainEventBus()
     axiom = _FakeEventSink()
-    sink = AxiomEventSink(
-        axiom_client=axiom, phase=Phase.PAPER,
-        strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
-    )
-    bus.subscribe(ReservationClaimed, sink.on_reservation_claimed)
-    bus.subscribe(OrderFilled, sink.on_order_filled)
 
     paper = EchoPaperExecutor(
         event_sink=axiom, phase=Phase.PAPER,

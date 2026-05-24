@@ -93,7 +93,7 @@ class DomainEventBus:
         """Scoped subscription — auto-unsubscribe on exit (incl. exception path).
 
         Use for ephemeral subscribers (smoke recorder, test spies). Permanent
-        wirings (ledger, axiom_sink) keep using subscribe().
+        wirings (ledger) keep using subscribe().
         """
         self.subscribe(event_type, handler)
         try:
