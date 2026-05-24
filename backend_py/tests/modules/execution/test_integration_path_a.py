@@ -71,7 +71,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
     probe.record_heartbeat("safety_chain")
     probe.record_heartbeat("executor")
 
-    ledger = PaperPositionLedger(account_id="default")
+    ledger = PaperPositionLedger(account_id="default")  # Empty ledger — no prior state needed for this sequence (was: replay_from_axiom with empty query)
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     pnl, div = _StubPnL(), _StubDiv()
 
