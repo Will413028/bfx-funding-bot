@@ -55,7 +55,6 @@ from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
-from bfx_funding_bot.modules.execution.axiom_sink import AxiomEventSink
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
@@ -115,7 +114,6 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     HealthStatus,
     HealthTarget,
     Level,
-    StrategyName,
 )
 from bfx_funding_bot.modules.marketfeed.self_smoke import maybe_run_self_smoke
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
@@ -581,7 +579,7 @@ async def _emit_locf_degraded(
 
 # _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
 # Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
-# Ledger + AxiomEventSink subscribe to DomainEventBus in build_daemon.
+# Ledger + OfferRegistry subscribe to DomainEventBus in build_daemon.
 
 
 class _StubPnLSource:
@@ -823,26 +821,14 @@ async def build_daemon(
             registry=offer_registry,
             persister=persister,
         )
-    axiom_sink = AxiomEventSink(
-        axiom_client=axiom,
-        phase=config.phase,
-        strategy=StrategyName.RATE_PERCENTILE,  # 4.3 single-strategy; multi-strategy = Phase 5+
-        cell="bfx_USDT",                         # 4.3 single-cell wiring
-    )
     bus.subscribe(ReservationClaimed,  ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled,         ledger.on_order_filled)
     bus.subscribe(ReservationReleased, ledger.on_reservation_released)
-    bus.subscribe(ReservationClaimed,  axiom_sink.on_reservation_claimed)
-    bus.subscribe(OrderFilled,         axiom_sink.on_order_filled)
-    bus.subscribe(ReservationReleased, axiom_sink.on_reservation_released)
     # Phase 4.4a: OfferRegistry projection — stays in sync with event log.
     bus.subscribe(ReservationClaimed,  offer_registry.handle)
     bus.subscribe(OrderFilled,         offer_registry.handle)
     bus.subscribe(ReservationReleased, offer_registry.handle)
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
-    # axiom_sink's reservation_* subscriptions still emit to Axiom redundantly
-    # (event_log is the real SoT) until 3c; its cancel handlers are now
-    # unsubscribed/dead and get deleted in 3c with the rest of AxiomEventSink.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
     bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
 

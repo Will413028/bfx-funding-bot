@@ -2,9 +2,7 @@
 
 Distinct from `modules/marketfeed/schemas.py` Pydantic payload models:
 - Domain events (這檔) = in-process bus payload, frozen dataclass
-- *Payload models (schemas.py)   = Axiom event payload serialization
-
-AxiomEventSink translates domain event → Pydantic payload → axiom.emit().
+- *Payload models (schemas.py)   = event payload serialization (persisted via event_log)
 
 Schema version 2 (Phase 4.4a):
   - Added bitemporal Optional fields: occurred_at_ms, recorded_at_ms
