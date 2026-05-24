@@ -346,6 +346,45 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
    `event_log`/`offer_claims`/`position_state`)。§6 step 3 的 cid-match 機制由本 reconciliation model 取代。
    Plan:`docs/superpowers/plans/2026-05-24-pg-event-store-a2-recovery.md`。
 
+9. **3b diagnostics 設計(2026-05-24,pre-implementation,best-practice review)。** 寫 plan 前對「forensic 落 PG」
+   做 first-principles 壓測(pre-launch 可重構成最佳)。
+   - **乾淨切換,不留 Axiom 雙寫。** dual-write + shadow-read 是為**線上、有真實資料、不能停機**的遷移而存在;
+     本系統 pre-launch、paper/shadow 可丟,§55 對 SoT 已下「乾淨切換」判斷,diagnostics 更低風險。雙寫只會
+     雙倍失敗面 + 一致性問題(Axiom 成功 PG 失敗?),且 best-effort 本就 swallow。3b/3c 仍拆開,理由是
+     **diff 體積管理**(Axiom 牽 7 module + HTTP smoke endpoint + CI/env),不是 data-shadow。
+   - **diagnostics 表 vs 純 stdout:** 嚴格 Twelve-Factor(XI)會說一律 stdout 讓平台 route。建表才對的兩個理由
+     (缺一不可):(a)要跟 `event_log` ledger 在 SQL 裡 JOIN(signal→decision→reservation→fill 因果鏈);
+     (b)observability 平台尚未引入(§257 defer)、stdout=grep Koyeb logs retention 短。→ **用已營運的 PG 當
+     過渡 forensic store**。定位是過渡,**不做成迷你 observability 系統**(反 gold-plating 紅線)。
+   - **嚴格 3 kinds**(對齊 §4 `diagnostics`):`DECISION`(signal_engine direct emit)、`SAFETY_TRIGGER`
+     (emit.py / daemon_smoke_boot direct emit)、`CANCEL_AUDIT`(`CANCEL_REQUESTED`+`CANCEL_ACKNOWLEDGED`,bus
+     subscriber)。`HEALTH_CHECK`/`SIGNAL`/`ORDER_SUBMIT` 屬 operational → 3c 走 structured stdout。
+     **`ORDER_SUBMIT` 的耐久事實已在 `event_log`**(A2 write-ahead 的 INTENT/CLAIMED/FAILED),剩下的
+     attempts/retry_total_ms 是 operational telemetry,不進表。
+   - **介面:`DiagnosticsSink.record(envelope: Envelope)` 單一 typed 寫入路徑** + `NoopDiagnosticsSink`(chain test)。
+     內部 `event_type → DiagnosticKind` map、非 forensic 型別 drop、寫一筆 row。**必開自己的 session/txn,
+     絕不共用 command txn**(唯一 correctness invariant:diagnostics 失敗不可 rollback SoT 寫入,§240-241)。
+     **best-effort 單次嘗試、swallow + log stdout,無 in-process buffer/retry**——diagnostics 寫的是 SoT 同一個
+     PG,PG 掛=SoT 也掛(相關性失敗),buffer 在 crash 照樣丟,retry 無意義。
+   - **direct-emit(DECISION/SAFETY)+ bus-subscriber(cancel)混用是有原則的**:cancel 本就是 bus 上的 order-lifecycle
+     domain event → subscriber 自然;DECISION/SAFETY 是 decision telemetry、非 state transition → direct emit 自然,
+     **不可為求一致硬塞進 DomainEventBus**(會汙染「reservation 生命週期事件」語意)。兩者最後都收進同一個
+     `record(envelope)`(cancel 的 bus handler 內部建 CANCEL envelope 後呼叫 record)。
+   - **schema:** `id` BIGSERIAL PK、`account_id`、`deployment_environment`、`kind`、`payload` JSONB、`occurred_at`、
+     `recorded_at`;index `(account_id, occurred_at)`。**payload 存完整 envelope(lossless)**,phase/strategy/cell/
+     level/correlation_id 全留 payload 當 forensic context;只把 account_id/deployment_environment/kind/occurred_at
+     提為欄位。**不加 `correlation_id` 欄+index**(solo bot 千列量級,`payload->>'signal_correlation_id'` 無索引
+     JOIN 已足,premature optimization)。JSONB 用 `JSON().with_variant(JSONB,"postgresql")`+`_BIG_PK`+`_NOW`
+     (mirror `event_store/tables.py`,避免 sqlite metadata 污染 gotcha)。event_store baseline 後第 2 個增量 migration。
+   - **module:** 獨立 `modules/execution/diagnostics/`(tables.py + sink.py)——非 SoT、非 append+projection,
+     不塞進 `event_store/`。wiring 在 `build_daemon`(persister 旁,~daemon.py:697):`DiagnosticsSink(session_factory,
+     env_str)`;`bus.subscribe(CancelRequested/Acknowledged, diagnostics.handle_*)` 並移除 axiom_sink cancel 訂閱;
+     repoint signal_engine DECISION + emit.py `emit_safety_trigger` + daemon_smoke_boot off `axiom`。
+   - **明確不在 3b(→ 3c):** 刪 AxiomClient/Config/adapter;HEALTH_CHECK/boot lifecycle/SIGNAL → stdout;L3 smoke →
+     PG read-your-writes;移除 axiom_sink 冗餘 SoT emit(CLAIMED/FILL/RELEASED);env/CI 清理;`deployment_environment`
+     從 `AxiomConfig` 解耦。
+   - Plan:`docs/superpowers/plans/2026-05-24-pg-event-store-3b-diagnostics.md`。
+
 **3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入,**done 2026-05-24**)→ `3a-recovery`(signed offers-query +
 boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**,**done 2026-05-24**)→
-`3b`(diagnostics)→ `3c`(Axiom 全移除)。
+`3b`(diagnostics,**設計就緒 2026-05-24 § item 9**)→ `3c`(Axiom 全移除)。
