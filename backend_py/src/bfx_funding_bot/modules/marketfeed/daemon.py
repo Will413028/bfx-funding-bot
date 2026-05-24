@@ -785,7 +785,7 @@ async def build_daemon(
     # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
     # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
     spec = build_executor(
-        axiom=stdout_sink,
+        event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
         cell=first_cell.cell_id,

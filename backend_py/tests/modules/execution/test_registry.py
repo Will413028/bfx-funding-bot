@@ -19,7 +19,7 @@ def test_default_paper_executor_no_fill_tracker(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
     spec = build_executor(
-        axiom=_EventCapture(), phase=Phase.PAPER,
+        event_sink=_EventCapture(), phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
     )
     assert isinstance(spec.executor, EchoPaperExecutor)
@@ -33,7 +33,7 @@ def test_paper_executor_with_fill_tracker_enabled_raises(
     monkeypatch.setenv("BFX_FILL_TRACKER_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="paper"):
         build_executor(
-            axiom=_EventCapture(), phase=Phase.PAPER,
+            event_sink=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         )
 
@@ -46,7 +46,7 @@ def test_bitfinex_live_without_credentials_raises(
     # No BFX_API_KEY / BFX_API_SECRET set → should raise
     with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
         build_executor(
-            axiom=_EventCapture(), phase=Phase.PAPER,
+            event_sink=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         )
 
@@ -55,6 +55,6 @@ def test_unknown_executor_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_EXECUTOR", "foo")
     with pytest.raises(ExecutorConfigError, match="unknown"):
         build_executor(
-            axiom=_EventCapture(), phase=Phase.PAPER,
+            event_sink=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         )

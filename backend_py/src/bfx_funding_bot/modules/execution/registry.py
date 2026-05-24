@@ -51,7 +51,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def build_executor(
     *,
-    axiom: _EventSink,
+    event_sink: _EventSink,
     phase: Phase,
     strategy: StrategyName,
     cell: str,
@@ -79,7 +79,7 @@ def build_executor(
             )
         return ExecutorSpec(
             executor=EchoPaperExecutor(
-                event_sink=axiom, phase=phase, strategy=strategy, cell=cell,
+                event_sink=event_sink, phase=phase, strategy=strategy, cell=cell,
             ),
             fill_tracker_enabled=False,
             ws_client_enabled=False,
@@ -105,7 +105,7 @@ def build_executor(
         from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
         return ExecutorSpec(
             executor=BitfinexLiveExecutor(
-                http=http, event_sink=axiom, bus=bus,
+                http=http, event_sink=event_sink, bus=bus,
                 phase=phase, strategy=strategy, cell=cell,
             ),
             fill_tracker_enabled=fill_tracker_enabled,
