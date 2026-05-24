@@ -133,6 +133,12 @@ def compute_recovery_actions(
     return actions
 
 
+def _is_transient_status(status_code: int) -> bool:
+    """Transient = retryable: transport/network (0), rate-limit (429), 5xx.
+    4xx (auth/bad-request) is deterministic — never retried."""
+    return status_code == 0 or status_code == 429 or status_code >= 500
+
+
 class _ActiveOffersQuery(Protocol):
     async def get_active_funding_offers(
         self, *, ctx: AccountContext, symbol: str = "fUSD",
@@ -211,8 +217,9 @@ class BootRecovery:
         )
 
     async def _fetch_offers(self) -> list[ActiveFundingOffer]:
-        """Fetch venue offers with bounded retry. Exhaustion re-raises so the
-        daemon fails to start (fail-safe: never trade without venue truth)."""
+        """Fetch venue offers with bounded retry on TRANSIENT failures only.
+        4xx re-raises immediately; transient exhaustion re-raises too. Either way
+        the daemon fails to start (fail-safe: never trade without venue truth)."""
         last_exc: BitfinexAPIError | None = None
         for attempt in range(self._max_attempts):
             try:
@@ -220,12 +227,18 @@ class BootRecovery:
                     ctx=self._ctx, symbol=self._symbol,
                 )
             except BitfinexAPIError as e:
+                if not _is_transient_status(e.status_code):
+                    log.error(
+                        "boot_recovery_venue_fetch_fatal status=%d err=%r — failing startup",
+                        e.status_code, e,
+                    )
+                    raise
                 last_exc = e
                 if attempt + 1 < self._max_attempts:
                     backoff = self._backoff_base_s * (2 ** attempt)
                     log.warning(
-                        "boot_recovery_venue_fetch_failed attempt=%d/%d err=%r backoff=%.1fs",
-                        attempt + 1, self._max_attempts, e, backoff,
+                        "boot_recovery_venue_fetch_transient attempt=%d/%d status=%d backoff=%.1fs",
+                        attempt + 1, self._max_attempts, e.status_code, backoff,
                     )
                     await asyncio.sleep(backoff)
         log.error("boot_recovery_venue_unreachable after %d attempts — failing startup", self._max_attempts)
