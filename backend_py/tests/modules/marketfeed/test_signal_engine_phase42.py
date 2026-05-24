@@ -42,3 +42,45 @@ async def test_decision_emitted_once_when_blocked_executor_not_called(
     assert decisions[0]["payload"]["decision_outcome"] == DecisionOutcome.SKIP.value
     assert decisions[0]["payload"]["skip_reason"] == SkipReason.SAFETY_BLOCK.value
     assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_decision_carries_staleness_metadata_on_post(
+    capture_engine: Any,
+) -> None:
+    """Durable DECISION (→ PG diagnostics) must carry the staleness dimension so
+    canary outcomes can be sliced stale-vs-fresh from the SoT (not just the
+    ephemeral SIGNAL on stdout). cell.staleness_budget_hours=2 → 7200s."""
+    engine, _axiom, diagnostics, _executor, _chain, cell, candle, registry = capture_engine
+    await engine.process_candle(
+        cell=cell, candle=candle, registry=registry,
+        is_stale=True, stale_seconds=900,
+    )
+    decisions = [e for e in diagnostics.events if e["event_type"] == EventType.DECISION.value]
+    assert len(decisions) == 1
+    payload = decisions[0]["payload"]
+    assert payload["decision_outcome"] == DecisionOutcome.POST.value
+    assert payload["is_stale"] is True
+    assert payload["stale_seconds"] == 900
+    assert payload["budget_seconds"] == 7200
+
+
+@pytest.mark.asyncio
+async def test_decision_preserves_staleness_metadata_when_blocked(
+    capture_engine_blocked: Any,
+) -> None:
+    """Safety-block rebuilds the DecisionPayload (POST→SKIP); staleness dimension
+    must survive the rebuild."""
+    engine, _axiom, diagnostics, _executor, _chain, cell, candle, registry = capture_engine_blocked
+    await engine.process_candle(
+        cell=cell, candle=candle, registry=registry,
+        is_stale=True, stale_seconds=1234,
+    )
+    decisions = [e for e in diagnostics.events if e["event_type"] == EventType.DECISION.value]
+    assert len(decisions) == 1
+    payload = decisions[0]["payload"]
+    assert payload["decision_outcome"] == DecisionOutcome.SKIP.value
+    assert payload["skip_reason"] == SkipReason.SAFETY_BLOCK.value
+    assert payload["is_stale"] is True
+    assert payload["stale_seconds"] == 1234
+    assert payload["budget_seconds"] == 7200

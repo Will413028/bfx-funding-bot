@@ -106,6 +106,12 @@ class DecisionPayload(BaseModel):
     offer_duration_days: int | None = None
     skip_reason: SkipReason | None = None
     skip_reason_detail: str | None = None
+    # ── NEW (Phase 4.3 LOCF): staleness dimension on the DURABLE decision record ──
+    # SIGNAL carries this too but lands on the ephemeral stdout sink; persisting it
+    # here (PG diagnostics) lets canary outcomes be sliced stale-vs-fresh via SQL.
+    is_stale: bool = False
+    stale_seconds: int = 0
+    budget_seconds: int | None = None
 
     @model_validator(mode="after")
     def _check_outcome_fields(self) -> DecisionPayload:
