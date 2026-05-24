@@ -1,8 +1,8 @@
-"""Phase 4.4b D1 — daemon wires real AxiomReplayQueryAdapter.
+"""Phase 4.4c regression guards — Axiom replay/query adapters removed from daemon.
 
-Phase 4.4c update: AxiomReplayQueryAdapter removed from daemon boot path
-(replaced by PG from_snapshot). The import and Daemon.axiom_query field are
-removed. Tests adjusted accordingly.
+Asserts that AxiomReplayQueryAdapter and stub placeholders are no longer
+present on the daemon module, and that daemon boot uses PG from_snapshot
+as the sole replay source.
 """
 from __future__ import annotations
 
