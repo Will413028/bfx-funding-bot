@@ -66,6 +66,8 @@ async def test_signal_engine_emits_signal_and_decision():
     assert "signal" in types
     decision_types = [e["event_type"] for e in decisions]
     assert "decision" in decision_types
+    assert "decision" not in types  # DECISION must not leak onto axiom channel
+    assert "signal" not in decision_types  # SIGNAL must not leak onto diagnostics channel
 
 
 async def test_cp3_every_emit_passes_schema_validation():
