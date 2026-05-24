@@ -34,6 +34,7 @@ class DiagnosticKind(StrEnum):
 
 
 # Single source of truth for "what is forensic". Anything not here is dropped.
+# CANCEL_AUDIT is emitted only via handle_cancel_*() (typed bus path), never via emit().
 _KIND_BY_EVENT_TYPE: dict[str, DiagnosticKind] = {
     EventType.DECISION.value: DiagnosticKind.DECISION,
     EventType.SAFETY_TRIGGER.value: DiagnosticKind.SAFETY_TRIGGER,
@@ -44,9 +45,11 @@ def _occurred_at(event: dict[str, Any]) -> datetime:
     ts = event.get("timestamp")
     if isinstance(ts, str):
         try:
-            return datetime.fromisoformat(ts)
+            dt = datetime.fromisoformat(ts)
         except ValueError:
             pass
+        else:
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     return datetime.now(UTC)
 
 
