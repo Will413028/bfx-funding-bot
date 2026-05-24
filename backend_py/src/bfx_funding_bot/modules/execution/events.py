@@ -25,6 +25,45 @@ __SCHEMA_VERSION__ = 2
 
 
 @dataclass(frozen=True, slots=True)
+class ReservationIntent:
+    """A2 write-ahead intent — durable record BEFORE the venue REST submit.
+
+    Persisted in txn1 so a crash between submit-call and outcome leaves a
+    recoverable PENDING claim (resolved at boot in 3a-recovery). Carries no
+    venue_offer_id (unknown until CLAIMED). Not published to the bus
+    (in-memory ledger/registry track CLAIMED+, not PENDING).
+    """
+    cid: int
+    size_usdt: Decimal
+    signal_correlation_id: UUID
+    account_id: str
+    is_simulated: bool
+    venue_seq: int | None = None
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationFailed:
+    """A2 terminal outcome — venue REST submit failed; intent resolves to FAILED.
+
+    Ledger effect: none (reserved untouched — capital was never committed).
+    Not published to the bus (no in-memory subscriber needs it).
+    """
+    cid: int
+    size_usdt: Decimal
+    signal_correlation_id: UUID
+    account_id: str
+    is_simulated: bool
+    reason: str  # e.g. "submit_failed"
+    venue_seq: int | None = None
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ReservationClaimed:
     """Submit returned status ∈ {submitted, filled} — capital reserved at venue.
 

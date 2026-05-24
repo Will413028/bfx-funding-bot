@@ -40,7 +40,9 @@ class EventType(StrEnum):
     ORDER_SUBMIT = "order_submit"
     ORDER_FILL = "order_fill"
     ORDER_STATUS_CHANGE = "order_status_change"  # deprecated, removed in 4.4
+    RESERVATION_INTENT = "reservation_intent"
     RESERVATION_CLAIMED = "reservation_claimed"
+    RESERVATION_FAILED = "reservation_failed"
     RESERVATION_RELEASED = "reservation_released"
     CANCEL_REQUESTED = "cancel_requested"
     CANCEL_ACKNOWLEDGED = "cancel_acknowledged"  # NEW — Phase 4.4b prework D2

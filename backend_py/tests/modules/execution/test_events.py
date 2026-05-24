@@ -135,3 +135,46 @@ def test_events_are_frozen() -> None:
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.cid = 99  # type: ignore[misc]
+
+
+from uuid import UUID
+
+from bfx_funding_bot.modules.execution.events import (
+    ReservationFailed,
+    ReservationIntent,
+)
+
+_SCID_T1 = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def test_reservation_intent_fields() -> None:
+    ev = ReservationIntent(
+        cid=42,
+        size_usdt=Decimal("100"),
+        signal_correlation_id=_SCID_T1,
+        account_id="acct",
+        is_simulated=True,
+        occurred_at_ms=1000,
+    )
+    assert ev.cid == 42
+    assert ev.size_usdt == Decimal("100")
+    assert ev.account_id == "acct"
+    # uniform bitemporal optionals default None
+    assert ev.event_seq is None
+    assert ev.recorded_at_ms is None
+    # INTENT carries no venue_offer_id (PENDING — voi unknown until CLAIMED)
+    assert not hasattr(ev, "venue_offer_id")
+
+
+def test_reservation_failed_fields() -> None:
+    ev = ReservationFailed(
+        cid=42,
+        size_usdt=Decimal("100"),
+        signal_correlation_id=_SCID_T1,
+        account_id="acct",
+        is_simulated=False,
+        reason="submit_failed",
+        occurred_at_ms=2000,
+    )
+    assert ev.reason == "submit_failed"
+    assert ev.is_simulated is False
