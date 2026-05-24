@@ -7,11 +7,18 @@ read-side recovery queries.
 """
 from __future__ import annotations
 
+import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
+import httpx
+
+from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.modules.execution.protocols import AccountContext
 
 # Funding-offer array indices (Bitfinex docs). No cid field exists.
 _MIN_ROW_LEN = 16
@@ -48,3 +55,53 @@ def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
             status=str(o[10]),
         ))
     return out
+
+
+BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
+_FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
+
+
+class BitfinexAuthREST:
+    """Authenticated read client for Bitfinex funding endpoints."""
+
+    def __init__(
+        self,
+        *,
+        http: httpx.AsyncClient,
+        base_url: str = BITFINEX_AUTH_REST_BASE,
+        nonce_provider: Callable[[], int] | None = None,
+    ) -> None:
+        self._http = http
+        self._base_url = base_url.rstrip("/")
+        self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
+
+    async def get_active_funding_offers(
+        self, *, ctx: AccountContext, symbol: str = "fUSD",
+    ) -> list[ActiveFundingOffer]:
+        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns active offers.
+
+        Raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
+        malformed body.
+        """
+        path = f"{_FUNDING_OFFERS_PATH}/{symbol}"
+        body_bytes = json.dumps({}).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        return parse_active_funding_offers(resp.json())
