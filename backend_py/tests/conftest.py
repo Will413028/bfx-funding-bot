@@ -58,9 +58,9 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
     async_url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
     engine = create_async_engine(async_url, pool_pre_ping=True, pool_recycle=600)
 
-    import bfx_funding_bot.modules.accounts.tables  # noqa: F401
-    import bfx_funding_bot.modules.candles.tables  # noqa: F401
-    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    import bfx_funding_bot.modules.accounts.tables
+    import bfx_funding_bot.modules.candles.tables
+    import bfx_funding_bot.modules.execution.event_store.tables
     import bfx_funding_bot.modules.funding_stats.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base
 
