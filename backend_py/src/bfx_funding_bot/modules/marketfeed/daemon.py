@@ -1068,7 +1068,7 @@ async def _run() -> None:
         daemon.config.phase, len(daemon.config.cells),
     )
 
-    # Optional duration cap (used by paper smoke mode); shadow has no duration.
+    # Optional duration cap (BFX_RUN_DURATION_HOURS); shadow has no duration.
     duration = daemon.config.run_duration_hours
     if duration is not None:
         async def _duration_timer() -> None:
