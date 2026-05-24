@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pydantic import ValidationInfo
 
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class MarketfeedConfig(BaseModel):
     axiom_api_key: str
     axiom_dataset: str
     database_url: str
+    deployment_environment: DeploymentEnvironment
     redis_url: str | None = None
     run_duration_hours: int | None = Field(default=None, gt=0)
     # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
@@ -122,6 +124,12 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if not database_url:
         raise ValueError("DATABASE_URL required")
     redis_url = os.environ.get("REDIS_URL") or None
+
+    deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
+    if not deployment_env_str:
+        raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, shadow, ci)")
+    deployment_environment = DeploymentEnvironment(deployment_env_str)
+
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
     run_duration_h: int | None
     if run_duration:
@@ -229,6 +237,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "axiom_api_key": axiom_api_key,
         "axiom_dataset": axiom_dataset,
         "database_url": database_url,
+        "deployment_environment": deployment_environment,
         "redis_url": redis_url,
         "run_duration_hours": run_duration_h,
         "scheduler_buffer_s": scheduler_buffer_s,
