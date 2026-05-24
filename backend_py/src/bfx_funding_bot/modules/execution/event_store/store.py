@@ -24,6 +24,9 @@ from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 # NOTE: dedup for events with venue_seq IS NULL is app-level only — the
 # uq_event_log_dedup unique index does not constrain NULLs (PG treats them as
 # distinct). WS-sourced fills/releases carry venue_seq, so this gap is narrow.
+# RESERVATION_CLAIMED is intentionally excluded: orphan-claim idempotency is
+# enforced at the reconciliation compute layer (boot_recovery.compute_recovery_actions
+# skips vois already in CLAIMED state), not by this store-level dedup.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
