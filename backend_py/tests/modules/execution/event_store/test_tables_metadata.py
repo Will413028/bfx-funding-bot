@@ -1,5 +1,7 @@
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401  (register)
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 
 def test_event_store_tables_registered() -> None:
@@ -23,6 +25,10 @@ def test_position_state_pk_is_account_env() -> None:
     assert pk == {"account_id", "deployment_environment"}
 
 
-def test_offer_claims_pk_is_cid() -> None:
-    pk = {c.name for c in Base.metadata.tables["offer_claims"].primary_key.columns}
-    assert pk == {"cid"}
+def test_registry_state_has_failed() -> None:
+    assert RegistryState("failed") is RegistryState.FAILED
+
+
+def test_offer_claims_composite_pk() -> None:
+    pk_cols = [c.name for c in OfferClaimRow.__table__.primary_key.columns]
+    assert pk_cols == ["account_id", "deployment_environment", "cid"]

@@ -63,11 +63,11 @@ class EventLogRow(Base):
 
 
 class OfferClaimRow(Base):
-    """Snapshot: offer FSM projection, keyed by cid (PENDING-ready for Plan 3)."""
+    """Snapshot: offer FSM projection, cid-keyed (composite PK with tenant scope)."""
 
     __tablename__ = "offer_claims"
 
-    cid: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cid: Mapped[int] = mapped_column(BigInteger, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
@@ -79,7 +79,7 @@ class OfferClaimRow(Base):
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        Index("idx_offer_claims_acct_env", "account_id", "deployment_environment"),
+        PrimaryKeyConstraint("account_id", "deployment_environment", "cid"),
         Index("idx_offer_claims_voi", "venue_offer_id"),
     )
 
