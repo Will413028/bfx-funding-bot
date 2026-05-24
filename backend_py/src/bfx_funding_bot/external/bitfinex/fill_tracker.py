@@ -36,6 +36,10 @@ from uuid import uuid4
 import httpx
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.persister import (
+    EventPersister,
+    NoopEventPersister,
+)
 from bfx_funding_bot.modules.execution.events import ReservationReleased
 from bfx_funding_bot.modules.execution.registry_offers import (
     OfferRegistry,
@@ -81,6 +85,7 @@ class RestPollingFillTracker:
         account_id: str,
         registry: OfferRegistry,
         poll_interval_s: float = 30.0,
+        persister: EventPersister | None = None,
     ) -> None:
         self.http = http
         self.axiom = axiom
@@ -92,6 +97,7 @@ class RestPollingFillTracker:
         self.account_id = account_id
         self._registry = registry
         self.poll_interval_s = poll_interval_s
+        self._persister = persister or NoopEventPersister()
         # venue_offer_id (str) → {cid: int, status: str, size: float}
         self._last_state: dict[str, dict[str, Any]] = {}
         self._consecutive_failures = 0
@@ -191,7 +197,7 @@ class RestPollingFillTracker:
                 )
                 continue
             # CLAIMED: emit with registry-sourced fields (G3 deterministic correlation_id)
-            await self._bus.publish(ReservationReleased(
+            release = ReservationReleased(
                 cid=claim.cid,
                 venue_offer_id=venue_offer_id,
                 size_usdt=claim.size_usdt,
@@ -200,7 +206,16 @@ class RestPollingFillTracker:
                 account_id=self.account_id,
                 is_simulated=False,
                 occurred_at_ms=int(time.time() * 1000),
-            ))
+            )
+            try:
+                await self._persister.persist(release)
+            except Exception as e:
+                log.critical(
+                    "fill_tracker_persist_failed err=%r voi=%s — skipping publish",
+                    e, venue_offer_id,
+                )
+                continue
+            await self._bus.publish(release)
 
     async def _emit_degraded(self, reason: str) -> None:
         self.probe.update(
