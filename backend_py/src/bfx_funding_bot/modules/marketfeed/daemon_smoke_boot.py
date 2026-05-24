@@ -45,7 +45,7 @@ async def run_boot_smoke(daemon: Any) -> None:
     except Exception as exc:
         log.critical("smoke_boot_failed err=%r — daemon continues", exc)
         try:
-            await daemon.axiom.emit({
+            await daemon.diagnostics.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.CRITICAL.value,
                 "phase": daemon.config.phase.value,
