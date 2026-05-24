@@ -614,17 +614,16 @@ async def build_daemon(
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     probe = HealthProbe()
-    # from_env() reads the SAME AXIOM_API_KEY/AXIOM_DATASET that load_config
-    # validated, plus BFX_DEPLOYMENT_ENV. A single axiom_cfg.deployment_env
-    # feeds BOTH the emit client (resource envelope) and the replay query
-    # adapter below — making emit/query env drift structurally impossible.
+    # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
+    # AxiomConfig.from_env() is kept for AxiomClient (api_key/dataset); its
+    # deployment_env field is no longer used here (3c T7).
     axiom_cfg = AxiomConfig.from_env()
     # on_flush isn't an env-derived field; wire the heartbeat callback after.
     # Bug B fix (5/20): wire axiom flush → heartbeat so scan_staleness can
     # detect axiom task hung (4.2.0 D4 DONE_WITH_CONCERNS).
     axiom_cfg.on_flush = lambda: probe.record_heartbeat("axiom")
     event_resource = EventResource(
-        deployment_environment=axiom_cfg.deployment_env,
+        deployment_environment=config.deployment_environment,
     )
     axiom = AxiomClient(cfg=axiom_cfg, resource=event_resource)
     stdout_sink = StdoutEventSink(resource=event_resource)
@@ -696,7 +695,7 @@ async def build_daemon(
     # Phase 4.4c / 3a: PG event-store replaces Axiom replay at boot.
     # from_snapshot reads position_state + offer_claims from Postgres (written
     # synchronously by ReservationEmittingMiddleware in the command txn — A2).
-    env_str = axiom_cfg.deployment_env.value
+    env_str = config.deployment_environment.value
     event_store = PostgresEventStore(deployment_environment=env_str)
     persister = EventStorePersister(store=event_store, session_factory=session_factory)
     diagnostics = DiagnosticsSink(
