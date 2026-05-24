@@ -314,5 +314,17 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
    `submit_date` 跨午夜會漂(executor 已有 CC2 capture-once)。→ 3a-write 需把 `submit_date` 抽到 middleware
    capture-once 後 thread 進 executor(或 middleware 算 cid 後傳入),確保 INTENT 與 outcome 的 cid 一致。
 
-**3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入)→ `3a-recovery`(signed offers-query + boot resolve PENDING +
-venue reconcile)→ `3b`(diagnostics)→ `3c`(Axiom 全移除)。
+7. **`RESERVATION_RELEASED` PG 持久化在 3a-write 後懸空,必須在 3a-recovery 補上**(2026-05-24,
+   3a-write 實作完 final review 發現)。3a-write 退役 `PostgresEventSink` 後,`fill_tracker._tick` /
+   `ws_dispatcher` 仍 `bus.publish(ReservationReleased)`,但**已無 subscriber 落 PG** —— release/cancel
+   不再寫 `event_log`、`position_state.reserved` 只增不減、`offer_claims` 走不到 RELEASED(store 投影
+   `_CLAIM_STATE_BY_TYPE` 有 `RELEASED→released` 分支但沒人餵)。paper/shadow 現況**不受影響**
+   (`BFX_FILL_TRACKER_ENABLED` 預設 False、WS 只在 live 跑、paper 的 fill 走 `OrderFilled` 已在 txn2 落地),
+   但**上 live 前 3a-recovery 必須把 release-side 持久化接上**——與 boot resolve PENDING + venue reconcile
+   同屬一塊:reconcile 偵測到「本地 CLAIMED、venue 已無該 offer」時(§6 step 4),正是要 `persister.persist(
+   ReservationReleased(...))` 的時機;WS `foc` / fill_tracker 偵測到 release 時同理需走同步持久化(沿用
+   3a-write 的 `EventStorePersister`,不要復活 bus-subscriber sink)。
+
+**3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入,**done 2026-05-24**)→ `3a-recovery`(signed offers-query +
+boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**)→ `3b`(diagnostics)→
+`3c`(Axiom 全移除)。
