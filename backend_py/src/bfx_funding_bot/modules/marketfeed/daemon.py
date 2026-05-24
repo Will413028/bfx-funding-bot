@@ -3,7 +3,7 @@
 設計依據: phase4.1-paper-shadow-infra-design.md Section "Data Flow"
 - Startup: load config → warmup all cells → start ws + writer + scheduler + health_monitor
 - Steady state: scheduler 觸發 signal_engine.process_candle
-- Shutdown: SIGTERM → stop scheduler → drain in-flight → flush axiom → close ws → exit 0
+- Shutdown: SIGTERM → stop scheduler → drain in-flight → close ws → exit 0
 """
 from __future__ import annotations
 
@@ -31,11 +31,6 @@ from sqlalchemy.ext.asyncio import (
 
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED, ExecutorAuthError
-from bfx_funding_bot.external.axiom import (
-    AxiomAuthError,
-    AxiomClient,
-    AxiomConfig,
-)
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
@@ -149,7 +144,6 @@ class Daemon:
     config: MarketfeedConfig
     registry: StrategyRegistry
     candle_q: asyncio.Queue[CandleMessage | None]
-    axiom: AxiomClient
     diagnostics: DiagnosticsSink
     probe: HealthProbe
     monitor: HealthMonitor
@@ -198,7 +192,6 @@ class Daemon:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
             tg.create_task(self._scheduler_loop(),     name="scheduler")
-            tg.create_task(self._axiom_loop(),         name="axiom")
             tg.create_task(self._monitor_loop(),       name="monitor")
             tg.create_task(self._heartbeat_scan_loop(), name="health_check")
             tg.create_task(self._db_keepalive_loop(),  name="db_keepalive")
@@ -269,18 +262,6 @@ class Daemon:
         await self._stop_event.wait()
         await self.scheduler.stop()
         log.info("sub_task_exit name=scheduler")
-
-    async def _axiom_loop(self) -> None:
-        """Run axiom's background emit loop.
-
-        Bug B fix (5/20): AxiomConfig.on_flush is wired in build_daemon to
-        probe.record_heartbeat("axiom"), so scan_staleness can detect axiom
-        task hung (threshold 60s in SUB_TASK_THRESHOLDS).
-        """
-        await self.axiom.start()
-        await self._stop_event.wait()
-        await self.axiom.stop()
-        log.info("sub_task_exit name=axiom")
 
     async def _monitor_loop(self) -> None:
         """State-change emission loop (was HealthMonitor.start() in Phase 4.1).
@@ -611,17 +592,9 @@ async def build_daemon(
 
     probe = HealthProbe()
     # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
-    # AxiomConfig.from_env() is kept for AxiomClient (api_key/dataset); its
-    # deployment_env field is no longer used here (3c T7).
-    axiom_cfg = AxiomConfig.from_env()
-    # on_flush isn't an env-derived field; wire the heartbeat callback after.
-    # Bug B fix (5/20): wire axiom flush → heartbeat so scan_staleness can
-    # detect axiom task hung (4.2.0 D4 DONE_WITH_CONCERNS).
-    axiom_cfg.on_flush = lambda: probe.record_heartbeat("axiom")
     event_resource = EventResource(
         deployment_environment=config.deployment_environment,
     )
-    axiom = AxiomClient(cfg=axiom_cfg, resource=event_resource)
     stdout_sink = StdoutEventSink(resource=event_resource)
     bitfinex_http = httpx.AsyncClient()
     bitfinex = BitfinexREST(
@@ -1041,7 +1014,6 @@ async def build_daemon(
         config=config,
         registry=registry,
         candle_q=candle_q,
-        axiom=axiom,
         diagnostics=diagnostics,
         probe=probe,
         monitor=monitor,
@@ -1076,9 +1048,6 @@ def main() -> None:
     )
     try:
         asyncio.run(_run())
-    except AxiomAuthError as exc:
-        log.error("axiom_auth_fail %r — exit 1", exc)
-        sys.exit(1)
     except ValueError as exc:
         log.error("config_fatal %s — exit 1", exc)
         sys.exit(1)
@@ -1121,13 +1090,10 @@ async def _run() -> None:
         # Auth failure means credentials are wrong / revoked — operator must
         # intervene. Avoid auto-retry loop (Google SRE Book ch. 22 — auth
         # crash-loop-backoff via sysexits EX_CONFIG 78 lets Koyeb stagger
-        # restarts instead of tight crash-on-boot retries.) Flush axiom so
-        # the safety_trigger event survives the exit.
+        # restarts instead of tight crash-on-boot retries.)
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        with contextlib.suppress(Exception):
-            await daemon.axiom.flush()
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
@@ -1136,7 +1102,7 @@ async def _run() -> None:
         )
         raise
     finally:
-        # Cleanup after TaskGroup completes (flush axiom, close http client)
+        # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
         await daemon.bitfinex_http.aclose()
         # SmokeRunner.aclose() is a no-op for PostgresEventLogQueryAdapter (no owned client);

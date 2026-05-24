@@ -266,9 +266,10 @@ class TestStalenessScan:
 
 class TestSubTaskThresholds:
     def test_thresholds_defined_for_all_subtasks(self):
-        """Per spec D4 heartbeat threshold table."""
-        for name in ("ws", "candle_writer", "scheduler", "axiom", "health_check", "db_keepalive"):
+        """Per spec D4 heartbeat threshold table. Phase 3c T10: axiom removed."""
+        for name in ("ws", "candle_writer", "scheduler", "health_check", "db_keepalive"):
             assert name in SUB_TASK_THRESHOLDS
+        assert "axiom" not in SUB_TASK_THRESHOLDS
 
     def test_threshold_values_match_spec(self):
         # Post-shadow-run lessons:
@@ -280,6 +281,7 @@ class TestSubTaskThresholds:
         assert SUB_TASK_THRESHOLDS["ws"] == 90
         assert SUB_TASK_THRESHOLDS["candle_writer"] == 65 * 60
         assert SUB_TASK_THRESHOLDS["scheduler"] == 65 * 60
-        assert SUB_TASK_THRESHOLDS["axiom"] == 60
+        # Phase 3c T10: "axiom" removed from SUB_TASK_THRESHOLDS (AxiomClient deleted).
+        # Unknown sub-tasks fall back to _DEFAULT_THRESHOLD_S (60s).
         assert SUB_TASK_THRESHOLDS["health_check"] == 6 * 60
         assert SUB_TASK_THRESHOLDS["db_keepalive"] == 7 * 60

@@ -33,7 +33,6 @@ SUB_TASK_THRESHOLDS: dict[str, int] = {
                                  # the fast-zombie detector now; candle_writer
                                  # only catches truly stuck queues (>3hr).
     "scheduler": 65 * 60,        # hourly boundary + buffer
-    "axiom": 60,                 # trading event cadence + 5min hb
     "health_check": 6 * 60,      # 5min hb + buffer
     "db_keepalive": 7 * 60,      # 5min interval + 2min buffer
     # Phase 4.2 Task 19: execution-pipeline sub-tasks.

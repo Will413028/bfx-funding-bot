@@ -35,6 +35,7 @@ async def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     visible to build_daemon's session_factory (from_snapshot at boot).
     """
     monkeypatch.setenv("BFX_PHASE", "paper")
+    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
     monkeypatch.setenv("AXIOM_API_KEY", "x")
     monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -70,13 +71,9 @@ async def test_build_daemon_wires_paper_executor_by_default(
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     _add_bitfinex_mock(httpx_mock)
     # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
@@ -100,13 +97,9 @@ async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.setenv("BFX_EXECUTOR", "paper")
     monkeypatch.setenv("BFX_FILL_TRACKER_ENABLED", "true")
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     _add_bitfinex_mock(httpx_mock)
     # Phase 4.4c: _apl mock removed.
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     with pytest.raises(ExecutorConfigError):
@@ -174,13 +167,9 @@ async def test_build_daemon_filters_disabled_hard_guards(
     )
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
 
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     _add_bitfinex_mock(httpx_mock)
     # Phase 4.4c: _apl mock removed.
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DivergenceRateGuard,
@@ -248,13 +237,9 @@ calibrated_guards:
 """)
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
 
-    httpx_mock.add_response(
-        url="https://api.axiom.co/v1/datasets/x/ingest",
-        method="POST", status_code=200, json={"ingested": 1},
-        is_reusable=True, is_optional=True,
-    )
     _add_bitfinex_mock(httpx_mock)
     # Phase 4.4c: _apl mock removed.
+    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DrawdownGuard,
