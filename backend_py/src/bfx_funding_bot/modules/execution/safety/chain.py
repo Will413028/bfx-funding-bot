@@ -32,6 +32,8 @@ GUARD_EVAL_TIMEOUT_SECONDS = 2.0
 
 
 class _DiagnosticsProtocol(Protocol):
+    """Forensic diagnostics port (→ PG DiagnosticsSink)."""
+
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 

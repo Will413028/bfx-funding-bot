@@ -69,10 +69,14 @@ def _resolve_staleness_budget_hours(cell: CellConfig) -> int:
 
 
 class _EventSink(Protocol):
+    """Operational telemetry port (→ structured-stdout StdoutEventSink)."""
+
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
 class _DiagnosticsProtocol(Protocol):
+    """Forensic diagnostics port (→ PG DiagnosticsSink)."""
+
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
