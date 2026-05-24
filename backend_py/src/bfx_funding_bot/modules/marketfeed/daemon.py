@@ -858,18 +858,17 @@ async def build_daemon(
     )
 
     # ---- Phase 4.4 prework: SmokeRunner ----
-    from bfx_funding_bot.modules.admin.axiom_query import AxiomSmokeQueryAdapter
+    from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 
-    smoke_axiom_query = AxiomSmokeQueryAdapter(
-        api_key=config.axiom_api_key,
-        dataset=config.axiom_dataset,
+    smoke_pg_query = PostgresEventLogQueryAdapter(
+        session_factory=session_factory,
+        deployment_environment=env_str,
     )
     smoke_runner = SmokeRunner(
         executor=wrapped_executor,
         bus=bus,
-        axiom_client=axiom,
-        axiom_query=smoke_axiom_query,
+        pg_query=smoke_pg_query,
         phase=config.phase,
         strategy=first_cell.strategy,
         cell=first_cell.cell_id,
@@ -1157,8 +1156,8 @@ async def _run() -> None:
         # Cleanup after TaskGroup completes (flush axiom, close http client)
         log.info("daemon_shutdown_complete")
         await daemon.bitfinex_http.aclose()
-        # SmokeRunner's AxiomSmokeQueryAdapter holds its own httpx.AsyncClient;
-        # close it on shutdown to avoid leaking the connection pool.
+        # SmokeRunner.aclose() is a no-op for PostgresEventLogQueryAdapter (no owned client);
+        # kept for forward-compatibility with adapters that may hold resources.
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
                 await daemon.smoke_runner.aclose()

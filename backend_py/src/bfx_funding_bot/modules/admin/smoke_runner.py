@@ -50,11 +50,7 @@ SMOKE_RATE = 0.0001
 SMOKE_DURATION_DAYS = 2
 
 
-class _AxiomProtocol(Protocol):
-    async def emit(self, event: dict[str, Any]) -> None: ...
-
-
-class _AxiomQueryProtocol(Protocol):
+class _EventLogQueryProtocol(Protocol):
     async def query_order_events(
         self, account_id: str, since: datetime,
     ) -> list[dict[str, Any]]: ...
@@ -90,29 +86,27 @@ class SmokeRunner:
         *,
         executor: ExecutorPort,
         bus: DomainEventBus,
-        axiom_client: _AxiomProtocol,
-        axiom_query: _AxiomQueryProtocol,
+        pg_query: _EventLogQueryProtocol,
         phase: Phase,
         strategy: StrategyName,
         cell: str,
     ) -> None:
         self._executor = executor
         self._bus = bus
-        self._axiom = axiom_client
-        self._axiom_query = axiom_query
+        self._pg_query = pg_query
         self._phase = phase
         self._strategy = strategy
         self._cell = cell
 
     async def aclose(self) -> None:
-        """Clean up internal axiom query adapter & handles.
+        """Clean up internal PG query adapter & handles.
 
-        Replaces daemon `_run()` direct access to `self._axiom_query` (which
+        Replaces daemon `_run()` direct access to `self._pg_query` (which
         required `# type: ignore[attr-defined]` — adapter shape not on
         SmokeRunner public surface). Phase 4.4 prework Followup (a).
         """
-        if self._axiom_query is not None and hasattr(self._axiom_query, "aclose"):
-            await self._axiom_query.aclose()
+        if self._pg_query is not None and hasattr(self._pg_query, "aclose"):
+            await self._pg_query.aclose()
 
     async def run_l2(self) -> SmokeResult:
         async with _SMOKE_LOCK:
@@ -227,11 +221,12 @@ class SmokeRunner:
         poll_attempts: int = 5,
         poll_interval_s: float = 3.0,
     ) -> SmokeResult:
-        """L2 + Axiom round-trip verification.
+        """L2 + PG event_log read-your-writes verification.
 
-        After L2 passes (chain published to bus + axiom_sink emitted to Axiom),
-        poll Axiom APL up to `poll_attempts x poll_interval_s` seconds for the
-        events to appear. Tests override poll parameters for speed.
+        After L2 passes (chain executed, events persisted to event_log via
+        EventStorePersister inside the command txn), poll PG event_log up to
+        `poll_attempts x poll_interval_s` seconds for the events to appear.
+        Tests override poll parameters for speed.
         """
         start = time.monotonic()
         checks: dict[str, Any] = {}
@@ -255,9 +250,9 @@ class SmokeRunner:
                 duration_ms=duration_ms, error=f"unexpected: {exc!r}",
             )
 
-        # ── L3 phase (round-trip Axiom query poll) ──
+        # ── L3 phase (PG event_log read-your-writes poll) ──
         try:
-            await self._poll_axiom_round_trip(
+            await self._poll_pg_event_log_round_trip(
                 before_ts, checks,
                 poll_attempts=poll_attempts, poll_interval_s=poll_interval_s,
             )
@@ -281,7 +276,7 @@ class SmokeRunner:
                 duration_ms=duration_ms, error=f"unexpected: {exc!r}",
             )
 
-    async def _poll_axiom_round_trip(
+    async def _poll_pg_event_log_round_trip(
         self,
         since: datetime,
         checks: dict[str, Any],
@@ -289,16 +284,13 @@ class SmokeRunner:
         poll_attempts: int,
         poll_interval_s: float,
     ) -> None:
-        from bfx_funding_bot.modules.marketfeed.schemas import EventType
-
-        required_types = {
-            EventType.RESERVATION_CLAIMED.value,
-            EventType.ORDER_FILL.value,
-        }
+        # UPPERCASE — matches PG event_log serialization (EventType.*.value is lowercase;
+        # do NOT use it here, it would silently never match the stored rows).
+        required_types = {"RESERVATION_CLAIMED", "ORDER_FILL"}
         last_seen = 0
         last_types: set[str] = set()
         for attempt in range(1, poll_attempts + 1):
-            events = await self._axiom_query.query_order_events(
+            events = await self._pg_query.query_order_events(
                 SMOKE_ACCOUNT_ID, since,
             )
             last_seen = len(events)
@@ -307,15 +299,15 @@ class SmokeRunner:
                 if isinstance(et := e.get("event_type"), str)
             }
             if last_seen >= 2 and required_types.issubset(last_types):
-                checks["axiom_events_seen"] = last_seen
-                checks["axiom_event_types"] = sorted(last_types)
+                checks["pg_events_seen"] = last_seen
+                checks["pg_event_types"] = sorted(last_types)
                 return
             if attempt < poll_attempts:
                 await asyncio.sleep(poll_interval_s)
         # Exhausted attempts
-        checks["axiom_events_seen"] = last_seen
-        checks["axiom_event_types"] = sorted(last_types)
+        checks["pg_events_seen"] = last_seen
+        checks["pg_event_types"] = sorted(last_types)
         raise SmokeAssertionError(
-            f"axiom round-trip timeout: seen={last_seen} types={sorted(last_types)} "
+            f"pg event_log round-trip timeout: seen={last_seen} types={sorted(last_types)} "
             f"required={sorted(required_types)}",
         )

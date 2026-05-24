@@ -41,7 +41,7 @@ class _FakeAxiomClient:
         self.emits.append(event)
 
 
-class _FakeAxiomQuery:
+class _StubEventLogQuery:
     async def query_order_events(
         self, account_id: str, since: Any,
     ) -> list[dict[str, Any]]:
@@ -70,8 +70,8 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
-        executor=wrapped, bus=bus, axiom_client=axiom,
-        axiom_query=_FakeAxiomQuery(),
+        executor=wrapped, bus=bus,
+        pg_query=_StubEventLogQuery(),
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         cell="bfx_USDT",
@@ -105,8 +105,8 @@ async def test_smoke_axiom_sink_emits_with_smoke_account_id() -> None:
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
     runner = SmokeRunner(
-        executor=wrapped, bus=bus, axiom_client=axiom,
-        axiom_query=_FakeAxiomQuery(),
+        executor=wrapped, bus=bus,
+        pg_query=_StubEventLogQuery(),
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
         cell="bfx_USDT",
