@@ -361,15 +361,19 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
      subscriber)。`HEALTH_CHECK`/`SIGNAL`/`ORDER_SUBMIT` 屬 operational → 3c 走 structured stdout。
      **`ORDER_SUBMIT` 的耐久事實已在 `event_log`**(A2 write-ahead 的 INTENT/CLAIMED/FAILED),剩下的
      attempts/retry_total_ms 是 operational telemetry,不進表。
-   - **介面:`DiagnosticsSink.record(envelope: Envelope)` 單一 typed 寫入路徑** + `NoopDiagnosticsSink`(chain test)。
-     內部 `event_type → DiagnosticKind` map、非 forensic 型別 drop、寫一筆 row。**必開自己的 session/txn,
-     絕不共用 command txn**(唯一 correctness invariant:diagnostics 失敗不可 rollback SoT 寫入,§240-241)。
-     **best-effort 單次嘗試、swallow + log stdout,無 in-process buffer/retry**——diagnostics 寫的是 SoT 同一個
-     PG,PG 掛=SoT 也掛(相關性失敗),buffer 在 crash 照樣丟,retry 無意義。
+   - **介面:`DiagnosticsSink.emit(event: dict)`,與 `AxiomClient` 同 port(drop-in)** + `NoopDiagnosticsSink`(chain test)。
+     ports-and-adapters:兩個 adapter 共用同一 `emit(dict)` port → 換 sink 只改一個 identifier、**3c 移除 Axiom 是純刪除、
+     零介面落差**;churn 最小(裸 dict 的 DECISION 點連結構都不改)。emit **寬鬆抽取** `event_type`/`account_id`/
+     `timestamp`/`payload`(**不做完整 `Envelope.model_validate`**:Envelope 的「非 HEALTH_CHECK 須帶 strategy+cell」是上游
+     observability 約束,對 forensic 儲存過度約束——smoke_boot 的 SAFETY_TRIGGER 合法地 `strategy=None`,完整驗證會誤 drop)
+     → `event_type → DiagnosticKind` map → 非 forensic 型別 drop → 走共用 `_insert()`;payload 存整個 event dict(lossless)。**`_insert` 必開自己的 session/txn(`session_scope`),絕不共用 command txn**(唯一
+     correctness invariant:diagnostics 失敗不可 rollback SoT 寫入,§240-241);**best-effort 單次嘗試、swallow + log
+     stdout、無 in-process buffer/retry**——寫的是 SoT 同一個 PG,PG 掛=SoT 也掛(相關性失敗),buffer 在 crash 照樣丟。
    - **direct-emit(DECISION/SAFETY)+ bus-subscriber(cancel)混用是有原則的**:cancel 本就是 bus 上的 order-lifecycle
      domain event → subscriber 自然;DECISION/SAFETY 是 decision telemetry、非 state transition → direct emit 自然,
-     **不可為求一致硬塞進 DomainEventBus**(會汙染「reservation 生命週期事件」語意)。兩者最後都收進同一個
-     `record(envelope)`(cancel 的 bus handler 內部建 CANCEL envelope 後呼叫 record)。
+     **不可為求一致硬塞進 DomainEventBus**(會汙染「reservation 生命週期事件」語意)。**cancel 的 bus handler 直接從
+     domain event 建 payload dict 走共用 `_insert(kind=CANCEL_AUDIT,...)`**(不 wrap 成帶假 strategy/cell 的 Envelope,
+     sink 也無需注入 phase/strategy/cell);DECISION/SAFETY 走 `emit(dict)`。兩路最後收進同一個 `_insert`。
    - **schema:** `id` BIGSERIAL PK、`account_id`、`deployment_environment`、`kind`、`payload` JSONB、`occurred_at`、
      `recorded_at`;index `(account_id, occurred_at)`。**payload 存完整 envelope(lossless)**,phase/strategy/cell/
      level/correlation_id 全留 payload 當 forensic context;只把 account_id/deployment_environment/kind/occurred_at
