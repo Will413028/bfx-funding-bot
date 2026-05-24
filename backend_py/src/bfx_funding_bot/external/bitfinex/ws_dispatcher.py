@@ -28,6 +28,10 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     FcuEvent,
     FocEvent,
 )
+from bfx_funding_bot.modules.execution.event_store.persister import (
+    EventPersister,
+    NoopEventPersister,
+)
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationReleased,
@@ -196,6 +200,7 @@ class BitfinexLiveWSDispatcher:
         axiom: _AxiomProtocol,
         clock: Callable[[], int] | None = None,
         queue_max: int = 10_000,
+        persister: EventPersister | None = None,
     ) -> None:
         self._ws_client = ws_client
         self._registry = registry
@@ -208,6 +213,7 @@ class BitfinexLiveWSDispatcher:
         self._recent_cancels: dict[str, int] = {}
         self._last_depth_emit_ms: int = 0
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._persister: EventPersister = persister or NoopEventPersister()
 
     async def handle_cancel_requested(self, event: Any) -> None:
         """Bus subscriber for CancelRequested — tracks recent cancels for 60s."""
@@ -256,11 +262,24 @@ class BitfinexLiveWSDispatcher:
                     bfx_event, now_ms + self.OOO_STAGING_TTL_MS,
                 )
         for ev in events:
-            try:
-                await self._bus.publish(ev)
-            except Exception as e:
-                log.critical("ws_dispatcher_publish_failed err=%r event=%s",
-                             e, type(ev).__name__)
+            await self._persist_then_publish(ev)
+
+    async def _persist_then_publish(self, ev: Any) -> None:
+        """Durable SoT write before in-memory fanout. WS events carry venue_seq
+        so re-delivery is deduped by the store; on persist failure we skip
+        publish to keep in-memory projections from drifting ahead of PG."""
+        try:
+            await self._persister.persist(ev)
+        except Exception as e:
+            log.critical(
+                "ws_dispatcher_persist_failed err=%r event=%s — SoT write lost, skipping publish",
+                e, type(ev).__name__,
+            )
+            return
+        try:
+            await self._bus.publish(ev)
+        except Exception as e:
+            log.critical("ws_dispatcher_publish_failed err=%r event=%s", e, type(ev).__name__)
 
     def _tick_maintenance(self) -> None:
         now_ms = self._clock()
