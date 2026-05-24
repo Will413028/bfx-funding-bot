@@ -405,6 +405,27 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
     - **非 3c**:`alembic check` 有既有 baseline drift(空 baseline migration + accounts/candles/funding_stats 等 ORM
       表從未進 migration);diagnostics 本身 reconcile 乾淨。屬獨立技術債。
 
+11. **3c shipped(2026-05-25)。** Axiom 完全移除(expand-contract 最終收縮)。15 tasks subagent-driven。
+    落地項目:
+    - `StdoutEventSink` — operational telemetry 轉 structured stdout;drop-in `emit(dict)` port + `EventResource` envelope enrichment。
+    - L3 smoke 改接 PG `event_log` read-your-writes via `PostgresEventLogQueryAdapter`(讀自寫驗證)。
+    - `deployment_environment` 從 `AxiomConfig.deployment_env` 解耦,改由 `load_config()` 直接讀取(item 10 follow-up ✓)。
+    - 刪除 `AxiomClient`/`AxiomConfig`/`AxiomEventSink`/`AxiomReplayQueryAdapter`/`AxiomSmokeQueryAdapter` 及完整 replay 路徑(`replay_from_axiom`)。
+    - 退役 G1 gate + `paper_smoke_runner`:signal 事件改往 stdout sink,無可查詢後端 — 產品決策(非技術債)。
+    - 移除 AXIOM_* env vars(config/CI/.env)。
+    - 改名:`_AxiomProtocol`→`_EventSink`(operational)、`_DiagnosticsProtocol`(forensic);test fake `_CaptureAxiom`→`_EventCapture`(item 10 follow-up ✓)。
+    - 刪除 Axiom-era dead code:event_upcasters module(upcast_row chain)、`OfferRegistry._parse_event`(Axiom row→domain event bridge)、`LedgerReplayError`(僅 Axiom replay 路徑拋出)。
+    **item 10 follow-ups 確認:**
+    - `handle_cancel_*` dead code → 隨 AxiomEventSink 一起刪 ✓(T8)
+    - protocol/fake 改名 ✓(T4/T5)
+    - `deployment_environment` 解耦 ✓(T2/T7)
+    - `kind=safety_trigger` 異質 payload 正規化 → **刻意不做(anti-gold-plating §358)**:lossless storage 已足,query-time 區分靠 `event_type` field;smoke-boot shape 和 safety chain shape 都能 query defensively。已在 spec 標 out-of-scope。
+    **Out-of-scope 發現(新):** `scripts/g2_audit_locf.py` 是獨立手工 audit script,自己定義 `AxiomQueryClient` + 查 Axiom APL。不在 3c 範圍(與 G1/paper_smoke 無關,是單獨 manual audit 工具);可能需要獨立 follow-up。
+    **g5 time-travel:** 3c 不含 PG 等效實作;raw events 仍留在 `event_log`(可手工重放),但無 API。設計決策,非技術債。
+    驗證:655 unit 綠(刪除 5 tests:event_upcasters + LedgerReplayError + _parse_event)、mypy 101 files clean、ruff clean。
+    `alembic check`:worktree 因 .env 指向壞密碼無法連線(auth error);pre-existing baseline drift 已在 item 10 記錄,屬獨立技術債,3c 不觸碰。
+    Plan link:`docs/superpowers/plans/2026-05-24-pg-event-store-3c-axiom-removal.md`。
+
 **3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入,**done 2026-05-24**)→ `3a-recovery`(signed offers-query +
 boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**,**done 2026-05-24**)→
-`3b`(diagnostics,**done 2026-05-24 § item 10**)→ `3c`(Axiom 全移除,依 item 10 follow-ups)。
+`3b`(diagnostics,**done 2026-05-24 § item 10**)→ `3c`(Axiom 全移除,**done 2026-05-25 § item 11**)。

@@ -46,6 +46,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationReleased,
 )
+
 log = logging.getLogger(__name__)
 
 
