@@ -104,4 +104,8 @@ class BitfinexAuthREST:
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
-        return parse_active_funding_offers(resp.json())
+        try:
+            body = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in funding-offers response: {e}") from e
+        return parse_active_funding_offers(body)
