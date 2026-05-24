@@ -389,6 +389,22 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
      從 `AxiomConfig` 解耦。
    - Plan:`docs/superpowers/plans/2026-05-24-pg-event-store-3b-diagnostics.md`。
 
+10. **3b shipped(2026-05-24)。** 14 impl commits(`5bac654..5f6f16f`,subagent-driven、逐 task 兩階段 review)
+    fast-forward 併入 main。落地:`diagnostics` 表 + migration(`d8e3f1a2b4c6`)+ `DiagnosticsSink`
+    (`emit(dict)` drop-in + cancel bus handlers + best-effort own-txn `_insert`)。DECISION / SAFETY_TRIGGER /
+    CANCEL_AUDIT 三類 forensic **乾淨切換**離開 Axiom;operational(SIGNAL/HEALTH_CHECK/ORDER_*)仍在 Axiom(3c)。
+    驗證:741 unit + 47 integration 綠、mypy/ruff clean、`alembic upgrade head` 過。
+    **3c 接手前的 follow-ups(本次執行發現):**
+    - `AxiomEventSink.handle_cancel_*` 已 unsubscribe 但仍存在(dead)→ 隨 AxiomEventSink 一起刪。
+    - consumer 的 `diagnostics` 參數型別沿用既有 `_AxiomProtocol`、測試 fake 沿用 `_CaptureAxiom` 命名 →
+      3c 改名 `_DiagnosticsProtocol`/`_EventCapture`(可選加具名 `DiagnosticsPort` Protocol)。
+    - `kind=safety_trigger` payload 異質:smoke-boot 發 `{check_target,status,error_message}`,safety chain 發
+      `SafetyTriggerPayload{guard_name,reason,decision_snapshot}`(已在 `daemon_smoke_boot.py` 註解 query defensively)
+      → 3c 評估專屬 kind 或正規化。
+    - `deployment_environment` 仍源自 `AxiomConfig.deployment_env` → 3c 必須解耦(item 9 已列)。
+    - **非 3c**:`alembic check` 有既有 baseline drift(空 baseline migration + accounts/candles/funding_stats 等 ORM
+      表從未進 migration);diagnostics 本身 reconcile 乾淨。屬獨立技術債。
+
 **3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入,**done 2026-05-24**)→ `3a-recovery`(signed offers-query +
 boot resolve PENDING + venue reconcile + **`RESERVATION_RELEASED` 同步持久化**,**done 2026-05-24**)→
-`3b`(diagnostics,**設計就緒 2026-05-24 § item 9**)→ `3c`(Axiom 全移除)。
+`3b`(diagnostics,**done 2026-05-24 § item 10**)→ `3c`(Axiom 全移除,依 item 10 follow-ups)。
