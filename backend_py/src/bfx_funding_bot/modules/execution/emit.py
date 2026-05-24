@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -36,7 +36,7 @@ def _now_iso() -> str:
 
 async def emit_order_submit(
     *,
-    axiom: _AxiomProtocol,
+    event_sink: _EventSink,
     phase: Phase,
     strategy: StrategyName,
     cell: str,
@@ -74,12 +74,12 @@ async def emit_order_submit(
         account_id=ctx.account_id,
         payload=payload.model_dump(mode="json"),
     )
-    await axiom.emit(env.model_dump(mode="json"))
+    await event_sink.emit(env.model_dump(mode="json"))
 
 
 async def emit_order_fill(
     *,
-    axiom: _AxiomProtocol,
+    event_sink: _EventSink,
     phase: Phase,
     strategy: StrategyName,
     cell: str,
@@ -110,12 +110,12 @@ async def emit_order_fill(
         account_id=ctx.account_id,
         payload=payload.model_dump(mode="json"),
     )
-    await axiom.emit(env.model_dump(mode="json"))
+    await event_sink.emit(env.model_dump(mode="json"))
 
 
 async def emit_safety_trigger(
     *,
-    diagnostics: _AxiomProtocol,
+    diagnostics: _EventSink,
     phase: Phase,
     strategy: StrategyName | None,
     cell: str | None,

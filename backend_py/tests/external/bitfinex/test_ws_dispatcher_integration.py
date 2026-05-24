@@ -37,7 +37,7 @@ class _StubAxiomQuery:
         return []
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -73,7 +73,7 @@ async def test_dispatcher_publishes_orderfilled_on_fcn() -> None:
 
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: 5000, queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: 5000, queue_max=100,
     )
 
     stop = asyncio.Event()
@@ -117,7 +117,7 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
 
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: 2200, queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: 2200, queue_max=100,
     )
     bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
 

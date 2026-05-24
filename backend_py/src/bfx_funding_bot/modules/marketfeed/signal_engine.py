@@ -68,7 +68,7 @@ def _resolve_staleness_budget_hours(cell: CellConfig) -> int:
     return cell.staleness_budget_hours
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -90,8 +90,8 @@ class SignalEngine:
         self,
         *,
         phase: Phase,
-        axiom: _AxiomProtocol,
-        diagnostics: _AxiomProtocol,
+        event_sink: _EventSink,
+        diagnostics: _EventSink,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
         safety_chain: _SafetyChainProtocol | None = None,
@@ -99,7 +99,7 @@ class SignalEngine:
         account_ctx: AccountContext | None = None,
     ) -> None:
         self.phase = phase
-        self.axiom = axiom
+        self._events = event_sink
         self.diagnostics = diagnostics
         self.candles_repo = candles_repo
         self.reporter = reporter or DivergenceReporter()
@@ -186,7 +186,7 @@ class SignalEngine:
         stale_seconds: int = 0,
     ) -> None:
         budget_seconds = _resolve_budget_seconds(cell)
-        await self.axiom.emit({
+        await self._events.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
             "phase": self.phase.value,
@@ -219,7 +219,7 @@ class SignalEngine:
         # quality-check side event. Shares correlation_id with the base
         # signal emit (same cycle / trace).
         budget_seconds = _resolve_budget_seconds(cell)
-        await self.axiom.emit({
+        await self._events.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,
             "phase": self.phase.value,
@@ -307,7 +307,7 @@ class SignalEngine:
         self, correlation_id: UUID, status: HealthStatus, *,
         target: HealthTarget, error_message: str,
     ) -> None:
-        await self.axiom.emit({
+        await self._events.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value if status == HealthStatus.DEGRADED else Level.ERROR.value,
             "phase": self.phase.value,

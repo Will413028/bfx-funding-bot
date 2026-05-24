@@ -65,7 +65,7 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
     bus.subscribe(ReservationReleased, sink.on_reservation_released)
 
     paper = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
@@ -100,7 +100,7 @@ async def test_smoke_axiom_sink_emits_with_smoke_account_id() -> None:
     bus.subscribe(OrderFilled, sink.on_order_filled)
 
     paper = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())

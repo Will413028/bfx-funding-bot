@@ -39,7 +39,7 @@ class _StubAxiomQuery:
         return []
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -75,14 +75,14 @@ def _credit(venue_id: int, amount: float = 100.0) -> list:
     ]
 
 
-def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom,
+def _build_tracker(client: httpx.AsyncClient, axiom: _EventCapture,
                    bus: DomainEventBus | None = None,
                    registry: OfferRegistry | None = None) -> RestPollingFillTracker:
     probe = HealthProbe()
     if registry is None:
         registry = OfferRegistry(axiom_query=_StubAxiomQuery(), clock=lambda: 5000)
     return RestPollingFillTracker(
-        http=client, axiom=axiom, probe=probe, bus=bus or DomainEventBus(),
+        http=client, event_sink=axiom, probe=probe, bus=bus or DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default", registry=registry, poll_interval_s=0.01,
     )
@@ -92,7 +92,7 @@ def _build_tracker(client: httpx.AsyncClient, axiom: _CaptureAxiom,
 async def test_atomic_poll_aborts_on_credits_failure() -> None:
     """Both /offers and /credits must succeed for a tick to count. If credits 500s,
     no events emit and last_state is preserved (next tick retries fresh)."""
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
 
     def handler(req: httpx.Request) -> httpx.Response:
         if "offers" in req.url.path:
@@ -125,7 +125,7 @@ async def test_atomic_poll_aborts_on_credits_failure() -> None:
 @pytest.mark.asyncio
 async def test_consecutive_failure_emits_degraded() -> None:
     """After CONSECUTIVE_FAIL_THRESHOLD consecutive tick failures, emit health_check degraded."""
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
 
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(500)
@@ -154,7 +154,7 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
     """Core diff: offer present in last tick, absent this tick → emit ReservationReleased
     via bus. Tracker uses venue_offer_id as bridge.
     Registry seeded with claim for voi=111 to satisfy new registry-aware contract."""
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     bus = DomainEventBus()
     released: list[ReservationReleased] = []
 
@@ -210,7 +210,7 @@ async def test_paper_offer_id_invariant_at_emit_time() -> None:
     """CC4 defense-in-depth: if a paper_ prefixed offer_id leaks into tracker state
     (registry CC4 should prevent this at startup; this guards against bypass),
     emit path raises InvariantError → propagates to TaskGroup → daemon restart."""
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
 
     def handler(req: httpx.Request) -> httpx.Response:
         if "offers" in req.url.path:

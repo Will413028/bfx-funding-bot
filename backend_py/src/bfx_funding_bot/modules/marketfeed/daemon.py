@@ -122,6 +122,7 @@ from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
 from bfx_funding_bot.modules.observability.resource import EventResource
+from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 from bfx_funding_bot.smoke.g1 import run_smoke_async
 
 if TYPE_CHECKING:
@@ -534,7 +535,7 @@ def _resolve_event_replay_days() -> int:
 
 
 async def _emit_locf_degraded(
-    axiom: AxiomClient,
+    stdout_sink: StdoutEventSink,
     config: MarketfeedConfig,
     cell: CellConfig,
     stale_seconds: int | None,
@@ -561,7 +562,7 @@ async def _emit_locf_degraded(
         "stale_seconds": stale_seconds,
         "budget_seconds": budget_seconds,
     }
-    await axiom.emit({
+    await stdout_sink.emit({
         "timestamp": datetime.now(UTC).isoformat(),
         "level": Level.WARN.value,
         "phase": config.phase.value,
@@ -626,6 +627,7 @@ async def build_daemon(
         deployment_environment=axiom_cfg.deployment_env,
     )
     axiom = AxiomClient(cfg=axiom_cfg, resource=event_resource)
+    stdout_sink = StdoutEventSink(resource=event_resource)
     bitfinex_http = httpx.AsyncClient()
     bitfinex = BitfinexREST(
         http=bitfinex_http,
@@ -633,7 +635,7 @@ async def build_daemon(
         limiter=FundingRateLimiter(),
     )
     registry = StrategyRegistry()
-    monitor = HealthMonitor(phase=config.phase, axiom=axiom, probe=probe)
+    monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
 
     now_mts = now_ms_utc()
@@ -783,7 +785,7 @@ async def build_daemon(
     # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
     # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
     spec = build_executor(
-        axiom=axiom,
+        axiom=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
         cell=first_cell.cell_id,
@@ -812,7 +814,7 @@ async def build_daemon(
     if spec.fill_tracker_enabled:
         fill_tracker = RestPollingFillTracker(
             http=bitfinex_http,
-            axiom=axiom,
+            event_sink=stdout_sink,
             probe=probe,
             bus=bus,
             phase=config.phase,
@@ -879,7 +881,7 @@ async def build_daemon(
             HealthTarget.LEDGER, HealthStatus.DEGRADED,
             error_message=f"{ledger.replay_floor_hit_count} floor hits during replay",
         )
-        await axiom.emit({
+        await stdout_sink.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,
             "phase": config.phase.value,
@@ -895,7 +897,7 @@ async def build_daemon(
 
     signal_engine_obj = SignalEngine(
         phase=config.phase,
-        axiom=axiom,
+        event_sink=stdout_sink,
         diagnostics=diagnostics,
         candles_repo=_CandlesRepoBridge(),
         safety_chain=safety_chain,
@@ -951,7 +953,7 @@ async def build_daemon(
             if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
                 probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
                 await _emit_locf_degraded(
-                    axiom, config, cell,
+                    stdout_sink, config, cell,
                     stale_seconds=None,  # no candles → no meaningful age
                     budget_seconds=budget_seconds,
                 )
@@ -965,7 +967,7 @@ async def build_daemon(
             if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
                 probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
                 await _emit_locf_degraded(
-                    axiom, config, cell,
+                    stdout_sink, config, cell,
                     stale_seconds=latest.stale_seconds,
                     budget_seconds=budget_seconds,
                 )
@@ -975,7 +977,7 @@ async def build_daemon(
         if probe.get_cell_pipeline_status(cell.pair_id) == HealthStatus.DEGRADED:
             # HEALTHY restore transition
             probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
-            await axiom.emit({
+            await stdout_sink.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
                 "phase": config.phase.value,
@@ -1048,7 +1050,7 @@ async def build_daemon(
             ws_client=auth_ws,
             registry=offer_registry,
             bus=bus,
-            axiom=axiom,
+            event_sink=stdout_sink,
             persister=persister,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)

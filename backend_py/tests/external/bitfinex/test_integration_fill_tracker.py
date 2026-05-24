@@ -27,7 +27,7 @@ class _StubAxiomQuery:
         return []
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -62,7 +62,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
             return httpx.Response(200, json=[])
         return httpx.Response(200, json=[])
 
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     bus = DomainEventBus()
     released: list[ReservationReleased] = []
 
@@ -88,7 +88,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
         probe = HealthProbe()
         tracker = RestPollingFillTracker(
             http=client,
-            axiom=axiom,
+            event_sink=axiom,
             probe=probe,
             bus=bus,
             phase=Phase.PAPER,

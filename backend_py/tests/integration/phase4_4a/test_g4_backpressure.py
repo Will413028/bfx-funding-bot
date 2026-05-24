@@ -36,8 +36,8 @@ class _FloodingWSClient:
         self._stop = True
 
 
-class _SlowAxiom:
-    """Slow axiom sink to keep the consumer busy so queue depth can build up."""
+class _SlowEventSink:
+    """Slow event sink to keep the consumer busy so queue depth can build up."""
     async def emit(self, event: dict[str, Any]) -> None:
         await asyncio.sleep(0.005)
 
@@ -71,7 +71,7 @@ async def test_dispatcher_queue_full_pauses_producer(
     fake_ws = _FloodingWSClient(count=100)
     dispatcher = _ObservingDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_SlowAxiom(), clock=lambda: 2000, queue_max=queue_max,
+        event_sink=_SlowEventSink(), clock=lambda: 2000, queue_max=queue_max,
     )
 
     stop = asyncio.Event()

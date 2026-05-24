@@ -39,7 +39,7 @@ class _StubWSClient:
             yield e
 
 
-class _NoopAxiom:
+class _EventCapture:
     async def emit(self, event):
         return None
 
@@ -76,7 +76,7 @@ async def test_ws_fcn_orderfilled_persisted_before_publish(pg_session_factory):
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=_StubWSClient([fcn]),
         registry=_registry_with_claim("888", 11, scid, 100),
-        bus=bus, axiom=_NoopAxiom(), persister=persister,
+        bus=bus, event_sink=_EventCapture(), persister=persister,
     )
     stop = asyncio.Event()
     task = asyncio.create_task(dispatcher.run(stop))
@@ -135,7 +135,7 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
                           occurred_at_ms=2),
     )
     tracker = RestPollingFillTracker(
-        http=_OneTickHttp(), axiom=_NoopAxiom(), probe=HealthProbe(), bus=DomainEventBus(),
+        http=_OneTickHttp(), event_sink=_EventCapture(), probe=HealthProbe(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
         account_id=_ACC_FT,
         registry=_registry_with_claim("888", 11, scid, 100, account_id=_ACC_FT),
@@ -207,7 +207,7 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
 
     flaky = _FlakyPersister(real)
     tracker = RestPollingFillTracker(
-        http=_GoneAfterFirst(), axiom=_NoopAxiom(), probe=HealthProbe(), bus=DomainEventBus(),
+        http=_GoneAfterFirst(), event_sink=_EventCapture(), probe=HealthProbe(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
         account_id=acc, registry=_registry_with_claim("889", 12, scid, 70, account_id=acc),
         persister=flaky, poll_interval_s=0.05,

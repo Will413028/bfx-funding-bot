@@ -41,7 +41,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 pytestmark = pytest.mark.integration
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -65,8 +65,8 @@ class _StubDiv:
 @pytest.mark.asyncio
 async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    axiom = _CaptureAxiom()
-    diagnostics = _CaptureAxiom()
+    axiom = _EventCapture()
+    diagnostics = _EventCapture()
     probe = HealthProbe()
     probe.record_heartbeat("safety_chain")
     probe.record_heartbeat("executor")
@@ -113,7 +113,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
         account_id="default",
     )
     executor = EchoPaperExecutor(
-        axiom=axiom,
+        event_sink=axiom,
         phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",

@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import (
 )
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -114,13 +114,13 @@ def _make_registry(cell: CellConfig) -> StrategyRegistry:
 @pytest.fixture
 def capture_engine() -> tuple:
     """Engine wired with _AllowChain — safety eval passes, executor.submit called."""
-    axiom = _CaptureAxiom()
-    diagnostics = _CaptureAxiom()
+    axiom = _EventCapture()
+    diagnostics = _EventCapture()
     chain = _AllowChain()
     executor = _SpyExecutor()
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )
@@ -131,13 +131,13 @@ def capture_engine() -> tuple:
 @pytest.fixture
 def capture_engine_blocked() -> tuple:
     """Engine wired with _BlockChain — safety eval blocks, executor NOT called."""
-    axiom = _CaptureAxiom()
-    diagnostics = _CaptureAxiom()
+    axiom = _EventCapture()
+    diagnostics = _EventCapture()
     chain = _BlockChain()
     executor = _SpyExecutor()
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )

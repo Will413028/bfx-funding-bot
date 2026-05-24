@@ -11,7 +11,7 @@ from bfx_funding_bot.modules.execution.registry import (
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -25,7 +25,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_paper_default_no_ws_no_tracker() -> None:
     spec = build_executor(
-        axiom=_DummyAxiom(), phase=Phase.PAPER,
+        axiom=_EventCapture(), phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
     )
     assert spec.fill_tracker_enabled is False
@@ -37,7 +37,7 @@ def test_paper_with_ws_client_enabled_raises(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
         build_executor(
-            axiom=_DummyAxiom(), phase=Phase.PAPER,
+            axiom=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         )
 
@@ -47,7 +47,7 @@ def test_bitfinex_live_without_api_key_raises(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
         build_executor(
-            axiom=_DummyAxiom(), phase=Phase.PAPER,
+            axiom=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         )
 
@@ -59,7 +59,7 @@ def test_bitfinex_live_without_ws_client_raises(monkeypatch: pytest.MonkeyPatch)
     # ws_client_enabled defaults false → invalid
     with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
         build_executor(
-            axiom=_DummyAxiom(), phase=Phase.PAPER,
+            axiom=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         )
 
@@ -71,7 +71,7 @@ def test_bitfinex_live_without_http_or_bus_raises(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     with pytest.raises(ExecutorConfigError, match="http"):
         build_executor(
-            axiom=_DummyAxiom(), phase=Phase.PAPER,
+            axiom=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         )
 
@@ -84,7 +84,7 @@ def test_bitfinex_live_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
     spec = build_executor(
-        axiom=_DummyAxiom(), phase=Phase.PAPER,
+        axiom=_EventCapture(), phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         http=httpx.AsyncClient(),
         bus=DomainEventBus(),

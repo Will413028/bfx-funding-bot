@@ -31,7 +31,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 pytestmark = pytest.mark.integration
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -41,7 +41,7 @@ class _CaptureAxiom:
 
 @pytest.mark.asyncio
 async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> None:
-    diagnostics = _CaptureAxiom()
+    diagnostics = _EventCapture()
     probe = HealthProbe()
 
     class _FakeQuery:

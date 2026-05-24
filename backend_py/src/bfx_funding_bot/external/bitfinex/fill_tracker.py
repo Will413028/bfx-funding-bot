@@ -62,7 +62,7 @@ _OFFERS_ENDPOINT = "/v2/auth/r/funding/offers"
 _CREDITS_ENDPOINT = "/v2/auth/r/funding/credits"
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -76,7 +76,7 @@ class RestPollingFillTracker:
         self,
         *,
         http: httpx.AsyncClient,
-        axiom: _AxiomProtocol,
+        event_sink: _EventSink,
         probe: HealthProbe,
         bus: DomainEventBus,
         phase: Phase,
@@ -88,7 +88,7 @@ class RestPollingFillTracker:
         persister: EventPersister | None = None,
     ) -> None:
         self.http = http
-        self.axiom = axiom
+        self._events = event_sink
         self.probe = probe
         self._bus = bus
         self.phase = phase
@@ -233,7 +233,7 @@ class RestPollingFillTracker:
             HealthTarget.FILL_TRACKER, HealthStatus.DEGRADED,
             error_message=reason,
         )
-        await self.axiom.emit({
+        await self._events.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.WARN.value,
             "phase": self.phase.value,
