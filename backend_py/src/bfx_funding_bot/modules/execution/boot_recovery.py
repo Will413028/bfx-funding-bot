@@ -16,7 +16,6 @@ submit reached the venue) is captured independently by orphan-claim.
 from __future__ import annotations
 
 import hashlib
-import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID, uuid5
@@ -30,7 +29,7 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
-log = logging.getLogger(__name__)
+RecoveryAction = ReservationClaimed | ReservationReleased | ReservationFailed
 
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
 # orphans (offers with no originating local signal).
@@ -48,14 +47,21 @@ class LocalClaim:
 
 
 def synth_orphan_cid(venue_offer_id: str) -> int:
-    """Stable synthetic cid for an orphan claim. Bitfinex offer ids are numeric;
-    use directly so re-running reconcile upserts the same offer_claims row.
-    Non-numeric fallback hashes the id into the int63 cid space."""
+    """Synthetic cid for a reconciled orphan claim, in the NEGATIVE namespace.
+
+    Real cids (generate_cid) are blake2b masked by BITFINEX_CID_MAX -> always
+    positive, so negating guarantees zero collision with a client-submitted
+    intent. Synthetic cids are never sent to the venue (orphans are reconciled,
+    not submitted); a negative cid in event_log marks "no originating intent".
+    Numeric voi (the normal case) is negated directly so re-running reconcile
+    upserts the same offer_claims row; non-numeric voi falls back to a hashed
+    value, also negated.
+    """
     try:
-        return int(venue_offer_id)
+        return -int(venue_offer_id)
     except ValueError:
         digest = hashlib.blake2b(venue_offer_id.encode(), digest_size=8).digest()
-        return int.from_bytes(digest, "big") & BITFINEX_CID_MAX
+        return -(int.from_bytes(digest, "big") & BITFINEX_CID_MAX)
 
 
 def synth_orphan_scid(venue_offer_id: str) -> UUID:
@@ -71,7 +77,7 @@ def compute_recovery_actions(
     is_simulated: bool,
     now_ms: int,
     grace_ms: int,
-) -> list[object]:
+) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append."""
     venue_by_voi = {o.venue_offer_id: o for o in venue_offers}
     claimed_by_voi = {
@@ -79,7 +85,7 @@ def compute_recovery_actions(
         for c in local_claims
         if c.state == RegistryState.CLAIMED and c.venue_offer_id is not None
     }
-    actions: list[object] = []
+    actions: list[RecoveryAction] = []
 
     # orphan: venue has it, local CLAIMED set doesn't -> claim (reserved += size)
     for voi, offer in venue_by_voi.items():

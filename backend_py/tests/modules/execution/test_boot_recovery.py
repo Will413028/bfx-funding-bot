@@ -87,8 +87,15 @@ def test_recent_pending_within_grace_is_left_alone():
     assert _actions([], [claim], grace_ms=120_000) == []
 
 
-def test_synth_cid_numeric_voi_is_int():
-    assert synth_orphan_cid("12345") == 12345
+def test_synth_cid_numeric_voi_is_negated():
+    assert synth_orphan_cid("12345") == -12345
+
+
+def test_synth_cid_nonnumeric_fallback_is_deterministic_and_negative():
+    from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
+    a = synth_orphan_cid("abc-xyz")
+    assert a == synth_orphan_cid("abc-xyz")          # deterministic
+    assert -BITFINEX_CID_MAX <= a < 0                # negative namespace, in range
 
 
 def test_synth_scid_is_deterministic():
