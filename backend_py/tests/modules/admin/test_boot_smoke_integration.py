@@ -20,12 +20,14 @@ async def test_boot_smoke_passes_logs_info(monkeypatch, caplog) -> None:
     ))
     daemon_stub.axiom = MagicMock()
     daemon_stub.axiom.emit = AsyncMock()
+    daemon_stub.diagnostics = MagicMock()
+    daemon_stub.diagnostics.emit = AsyncMock()
 
     from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
     await run_boot_smoke(daemon_stub)
 
     daemon_stub.smoke_runner.run_l2.assert_awaited_once()
-    daemon_stub.axiom.emit.assert_not_awaited()
+    daemon_stub.diagnostics.emit.assert_not_awaited()
     assert any("smoke_boot_passed" in rec.message for rec in caplog.records)
 
 
@@ -41,13 +43,15 @@ async def test_boot_smoke_fails_emits_safety_trigger(caplog) -> None:
     ))
     daemon_stub.axiom = MagicMock()
     daemon_stub.axiom.emit = AsyncMock()
+    daemon_stub.diagnostics = MagicMock()
+    daemon_stub.diagnostics.emit = AsyncMock()
     daemon_stub.config.phase.value = "paper"
 
     from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
     await run_boot_smoke(daemon_stub)
 
-    daemon_stub.axiom.emit.assert_awaited_once()
-    emit_call = daemon_stub.axiom.emit.call_args[0][0]
+    daemon_stub.diagnostics.emit.assert_awaited_once()
+    emit_call = daemon_stub.diagnostics.emit.call_args[0][0]
     assert emit_call["event_type"] == "safety_trigger"
     assert emit_call["level"] == "critical"
     assert "smoke_boot" in str(emit_call["payload"])
@@ -59,8 +63,10 @@ async def test_boot_smoke_none_runner_skips_silently(caplog) -> None:
     daemon_stub.smoke_runner = None
     daemon_stub.axiom = MagicMock()
     daemon_stub.axiom.emit = AsyncMock()
+    daemon_stub.diagnostics = MagicMock()
+    daemon_stub.diagnostics.emit = AsyncMock()
 
     from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
     await run_boot_smoke(daemon_stub)
 
-    daemon_stub.axiom.emit.assert_not_awaited()
+    daemon_stub.diagnostics.emit.assert_not_awaited()
