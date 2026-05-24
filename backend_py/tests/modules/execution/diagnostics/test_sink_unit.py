@@ -133,7 +133,11 @@ async def test_handle_cancel_acknowledged_persists(diag_factory) -> None:
         venue_offer_id="v1", acknowledged_at_ms=2000, signal_correlation_id=_SCID,
         account_id="acct", rest_status="ok", venue_response_text="done"))
     rows = await _rows(diag_factory)
-    assert len(rows) == 1 and rows[0].kind == "cancel_audit"
+    assert len(rows) == 1
+    assert rows[0].kind == "cancel_audit"
+    assert rows[0].payload["rest_status"] == "ok"
+    assert rows[0].payload["venue_response_text"] == "done"
+    assert rows[0].payload["acknowledged_at_ms"] == 2000
 
 
 async def test_noop_sink_does_nothing(diag_factory) -> None:
