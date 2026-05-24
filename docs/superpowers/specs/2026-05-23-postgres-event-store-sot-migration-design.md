@@ -420,7 +420,7 @@ Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 cod
     - protocol/fake 改名 ✓(T4/T5)
     - `deployment_environment` 解耦 ✓(T2/T7)
     - `kind=safety_trigger` 異質 payload 正規化 → **刻意不做(anti-gold-plating §358)**:lossless storage 已足,query-time 區分靠 `event_type` field;smoke-boot shape 和 safety chain shape 都能 query defensively。已在 spec 標 out-of-scope。
-    **Out-of-scope 發現(新):** `scripts/g2_audit_locf.py` 是獨立手工 audit script,自己定義 `AxiomQueryClient` + 查 Axiom APL。不在 3c 範圍(與 G1/paper_smoke 無關,是單獨 manual audit 工具);可能需要獨立 follow-up。
+    **Out-of-scope 發現(新)→ 已退役(2026-05-25):** `backend_py/scripts/g2_audit_locf.py` 是獨立手工 audit script,自己定義 `AxiomQueryClient` + 查 Axiom APL。不在 3c 範圍(與 G1/paper_smoke 無關,是單獨 manual audit 工具);Axiom dataset 關閉前已刪除 script + `tests/scripts/test_g2_audit_locf.py`(self-contained,無 app 依賴)。
     **g5 time-travel:** 3c 不含 PG 等效實作;raw events 仍留在 `event_log`(可手工重放),但無 API。設計決策,非技術債。
     驗證:655 unit 綠(刪除 5 tests:event_upcasters + LedgerReplayError + _parse_event)、mypy 101 files clean、ruff clean。
     `alembic check`:worktree 因 .env 指向壞密碼無法連線(auth error);pre-existing baseline drift 已在 item 10 記錄,屬獨立技術債,3c 不觸碰。
