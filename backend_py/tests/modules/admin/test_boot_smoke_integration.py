@@ -18,8 +18,6 @@ async def test_boot_smoke_passes_logs_info(monkeypatch, caplog) -> None:
     daemon_stub.smoke_runner.run_l2 = AsyncMock(return_value=SmokeResult(
         status="pass", level="L2", checks={}, duration_ms=10,
     ))
-    daemon_stub.axiom = MagicMock()
-    daemon_stub.axiom.emit = AsyncMock()
     daemon_stub.diagnostics = MagicMock()
     daemon_stub.diagnostics.emit = AsyncMock()
 
@@ -41,8 +39,6 @@ async def test_boot_smoke_fails_emits_safety_trigger(caplog) -> None:
         status="fail", level="L2", checks={"events_count": 1},
         duration_ms=5, error="expected 2 events, got 1",
     ))
-    daemon_stub.axiom = MagicMock()
-    daemon_stub.axiom.emit = AsyncMock()
     daemon_stub.diagnostics = MagicMock()
     daemon_stub.diagnostics.emit = AsyncMock()
     daemon_stub.config.phase.value = "paper"
@@ -61,8 +57,6 @@ async def test_boot_smoke_none_runner_skips_silently(caplog) -> None:
     """If smoke_runner is None on Daemon (e.g. wiring opt-out), block is no-op."""
     daemon_stub = MagicMock()
     daemon_stub.smoke_runner = None
-    daemon_stub.axiom = MagicMock()
-    daemon_stub.axiom.emit = AsyncMock()
     daemon_stub.diagnostics = MagicMock()
     daemon_stub.diagnostics.emit = AsyncMock()
 
