@@ -63,7 +63,7 @@ def _make_signal_engine(axiom: MagicMock, cell: CellConfig) -> SignalEngine:
     # Return a minimal history so divergence check doesn't crash
     candles_repo.get_up_to = AsyncMock(return_value=[_candle(_REF_MTS)])
     return SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=NoopDiagnosticsSink(),
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=NoopDiagnosticsSink(),
         candles_repo=candles_repo,
     )
 

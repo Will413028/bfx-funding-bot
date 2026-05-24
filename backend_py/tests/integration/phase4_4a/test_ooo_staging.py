@@ -19,7 +19,7 @@ from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationCla
 from .conftest import ScriptedWSClient
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -50,7 +50,7 @@ async def test_fcn_arrives_before_claim_then_drained_after_claim(
     clock_ms = [500]
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: clock_ms[0], queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: clock_ms[0], queue_max=100,
     )
 
     captured: list[OrderFilled] = []

@@ -56,7 +56,7 @@ class _FakeAxiomQuery:
 def _build_chain(bus: DomainEventBus, axiom: _FakeAxiomClient):
     """Build wrapped chain with paper executor + ReservationEmittingMiddleware."""
     paper = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     return ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())

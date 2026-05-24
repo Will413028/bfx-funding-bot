@@ -107,13 +107,13 @@ def _make_ctx() -> AccountContext:
 
 
 def _make_executor(bus: DomainEventBus, http: httpx.AsyncClient) -> BitfinexLiveExecutor:
-    class _Axiom:
+    class _EventCapture:
         async def emit(self, event: dict[str, Any]) -> None:
             return None
 
     return BitfinexLiveExecutor(
         http=http,
-        axiom=_Axiom(),
+        event_sink=_EventCapture(),
         bus=bus,
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,

@@ -44,7 +44,7 @@ SUB_TASK_THRESHOLDS: dict[str, int] = {
 _DEFAULT_THRESHOLD_S = 60
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -130,12 +130,12 @@ class HealthMonitor:
         self,
         *,
         phase: Phase,
-        axiom: _AxiomProtocol,
+        event_sink: _EventSink,
         probe: HealthProbe,
         heartbeat_interval_s: float = 300.0,
     ) -> None:
         self.phase = phase
-        self.axiom = axiom
+        self._events = event_sink
         self.probe = probe
         self.heartbeat_interval_s = heartbeat_interval_s
         self._task: asyncio.Task[None] | None = None
@@ -180,7 +180,7 @@ class HealthMonitor:
             payload["latency_ms"] = state.latency_ms
         if state.error_message:
             payload["error_message"] = state.error_message
-        await self.axiom.emit({
+        await self._events.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": level.value,
             "phase": self.phase.value,
@@ -233,7 +233,7 @@ class HealthMonitor:
             # Emit BEFORE potential fatal escalation so axiom sees root cause
             level = Level.ERROR if severity == "down" else Level.WARN
             status = HealthStatus.DOWN if severity == "down" else HealthStatus.DEGRADED
-            await self.axiom.emit({
+            await self._events.emit({
                 "timestamp": now.isoformat(),
                 "level": level.value,
                 "phase": self.phase.value,
@@ -268,7 +268,7 @@ class HealthMonitor:
                     "severity": severity,
                     "age_s": None,  # wall-clock age not tracked here; daemon owns TTL
                 })
-                await self.axiom.emit({
+                await self._events.emit({
                     "timestamp": now.isoformat(),
                     "level": Level.WARN.value,
                     "phase": self.phase.value,

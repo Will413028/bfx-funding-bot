@@ -50,7 +50,7 @@ async def test_signal_engine_emits_signal_and_decision():
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
     )
     cell = _cell()
@@ -84,7 +84,7 @@ async def test_cp3_every_emit_passes_schema_validation():
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo,
     )
     cell = _cell()
@@ -135,7 +135,7 @@ async def test_cp3_divergence_path_also_passes_schema():
     })
 
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=candles_repo, reporter=reporter,
     )
     cell = _cell()

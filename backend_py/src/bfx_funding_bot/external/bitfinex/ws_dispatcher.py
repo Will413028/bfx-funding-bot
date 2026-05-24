@@ -172,7 +172,7 @@ def _translate_foc(
 log = logging.getLogger(__name__)
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -197,7 +197,7 @@ class BitfinexLiveWSDispatcher:
         ws_client: _WSClientProtocol,
         registry: Any,  # OfferRegistry
         bus: Any,       # DomainEventBus
-        axiom: _AxiomProtocol,
+        event_sink: _EventSink,
         clock: Callable[[], int] | None = None,
         queue_max: int = 10_000,
         persister: EventPersister | None = None,
@@ -205,7 +205,7 @@ class BitfinexLiveWSDispatcher:
         self._ws_client = ws_client
         self._registry = registry
         self._bus = bus
-        self._axiom = axiom
+        self._events = event_sink
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._queue: asyncio.Queue[BfxWSEvent] = asyncio.Queue(maxsize=queue_max)
         self._queue_max = queue_max

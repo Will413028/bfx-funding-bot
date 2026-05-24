@@ -143,7 +143,7 @@ def classify_cancel_response(raw: Any) -> tuple[str, str | None]:
     return "other", text
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -161,7 +161,7 @@ class BitfinexLiveExecutor:
         self,
         *,
         http: httpx.AsyncClient,
-        axiom: _AxiomProtocol,
+        event_sink: _EventSink,
         bus: DomainEventBus,
         phase: Phase,
         strategy: StrategyName,
@@ -171,7 +171,7 @@ class BitfinexLiveExecutor:
         base_url: str = BITFINEX_REST_BASE,
     ) -> None:
         self._http = http
-        self._axiom = axiom
+        self._events = event_sink
         self._bus = bus
         self._phase = phase
         self._strategy = strategy

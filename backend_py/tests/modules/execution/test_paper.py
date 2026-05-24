@@ -22,7 +22,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -44,9 +44,9 @@ def _decision(corr: UUID) -> DecisionPayload:
 
 @pytest.mark.asyncio
 async def test_submit_emits_order_submit_then_order_fill() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     ex = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         date_provider=lambda: date(2026, 5, 21),
     )
@@ -64,9 +64,9 @@ async def test_submit_emits_order_submit_then_order_fill() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_same_correlation_id_same_date_same_cid() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     ex = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         date_provider=lambda: date(2026, 5, 21),
     )
@@ -78,9 +78,9 @@ async def test_submit_same_correlation_id_same_date_same_cid() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_uses_provided_cid() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     ex = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         date_provider=lambda: date(2026, 5, 21),
     )
@@ -91,9 +91,9 @@ async def test_submit_uses_provided_cid() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_without_cid_falls_back_to_generated() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     ex = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         date_provider=lambda: date(2026, 5, 21),
     )
@@ -105,9 +105,9 @@ async def test_submit_without_cid_falls_back_to_generated() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_fill_price_and_size_match_decision() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     ex = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         date_provider=lambda: date(2026, 5, 21),
     )

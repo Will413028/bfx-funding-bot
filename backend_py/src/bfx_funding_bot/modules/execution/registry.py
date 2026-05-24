@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.execution.protocols import ExecutorPort
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -51,7 +51,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def build_executor(
     *,
-    axiom: _AxiomProtocol,
+    axiom: _EventSink,
     phase: Phase,
     strategy: StrategyName,
     cell: str,
@@ -79,7 +79,7 @@ def build_executor(
             )
         return ExecutorSpec(
             executor=EchoPaperExecutor(
-                axiom=axiom, phase=phase, strategy=strategy, cell=cell,
+                event_sink=axiom, phase=phase, strategy=strategy, cell=cell,
             ),
             fill_tracker_enabled=False,
             ws_client_enabled=False,
@@ -105,7 +105,7 @@ def build_executor(
         from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
         return ExecutorSpec(
             executor=BitfinexLiveExecutor(
-                http=http, axiom=axiom, bus=bus,
+                http=http, event_sink=axiom, bus=bus,
                 phase=phase, strategy=strategy, cell=cell,
             ),
             fill_tracker_enabled=fill_tracker_enabled,

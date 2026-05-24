@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.execution.events import (
 from .conftest import ScriptedWSClient
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -61,7 +61,7 @@ async def test_cancel_then_foc_emits_user_cancel(
     fake_ws = ScriptedWSClient([foc])
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: 2100, queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: 2100, queue_max=100,
     )
     bus.subscribe(CancelRequested, dispatcher.handle_cancel_requested)
 

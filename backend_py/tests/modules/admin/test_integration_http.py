@@ -68,7 +68,7 @@ def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     bus.subscribe(OrderFilled, sink.on_order_filled)
 
     paper = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
@@ -114,7 +114,7 @@ def test_http_no_token_means_admin_router_not_mounted() -> None:
     bus = DomainEventBus()
     axiom = _FakeAxiomClient()
     paper = EchoPaperExecutor(
-        axiom=axiom, phase=Phase.PAPER,
+        event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())

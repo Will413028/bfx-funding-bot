@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -51,10 +51,10 @@ def _decision(corr: Any) -> DecisionPayload:
 
 @pytest.mark.asyncio
 async def test_emit_order_submit_paper_shape() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     corr = uuid4()
     await emit_order_submit(
-        axiom=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        event_sink=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30", decision=_decision(corr), ctx=_ctx(),
         cid=42, offer_id="paper_abc", is_simulated=True, status="submitted",
     )
@@ -69,10 +69,10 @@ async def test_emit_order_submit_paper_shape() -> None:
 
 @pytest.mark.asyncio
 async def test_emit_order_submit_failed_requires_reason() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     with pytest.raises(ValueError, match="failure_reason"):
         await emit_order_submit(
-            axiom=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+            event_sink=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
             cell="fUSD_a30", decision=_decision(uuid4()), ctx=_ctx(),
             cid=1, offer_id=None, is_simulated=False, status="failed",
             failure_reason=None,
@@ -81,10 +81,10 @@ async def test_emit_order_submit_failed_requires_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_emit_order_fill_shape() -> None:
-    axiom = _CaptureAxiom()
+    axiom = _EventCapture()
     corr = uuid4()
     await emit_order_fill(
-        axiom=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        event_sink=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30", decision=_decision(corr), ctx=_ctx(),
         cid=1, offer_id="paper_x", fill_size_usdt=100.0, fill_price=0.0001,
         is_simulated=True,
@@ -94,7 +94,7 @@ async def test_emit_order_fill_shape() -> None:
 
 @pytest.mark.asyncio
 async def test_emit_safety_trigger_shape() -> None:
-    diagnostics = _CaptureAxiom()
+    diagnostics = _EventCapture()
     corr = uuid4()
     await emit_safety_trigger(
         diagnostics=diagnostics, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,

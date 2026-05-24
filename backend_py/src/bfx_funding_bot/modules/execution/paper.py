@@ -27,7 +27,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _AxiomProtocol(Protocol):
+class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -42,13 +42,13 @@ class EchoPaperExecutor:
     def __init__(
         self,
         *,
-        axiom: _AxiomProtocol,
+        event_sink: _EventSink,
         phase: Phase,
         strategy: StrategyName,
         cell: str,
         date_provider: Callable[[], date] | None = None,
     ) -> None:
-        self.axiom = axiom
+        self._events = event_sink
         self.phase = phase
         self.strategy = strategy
         self.cell = cell
@@ -69,14 +69,14 @@ class EchoPaperExecutor:
         offer_id = f"paper_{uuid.uuid4().hex[:12]}"
 
         await emit_order_submit(
-            axiom=self.axiom,
+            event_sink=self._events,
             phase=self.phase, strategy=self.strategy, cell=self.cell,
             decision=decision, ctx=ctx,
             cid=cid, offer_id=offer_id,
             is_simulated=True, status="submitted",
         )
         await emit_order_fill(
-            axiom=self.axiom,
+            event_sink=self._events,
             phase=self.phase, strategy=self.strategy, cell=self.cell,
             decision=decision, ctx=ctx,
             cid=cid, offer_id=offer_id,

@@ -39,7 +39,7 @@ def _make_ctx() -> AccountContext:
     )
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -59,7 +59,7 @@ async def test_submit_returns_submitted_on_success() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     bus = DomainEventBus()
     executor = BitfinexLiveExecutor(
-        http=http, axiom=_DummyAxiom(), bus=bus,
+        http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
@@ -78,7 +78,7 @@ async def test_submit_returns_failed_on_http_error() -> None:
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     bus = DomainEventBus()
     executor = BitfinexLiveExecutor(
-        http=http, axiom=_DummyAxiom(), bus=bus,
+        http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
@@ -107,7 +107,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
     bus.subscribe(CancelRequested, capture)
 
     executor = BitfinexLiveExecutor(
-        http=http, axiom=_DummyAxiom(), bus=bus,
+        http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),

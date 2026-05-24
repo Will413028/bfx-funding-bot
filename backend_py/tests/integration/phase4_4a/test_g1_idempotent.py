@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from .conftest import ScriptedWSClient
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -56,7 +56,7 @@ async def test_duplicate_fcn_does_not_double_realize(
     fake_ws = ScriptedWSClient([fcn1, fcn2])
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: 2500, queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: 2500, queue_max=100,
     )
 
     stop = asyncio.Event()

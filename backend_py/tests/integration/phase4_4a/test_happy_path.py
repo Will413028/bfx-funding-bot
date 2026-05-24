@@ -53,12 +53,12 @@ async def test_submit_then_fcn_completes_orderfilled_chain(
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    class _DummyAxiom:
+    class _EventCapture:
         async def emit(self, event: dict[str, Any]) -> None:
             pass
 
     executor = BitfinexLiveExecutor(
-        http=http, axiom=_DummyAxiom(), bus=bus,
+        http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
@@ -105,7 +105,7 @@ async def test_submit_then_fcn_completes_orderfilled_chain(
 
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
-        axiom=_DummyAxiom(), clock=lambda: 2500, queue_max=100,
+        event_sink=_EventCapture(), clock=lambda: 2500, queue_max=100,
     )
 
     stop = asyncio.Event()

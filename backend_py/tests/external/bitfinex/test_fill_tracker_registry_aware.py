@@ -21,7 +21,7 @@ class _StubAxiomQuery:
         return []
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -58,7 +58,7 @@ async def test_fill_tracker_skips_emit_when_registry_already_released() -> None:
     pre_count = len(captured)
 
     tracker = RestPollingFillTracker(
-        http=http, axiom=_DummyAxiom(), probe=HealthProbe(),
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
         bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id="default", registry=registry,
     )
@@ -95,7 +95,7 @@ async def test_fill_tracker_emits_with_claim_correlation_id_not_uuid4() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     tracker = RestPollingFillTracker(
-        http=http, axiom=_DummyAxiom(), probe=HealthProbe(),
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
         bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id="default", registry=registry,
     )
@@ -124,7 +124,7 @@ async def test_fill_tracker_skips_when_voi_not_in_registry() -> None:
     bus.subscribe(ReservationReleased, capture)
 
     tracker = RestPollingFillTracker(
-        http=http, axiom=_DummyAxiom(), probe=HealthProbe(),
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
         bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id="default", registry=registry,
     )

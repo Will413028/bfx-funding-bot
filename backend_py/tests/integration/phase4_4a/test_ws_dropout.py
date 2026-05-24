@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 
-class _DummyAxiom:
+class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
 
@@ -62,7 +62,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
     )
 
     tracker = RestPollingFillTracker(
-        http=http, axiom=_DummyAxiom(), probe=HealthProbe(),
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
         bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
         cell="C-1", account_id="default", registry=registry,
     )
