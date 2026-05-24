@@ -78,7 +78,7 @@ async def test_daemon_shutdown_does_not_hang_on_normal_stop(
     grace force-exits if anything hangs. No daemon-level wait_for enforcement
     (no "55s timeout" wrapper) — that's delegated to Koyeb.
 
-    The test verifies happy-path no-hang under normal stop. Hung-axiom is
+    The test verifies happy-path no-hang under normal stop. Hung sub-tasks are
     covered by Koyeb-grade SIGKILL (not unit-tested here).
     """
     _set_daemon_env(monkeypatch, pg_engine)

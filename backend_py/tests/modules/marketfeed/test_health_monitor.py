@@ -21,9 +21,9 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 
 
 async def test_state_change_emits_immediately():
-    axiom = AsyncMock()
+    event_sink = AsyncMock()
     probe = HealthProbe()
-    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=axiom, probe=probe,
+    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=event_sink, probe=probe,
                             heartbeat_interval_s=10.0)
     await monitor.start()
     probe.update(HealthTarget.BITFINEX_WS, HealthStatus.HEALTHY,
@@ -37,24 +37,24 @@ async def test_state_change_emits_immediately():
 
     statuses = [
         call.args[0]["payload"]["status"]
-        for call in axiom.emit.call_args_list
+        for call in event_sink.emit.call_args_list
     ]
     assert HealthStatus.HEALTHY.value in statuses
     assert HealthStatus.DEGRADED.value in statuses
 
 
 async def test_heartbeat_emits_periodically():
-    axiom = AsyncMock()
+    event_sink = AsyncMock()
     probe = HealthProbe()
     probe.update(HealthTarget.BITFINEX_WS, HealthStatus.HEALTHY,
                  last_msg_age_ms=100, reconnect_count_last_hour=0)
-    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=axiom, probe=probe,
+    monitor = HealthMonitor(phase=Phase.PAPER, event_sink=event_sink, probe=probe,
                             heartbeat_interval_s=0.1)
     await monitor.start()
     await asyncio.sleep(0.35)
     await monitor.stop()
 
-    assert axiom.emit.call_count >= 2  # multiple heartbeats fired
+    assert event_sink.emit.call_count >= 2  # multiple heartbeats fired
 
 
 class TestHeartbeatRegistry:
@@ -103,18 +103,18 @@ class TestCurrentStatus:
 
 class TestStalenessScan:
     @pytest.fixture
-    def fake_axiom(self):
+    def fake_sink(self):
         class _Fake:
             def __init__(self): self.emitted = []
             async def emit(self, event): self.emitted.append(event)
         return _Fake()
 
     @pytest.fixture
-    def monitor(self, fake_axiom):
+    def monitor(self, fake_sink):
         probe = HealthProbe()
         return HealthMonitor(
             phase=Phase.SHADOW,
-            event_sink=fake_axiom,
+            event_sink=fake_sink,
             probe=probe,
             heartbeat_interval_s=300.0,
         )
@@ -130,8 +130,9 @@ class TestStalenessScan:
         result = await monitor.scan_staleness()
         assert result == []
 
-    async def test_emit_degraded_when_over_threshold(self, monitor, fake_axiom):
-        # axiom threshold 60s → 70s > threshold but < 2× = degraded
+    async def test_emit_degraded_when_over_threshold(self, monitor, fake_sink):
+        # "axiom" is an arbitrary unknown key (removed sub-task); falls back to
+        # default 60s threshold → 70s > threshold but < 2× = degraded
         monitor.probe.last_active_ts["axiom"] = (
             datetime.now(UTC) - timedelta(seconds=70)
         )
@@ -140,22 +141,24 @@ class TestStalenessScan:
         rec = result[0]
         assert rec["sub_task"] == "axiom"
         assert rec["severity"] == "degraded"
-        assert len(fake_axiom.emitted) == 1
-        emitted = fake_axiom.emitted[0]
+        assert len(fake_sink.emitted) == 1
+        emitted = fake_sink.emitted[0]
         assert emitted["event_type"] == "health_check"
         assert emitted["payload"]["check_target"] == "axiom"
         assert emitted["payload"]["status"] == "degraded"
 
     async def test_emit_down_when_over_2x_threshold(self, monitor):
-        # axiom threshold 60s → 130s > 2× (120s) but < 3× (180s) = down
+        # "axiom" is an arbitrary unknown key; unknown-key default 60s →
+        # 130s > 2× (120s) but < 3× (180s) = down
         monitor.probe.last_active_ts["axiom"] = (
             datetime.now(UTC) - timedelta(seconds=130)
         )
         result = await monitor.scan_staleness()
         assert result[0]["severity"] == "down"
 
-    async def test_fatal_escalation_at_3x_threshold(self, monitor, fake_axiom):
-        # axiom threshold 60s → 190s > 3× (180s) = fatal
+    async def test_fatal_escalation_at_3x_threshold(self, monitor, fake_sink):
+        # "axiom" is an arbitrary unknown key; unknown-key default 60s →
+        # 190s > 3× (180s) = fatal
         monitor.probe.last_active_ts["axiom"] = (
             datetime.now(UTC) - timedelta(seconds=190)
         )
@@ -163,10 +166,10 @@ class TestStalenessScan:
             await monitor.scan_staleness()
         assert "axiom" in str(exc.value)
         assert "190" in str(exc.value) or "stale" in str(exc.value).lower()
-        # Verify emit happened before raise — axiom has the down event
-        assert len(fake_axiom.emitted) == 1
-        assert fake_axiom.emitted[0]["payload"]["check_target"] == "axiom"
-        assert fake_axiom.emitted[0]["payload"]["status"] == "down"  # 190s > 2×60s
+        # Verify emit happened before raise — fake_sink has the down event
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == "axiom"
+        assert fake_sink.emitted[0]["payload"]["status"] == "down"  # 190s > 2×60s
 
     async def test_unknown_subtask_uses_default_threshold(self, monitor):
         """No registered threshold → treat as default (60s)."""
@@ -180,7 +183,7 @@ class TestStalenessScan:
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 
     async def test_no_fatal_escalation_for_signal_pipeline_stale_exceeded(
-        self, monitor, fake_axiom,
+        self, monitor, fake_sink,
     ) -> None:
         """SIGNAL_PIPELINE DEGRADED (reason=stale_exceeded) never raises FatalError.
 
@@ -204,8 +207,8 @@ class TestStalenessScan:
         assert rec["age_s"] is None
 
         # Observability emit happened (WARN, not ERROR/FATAL)
-        assert len(fake_axiom.emitted) == 1
-        emitted = fake_axiom.emitted[0]
+        assert len(fake_sink.emitted) == 1
+        emitted = fake_sink.emitted[0]
         assert emitted["level"] == "warn"
         assert emitted["payload"]["check_target"] == "signal_pipeline"
         assert emitted["payload"]["status"] == "degraded"
@@ -235,7 +238,7 @@ class TestStalenessScan:
         assert "candle_writer" in str(exc.value)
 
     async def test_signal_pipeline_down_also_emits_warn_no_fatal(
-        self, monitor, fake_axiom,
+        self, monitor, fake_sink,
     ) -> None:
         """SIGNAL_PIPELINE DOWN (future-proofing) also emits without escalating fatal.
 
@@ -255,8 +258,8 @@ class TestStalenessScan:
         assert rec["age_s"] is None
 
         # Observability emit happened (WARN, not ERROR/FATAL)
-        assert len(fake_axiom.emitted) == 1
-        emitted = fake_axiom.emitted[0]
+        assert len(fake_sink.emitted) == 1
+        emitted = fake_sink.emitted[0]
         assert emitted["level"] == "warn"
         assert emitted["payload"]["check_target"] == "signal_pipeline"
         assert emitted["payload"]["status"] == "down"
