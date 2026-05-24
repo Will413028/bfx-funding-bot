@@ -26,7 +26,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _FakeAxiomClient:
+class _FakeEventSink:
     def __init__(self) -> None:
         self.emits: list[dict[str, Any]] = []
 
@@ -56,7 +56,7 @@ class _StubEventLogQuery:
 
 def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     sink = AxiomEventSink(
         axiom_client=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
@@ -109,7 +109,7 @@ def test_http_smoke_l2_query_param() -> None:
 def test_http_no_token_means_admin_router_not_mounted() -> None:
     """make_app(admin_token=None) -> POST /admin/smoke-test should 404."""
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     paper = EchoPaperExecutor(
         event_sink=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",

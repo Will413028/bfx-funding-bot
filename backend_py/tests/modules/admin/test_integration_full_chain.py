@@ -33,7 +33,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _FakeAxiomClient:
+class _FakeEventSink:
     def __init__(self) -> None:
         self.emits: list[dict[str, Any]] = []
 
@@ -51,7 +51,7 @@ class _StubEventLogQuery:
 async def test_smoke_does_not_touch_prod_ledger() -> None:
     """Invariant I1: smoke pollutes 0 prod state."""
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     prod_ledger = PaperPositionLedger(account_id="default")
     sink = AxiomEventSink(
         axiom_client=axiom, phase=Phase.PAPER,
@@ -91,7 +91,7 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
 async def test_smoke_axiom_sink_emits_with_smoke_account_id() -> None:
     """Invariant I5: axiom_sink emits 2 events with account_id=smoke_test."""
     bus = DomainEventBus()
-    axiom = _FakeAxiomClient()
+    axiom = _FakeEventSink()
     sink = AxiomEventSink(
         axiom_client=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
