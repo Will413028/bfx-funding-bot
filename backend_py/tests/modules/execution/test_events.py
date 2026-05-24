@@ -1,5 +1,5 @@
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -8,6 +8,8 @@ from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
     ReservationClaimed,
+    ReservationFailed,
+    ReservationIntent,
     ReservationReleased,
 )
 
@@ -136,13 +138,6 @@ def test_events_are_frozen() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.cid = 99  # type: ignore[misc]
 
-
-from uuid import UUID
-
-from bfx_funding_bot.modules.execution.events import (
-    ReservationFailed,
-    ReservationIntent,
-)
 
 _SCID_T1 = UUID("11111111-1111-1111-1111-111111111111")
 
