@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 GUARD_EVAL_TIMEOUT_SECONDS = 2.0
 
 
-class _AxiomProtocol(Protocol):
+class _DiagnosticsProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
@@ -41,7 +41,7 @@ class SafetyGuardChain:
         *,
         guards: list[GuardRule],
         probe: HealthProbe,
-        diagnostics: _AxiomProtocol,
+        diagnostics: _DiagnosticsProtocol,
         phase: Phase,
         strategy: StrategyName,
         cell: str,

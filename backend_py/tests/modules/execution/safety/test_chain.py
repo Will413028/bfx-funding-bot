@@ -39,7 +39,7 @@ def _post() -> DecisionPayload:
     )
 
 
-class _CaptureAxiom:
+class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
@@ -90,7 +90,7 @@ async def test_chain_short_circuits_on_first_block() -> None:
     g2 = _BlockGuard("g2")
     g3 = _AllowGuard("g3")
     chain = SafetyGuardChain(
-        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
+        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_EventCapture(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -105,7 +105,7 @@ async def test_chain_short_circuits_on_first_block() -> None:
 async def test_chain_all_run_when_all_pass() -> None:
     g1, g2, g3 = _AllowGuard("a"), _AllowGuard("b"), _AllowGuard("c")
     chain = SafetyGuardChain(
-        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
+        guards=[g1, g2, g3], probe=HealthProbe(), diagnostics=_EventCapture(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -118,7 +118,7 @@ async def test_chain_all_run_when_all_pass() -> None:
 async def test_chain_heartbeat_recorded_on_eval() -> None:
     probe = HealthProbe()
     chain = SafetyGuardChain(
-        guards=[_AllowGuard("a")], probe=probe, diagnostics=_CaptureAxiom(),
+        guards=[_AllowGuard("a")], probe=probe, diagnostics=_EventCapture(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -128,7 +128,7 @@ async def test_chain_heartbeat_recorded_on_eval() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_internal_exception_fail_closed() -> None:
-    diagnostics = _CaptureAxiom()
+    diagnostics = _EventCapture()
     chain = SafetyGuardChain(
         guards=[_CrashGuard()], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
@@ -145,7 +145,7 @@ async def test_chain_internal_exception_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_eval_timeout_fail_closed() -> None:
-    diagnostics = _CaptureAxiom()
+    diagnostics = _EventCapture()
     chain = SafetyGuardChain(
         guards=[_HangGuard()], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
@@ -161,7 +161,7 @@ async def test_chain_eval_timeout_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_chain_empty_guards_allows() -> None:
     chain = SafetyGuardChain(
-        guards=[], probe=HealthProbe(), diagnostics=_CaptureAxiom(),
+        guards=[], probe=HealthProbe(), diagnostics=_EventCapture(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
         account_id="default",
     )
@@ -171,7 +171,7 @@ async def test_chain_empty_guards_allows() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_block_emits_safety_trigger() -> None:
-    diagnostics = _CaptureAxiom()
+    diagnostics = _EventCapture()
     chain = SafetyGuardChain(
         guards=[_BlockGuard("cap")], probe=HealthProbe(), diagnostics=diagnostics,
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",

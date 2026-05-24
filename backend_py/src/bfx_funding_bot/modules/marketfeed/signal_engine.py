@@ -72,6 +72,10 @@ class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
+class _DiagnosticsProtocol(Protocol):
+    async def emit(self, event: dict[str, Any]) -> None: ...
+
+
 class _CandlesRepoProtocol(Protocol):
     async def get_up_to(
         self, *, symbol: str, timeframe: str, period_agg: str,
@@ -91,7 +95,7 @@ class SignalEngine:
         *,
         phase: Phase,
         event_sink: _EventSink,
-        diagnostics: _EventSink,
+        diagnostics: _DiagnosticsProtocol,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
         safety_chain: _SafetyChainProtocol | None = None,
