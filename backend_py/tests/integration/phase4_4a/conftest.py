@@ -1,7 +1,7 @@
 """Phase 4.4a integration test shared fixtures.
 
 Pattern: real DomainEventBus + real PaperPositionLedger + real OfferRegistry +
-axiom_sink stub. Each test composes the chain with subscribers wired.
+StubEventSink. Each test composes the chain with subscribers wired.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 
 
-class StubAxiomSink:
+class StubEventSink:
     """Captures every domain event as a row for assertion."""
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
@@ -63,15 +63,15 @@ class ScriptedWSClient:
 
 
 @pytest.fixture
-def axiom_sink() -> StubAxiomSink:
-    return StubAxiomSink()
+def event_sink_stub() -> StubEventSink:
+    return StubEventSink()
 
 
 @pytest.fixture
-def domain_chain(axiom_sink: StubAxiomSink) -> dict[str, Any]:
+def domain_chain(event_sink_stub: StubEventSink) -> dict[str, Any]:
     """Build (bus, ledger, registry) with subscribers wired.
 
-    Returns: {"bus", "ledger", "registry", "axiom_sink"}
+    Returns: {"bus", "ledger", "registry", "event_sink_stub"}
     """
     bus = DomainEventBus(clock=lambda: 5000)
     registry = OfferRegistry(clock=lambda: 5000)
@@ -83,9 +83,9 @@ def domain_chain(axiom_sink: StubAxiomSink) -> dict[str, Any]:
     bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled, ledger.on_order_filled)
     bus.subscribe(ReservationReleased, ledger.on_reservation_released)
-    bus.subscribe(ReservationClaimed, axiom_sink.handle)
-    bus.subscribe(OrderFilled, axiom_sink.handle)
-    bus.subscribe(ReservationReleased, axiom_sink.handle)
-    bus.subscribe(CancelRequested, axiom_sink.handle)
+    bus.subscribe(ReservationClaimed, event_sink_stub.handle)
+    bus.subscribe(OrderFilled, event_sink_stub.handle)
+    bus.subscribe(ReservationReleased, event_sink_stub.handle)
+    bus.subscribe(CancelRequested, event_sink_stub.handle)
 
-    return {"bus": bus, "registry": registry, "ledger": ledger, "axiom_sink": axiom_sink}
+    return {"bus": bus, "registry": registry, "ledger": ledger, "event_sink_stub": event_sink_stub}

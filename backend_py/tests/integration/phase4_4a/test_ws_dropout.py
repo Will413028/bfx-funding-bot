@@ -34,7 +34,7 @@ class _EventCapture:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
-    domain_chain: dict[str, Any], axiom_sink: Any,
+    domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]
@@ -74,7 +74,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
     assert ledger.current_exposure() == Decimal("0")
     assert registry.snapshot()[voi].state.value == "released"
 
-    # 4. axiom_sink rows: reason=missing_from_venue (distinct from cancel)
-    release_rows = [r for r in axiom_sink.rows if r["event_type"] == "ReservationReleased"]
+    # 4. event rows: reason=missing_from_venue (distinct from cancel)
+    release_rows = [r for r in event_sink_stub.rows if r["event_type"] == "ReservationReleased"]
     assert len(release_rows) == 1
     assert release_rows[0]["reason"] == "missing_from_venue"

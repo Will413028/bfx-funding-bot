@@ -3,7 +3,7 @@
 Wraps daemon.build_daemon to (1) swap executor.submit with one that raises
 ExecutorAuthError and (2) wrap daemon.run() so a synthetic task inside the
 daemon's TaskGroup calls submit() once at startup. Then runs daemon.main()
-unmodified — _run's `except* ExecutorAuthError → flush axiom → sys.exit(78)`
+unmodified — _run's `except* ExecutorAuthError → sys.exit(78)`
 handler must catch the propagated error and exit the process with 78.
 
 Not a pytest file (leading underscore) — pytest skips it during collection.

@@ -27,7 +27,7 @@ class _EventCapture:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_fcn_arrives_before_claim_then_drained_after_claim(
-    domain_chain: dict[str, Any], axiom_sink: Any,
+    domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]

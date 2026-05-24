@@ -3,7 +3,7 @@
 The in-process Path E coverage lives in tests/modules/execution/
 test_integration_fatal.py (constants + ExecutorAuthError class). This file
 adds the only test that actually exercises daemon._run's
-`except* ExecutorAuthError → flush axiom → sys.exit(78)` end-to-end via a
+`except* ExecutorAuthError → sys.exit(78)` end-to-end via a
 real subprocess so we can observe the OS-level returncode.
 
 Koyeb's crash-loop-backoff contract depends on the daemon exiting with

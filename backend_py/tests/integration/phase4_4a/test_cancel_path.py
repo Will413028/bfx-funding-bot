@@ -33,7 +33,7 @@ class _EventCapture:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cancel_then_foc_emits_user_cancel(
-    domain_chain: dict[str, Any], axiom_sink: Any,
+    domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]
@@ -88,9 +88,9 @@ async def test_cancel_then_foc_emits_user_cancel(
     assert ledger.current_exposure() == Decimal("0")
     assert registry.snapshot()[voi].state.value == "released"
 
-    release_rows = [r for r in axiom_sink.rows if r["event_type"] == "ReservationReleased"]
+    release_rows = [r for r in event_sink_stub.rows if r["event_type"] == "ReservationReleased"]
     assert len(release_rows) == 1
     assert release_rows[0]["reason"] == "user_cancel"
 
-    cancel_rows = [r for r in axiom_sink.rows if r["event_type"] == "CancelRequested"]
+    cancel_rows = [r for r in event_sink_stub.rows if r["event_type"] == "CancelRequested"]
     assert len(cancel_rows) == 1  # cancel auditable in event log

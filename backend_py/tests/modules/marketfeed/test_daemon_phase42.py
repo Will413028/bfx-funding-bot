@@ -69,8 +69,6 @@ async def test_build_daemon_wires_paper_executor_by_default(
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
     _add_bitfinex_mock(httpx_mock)
-    # Phase 4.4c: _apl mock removed (no Axiom replay at boot).
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
@@ -95,8 +93,6 @@ async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch.setenv("BFX_EXECUTOR", "paper")
     monkeypatch.setenv("BFX_FILL_TRACKER_ENABLED", "true")
     _add_bitfinex_mock(httpx_mock)
-    # Phase 4.4c: _apl mock removed.
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     with pytest.raises(ExecutorConfigError):
@@ -165,8 +161,6 @@ async def test_build_daemon_filters_disabled_hard_guards(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
 
     _add_bitfinex_mock(httpx_mock)
-    # Phase 4.4c: _apl mock removed.
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DivergenceRateGuard,
@@ -235,8 +229,6 @@ calibrated_guards:
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
 
     _add_bitfinex_mock(httpx_mock)
-    # Phase 4.4c: _apl mock removed.
-    # Phase 3c T10: AxiomClient removed — no axiom ingest mock needed.
 
     from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
         DrawdownGuard,

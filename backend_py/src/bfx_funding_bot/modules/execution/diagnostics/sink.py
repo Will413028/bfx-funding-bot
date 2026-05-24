@@ -1,11 +1,11 @@
 """DiagnosticsSink — forensic events (DECISION / SAFETY_TRIGGER / CANCEL_AUDIT)
 to the `diagnostics` table.
 
-Drop-in for the AxiomClient `emit(dict)` port. Best-effort: a persistence
+Implements the `emit(dict)` port (same interface as StdoutEventSink). Best-effort: a persistence
 failure is swallowed + logged to stdout and NEVER propagates — forensic writes
 must not block trading (spec §240-241). Each write opens its OWN txn via
 session_scope (never the command txn). Non-forensic / unknown event types are
-silently dropped — operational telemetry stays on stdout/Axiom (3c).
+silently dropped — operational telemetry goes to StdoutEventSink (3c).
 """
 from __future__ import annotations
 
@@ -64,9 +64,9 @@ class DiagnosticsSink:
         self._env = deployment_environment
 
     async def emit(self, event: dict[str, Any]) -> None:
-        """Drop-in for AxiomClient.emit. Persists only forensic kinds; lenient
-        field extraction (NO full Envelope validation — its strategy/cell rule
-        over-constrains forensic storage, e.g. smoke_boot SAFETY_TRIGGER)."""
+        """Persists only forensic kinds; lenient field extraction (NO full
+        Envelope validation — its strategy/cell rule over-constrains forensic
+        storage, e.g. smoke_boot SAFETY_TRIGGER)."""
         kind = _KIND_BY_EVENT_TYPE.get(str(event.get("event_type")))
         if kind is None:
             return  # operational / unknown — not forensic, dropped

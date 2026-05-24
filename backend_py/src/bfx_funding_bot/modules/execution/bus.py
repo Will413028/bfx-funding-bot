@@ -4,8 +4,7 @@ FORWARD-COMPAT (Phase 5+): outbox pattern upgrade point.
 Future: persist event to Postgres outbox table before publish; publisher
 service polls outbox and forwards to subscribers with idempotency tokens.
 Failed publishes go to DLQ; reconciler retries. Current scope: in-process
-gather() with handler isolation; Axiom client's internal buffer+retry
-covers transient downstream failures.
+gather() with handler isolation; downstream failures are swallowed per-handler.
 """
 from __future__ import annotations
 
@@ -53,8 +52,8 @@ class DomainEventBus:
 
         Handlers run concurrently via asyncio.gather(return_exceptions=True).
         A failing handler is logged but does not affect siblings or raise to
-        caller. Caller treats publish() as best-effort fire; reliability is
-        handled by Axiom client buffer+retry (sink layer) and replay (ledger).
+        caller. Caller treats publish() as best-effort fire; replay uses the
+        PG event_log for durable state recovery at boot.
         """
         # Attach event_seq and recorded_at_ms if event supports them.
         if hasattr(event, "event_seq") and hasattr(event, "recorded_at_ms"):

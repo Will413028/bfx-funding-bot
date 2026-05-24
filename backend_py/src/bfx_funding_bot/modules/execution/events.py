@@ -11,7 +11,7 @@ Schema version 2 (Phase 4.4a):
     None for non-WS events kept for uniform schema)
   - Added CancelRequested as first-class cancel event
 
-Migration: 4.3 Axiom rows lack these fields; upcaster_chain v1→v2 fills None.
+Migration: 4.3 legacy rows lack these fields; PG-sourced rows set them from event_log columns.
 """
 from __future__ import annotations
 
