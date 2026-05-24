@@ -1,0 +1,30 @@
+# Phase 4.4 canary cells -- MINIMAL subset for first real-money run.
+#
+# Only the 2 highest-WFO-margin MeanReversion cells (fUSD x a30: margin 0.199,
+# fUSD x p2: margin 0.188). Both non-sparse (no LOCF staleness override needed).
+# RatePercentile is disqualified under LOCF (Task 10 sweep) -- excluded.
+# p30 / fUST cells excluded for the first canary -- add after pipeline proves out.
+#
+# Params identical to configs/cells.yaml (do not re-tune here).
+# Select at deploy time: BFX_CELLS_YAML=configs/cells.canary.yaml
+#
+# Sizing note: reference_amount_usdt=150 with BFX_ALLOCATION_CAP_USDT=150 means
+# at most one $150 offer open at a time across both cells (cap-bound). Lower
+# reference_amount_usdt to run both concurrently within the cap.
+
+cells:
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4796, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+
+  - strategy: mean_reversion
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    reference_amount_usdt: 150.0
+
+phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
