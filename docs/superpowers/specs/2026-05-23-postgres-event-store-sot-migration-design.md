@@ -257,3 +257,62 @@ snapshot 跟 log 永遠在同一 txn,**不可能 diverge**。直接消滅「PG s
 - **真正的 observability 平台**(自架 Grafana+Loki on k3s,或 SaaS)—— 等實際上線當獨立決策引入。
 - **event_log retention / partitioning** —— 永久保留即可,規模到了再議。
 - **歷史 realized-accrual 回填** —— 乾淨切換已決,捨棄。
+
+## 13. Plan 3 Refinements (2026-05-24, pre-implementation)
+
+Plan 1 (foundation) + Plan 2 (cutover) 已 ship。寫 Plan 3 前對照現況 code 做 gap 分析,
+鎖定 4 個 refinement(皆 pre-launch best-practice 對齊,業界光譜已攤):
+
+1. **Plan 3 拆 3a/3b/3c(expand-contract / Strangler Fig)** — Axiom 移除牽動遠超 §8(L3 smoke
+   endpoint、signal_engine、health_monitor、fill_tracker、smoke_runner、g1.py 都掛 Axiom)。
+   - **3a** — A2 write-ahead intent + boot resolve PENDING + venue reconcile(本 SoT 寫入正解)
+   - **3b** — `diagnostics` 表 + `diagnostics_sink`(forensic 落 PG)
+   - **3c** — Axiom 全移除(repoint L3、刪 client/adapter/env/CI/test);依賴 3b 先就位
+   - 順序 3a → 3b → 3c;contract(3c)最後,等替代物 shadow-verify 過。
+
+2. **`offer_claims` PK 改 `(account_id, deployment_environment, cid)` 複合** — 對齊 `position_state`
+   複合 PK + `event_log` account-scoped index。裸 `cid` 是唯一多租戶破口(cid=blake2b(correlation_id+date)
+   不含 account_id)。carry-forward (d) 點名;pre-launch 空表 migration 成本 ~0。
+   (附:carry-forward (d) 的「`offer_claims.last_event_seq` 恆 0」屬 by-design — `store.py:134` 註解
+    說明 FSM state 才是 claims SoT、high-water mark 由 `position_state` 扛;不改。)
+
+3. **L3 smoke endpoint 改查 PG `event_log`(read-your-writes)** — 取代 Axiom round-trip poll。
+   對齊 §11「T12 integration test 改 PG read-your-writes 直接斷言、刪 indexing-latency polling」。
+   保留 real-money canary 前的 deploy-time wiring-drift gate,且更簡單可靠。
+
+4. **A2 寫入路徑改「全同步 in-command txn」,退役 Plan 2 的 async `PostgresEventSink`** — SoT 持久化
+   收進 command txn(txn1 INTENT 送單前 commit、txn2 outcome 送單後 commit,**never 跨 REST call 持 txn**);
+   `bus` 降為純 in-memory projection(ledger/registry)+ diagnostics fanout。
+   - 業界光譜:event store append 在 command txn 內(EventStoreDB/Marten/Axon/Greg Young ES 正統)
+     + write-ahead intent(Stripe PaymentIntent / idempotency-key)= SoT 正解;async fire-and-forget
+     subscriber(Plan 2 現況)是 projection 機制、扛 SoT 是錯位。對齊 §5「append+snapshot 同 txn」
+     §10「crash 中途靠 PG 原子性」+ §Q9「relational DB 做 transactional invariants」。
+   - Plan 2 sink 本是 cutover 過渡(先讓開機脫離 Axiom);3a 是 expand-contract 的 contract step。
+   - **projection 實作 note**:`offer_claims` 投影改 **cid-keyed**(cid 是全生命週期穩定身分,所有 event 都帶):
+     INTENT→PENDING(voi=NULL)、CLAIMED→CLAIMED(+voi,upsert 同 cid row)、RELEASED→RELEASED、
+     FAILED→FAILED。voi-keyed `transition()` 留給 in-memory `OfferRegistry`(fill-tracking by voi)。
+     現況 `store._project_offer_claims` voi-keyed 且 skip voi=NULL,3a 需改寫成 cid-keyed 狀態機。
+
+### 13.1 Signature-mapping findings(2026-05-24,影響 3a 拆法)
+
+寫 plan 前 map 精確簽章,發現兩個 §6 假設背後的隱藏前提 → 3a 再拆成 **3a-write / 3a-recovery**:
+
+5. **boot venue reconcile 依賴尚未建好的 authenticated venue 查詢** — §6「沿用 `fill_tracker` diff 做 boot
+   reconcile」有隱藏前提。`RestPollingFillTracker._tick` 打 `GET /v2/auth/r/funding/offers`
+   (`fill_tracker.py:117`)用的是 build_daemon 傳入的**裸 `httpx.AsyncClient()`**(`daemon.py:618`,無
+   base_url、無簽章),且 `BFX_FILL_TRACKER_ENABLED` 預設 False、從沒對 live 跑過。真正的 HMAC 簽章只在
+   `live_executor.sign_request`。→ resolve-PENDING + reconcile 前需先建正規 signed
+   `BitfinexREST.get_active_funding_offers()`(sign_request + creds threading),非「直接重用 fill_tracker」。
+   **決策**:把 **boot resolve-PENDING + venue reconcile 拆成 `3a-recovery`**(含先建 signed offers-query);
+   `3a-write` 只做 A2 寫入路徑(INTENT/FAILED 事件 + 同步持久化 + composite PK)。3a-write 是 strict
+   improvement(durable write-ahead log 存在),boot 仍走現有 `from_snapshot`(PENDING rows 被 voi-not-null
+   filter 排除,無 regression);recovery 緊接其後補上「resolve PENDING」的安全保證。
+
+6. **cid 必須在送單前可算(thread submit_date)** — cid 現在在 `executor.submit` 內部用
+   `generate_cid(correlation_id, submit_date)` 產生(`paper.py:65` / `live_executor.py:186`,SubmittedOrder.cid
+   回傳)。A2 要在送單**前**寫 INTENT,middleware 必須先算出**同一個** cid。generate_cid deterministic,但
+   `submit_date` 跨午夜會漂(executor 已有 CC2 capture-once)。→ 3a-write 需把 `submit_date` 抽到 middleware
+   capture-once 後 thread 進 executor(或 middleware 算 cid 後傳入),確保 INTENT 與 outcome 的 cid 一致。
+
+**3a 後修訂的 Plan 3 順序**:`3a-write`(A2 寫入)→ `3a-recovery`(signed offers-query + boot resolve PENDING +
+venue reconcile)→ `3b`(diagnostics)→ `3c`(Axiom 全移除)。
