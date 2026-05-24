@@ -41,7 +41,7 @@ class _CaptureAxiom:
 
 @pytest.mark.asyncio
 async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> None:
-    axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     probe = HealthProbe()
 
     class _FakeQuery:
@@ -72,7 +72,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     chain = SafetyGuardChain(
         guards=[AllocationCapGuard(ledger=ledger)],
         probe=probe,
-        axiom=axiom,
+        diagnostics=diagnostics,
         phase=Phase.PAPER,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
@@ -90,7 +90,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     assert result.allowed is False
 
     safety_triggers = [
-        e for e in axiom.events
+        e for e in diagnostics.events
         if e["event_type"] == EventType.SAFETY_TRIGGER.value
     ]
     assert len(safety_triggers) == 1
