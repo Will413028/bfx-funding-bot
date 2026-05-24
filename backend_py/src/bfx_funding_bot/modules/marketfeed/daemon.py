@@ -894,6 +894,7 @@ async def build_daemon(
     signal_engine_obj = SignalEngine(
         phase=config.phase,
         axiom=axiom,
+        diagnostics=diagnostics,
         candles_repo=_CandlesRepoBridge(),
         safety_chain=safety_chain,
         executor=wrapped_executor,

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bfx_funding_bot.modules.candles.repository import get_up_to, upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
+from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
@@ -140,7 +141,10 @@ async def _make_tick_fn(
                     lookback=lookback,
                 )
 
-    engine = SignalEngine(phase=Phase.PAPER, axiom=axiom, candles_repo=_RepoBridge())
+    engine = SignalEngine(
+        phase=Phase.PAPER, axiom=axiom, diagnostics=NoopDiagnosticsSink(),
+        candles_repo=_RepoBridge(),
+    )
 
     # Pre-warm registry with enough history so signal computation doesn't crash.
     # lookback_hours=5 → strategy needs at least 5 candles.

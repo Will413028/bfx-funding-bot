@@ -91,6 +91,7 @@ class SignalEngine:
         *,
         phase: Phase,
         axiom: _AxiomProtocol,
+        diagnostics: _AxiomProtocol,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
         safety_chain: _SafetyChainProtocol | None = None,
@@ -99,6 +100,7 @@ class SignalEngine:
     ) -> None:
         self.phase = phase
         self.axiom = axiom
+        self.diagnostics = diagnostics
         self.candles_repo = candles_repo
         self.reporter = reporter or DivergenceReporter()
         self.safety_chain = safety_chain
@@ -289,7 +291,7 @@ class SignalEngine:
         sourced from account_ctx or 'default' fallback) + payload from the
         post-safety-eval DecisionPayload model_dump.
         """
-        await self.axiom.emit({
+        await self.diagnostics.emit({
             "timestamp": datetime.now(UTC).isoformat(),
             "level": Level.INFO.value,
             "phase": self.phase.value,

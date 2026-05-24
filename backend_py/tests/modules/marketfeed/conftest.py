@@ -115,27 +115,31 @@ def _make_registry(cell: CellConfig) -> StrategyRegistry:
 def capture_engine() -> tuple:
     """Engine wired with _AllowChain — safety eval passes, executor.submit called."""
     axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     chain = _AllowChain()
     executor = _SpyExecutor()
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, candles_repo=_StubCandlesRepo(),
+        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )
     registry = _make_registry(cell)
-    return engine, axiom, executor, chain, cell, _candle(), registry
+    return engine, axiom, diagnostics, executor, chain, cell, _candle(), registry
 
 
 @pytest.fixture
 def capture_engine_blocked() -> tuple:
     """Engine wired with _BlockChain — safety eval blocks, executor NOT called."""
     axiom = _CaptureAxiom()
+    diagnostics = _CaptureAxiom()
     chain = _BlockChain()
     executor = _SpyExecutor()
     cell = _cell()
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, candles_repo=_StubCandlesRepo(),
+        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        candles_repo=_StubCandlesRepo(),
         safety_chain=chain, executor=executor, account_ctx=_ctx(),
     )
     registry = _make_registry(cell)
-    return engine, axiom, executor, chain, cell, _candle(), registry
+    return engine, axiom, diagnostics, executor, chain, cell, _candle(), registry

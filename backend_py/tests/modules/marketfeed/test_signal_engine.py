@@ -42,10 +42,17 @@ async def test_signal_engine_emits_signal_and_decision():
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
 
+    decisions: list[dict] = []
+    diagnostics = MagicMock()
+    diagnostics.emit = AsyncMock(side_effect=lambda e: decisions.append(e))
+
     candles_repo = MagicMock()
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
-    engine = SignalEngine(phase=Phase.PAPER, axiom=axiom, candles_repo=candles_repo)
+    engine = SignalEngine(
+        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        candles_repo=candles_repo,
+    )
     cell = _cell()
     reg = StrategyRegistry()
     strategy = build_strategy(cell)
@@ -57,7 +64,8 @@ async def test_signal_engine_emits_signal_and_decision():
 
     types = [e["event_type"] for e in captured]
     assert "signal" in types
-    assert "decision" in types
+    decision_types = [e["event_type"] for e in decisions]
+    assert "decision" in decision_types
 
 
 async def test_cp3_every_emit_passes_schema_validation():
@@ -66,10 +74,17 @@ async def test_cp3_every_emit_passes_schema_validation():
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
 
+    decisions: list[dict] = []
+    diagnostics = MagicMock()
+    diagnostics.emit = AsyncMock(side_effect=lambda e: decisions.append(e))
+
     candles_repo = MagicMock()
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
-    engine = SignalEngine(phase=Phase.PAPER, axiom=axiom, candles_repo=candles_repo)
+    engine = SignalEngine(
+        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        candles_repo=candles_repo,
+    )
     cell = _cell()
     reg = StrategyRegistry()
     strategy = build_strategy(cell)
@@ -79,9 +94,10 @@ async def test_cp3_every_emit_passes_schema_validation():
 
     await engine.process_candle(cell=cell, candle=_history(8)[-1], registry=reg)
 
-    # Non-divergent path: exactly 2 events emitted (signal + decision)
-    assert len(captured) == 2
-    for event in captured:
+    # Non-divergent path: 1 event on axiom (signal), 1 on diagnostics (decision)
+    assert len(captured) == 1
+    assert len(decisions) == 1
+    for event in captured + decisions:
         Envelope.model_validate(event)  # raises if schema violation
 
 
@@ -99,6 +115,10 @@ async def test_cp3_divergence_path_also_passes_schema():
     axiom = MagicMock()
     axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
 
+    decisions: list[dict] = []
+    diagnostics = MagicMock()
+    diagnostics.emit = AsyncMock(side_effect=lambda e: decisions.append(e))
+
     candles_repo = MagicMock()
     candles_repo.get_up_to = AsyncMock(return_value=_history(8))
 
@@ -113,7 +133,8 @@ async def test_cp3_divergence_path_also_passes_schema():
     })
 
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, candles_repo=candles_repo, reporter=reporter,
+        phase=Phase.PAPER, axiom=axiom, diagnostics=diagnostics,
+        candles_repo=candles_repo, reporter=reporter,
     )
     cell = _cell()
     reg = StrategyRegistry()
@@ -124,19 +145,21 @@ async def test_cp3_divergence_path_also_passes_schema():
 
     await engine.process_candle(cell=cell, candle=_history(8)[-1], registry=reg)
 
-    # Divergent path: 3 events (signal + signal_divergence + decision)
-    assert len(captured) == 3
+    # Divergent path: 2 on axiom (signal + signal_divergence), 1 on diagnostics (decision)
+    assert len(captured) == 2
+    assert len(decisions) == 1
     types_and_levels = [(e["event_type"], e["level"]) for e in captured]
     assert ("signal", "info") in types_and_levels
     assert ("signal_divergence", "warn") in types_and_levels
-    assert ("decision", "info") in types_and_levels
+    assert decisions[0]["event_type"] == "decision"
+    assert decisions[0]["level"] == "info"
 
     # Exactly one real signal per cycle (not two) — fixes C2 over-count bug
     signal_events = [e for e in captured if e["event_type"] == "signal"]
     assert len(signal_events) == 1
 
     # All must validate
-    for event in captured:
+    for event in captured + decisions:
         Envelope.model_validate(event)
 
     # Divergence event must carry divergence_detail
