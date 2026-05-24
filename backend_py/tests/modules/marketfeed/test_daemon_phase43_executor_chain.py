@@ -46,7 +46,7 @@ class _CapturingAxiom:
 
 class _PaperInner:
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
         return SubmittedOrder(
             cid=42,

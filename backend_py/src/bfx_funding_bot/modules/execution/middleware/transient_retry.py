@@ -23,6 +23,6 @@ class TransientRetryMiddleware:
         self._submit_retried = transient_retry(inner.submit)
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext,
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
-        return await self._submit_retried(decision, ctx)
+        return await self._submit_retried(decision, ctx, cid=cid)

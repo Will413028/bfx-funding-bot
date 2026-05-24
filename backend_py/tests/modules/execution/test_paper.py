@@ -77,6 +77,33 @@ async def test_submit_same_correlation_id_same_date_same_cid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_uses_provided_cid() -> None:
+    axiom = _CaptureAxiom()
+    ex = EchoPaperExecutor(
+        axiom=axiom, phase=Phase.PAPER,
+        strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        date_provider=lambda: date(2026, 5, 21),
+    )
+    result = await ex.submit(_decision(uuid4()), _ctx(), cid=99999)
+    assert result.cid == 99999
+    assert axiom.events[0]["payload"]["cid"] == 99999
+
+
+@pytest.mark.asyncio
+async def test_submit_without_cid_falls_back_to_generated() -> None:
+    axiom = _CaptureAxiom()
+    ex = EchoPaperExecutor(
+        axiom=axiom, phase=Phase.PAPER,
+        strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        date_provider=lambda: date(2026, 5, 21),
+    )
+    corr = uuid4()
+    r1 = await ex.submit(_decision(corr), _ctx())
+    r2 = await ex.submit(_decision(corr), _ctx(), cid=None)
+    assert r1.cid == r2.cid
+
+
+@pytest.mark.asyncio
 async def test_submit_fill_price_and_size_match_decision() -> None:
     axiom = _CaptureAxiom()
     ex = EchoPaperExecutor(

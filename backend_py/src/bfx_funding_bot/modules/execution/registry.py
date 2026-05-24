@@ -39,6 +39,7 @@ class ExecutorSpec:
     executor: ExecutorPort
     fill_tracker_enabled: bool
     ws_client_enabled: bool
+    is_simulated: bool  # paper -> True; bitfinex_live -> False (drives A2 event payload)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -82,6 +83,7 @@ def build_executor(
             ),
             fill_tracker_enabled=False,
             ws_client_enabled=False,
+            is_simulated=True,
         )
 
     # Live invariants
@@ -108,6 +110,7 @@ def build_executor(
             ),
             fill_tracker_enabled=fill_tracker_enabled,
             ws_client_enabled=ws_client_enabled,
+            is_simulated=False,
         )
 
     raise ExecutorConfigError(f"unknown BFX_EXECUTOR={executor_raw!r}")

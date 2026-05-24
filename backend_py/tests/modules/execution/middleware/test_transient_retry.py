@@ -47,7 +47,9 @@ class _CountingInner:
         self._behavior = behavior
         self.calls = 0
 
-    async def submit(self, decision: DecisionPayload, ctx: AccountContext) -> SubmittedOrder:
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+    ) -> SubmittedOrder:
         self.calls += 1
         result = self._behavior[self.calls - 1]
         if isinstance(result, BaseException):
