@@ -11,6 +11,8 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
+    ReservationFailed,
+    ReservationIntent,
     ReservationReleased,
 )
 
@@ -44,6 +46,31 @@ def test_roundtrip(event: object) -> None:
     assert isinstance(payload, dict)
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
+
+
+def test_intent_failed_event_type_of() -> None:
+    intent = ReservationIntent(cid=1, size_usdt=Decimal("5"),
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000)
+    failed = ReservationFailed(cid=1, size_usdt=Decimal("5"),
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        reason="submit_failed", occurred_at_ms=1000)
+    assert event_type_of(intent) == "RESERVATION_INTENT"
+    assert event_type_of(failed) == "RESERVATION_FAILED"
+
+
+@pytest.mark.parametrize("event", [
+    ReservationIntent(cid=9, size_usdt=Decimal("7.5"),
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000),
+    ReservationFailed(cid=9, size_usdt=Decimal("7.5"),
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=False,
+        reason="submit_failed", occurred_at_ms=2000),
+])
+def test_intent_failed_roundtrip(event: object) -> None:
+    etype = event_type_of(event)
+    restored = deserialize_event(etype, serialize_event(event))
+    assert restored == event
 
 
 def test_decimal_preserved_as_string() -> None:

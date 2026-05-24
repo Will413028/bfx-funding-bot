@@ -8,12 +8,16 @@ from uuid import UUID
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
+    ReservationFailed,
+    ReservationIntent,
     ReservationReleased,
 )
 
 # event_type string <-> domain class. Clean field names (we own this schema).
 _TYPE_BY_CLASS: dict[type, str] = {
+    ReservationIntent: "RESERVATION_INTENT",
     ReservationClaimed: "RESERVATION_CLAIMED",
+    ReservationFailed: "RESERVATION_FAILED",
     OrderFilled: "ORDER_FILL",
     ReservationReleased: "RESERVATION_RELEASED",
 }
