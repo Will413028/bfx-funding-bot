@@ -502,5 +502,20 @@ def test_load_config_missing_deployment_environment_raises(
     monkeypatch.delenv("BFX_CELLS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV"):
+    with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV required"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_load_config_invalid_deployment_environment_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("AXIOM_API_KEY", "x")
+    monkeypatch.setenv("AXIOM_DATASET", "x")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "staging")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV must be one of"):
         load_config(cells_yaml_path=yaml_path)
