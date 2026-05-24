@@ -839,7 +839,9 @@ async def build_daemon(
     bus.subscribe(OrderFilled,         offer_registry.handle)
     bus.subscribe(ReservationReleased, offer_registry.handle)
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
-    # (axiom_sink keeps its redundant SoT emits until 3c.)
+    # axiom_sink's reservation_* subscriptions still emit to Axiom redundantly
+    # (event_log is the real SoT) until 3c; its cancel handlers are now
+    # unsubscribed/dead and get deleted in 3c with the rest of AxiomEventSink.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
     bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
 
