@@ -51,10 +51,10 @@ class _StubEventLogQuery:
 
 def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     bus = DomainEventBus()
-    axiom = _FakeEventSink()
+    fake_sink = _FakeEventSink()
 
     paper = EchoPaperExecutor(
-        event_sink=axiom, phase=Phase.PAPER,
+        event_sink=fake_sink, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
@@ -98,9 +98,9 @@ def test_http_smoke_l2_query_param() -> None:
 def test_http_no_token_means_admin_router_not_mounted() -> None:
     """make_app(admin_token=None) -> POST /admin/smoke-test should 404."""
     bus = DomainEventBus()
-    axiom = _FakeEventSink()
+    fake_sink = _FakeEventSink()
     paper = EchoPaperExecutor(
-        event_sink=axiom, phase=Phase.PAPER,
+        event_sink=fake_sink, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())

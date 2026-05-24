@@ -1,8 +1,9 @@
 """Full chain integration: SmokeRunner end-to-end with real bus + middleware
 + prod_ledger. Verifies (1) prod ledger untouched, (2) smoke passes via PG path.
 
-Note: NOT marked pytest.mark.integration — runs without network (fake axiom
-client). Lives in tests/modules/admin/ for default test run inclusion.
+Note: NOT marked pytest.mark.integration — runs without network
+(no network calls / pure in-process). Lives in tests/modules/admin/ for
+default test run inclusion.
 """
 from __future__ import annotations
 
@@ -45,16 +46,20 @@ class _StubEventLogQuery:
 
 
 async def test_smoke_does_not_touch_prod_ledger() -> None:
-    """Invariant I1: smoke pollutes 0 prod state."""
+    """Invariant I1: smoke pollutes 0 prod state.
+
+    Focuses on prod-ledger isolation; EchoPaperExecutor emit behavior is
+    covered separately in test_paper.py.
+    """
     bus = DomainEventBus()
-    axiom = _FakeEventSink()
+    fake_sink = _FakeEventSink()
     prod_ledger = PaperPositionLedger(account_id="default")
     bus.subscribe(ReservationClaimed, prod_ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled, prod_ledger.on_order_filled)
     bus.subscribe(ReservationReleased, prod_ledger.on_reservation_released)
 
     paper = EchoPaperExecutor(
-        event_sink=axiom, phase=Phase.PAPER,
+        event_sink=fake_sink, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
     wrapped = ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
