@@ -82,7 +82,7 @@ from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     RealizedLossGuard,
 )
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.config import load_safety_config
+from bfx_funding_bot.modules.execution.safety.config import SafetyConfig, load_safety_config
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
@@ -109,6 +109,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     HealthStatus,
     HealthTarget,
     Level,
+    Phase,
 )
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
@@ -579,6 +580,33 @@ class _StubDivergenceSource:
         return 0.0
 
 
+_CANARY_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat", "allocation_cap")
+_CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
+
+
+def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
+    """Canary (real money) must not run with a safety guard silently off.
+
+    Requires the 4 hard guards + the 2 loss-limiters enabled; raises a
+    config-fatal ValueError (propagates to non-zero startup exit) otherwise.
+    No-op for paper/shadow. divergence_rate stays optional.
+    """
+    if phase != Phase.CANARY:
+        return
+    missing = [
+        name for name in _CANARY_REQUIRED_HARD
+        if not getattr(safety_cfg.hard_guards, name).enabled
+    ]
+    missing += [
+        name for name in _CANARY_REQUIRED_CALIBRATED
+        if not getattr(safety_cfg.calibrated_guards, name).enabled
+    ]
+    if missing:
+        raise ValueError(
+            f"BFX_PHASE=canary requires all safety guards enabled; disabled: {missing}"
+        )
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -699,6 +727,8 @@ async def build_daemon(
     # `BFX_PHASE=canary` is rejected upstream in load_config so allowing
     # operators to disable hard guards in paper/shadow is bounded; 4.4 canary
     # spec will need an additional invariant requiring all hard guards on.
+    # Canary (real money) must not boot with a safety guard silently off.
+    assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
     guards: list[GuardRule] = []
