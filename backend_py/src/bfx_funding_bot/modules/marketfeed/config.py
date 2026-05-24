@@ -85,7 +85,7 @@ class CellConfig(BaseModel):
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: Annotated[Phase, Field(description="paper / shadow only -- canary rejected by daemon")]
+    phase: Annotated[Phase, Field(description="paper / shadow / canary")]
     cells: list[CellConfig]
     database_url: str
     deployment_environment: DeploymentEnvironment
@@ -107,10 +107,8 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
-    if phase_str == "canary":
-        raise ValueError("BFX_PHASE=canary not allowed in 4.1 daemon -- canary is 4.4 sub-spec")
-    if phase_str not in {"paper", "shadow"}:
-        raise ValueError(f"BFX_PHASE must be paper or shadow, got {phase_str!r}")
+    if phase_str not in {"paper", "shadow", "canary"}:
+        raise ValueError(f"BFX_PHASE must be paper, shadow, or canary, got {phase_str!r}")
 
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
