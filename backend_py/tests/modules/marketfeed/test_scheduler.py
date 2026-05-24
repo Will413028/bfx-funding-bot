@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
+from bfx_funding_bot.modules.execution.diagnostics.sink import NoopDiagnosticsSink
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.scheduler import (
@@ -61,7 +62,10 @@ def _make_signal_engine(axiom: MagicMock, cell: CellConfig) -> SignalEngine:
     candles_repo = MagicMock()
     # Return a minimal history so divergence check doesn't crash
     candles_repo.get_up_to = AsyncMock(return_value=[_candle(_REF_MTS)])
-    return SignalEngine(phase=Phase.PAPER, axiom=axiom, candles_repo=candles_repo)
+    return SignalEngine(
+        phase=Phase.PAPER, axiom=axiom, diagnostics=NoopDiagnosticsSink(),
+        candles_repo=candles_repo,
+    )
 
 
 def _make_registry(cell: CellConfig) -> StrategyRegistry:
