@@ -35,9 +35,6 @@ async def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     visible to build_daemon's session_factory (from_snapshot at boot).
     """
     monkeypatch.setenv("BFX_PHASE", "paper")
-    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     db_path = tmp_path / "daemon_p42.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")

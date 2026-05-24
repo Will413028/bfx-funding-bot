@@ -51,8 +51,6 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["DATABASE_URL"] = pg_engine.url.render_as_string(hide_password=False)
     env["BFX_CELLS_YAML"] = str(_CELLS_YAML)
     env["BFX_PHASE"] = "paper"
-    env["AXIOM_API_KEY"] = "test"
-    env["AXIOM_DATASET"] = "test"
     env["BFX_API_KEY"] = "test_key"
     env["BFX_API_SECRET"] = "test_secret"
     # Port 0 → kernel-assigned random port; avoids collision when a real

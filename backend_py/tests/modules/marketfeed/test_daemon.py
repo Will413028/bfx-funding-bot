@@ -33,10 +33,6 @@ cells:
 phase3b_wfo_results_ref: x
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
-    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
-    # AxiomClient (T10) is gone, but config validation still enforces these fields.
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     # Phase 4.4c: file-based sqlite so event-store tables created below are
     # visible to build_daemon's engine (per-connection :memory: would not share
@@ -108,9 +104,6 @@ cells:
     reference_amount_usdt: 150.0
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
-    # AXIOM_API_KEY/AXIOM_DATASET still required by load_config (Task 14 removes them).
-    monkeypatch.setenv("AXIOM_API_KEY", "x")
-    monkeypatch.setenv("AXIOM_DATASET", "x")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     # File-based sqlite so from_snapshot inside build_daemon can open sessions.
     db_path = tmp_path / "daemon_d3.db"
