@@ -299,7 +299,7 @@ class OfferRegistry:
             )
 
         if et == EventType.ORDER_FILL.value:
-            # Legacy OrderFillPayload schema bridge (mirrors ledger.py:164-173)
+            # Legacy OrderFillPayload schema bridge (field mapping: offer_id → venue_offer_id, fill_size_usdt → size_usdt, fill_price → fill_rate)
             return OrderFilled(
                 cid=payload["cid"],
                 venue_offer_id=payload["offer_id"],         # legacy field name
