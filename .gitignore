@@ -17,6 +17,7 @@ tmp/
 
 # Keys
 *.pem
+bfx.txt
 
 # OS
 .DS_Store
