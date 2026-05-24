@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -19,13 +18,24 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     OfferClaimRow,
     PositionStateRow,
 )
-from bfx_funding_bot.modules.execution.registry_offers import ClaimRecord, RegistryState, transition
+from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
 # NOTE: dedup for events with venue_seq IS NULL is app-level only — the
 # uq_event_log_dedup unique index does not constrain NULLs (PG treats them as
 # distinct). WS-sourced fills/releases carry venue_seq, so this gap is narrow.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
+
+# offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
+# transition() (registry_offers.py) is reserved for the in-memory OfferRegistry's
+# fill-tracking; this snapshot is keyed by cid (stable across the whole lifecycle).
+_CLAIM_STATE_BY_TYPE: dict[str, RegistryState] = {
+    "RESERVATION_INTENT": RegistryState.PENDING,
+    "RESERVATION_CLAIMED": RegistryState.CLAIMED,
+    "RESERVATION_FAILED": RegistryState.FAILED,
+    "ORDER_FILL": RegistryState.RELEASED,
+    "RESERVATION_RELEASED": RegistryState.RELEASED,
+}
 
 
 class PostgresEventStore:
@@ -67,7 +77,7 @@ class PostgresEventStore:
         session.add(row)
         await session.flush()  # assigns row.event_seq
         # Snapshot maintenance (same txn).
-        await self._project_offer_claims(session, event, account_id, venue_offer_id)
+        await self._project_offer_claims(session, event, account_id)
         await self._project_position_state(
             session, etype, account_id, getattr(_ev, "size_usdt", None), row.event_seq
         )
@@ -95,56 +105,78 @@ class PostgresEventStore:
         session: AsyncSession,
         event: object,
         account_id: str,
-        venue_offer_id: str | None,
     ) -> None:
-        if venue_offer_id is None:
-            return  # PENDING intents have no voi (Plan 3); nothing to project here.
-        existing = (
-            await session.execute(
-                select(OfferClaimRow).where(
-                    OfferClaimRow.venue_offer_id == venue_offer_id,
-                    OfferClaimRow.account_id == account_id,
-                    OfferClaimRow.deployment_environment == self._env,
-                )
-            )
-        ).scalars().all()
-        before: dict[str, ClaimRecord] = {
-            r.venue_offer_id: _row_to_claim(r) for r in existing if r.venue_offer_id is not None
-        }
-        now_ms: int = cast(Any, event).occurred_at_ms or 0
-        after, _diags = transition(before, event, now_ms)
-        rec = after.get(venue_offer_id)
-        if rec is None:
-            return
-        await self._upsert_claim(session, rec)
+        """Project event onto the cid-keyed offer_claims snapshot (same txn).
 
-    async def _upsert_claim(self, session: AsyncSession, rec: ClaimRecord) -> None:
+        Direct event_type -> state mapping; no pre-select, no voi-keyed
+        transition(). cid is stable across the whole lifecycle so a single
+        row is upserted in place (PENDING -> CLAIMED -> RELEASED/FAILED).
+        """
+        etype = event_type_of(event)
+        state = _CLAIM_STATE_BY_TYPE.get(etype)
+        if state is None:
+            return  # audit-only events (e.g. cancel) are not claim-bearing
+        _ev: Any = cast(Any, event)
+        cid: int | None = getattr(_ev, "cid", None)
+        if cid is None:
+            return  # no cid -> nothing to key on
+        now_ms: int = _ev.occurred_at_ms or 0
+        await self._upsert_claim(
+            session,
+            cid=cid,
+            account_id=account_id,
+            state=state,
+            venue_offer_id=getattr(_ev, "venue_offer_id", None),
+            size_usdt=Decimal(str(_ev.size_usdt)),
+            signal_correlation_id=str(_ev.signal_correlation_id),
+            occurred_at_ms=now_ms,
+            last_updated_ms=now_ms,
+        )
+
+    async def _upsert_claim(
+        self,
+        session: AsyncSession,
+        *,
+        cid: int,
+        account_id: str,
+        state: RegistryState,
+        venue_offer_id: str | None,
+        size_usdt: Decimal,
+        signal_correlation_id: str,
+        occurred_at_ms: int,
+        last_updated_ms: int,
+    ) -> None:
         dialect = session.bind.dialect.name if session.bind else "postgresql"
         ins = pg_insert if dialect == "postgresql" else sqlite_insert
         values: dict[str, Any] = {
-            "cid": rec.cid,
-            "account_id": rec.account_id,
+            "cid": cid,
+            "account_id": account_id,
             "deployment_environment": self._env,
-            "state": rec.state.value,
-            "venue_offer_id": rec.venue_offer_id,
-            "size_usdt": rec.size_usdt,
-            "signal_correlation_id": str(rec.signal_correlation_id),
-            "occurred_at_ms": rec.occurred_at_ms,
-            "last_updated_ms": rec.last_updated_ms,
-            "last_event_seq": 0,  # FSM state is the SoT for claims; position_state carries the high-water mark (Task 6)
+            "state": state.value,
+            "venue_offer_id": venue_offer_id,
+            "size_usdt": size_usdt,
+            "signal_correlation_id": signal_correlation_id,
+            "occurred_at_ms": occurred_at_ms,
+            "last_updated_ms": last_updated_ms,
+            # FSM state is the SoT for claims; position_state carries the
+            # high-water mark, so last_event_seq stays 0 here (by-design,
+            # carry-forward (d)).
+            "last_event_seq": 0,
         }
-        stmt = ins(OfferClaimRow).values(values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["cid"],
+        stmt = ins(OfferClaimRow).values(values).on_conflict_do_update(
+            index_elements=["account_id", "deployment_environment", "cid"],
             set_={k: values[k] for k in ("state", "venue_offer_id", "last_updated_ms")},
         )
         await session.execute(stmt)
-        # Expire the identity-map entry for this cid so any subsequent select() in the
-        # same session re-fetches from the DB rather than returning a stale cached object.
-        cached = session.identity_map.get((OfferClaimRow, (rec.cid,), None))
+        # Core-level upsert bypasses the ORM, so any instance already loaded into
+        # this session's identity map for the same composite PK is now stale.
+        # Expire it so a subsequent select() re-fetches the updated row. The PK
+        # tuple order follows the OfferClaimRow PrimaryKeyConstraint declaration.
+        cached = session.identity_map.get(
+            (OfferClaimRow, (account_id, self._env, cid), None)
+        )
         if cached is not None:
             session.expire(cached)
-
 
     async def _project_position_state(
         self,
@@ -205,20 +237,7 @@ class PostgresEventStore:
         )).scalars().all()
         for r in rows:
             event = deserialize_event(r.event_type, r.payload)
-            await self._project_offer_claims(session, event, account_id, r.venue_offer_id)
+            await self._project_offer_claims(session, event, account_id)
             await self._project_position_state(
                 session, r.event_type, account_id,
                 getattr(event, "size_usdt", None), r.event_seq)
-
-
-def _row_to_claim(row: OfferClaimRow) -> ClaimRecord:
-    return ClaimRecord(
-        venue_offer_id=row.venue_offer_id or "",
-        cid=row.cid,
-        signal_correlation_id=UUID(row.signal_correlation_id),
-        size_usdt=Decimal(str(row.size_usdt)),
-        account_id=row.account_id,
-        state=RegistryState(row.state),
-        occurred_at_ms=row.occurred_at_ms,
-        last_updated_ms=row.last_updated_ms,
-    )
