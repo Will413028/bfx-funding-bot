@@ -12,6 +12,7 @@ from bfx_funding_bot.modules.admin.smoke_runner import (
     SmokeRunner,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -58,7 +59,7 @@ def _build_chain(bus: DomainEventBus, axiom: _FakeAxiomClient):
         axiom=axiom, phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE, cell="bfx_USDT",
     )
-    return ReservationEmittingMiddleware(paper, bus=bus)
+    return ReservationEmittingMiddleware(paper, bus=bus, persister=NoopEventPersister())
 
 
 def _make_runner(executor=None, bus=None, axiom=None, axiom_query=None) -> SmokeRunner:

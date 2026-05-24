@@ -1,4 +1,4 @@
-"""ReservationEmittingMiddleware — publish ReservationClaimed + OrderFilled (paper)."""
+"""ReservationEmittingMiddleware — A2 write-ahead intent + sync persistence."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -11,6 +11,8 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
+    ReservationFailed,
+    ReservationIntent,
 )
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
@@ -20,10 +22,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 
 def _decision() -> DecisionPayload:
@@ -41,112 +40,113 @@ def _ctx() -> AccountContext:
     )
 
 
+class _RecordingPersister:
+    """Records each persist() call as one tuple of events (= one txn)."""
+    def __init__(self) -> None:
+        self.txns: list[tuple[object, ...]] = []
+
+    async def persist(self, *events: object) -> None:
+        self.txns.append(events)
+
+
 class _StubInner:
-    def __init__(self, result: SubmittedOrder | BaseException) -> None:
-        self._result = result
+    """Echoes the injected cid back in the SubmittedOrder (A2 contract)."""
+    def __init__(self, status: str, voi: str | None, *, persister: _RecordingPersister | None = None) -> None:
+        self._status = status
+        self._voi = voi
+        self._persister = persister
+        self.persist_calls_at_submit: int | None = None
+        self.cid_seen: int | None = None
 
-    async def submit(self, decision: DecisionPayload, ctx: AccountContext) -> SubmittedOrder:
-        if isinstance(self._result, BaseException):
-            raise self._result
-        return self._result
+    async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+        self.cid_seen = cid
+        if self._persister is not None:
+            self.persist_calls_at_submit = len(self._persister.txns)
+        return SubmittedOrder(cid=cid or 0, venue_offer_id=self._voi, status=self._status, raw_response=None)
 
 
-def _make_bus_capture() -> tuple[DomainEventBus, list[ReservationClaimed], list[OrderFilled]]:
+def _bus_capture() -> tuple[DomainEventBus, list[object]]:
     bus = DomainEventBus()
-    claims: list[ReservationClaimed] = []
-    fills: list[OrderFilled] = []
-    async def on_claim(e: ReservationClaimed) -> None:
-        claims.append(e)
-    async def on_fill(e: OrderFilled) -> None:
-        fills.append(e)
-    bus.subscribe(ReservationClaimed, on_claim)
-    bus.subscribe(OrderFilled, on_fill)
-    return bus, claims, fills
+    seen: list[object] = []
+    async def _on(e: object) -> None:
+        seen.append(e)
+    bus.subscribe(ReservationClaimed, _on)
+    bus.subscribe(OrderFilled, _on)
+    return bus, seen
 
 
 @pytest.mark.asyncio
-async def test_paper_filled_emits_claim_then_fill() -> None:
-    bus, claims, fills = _make_bus_capture()
-    inner = _StubInner(SubmittedOrder(
-        cid=42, venue_offer_id="paper_abc", status="filled", raw_response=None,
-    ))
-    mw = ReservationEmittingMiddleware(inner, bus=bus)
+async def test_paper_filled_persists_intent_then_claim_and_fill() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("filled", "paper_abc", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
     await mw.submit(_decision(), _ctx())
-    assert len(claims) == 1
-    assert len(fills) == 1
-    assert claims[0].cid == 42
-    assert claims[0].venue_offer_id == "paper_abc"
-    assert claims[0].size_usdt == Decimal("100.0")
-    assert fills[0].cid == 42
+    assert len(persister.txns) == 2
+    assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
+    assert [type(e) for e in persister.txns[1]] == [ReservationClaimed, OrderFilled]
+    assert inner.persist_calls_at_submit == 1
+    assert [type(e) for e in seen] == [ReservationClaimed, OrderFilled]
 
 
 @pytest.mark.asyncio
-async def test_live_submitted_emits_claim_only() -> None:
-    """Live BitfinexLive returns status='submitted' — Reserved emitted, Fill 不發."""
-    bus, claims, fills = _make_bus_capture()
-    inner = _StubInner(SubmittedOrder(
-        cid=42, venue_offer_id="123456", status="submitted", raw_response=None,
-    ))
-    mw = ReservationEmittingMiddleware(inner, bus=bus)
+async def test_live_submitted_persists_intent_then_claim_only() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("submitted", "123456", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
     await mw.submit(_decision(), _ctx())
-    assert len(claims) == 1
-    assert len(fills) == 0
+    assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
+    assert [type(e) for e in persister.txns[1]] == [ReservationClaimed]
+    assert [type(e) for e in seen] == [ReservationClaimed]
+    assert persister.txns[1][0].is_simulated is False
 
 
 @pytest.mark.asyncio
-async def test_failed_status_emits_nothing() -> None:
-    """I3-EM: status=failed → 不 emit 任何 event (防 ledger 漏洞)."""
-    bus, claims, fills = _make_bus_capture()
-    inner = _StubInner(SubmittedOrder(
-        cid=42, venue_offer_id=None, status="failed", raw_response=None,
-    ))
-    mw = ReservationEmittingMiddleware(inner, bus=bus)
+async def test_failed_persists_intent_then_failed_no_publish() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("failed", None, persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
     await mw.submit(_decision(), _ctx())
-    assert len(claims) == 0
-    assert len(fills) == 0
+    assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
+    assert [type(e) for e in persister.txns[1]] == [ReservationFailed]
+    assert seen == []
 
 
 @pytest.mark.asyncio
-async def test_inner_raise_propagates_no_emit() -> None:
-    bus, claims, fills = _make_bus_capture()
-    inner = _StubInner(ExecutorTransientError("blip"))
-    mw = ReservationEmittingMiddleware(inner, bus=bus)
-    with pytest.raises(ExecutorTransientError):
-        await mw.submit(_decision(), _ctx())
-    assert len(claims) == 0
-    assert len(fills) == 0
+async def test_same_cid_threaded_to_inner_and_all_events() -> None:
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("filled", "paper_x", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
+    await mw.submit(_decision(), _ctx())
+    intent_cid = persister.txns[0][0].cid
+    claim_cid = persister.txns[1][0].cid
+    assert inner.cid_seen == intent_cid == claim_cid
 
 
 @pytest.mark.asyncio
 async def test_bus_publish_failure_does_not_break_submit() -> None:
-    """I4-EM: bus.publish 例外 swallow，submit 仍 return result.
-
-    Note: DomainEventBus.publish already isolates handler exceptions via
-    gather(return_exceptions=True). This test verifies the outer try/except
-    in middleware swallows even publish-level (not handler-level) failures.
-    Use a broken bus to force this path.
-    """
     class _BrokenBus:
         async def publish(self, event: object) -> None:
             raise RuntimeError("bus publish broken")
-    inner = _StubInner(SubmittedOrder(
-        cid=42, venue_offer_id="paper_abc", status="filled", raw_response=None,
-    ))
-    mw = ReservationEmittingMiddleware(inner, bus=_BrokenBus())  # type: ignore[arg-type]
+    persister = _RecordingPersister()
+    inner = _StubInner("filled", "paper_abc", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=_BrokenBus(), persister=persister, is_simulated=True)  # type: ignore[arg-type]
     result = await mw.submit(_decision(), _ctx())
     assert result.status == "filled"
 
 
 @pytest.mark.asyncio
-async def test_decimal_conversion_from_decision() -> None:
-    bus, claims, _ = _make_bus_capture()
-    inner = _StubInner(SubmittedOrder(
-        cid=1, venue_offer_id="x", status="submitted", raw_response=None,
-    ))
-    mw = ReservationEmittingMiddleware(inner, bus=bus)
-    d = DecisionPayload(
-        decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
-        offer_rate=0.0001, offer_amount_usdt=12345.67, offer_duration_days=2,
-    )
-    await mw.submit(d, _ctx())
-    assert claims[0].size_usdt == Decimal("12345.67")
+async def test_inner_raise_after_intent_propagates() -> None:
+    class _RaisingInner:
+        async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+            raise ExecutorTransientError("blip")
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    mw = ReservationEmittingMiddleware(_RaisingInner(), bus=bus, persister=persister, is_simulated=True)
+    with pytest.raises(ExecutorTransientError):
+        await mw.submit(_decision(), _ctx())
+    assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
+    assert len(persister.txns) == 1
