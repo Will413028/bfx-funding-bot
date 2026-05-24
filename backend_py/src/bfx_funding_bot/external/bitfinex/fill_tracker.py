@@ -160,10 +160,17 @@ class RestPollingFillTracker:
 
         self._consecutive_failures = 0
 
-        await self._diff_and_emit(current)
-        self._last_state = current
+        failed = await self._diff_and_emit(current)
+        # Retain vois whose release-persist failed so the next tick re-detects
+        # and retries them (PG may be transiently down). Successfully-handled
+        # disappearances advance out of last_state normally. Boot recovery is
+        # the cross-restart backstop.
+        self._last_state = {
+            **current,
+            **{voi: self._last_state[voi] for voi in failed if voi in self._last_state},
+        }
 
-    async def _diff_and_emit(self, current: dict[str, dict[str, Any]]) -> None:
+    async def _diff_and_emit(self, current: dict[str, dict[str, Any]]) -> set[str]:
         """Disappearance = present in last_state, absent from current → reservation released.
 
         Registry-aware dedup (4.4a):
@@ -171,6 +178,7 @@ class RestPollingFillTracker:
         - If registry state == RELEASED: WS already handled it — skip (dedup).
         - If registry state == CLAIMED: emit with registry's correlation_id (G3 fix).
         """
+        failed: set[str] = set()
         snapshot = self._registry.snapshot()
         for venue_offer_id, _prev in self._last_state.items():
             if venue_offer_id in current:
@@ -211,11 +219,14 @@ class RestPollingFillTracker:
                 await self._persister.persist(release)
             except Exception as e:
                 log.critical(
-                    "fill_tracker_persist_failed err=%r voi=%s — skipping publish",
+                    "fill_tracker_persist_failed err=%r voi=%s — SoT write lost; "
+                    "retrying next poll (boot recovery is backstop)",
                     e, venue_offer_id,
                 )
+                failed.add(venue_offer_id)
                 continue
             await self._bus.publish(release)
+        return failed
 
     async def _emit_degraded(self, reason: str) -> None:
         self.probe.update(
