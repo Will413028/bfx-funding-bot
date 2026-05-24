@@ -139,3 +139,4 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
     ]
     assert all(e["correlation_id"] == str(corr) for e in axiom.events)
     assert all(e["account_id"] == "default" for e in axiom.events)
+    assert diagnostics.events == []  # allowed path emits no SAFETY_TRIGGER

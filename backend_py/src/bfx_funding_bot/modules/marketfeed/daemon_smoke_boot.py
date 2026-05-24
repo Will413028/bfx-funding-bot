@@ -45,6 +45,11 @@ async def run_boot_smoke(daemon: Any) -> None:
     except Exception as exc:
         log.critical("smoke_boot_failed err=%r — daemon continues", exc)
         try:
+            # NOTE: boot-smoke failure is not a guard block, so this SAFETY_TRIGGER
+            # payload intentionally differs from SafetyTriggerPayload (no guard_name/
+            # reason/decision_snapshot). diagnostics rows with kind=safety_trigger are
+            # therefore heterogeneous — query defensively. (3b follow-up: consider a
+            # dedicated kind if this grows.)
             await daemon.diagnostics.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.CRITICAL.value,
