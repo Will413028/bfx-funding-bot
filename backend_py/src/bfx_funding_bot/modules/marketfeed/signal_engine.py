@@ -167,7 +167,10 @@ class SignalEngine:
 
         # Phase 4.2 Task 19: defer DECISION emit until post-safety-eval.
         # Build tentative decision (post-strategy, pre-safety).
-        tentative = self._build_tentative_decision(correlation_id, cell, live_signal)
+        tentative = self._build_tentative_decision(
+            correlation_id, cell, live_signal,
+            is_stale=is_stale, stale_seconds=stale_seconds,
+        )
 
         final = await self._apply_safety_eval(tentative)
 
@@ -248,12 +251,17 @@ class SignalEngine:
 
     def _build_tentative_decision(
         self, correlation_id: UUID, cell: CellConfig, sig: ExtractedSignal,
+        *, is_stale: bool = False, stale_seconds: int = 0,
     ) -> DecisionPayload:
         """Pre-safety DecisionPayload built from strategy output.
 
         Decimal → float: DecisionPayload schema declares offer_rate: float | None.
         Funding rate precision (~6 dp) is well within double-precision range.
+
+        Staleness (is_stale/stale_seconds + cell budget) is stamped here so it
+        rides the durable DECISION record, not just the ephemeral SIGNAL.
         """
+        budget_seconds = _resolve_budget_seconds(cell)
         if sig.signal_direction == SignalDirection.POST and sig.lend_decision is not None:
             return DecisionPayload(
                 decision_outcome=DecisionOutcome.POST,
@@ -261,11 +269,13 @@ class SignalEngine:
                 offer_rate=float(sig.lend_decision.rate),
                 offer_amount_usdt=cell.reference_amount_usdt,
                 offer_duration_days=int(sig.lend_decision.period_days),
+                is_stale=is_stale, stale_seconds=stale_seconds, budget_seconds=budget_seconds,
             )
         return DecisionPayload(
             decision_outcome=DecisionOutcome.SKIP,
             signal_correlation_id=correlation_id,
             skip_reason=SkipReason.BELOW_THRESHOLD,
+            is_stale=is_stale, stale_seconds=stale_seconds, budget_seconds=budget_seconds,
         )
 
     async def _apply_safety_eval(self, tentative: DecisionPayload) -> DecisionPayload:
@@ -287,6 +297,9 @@ class SignalEngine:
             signal_correlation_id=tentative.signal_correlation_id,
             skip_reason=SkipReason.SAFETY_BLOCK,
             skip_reason_detail=result.reason,
+            is_stale=tentative.is_stale,
+            stale_seconds=tentative.stale_seconds,
+            budget_seconds=tentative.budget_seconds,
         )
 
     async def _emit_decision_final(
