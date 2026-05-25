@@ -197,13 +197,16 @@ class TestStalenessScan:
         assert fake_sink.emitted[0]["payload"]["check_target"] == "executor"
         assert fake_sink.emitted[0]["payload"]["status"] == "down"
 
-    async def test_liveness_subtask_still_escalates_fatal(self, monitor):
-        """A liveness sub-task (ws, threshold 90s) past 3× (270s) still raises."""
+    async def test_liveness_subtask_still_escalates_fatal(self, monitor, fake_sink):
+        """A liveness sub-task (ws, threshold 90s) past 3× (270s) still raises,
+        and emits the observability event before raising."""
         monitor.probe.last_active_ts["ws"] = (
             datetime.now(UTC) - timedelta(seconds=300)
         )
         with pytest.raises(FatalError):
             await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == "ws"
 
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 
