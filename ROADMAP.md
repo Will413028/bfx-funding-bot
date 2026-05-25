@@ -1,11 +1,52 @@
 # 開發路線圖
 
-> 最後更新：2026-03-22（G0-G11 + GT1-6 + P1-P3 全部 + I/J/K/L 完成）
+> 最後更新：2026-05-26（Python rewrite Phase 2–4 完成，canary 程式碼 ready，待首次真錢 deploy）
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
+> 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
+
+> **現行後端為 `backend_py/`（Python）。** 下方「已完成功能」「DB Schema」「API Endpoints」
+> 等大表是 Go `backend/` MVP 時代的紀錄（**已封存**，見 CLAUDE.md），保留作歷史。
+> 當前實際開發軌道見下節。
 
 ---
 
-## 已完成功能
+## 現行軌道：Python Rewrite（Phase 2–4）
+
+走 backtest → paper → shadow → canary 的真錢上線軌道。
+
+| Phase | 內容 | 狀態 |
+|---|---|---|
+| 2 | Data backfill — fUSD/fUST candles + funding_stats（~547k rows）回填 Neon | ✅ 2026-05-10 |
+| 3a-recovery | Boot recovery + 依 venue id 的 venue reconcile + event-store write-ahead | ✅ 2026-05-24 |
+| 3b | Walk-Forward Optimization 策略矩陣 + diagnostics sink；RatePercentile + MeanReversion qualify（best: MR×fUSD_a30, margin +19.9% / win 81.6%） | ✅ 2026-05-18 |
+| 3c | 移除 Axiom，改 PG event store 為 SoT（forensics→`diagnostics`、SoT→`event_log`、operational→stdout、smoke→L3 PG endpoint，−3868 LOC） | ✅ 2026-05-25 |
+| 4.1 | Paper / shadow infra — live WS → signal → decision logging + health monitor | ✅ |
+| 4.2 | Real-money safety + executor 抽象 — hexagonal Executor ports + SafetyGuardChain（hard + calibrated guards） | ✅ 2026-05-21 |
+| 4.3 | LOCF + per-cell staleness budget（sparse p30 cells）；backtest 驗證通過 | ✅（G2 calibration audit 待 ~2026-06-10） |
+| 4.4 live infra | Bitfinex live executor + WS dispatcher + OfferRegistry FSM（event-sourcing baseline，env flag 控制，paper-preserving） | ✅ Koyeb HEALTHY |
+| 4.4 canary | `BFX_PHASE=canary` 啟用 + all-guards invariant + canary deploy config（`cells.canary.yaml` / `safety.canary.yaml`） | ✅ 程式碼完成 |
+
+### 當前位置：首次 canary 上線（$150 真錢）
+
+canary spec context（2026-05-25）確認：WFO backtest ✅ / paper ✅ / shadow ✅ /
+venue reconcile wire+auth ✅ / PG SoT + durable staleness ✅ / canary 程式碼 ✅。
+**剩下唯一 blocker = 首次真錢 deploy**，gated on 以下 user action（非程式碼）：
+
+- [ ] 確認 Bitfinex API key 有 **submit/cancel funding-offer** scope（2026-05-25 reconcile 只驗了 read）
+- [ ] 帳戶有可放貸 USD 餘額
+- [ ] Koyeb 設定 real `BFX_API_KEY`/`BFX_API_SECRET` + `BFX_PHASE=canary` + `BFX_EXECUTOR=bitfinex_live` + `BFX_WS_CLIENT_ENABLED=true` + `BFX_ALLOCATION_CAP_USDT=150`
+- [ ] env 指向 canary config：`BFX_CELLS_YAML=configs/cells.canary.yaml` + `BFX_SAFETY_CONFIG=configs/safety.canary.yaml`
+- [ ] kill switch 備用：`BFX_KILL_SWITCH=true` 可即時全停
+
+下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
+Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。
+Phase 5 = 解 cap / 多 cells / 多策略 scale-up。
+
+---
+
+## 已完成功能（Go backend MVP — 已封存）
+
+> 以下為 Go `backend/` 時代的功能清單，Phase 0 重寫至 Python 後不再開發，保留作歷史紀錄。
 
 | # | 功能 | 涵蓋檔案 | Commit |
 |---|------|---------|--------|
@@ -162,11 +203,18 @@ marketfeed/service.go (C1)
 
 ## 待開發功能
 
-### Phase H — 運維（Axiom 集中式日誌 + 監控）
+> 現行軌道的待辦見上方「現行軌道」節（首次 canary deploy + G2 audit）。
+> 以下為 Go-era 殘留 backlog。
 
-| # | 功能 | 說明 | 複雜度 |
-|---|------|------|--------|
-| H3 | Axiom Dashboard & Alerts | Axiom UI 建立監控面板 + 告警規則（Worker 崩潰率、API 錯誤率、WS 斷線） | 中 |
+### ~~Phase H — 運維（Axiom 集中式日誌 + 監控）~~ ❌ 作廢
+
+> **Axiom 已於 2026-05-25（Phase 3c）完全 retire**，改用 PG event store：
+> operational telemetry → stdout、forensics → `diagnostics` 表、SoT → `event_log` 表、
+> smoke 驗證 → L3 PG-backed HTTP endpoint。原 H3「Axiom Dashboard & Alerts」隨之作廢。
+
+| # | 功能 | 狀態 |
+|---|------|------|
+| ~~H3~~ | ~~Axiom Dashboard & Alerts~~ | ❌ 作廢（Axiom retired，見上） |
 
 ### Phase G — 策略行為增強
 
@@ -288,13 +336,13 @@ marketfeed/service.go (C1)
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ |
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ |
-| Phase G（策略行為增強） | 37/41 完成，**4 項待開發** |
-| ~~Phase H（運維 — Axiom）~~ | ~~H1+H2~~ ✅，H3 待部署後設定 |
+| Phase G（策略行為增強） | 40/41 完成，**1 項待開發**（G13） |
+| ~~Phase H（運維 — Axiom）~~ | ❌ Axiom 已 retire（Phase 3c），H1–H3 全作廢，改用 PG event store |
 | ~~Phase I（CI/CD）~~ | ~~I1+I2~~ ✅ |
 | ~~Phase J（Auth 強化）~~ | ~~J1+J2+J3+J5+J6~~ ✅ |
 | ~~Phase K（前端測試）~~ | ~~K2~~ ✅ |
 | ~~Phase L（UX 強化）~~ | ~~L1+L2+L3+L4+L5~~ ✅ |
-| **待開發合計** | **2 項**（G13 + H3） |
+| **Go-era 待開發合計** | **1 項**（G13；現行軌道待辦見上方「現行軌道」節） |
 
 ## 依賴關係
 
@@ -321,8 +369,7 @@ Phase A ✅ 全部完成
          │
          ├── Phase F ✅ 全部完成 (16 項)
          │
-         └── Phase H (運維 — Axiom)
-             ✅ H1+H2 完成 → H3 (Dashboard & Alerts，待部署後設定)
+         └── ~~Phase H (運維 — Axiom)~~ ❌ Axiom retired（Phase 3c）→ 改用 PG event store
 ```
 
 ## 建議開發順序
@@ -343,7 +390,7 @@ Phase A ✅ 全部完成
 14. ~~**F16** — 前端測試~~ ✅
 15. ~~**F15** — 前端 Production hardening（Sentry + CSP）~~ ✅
 16. ~~**H1, H2** — Axiom 日誌整合~~ ✅
-17. **H3** — Axiom Dashboard & Alerts（部署後在 Axiom UI 設定）
+17. ~~**H3** — Axiom Dashboard & Alerts~~ ❌ 作廢（Axiom retired，Phase 3c）
 
 #### ~~P0 — Pipeline 接線~~ ✅
 
