@@ -740,7 +740,13 @@ async def build_daemon(
         guards.append(HeartbeatGuard(
             probe=probe,
             threshold_seconds=hg.heartbeat.sub_task_stale_threshold_seconds,
-            watched_sub_tasks=["safety_chain", "executor"],
+            # Readiness gate: block POST only when our MARKET VIEW is stale.
+            # Watch market-data own-loop liveness ("ws"), not the reactive
+            # executor/safety_chain — those are bumped only by trading itself,
+            # so watching them self-suppresses trades in quiet markets and was
+            # part of the 2026-05-26 canary restart loop. ws stays fresh in
+            # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
+            watched_sub_tasks=["ws"],
         ))
     if hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(ledger=ledger))

@@ -242,3 +242,37 @@ calibrated_guards:
     types = {type(g) for g in daemon.safety_chain.guards}
     assert RealizedLossGuard in types  # enabled
     assert DrawdownGuard not in types  # disabled
+
+
+@pytest.mark.asyncio
+async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """HeartbeatGuard is a readiness gate ('don't trade on a stale market
+    view'), so it watches market-data own-loop liveness (ws), NOT the reactive
+    executor/safety_chain — watching those self-suppresses trading in quiet
+    markets (the 2026-05-26 canary restart bug) and is a reactive mismatch."""
+    await _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    # heartbeat guard enabled (disable nothing).
+    safety_yaml = _write_safety_yaml(tmp_path, disable=set())
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
+    _add_bitfinex_mock(httpx_mock)
+
+    from bfx_funding_bot.modules.execution.safety.hard_guards import HeartbeatGuard
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    daemon = await build_daemon(
+        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+    )
+    hbg = next(
+        g for g in daemon.safety_chain.guards if isinstance(g, HeartbeatGuard)
+    )
+    assert hbg.watched == ["ws"]
+    assert "executor" not in hbg.watched
+    assert "safety_chain" not in hbg.watched
