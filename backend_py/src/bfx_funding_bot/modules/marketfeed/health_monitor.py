@@ -59,6 +59,13 @@ ACTIVITY_THRESHOLDS: dict[str, int] = {
 SUB_TASK_THRESHOLDS: dict[str, int] = {**LIVENESS_THRESHOLDS, **ACTIVITY_THRESHOLDS}
 _DEFAULT_THRESHOLD_S = 60
 
+# A sub-task is EITHER liveness OR activity, never both. Overlap would make the
+# merged dict silently take the ACTIVITY value and the scan_staleness gate would
+# suppress fatal escalation for a task meant to be liveness — enforce at import.
+assert not (LIVENESS_THRESHOLDS.keys() & ACTIVITY_THRESHOLDS.keys()), (
+    "sub-task threshold keys must not overlap between LIVENESS and ACTIVITY"
+)
+
 
 class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
@@ -208,7 +215,9 @@ class HealthMonitor:
 
     async def scan_staleness(self) -> list[dict[str, Any]]:
         """Check last_active_ts for each sub-task. Emit + return records for
-        any stale. Raises FatalError on 3× threshold breach.
+        any stale. Raises FatalError on 3× threshold breach for liveness
+        sub-tasks; activity-class sub-tasks (executor, safety_chain) emit but
+        never escalate.
 
         SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
         Per-cell pipeline state is tracked separately in
