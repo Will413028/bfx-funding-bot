@@ -38,10 +38,12 @@ paper ✅ / shadow ✅ / venue reconcile wire+auth ✅ / PG SoT ✅ / canary 程
 - [ ] **帳戶入金**可放貸 USD（≤ $150 cap）— 入金後才會實際掛單
 - [ ] 驗 submit/cancel scope（目前 smoke L2 boot 的真實 submit 回 500，疑似餘額不足；入金後可分辨是 scope 還是 balance）
 
-⚠️ **已知問題（入金前建議先解）**：空跑時 executor heartbeat 無交易活動 → 累積 stale
-（>360s threshold）→ `executor degraded` → Koyeb `/healthz` fail → daemon 重啟過一次（2026-05-25 22:39）。
-executor 在「正常但無活動」時不該被判 unhealthy 到觸發重啟 — 屬 daemon robustness bug，
-入金後若市場長時間無成交可能復發。
+✅ **已修（2026-05-26，branch `fix/executor-liveness-health`）**：空跑時 executor heartbeat
+無交易活動曾累積 stale（>360s）→ `/healthz` 503 → daemon 重啟（觀測 2026-05-25 22:39）。
+Root cause：executor/safety_chain 是 reactive（只在 POST decision 時 bump），不該當 liveness。
+修法：兩者移出 liveness（`/healthz` + `scan_staleness` fatal），HeartbeatGuard 改 watch `ws`
+（market-data liveness，安靜市場靠 hb frame 保持 fresh）。
+見 `docs/superpowers/plans/2026-05-26-executor-liveness-health-refactor.md`。
 
 下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
 Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。
