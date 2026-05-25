@@ -1,40 +1,45 @@
 #!/usr/bin/env bash
-# Phase 4.1 Koyeb deploy script (idempotent)
+# Koyeb deploy script (idempotent) — paper / shadow / canary
 #
 # Usage:
-#   scripts/deploy-koyeb.sh paper      # 1hr smoke run
-#   scripts/deploy-koyeb.sh shadow     # 2-4 週 long run (no auto-exit)
+#   scripts/deploy-koyeb.sh paper      # 1hr smoke run (simulated)
+#   scripts/deploy-koyeb.sh shadow     # 2-4 週 long run, simulated, no auto-exit
+#   scripts/deploy-koyeb.sh canary     # ⚠️ REAL MONEY: bitfinex_live, $150 cap
 #
 # Behaviour:
 #   - Idempotent: app/service created if missing, env vars upserted if exists.
-#   - Each invocation triggers a new Koyeb deployment (env-var update or fresh
-#     service create both kick off build → deploy cycle).
+#   - Each invocation triggers a new Koyeb deployment.
 #   - Koyeb pulls latest commit from main branch on every deployment.
+#   - Phase flips are bidirectional: switching to paper/shadow clears the
+#     canary-only live vars (BFX_EXECUTOR etc.) so flipping back never leaves a
+#     `paper + bitfinex_live` mismatch (ExecutorConfigError). Safe to flip freely.
 #
 # Prerequisites:
 #   1. koyeb CLI installed:  brew install koyeb/tap/koyeb
-#   2. koyeb authenticated:  `koyeb whoami` works (login via `koyeb login`
-#      in a real terminal, or write ~/.koyeb.yaml manually)
-#   3. 3 Koyeb secrets created via dashboard (https://app.koyeb.com/secrets):
-#        - bfx-axiom-api-key  (Axiom API token with ingest + query scope)
+#   2. koyeb authenticated:  `koyeb whoami` works (login via `koyeb login`)
+#   3. Koyeb secrets created via dashboard (https://app.koyeb.com/secrets):
 #        - bfx-database-url   (Neon connection string, scheme must be
 #                              `postgresql+asyncpg://`, NOT `postgresql://`)
 #        - bfx-redis-url      (Upstash connection string, scheme `rediss://`)
+#        canary additionally needs:
+#        - bfx-api-key        (Bitfinex API key — Funding read + WRITE/CANCEL scope)
+#        - bfx-api-secret     (Bitfinex API secret)
 #   4. Repo pushed to origin/main (Koyeb builds from GitHub).
 #
-# Idempotency notes:
-#   - Re-running with the same phase: updates env vars (likely no-op) + redeploys.
-#   - Re-running with the other phase: swaps BFX_PHASE + adjusts
-#     BFX_RUN_DURATION_HOURS, then redeploys. Safe to flip back and forth.
+# Observability: structured stdout (Axiom retired in Phase 3c). View via
+#   `koyeb service logs ...`. Smoke validation = PG-backed L3 HTTP endpoint.
+#
+# Canary specifics: see docs/deploy/koyeb-canary.md (Pre-live Gate, kill switch,
+# rollback). Run the Pre-live Gate checklist BEFORE first canary deploy.
 
 set -euo pipefail
 
 # ---------- Args ----------
 PHASE="${1:-}"
 case "$PHASE" in
-  paper|shadow) ;;
+  paper|shadow|canary) ;;
   *)
-    echo "Usage: $0 paper|shadow" >&2
+    echo "Usage: $0 paper|shadow|canary" >&2
     exit 1
     ;;
 esac
@@ -46,8 +51,11 @@ GIT_REPO="github.com/Will413028/bfx-funding-bot"
 GIT_BRANCH="main"
 REGION="sin"               # match Neon ap-southeast-1
 INSTANCE="nano"
-AXIOM_DATASET="bfx-funding-bot"
-REQUIRED_SECRETS=(bfx-axiom-api-key bfx-database-url bfx-redis-url)
+
+REQUIRED_SECRETS=(bfx-database-url bfx-redis-url)
+if [[ "$PHASE" == "canary" ]]; then
+  REQUIRED_SECRETS+=(bfx-api-key bfx-api-secret)
+fi
 
 # ---------- Helpers ----------
 say() { printf '\033[34m→\033[0m %s\n' "$*"; }
@@ -56,6 +64,20 @@ warn() { printf '\033[33m⚠\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 say "Phase: $PHASE"
+
+# ---------- 0. Real-money confirmation (canary only) ----------
+if [[ "$PHASE" == "canary" ]]; then
+  warn "CANARY = REAL MONEY. bitfinex_live will place real funding offers (\$150 cap)."
+  warn "Confirm the Pre-live Gate in docs/deploy/koyeb-canary.md is complete"
+  warn "(API key submit/cancel scope, USD balance, G2 audit)."
+  if [[ "${BFX_CANARY_CONFIRM:-}" != "yes" ]]; then
+    printf 'Type "yes" to proceed with real-money canary deploy: '
+    read -r reply || die "no input (use BFX_CANARY_CONFIRM=yes for non-interactive)"
+    [[ "$reply" == "yes" ]] || die "aborted: expected \"yes\", got \"$reply\""
+  else
+    say "BFX_CANARY_CONFIRM=yes — skipping interactive prompt"
+  fi
+fi
 
 # ---------- 1. Prerequisite checks ----------
 say "Checking prerequisites..."
@@ -90,19 +112,49 @@ else
 fi
 
 # ---------- 4. Build env-var flags (phase-specific) ----------
+# Base env (all phases). `!VAR` deletes an existing Koyeb env var.
 ENV_ARGS=(
   --env "BFX_PHASE=$PHASE"
-  --env "AXIOM_DATASET=$AXIOM_DATASET"
-  --env 'AXIOM_API_KEY={{secret.bfx-axiom-api-key}}'
   --env 'DATABASE_URL={{secret.bfx-database-url}}'
   --env 'REDIS_URL={{secret.bfx-redis-url}}'
 )
-if [[ "$PHASE" == "paper" ]]; then
-  ENV_ARGS+=(--env "BFX_RUN_DURATION_HOURS=1")
-else
-  # Shadow: explicitly delete BFX_RUN_DURATION_HOURS so daemon runs indefinitely
-  ENV_ARGS+=(--env '!BFX_RUN_DURATION_HOURS')
-fi
+
+case "$PHASE" in
+  paper|shadow)
+    # Simulated: paper executor (default). Clear any canary-only live vars so a
+    # flip back from canary never leaves paper + bitfinex_live (ExecutorConfigError).
+    ENV_ARGS+=(
+      --env '!BFX_EXECUTOR'
+      --env '!BFX_WS_CLIENT_ENABLED'
+      --env '!BFX_API_KEY'
+      --env '!BFX_API_SECRET'
+      --env '!BFX_ALLOCATION_CAP_USDT'
+      --env '!BFX_CELLS_YAML'
+      --env '!BFX_SAFETY_CONFIG'
+      --env '!BFX_KILL_SWITCH'
+    )
+    if [[ "$PHASE" == "paper" ]]; then
+      ENV_ARGS+=(--env "BFX_RUN_DURATION_HOURS=1")
+    else
+      ENV_ARGS+=(--env '!BFX_RUN_DURATION_HOURS')
+    fi
+    ;;
+  canary)
+    # REAL MONEY. Values match docs/deploy/koyeb-canary.md (verified against
+    # registry.py / daemon.py / config.py). bitfinex_live requires key+secret
+    # and BFX_WS_CLIENT_ENABLED=true or build_executor raises ExecutorConfigError.
+    ENV_ARGS+=(
+      --env "BFX_EXECUTOR=bitfinex_live"
+      --env "BFX_WS_CLIENT_ENABLED=true"
+      --env 'BFX_API_KEY={{secret.bfx-api-key}}'
+      --env 'BFX_API_SECRET={{secret.bfx-api-secret}}'
+      --env "BFX_ALLOCATION_CAP_USDT=150"
+      --env "BFX_CELLS_YAML=/app/configs/cells.canary.yaml"
+      --env "BFX_SAFETY_CONFIG=/app/configs/safety.canary.yaml"
+      --env '!BFX_RUN_DURATION_HOURS'
+    )
+    ;;
+esac
 
 # ---------- 5. Create or update service ----------
 say "Deploying service '$APP/$SERVICE' (phase=$PHASE, region=$REGION)..."
@@ -146,26 +198,43 @@ echo "  koyeb service describe $SVC_ID             # status + deployment list"
 echo "  koyeb service redeploy $SVC_ID             # re-trigger deploy without env change"
 echo ""
 
-if [[ "$PHASE" == "paper" ]]; then
-  cat <<EOF
-After ~1hr (BFX_RUN_DURATION_HOURS=1), daemon auto-exits with code 0.
-Then run G1 smoke locally:
+case "$PHASE" in
+  paper)
+    cat <<EOF
+Paper auto-exits with code 0 after ~1hr (BFX_RUN_DURATION_HOURS=1).
+Verify before shadow — L3 smoke endpoint (PG read-your-writes):
 
-  cd backend_py
-  export AXIOM_API_KEY=<token-same-as-koyeb>
-  export AXIOM_DATASET=$AXIOM_DATASET
-  uv run python scripts/g1_smoke_check.py --hours 1
+  curl -X POST "https://<service-url>/smoke-test?level=L3" -H "Authorization: Bearer <admin-token>"
 
-If exit 0 (PASS):  ./scripts/deploy-koyeb.sh shadow
-If exit ≠ 0:        see docs/deploy/koyeb-paper.md troubleshooting
+PASS ({"status":"ok","level":"L3"}):  ./scripts/deploy-koyeb.sh shadow
+FAIL / non-2xx:                        see docs/deploy/koyeb-paper.md troubleshooting
 EOF
-else
-  cat <<EOF
-Shadow phase — daemon runs continuously. Monitor:
-  - Koyeb runtime log:    koyeb service logs $SVC_ID -f
-  - Axiom live stream:    https://app.axiom.co (dataset: $AXIOM_DATASET)
+    ;;
+  shadow)
+    cat <<EOF
+Shadow runs continuously (simulated). Monitor:
+  - Koyeb runtime log:  koyeb service logs $SVC_ID -f   (structured stdout)
 
 Plan: 2-4 weeks of shadow data feeds into Phase 4.3 calibration.
 To stop shadow:  koyeb service pause $SVC_ID
 EOF
-fi
+    ;;
+  canary)
+    cat <<EOF
+⚠️ CANARY IS LIVE (real money). Watch closely:
+  - First offer (proves submit scope):  koyeb service logs $SVC_ID -f
+      expect order_submit / ORDER_FILL structured stdout; a venue scope error
+      here means the API key lacks funding write/cancel — KILL immediately.
+  - L3 smoke (execution chain landed in PG):
+      curl -X POST "https://<service-url>/smoke-test?level=L3" -H "Authorization: Bearer <admin-token>"
+
+KILL SWITCH (block all new offers):
+  koyeb service update $APP/$SERVICE --env "BFX_KILL_SWITCH=true"
+
+Rollback to shadow (stop real money):
+  ./scripts/deploy-koyeb.sh shadow
+
+Full procedure: docs/deploy/koyeb-canary.md
+EOF
+    ;;
+esac
