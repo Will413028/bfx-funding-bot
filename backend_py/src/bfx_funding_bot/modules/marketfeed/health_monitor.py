@@ -22,8 +22,11 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 
 log = logging.getLogger(__name__)
 
-# Per spec D4 heartbeat threshold table — staleness threshold in seconds.
-SUB_TASK_THRESHOLDS: dict[str, int] = {
+# ── Liveness sub-tasks (own-loop, event-loop-driven) ──────────────────────────
+# A stale heartbeat means the loop is stuck or the event loop is deadlocked →
+# restarting the process can recover. These DRIVE /healthz 503 (Koyeb restart)
+# and scan_staleness FatalError. Per spec D4 heartbeat threshold table.
+LIVENESS_THRESHOLDS: dict[str, int] = {
     "ws": 90,                    # Phase 4.2.0 lesson v2: poll ws_client.last_msg_age_ms()
                                  # every 15s; threshold 90s covers 4-5 missed Bitfinex
                                  # `hb` frames (which arrive ~15s on subscribed channels).
@@ -35,11 +38,25 @@ SUB_TASK_THRESHOLDS: dict[str, int] = {
     "scheduler": 65 * 60,        # hourly boundary + buffer
     "health_check": 6 * 60,      # 5min hb + buffer
     "db_keepalive": 7 * 60,      # 5min interval + 2min buffer
-    # Phase 4.2 Task 19: execution-pipeline sub-tasks.
-    "safety_chain": 6 * 60,      # 5min watchdog + 1min buffer
-    "executor": 6 * 60,          # 5min watchdog + 1min buffer
     "fill_tracker": 90,          # 30s poll cadence x 3 missed
 }
+
+# ── Activity sub-tasks (reactive middleware) ──────────────────────────────────
+# executor/safety_chain are bumped ONLY when a POST decision flows through the
+# chain (execution/middleware/heartbeat.py, signal_engine.py:290). A stale
+# heartbeat means "no trading activity", NOT a failure. Tying these to liveness
+# caused the 2026-05-26 canary restart loop (idle market → stale → /healthz 503
+# → restart) — a textbook k8s anti-pattern (liveness must not depend on business
+# activity). These are emitted as WARN for observability but NEVER drive a
+# restart, FatalError, or trade block.
+ACTIVITY_THRESHOLDS: dict[str, int] = {
+    "safety_chain": 6 * 60,
+    "executor": 6 * 60,
+}
+
+# Merged view: scan_staleness needs a threshold for both classes to emit. The
+# liveness/fatal gating is keyed on LIVENESS_THRESHOLDS membership, not on this.
+SUB_TASK_THRESHOLDS: dict[str, int] = {**LIVENESS_THRESHOLDS, **ACTIVITY_THRESHOLDS}
 _DEFAULT_THRESHOLD_S = 60
 
 
@@ -247,8 +264,12 @@ class HealthMonitor:
                 },
             })
 
-            # Escalate to fatal AFTER emit, so the event is persisted before raise
-            if age_s > 3 * threshold:
+            # Escalate to fatal AFTER emit, so the event is persisted before raise.
+            # Activity-class sub-tasks (reactive: executor / safety_chain) never
+            # escalate — a stale executor means "no trades flowed", not a stuck
+            # process. Liveness sub-tasks and unknown keys (default threshold)
+            # still escalate so a genuinely hung own-loop task triggers restart.
+            if age_s > 3 * threshold and sub_task not in ACTIVITY_THRESHOLDS:
                 raise FatalError(
                     f"sub_task={sub_task} stale {age_s:.0f}s > "
                     f"3× threshold ({3 * threshold}s) — escalating fatal"

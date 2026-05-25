@@ -180,6 +180,31 @@ class TestStalenessScan:
         assert len(result) == 1
         assert result[0]["sub_task"] == "custom_task"
 
+    async def test_activity_subtask_emits_but_never_fatal(self, monitor, fake_sink):
+        """executor/safety_chain are reactive activity (not liveness): a stale
+        heartbeat means 'no trades flowed', NOT a stuck process. Must emit a
+        WARN/down observability event but NEVER raise FatalError, even past 3×."""
+        # executor threshold 360s; 30min=1800s > 3× (1080s) → fatal for a
+        # liveness task, but executor is activity-class → must not raise.
+        monitor.probe.last_active_ts["executor"] = (
+            datetime.now(UTC) - timedelta(minutes=30)
+        )
+        result = await monitor.scan_staleness()  # must NOT raise
+        assert len(result) == 1
+        assert result[0]["sub_task"] == "executor"
+        assert result[0]["severity"] == "down"  # >2× threshold
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == "executor"
+        assert fake_sink.emitted[0]["payload"]["status"] == "down"
+
+    async def test_liveness_subtask_still_escalates_fatal(self, monitor):
+        """A liveness sub-task (ws, threshold 90s) past 3× (270s) still raises."""
+        monitor.probe.last_active_ts["ws"] = (
+            datetime.now(UTC) - timedelta(seconds=300)
+        )
+        with pytest.raises(FatalError):
+            await monitor.scan_staleness()
+
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 
     async def test_no_fatal_escalation_for_signal_pipeline_stale_exceeded(
