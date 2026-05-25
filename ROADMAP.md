@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-05-26（Python rewrite Phase 2–4 完成，canary 程式碼 ready，待首次真錢 deploy）
+> 最後更新：2026-05-26（Python rewrite Phase 2–4 完成；canary 已上線 2026-05-25，空跑待入金）
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 > 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
 
@@ -24,19 +24,24 @@
 | 4.2 | Real-money safety + executor 抽象 — hexagonal Executor ports + SafetyGuardChain（hard + calibrated guards） | ✅ 2026-05-21 |
 | 4.3 | LOCF + per-cell staleness budget（sparse p30 cells）；backtest 驗證通過 | ✅（G2 calibration audit 待 ~2026-06-10） |
 | 4.4 live infra | Bitfinex live executor + WS dispatcher + OfferRegistry FSM（event-sourcing baseline，env flag 控制，paper-preserving） | ✅ Koyeb HEALTHY |
-| 4.4 canary | `BFX_PHASE=canary` 啟用 + all-guards invariant + canary deploy config（`cells.canary.yaml` / `safety.canary.yaml`） | ✅ 程式碼完成 |
+| 4.4 canary | `BFX_PHASE=canary` 啟用 + all-guards invariant + canary deploy config（`cells.canary.yaml` / `safety.canary.yaml`） | ✅ 已上線 2026-05-25 22:31（deployment d824ee7a，HEALTHY，空跑待入金）|
 
-### 當前位置：首次 canary 上線（$150 真錢）
+### 當前位置：canary 已上線，空跑待入金
 
-canary spec context（2026-05-25）確認：WFO backtest ✅ / paper ✅ / shadow ✅ /
-venue reconcile wire+auth ✅ / PG SoT + durable staleness ✅ / canary 程式碼 ✅。
-**剩下唯一 blocker = 首次真錢 deploy**，gated on 以下 user action（非程式碼）：
+canary 真錢 daemon 於 **2026-05-25 22:31 上線**（Koyeb deployment `d824ee7a`，instance HEALTHY，
+`BFX_PHASE=canary` + `BFX_EXECUTOR=bitfinex_live` + `$150` cap）。前置已備：WFO backtest ✅ /
+paper ✅ / shadow ✅ / venue reconcile wire+auth ✅ / PG SoT ✅ / canary 程式碼 ✅。
 
-- [ ] 確認 Bitfinex API key 有 **submit/cancel funding-offer** scope（2026-05-25 reconcile 只驗了 read）
-- [ ] 帳戶有可放貸 USD 餘額
-- [ ] Koyeb 設定 real `BFX_API_KEY`/`BFX_API_SECRET` + `BFX_PHASE=canary` + `BFX_EXECUTOR=bitfinex_live` + `BFX_WS_CLIENT_ENABLED=true` + `BFX_ALLOCATION_CAP_USDT=150`
-- [ ] env 指向 canary config：`BFX_CELLS_YAML=configs/cells.canary.yaml` + `BFX_SAFETY_CONFIG=configs/safety.canary.yaml`
-- [ ] kill switch 備用：`BFX_KILL_SWITCH=true` 可即時全停
+**目前狀態：空跑（帳戶未入金）。** 零 `order_submit`、零 `order_fill`、venue offers=0 — 無財務風險。
+
+待辦（user action）：
+- [ ] **帳戶入金**可放貸 USD（≤ $150 cap）— 入金後才會實際掛單
+- [ ] 驗 submit/cancel scope（目前 smoke L2 boot 的真實 submit 回 500，疑似餘額不足；入金後可分辨是 scope 還是 balance）
+
+⚠️ **已知問題（入金前建議先解）**：空跑時 executor heartbeat 無交易活動 → 累積 stale
+（>360s threshold）→ `executor degraded` → Koyeb `/healthz` fail → daemon 重啟過一次（2026-05-25 22:39）。
+executor 在「正常但無活動」時不該被判 unhealthy 到觸發重啟 — 屬 daemon robustness bug，
+入金後若市場長時間無成交可能復發。
 
 下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
 Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。

@@ -12,6 +12,12 @@
 > · [phase4-roadmap-design](../superpowers/specs/2026-05-18-phase4-roadmap-design.md)
 > · [venue-reconcile-verify-design](../superpowers/specs/2026-05-25-venue-reconcile-verify-design.md)
 
+> **目前狀態（2026-05-26）**：canary 已於 2026-05-25 22:31 上線（Koyeb deployment `d824ee7a`，
+> HEALTHY），**空跑、帳戶未入金** — 零 order_submit / 零 fill / venue offers=0，無財務風險。
+> 本 runbook 作為 SOP 持續適用（重新 deploy / 改 config / kill / rollback）。
+> ⚠️ 已知問題：空跑時 executor heartbeat stale（>360s）→ `/healthz` fail → daemon 曾於 22:39 重啟一次；
+> 入金前建議先確認 heartbeat 邏輯（見 Troubleshooting 最後一列）。
+
 ---
 
 ## Pre-live Gate（deploy 前逐條確認）
@@ -177,6 +183,8 @@ koyeb service update bfx-funding-bot/marketfeed --env "BFX_KILL_SWITCH=true"
 | exit 1 `unknown BFX_EXECUTOR=...` | executor 值打錯 | 必須字面 `bitfinex_live` |
 | log 第一筆 submit 噴 venue permission/scope error | API key 缺 funding write/cancel scope | Kill Switch → Bitfinex 補權限 → 重新 deploy |
 | open exposure 想跑兩 cells 並行但被 cap 卡住 | `reference_amount_usdt=150` × cap 150 = 同時只能一筆 | 調低 `cells.canary.yaml` 的 `reference_amount_usdt`（commit→push→redeploy）|
+| 空跑（無成交）時 instance 反覆 unhealthy / daemon 重啟 | executor 無交易活動 → heartbeat stale >360s → `executor degraded` → Koyeb `/healthz` fail | **daemon robustness bug**：executor「正常但無活動」被判 degraded。入金後有掛單/成交活動可緩解；治本需改 executor health 判定（不把無活動當 degraded）。觀測到 2026-05-25 22:39 重啟一次 |
+| smoke L2 boot `smoke_boot_failed` CRITICAL + `offer/submit` 回 500 | 帳戶未入金 → 真實 submit 被 venue 拒（daemon 設計上 continues，非 fatal）| 入金後即消失；若入金後仍 500，才是 API scope/簽章問題 |
 
 ---
 
