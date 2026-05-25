@@ -68,8 +68,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
     axiom = _EventCapture()
     diagnostics = _EventCapture()
     probe = HealthProbe()
-    probe.record_heartbeat("safety_chain")
-    probe.record_heartbeat("executor")
+    probe.record_heartbeat("ws")
 
     ledger = PaperPositionLedger(account_id="default")  # Empty ledger — no prior state needed for this sequence (was: replay_from_axiom with empty query)
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
@@ -82,7 +81,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
             HeartbeatGuard(
                 probe=probe,
                 threshold_seconds=300,
-                watched_sub_tasks=["safety_chain", "executor"],
+                watched_sub_tasks=["ws"],
             ),
             AllocationCapGuard(ledger=ledger),
             RealizedLossGuard(enabled=False, threshold_usdt=None, source=pnl),
