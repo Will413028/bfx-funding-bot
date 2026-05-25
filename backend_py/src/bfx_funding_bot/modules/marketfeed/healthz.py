@@ -11,13 +11,17 @@ coroutine; the daemon adds it as one task in its TaskGroup. Reads from the
 shared HealthProbe — no new state.
 
 Responses:
-  200 OK            — all SUB_TASK_THRESHOLDS-listed sub-tasks have a
+  200 OK            — all LIVENESS_THRESHOLDS-listed sub-tasks have a
                       heartbeat within their threshold. Body = JSON
                       `{"status": "ok", "tasks": N}`.
-  503 Service Unavailable — at least one sub-task heartbeat is stale OR
-                      no sub-tasks are registered yet (during startup).
-                      Body = JSON `{"stale": [...]}` listing per-task age
-                      vs threshold so log scrapers can debug.
+                      Reactive activity sub-tasks (executor, safety_chain)
+                      are intentionally excluded — idle trading must never
+                      trigger a restart (k8s liveness anti-pattern).
+  503 Service Unavailable — at least one liveness sub-task heartbeat is
+                      stale OR no liveness sub-tasks are registered yet
+                      (during startup). Body = JSON `{"stale": [...]}` or
+                      `{"status": "starting", "reason": ...}` so log
+                      scrapers can debug.
 """
 from __future__ import annotations
 
@@ -31,8 +35,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
-    _DEFAULT_THRESHOLD_S,
-    SUB_TASK_THRESHOLDS,
+    LIVENESS_THRESHOLDS,
     HealthProbe,
 )
 
@@ -59,16 +62,23 @@ def make_app(
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        last_active = dict(probe.last_active_ts)  # snapshot
-        if not last_active:
+        # Liveness probe: ONLY own-loop, event-loop-driven sub-tasks count.
+        # Reactive activity (executor / safety_chain) and unknown keys are
+        # excluded — "no trading activity" must never trigger a restart
+        # (k8s liveness anti-pattern). See health_monitor.LIVENESS_THRESHOLDS.
+        now = datetime.now(UTC)
+        liveness = {
+            t: ts for t, ts in probe.last_active_ts.items()
+            if t in LIVENESS_THRESHOLDS
+        }
+        if not liveness:
             return JSONResponse(
                 status_code=503,
-                content={"status": "starting", "reason": "no_sub_tasks_registered_yet"},
+                content={"status": "starting", "reason": "no_liveness_sub_tasks_registered_yet"},
             )
-        now = datetime.now(UTC)
         stale: list[dict[str, float | int | str]] = []
-        for task, last_ts in last_active.items():
-            threshold = SUB_TASK_THRESHOLDS.get(task, _DEFAULT_THRESHOLD_S)
+        for task, last_ts in liveness.items():
+            threshold = LIVENESS_THRESHOLDS[task]
             age_s = (now - last_ts).total_seconds()
             if age_s > threshold:
                 stale.append({"task": task, "age_s": age_s, "threshold_s": threshold})
@@ -76,7 +86,7 @@ def make_app(
             return JSONResponse(status_code=503, content={"status": "degraded", "stale": stale})
         return JSONResponse(
             status_code=200,
-            content={"status": "ok", "tasks": len(last_active)},
+            content={"status": "ok", "tasks": len(liveness)},
         )
 
     if smoke_runner is not None and admin_token:
