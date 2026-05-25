@@ -1,7 +1,7 @@
 # Koyeb Paper/Shadow Deploy Runbook (Phase 4.1)
 
 > 用途：BFX_PHASE=paper 1hr smoke → L3 smoke PASS → BFX_PHASE=shadow 2-4 週 run。
-> 範圍：Phase 4.1。Phase 4.2 加入 real-money execution 後另寫 canary runbook。
+> 範圍：Phase 4.1（paper/shadow）。真錢 canary 見 [koyeb-canary.md](./koyeb-canary.md)。
 > Spec: [phase4.1-koyeb-deploy-design.md](../superpowers/specs/2026-05-18-phase4.1-koyeb-deploy-design.md)
 
 ## TL;DR — `scripts/deploy-koyeb.sh`
