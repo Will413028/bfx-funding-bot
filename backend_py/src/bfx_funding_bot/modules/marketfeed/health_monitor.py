@@ -39,6 +39,9 @@ LIVENESS_THRESHOLDS: dict[str, int] = {
     "health_check": 6 * 60,      # 5min hb + buffer
     "db_keepalive": 7 * 60,      # 5min interval + 2min buffer
     "fill_tracker": 90,          # 30s poll cadence x 3 missed
+    "periodic_reconcile": 3 * 90,  # BFX_RECONCILE_INTERVAL_S default 90s x 3 missed
+                                    # (proactive: beats unconditionally each interval, so a
+                                    # stale beat means the reconcile backbone is stuck → restart)
 }
 
 # ── Activity sub-tasks (reactive middleware) ──────────────────────────────────
