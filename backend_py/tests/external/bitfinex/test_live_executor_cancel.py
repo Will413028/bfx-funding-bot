@@ -117,6 +117,7 @@ def _make_executor(bus: DomainEventBus, http: httpx.AsyncClient) -> BitfinexLive
         bus=bus,
         phase=Phase.PAPER,
         strategy=StrategyName.RATE_PERCENTILE,
+        symbol="fUSD",
         cell="fUSD_p2",
         nonce_provider=lambda: 1700000000_000_000,
         date_provider=lambda: date(2026, 5, 23),

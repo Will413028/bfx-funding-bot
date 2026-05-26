@@ -2,10 +2,36 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import (
     build_offer_payload,
+    format_venue_decimal,
     parse_offer_response,
 )
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+
+
+def test_format_venue_decimal_no_scientific_notation() -> None:
+    # Bitfinex funding API rejects scientific-notation rate strings. str(5.531e-05)
+    # would give "5.531e-05"; the helper must emit fixed-point.
+    assert format_venue_decimal(5.531e-05) == "0.00005531"
+    assert format_venue_decimal(1.2e-06) == "0.0000012"
+    assert "e" not in format_venue_decimal(5.531e-05).lower()
+
+
+def test_format_venue_decimal_preserves_normal_values() -> None:
+    assert format_venue_decimal(0.0005) == "0.0005"
+    assert format_venue_decimal(100.0) == "100.0"
+    assert format_venue_decimal(150.0) == "150.0"
+
+
+def test_build_offer_payload_small_rate_is_fixed_point() -> None:
+    # Regression: fUST mean-reversion rate (~5.5e-05) must not serialize as
+    # scientific notation (caused live submit 500s, 2026-05-26).
+    payload = build_offer_payload(
+        symbol="fUST", amount_usdt=150.0, rate=5.531e-05, period_days=2, cid=1,
+    )
+    assert payload["rate"] == "0.00005531"
+    assert "e" not in payload["rate"].lower()
+    assert payload["symbol"] == "fUST"
 
 
 def test_build_offer_payload_structure() -> None:
