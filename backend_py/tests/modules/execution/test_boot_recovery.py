@@ -266,13 +266,13 @@ def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_reconcile_result_for_missing_claim():
+async def test_run_returns_reconcile_result_for_orphan_claim():
     """run() returns ReconcileResult; venue has one orphan offer -> n_claimed=1."""
     # _StubSession returns no rows, so local_claims will be []
     # → no release; but we want to test a release scenario.
     # Use action_grace_ms=0 (boot default) with a stale CLAIMED offer absent from venue.
-    # We can't inject rows via _StubSession.execute easily, so test the orphan-claim path
-    # instead: venue has one offer, local has none → n_claimed=1.
+    # We can't inject rows via _StubSession.execute easily, so test the orphan-claim path:
+    # venue has one offer, local has none → n_claimed=1.
     store = _StubStore()
     bus = _StubBus()
     auth = _StubAuthRest([_offer(voi="999", amount="200")])
