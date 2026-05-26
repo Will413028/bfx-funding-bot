@@ -8,6 +8,7 @@ from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
     LocalClaim,
+    ReconcileResult,
     compute_recovery_actions,
     synth_orphan_cid,
     synth_orphan_scid,
@@ -189,6 +190,124 @@ def test_action_grace_zero_preserves_boot_behaviour():
         is_simulated=False, now_ms=_NOW, grace_ms=120_000,
     )
     assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
+
+
+class _StubStore:
+    """Minimal PostgresEventStore stub — records appended events, no DB."""
+    def __init__(self):
+        self.appended: list = []
+    async def append(self, session, event):
+        self.appended.append(event)
+        return True
+
+
+class _StubSession:
+    """Async context manager stub for AsyncSession."""
+    async def execute(self, stmt):
+        return _EmptyScalars()
+    async def commit(self):
+        pass
+    async def rollback(self):
+        pass
+
+
+class _EmptyScalars:
+    def scalars(self):
+        return self
+    def all(self):
+        return []
+
+
+class _StubSessionFactory:
+    """Minimal async_sessionmaker stub — yields a _StubSession."""
+    def __call__(self):
+        return _StubSessionCtx()
+
+
+class _StubSessionCtx:
+    async def __aenter__(self):
+        return _StubSession()
+    async def __aexit__(self, *args):
+        pass
+
+
+class _StubBus:
+    def __init__(self):
+        self.published: list = []
+    async def publish(self, event):
+        self.published.append(event)
+
+
+class _StubAuthRest:
+    def __init__(self, offers):
+        self._offers = offers
+    async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+        return self._offers
+
+
+def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
+    """Construct a BootRecovery with all real stubs wired (for run() tests)."""
+    return BootRecovery(
+        store=store,
+        session_factory=session_factory,
+        auth_rest=auth_rest,
+        account_ctx=AccountContext(
+            account_id="default",
+            credentials=Credentials(api_key="k", api_secret="s"),
+            allocation_cap_usdt=Decimal("1"),
+        ),
+        deployment_environment="ci",
+        bus=bus,
+        max_attempts=1,
+        backoff_base_s=0,
+        clock=lambda: _NOW,
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_returns_reconcile_result_for_missing_claim():
+    """run() returns ReconcileResult; venue has one orphan offer -> n_claimed=1."""
+    # _StubSession returns no rows, so local_claims will be []
+    # → no release; but we want to test a release scenario.
+    # Use action_grace_ms=0 (boot default) with a stale CLAIMED offer absent from venue.
+    # We can't inject rows via _StubSession.execute easily, so test the orphan-claim path
+    # instead: venue has one offer, local has none → n_claimed=1.
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRest([_offer(voi="999", amount="200")])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    result = await rec.run()
+
+    assert isinstance(result, ReconcileResult)
+    assert result.n_claimed == 1
+    assert result.n_released == 0
+    assert result.n_failed == 0
+    assert len(bus.published) == 1
+    assert isinstance(bus.published[0], ReservationClaimed)
+
+
+@pytest.mark.asyncio
+async def test_run_accepts_and_threads_action_grace_ms():
+    """action_grace_ms=120_000 with a freshly-created offer → n_claimed=0 (grace skips it)."""
+    fresh_offer = ActiveFundingOffer(
+        venue_offer_id="888", symbol="fUSD", amount=Decimal("100"),
+        rate=0.0003, period_days=2,
+        mts_created=_NOW - 50_000,  # 50s ago — within 120s grace
+        status="ACTIVE",
+    )
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRest([fresh_offer])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, action_grace_ms=120_000)
+
+    result = await rec.run()
+
+    assert isinstance(result, ReconcileResult)
+    assert result.n_claimed == 0   # grace skipped the fresh orphan
+    assert result.n_released == 0
+    assert result.n_failed == 0
 
 
 @pytest.mark.asyncio
