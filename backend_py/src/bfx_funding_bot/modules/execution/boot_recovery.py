@@ -46,6 +46,14 @@ log = logging.getLogger(__name__)
 
 RecoveryAction = ReservationClaimed | ReservationReleased | ReservationFailed
 
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    n_claimed: int
+    n_released: int
+    n_failed: int
+
+
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
 # orphans (offers with no originating local signal).
 _RECOVERY_SCID_NS = UUID("3a000000-0000-4000-8000-000000000001")
@@ -183,6 +191,7 @@ class BootRecovery:
         is_simulated: bool = False,
         symbol: str = "fUSD",
         grace_ms: int = 120_000,
+        action_grace_ms: int = 0,
         max_attempts: int = 3,
         backoff_base_s: float = 1.0,
         clock: Callable[[], int] | None = None,
@@ -196,11 +205,12 @@ class BootRecovery:
         self._is_simulated = is_simulated
         self._symbol = symbol
         self._grace_ms = grace_ms
+        self._action_grace_ms = action_grace_ms
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._clock = clock or (lambda: int(time.time() * 1000))
 
-    async def run(self) -> None:
+    async def run(self) -> ReconcileResult:
         venue_offers = await self._fetch_offers()  # may raise -> daemon fail-safe (no trade w/o venue truth)
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
@@ -208,6 +218,7 @@ class BootRecovery:
                 venue_offers=venue_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=self._clock(), grace_ms=self._grace_ms,
+                action_grace_ms=self._action_grace_ms,
             )
             for ev in actions:
                 await self._store.append(session, ev)
@@ -223,9 +234,10 @@ class BootRecovery:
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
         log.info(
-            "boot_recovery_complete venue_offers=%d orphans_claimed=%d released=%d pending_failed=%d",
+            "reconcile_complete venue_offers=%d orphans_claimed=%d released=%d pending_failed=%d",
             len(venue_offers), n_claim, n_release, n_fail,
         )
+        return ReconcileResult(n_claimed=n_claim, n_released=n_release, n_failed=n_fail)
 
     async def _fetch_offers(self) -> list[ActiveFundingOffer]:
         """Fetch venue offers with bounded retry on TRANSIENT failures only.
