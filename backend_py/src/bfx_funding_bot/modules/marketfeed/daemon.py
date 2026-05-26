@@ -790,6 +790,7 @@ async def build_daemon(
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
+        symbol=first_cell.symbol,
         cell=first_cell.cell_id,
         http=bitfinex_http,
         bus=bus,
@@ -810,6 +811,7 @@ async def build_daemon(
             deployment_environment=env_str,
             bus=bus,
             is_simulated=spec.is_simulated,
+            symbol=first_cell.symbol,
         )
 
     fill_tracker: RestPollingFillTracker | None = None

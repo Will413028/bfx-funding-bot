@@ -26,7 +26,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_paper_default_no_ws_no_tracker() -> None:
     spec = build_executor(
         event_sink=_EventCapture(), phase=Phase.PAPER,
-        strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+        strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
     )
     assert spec.fill_tracker_enabled is False
     assert spec.ws_client_enabled is False
@@ -38,7 +38,7 @@ def test_paper_with_ws_client_enabled_raises(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
         build_executor(
             event_sink=_EventCapture(), phase=Phase.PAPER,
-            strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+            strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
         )
 
 
@@ -48,7 +48,7 @@ def test_bitfinex_live_without_api_key_raises(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
         build_executor(
             event_sink=_EventCapture(), phase=Phase.PAPER,
-            strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+            strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
         )
 
 
@@ -60,7 +60,7 @@ def test_bitfinex_live_without_ws_client_raises(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(ExecutorConfigError, match="BFX_WS_CLIENT_ENABLED"):
         build_executor(
             event_sink=_EventCapture(), phase=Phase.PAPER,
-            strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+            strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
         )
 
 
@@ -72,7 +72,7 @@ def test_bitfinex_live_without_http_or_bus_raises(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(ExecutorConfigError, match="http"):
         build_executor(
             event_sink=_EventCapture(), phase=Phase.PAPER,
-            strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+            strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
         )
 
 
@@ -85,7 +85,7 @@ def test_bitfinex_live_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     from bfx_funding_bot.modules.execution.bus import DomainEventBus
     spec = build_executor(
         event_sink=_EventCapture(), phase=Phase.PAPER,
-        strategy=StrategyName.RATE_PERCENTILE, cell="C-1",
+        strategy=StrategyName.RATE_PERCENTILE, symbol="fUSD", cell="C-1",
         http=httpx.AsyncClient(),
         bus=DomainEventBus(),
     )

@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -55,6 +56,17 @@ _OFFER_SUBMIT_PATH = "v2/auth/w/funding/offer/submit"
 _OFFER_CANCEL_PATH = "v2/auth/w/funding/offer/cancel"
 
 
+def format_venue_decimal(x: float) -> str:
+    """Serialize a money/rate value as a fixed-point decimal string for Bitfinex.
+
+    NEVER use str(float) for venue values: str(5.531e-05) == "5.531e-05"
+    (scientific notation), which Bitfinex's funding API rejects (HTTP 500).
+    Decimal(str(x)) avoids float repr artifacts; the "f" format spec forces
+    fixed-point (no exponent). e.g. 5.531e-05 -> "0.00005531", 150.0 -> "150.0".
+    """
+    return f"{Decimal(str(x)):f}"
+
+
 def build_offer_payload(
     *,
     symbol: str,
@@ -70,8 +82,8 @@ def build_offer_payload(
     return {
         "type": "LIMIT",
         "symbol": symbol,
-        "amount": str(amount_usdt),
-        "rate": str(rate),
+        "amount": format_venue_decimal(amount_usdt),
+        "rate": format_venue_decimal(rate),
         "period": period_days,
         "flags": 0,
     }
@@ -165,6 +177,7 @@ class BitfinexLiveExecutor:
         bus: DomainEventBus,
         phase: Phase,
         strategy: StrategyName,
+        symbol: str,
         cell: str,
         nonce_provider: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
@@ -175,6 +188,7 @@ class BitfinexLiveExecutor:
         self._bus = bus
         self._phase = phase
         self._strategy = strategy
+        self._symbol = symbol
         self._cell = cell
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
         self._date_provider = date_provider or (lambda: date.today())
@@ -188,7 +202,7 @@ class BitfinexLiveExecutor:
         if cid is None:
             cid = generate_cid(decision.signal_correlation_id, self._date_provider())
         payload = build_offer_payload(
-            symbol="fUSD",
+            symbol=self._symbol,
             amount_usdt=decision.offer_amount_usdt or 0.0,
             rate=decision.offer_rate or 0.0,
             period_days=decision.offer_duration_days or 2,
@@ -211,8 +225,22 @@ class BitfinexLiveExecutor:
                 content=body_bytes, headers=headers,
             )
             resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Capture the venue response body — Bitfinex returns the real error
+            # (e.g. "funding: not enough balance", bad rate format) in the body
+            # even on HTTP 500. Log payload symbol/rate/amount (never headers/keys).
+            body = e.response.text[:1000] if e.response is not None else ""
+            status = e.response.status_code if e.response is not None else None
+            log.warning(
+                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s body=%s",
+                status, payload["symbol"], payload["rate"], payload["amount"], body,
+            )
+            return SubmittedOrder(
+                cid=cid, venue_offer_id=None, status="failed",
+                raw_response={"http_status": status, "body": body},
+            )
         except httpx.HTTPError as e:
-            log.warning("bitfinex_submit_http_error err=%r", e)
+            log.warning("bitfinex_submit_network_error symbol=%s err=%r", self._symbol, e)
             return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None)
 
         parsed = parse_offer_response(resp.json())
