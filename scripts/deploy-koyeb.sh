@@ -67,9 +67,9 @@ say "Phase: $PHASE"
 
 # ---------- 0. Real-money confirmation (canary only) ----------
 if [[ "$PHASE" == "canary" ]]; then
-  warn "CANARY = REAL MONEY. bitfinex_live will place real funding offers (\$150 cap)."
+  warn "CANARY = REAL MONEY. bitfinex_live will place real funding offers (\$450 cap, fUST/USDT)."
   warn "Confirm the Pre-live Gate in docs/deploy/koyeb-canary.md is complete"
-  warn "(API key submit/cancel scope, USD balance, G2 audit)."
+  warn "(API key submit/cancel scope, funding-wallet balance, G2 audit)."
   if [[ "${BFX_CANARY_CONFIRM:-}" != "yes" ]]; then
     printf 'Type "yes" to proceed with real-money canary deploy: '
     read -r reply || die "no input (use BFX_CANARY_CONFIRM=yes for non-interactive)"
