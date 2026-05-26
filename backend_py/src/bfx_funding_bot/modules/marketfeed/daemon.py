@@ -68,6 +68,7 @@ from bfx_funding_bot.modules.execution.middleware import (
     ReservationEmittingMiddleware,
     TransientRetryMiddleware,
 )
+from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -165,6 +166,7 @@ class Daemon:
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     boot_recovery: BootRecovery | None = None
+    periodic_reconcile: PeriodicReconcile | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
@@ -212,6 +214,13 @@ class Daemon:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
                     name="ws_dispatcher",
+                )
+            # Spec 2026-05-27: periodic venue reconcile is the correctness
+            # backbone — runs live-only, converges the ledger every interval.
+            if self.periodic_reconcile is not None:
+                tg.create_task(
+                    self.periodic_reconcile.run_loop(self._stop_event),
+                    name="periodic_reconcile",
                 )
             # When _stop_event is set externally (SIGTERM), each sub-task's
             # internal loop exits cleanly; TaskGroup waits for all to drain.
@@ -801,6 +810,7 @@ async def build_daemon(
     # venue offers (BFX_FILL_TRACKER/WS gated off) -> boot_recovery stays None
     # and Daemon.run() skips it.
     boot_recovery: BootRecovery | None = None
+    periodic_reconcile: PeriodicReconcile | None = None
     if not spec.is_simulated:
         auth_rest = BitfinexAuthREST(http=bitfinex_http)
         boot_recovery = BootRecovery(
@@ -812,6 +822,23 @@ async def build_daemon(
             bus=bus,
             is_simulated=spec.is_simulated,
             symbol=first_cell.symbol,
+        )
+        reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
+        runtime_recovery = BootRecovery(
+            store=event_store,
+            session_factory=session_factory,
+            auth_rest=auth_rest,
+            account_ctx=account_ctx,
+            deployment_environment=env_str,
+            bus=bus,
+            is_simulated=spec.is_simulated,
+            symbol=first_cell.symbol,
+            action_grace_ms=120_000,
+        )
+        periodic_reconcile = PeriodicReconcile(
+            recovery=runtime_recovery,
+            probe=probe,
+            interval_s=reconcile_interval_s,
         )
 
     fill_tracker: RestPollingFillTracker | None = None
@@ -1071,6 +1098,7 @@ async def build_daemon(
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
+        periodic_reconcile=periodic_reconcile,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
