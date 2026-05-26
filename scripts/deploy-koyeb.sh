@@ -155,7 +155,7 @@ case "$PHASE" in
       --env "BFX_WS_CLIENT_ENABLED=true"
       --env 'BFX_API_KEY={{secret.bfx-api-key}}'
       --env 'BFX_API_SECRET={{secret.bfx-api-secret}}'
-      --env "BFX_ALLOCATION_CAP_USDT=150"
+      --env "BFX_ALLOCATION_CAP_USDT=450"
       --env "BFX_CELLS_YAML=/app/configs/cells.canary.yaml"
       --env "BFX_SAFETY_CONFIG=/app/configs/safety.canary.yaml"
       --env '!BFX_RUN_DURATION_HOURS'
@@ -166,8 +166,11 @@ esac
 # ---------- 5. Create or update service ----------
 say "Deploying service '$APP/$SERVICE' (phase=$PHASE, region=$REGION)..."
 if koyeb service get "$SERVICE" --app "$APP" >/dev/null 2>&1; then
-  ok "service exists — updating env vars + triggering redeploy"
-  koyeb service update "$APP/$SERVICE" "${ENV_ARGS[@]}" >/dev/null
+  ok "service exists — updating env vars + triggering redeploy (latest $GIT_BRANCH HEAD)"
+  # --git-sha '' = deploy the latest commit of the configured branch. Required
+  # because the service may be pinned to an older sha (e.g. after a --skip-build
+  # redeploy). auto-deploy-on-push stays off; manual deploys pull latest.
+  koyeb service update "$APP/$SERVICE" --git-sha '' "${ENV_ARGS[@]}" >/dev/null
 else
   ok "service missing — creating fresh"
   # type=web + port=tcp + HTTP healthz: Koyeb workers don't support health
