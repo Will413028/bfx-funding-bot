@@ -126,6 +126,27 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
         ) from None
 
+    # Phase <-> realm fail-fast guard (defense in depth; deploy-koyeb.sh sets
+    # the realm explicitly per phase, but reject obviously-wrong combos in case
+    # an env is set by hand). phase = rollout/real-money dimension;
+    # deployment_environment = data-isolation realm (prod/shadow/ci). canary is
+    # real money -> must land in prod (never shadow, which holds the Phase 4.3
+    # calibration dataset). paper/shadow are simulated -> must never land in
+    # prod (fake fills would corrupt real-money analytics). ci is the universal
+    # test/dev realm and is always allowed.
+    if phase_str == "canary" and deployment_environment is DeploymentEnvironment.SHADOW:
+        raise ValueError(
+            "BFX_PHASE=canary (real money) must not run in the shadow realm "
+            "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
+            "calibration dataset. Use prod (or ci for tests)."
+        )
+    if phase_str in {"paper", "shadow"} and deployment_environment is DeploymentEnvironment.PROD:
+        raise ValueError(
+            f"BFX_PHASE={phase_str} (simulated) must not run in the prod realm "
+            "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money analytics. "
+            "Use shadow (or ci for tests)."
+        )
+
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
     run_duration_h: int | None
     if run_duration:

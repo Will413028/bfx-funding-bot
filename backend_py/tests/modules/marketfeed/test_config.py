@@ -68,6 +68,65 @@ def test_load_config_accepts_canary_phase(tmp_path: Path, monkeypatch: pytest.Mo
     assert cfg.phase == "canary"
 
 
+def test_canary_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Real-money canary must never write to the shadow (simulated) realm —
+    it would pollute the Phase 4.3 calibration dataset. Regression for the
+    residual-env config drift (canary deploy inherited BFX_DEPLOYMENT_ENV=shadow)."""
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match=r"canary.*must not.*shadow"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_canary_phase_accepts_prod_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    cfg = load_config(cells_yaml_path=yaml_path)
+
+    assert cfg.phase == "canary"
+    assert cfg.deployment_environment == DeploymentEnvironment.PROD
+
+
+@pytest.mark.parametrize("sim_phase", ["paper", "shadow"])
+def test_simulated_phase_rejects_prod_realm(
+    sim_phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Simulated phases must never write to the prod (real-money) realm —
+    fake fills would corrupt prod analytics."""
+    monkeypatch.setenv("BFX_PHASE", sim_phase)
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match=r"simulated.*must not.*prod"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_shadow_phase_accepts_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BFX_PHASE", "shadow")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
+    monkeypatch.delenv("BFX_CELLS", raising=False)
+    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    cfg = load_config(cells_yaml_path=yaml_path)
+
+    assert cfg.deployment_environment == DeploymentEnvironment.SHADOW
+
+
 def test_load_config_rejects_unknown_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "bogus")
     monkeypatch.setenv("DATABASE_URL", "x")
