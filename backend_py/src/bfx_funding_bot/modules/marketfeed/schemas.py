@@ -77,6 +77,7 @@ class HealthTarget(StrEnum):
     SAFETY_CHAIN = "safety_chain"
     FILL_TRACKER = "fill_tracker"
     LEDGER = "ledger"
+    RECONCILE = "reconcile"
 
 
 class HealthStatus(StrEnum):

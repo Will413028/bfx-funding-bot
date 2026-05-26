@@ -66,8 +66,31 @@ async def test_divergence_on_periodic_release_sets_degraded():
 
     await asyncio.gather(pr.run_loop(stop), _stop_soon())
     assert any(
-        t == HealthTarget.BITFINEX_REST and s == HealthStatus.DEGRADED
+        t == HealthTarget.RECONCILE and s == HealthStatus.DEGRADED
         for (t, s, _f) in probe.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_divergence_clears_on_clean_tick():
+    """RECONCILE goes DEGRADED on drift tick, then HEALTHY on the next clean tick."""
+    probe = _FakeProbe()
+    # tick 1: drift (n_claimed=2), tick 2+: clean (all zeros)
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 2, 0), ReconcileResult(0, 0, 0)])
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=0.005, max_consecutive_failures=3,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.04)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+    reconcile_updates = [(s) for (t, s, _f) in probe.updates if t == HealthTarget.RECONCILE]
+    assert reconcile_updates, "expected at least one RECONCILE update"
+    assert reconcile_updates[-1] == HealthStatus.HEALTHY, (
+        f"expected last RECONCILE update to be HEALTHY, got {reconcile_updates}"
     )
 
 

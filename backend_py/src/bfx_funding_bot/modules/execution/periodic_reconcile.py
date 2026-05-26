@@ -5,8 +5,10 @@ stream is a latency optimization; this loop is what GUARANTEES the ledger
 converges to venue truth, so the bot can never get permanently stuck at the
 allocation cap when the stream silently breaks.
 
-- Divergence: a release on a periodic (non-boot) run means the stream missed an
-  event -> BITFINEX_REST DEGRADED + WARN so the silent breakage surfaces.
+- Divergence: a release/claim on a periodic (non-boot) run means the stream
+  missed an event -> RECONCILE DEGRADED (self-clears on the next clean tick) +
+  WARN so the silent breakage surfaces. This loop FULLY OWNS HealthTarget.RECONCILE
+  and does NOT touch HealthTarget.BITFINEX_REST (owned by the daemon REST poller).
 - Fail-safe: consecutive venue-fetch failures -> EXECUTOR DOWN so AuthHealthGuard
   blocks new offers (never trade on a stale ledger). Cleared on recovery.
 """
@@ -48,6 +50,7 @@ class PeriodicReconcile:
         self._max_failures = max_consecutive_failures
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
+        self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
 
     async def run_loop(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
@@ -88,9 +91,16 @@ class PeriodicReconcile:
                 "— WS lifecycle path missed events",
                 result.n_released, result.n_claimed, result.n_failed,
             )
+            self._divergence_flagged = True
             self._probe.update(
-                HealthTarget.BITFINEX_REST, HealthStatus.DEGRADED,
+                HealthTarget.RECONCILE, HealthStatus.DEGRADED,
                 error_message=(
                     f"reconcile drift released={result.n_released} claimed={result.n_claimed}"
                 ),
+            )
+        elif self._divergence_flagged:
+            self._divergence_flagged = False
+            self._probe.update(
+                HealthTarget.RECONCILE, HealthStatus.HEALTHY,
+                error_message="reconcile drift cleared",
             )
