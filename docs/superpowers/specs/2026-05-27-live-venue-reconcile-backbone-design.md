@@ -74,8 +74,8 @@ broke, nothing converged. Best practice forbids this.
 | Venue = source of truth; local ledger = projection that must converge | Periodic REST snapshot reconcile is the backbone |
 | **Stream is a latency optimization that is allowed to fail** | WS `foc` path is secondary; correctness never depends on it |
 | Snapshot + incremental sync; re-sync on **seq gap / reconnect**, not only a timer | Timer-driven reconcile **plus** WS-reconnect/seq-gap-triggered reconcile |
-| Fail-safe (fail-closed) on uncertainty | Repeated venue-fetch failure → executor DEGRADED → block new offers |
-| Divergence observability | Each reconcile emits released/claimed counts; non-zero on a periodic run → DEGRADED + WARN |
+| Fail-safe (fail-closed) on uncertainty | Repeated venue-fetch failure → executor `DOWN` → block new offers (only `DOWN` blocks via `AuthHealthGuard`; cleared on recovery) |
+| Divergence observability | Each reconcile emits released/claimed counts; non-zero on a periodic run → dedicated self-clearing `HealthTarget.RECONCILE` `DEGRADED` + WARN |
 | Reconcile must not race live placement | Grace window on reconcile actions (see below) |
 | Idempotent application | registry RELEASED dedup + `venue_seq` dedup + deterministic synthetic cids |
 
@@ -111,8 +111,8 @@ the WS fix is not on the critical path.
 |---|---|---|
 | **Periodic reconcile (NEW)** | new `modules/execution/periodic_reconcile.py` (or daemon sub-task) | Interval loop reusing `BootRecovery` fetch/persist/publish + `compute_recovery_actions`. Iterates the **distinct symbols across all cells** (canary: `fUST`). Triggers: (a) every `BFX_RECONCILE_INTERVAL_S`; (b) immediate on WS reconnect / `venue_seq` gap. |
 | **Grace on reconcile actions** | `boot_recovery.py::compute_recovery_actions` | Add a per-direction grace param applied to `orphan→ReservationClaimed` and `missing→ReservationReleased` (only act on offers stable at venue / claims older than `grace_ms`). `PENDING→FAILED` already grace-guarded. **Boot passes `action_grace_ms=0`** (no concurrent placement → reconcile fully and immediately, current behaviour preserved); **periodic runtime passes `action_grace_ms>0`** so it never races an offer mid-placement. |
-| **Runtime fail-safe** | periodic reconcile + executor/safety chain | Consecutive venue-fetch failures → emit executor `DEGRADED` health → `AllocationCapGuard`/safety chain blocks new offers until reconcile recovers. Mirrors boot fail-safe (which fails startup). |
-| **Divergence signal** | periodic reconcile | Structured log per run (`released`, `orphans_claimed`, `pending_failed`). A non-zero release on a **periodic** (non-boot) run means the WS stream silently missed an event → health `DEGRADED` + WARN. |
+| **Runtime fail-safe** | periodic reconcile + executor/safety chain | Consecutive venue-fetch failures → emit executor `DOWN` health → `AuthHealthGuard` blocks new offers until reconcile recovers. (`AuthHealthGuard` blocks only on `DOWN`; `DEGRADED` is a soft warn that does NOT block — so the fail-safe must use `DOWN`.) Cleared back to `HEALTHY` on recovery via an ownership flag so it never stomps another writer's `DOWN`. Mirrors boot fail-safe (which fails startup). |
+| **Divergence signal** | periodic reconcile | Structured log per run (`released`, `orphans_claimed`, `pending_failed`). A non-zero release on a **periodic** (non-boot) run means the WS stream silently missed an event → a dedicated, loop-owned `HealthTarget.RECONCILE` goes `DEGRADED` + WARN, and **self-clears to `HEALTHY` on the next clean tick** (kept off `BITFINEX_REST` to avoid colliding with the daemon's REST health poller). |
 | **daemon wiring** | `daemon.py` (TaskGroup, ~line 188 / 800-1073) | Register periodic reconcile as a live-only sub-task alongside `ws_dispatcher`. New env `BFX_RECONCILE_INTERVAL_S` (default 90). |
 | **WS `foc` parser fix** | `auth_ws.py::_parse_foc` | Align indices to verified layout: `symbol=d[1]`, `mts_create=d[2]`, `mts_update=d[3]`, `amount=d[4]`, `status=d[10]`, `rate=d[14]`, `period=d[15]`; tolerant None-guard on `rate`/`period`. |
 | **WS `fcn` parser** | `auth_ws.py::_parse_fcn` | Drop the unsound `offer_id_meta=d[14]` mapping; `fcn` becomes informational (lifecycle no longer depends on it). |
@@ -135,7 +135,7 @@ $300). Enabling fill_tracker as a faster detection layer is a deferred option.
   Released.
 - **WS fully dead (the incident):** reconcile is the sole convergence path →
   still correct, interval-latency; divergence signal fires.
-- **Venue unreachable:** reconcile fetch fails repeatedly → executor DEGRADED →
+- **Venue unreachable:** reconcile fetch fails repeatedly → executor `DOWN` →
   new offers blocked (fail-safe).
 
 ## Error handling
@@ -157,7 +157,7 @@ $300). Enabling fill_tracker as a faster detection layer is a deferred option.
 | unit — reconcile | existing `compute_recovery_actions` tests + **grace both directions** (orphan within grace not claimed; missing past grace released; release of long-stale claim) |
 | unit — WS parser | rebuild `foc`/`fcn` fixtures from **real payloads**; fast-contract (parses, fields/types correct) + gated-live-contract (`@pytest.mark.integration`, venue drift) |
 | unit — dispatcher | `foc EXECUTED → OrderFilled` |
-| unit — periodic loop | timer fires reconcile; consecutive failure → DEGRADED; WS reconnect / seq-gap → immediate reconcile (fakes) |
+| unit — periodic loop | timer fires reconcile; consecutive failure → `EXECUTOR DOWN` (+ self-clear on recovery); divergence → `RECONCILE DEGRADED` (+ self-clear on clean tick). (WS reconnect / seq-gap-triggered reconcile → Plan 2) |
 | **integration (reproduces incident)** | **WS silent (no events) → periodic reconcile converges ledger**; reserved drops from cap, new offers resume |
 
 Commit gate: `cd backend_py && uv run pytest -m "not integration"` green + mypy +
