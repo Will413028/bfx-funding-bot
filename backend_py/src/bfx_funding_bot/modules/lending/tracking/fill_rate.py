@@ -5,10 +5,10 @@ See docs/superpowers/specs/2026-05-26-g13-fill-rate-learning-design.md.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field  # noqa: F401
+from dataclasses import dataclass, field
 from decimal import Decimal
 
-from bfx_funding_bot.modules.candles.schemas import FundingCandle  # noqa: F401
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 # Spread buckets in basis points of relative spread (1% = 100 bps), non-uniform,
 # denser near 0. Each value is a bucket midpoint; the learner evaluates a
@@ -43,3 +43,70 @@ def _percentile(sorted_values: list[int], q: float) -> int | None:
         return None
     rank = max(1, math.ceil(q / 100 * len(sorted_values)))
     return sorted_values[rank - 1]
+
+
+@dataclass
+class _Acc:
+    filled: int = 0
+    total: int = 0
+    ttfs: list[int] = field(default_factory=list)
+
+
+class FillRateLearner:
+    """Pure aggregator: candles → list[BucketStat]. No DB."""
+
+    def __init__(
+        self,
+        *,
+        bucket_grid: list[int] | None = None,
+        horizons: list[int] | None = None,
+    ) -> None:
+        self.bucket_grid = list(bucket_grid) if bucket_grid is not None else list(BUCKET_GRID_BPS)
+        self.horizons = list(horizons) if horizons is not None else list(HORIZONS_H)
+
+    def learn(self, candles: list[FundingCandle]) -> list[BucketStat]:
+        sorted_c = sorted(candles, key=lambda c: c.mts)
+        acc: dict[tuple[int, int], _Acc] = {}
+
+        for idx, c in enumerate(sorted_c):
+            ref = c.close
+            if ref is None or ref <= 0:
+                continue
+            for horizon_h in self.horizons:
+                window_end = c.mts + horizon_h * _MS_PER_HOUR
+                # Window = candles strictly after t, up to t+H (gap-safe, by mts).
+                window: list[FundingCandle] = []
+                j = idx + 1
+                while j < len(sorted_c) and sorted_c[j].mts <= window_end:
+                    if sorted_c[j].mts > c.mts:
+                        window.append(sorted_c[j])
+                    j += 1
+                if not window:
+                    continue
+                for bps in self.bucket_grid:
+                    offer = ref * (Decimal(1) + Decimal(bps) / Decimal(10000))
+                    hit_mts: int | None = None
+                    for w in window:
+                        if w.high is not None and w.high >= offer:
+                            hit_mts = w.mts
+                            break
+                    a = acc.setdefault((horizon_h, bps), _Acc())
+                    a.total += 1
+                    if hit_mts is not None:
+                        a.filled += 1
+                        a.ttfs.append(hit_mts - c.mts)
+
+        out: list[BucketStat] = []
+        for (horizon_h, bps), a in sorted(acc.items()):
+            fill_prob = Decimal(a.filled) / Decimal(a.total) if a.total else Decimal(0)
+            ttfs_sorted = sorted(a.ttfs)
+            out.append(BucketStat(
+                horizon_h=horizon_h,
+                spread_bucket_bps=bps,
+                fill_prob=fill_prob,
+                n_samples=a.total,
+                ttf_p50_ms=_percentile(ttfs_sorted, 50.0),
+                ttf_p90_ms=_percentile(ttfs_sorted, 90.0),
+                mean_ttf_ms=(sum(a.ttfs) // len(a.ttfs)) if a.ttfs else None,
+            ))
+        return out
