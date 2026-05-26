@@ -824,6 +824,10 @@ async def build_daemon(
             symbol=first_cell.symbol,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
+        if reconcile_interval_s <= 0:
+            raise ValueError(
+                f"BFX_RECONCILE_INTERVAL_S must be > 0, got {reconcile_interval_s}"
+            )
         runtime_recovery = BootRecovery(
             store=event_store,
             session_factory=session_factory,
