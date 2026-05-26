@@ -92,8 +92,13 @@ def compute_recovery_actions(
     is_simulated: bool,
     now_ms: int,
     grace_ms: int,
+    action_grace_ms: int = 0,
 ) -> list[RecoveryAction]:
-    """Pure reconciliation: produce the ordered list of domain events to append."""
+    """Pure reconciliation: produce the ordered list of domain events to append.
+
+    action_grace_ms gates the orphan/missing directions so a runtime reconcile
+    never acts on an offer/claim still mid-placement (boot passes 0 = immediate).
+    """
     venue_by_voi = {o.venue_offer_id: o for o in venue_offers}
     claimed_by_voi = {
         c.venue_offer_id: c
@@ -104,21 +109,27 @@ def compute_recovery_actions(
 
     # orphan: venue has it, local CLAIMED set doesn't -> claim (reserved += size)
     for voi, offer in venue_by_voi.items():
-        if voi not in claimed_by_voi:
-            actions.append(ReservationClaimed(
-                cid=synth_orphan_cid(voi), venue_offer_id=voi,
-                size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
-                account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
-            ))
+        if voi in claimed_by_voi:
+            continue
+        if (now_ms - offer.mts_created) < action_grace_ms:
+            continue  # too fresh — local claim may still be committing
+        actions.append(ReservationClaimed(
+            cid=synth_orphan_cid(voi), venue_offer_id=voi,
+            size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
+            account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+        ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
     for voi, claim in claimed_by_voi.items():
-        if voi not in venue_by_voi:
-            actions.append(ReservationReleased(
-                cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
-                reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
-                account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
-            ))
+        if voi in venue_by_voi:
+            continue
+        if (now_ms - claim.occurred_at_ms) < action_grace_ms:
+            continue  # too fresh — venue snapshot may lag the just-placed offer
+        actions.append(ReservationReleased(
+            cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
+            reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
+            account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+        ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
     for c in local_claims:
