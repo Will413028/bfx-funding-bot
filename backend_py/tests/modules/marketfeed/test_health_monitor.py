@@ -371,3 +371,15 @@ class TestSubTaskThresholds:
         # Unknown sub-tasks fall back to _DEFAULT_THRESHOLD_S (60s).
         assert SUB_TASK_THRESHOLDS["health_check"] == 6 * 60
         assert SUB_TASK_THRESHOLDS["db_keepalive"] == 7 * 60
+
+    def test_periodic_reconcile_registered_as_liveness(self):
+        from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
+        from bfx_funding_bot.modules.marketfeed.health_monitor import (
+            ACTIVITY_THRESHOLDS,
+            LIVENESS_THRESHOLDS,
+        )
+        # proactive task → liveness, not activity; threshold must exceed the default
+        # 90s interval so steady-state beats are never flagged stale.
+        assert PeriodicReconcile.SUB_TASK in LIVENESS_THRESHOLDS
+        assert PeriodicReconcile.SUB_TASK not in ACTIVITY_THRESHOLDS
+        assert LIVENESS_THRESHOLDS[PeriodicReconcile.SUB_TASK] > 90
