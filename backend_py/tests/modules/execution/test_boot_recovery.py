@@ -134,6 +134,51 @@ def _boot_recovery(auth_rest, **kw):
     )
 
 
+def test_action_grace_skips_recent_orphan():
+    # offer created 50s before now; action_grace_ms=120s → too fresh to claim
+    offer = ActiveFundingOffer(
+        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
+        rate=0.0003, period_days=2, mts_created=_NOW - 50_000, status="ACTIVE",
+    )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+    )
+    assert acts == []
+
+
+def test_action_grace_skips_recent_missing_claim():
+    claim = _claim(cid=1, voi="555", state=RegistryState.CLAIMED, occurred=_NOW - 50_000)
+    acts = compute_recovery_actions(
+        venue_offers=[], local_claims=[claim], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+    )
+    assert acts == []
+
+
+def test_action_grace_releases_stale_missing_claim():
+    claim = _claim(cid=1, voi="555", state=RegistryState.CLAIMED, occurred=_NOW - 300_000)
+    acts = compute_recovery_actions(
+        venue_offers=[], local_claims=[claim], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+    )
+    assert len(acts) == 1
+    assert isinstance(acts[0], ReservationReleased)
+    assert acts[0].venue_offer_id == "555"
+
+
+def test_action_grace_zero_preserves_boot_behaviour():
+    offer = ActiveFundingOffer(
+        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
+        rate=0.0003, period_days=2, mts_created=_NOW - 1, status="ACTIVE",
+    )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+    )
+    assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
+
+
 @pytest.mark.asyncio
 async def test_fetch_offers_does_not_retry_4xx():
     auth = _FailingAuthRest(status_code=401)
