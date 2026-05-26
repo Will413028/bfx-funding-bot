@@ -167,6 +167,18 @@ def test_action_grace_releases_stale_missing_claim():
     assert acts[0].venue_offer_id == "555"
 
 
+def test_action_grace_claims_stale_orphan():
+    offer = ActiveFundingOffer(
+        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
+        rate=0.0003, period_days=2, mts_created=_NOW - 300_000, status="ACTIVE",
+    )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+    )
+    assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
+
+
 def test_action_grace_zero_preserves_boot_behaviour():
     offer = ActiveFundingOffer(
         venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
