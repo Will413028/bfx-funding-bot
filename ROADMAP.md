@@ -258,7 +258,8 @@ marketfeed/service.go (C1)
 
 - [x] G11 Idle Capital Urgency（`e5825aa`）
 - [x] G12 FRR Trend Tracking — FRR EMA 趨勢判斷（`03f63ad`）
-- [ ] G13 Historical Fill Rate Learning — 數據驅動定價
+- [x] G13 Historical Fill Rate Learning — 數據驅動定價（candle path-crossing 經驗 fill 模型 + `fill_rate_stats` 表 + backtest engine 整合；spec `docs/superpowers/specs/2026-05-26-g13-fill-rate-learning-design.md`）
+  - ⚠️ 啟用待辦：① 刷新本地 `.env` Neon 密碼後 `cd backend_py && uv run alembic upgrade head`（建表）② 跑 `uv run python -m scripts.learn_fill_rate`（填 stats）③ 把 `FillRateModel` 接進 WFO/matrix runner（目前 engine 已能消費 empirical，但 matrix.py 尚未載入 stats → 實際仍 fallback linear）
 - [x] G14 Auto-Renew Re-pricing — 到期走 pipeline 重新定價（`12829a2`）
 - [x] G15 Smart Wall Positioning — price just below wall（`03f63ad`）
 - [x] G16 Order Book Gap Detection — book 空隙報價（`12829a2`）
@@ -343,13 +344,13 @@ marketfeed/service.go (C1)
 | ~~Phase D（策略決策層）~~ | ~~13 項~~ ✅ |
 | ~~Phase E（執行層 + Worker）~~ | ~~8 項~~ ✅ |
 | ~~Phase F（前端）~~ | ~~16 項~~ ✅ |
-| Phase G（策略行為增強） | 40/41 完成，**1 項待開發**（G13） |
+| Phase G（策略行為增強） | 41/41 完成 ✅（G13 已實作，待啟用見上） |
 | ~~Phase H（運維 — Axiom）~~ | ❌ Axiom 已 retire（Phase 3c），H1–H3 全作廢，改用 PG event store |
 | ~~Phase I（CI/CD）~~ | ~~I1+I2~~ ✅ |
 | ~~Phase J（Auth 強化）~~ | ~~J1+J2+J3+J5+J6~~ ✅ |
 | ~~Phase K（前端測試）~~ | ~~K2~~ ✅ |
 | ~~Phase L（UX 強化）~~ | ~~L1+L2+L3+L4+L5~~ ✅ |
-| **Go-era 待開發合計** | **1 項**（G13；現行軌道待辦見上方「現行軌道」節） |
+| **Go-era 待開發合計** | **0 項** ✅（G13 已實作；現行軌道待辦見上方「現行軌道」節） |
 
 ## 依賴關係
 
@@ -368,9 +369,9 @@ Phase A ✅ 全部完成
     ├── A5 (Execution) ✅ → Phase E ✅ 全部完成
     │                      │
     │                      ▼
-    │                  Phase G（40/41 完成）
+    │                  Phase G（41/41 完成 ✅）
     │                      ├── G0-G16 ✅ + GT1-6 ✅ + M1-M8 ✅ + S1-S10 ✅
-    │                      └── 待開發：G13
+    │                      └── G13 ✅（待啟用見「待開發功能」節）
     │
     └── All backend APIs ready
          │
@@ -443,4 +444,4 @@ Phase A ✅ 全部完成
 - [x] S7 Per-Currency Parameters
 - [x] S9 Rolling Period Ladder
 - [x] M7 Temporal Laddering
-- [ ] G13 Historical Fill Rate Learning
+- [x] G13 Historical Fill Rate Learning
