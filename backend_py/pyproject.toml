@@ -88,7 +88,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 markers = [
     "integration: marks tests requiring network/live services (deselect with '-m \"not integration\"')",
     "property: hypothesis-based property tests; CI default 100 iter, nightly 1k, pre-ship manual 10k",
