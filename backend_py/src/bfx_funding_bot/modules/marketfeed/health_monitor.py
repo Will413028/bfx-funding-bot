@@ -163,6 +163,10 @@ class HealthMonitor:
         self.heartbeat_interval_s = heartbeat_interval_s
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        # Last-emitted staleness severity per activity-class sub-task, for
+        # transition-only emit (see scan_staleness). Cleared on recovery so a
+        # later re-staleness re-emits the healthy→degraded transition.
+        self._last_activity_severity: dict[str, str] = {}
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -245,7 +249,12 @@ class HealthMonitor:
         for sub_task, last_ts in self.probe.last_active_ts.items():
             threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
             age_s = (now - last_ts).total_seconds()
+            is_activity = sub_task in ACTIVITY_THRESHOLDS
             if age_s <= threshold:
+                # Recovered (or never stale): reset transition state so a later
+                # re-staleness re-emits the healthy→degraded transition.
+                if is_activity:
+                    self._last_activity_severity.pop(sub_task, None)
                 continue
 
             severity = "down" if age_s > 2 * threshold else "degraded"
@@ -254,6 +263,17 @@ class HealthMonitor:
                 "severity": severity,
                 "age_s": age_s,
             })
+
+            # Activity-class (reactive executor/safety_chain) sub-tasks emit only
+            # on a severity TRANSITION. A persistently stale executor in an idle
+            # market would otherwise spam one WARN per scan (~30s) — pure noise,
+            # since these never escalate to FatalError. Liveness sub-tasks still
+            # emit every scan: they escalate at 3× threshold (restart), so the
+            # repeated emits are short-lived and show the climbing age.
+            if is_activity:
+                if self._last_activity_severity.get(sub_task) == severity:
+                    continue
+                self._last_activity_severity[sub_task] = severity
 
             # Emit BEFORE potential fatal escalation so the event is persisted before raise
             level = Level.ERROR if severity == "down" else Level.WARN
