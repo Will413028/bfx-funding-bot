@@ -197,6 +197,61 @@ class TestStalenessScan:
         assert fake_sink.emitted[0]["payload"]["check_target"] == "executor"
         assert fake_sink.emitted[0]["payload"]["status"] == "down"
 
+    async def test_activity_subtask_emits_only_on_transition(self, monitor, fake_sink):
+        """Activity-class (executor/safety_chain) persistently stale at the SAME
+        severity emits ONE WARN (the healthy→degraded transition), not one per
+        scan. Kills the ~30s WARN noise in idle markets while still reporting the
+        ongoing staleness in the returned list every scan."""
+        # 8min = 480s; executor threshold 360s, 2× = 720s → stays "degraded".
+        monitor.probe.last_active_ts["executor"] = (
+            datetime.now(UTC) - timedelta(minutes=8)
+        )
+        for _ in range(3):
+            result = await monitor.scan_staleness()
+
+        # Staleness still surfaced to callers on every scan.
+        assert result[0]["sub_task"] == "executor"
+        assert result[0]["severity"] == "degraded"
+        # But only the transition emitted — 1 event, not 3.
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == "executor"
+        assert fake_sink.emitted[0]["payload"]["status"] == "degraded"
+
+    async def test_activity_subtask_re_emits_on_severity_change(self, monitor, fake_sink):
+        """A severity transition (degraded→down) re-emits even for activity-class."""
+        monitor.probe.last_active_ts["safety_chain"] = (
+            datetime.now(UTC) - timedelta(minutes=8)  # 480s < 2× (720s) → degraded
+        )
+        await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[-1]["payload"]["status"] == "degraded"
+
+        monitor.probe.last_active_ts["safety_chain"] = (
+            datetime.now(UTC) - timedelta(minutes=13)  # 780s > 2× (720s) → down
+        )
+        await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 2
+        assert fake_sink.emitted[-1]["payload"]["status"] == "down"
+
+    async def test_activity_subtask_re_emits_after_recovery(self, monitor, fake_sink):
+        """After a fresh heartbeat (recovery), a new staleness re-emits the
+        healthy→degraded transition (transition state is reset on recovery)."""
+        monitor.probe.last_active_ts["executor"] = (
+            datetime.now(UTC) - timedelta(minutes=8)
+        )
+        await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 1
+
+        monitor.probe.record_heartbeat("executor")  # recover → fresh
+        await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 1  # fresh, no emit
+
+        monitor.probe.last_active_ts["executor"] = (
+            datetime.now(UTC) - timedelta(minutes=8)
+        )
+        await monitor.scan_staleness()
+        assert len(fake_sink.emitted) == 2  # transition again → re-emit
+
     async def test_liveness_subtask_still_escalates_fatal(self, monitor, fake_sink):
         """A liveness sub-task (ws, threshold 90s) past 3× (270s) still raises,
         and emits the observability event before raising."""
