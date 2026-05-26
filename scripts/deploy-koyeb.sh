@@ -134,16 +134,23 @@ case "$PHASE" in
       --env '!BFX_KILL_SWITCH'
     )
     if [[ "$PHASE" == "paper" ]]; then
-      ENV_ARGS+=(--env "BFX_RUN_DURATION_HOURS=1")
+      # paper = throwaway 1h smoke -> ci realm (short retention, isolated from
+      # the shadow calibration dataset). See config.py phase<->realm guard.
+      ENV_ARGS+=(--env "BFX_RUN_DURATION_HOURS=1" --env "BFX_DEPLOYMENT_ENV=ci")
     else
-      ENV_ARGS+=(--env '!BFX_RUN_DURATION_HOURS')
+      # shadow = simulated long-run calibration dataset -> shadow realm.
+      ENV_ARGS+=(--env '!BFX_RUN_DURATION_HOURS' --env "BFX_DEPLOYMENT_ENV=shadow")
     fi
     ;;
   canary)
     # REAL MONEY. Values match docs/deploy/koyeb-canary.md (verified against
     # registry.py / daemon.py / config.py). bitfinex_live requires key+secret
     # and BFX_WS_CLIENT_ENABLED=true or build_executor raises ExecutorConfigError.
+    # Set realm explicitly: canary is real money -> prod realm (NOT shadow; the
+    # config.py guard rejects canary+shadow). Setting it here prevents the
+    # residual-env drift that left a prior canary deploy on BFX_DEPLOYMENT_ENV=shadow.
     ENV_ARGS+=(
+      --env "BFX_DEPLOYMENT_ENV=prod"
       --env "BFX_EXECUTOR=bitfinex_live"
       --env "BFX_WS_CLIENT_ENABLED=true"
       --env 'BFX_API_KEY={{secret.bfx-api-key}}'

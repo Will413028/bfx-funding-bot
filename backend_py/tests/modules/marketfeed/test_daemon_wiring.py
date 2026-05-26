@@ -32,16 +32,29 @@ phase3b_wfo_results_ref: x
     return yaml_path
 
 
-@pytest.mark.parametrize("env_value", ["prod", "shadow", "ci"])
+# Valid (phase, realm) deployable combos — the config.py phase<->realm guard
+# rejects canary+shadow and simulated+prod, so pair each realm value with a
+# phase that can actually ship it. Still exercises all 3 realm values flowing
+# through to the emit sink (the invariant under test).
+@pytest.mark.parametrize(
+    "phase,env_value",
+    [("paper", "ci"), ("shadow", "shadow"), ("canary", "prod")],
+)
 @pytest.mark.asyncio
 async def test_build_daemon_emit_and_query_env_symmetric(
+    phase: str,
     env_value: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("BFX_PHASE", phase)
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", env_value)
+    if phase == "canary":
+        # canary boot requires all safety guards enabled (assert_canary_guard_invariant).
+        # Executor stays paper (BFX_EXECUTOR unset) — fine for an env-wiring unit test.
+        safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
+        monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
     # Phase 4.4c: file-based sqlite so event-store tables created below are
     # visible to build_daemon's engine (from_snapshot uses them at boot).
