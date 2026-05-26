@@ -1,30 +1,37 @@
 # Phase 4.4 canary cells -- MINIMAL subset for first real-money run.
 #
-# Only the 2 highest-WFO-margin MeanReversion cells (fUSD x a30: margin 0.199,
-# fUSD x p2: margin 0.188). Both non-sparse (no LOCF staleness override needed).
-# RatePercentile is disqualified under LOCF (Task 10 sweep) -- excluded.
-# p30 / fUST cells excluded for the first canary -- add after pipeline proves out.
+# CURRENCY: fUST (USDT) only. The operator funded the account with USDT, so the
+# canary lends fUST. The 2 highest-WFO-margin MeanReversion fUST cells (both in
+# QUALIFIED_PAIRS: mean_reversion fUST_a30, fUST_p2). RatePercentile is
+# disqualified under LOCF (Task 10 sweep) -- excluded. p30 / fUST_p30 excluded.
+#
+# To ALSO lend fUSD later: the allocation cap is currently a single GLOBAL pool
+# (ledger.current_exposure sums all currencies), so adding fUSD cells now would
+# let USD and USDT share one cap -- NOT independent. Per-currency independent
+# allocation is a separate feature (see docs/superpowers/specs/ per-currency
+# allocation design). Add fUSD cells only after that ships AND USD is funded.
 #
 # Params identical to configs/cells.yaml (do not re-tune here).
 # Select at deploy time: BFX_CELLS_YAML=configs/cells.canary.yaml
 #
-# Sizing note: reference_amount_usdt=150 with BFX_ALLOCATION_CAP_USDT=150 means
-# at most one $150 offer open at a time across both cells (cap-bound). Lower
-# reference_amount_usdt to run both concurrently within the cap.
+# Sizing note (first real-money validation run): reference_amount_usdt=150 with
+# BFX_ALLOCATION_CAP_USDT=450 -> up to ~3 concurrent $150 positions, bounded
+# first-run downside. Ramp the cap up after a few clean offer->fill->renew->close
+# cycles validate the live pipeline.
 
 cells:
   - strategy: mean_reversion
-    symbol: fUSD
+    symbol: fUST
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4796, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.9915, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
-    symbol: fUSD
+    symbol: fUST
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.9543, ema_alpha: 0.01183}
     reference_amount_usdt: 150.0
 
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
