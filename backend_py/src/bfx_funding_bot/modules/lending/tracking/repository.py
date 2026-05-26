@@ -24,6 +24,11 @@ async def upsert_fill_rate_stats(
     candle_range_end_ms: int,
     learned_at: datetime,
 ) -> None:
+    """Upsert stats by composite PK. SQLITE-ONLY (uses the sqlite ON CONFLICT
+    dialect) — exercised by the unit tests. Production persistence goes through
+    scripts/learn_fill_rate.py's dialect-agnostic delete-then-insert, NOT this.
+    Do not call against Postgres without switching to a pg/dialect-neutral upsert.
+    """
     if not stats:
         return
     values = [
