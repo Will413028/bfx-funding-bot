@@ -10,6 +10,7 @@ from bfx_funding_bot.modules.backtest.sortino import (
 )
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 
 def _resolve_market_rate(candle: FundingCandle, source: str) -> Decimal | None:
@@ -22,12 +23,24 @@ def _apply_friction(
     decision: LendDecision,
     candle: FundingCandle,
     config: BacktestConfig,
+    fill_model: FillRateModel | None = None,
 ) -> tuple[Decimal, Decimal]:
     market_rate = _resolve_market_rate(candle, config.market_rate_source)
     if market_rate is None or market_rate == 0:
         return decision.rate, Decimal("1")
     spread_pct = (decision.rate - market_rate) / market_rate
-    fill_prob = compute_fill_prob(spread_pct, config.fill_alpha)
+
+    fill_prob: Decimal | None = None
+    if config.fill_model == "empirical" and fill_model is not None:
+        est = fill_model.estimate_fill(
+            reference_rate=market_rate, offer_rate=decision.rate,
+            period_agg=candle.period_agg, horizon_h=config.fill_horizon_h,
+        )
+        if est is not None and not est.low_confidence:
+            fill_prob = est.fill_prob
+    if fill_prob is None:  # linear mode, or empirical fallback (no/low-confidence stats)
+        fill_prob = compute_fill_prob(spread_pct, config.fill_alpha)
+
     gross_rate = decision.rate * fill_prob
     return gross_rate, fill_prob
 
@@ -38,6 +51,7 @@ def run_backtest(
     config: BacktestConfig | None = None,
     record_start_mts: int | None = None,
     record_end_mts: int | None = None,
+    fill_model: FillRateModel | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -98,7 +112,7 @@ def run_backtest(
         if decision is None:
             continue
 
-        gross_rate, fill_prob = _apply_friction(decision, candle, config)
+        gross_rate, fill_prob = _apply_friction(decision, candle, config, fill_model)
         period = Decimal(decision.period_days)
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee
