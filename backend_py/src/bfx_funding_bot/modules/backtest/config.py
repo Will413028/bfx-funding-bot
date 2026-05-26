@@ -18,6 +18,11 @@ class BacktestConfig:
     gap_minutes: int = 30
     fill_alpha: Decimal = Decimal("5.0")
     market_rate_source: Literal["candle_close", "frr"] = "candle_close"
+    # G13: "empirical" uses the learned FillRateModel (injected into run_backtest),
+    # falling back to the linear model per-lookup when stats are absent/low-confidence.
+    # "linear" forces the legacy compute_fill_prob (deterministic).
+    fill_model: Literal["empirical", "linear"] = "empirical"
+    fill_horizon_h: int = 4
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.fee_rate <= Decimal("1")):
@@ -26,6 +31,8 @@ class BacktestConfig:
             raise ValueError(f"gap_minutes must be non-negative, got {self.gap_minutes}")
         if self.fill_alpha <= 0:
             raise ValueError(f"fill_alpha must be positive, got {self.fill_alpha}")
+        if self.fill_horizon_h <= 0:
+            raise ValueError(f"fill_horizon_h must be positive, got {self.fill_horizon_h}")
 
 
 def compute_fill_prob(spread_pct: Decimal, fill_alpha: Decimal) -> Decimal:
