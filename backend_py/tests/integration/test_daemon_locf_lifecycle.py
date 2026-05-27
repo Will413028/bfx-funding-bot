@@ -2,7 +2,7 @@
 
 3 tests using testcontainer Postgres + sparse p30 candle fixture.
 Each test exercises the REAL DB path (upsert → get_up_to) and verifies
-emitted Axiom events from a single scheduler tick.
+emitted telemetry events from a single scheduler tick.
 
 Value-add over unit tests/test_scheduler.py:
 - Real Postgres upsert + get_up_to via asyncpg (exercises actual SQL/index)
@@ -87,17 +87,17 @@ def _candle(mts: int, rate: str = "0.0001") -> FundingCandle:
     )
 
 
-def _make_axiom_capture() -> tuple[MagicMock, list[dict[str, Any]]]:
-    """Return (mock_axiom, captured_events_list)."""
+def _make_event_sink_capture() -> tuple[MagicMock, list[dict[str, Any]]]:
+    """Return (mock_event_sink, captured_events_list)."""
     captured: list[dict[str, Any]] = []
-    axiom = MagicMock()
-    axiom.emit = AsyncMock(side_effect=lambda e: captured.append(e))
-    return axiom, captured
+    event_sink = MagicMock()
+    event_sink.emit = AsyncMock(side_effect=lambda e: captured.append(e))
+    return event_sink, captured
 
 
 async def _make_tick_fn(
     *,
-    axiom: MagicMock,
+    event_sink: MagicMock,
     session_factory: async_sessionmaker,  # type: ignore[type-arg]
     cell: CellConfig,
     candle_mts: int,
@@ -142,7 +142,7 @@ async def _make_tick_fn(
                 )
 
     engine = SignalEngine(
-        phase=Phase.PAPER, axiom=axiom, diagnostics=NoopDiagnosticsSink(),
+        phase=Phase.PAPER, event_sink=event_sink, diagnostics=NoopDiagnosticsSink(),
         candles_repo=_RepoBridge(),
     )
 
@@ -178,7 +178,7 @@ async def _make_tick_fn(
             budget_seconds = budget_hours * 3600
             if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
                 probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
-                await axiom.emit({
+                await event_sink.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
                     "phase": Phase.PAPER.value,
@@ -203,7 +203,7 @@ async def _make_tick_fn(
             budget_seconds = budget_hours * 3600
             if probe.get_cell_pipeline_status(cell.pair_id) != HealthStatus.DEGRADED:
                 probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.DEGRADED)
-                await axiom.emit({
+                await event_sink.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
                     "phase": Phase.PAPER.value,
@@ -224,7 +224,7 @@ async def _make_tick_fn(
 
         if probe.get_cell_pipeline_status(cell.pair_id) == HealthStatus.DEGRADED:
             probe.set_cell_pipeline_status(cell.pair_id, HealthStatus.HEALTHY)
-            await axiom.emit({
+            await event_sink.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
                 "phase": Phase.PAPER.value,
@@ -267,9 +267,9 @@ async def test_daemon_emits_stale_signal_on_sparse_p30_fixture(
         await session.commit()
 
     cell = _p30_cell(staleness_budget_hours=12)
-    axiom, captured = _make_axiom_capture()
+    event_sink, captured = _make_event_sink_capture()
     _, tick = await _make_tick_fn(
-        axiom=axiom, session_factory=pg_session_factory, cell=cell,
+        event_sink=event_sink, session_factory=pg_session_factory, cell=cell,
         candle_mts=_T1_CANDLE_MTS,
     )
 
@@ -316,9 +316,9 @@ async def test_daemon_emits_degraded_on_sparse_p30_beyond_budget(
         await session.commit()
 
     cell = _p30_cell(staleness_budget_hours=12)
-    axiom, captured = _make_axiom_capture()
+    event_sink, captured = _make_event_sink_capture()
     _, tick = await _make_tick_fn(
-        axiom=axiom, session_factory=pg_session_factory, cell=cell,
+        event_sink=event_sink, session_factory=pg_session_factory, cell=cell,
         candle_mts=_T2_CANDLE_MTS,
     )
 
@@ -371,9 +371,9 @@ async def test_replay_engine_byte_equivalent_with_daemon_on_sparse_input(
         await session.commit()
 
     cell = _p30_cell(staleness_budget_hours=12)
-    axiom, captured = _make_axiom_capture()
+    event_sink, captured = _make_event_sink_capture()
     _, tick = await _make_tick_fn(
-        axiom=axiom, session_factory=pg_session_factory, cell=cell,
+        event_sink=event_sink, session_factory=pg_session_factory, cell=cell,
         candle_mts=_T3_CANDLE_MTS,
     )
 
