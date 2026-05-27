@@ -39,7 +39,13 @@ def test_parse_foc_canceled() -> None:
     result = parse_frame(raw)
     assert isinstance(result, FocEvent)
     assert result.venue_offer_id == "789012"
+    assert result.symbol == "fUSD"
+    assert result.mts_create == 1716383500000
+    assert result.mts_update == 1716383600000
+    assert result.amount == Decimal("100.0")  # abs of signed -100.0 (venue signs offers negative)
     assert result.status == "CANCELED"
+    assert result.rate == 0.0005
+    assert result.period_days == 2
 
 
 def test_parse_foc_executed() -> None:
@@ -47,7 +53,17 @@ def test_parse_foc_executed() -> None:
     result = parse_frame(raw)
     assert isinstance(result, FocEvent)
     assert result.venue_offer_id == "789012"
+    assert result.symbol == "fUSD"
     assert result.status.startswith("EXECUTED")
+    assert result.rate == 0.0005
+    assert result.period_days == 2
+
+
+def test_parse_foc_malformed_row_is_dropped_not_raised() -> None:
+    """A short/malformed foc array → parse_frame drops it (returns None), never
+    raises (BitfinexShapeError must be caught like the other parse errors)."""
+    raw = json.dumps([0, "foc", [789012, "fUSD", 1, 2]])  # < 16 elements
+    assert parse_frame(raw) is None
 
 
 def test_parse_auth_ack() -> None:

@@ -28,6 +28,8 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from bfx_funding_bot.external.bitfinex.errors import BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.modules.execution.protocols import Credentials
 
 log = logging.getLogger(__name__)
@@ -166,7 +168,7 @@ def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
             return _parse_fcu(data, raw_seq)
         if msg_type == "foc":
             return _parse_foc(data, raw_seq)
-    except (IndexError, TypeError, ValueError) as e:
+    except (IndexError, TypeError, ValueError, BitfinexShapeError) as e:
         log.warning("bfx_ws_parse_failed type=%s err=%r", msg_type, e)
         return None
 
@@ -207,15 +209,18 @@ def _parse_fcu(d: list[Any], raw_seq: int | None) -> FcuEvent:
 
 
 def _parse_foc(d: list[Any], raw_seq: int | None) -> FocEvent:
+    # foc is a funding-offer array — layout owned by parse_funding_offer_row,
+    # shared with the REST parser so the two can never drift.
+    row = parse_funding_offer_row(d)
     return FocEvent(
-        venue_offer_id=str(d[0]),
-        symbol=str(d[2]),
-        mts_create=int(d[3]),
-        mts_update=int(d[4]),
-        amount=Decimal(str(d[5])),
-        status=str(d[7]),
-        rate=float(d[11]),
-        period_days=int(d[12]),
+        venue_offer_id=row.venue_offer_id,
+        symbol=row.symbol,
+        mts_create=row.mts_create,
+        mts_update=row.mts_update,
+        amount=row.amount,
+        status=row.status,
+        rate=row.rate if row.rate is not None else 0.0,
+        period_days=row.period_days if row.period_days is not None else 0,
         raw_seq=raw_seq,
         raw=d,
     )
