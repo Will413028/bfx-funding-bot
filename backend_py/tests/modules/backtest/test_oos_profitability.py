@@ -7,6 +7,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     WindowOutcome,
     _percentile,
     active_return_summary,
+    bootstrap_ci,
     summarize_oos,
 )
 
@@ -148,3 +149,32 @@ def test_active_return_information_ratio_consistent_underperformance():
     assert a.information_ratio == Decimal("0")
     assert a.mean_active < 0
     assert a.pct_months_outperform == Decimal("0")
+
+
+def _mean(vals: list[Decimal]) -> Decimal:
+    return sum(vals, Decimal("0")) / Decimal(len(vals))
+
+
+def test_bootstrap_ci_deterministic_with_seed():
+    vals = [Decimal(str(x)) for x in range(1, 21)]  # 1..20
+    lo1, hi1 = bootstrap_ci(vals, _mean, n_resamples=500, seed=42)
+    lo2, hi2 = bootstrap_ci(vals, _mean, n_resamples=500, seed=42)
+    assert (lo1, hi1) == (lo2, hi2)  # same seed -> identical
+
+
+def test_bootstrap_ci_brackets_point_estimate():
+    vals = [Decimal(str(x)) for x in range(1, 21)]
+    point = _mean(vals)  # 10.5
+    lo, hi = bootstrap_ci(vals, _mean, n_resamples=2000, seed=7)
+    assert lo < point < hi
+
+
+def test_bootstrap_ci_degenerate_all_equal():
+    vals = [Decimal("3")] * 10
+    lo, hi = bootstrap_ci(vals, _mean, n_resamples=200, seed=1)
+    assert lo == Decimal("3") and hi == Decimal("3")
+
+
+def test_bootstrap_ci_empty_raises():
+    with pytest.raises(ValueError):
+        bootstrap_ci([], _mean, n_resamples=10, seed=1)
