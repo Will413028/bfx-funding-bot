@@ -7,10 +7,12 @@ lending strategy (equity is monotonic; see engine.py).
 """
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from statistics import NormalDist
 
 from bfx_funding_bot.modules.backtest.sortino import compute_sortino
 
@@ -172,3 +174,65 @@ def bootstrap_ci(
     lo = _percentile(stats, Decimal(str(alpha / 2)))
     hi = _percentile(stats, Decimal(str(1 - alpha / 2)))
     return lo, hi
+
+
+_GAMMA = 0.5772156649015329  # Euler-Mascheroni
+_NORM = NormalDist()
+
+
+def sharpe_skew_kurt(returns: list[Decimal]) -> tuple[Decimal, Decimal, Decimal]:
+    """Return (Sharpe, skewness, raw kurtosis) of a return series.
+
+    Sharpe = mean/std (population, ddof=0). Kurtosis is the raw 4th standardized
+    moment (3.0 for a normal). Requires >= 3 observations.
+    """
+    n = len(returns)
+    if n < 3:
+        raise ValueError(f"sharpe_skew_kurt: need >= 3 returns, got {n}")
+    fl = [float(r) for r in returns]
+    mean = sum(fl) / n
+    var = sum((x - mean) ** 2 for x in fl) / n
+    if var == 0:
+        return Decimal("0"), Decimal("0"), Decimal("0")
+    std = math.sqrt(var)
+    sharpe = mean / std
+    skew = (sum((x - mean) ** 3 for x in fl) / n) / std**3
+    kurt = (sum((x - mean) ** 4 for x in fl) / n) / std**4
+    return Decimal(str(sharpe)), Decimal(str(skew)), Decimal(str(kurt))
+
+
+def deflated_sharpe(
+    observed_sharpe: Decimal,
+    *,
+    n_trials: int,
+    n_obs: int,
+    skew: Decimal,
+    kurtosis: Decimal,
+) -> Decimal:
+    """Deflated Sharpe Ratio (Bailey & López de Prado) — probability in [0,1].
+
+    Probabilistic Sharpe vs SR0 = expected max Sharpe under the null across n_trials
+    independent configs. > 0.95 => edge survives selection-bias deflation.
+    Returns Decimal("0") if the variance term is degenerate (denom_inner <= 0).
+    """
+    if n_trials < 1:
+        raise ValueError(f"deflated_sharpe: n_trials must be >= 1, got {n_trials}")
+    if n_obs < 2:
+        raise ValueError(f"deflated_sharpe: n_obs must be >= 2, got {n_obs}")
+    sr = float(observed_sharpe)
+
+    if n_trials == 1:
+        sr0 = 0.0
+    else:
+        n = float(n_trials)
+        sr0 = math.sqrt(1.0 / n_obs) * (
+            (1 - _GAMMA) * _NORM.inv_cdf(1 - 1.0 / n)
+            + _GAMMA * _NORM.inv_cdf(1 - 1.0 / (n * math.e))
+        )
+
+    denom_inner = 1 - float(skew) * sr + (float(kurtosis) - 1) / 4 * sr**2
+    if denom_inner <= 0:
+        return Decimal("0")
+
+    z = (sr - sr0) * math.sqrt(n_obs - 1) / math.sqrt(denom_inner)
+    return Decimal(str(_NORM.cdf(z)))
