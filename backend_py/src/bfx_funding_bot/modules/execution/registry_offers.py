@@ -16,8 +16,8 @@ State graph:
 Transition rules:
   ReservationClaimed  + voi not in snapshot  → add CLAIMED record
   ReservationClaimed  + voi exists           → no-op (idempotent dedup)
-  OrderFilled         + voi not in snapshot  → info diag "fcn before claimed";
-                                               no mutation (OOO buffer hint)
+  OrderFilled         + voi not in snapshot  → info diag "fill before claim";
+                                               no mutation (reconcile converges)
   OrderFilled         + voi RELEASED         → no-op (idempotent)
   OrderFilled         + voi CLAIMED          → CLAIMED → RELEASED
   ReservationReleased + voi not in snapshot  → warn diag "not in registry";
@@ -134,7 +134,7 @@ def transition(
                 DiagnosticLog(
                     level="info",
                     message=(
-                        f"fcn before claimed — dispatcher should stage in OOO buffer (voi={voi})"
+                        f"fill before claim — no mutation; reconcile converges (voi={voi})"
                     ),
                     venue_offer_id=voi,
                 )

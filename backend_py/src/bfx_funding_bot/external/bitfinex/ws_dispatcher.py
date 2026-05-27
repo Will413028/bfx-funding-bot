@@ -154,10 +154,8 @@ class BitfinexLiveWSDispatcher:
     → translate_bfx_event → publish domain events to bus.
 
     Per spec §6.2 / §4 (G4): bounded queue + queue-depth observability.
-    OOO staging buffer for fcn-before-claim race (200ms TTL).
     """
 
-    OOO_STAGING_TTL_MS = 200
     RECENT_CANCELS_TTL_MS = 60_000
 
     def __init__(
@@ -178,10 +176,8 @@ class BitfinexLiveWSDispatcher:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._queue: asyncio.Queue[BfxWSEvent] = asyncio.Queue(maxsize=queue_max)
         self._queue_max = queue_max
-        self._staging_buffer: dict[str, tuple[BfxWSEvent, int]] = {}
         self._recent_cancels: dict[str, int] = {}
         self._last_depth_emit_ms: int = 0
-        self._background_tasks: set[asyncio.Task[None]] = set()
         self._persister: EventPersister = persister or NoopEventPersister()
 
     async def handle_cancel_requested(self, event: Any) -> None:
@@ -189,7 +185,7 @@ class BitfinexLiveWSDispatcher:
         self._recent_cancels[event.venue_offer_id] = event.requested_at_ms
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Main loop: drain WS events + drain staging buffer."""
+        """Main loop: drain WS events; periodic maintenance on idle ticks."""
         producer = asyncio.create_task(self._produce(stop_event))
         try:
             while not stop_event.is_set():
@@ -225,11 +221,6 @@ class BitfinexLiveWSDispatcher:
                 "ws_dispatcher_diag voi=%s msg=%s",
                 d.venue_offer_id, d.message,
             )
-            # If diag is "fcn before claimed" (stage hint) — stage in OOO buffer
-            if d.venue_offer_id and "stage" in d.message.lower():
-                self._staging_buffer[d.venue_offer_id] = (
-                    bfx_event, now_ms + self.OOO_STAGING_TTL_MS,
-                )
         for ev in events:
             await self._persist_then_publish(ev)
 
@@ -252,21 +243,6 @@ class BitfinexLiveWSDispatcher:
 
     def _tick_maintenance(self) -> None:
         now_ms = self._clock()
-        # Cleanup expired staging buffer entries
-        expired = [voi for voi, (_, exp) in self._staging_buffer.items() if exp < now_ms]
-        for voi in expired:
-            log.error("ws_dispatcher_ooo_drop voi=%s — fcn TTL expired, _realized may be wrong",
-                      voi)
-            del self._staging_buffer[voi]
-        # Drain staging buffer: re-process if claim now exists
-        snapshot = self._registry.snapshot()
-        ready = [voi for voi in list(self._staging_buffer.keys()) if voi in snapshot]
-        for voi in ready:
-            bfx_event, _ = self._staging_buffer.pop(voi)
-            t = asyncio.create_task(self._process(bfx_event))
-            self._background_tasks.add(t)
-            t.add_done_callback(self._background_tasks.discard)
-
         # Cleanup expired recent_cancels
         cancel_cutoff = now_ms - self.RECENT_CANCELS_TTL_MS
         self._recent_cancels = {
