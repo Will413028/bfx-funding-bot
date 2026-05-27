@@ -96,3 +96,48 @@ def test_summarize_sortino_all_positive_is_infinity():
 def test_summarize_empty_raises():
     with pytest.raises(ValueError):
         summarize_oos([])
+
+
+from bfx_funding_bot.modules.backtest.oos_profitability import (  # noqa: E402
+    ActiveReturnSummary,  # noqa: F401
+    active_return_summary,
+)
+
+
+def test_active_return_paired_by_month():
+    strat = [_w(0, "3.0"), _w(1, "2.0"), _w(2, "4.0")]
+    base = [_w(0, "1.0"), _w(1, "2.0"), _w(2, "1.0")]
+    a = active_return_summary(strat, base)
+    assert a.n_windows == 3
+    # actives: 2.0, 0.0, 3.0 -> median 2.0, mean 5/3
+    assert a.median_active == Decimal("2.0")
+    assert a.mean_active == Decimal("5") / Decimal("3")
+    # outperform = strat strictly > base in 2 of 3 windows
+    assert a.pct_months_outperform == Decimal("2") / Decimal("3")
+
+
+def test_active_return_information_ratio_zero_std():
+    # constant active return -> std 0, mean > 0 -> IR = +inf
+    strat = [_w(0, "3.0"), _w(1, "3.0"), _w(2, "3.0")]
+    base = [_w(0, "1.0"), _w(1, "1.0"), _w(2, "1.0")]
+    a = active_return_summary(strat, base)
+    assert a.information_ratio == Decimal("Infinity")
+
+
+def test_active_return_information_ratio_all_zero():
+    strat = [_w(0, "1.0"), _w(1, "1.0"), _w(2, "1.0")]
+    base = [_w(0, "1.0"), _w(1, "1.0"), _w(2, "1.0")]
+    a = active_return_summary(strat, base)
+    assert a.information_ratio == Decimal("0")
+
+
+def test_active_return_misaligned_months_raises():
+    strat = [_w(0, "3.0"), _w(1, "2.0")]
+    base = [_w(0, "1.0"), _w(99, "1.0")]
+    with pytest.raises(ValueError):
+        active_return_summary(strat, base)
+
+
+def test_active_return_length_mismatch_raises():
+    with pytest.raises(ValueError):
+        active_return_summary([_w(0, "1.0")], [_w(0, "1.0"), _w(1, "1.0")])

@@ -91,3 +91,51 @@ def summarize_oos(outcomes: list[WindowOutcome]) -> OosSummary:
         mean_fill_rate=mean_fill,
         sortino=sortino,
     )
+
+
+@dataclass(frozen=True)
+class ActiveReturnSummary:
+    """Strategy minus passive benchmark, paired per window."""
+
+    n_windows: int
+    median_active: Decimal  # median of (strat - base) per window, percent
+    mean_active: Decimal
+    information_ratio: Decimal  # mean_active / population std; +inf if std 0 & mean>0; 0 if degenerate
+    pct_months_outperform: Decimal  # fraction of windows with strat strictly > base
+
+
+def active_return_summary(
+    strat: list[WindowOutcome], base: list[WindowOutcome]
+) -> ActiveReturnSummary:
+    """Paired active-return stats. Both lists must align 1:1 by month_mts (same order)."""
+    if len(strat) != len(base):
+        raise ValueError(
+            f"active_return_summary: length mismatch {len(strat)} != {len(base)}"
+        )
+    if not strat:
+        raise ValueError("active_return_summary: no outcomes")
+    actives: list[Decimal] = []
+    outperform = 0
+    for s, b in zip(strat, base, strict=True):
+        if s.month_mts != b.month_mts:
+            raise ValueError(
+                f"active_return_summary: misaligned month {s.month_mts} != {b.month_mts}"
+            )
+        diff = s.net_monthly - b.net_monthly
+        actives.append(diff)
+        if diff > 0:
+            outperform += 1
+
+    n = len(actives)
+    mean = sum(actives, Decimal("0")) / Decimal(n)
+    var = sum(((a - mean) ** 2 for a in actives), Decimal("0")) / Decimal(n)  # population
+    std = var.sqrt()
+    ir = (Decimal("Infinity") if mean > 0 else Decimal("0")) if std == 0 else mean / std
+
+    return ActiveReturnSummary(
+        n_windows=n,
+        median_active=_percentile(sorted(actives), Decimal("0.5")),
+        mean_active=mean,
+        information_ratio=ir,
+        pct_months_outperform=Decimal(outperform) / Decimal(n),
+    )
