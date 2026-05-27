@@ -3,7 +3,7 @@
 Pure fns (build_offer_payload, parse_offer_response) + I/O shell (Task 14).
 
 Per spec §6.3:
-  - submit returns status="submitted" (NOT "filled") — WS fcn fills later
+  - submit returns status="submitted" (NOT "filled") — WS foc EXECUTED fills later
   - submit failure → status="failed", venue_offer_id=None
   - cancel publishes CancelRequested event (no in-memory _pending_cancels dict)
 """
@@ -163,7 +163,7 @@ class BitfinexLiveExecutor:
     """Bitfinex REST funding offer executor.
 
     Pure REST — no WS, no Registry dependency. submit returns status="submitted";
-    WS fcn (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
+    WS foc EXECUTED (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
 
     cancel publishes CancelRequested event (first-class) — replaces former
     _pending_cancels dict pattern.

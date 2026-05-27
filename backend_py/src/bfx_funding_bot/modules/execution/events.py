@@ -81,10 +81,11 @@ class ReservationClaimed:
 
 @dataclass(frozen=True, slots=True)
 class OrderFilled:
-    """Offer → credit transition (paper synchronous OR live WS `fcn`).
+    """Offer → credit transition (paper synchronous OR live WS `foc` EXECUTED).
 
     Ledger effect: _reserved -= size_usdt; _realized += size_usdt.
-    `credit_id` None for paper (no real credit); populated for 4.4 live.
+    `credit_id` is None for paper (no real credit) and for live (the `foc`
+    EXECUTED frame carries no credit id; the fill is keyed by venue_offer_id).
     """
     cid: int
     venue_offer_id: str
