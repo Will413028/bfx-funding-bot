@@ -15,7 +15,10 @@ allocation cap when the stream silently breaks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
+from collections.abc import Callable
 from typing import Protocol
 
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
@@ -43,23 +46,65 @@ class PeriodicReconcile:
         probe: _Probe,
         interval_s: float,
         max_consecutive_failures: int = 3,
+        min_resync_interval_s: float = 10.0,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._recovery = recovery
         self._probe = probe
         self._interval_s = interval_s
         self._max_failures = max_consecutive_failures
+        self._min_resync_interval_s = min_resync_interval_s
+        self._monotonic = monotonic or time.monotonic
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
         self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
+        self._resync_event = asyncio.Event()
+        self._resync_reason = ""
+        self._last_tick_mono = 0.0
+
+    def request_resync(self, reason: str) -> None:
+        """Request one off-interval reconcile. Synchronous and safe to call from a
+        WS callback (same event loop). Multiple calls before the next wake collapse
+        into a single reconcile (the Event is idempotent)."""
+        self._resync_reason = reason  # best-effort: if several callers race, last wins
+        self._resync_event.set()
 
     async def run_loop(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
             await self._tick()
+            self._last_tick_mono = self._monotonic()
             self._probe.record_heartbeat(self.SUB_TASK)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._interval_s)
-            except TimeoutError:
-                continue
+            if await self._wait_next(stop_event):
+                reason = self._resync_reason
+                self._resync_event.clear()
+                await self._debounce(stop_event)
+                log.info("periodic_reconcile_resync reason=%s", reason)
+
+    async def _wait_next(self, stop_event: asyncio.Event) -> bool:
+        """Sleep up to interval_s, waking early on stop or a resync request.
+        Returns True iff a resync was requested (not on timeout/stop)."""
+        stop_task = asyncio.create_task(stop_event.wait())
+        trig_task = asyncio.create_task(self._resync_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {stop_task, trig_task},
+                timeout=self._interval_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for t in (stop_task, trig_task):
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
+        return trig_task in done and not stop_event.is_set()
+
+    async def _debounce(self, stop_event: asyncio.Event) -> None:
+        """Enforce >= min_resync_interval_s between ticks; stop-interruptible so a
+        storm of triggers can never reconcile faster than the window."""
+        remaining = self._min_resync_interval_s - (self._monotonic() - self._last_tick_mono)
+        if remaining > 0:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=remaining)
 
     async def _tick(self) -> None:
         try:

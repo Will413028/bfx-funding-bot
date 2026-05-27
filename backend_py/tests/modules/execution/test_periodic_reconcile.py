@@ -132,3 +132,89 @@ async def test_recovery_after_failure_clears_failsafe():
     await asyncio.gather(pr.run_loop(stop), _stop_soon())
     exec_updates = [(s) for (t, s, _f) in probe.updates if t == HealthTarget.EXECUTOR]
     assert exec_updates and exec_updates[-1] == HealthStatus.HEALTHY
+
+
+@pytest.mark.asyncio
+async def test_request_resync_wakes_loop_before_interval():
+    """A resync request triggers an off-interval tick well before interval_s."""
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=10.0,  # long: only a trigger can cause tick 2
+        max_consecutive_failures=3, min_resync_interval_s=0.0,
+    )
+    stop = asyncio.Event()
+
+    async def _drive():
+        await asyncio.sleep(0.02)
+        pr.request_resync("reconnect")
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _drive())
+    assert recovery._i >= 2  # tick 1 at loop start + tick 2 from the resync
+
+
+@pytest.mark.asyncio
+async def test_repeated_requests_dedup_into_bounded_ticks():
+    """Many request_resync calls before a wake collapse into exactly one extra tick."""
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=10.0,
+        max_consecutive_failures=3, min_resync_interval_s=0.05,
+    )
+    stop = asyncio.Event()
+
+    async def _drive():
+        await asyncio.sleep(0.01)
+        for _ in range(20):
+            pr.request_resync("seq_gap")  # storm before the loop wakes
+        await asyncio.sleep(0.10)  # > debounce window → exactly one resync tick fires
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _drive())
+    # tick 1 (loop start) + exactly one debounced resync tick despite 20 requests
+    assert recovery._i == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_during_debounce_exits_promptly():
+    """Stopping while a resync is in its debounce wait exits without hanging."""
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=10.0,
+        max_consecutive_failures=3, min_resync_interval_s=100.0,  # long debounce
+    )
+    stop = asyncio.Event()
+
+    async def _drive():
+        await asyncio.sleep(0.02)
+        pr.request_resync("reconnect")  # enters a 100s debounce wait
+        await asyncio.sleep(0.02)
+        stop.set()  # must break the debounce wait
+
+    await asyncio.wait_for(
+        asyncio.gather(pr.run_loop(stop), _drive()), timeout=2.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resync_requested_before_loop_start_is_honored():
+    """A resync set synchronously before run_loop still produces an early tick."""
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=10.0,
+        max_consecutive_failures=3, min_resync_interval_s=0.0,
+    )
+    pr.request_resync("reconnect")  # before the loop is even running
+    stop = asyncio.Event()
+
+    async def _drive():
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _drive())
+    assert recovery._i >= 2  # tick 1 (loop start) + the pre-set resync tick
