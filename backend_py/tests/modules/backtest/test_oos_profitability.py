@@ -1,4 +1,6 @@
+import math
 from decimal import Decimal
+from statistics import NormalDist
 
 import pytest
 
@@ -8,6 +10,8 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     _percentile,
     active_return_summary,
     bootstrap_ci,
+    deflated_sharpe,
+    sharpe_skew_kurt,
     summarize_oos,
 )
 
@@ -178,3 +182,52 @@ def test_bootstrap_ci_degenerate_all_equal():
 def test_bootstrap_ci_empty_raises():
     with pytest.raises(ValueError):
         bootstrap_ci([], _mean, n_resamples=10, seed=1)
+
+
+def test_sharpe_skew_kurt_symmetric_series():
+    # symmetric returns -> skew ~ 0
+    rets = [Decimal("-2"), Decimal("-1"), Decimal("0"), Decimal("1"), Decimal("2")]
+    sr, skew, kurt = sharpe_skew_kurt(rets)
+    assert sr == Decimal("0")  # mean 0
+    assert abs(skew) < Decimal("0.0001")
+    assert kurt > Decimal("1")  # raw kurtosis positive
+
+
+def test_sharpe_skew_kurt_too_few_raises():
+    with pytest.raises(ValueError):
+        sharpe_skew_kurt([Decimal("1"), Decimal("2")])
+
+
+def test_deflated_sharpe_single_trial_equals_psr_vs_zero():
+    # n_trials=1 -> SR0=0 -> DSR == Φ(SR*sqrt(n-1)/sqrt(denom)) with skew 0, kurt 3
+    sr = Decimal("0.5")
+    n_obs = 50
+    dsr = deflated_sharpe(sr, n_trials=1, n_obs=n_obs, skew=Decimal("0"), kurtosis=Decimal("3"))
+    denom = math.sqrt(1 + 0.5 * 0.5**2)  # 1 - 0 + (3-1)/4 * SR^2
+    expected = NormalDist().cdf(0.5 * math.sqrt(n_obs - 1) / denom)
+    assert abs(float(dsr) - expected) < 1e-6
+
+
+def test_deflated_sharpe_decreases_with_more_trials():
+    sr = Decimal("0.5")
+    d1 = deflated_sharpe(sr, n_trials=1, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3"))
+    d9 = deflated_sharpe(sr, n_trials=9, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3"))
+    assert d9 < d1  # more trials -> harder to clear -> lower probability
+
+
+def test_deflated_sharpe_degenerate_denominator_returns_zero():
+    # craft skew/kurt making denom_inner <= 0
+    dsr = deflated_sharpe(
+        Decimal("2"), n_trials=2, n_obs=50, skew=Decimal("5"), kurtosis=Decimal("3")
+    )
+    assert dsr == Decimal("0")
+
+
+def test_deflated_sharpe_n_obs_too_small_raises():
+    with pytest.raises(ValueError):
+        deflated_sharpe(Decimal("0.5"), n_trials=2, n_obs=1, skew=Decimal("0"), kurtosis=Decimal("3"))
+
+
+def test_deflated_sharpe_n_trials_zero_raises():
+    with pytest.raises(ValueError):
+        deflated_sharpe(Decimal("0.5"), n_trials=0, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3"))
