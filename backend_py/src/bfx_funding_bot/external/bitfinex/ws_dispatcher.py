@@ -130,13 +130,25 @@ def _translate_foc(
 
     status_upper = foc.status.upper()
 
-    # EXECUTED handled by fcn — foc EXECUTED is redundant
+    # EXECUTED is the authoritative fill: foc carries venue_offer_id (fcn does not).
     if "EXECUTED" in status_upper:
-        return [], [], [DiagnosticLog(
-            "info",
-            f"foc EXECUTED voi={voi} — redundant (fcn should have handled)",
-            voi,
-        )]
+        fill = OrderFilled(
+            cid=claim.cid,
+            venue_offer_id=voi,
+            credit_id=None,
+            size_usdt=claim.size_usdt,
+            fill_rate=foc.rate,
+            signal_correlation_id=claim.signal_correlation_id,
+            account_id=claim.account_id,
+            is_simulated=False,
+            venue_seq=foc.raw_seq,
+            occurred_at_ms=foc.mts_update,
+        )
+        return [fill], [RegistryMutation(
+            venue_offer_id=voi,
+            new_state=RegistryState.RELEASED,
+            occurred_at_ms=foc.mts_update,
+        )], []
 
     # Determine reason
     if "EXPIRED" in status_upper:
