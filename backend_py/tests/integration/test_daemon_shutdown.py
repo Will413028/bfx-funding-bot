@@ -18,20 +18,19 @@ def _set_daemon_env(monkeypatch, pg_engine) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_CELLS_YAML", _CELLS_YAML)
-    # pg_engine.url is already postgresql+asyncpg://..., which build_daemon
-    # passes directly to create_async_engine — no further transformation needed.
-    monkeypatch.setenv("DATABASE_URL", str(pg_engine.url))
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    # Port 0 → kernel-assigned random port; avoids "address already in use"
+    # when a real bfx daemon (or a sibling test) holds the default 8080.
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    # render_as_string(hide_password=False): str(URL) masks the password as
+    # "***", so the daemon's create_async_engine connects with the wrong
+    # password (InvalidPasswordError). The daemon needs the real password.
+    monkeypatch.setenv(
+        "DATABASE_URL", pg_engine.url.render_as_string(hide_password=False)
+    )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pre-existing infra mismatch: integration DB fixture renders the JSONB "
-        "'config' column on SQLite (CompileError). Tracked in "
-        "wiki/projects/bfx-funding-bot/index.md Pending "
-        "'5 pre-existing integration failure 修'."
-    ),
-)
 async def test_daemon_shutdown_happy_path(monkeypatch, pg_session_factory, pg_engine):
     """SIGTERM-equivalent stop_event.set() → daemon.run() returns within 10s.
 
@@ -56,15 +55,6 @@ async def test_daemon_shutdown_happy_path(monkeypatch, pg_session_factory, pg_en
                 raise
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pre-existing infra mismatch: integration DB fixture renders the JSONB "
-        "'config' column on SQLite (CompileError). Tracked in "
-        "wiki/projects/bfx-funding-bot/index.md Pending "
-        "'5 pre-existing integration failure 修'."
-    ),
-)
 async def test_daemon_shutdown_does_not_hang_on_normal_stop(
     monkeypatch, pg_engine, pg_session_factory,
 ):
@@ -93,15 +83,6 @@ async def test_daemon_shutdown_does_not_hang_on_normal_stop(
         pass
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pre-existing infra mismatch: integration DB fixture renders the JSONB "
-        "'config' column on SQLite (CompileError). Tracked in "
-        "wiki/projects/bfx-funding-bot/index.md Pending "
-        "'5 pre-existing integration failure 修'."
-    ),
-)
 async def test_daemon_subtask_fatal_escalates(
     monkeypatch, pg_engine, pg_session_factory,
 ):

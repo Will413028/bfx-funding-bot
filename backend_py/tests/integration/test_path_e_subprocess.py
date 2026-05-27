@@ -29,15 +29,6 @@ _CELLS_YAML = (
 )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pre-existing infra mismatch: integration DB fixture renders the JSONB "
-        "'config' column on SQLite (CompileError). Tracked in "
-        "wiki/projects/bfx-funding-bot/index.md Pending "
-        "'5 pre-existing integration failure 修'."
-    ),
-)
 @pytest.mark.asyncio
 async def test_path_e_subprocess_exits_with_auth_failed_code(
     pg_engine, pg_session_factory,
@@ -51,6 +42,7 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["DATABASE_URL"] = pg_engine.url.render_as_string(hide_password=False)
     env["BFX_CELLS_YAML"] = str(_CELLS_YAML)
     env["BFX_PHASE"] = "paper"
+    env["BFX_DEPLOYMENT_ENV"] = "ci"
     env["BFX_API_KEY"] = "test_key"
     env["BFX_API_SECRET"] = "test_secret"
     # Port 0 → kernel-assigned random port; avoids collision when a real
