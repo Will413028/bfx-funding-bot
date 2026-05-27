@@ -7,6 +7,8 @@ lending strategy (equity is monotonic; see engine.py).
 """
 from __future__ import annotations
 
+import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -142,3 +144,31 @@ def active_return_summary(
         information_ratio=ir,
         pct_months_outperform=Decimal(outperform) / Decimal(n),
     )
+
+
+def bootstrap_ci(
+    values: list[Decimal],
+    stat_fn: Callable[[list[Decimal]], Decimal],
+    *,
+    n_resamples: int = 10_000,
+    alpha: float = 0.05,
+    seed: int = 12345,
+) -> tuple[Decimal, Decimal]:
+    """Percentile bootstrap CI for stat_fn over values.
+
+    Resamples `values` with replacement n_resamples times, computes stat_fn on each
+    resample, and returns the (alpha/2, 1-alpha/2) percentiles of that distribution.
+    Deterministic given `seed`.
+    """
+    if not values:
+        raise ValueError("bootstrap_ci: empty values")
+    rng = random.Random(seed)
+    n = len(values)
+    stats: list[Decimal] = []
+    for _ in range(n_resamples):
+        sample = [values[rng.randrange(n)] for _ in range(n)]
+        stats.append(stat_fn(sample))
+    stats.sort()
+    lo = _percentile(stats, Decimal(str(alpha / 2)))
+    hi = _percentile(stats, Decimal(str(1 - alpha / 2)))
+    return lo, hi
