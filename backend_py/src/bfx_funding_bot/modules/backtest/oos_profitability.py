@@ -214,6 +214,10 @@ def deflated_sharpe(
     Probabilistic Sharpe vs SR0 = expected max Sharpe under the null across n_trials
     independent configs. > 0.95 => edge survives selection-bias deflation.
     Returns Decimal("0") if the variance term is degenerate (denom_inner <= 0).
+
+    Args:
+        kurtosis: RAW (non-excess) 4th standardized moment — normal = 3.0. Pass the
+            sharpe_skew_kurt() output directly; do NOT pass scipy/pandas excess kurtosis.
     """
     if n_trials < 1:
         raise ValueError(f"deflated_sharpe: n_trials must be >= 1, got {n_trials}")
@@ -222,6 +226,7 @@ def deflated_sharpe(
     sr = float(observed_sharpe)
 
     if n_trials == 1:
+        # E[max of 1 standard normal] = 0; the general branch would call inv_cdf(0) and raise.
         sr0 = 0.0
     else:
         n = float(n_trials)

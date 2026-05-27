@@ -190,7 +190,7 @@ def test_sharpe_skew_kurt_symmetric_series():
     sr, skew, kurt = sharpe_skew_kurt(rets)
     assert sr == Decimal("0")  # mean 0
     assert abs(skew) < Decimal("0.0001")
-    assert kurt > Decimal("1")  # raw kurtosis positive
+    assert abs(kurt - Decimal("1.7")) < Decimal("0.0001")  # known raw kurtosis of [-2,-1,0,1,2]
 
 
 def test_sharpe_skew_kurt_too_few_raises():
@@ -231,3 +231,12 @@ def test_deflated_sharpe_n_obs_too_small_raises():
 def test_deflated_sharpe_n_trials_zero_raises():
     with pytest.raises(ValueError):
         deflated_sharpe(Decimal("0.5"), n_trials=0, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3"))
+
+
+def test_deflated_sharpe_below_half_when_sr_below_sr0():
+    # n_trials=5 raises SR0 (~0.17) above the observed SR (0.1): the edge does not survive
+    # selection-bias deflation, so DSR < 0.5.
+    d = deflated_sharpe(
+        Decimal("0.1"), n_trials=5, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3")
+    )
+    assert d < Decimal("0.5")
