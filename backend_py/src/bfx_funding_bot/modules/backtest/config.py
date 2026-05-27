@@ -11,13 +11,16 @@ class BacktestConfig:
       - fee_rate=0.15 (Bitfinex platform fee, takes 15% of interest)
       - gap_minutes=30 (avg credit return → next offer fill latency)
       - fill_alpha=5.0 (fill probability slope; 10% above market = 50% fill)
-      - market_rate_source="candle_close" (FRR proxy until Phase 2 backfills funding_stats)
+      - market_rate_source="candle_close" — the canonical per-day market
+        funding rate (Bitfinex funding-candle close). FRR is NOT a
+        unit-convertible market-rate proxy; see
+        docs/superpowers/specs/2026-05-28-frr-market-rate-decoupling-design.md.
     """
 
     fee_rate: Decimal = Decimal("0.15")
     gap_minutes: int = 30
     fill_alpha: Decimal = Decimal("5.0")
-    market_rate_source: Literal["candle_close", "frr"] = "candle_close"
+    market_rate_source: Literal["candle_close"] = "candle_close"
     # G13: "empirical" uses the learned FillRateModel (injected into run_backtest),
     # falling back to the linear model per-lookup when stats are absent/low-confidence.
     # "linear" forces the legacy compute_fill_prob (deterministic).
@@ -33,6 +36,11 @@ class BacktestConfig:
             raise ValueError(f"fill_alpha must be positive, got {self.fill_alpha}")
         if self.fill_horizon_h <= 0:
             raise ValueError(f"fill_horizon_h must be positive, got {self.fill_horizon_h}")
+        if self.market_rate_source != "candle_close":
+            raise ValueError(
+                f"market_rate_source must be 'candle_close', got "
+                f"{self.market_rate_source!r}"
+            )
 
 
 def compute_fill_prob(spread_pct: Decimal, fill_alpha: Decimal) -> Decimal:

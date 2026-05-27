@@ -39,7 +39,6 @@ from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.modules.backfill.checks import (
     check_continuity,
-    check_frr_unit_stability,
     check_round_trip,
     check_row_counts,
 )
@@ -169,14 +168,12 @@ async def _amain() -> int:
             async with session_scope(session_factory) as session:
                 rc = await check_row_counts(session, [r.spec for r in results])
                 rt = await check_round_trip(session, client, specs_ok)
-                fr = await check_frr_unit_stability(session, symbol="fUSD")
                 ct = await check_continuity(session, specs_ok)
 
             print("=== PASS Checks ===")
             for label, res in [
                 ("row_count > 0", rc),
                 ("round-trip exact-match", rt),
-                ("FRR unit stability (diagnostic)", fr),
                 ("continuity", ct),
             ]:
                 mark = "✓" if res.passed else "✗"
@@ -186,7 +183,7 @@ async def _amain() -> int:
 
             logger.info("Total elapsed: %.1fs", time.time() - started)
 
-            checks_passed = rc.passed and rt.passed and fr.passed and ct.passed
+            checks_passed = rc.passed and rt.passed and ct.passed
             any_series_failed = any(isinstance(r, BackfillError) for r in results)
 
             if not checks_passed:

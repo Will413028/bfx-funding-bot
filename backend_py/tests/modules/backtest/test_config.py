@@ -40,6 +40,16 @@ def test_config_rejects_zero_fill_alpha() -> None:
         BacktestConfig(fill_alpha=Decimal("0"))
 
 
+def test_config_rejects_unsupported_market_rate_source() -> None:
+    """candle_close is the only supported market rate. FRR is a distinct
+    quantity (112-362x below candle_close, non-stationary ratio), not a
+    unit-convertible market-rate proxy — see
+    docs/superpowers/specs/2026-05-28-frr-market-rate-decoupling-design.md.
+    Reject unsupported sources at construction (fail-fast)."""
+    with pytest.raises(ValueError, match="market_rate_source"):
+        BacktestConfig(market_rate_source="frr")  # type: ignore[arg-type]
+
+
 def test_fill_prob_at_market_is_one() -> None:
     """spread_pct=0 → fill_prob=1.0."""
     assert compute_fill_prob(Decimal("0"), Decimal("5")) == Decimal("1.0")
