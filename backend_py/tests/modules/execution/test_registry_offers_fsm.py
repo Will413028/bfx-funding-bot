@@ -68,7 +68,7 @@ def test_filled_on_empty_yields_diagnostic_no_mutation() -> None:
     new_snap, diags = transition(snap, _filled(), now_ms=2000)
     assert new_snap == {}
     assert len(diags) == 1
-    assert "fcn before claimed" in diags[0].message.lower()
+    assert "fill before claim" in diags[0].message.lower()
 
 
 def test_filled_on_released_idempotent() -> None:
