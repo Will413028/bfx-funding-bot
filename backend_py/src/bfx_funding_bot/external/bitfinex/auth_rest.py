@@ -18,10 +18,8 @@ import httpx
 
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
+from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_offer_row
 from bfx_funding_bot.modules.execution.protocols import AccountContext
-
-# Funding-offer array indices (Bitfinex docs). No cid field exists.
-_MIN_ROW_LEN = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,23 +34,25 @@ class ActiveFundingOffer:
 
 
 def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
-    """Parse Bitfinex auth funding-offers response -> list[ActiveFundingOffer]."""
+    """Parse Bitfinex auth funding-offers response -> list[ActiveFundingOffer].
+
+    Layout is owned by funding_offer_row.parse_funding_offer_row (shared with WS).
+    """
     if not isinstance(raw, list):
         raise BitfinexShapeError(
             f"expected list of funding offers, got {type(raw).__name__}: {raw!r}"
         )
     out: list[ActiveFundingOffer] = []
     for o in raw:
-        if not isinstance(o, list) or len(o) < _MIN_ROW_LEN:
-            raise BitfinexShapeError(f"funding offer row malformed: {o!r}")
+        row = parse_funding_offer_row(o)
         out.append(ActiveFundingOffer(
-            venue_offer_id=str(o[0]),
-            symbol=str(o[1]),
-            amount=abs(Decimal(str(o[4]))),
-            rate=float(o[14]),
-            period_days=int(o[15]),
-            mts_created=int(o[2]),
-            status=str(o[10]),
+            venue_offer_id=row.venue_offer_id,
+            symbol=row.symbol,
+            amount=row.amount,
+            rate=row.rate if row.rate is not None else 0.0,
+            period_days=row.period_days if row.period_days is not None else 0,
+            mts_created=row.mts_create,
+            status=row.status,
         ))
     return out
 

@@ -19,6 +19,7 @@ def _row(offer_id=12345, symbol="fUSD", mts=1_700_000_000_000, amount=-100.0,
     row[0] = offer_id
     row[1] = symbol
     row[2] = mts
+    row[3] = mts  # mts_update; required int (was None — exposed by shared parser)
     row[4] = amount        # negative for an offer; we store abs
     row[5] = amount  # index 5 = AMOUNT_ORIG, not parsed
     row[10] = status
