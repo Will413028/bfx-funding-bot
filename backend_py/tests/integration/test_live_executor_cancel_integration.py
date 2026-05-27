@@ -33,7 +33,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 pytestmark = pytest.mark.integration
 
 
-class _RecordingAxiom:
+class _RecordingSink:
     def __init__(self) -> None:
         self.emitted: list[dict[str, Any]] = []
 
@@ -62,10 +62,11 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
     async with httpx.AsyncClient() as http:
         executor = BitfinexLiveExecutor(
             http=http,
-            axiom=_RecordingAxiom(),
+            event_sink=_RecordingSink(),
             bus=bus,
             phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE,
+            symbol="fUSD",
             cell="fUSD_p2",
             nonce_provider=lambda: 1700000000_000_000,
             date_provider=lambda: date(2026, 5, 23),
