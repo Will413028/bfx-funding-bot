@@ -172,6 +172,11 @@ def _parse_event_dict(msg: dict[str, Any]) -> BfxWSEvent | None:
     return None
 
 
+def _public_seq_of(event: BfxWSEvent) -> int | None:
+    """Extract raw_seq from a parsed event (None for events that don't carry one)."""
+    return getattr(event, "raw_seq", None)
+
+
 def _public_seq(msg: list[Any]) -> int | None:
     """Public sequence number from a SEQ_ALL channel frame.
 
@@ -327,17 +332,21 @@ class BitfinexAuthWSClient:
         hb_timeout_s: float = 30.0,
         nonce_provider: Callable[[], int] | None = None,
         on_disconnect: Callable[[str], None] | None = None,
+        on_resync_needed: Callable[[str], None] | None = None,
     ) -> None:
         self._creds = creds
         self._url = url
         self._hb_timeout_s = hb_timeout_s
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1000))
         self._on_disconnect = on_disconnect
+        self._on_resync_needed = on_resync_needed
         self._ws: ClientConnection | None = None
         self._stop = False
         self.reconnect_attempts = 0
         self._reconnect_history: deque[float] = deque(maxlen=1000)
         self._last_msg_ts: float = time.monotonic()
+        self._seq = SequenceTracker()
+        self._connection_count = 0
 
     def reconnect_count_last_hour(self) -> int:
         cutoff = time.monotonic() - 3600
@@ -382,19 +391,33 @@ class BitfinexAuthWSClient:
                     )
                     await asyncio.sleep(backoff)
 
+    def _fire_resync(self, reason: str) -> None:
+        if self._on_resync_needed is not None:
+            with contextlib.suppress(Exception):
+                self._on_resync_needed(reason)
+
     async def _connect_and_stream(self) -> AsyncIterator[BfxWSEvent]:
         async with websockets.connect(self._url, max_size=2**20) as ws:
             self._ws = ws
+            self._seq.reset()
+            self._connection_count += 1
+            if self._connection_count > 1:
+                # A reconnect: events during the gap were lost → resync the ledger.
+                # (First connection is covered by boot reconcile, so it fires nothing.)
+                self._fire_resync("reconnect")
             auth = build_auth_payload(
                 api_key=self._creds.api_key,
                 api_secret=self._creds.api_secret,
                 nonce_ms=self._nonce_provider(),
             )
             await ws.send(json.dumps(auth))
+            await ws.send(json.dumps({"event": "conf", "flags": SEQ_ALL_FLAG}))
 
             async for raw in ws:
                 event = parse_frame(raw)
                 if event is not None:
+                    if self._seq.observe(_public_seq_of(event)) == "gap":
+                        self._fire_resync("seq_gap")
                     yield event
                 if self._stop:
                     return
