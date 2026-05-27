@@ -828,6 +828,11 @@ async def build_daemon(
             raise ValueError(
                 f"BFX_RECONCILE_INTERVAL_S must be > 0, got {reconcile_interval_s}"
             )
+        resync_min_interval_s = float(os.environ.get("BFX_RESYNC_MIN_INTERVAL_S", "10"))
+        if resync_min_interval_s < 0:
+            raise ValueError(
+                f"BFX_RESYNC_MIN_INTERVAL_S must be >= 0, got {resync_min_interval_s}"
+            )
         runtime_recovery = BootRecovery(
             store=event_store,
             session_factory=session_factory,
@@ -843,6 +848,7 @@ async def build_daemon(
             recovery=runtime_recovery,
             probe=probe,
             interval_s=reconcile_interval_s,
+            min_resync_interval_s=resync_min_interval_s,
         )
 
     fill_tracker: RestPollingFillTracker | None = None
@@ -1067,7 +1073,14 @@ async def build_daemon(
             api_key=_require_env("BFX_API_KEY"),
             api_secret=_require_env("BFX_API_SECRET"),
         )
-        auth_ws = BitfinexAuthWSClient(creds=creds)
+        auth_ws = BitfinexAuthWSClient(
+            creds=creds,
+            on_resync_needed=(
+                periodic_reconcile.request_resync
+                if periodic_reconcile is not None
+                else None
+            ),
+        )
         ws_dispatcher = BitfinexLiveWSDispatcher(
             ws_client=auth_ws,
             registry=offer_registry,

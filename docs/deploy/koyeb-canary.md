@@ -86,6 +86,8 @@ shadow → canary 是**同一個 service 改 env 後 redeploy**。canary 的完�
 | `REDIS_URL` | `{{secret.bfx-redis-url}}` | 同 paper | optional |
 | `BFX_KILL_SWITCH` | **不設** | `hard_guards.py:35` | 設 `=true` 即時全停（見 Kill Switch）|
 | `BFX_RUN_DURATION_HOURS` | **不設/刪除** | — | canary 持續跑，不自動退 |
+| `BFX_RECONCILE_INTERVAL_S` | **不設**（預設 `90`）| `daemon.py`（`BFX_RECONCILE_INTERVAL_S` 讀取）| live-only；強制 venue snapshot 對帳的週期（正確性骨幹計時器）；不設即用預設 |
+| `BFX_RESYNC_MIN_INTERVAL_S` | **不設**（預設 `10`）| `daemon.py`（`BFX_RESYNC_MIN_INTERVAL_S` 讀取）| live-only；WS resync 觸發（重連 / seq-gap）後，非週期對帳的 debounce 視窗（秒）；`0` = 不 debounce |
 
 > canary invariant（`assert_canary_guard_invariant`，daemon build 時）：`BFX_PHASE=canary`
 > 下若 `safety.canary.yaml` 任一必要 guard（manual_kill / auth_health / heartbeat /
