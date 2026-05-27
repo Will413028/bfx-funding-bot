@@ -890,18 +890,25 @@ async def build_daemon(
     from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
 
-    smoke_pg_query = PostgresEventLogQueryAdapter(
-        session_factory=session_factory,
-        deployment_environment=env_str,
-    )
-    smoke_runner = SmokeRunner(
-        executor=wrapped_executor,
-        bus=bus,
-        pg_query=smoke_pg_query,
-        phase=config.phase,
-        strategy=first_cell.strategy,
-        cell=first_cell.cell_id,
-    )
+    # Simulated-only: the L2/L3 smoke submits a probe order through wrapped_executor
+    # with placeholder creds, expecting a simulated "filled". Against a live executor
+    # that is a real venue POST with bogus creds (→ 10100 "apikey: digest invalid"),
+    # or with real creds a real boot-time order. So wire smoke only when simulated;
+    # live (canary) leaves it None → boot smoke skips + HTTP /admin/smoke-test unmounted.
+    smoke_runner: SmokeRunner | None = None
+    if spec.is_simulated:
+        smoke_pg_query = PostgresEventLogQueryAdapter(
+            session_factory=session_factory,
+            deployment_environment=env_str,
+        )
+        smoke_runner = SmokeRunner(
+            executor=wrapped_executor,
+            bus=bus,
+            pg_query=smoke_pg_query,
+            phase=config.phase,
+            strategy=first_cell.strategy,
+            cell=first_cell.cell_id,
+        )
 
     # ---- Phase 4.3 replay invariant report ----
     if ledger.replay_floor_hit_count > 0:
