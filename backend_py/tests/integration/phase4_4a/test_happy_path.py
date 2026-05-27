@@ -1,4 +1,4 @@
-"""Phase 4.4a integration: submit → ReservationClaimed → fcn → OrderFilled E2E."""
+"""Phase 4.4a integration: submit → ReservationClaimed → foc EXECUTED → OrderFilled E2E."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
@@ -37,7 +37,7 @@ def _success_response(venue_offer_id: str = "42") -> list[Any]:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_submit_then_fcn_completes_orderfilled_chain(
+async def test_submit_then_foc_executed_completes_orderfilled_chain(
     domain_chain: dict[str, Any],
     event_sink_stub: Any,
 ) -> None:
@@ -92,16 +92,16 @@ async def test_submit_then_fcn_completes_orderfilled_chain(
     assert ledger.current_exposure() == Decimal("100")
     assert registry.snapshot()[voi].state.value == "claimed"
 
-    # 3. WS pushes fcn — dispatcher translates to OrderFilled
-    fcn = FcnEvent(
-        credit_id=999, symbol="fUSD", side=1,
+    # 3. WS pushes foc EXECUTED — dispatcher translates to OrderFilled
+    foc = FocEvent(
+        venue_offer_id=voi, symbol="fUSD",
         mts_create=2000, mts_update=2000,
-        amount=Decimal("100"), rate=0.0005, period_days=2,
-        offer_id_meta=42, raw_seq=5, raw=[],
+        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)",
+        rate=0.0005, period_days=2, raw_seq=5, raw=[],
     )
 
     from .conftest import ScriptedWSClient
-    fake_ws = ScriptedWSClient([fcn])
+    fake_ws = ScriptedWSClient([foc])
 
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
@@ -125,6 +125,6 @@ async def test_submit_then_fcn_completes_orderfilled_chain(
 
     fill_rows = [r for r in event_sink_stub.rows if r["event_type"] == "OrderFilled"]
     assert len(fill_rows) == 1
-    assert fill_rows[0]["credit_id"] == "999"
+    assert fill_rows[0]["credit_id"] is None  # foc carries no credit id
     assert fill_rows[0]["event_seq"] is not None
     assert fill_rows[0]["occurred_at_ms"] == 2000

@@ -28,7 +28,7 @@ class _FloodingWSClient:
                 credit_id=i, symbol="fUSD", side=1,
                 mts_create=2000+i, mts_update=2000+i,
                 amount=Decimal("100"), rate=0.0005, period_days=2,
-                offer_id_meta=i, raw_seq=i, raw=[],
+                raw_seq=i, raw=[],
             )
             self._produced += 1
 

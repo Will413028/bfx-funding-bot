@@ -26,7 +26,6 @@ def _fcn(voi: str = "v1", credit_id: int = 999, raw_seq: int = 5) -> FcnEvent:
         credit_id=credit_id, symbol="fUSD", side=1,
         mts_create=2000, mts_update=2000,
         amount=Decimal("100"), rate=0.0005, period_days=2,
-        offer_id_meta=int(voi.replace("v", "0")),
         raw_seq=raw_seq, raw=[],
     )
 
@@ -40,31 +39,15 @@ def _foc(voi: str = "v1", status: str = "CANCELED") -> FocEvent:
     )
 
 
-def test_fcn_on_claimed_emits_orderfilled_and_release_mutation() -> None:
-    # offer_id_meta = int("v1".replace("v","0")) = int("01") = 1
-    # dispatcher does str(fcn.offer_id_meta) = "1"
-    snapshot = {"1": _claim_record("1")}
+def test_fcn_is_informational_no_op() -> None:
+    """fcn no longer drives the lifecycle (it carries no offer id). foc EXECUTED
+    is the fill signal; reconcile is the backbone. fcn → no domain effect."""
+    snapshot = {"v1": _claim_record("v1")}
     events, mutations, _diags = translate_bfx_event(
         _fcn("v1", credit_id=999), snapshot, recent_cancels={}, now_ms=2500,
     )
-    assert len(events) == 1
-    assert isinstance(events[0], OrderFilled)
-    assert events[0].credit_id == "999"
-    assert events[0].venue_seq == 5
-    assert events[0].occurred_at_ms == 2000
-    assert len(mutations) == 1
-    assert mutations[0].new_state == RegistryState.RELEASED
-
-
-def test_fcn_on_empty_emits_no_event_with_diag() -> None:
-    """OOO race: fcn before ReservationClaimed → diag (dispatcher stages)."""
-    events, mutations, diags = translate_bfx_event(
-        _fcn("v1"), snapshot={}, recent_cancels={}, now_ms=2500,
-    )
     assert events == []
     assert mutations == []
-    assert len(diags) >= 1
-    assert "stage" in diags[0].message.lower() or "not in registry" in diags[0].message.lower()
 
 
 def test_foc_canceled_with_recent_cancel_emits_user_cancel() -> None:
