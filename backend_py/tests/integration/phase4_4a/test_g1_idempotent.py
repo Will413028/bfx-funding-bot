@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 
@@ -25,10 +25,10 @@ class _EventCapture:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_duplicate_fcn_does_not_double_realize(
+async def test_duplicate_foc_executed_does_not_double_realize(
     domain_chain: dict[str, Any], event_sink_stub: Any,
 ) -> None:
-    """G1 invariant: same fcn emitted twice → _realized +100 ONCE."""
+    """G1 invariant: same foc EXECUTED delivered twice → _realized +100 ONCE."""
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]
     registry = domain_chain["registry"]
@@ -42,18 +42,20 @@ async def test_duplicate_fcn_does_not_double_realize(
         occurred_at_ms=1000,
     ))
 
-    # Same fcn delivered twice — venue WS may redeliver
-    fcn1 = FcnEvent(
-        credit_id=999, symbol="fUSD", side=1, mts_create=2000, mts_update=2000,
-        amount=Decimal("100"), rate=0.0005, period_days=2,
-        offer_id_meta=42, raw_seq=5, raw=[],
+    # Same foc EXECUTED delivered twice — venue WS may redeliver
+    foc1 = FocEvent(
+        venue_offer_id=voi, symbol="fUSD",
+        mts_create=2000, mts_update=2000,
+        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)",
+        rate=0.0005, period_days=2, raw_seq=5, raw=[],
     )
-    fcn2 = FcnEvent(
-        credit_id=999, symbol="fUSD", side=1, mts_create=2000, mts_update=2000,
-        amount=Decimal("100"), rate=0.0005, period_days=2,
-        offer_id_meta=42, raw_seq=5, raw=[],  # same venue_seq
+    foc2 = FocEvent(
+        venue_offer_id=voi, symbol="fUSD",
+        mts_create=2000, mts_update=2000,
+        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)",
+        rate=0.0005, period_days=2, raw_seq=5, raw=[],  # same venue_seq
     )
-    fake_ws = ScriptedWSClient([fcn1, fcn2])
+    fake_ws = ScriptedWSClient([foc1, foc2])
     dispatcher = BitfinexLiveWSDispatcher(
         ws_client=fake_ws, registry=registry, bus=bus,
         event_sink=_EventCapture(), clock=lambda: 2500, queue_max=100,

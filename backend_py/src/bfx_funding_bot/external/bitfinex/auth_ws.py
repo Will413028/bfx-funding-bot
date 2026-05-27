@@ -51,7 +51,6 @@ class FcnEvent(BfxWSEvent):
     amount: Decimal
     rate: float
     period_days: int
-    offer_id_meta: int | None  # cross-map to our venue_offer_id (TBV vs real API)
     raw_seq: int | None        # WS SEQ if present
     raw: list[Any] = field(default_factory=list)
 
@@ -189,7 +188,6 @@ def _parse_fcn(d: list[Any], raw_seq: int | None) -> FcnEvent:
         amount=Decimal(str(d[5])),
         rate=float(d[12]),
         period_days=int(d[13]),
-        offer_id_meta=int(d[14]) if len(d) > 14 and d[14] is not None else None,
         raw_seq=raw_seq,
         raw=d,
     )

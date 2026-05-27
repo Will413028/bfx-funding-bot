@@ -4,12 +4,11 @@ Anti-corruption layer. Pure translate_bfx_event(bfx_ev, snapshot, cancels, now_m
 + I/O shell (Task 16).
 
 Per spec §6.2 dispatch table:
-  FcnEvent + CLAIMED → OrderFilled + state RELEASED
-  FcnEvent + not_in_registry → diag (dispatcher stages OOO)
-  FocEvent EXECUTED + CLAIMED → no-op (fcn handled it)
+  FocEvent EXECUTED + CLAIMED → OrderFilled + state RELEASED (authoritative fill)
   FocEvent CANCELED + recent_cancel ≤5s → user_cancel
   FocEvent CANCELED otherwise → venue_cancel
   FocEvent EXPIRED → expired
+  FcnEvent → informational no-op (credit events carry no offer id)
   any event on RELEASED → idempotent no-op
 """
 from __future__ import annotations
@@ -60,54 +59,12 @@ def translate_bfx_event(
 ) -> tuple[list[Any], list[RegistryMutation], list[DiagnosticLog]]:
     """Pure mapping. Returns (domain_events, mutations, diagnostics)."""
     if isinstance(bfx_event, FcnEvent):
-        return _translate_fcn(bfx_event, snapshot, now_ms)
+        return [], [], []  # informational only — no offer id; foc EXECUTED is the fill signal
     if isinstance(bfx_event, FocEvent):
         return _translate_foc(bfx_event, snapshot, recent_cancels, now_ms)
     if isinstance(bfx_event, FcuEvent):
         return [], [], []  # 4.4a: rate updates not modeled
     return [], [], []  # Heartbeat / AuthAck / ChannelInfo / Unknown
-
-
-def _translate_fcn(
-    fcn: FcnEvent,
-    snapshot: dict[str, ClaimRecord],
-    now_ms: int,
-) -> tuple[list[Any], list[RegistryMutation], list[DiagnosticLog]]:
-    voi = str(fcn.offer_id_meta) if fcn.offer_id_meta is not None else None
-    if voi is None:
-        return [], [], [DiagnosticLog(
-            "warn",
-            f"fcn credit_id={fcn.credit_id} missing offer_id_meta — cannot map back",
-        )]
-
-    claim = snapshot.get(voi)
-    if claim is None:
-        return [], [], [DiagnosticLog(
-            "info",
-            f"fcn for voi={voi} not in registry — stage in OOO buffer",
-            voi,
-        )]
-    if claim.state == RegistryState.RELEASED:
-        return [], [], []  # idempotent
-
-    event = OrderFilled(
-        cid=claim.cid,
-        venue_offer_id=voi,
-        credit_id=str(fcn.credit_id),
-        size_usdt=claim.size_usdt,
-        fill_rate=fcn.rate,
-        signal_correlation_id=claim.signal_correlation_id,
-        account_id=claim.account_id,
-        is_simulated=False,
-        venue_seq=fcn.raw_seq,
-        occurred_at_ms=fcn.mts_create,
-    )
-    mutation = RegistryMutation(
-        venue_offer_id=voi,
-        new_state=RegistryState.RELEASED,
-        occurred_at_ms=fcn.mts_create,
-    )
-    return [event], [mutation], []
 
 
 def _translate_foc(

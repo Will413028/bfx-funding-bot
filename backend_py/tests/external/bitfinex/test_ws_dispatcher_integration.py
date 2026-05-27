@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FcnEvent, FocEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
@@ -38,27 +38,26 @@ class _EventCapture:
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_publishes_orderfilled_on_fcn() -> None:
+async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
     bus = DomainEventBus(clock=lambda: 5000)
     registry = OfferRegistry(clock=lambda: 5000)
     bus.subscribe(ReservationClaimed, registry.handle)
     bus.subscribe(OrderFilled, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
 
-    # Seed registry: claim with voi="42" so dispatcher maps fcn.offer_id_meta=42 → "42"
     await bus.publish(ReservationClaimed(
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
         occurred_at_ms=1000,
     ))
 
-    fcn = FcnEvent(
-        credit_id=999, symbol="fUSD", side=1,
-        mts_create=2000, mts_update=2000,
-        amount=Decimal("100"), rate=0.0005, period_days=2,
-        offer_id_meta=42, raw_seq=5, raw=[],
+    foc = FocEvent(
+        venue_offer_id="42", symbol="fUSD",
+        mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)",
+        rate=0.0005, period_days=2, raw_seq=5, raw=[],
     )
-    fake_ws = _FakeWSClient([fcn])
+    fake_ws = _FakeWSClient([foc])
 
     captured: list = []
 
@@ -81,7 +80,9 @@ async def test_dispatcher_publishes_orderfilled_on_fcn() -> None:
         task.cancel()
 
     assert len(captured) == 1
-    assert captured[0].credit_id == "999"
+    assert captured[0].credit_id is None
+    assert captured[0].venue_offer_id == "42"
+    assert captured[0].fill_rate == 0.0005
 
 
 @pytest.mark.asyncio

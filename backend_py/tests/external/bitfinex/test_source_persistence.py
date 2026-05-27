@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
-from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -55,7 +55,7 @@ def _registry_with_claim(voi, cid, scid, size, account_id=_ACC):
 
 
 @pytest.mark.asyncio
-async def test_ws_fcn_orderfilled_persisted_before_publish(pg_session_factory):
+async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_factory):
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()
@@ -67,12 +67,12 @@ async def test_ws_fcn_orderfilled_persisted_before_publish(pg_session_factory):
                           signal_correlation_id=scid, account_id=_ACC, is_simulated=False,
                           occurred_at_ms=2),
     )
-    fcn = FcnEvent(credit_id=1, symbol="fUSD", side=1, mts_create=10, mts_update=10,
-                   amount=Decimal("100"), rate=0.0003, period_days=2,
-                   offer_id_meta=888, raw_seq=99)
+    foc = FocEvent(venue_offer_id="888", symbol="fUSD", mts_create=10, mts_update=10,
+                   amount=Decimal("100"), status="EXECUTED @ 0.0003 (100.0)",
+                   rate=0.0003, period_days=2, raw_seq=99, raw=[])
     bus = DomainEventBus()
     dispatcher = BitfinexLiveWSDispatcher(
-        ws_client=_StubWSClient([fcn]),
+        ws_client=_StubWSClient([foc]),
         registry=_registry_with_claim("888", 11, scid, 100),
         bus=bus, event_sink=_EventCapture(), persister=persister,
     )
