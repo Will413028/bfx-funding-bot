@@ -3,8 +3,10 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.backtest.oos_profitability import (
+    ActiveReturnSummary,  # noqa: F401
     WindowOutcome,
     _percentile,
+    active_return_summary,
     summarize_oos,
 )
 
@@ -98,12 +100,6 @@ def test_summarize_empty_raises():
         summarize_oos([])
 
 
-from bfx_funding_bot.modules.backtest.oos_profitability import (  # noqa: E402
-    ActiveReturnSummary,  # noqa: F401
-    active_return_summary,
-)
-
-
 def test_active_return_paired_by_month():
     strat = [_w(0, "3.0"), _w(1, "2.0"), _w(2, "4.0")]
     base = [_w(0, "1.0"), _w(1, "2.0"), _w(2, "1.0")]
@@ -141,3 +137,14 @@ def test_active_return_misaligned_months_raises():
 def test_active_return_length_mismatch_raises():
     with pytest.raises(ValueError):
         active_return_summary([_w(0, "1.0")], [_w(0, "1.0"), _w(1, "1.0")])
+
+
+def test_active_return_information_ratio_consistent_underperformance():
+    # strat consistently earns less than base, constant gap -> std 0, mean < 0 -> IR = 0 by convention.
+    # IR=0 here means "consistent underperformance"; callers distinguish it from a perfect tie via mean_active sign.
+    strat = [_w(0, "1.0"), _w(1, "1.0"), _w(2, "1.0")]
+    base = [_w(0, "2.0"), _w(1, "2.0"), _w(2, "2.0")]
+    a = active_return_summary(strat, base)
+    assert a.information_ratio == Decimal("0")
+    assert a.mean_active < 0
+    assert a.pct_months_outperform == Decimal("0")
