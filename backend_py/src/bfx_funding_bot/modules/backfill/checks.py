@@ -6,7 +6,7 @@ Pure-ish: takes a session + specs + (for round-trip) a Bitfinex client.
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -208,78 +208,7 @@ async def check_round_trip(
     )
 
 
-# ---------- 3. FRR raw correlation diagnostic (Phase 3a Gate 1 FAIL fallback) ----------
-
-async def check_frr_unit_stability(
-    session: AsyncSession,
-    symbol: str = "fUSD",
-    sample_size: int = 1000,
-) -> CheckResult:
-    """Diagnostic-only raw correlation: r^2 of close ~ a x frr (no
-    avg_period weighting) on N most-recent samples.
-
-    Phase 3a Gate 1 FAIL: no winning hypothesis was committed (all 5
-    H missed R^2>0.99 + slope_cv<5% + slope_diff<5% + median_rel_err<5%
-    threshold; per-year slope swung 9x across 2016-2026 indicating
-    Bitfinex methodology changed over time). This check is a placeholder
-    until Phase 3c re-investigates with extended hypothesis set
-    (multivariate w/ funding_amount_used / funding_amount, lower-50%
-    lifetime weighting).
-
-    Always returns passed=True (diagnostic, doesn't block backfill exit
-    code). Logs r² for ongoing visibility.
-    """
-    sql = text("""
-        SELECT c.mts, fs.frr, c.close
-        FROM funding_candles c
-        CROSS JOIN LATERAL (
-            SELECT frr FROM funding_stats fs2
-            WHERE fs2.symbol = c.symbol AND fs2.mts <= c.mts
-            ORDER BY fs2.mts DESC LIMIT 1
-        ) fs
-        WHERE c.symbol = :symbol
-          AND c.timeframe = '1h' AND c.period_agg = 'p2'
-          AND c.close IS NOT NULL AND c.close > 0
-          AND fs.frr IS NOT NULL AND fs.frr > 0
-        ORDER BY c.mts DESC
-        LIMIT :limit
-    """)
-    try:
-        result = await session.execute(sql, {"symbol": symbol, "limit": sample_size})
-        rows = result.fetchall()
-    except Exception as e:
-        return CheckResult(passed=True, message=f"FRR raw r² skipped: {e!r}")
-
-    pairs = [
-        (float(frr), float(close))
-        for _mts, frr, close in rows
-        if frr is not None and close is not None and float(close) > 0
-    ]
-    if len(pairs) < 50:
-        return CheckResult(
-            passed=True,
-            message=f"FRR raw r² skipped: only {len(pairs)} valid samples",
-        )
-
-    import statistics
-    xs = [p[0] for p in pairs]
-    ys = [p[1] for p in pairs]
-    mean_x, mean_y = statistics.mean(xs), statistics.mean(ys)
-    s_xy = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
-    s_xx = sum((x - mean_x) ** 2 for x in xs)
-    s_yy = sum((y - mean_y) ** 2 for y in ys)
-    r2 = (s_xy ** 2) / (s_xx * s_yy) if s_xx > 0 and s_yy > 0 else 0.0
-
-    return CheckResult(
-        passed=True,
-        message=(
-            f"FRR raw r² (Gate 1 FAIL fallback): r²={r2:.4f} on {len(pairs)} "
-            f"samples. Phase 3a no winning hypothesis; conversion not committed."
-        ),
-    )
-
-
-# ---------- 4. continuity ----------
+# ---------- 3. continuity ----------
 
 async def check_continuity(
     session: AsyncSession, specs: list[SeriesSpec],
