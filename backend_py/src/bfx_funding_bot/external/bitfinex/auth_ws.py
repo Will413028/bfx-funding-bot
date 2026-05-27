@@ -119,7 +119,7 @@ class AuthAck(BfxWSEvent):
 
 @dataclass(frozen=True, slots=True)
 class Heartbeat(BfxWSEvent):
-    pass
+    raw_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +132,7 @@ class ChannelInfo(BfxWSEvent):
 @dataclass(frozen=True, slots=True)
 class Unknown(BfxWSEvent):
     raw: Any
+    raw_seq: int | None = None
 
 
 def parse_frame(raw: str | bytes) -> BfxWSEvent | None:
@@ -171,18 +172,32 @@ def _parse_event_dict(msg: dict[str, Any]) -> BfxWSEvent | None:
     return None
 
 
+def _public_seq(msg: list[Any]) -> int | None:
+    """Public sequence number from a SEQ_ALL channel frame.
+
+    Channel-0 data frames end with [..., MSG_SEQ, AUTH_SEQ] -> public = 2nd-to-last;
+    heartbeats / frames without an auth seq end with [..., MSG_SEQ] -> public = last.
+    Returns None when no trailing int seq is present (flag not applied).
+    """
+    if len(msg) >= 2 and isinstance(msg[-1], int) and isinstance(msg[-2], int):
+        return msg[-2]
+    if msg and isinstance(msg[-1], int):
+        return msg[-1]
+    return None
+
+
 def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
     if len(msg) < 2:
         return None
+    raw_seq = _public_seq(msg)
     payload = msg[1]
     if payload == "hb":
-        return Heartbeat()
+        return Heartbeat(raw_seq=raw_seq)
     if not isinstance(payload, str) or len(msg) < 3:
         return None
 
     msg_type = payload
     data = msg[2]
-    raw_seq = msg[3] if len(msg) > 3 and isinstance(msg[3], int) else None
 
     if not isinstance(data, list):
         return None
@@ -198,7 +213,7 @@ def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
         log.warning("bfx_ws_parse_failed type=%s err=%r", msg_type, e)
         return None
 
-    return Unknown(raw=msg)
+    return Unknown(raw=msg, raw_seq=raw_seq)
 
 
 def _parse_fcn(d: list[Any], raw_seq: int | None) -> FcnEvent:
