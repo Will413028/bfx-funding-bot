@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -33,6 +33,33 @@ from bfx_funding_bot.external.bitfinex.funding_offer_row import parse_funding_of
 from bfx_funding_bot.modules.execution.protocols import Credentials
 
 log = logging.getLogger(__name__)
+
+SEQ_ALL_FLAG = 65536  # Bitfinex `conf` flag: append a sequence number to every packet
+
+
+class SequenceTracker:
+    """Detects dropped packets via Bitfinex's monotonic public sequence number.
+
+    Pure logic — no socket, no domain types. `reset()` at each (re)connect, since
+    the sequence restarts per connection. A forward jump means packets were lost.
+    A `None` seq carries no information (flag not applied / non-seq frame).
+    """
+
+    def __init__(self) -> None:
+        self._expected: int | None = None
+
+    def reset(self) -> None:
+        self._expected = None
+
+    def observe(self, seq: int | None) -> Literal["ok", "gap"]:
+        if seq is None:
+            return "ok"
+        if self._expected is not None and seq > self._expected:
+            self._expected = seq + 1
+            return "gap"
+        if self._expected is None or seq + 1 > self._expected:
+            self._expected = seq + 1
+        return "ok"
 
 
 @dataclass(frozen=True, slots=True)
