@@ -204,3 +204,88 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     # bound method equality: same __self__ + __func__
     assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.request_resync
     assert daemon.periodic_reconcile._min_resync_interval_s == 7.0
+
+
+@pytest.mark.asyncio
+async def test_smoke_runner_present_for_simulated_paper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Paper (simulated) keeps the boot/HTTP smoke runner — guards the live-gate
+    from over-disabling it."""
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
+    db_path = tmp_path / "smoke_paper.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
+    monkeypatch.delenv("BFX_WS_CLIENT_ENABLED", raising=False)
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
+
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
+        is_reusable=True, is_optional=True,
+    )
+
+    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+    assert daemon.smoke_runner is not None  # simulated → smoke chain self-test wired
+
+
+@pytest.mark.asyncio
+async def test_smoke_runner_gated_off_for_live_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Canary/live executor must NOT wire the SmokeRunner: its chain self-test
+    submits with placeholder creds, which against the real venue returns
+    `10100 apikey: digest invalid`. Smoke is a simulated-only self-test."""
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+
+    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
+    db_path = tmp_path / "smoke_live.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
+
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
+        is_reusable=True, is_optional=True,
+    )
+
+    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+    assert daemon.smoke_runner is None  # live → smoke self-test disabled (no real-venue probe)
