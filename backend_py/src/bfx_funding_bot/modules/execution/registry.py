@@ -96,7 +96,7 @@ def build_executor(
         if not ws_client_enabled:
             raise ExecutorConfigError(
                 "BFX_EXECUTOR=bitfinex_live without BFX_WS_CLIENT_ENABLED=true "
-                "= stale exposure (REST submit returns 'submitted'; WS fcn fills). "
+                "= stale exposure (REST submit returns 'submitted'; WS foc EXECUTED fills). "
                 "Set BFX_WS_CLIENT_ENABLED=true."
             )
         if http is None or bus is None:
