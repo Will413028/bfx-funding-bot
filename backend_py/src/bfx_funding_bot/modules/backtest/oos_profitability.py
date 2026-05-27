@@ -100,7 +100,7 @@ class ActiveReturnSummary:
     n_windows: int
     median_active: Decimal  # median of (strat - base) per window, percent
     mean_active: Decimal
-    information_ratio: Decimal  # mean_active / population std; +inf if std 0 & mean>0; 0 if degenerate
+    information_ratio: Decimal  # mean_active / population std; +inf if std==0 & mean>0; 0 if std==0 & mean<=0
     pct_months_outperform: Decimal  # fraction of windows with strat strictly > base
 
 
@@ -130,7 +130,10 @@ def active_return_summary(
     mean = sum(actives, Decimal("0")) / Decimal(n)
     var = sum(((a - mean) ** 2 for a in actives), Decimal("0")) / Decimal(n)  # population
     std = var.sqrt()
-    ir = (Decimal("Infinity") if mean > 0 else Decimal("0")) if std == 0 else mean / std
+    if std == 0:  # noqa: SIM108  # two zero-std sub-cases clearer as explicit branches
+        ir = Decimal("Infinity") if mean > 0 else Decimal("0")
+    else:
+        ir = mean / std
 
     return ActiveReturnSummary(
         n_windows=n,
