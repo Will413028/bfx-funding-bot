@@ -104,15 +104,21 @@ def test_foc_expired_emits_expired_reason() -> None:
     assert events[0].reason == "expired"
 
 
-def test_foc_executed_on_claimed_is_no_op_with_diag() -> None:
-    """foc EXECUTED is redundant with fcn — handled there. dispatcher emits diag."""
+def test_foc_executed_on_claimed_emits_orderfilled() -> None:
+    """foc EXECUTED is the authoritative fill signal (carries venue_offer_id)."""
     snapshot = {"v1": _claim_record("v1")}
-    events, mutations, diags = translate_bfx_event(
-        _foc("v1", status="EXECUTED @ 0.0005 (100)"), snapshot, {}, now_ms=2500,
+    events, mutations, _diags = translate_bfx_event(
+        _foc("v1", status="EXECUTED @ 0.0005 (100.0)"), snapshot, {}, now_ms=2500,
     )
-    assert events == []
-    assert mutations == []
-    assert len(diags) >= 1
+    assert len(events) == 1
+    assert isinstance(events[0], OrderFilled)
+    assert events[0].credit_id is None        # foc carries no credit id
+    assert events[0].venue_offer_id == "v1"
+    assert events[0].fill_rate == 0.0005
+    assert events[0].venue_seq == 7
+    assert events[0].occurred_at_ms == 2000   # _foc mts_update
+    assert len(mutations) == 1
+    assert mutations[0].new_state == RegistryState.RELEASED
 
 
 def test_any_event_on_released_state_is_idempotent_no_op() -> None:
