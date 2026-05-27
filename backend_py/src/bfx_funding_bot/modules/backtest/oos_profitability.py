@@ -43,6 +43,11 @@ class OosSummary:
     sortino: Decimal  # compute_sortino over monthly fractions; 0 if <3 windows, Decimal("Infinity") when no downside observed (the normal lending case)
 
 
+def percentile(values: list[Decimal], q: Decimal) -> Decimal:
+    """Public linear-interpolated percentile. Sorts `values` first; q in [0, 1]."""
+    return _percentile(sorted(values), q)
+
+
 def _percentile(sorted_vals: list[Decimal], q: Decimal) -> Decimal:
     """Linear-interpolated percentile (numpy 'linear' method). q in [0, 1].
 

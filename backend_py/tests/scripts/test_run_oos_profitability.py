@@ -32,6 +32,36 @@ def test_canary_cells_match_config():
     assert all(c.symbol == "fUST" and c.strategy == "mean_reversion" for c in cells)
 
 
+def test_render_markdown_handles_infinity_sortino_and_ir():
+    # The normal lending case: no down months -> Sortino and IR are +Infinity.
+    inf = Decimal("Infinity")
+    report = mod.CellReport(
+        cell_label="fUST_p2",
+        n_windows=3,
+        strat_summary=mod.OosSummary(
+            n_windows=3, median_monthly=Decimal("0.5"), p25_monthly=Decimal("0.3"),
+            worst_monthly=Decimal("0.1"), best_monthly=Decimal("0.9"),
+            mean_monthly=Decimal("0.5"), annualized_pct=Decimal("6.2"),
+            idle_rate=Decimal("0.1"), mean_fill_rate=Decimal("0.8"), sortino=inf,
+        ),
+        base_summary=mod.OosSummary(
+            n_windows=3, median_monthly=Decimal("0.4"), p25_monthly=Decimal("0.2"),
+            worst_monthly=Decimal("0.05"), best_monthly=Decimal("0.8"),
+            mean_monthly=Decimal("0.4"), annualized_pct=Decimal("4.9"),
+            idle_rate=Decimal("0"), mean_fill_rate=Decimal("0.9"), sortino=inf,
+        ),
+        active=mod.ActiveReturnSummary(
+            n_windows=3, median_active=Decimal("0.1"), mean_active=Decimal("0.1"),
+            information_ratio=inf, pct_months_outperform=Decimal("0.66"),
+        ),
+        median_ci=(Decimal("0.3"), Decimal("0.7")),
+        deflated_sharpe=Decimal("0.97"),
+        n_trials=9,
+    )
+    md = mod.render_markdown([report], data_window="2022-01..2026-05")
+    assert "Infinity" in md
+
+
 def test_render_markdown_contains_key_sections():
     report = mod.CellReport(
         cell_label="fUST_a30",

@@ -34,10 +34,10 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     ActiveReturnSummary,
     OosSummary,
     WindowOutcome,
-    _percentile,
     active_return_summary,
     bootstrap_ci,
     deflated_sharpe,
+    percentile,
     sharpe_skew_kurt,
     summarize_oos,
 )
@@ -119,7 +119,7 @@ def build_cell_report(
 
     monthly = [o.net_monthly for o in strat_outcomes]
     median_ci = bootstrap_ci(
-        monthly, lambda vs: _percentile(sorted(vs), Decimal("0.5")), seed=20260528
+        monthly, lambda vs: percentile(vs, Decimal("0.5")), seed=20260528  # seed = first-run date, fixed for reproducibility
     )
 
     sr, skew, kurt = sharpe_skew_kurt([m / Decimal("100") for m in monthly])
@@ -238,6 +238,8 @@ async def _run_cell(session: AsyncSession, cell: CanaryCell, n_trials: int) -> C
     if not candles:
         raise SystemExit(f"No candles for {cell.label}; run scripts/backfill_candles.py")
     windows = compute_wfo_windows(candles)
+    if not windows:
+        raise SystemExit(f"No WFO windows for {cell.label}; candle series too short?")
     ema_span = alpha_to_ema_span(cell.ema_alpha)
 
     strat_outcomes: list[WindowOutcome] = []

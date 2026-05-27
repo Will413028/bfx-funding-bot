@@ -11,6 +11,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     active_return_summary,
     bootstrap_ci,
     deflated_sharpe,
+    percentile,
     sharpe_skew_kurt,
     summarize_oos,
 )
@@ -41,6 +42,11 @@ def test_percentile_single_value():
 def test_percentile_empty_raises():
     with pytest.raises(ValueError):
         _percentile([], Decimal("0.5"))
+
+
+def test_percentile_public_sorts_input():
+    assert percentile([Decimal("3"), Decimal("1"), Decimal("2")], Decimal("0.5")) == Decimal("2")
+    assert percentile([Decimal("4"), Decimal("1")], Decimal("0.5")) == Decimal("2.5")
 
 
 def test_summarize_basic_distribution():
