@@ -85,6 +85,14 @@ def test_summarize_sortino_small_sample_is_zero():
     assert s.sortino == Decimal("0")
 
 
+def test_summarize_sortino_all_positive_is_infinity():
+    # All monthly returns >= 0 (the normal lending case): no downside observed
+    # -> compute_sortino returns +Infinity. This is the expected value, not an edge case.
+    outcomes = [_w(i, "1.0") for i in range(3)]
+    s = summarize_oos(outcomes)
+    assert s.sortino == Decimal("Infinity")
+
+
 def test_summarize_empty_raises():
     with pytest.raises(ValueError):
         summarize_oos([])

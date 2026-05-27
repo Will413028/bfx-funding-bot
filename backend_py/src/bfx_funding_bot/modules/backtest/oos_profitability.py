@@ -36,7 +36,7 @@ class OosSummary:
     annualized_pct: Decimal  # geometric: (prod(1+m/100))^(12/N) - 1, percent
     idle_rate: Decimal  # fraction of windows with n_trades == 0
     mean_fill_rate: Decimal  # mean fill_rate over windows with n_trades > 0; 0 if none
-    sortino: Decimal  # compute_sortino over monthly fractions (0 if <3 windows)
+    sortino: Decimal  # compute_sortino over monthly fractions; 0 if <3 windows, Decimal("Infinity") when no downside observed (the normal lending case)
 
 
 def _percentile(sorted_vals: list[Decimal], q: Decimal) -> Decimal:
