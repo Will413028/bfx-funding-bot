@@ -82,7 +82,8 @@ class PostgresEventStore:
         # Snapshot maintenance (same txn).
         await self._project_offer_claims(session, event, account_id)
         await self._project_position_state(
-            session, etype, account_id, getattr(_ev, "size_usdt", None), row.event_seq
+            session, etype, account_id, getattr(_ev, "size_usdt", None),
+            row.event_seq, occurred_at_ms,
         )
         return True
 
@@ -188,6 +189,7 @@ class PostgresEventStore:
         account_id: str,
         size_usdt: Any,
         event_seq: int,
+        occurred_at_ms: int,
     ) -> None:
         size = Decimal(str(size_usdt)) if size_usdt is not None else Decimal("0")
         ps = (
@@ -204,6 +206,7 @@ class PostgresEventStore:
                 deployment_environment=self._env,
                 reserved_usdt=Decimal("0"),
                 realized_usdt=Decimal("0"),
+                last_updated_ms=0,
                 last_event_seq=0,
             )
             session.add(ps)
@@ -219,6 +222,7 @@ class PostgresEventStore:
             reserved -= min(reserved, size)
         ps.reserved_usdt = reserved
         ps.realized_usdt = realized
+        ps.last_updated_ms = occurred_at_ms
         ps.last_event_seq = event_seq
 
     async def rebuild_snapshot_from_log(
@@ -243,4 +247,4 @@ class PostgresEventStore:
             await self._project_offer_claims(session, event, account_id)
             await self._project_position_state(
                 session, r.event_type, account_id,
-                getattr(event, "size_usdt", None), r.event_seq)
+                getattr(event, "size_usdt", None), r.event_seq, r.occurred_at_ms)

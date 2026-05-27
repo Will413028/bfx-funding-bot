@@ -93,9 +93,12 @@ class PositionStateRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
     realized_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    # Event/domain time of the latest projected event (epoch ms, from the event's
+    # occurred_at_ms) — mirrors offer_claims.last_updated_ms. NOT wall-clock: a
+    # projection is a deterministic function of the event stream, so rebuild
+    # reproduces it exactly. Projector freshness/lag is monitored via
+    # last_event_seq vs the event_log head, not a wall-clock timestamp.
+    last_updated_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=_NOW
-    )
 
     __table_args__ = (PrimaryKeyConstraint("account_id", "deployment_environment"),)
