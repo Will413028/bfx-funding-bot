@@ -116,6 +116,72 @@ async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSes
     assert rows[0].venue_offer_id == "v301"
 
 
+async def test_position_state_tracks_event_time_deterministically(sqlite_session: AsyncSession) -> None:
+    """last_updated_ms is sourced from the event's occurred_at_ms (domain time),
+    not a wall-clock projection-time default — so it advances on every projected
+    event and is reproducible via rebuild (event-sourcing determinism)."""
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=400, venue_offer_id="v400", size_usdt=Decimal("5"),
+        signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
+        venue_seq=1, occurred_at_ms=1000))
+    await sqlite_session.flush()
+    ps = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acctT"))).scalar_one()
+    assert ps.last_updated_ms == 1000
+
+    # a later event advances last_updated_ms to that event's time
+    await store.append(sqlite_session, ReservationReleased(
+        cid=400, venue_offer_id="v400", size_usdt=Decimal("5"), reason="venue_cancel",
+        signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
+        venue_seq=2, occurred_at_ms=5000))
+    await sqlite_session.flush()
+    ps2 = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acctT"))).scalar_one()
+    assert ps2.last_updated_ms == 5000
+
+
+async def test_last_updated_ms_follows_event_seq_not_max_time(sqlite_session: AsyncSession) -> None:
+    """When event time is non-monotonic vs append order, last_updated_ms tracks
+    the LAST-processed (highest event_seq) event's time, not max(occurred_at_ms).
+    This is the semantic the migration backfill must mirror to stay reproducible."""
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=410, venue_offer_id="v410", size_usdt=Decimal("5"),
+        signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
+        venue_seq=1, occurred_at_ms=9000))
+    # appended later (higher event_seq) but with an EARLIER event time
+    await store.append(sqlite_session, ReservationReleased(
+        cid=410, venue_offer_id="v410", size_usdt=Decimal("5"), reason="venue_cancel",
+        signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
+        venue_seq=2, occurred_at_ms=1000))
+    await sqlite_session.flush()
+    ps = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acctOOO"))).scalar_one()
+    assert ps.last_updated_ms == 1000  # last-processed wins, NOT max(9000, 1000)
+
+
+async def test_rebuild_reproduces_identical_position_state(sqlite_session: AsyncSession) -> None:
+    """Rebuilding the snapshot from the log yields an identical last_updated_ms —
+    proving the projection is a deterministic function of the event stream."""
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, _claimed(7))  # cid 107, occurred_at_ms=1007
+    await sqlite_session.flush()
+    before = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acct"))).scalar_one()
+    assert before.last_updated_ms == 1007
+
+    await store.rebuild_snapshot_from_log(
+        sqlite_session, account_id="acct", deployment_environment="ci")
+    await sqlite_session.flush()
+    after = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acct"))).scalar_one()
+    assert after.last_updated_ms == 1007  # identical — no wall-clock drift
+
+
 async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session: AsyncSession) -> None:
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
