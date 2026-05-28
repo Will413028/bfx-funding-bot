@@ -113,6 +113,25 @@ class ActiveReturnSummary:
     pct_months_outperform: Decimal  # fraction of windows with strat strictly > base
 
 
+def paired_active_returns(
+    strat: list[WindowOutcome], base: list[WindowOutcome]
+) -> list[Decimal]:
+    """Per-window (strat - base) net_monthly, aligned 1:1 by month_mts (same order).
+
+    The raw input to bootstrap_ci for the deploy gate's mean-active CI.
+    """
+    if len(strat) != len(base):
+        raise ValueError(f"paired_active_returns: length mismatch {len(strat)} != {len(base)}")
+    if not strat:
+        raise ValueError("paired_active_returns: no outcomes")
+    out: list[Decimal] = []
+    for s, b in zip(strat, base, strict=True):
+        if s.month_mts != b.month_mts:
+            raise ValueError(f"paired_active_returns: misaligned month {s.month_mts} != {b.month_mts}")
+        out.append(s.net_monthly - b.net_monthly)
+    return out
+
+
 def active_return_summary(
     strat: list[WindowOutcome], base: list[WindowOutcome]
 ) -> ActiveReturnSummary:
