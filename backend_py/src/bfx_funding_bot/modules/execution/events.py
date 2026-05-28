@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 __SCHEMA_VERSION__ = 2
@@ -152,7 +153,7 @@ class CancelAcknowledged:
     acknowledged_at_ms: int
     signal_correlation_id: UUID
     account_id: str
-    rest_status: str  # "success" | "already_terminal"
+    rest_status: Literal["success", "already_terminal"]
     venue_response_text: str | None = None  # Bitfinex 9th element TEXT field
     venue_seq: int | None = None  # always None — not WS-sourced
     event_seq: int | None = None
