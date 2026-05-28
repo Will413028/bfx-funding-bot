@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 import httpx
@@ -128,7 +128,9 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     )
 
 
-def classify_cancel_response(raw: Any) -> tuple[str, str | None]:
+def classify_cancel_response(
+    raw: Any,
+) -> tuple[Literal["success", "already_terminal", "other"], str | None]:
     """Classify Bitfinex cancel REST response → (rest_status, text).
 
     rest_status:
