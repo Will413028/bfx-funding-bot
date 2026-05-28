@@ -24,14 +24,14 @@ cells:
     symbol: fUST
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.9915, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.42049266874194213, ema_span: 24}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.9543, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.4062263004196277, ema_span: 24}
     reference_amount_usdt: 150.0
 
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
