@@ -194,7 +194,7 @@ class BitfinexLiveExecutor:
         self._cell = cell
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
         self._date_provider = date_provider or (lambda: date.today())
-        self._base_url = base_url
+        self._base_url = base_url.rstrip("/")
 
     async def submit(
         self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,

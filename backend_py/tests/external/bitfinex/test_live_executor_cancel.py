@@ -106,11 +106,18 @@ def _make_ctx() -> AccountContext:
     )
 
 
-def _make_executor(bus: DomainEventBus, http: httpx.AsyncClient) -> BitfinexLiveExecutor:
+def _make_executor(
+    bus: DomainEventBus,
+    http: httpx.AsyncClient,
+    base_url: str | None = None,
+) -> BitfinexLiveExecutor:
     class _EventCapture:
         async def emit(self, event: dict[str, Any]) -> None:
             return None
 
+    kwargs: dict[str, Any] = {}
+    if base_url is not None:
+        kwargs["base_url"] = base_url
     return BitfinexLiveExecutor(
         http=http,
         event_sink=_EventCapture(),
@@ -121,6 +128,7 @@ def _make_executor(bus: DomainEventBus, http: httpx.AsyncClient) -> BitfinexLive
         cell="fUSD_p2",
         nonce_provider=lambda: 1700000000_000_000,
         date_provider=lambda: date(2026, 5, 23),
+        **kwargs,
     )
 
 
@@ -256,6 +264,35 @@ async def test_cancel_5xx_retries_then_swallows(_no_tenacity_sleep: None) -> Non
     # Only CancelRequested fired (no Acknowledged)
     types = [type(e).__name__ for e in captured]
     assert types == ["CancelRequested"]
+
+
+async def test_cancel_base_url_with_trailing_slash_joins_single_slash() -> None:
+    """A trailing slash on base_url must not yield a double-slash request path.
+
+    The path constants carry no leading slash, so naive f-string joining relies
+    on base_url having no trailing slash. Normalize defensively instead.
+    """
+    bus = DomainEventBus()
+    success_resp = [
+        1700000000000, "foc-req", None, None,
+        ["123", "fUSD", "rate", "amount"],
+        "0", "SUCCESS", None, "Submitting cancel request",
+    ]
+    async with httpx.AsyncClient() as http:
+        executor = _make_executor(bus, http, base_url="https://api.bitfinex.com/")
+        with respx.mock(base_url="https://api.bitfinex.com") as router:
+            route = router.post("/v2/auth/w/funding/offer/cancel").mock(
+                return_value=Response(200, json=success_resp),
+            )
+            await executor.cancel(
+                venue_offer_id="123",
+                signal_correlation_id=uuid4(),
+                account_id="default",
+                ctx=_make_ctx(),
+            )
+
+    assert route.called
+    assert route.calls.last.request.url.path == "/v2/auth/w/funding/offer/cancel"
 
 
 async def test_cancel_other_error_logs_no_acknowledged() -> None:
