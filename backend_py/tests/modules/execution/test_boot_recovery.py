@@ -206,6 +206,7 @@ class _StubStore:
         self, session, *, account_id, reserved_usdt, realized_usdt,
         n_offers, n_credits, occurred_at_ms,
     ):
+        from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
         self.snapshot_calls.append({
             "account_id": account_id,
             "reserved_usdt": reserved_usdt,
@@ -214,6 +215,7 @@ class _StubStore:
             "n_credits": n_credits,
             "occurred_at_ms": occurred_at_ms,
         })
+        return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
 
 
 class _StubSession:
@@ -478,3 +480,24 @@ async def test_run_reconcile_result_includes_credit_dimensions():
     assert result.realized_usdt == Decimal("200")
     assert result.reserved_usdt == Decimal("0")
     assert result.n_credits == 1
+
+
+@pytest.mark.asyncio
+async def test_run_threads_drift_from_snapshot_into_result():
+    """ReconcileResult carries realized_drift/reserved_drift from set_position_snapshot."""
+    from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
+
+    class _DriftStore(_StubStore):
+        async def set_position_snapshot(self, session, **kw):
+            await super().set_position_snapshot(session, **kw)
+            return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("150"))
+
+    store = _DriftStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=[_credit("1", "450")])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    result = await rec.run()
+
+    assert result.realized_drift_usdt == Decimal("150")
+    assert result.reserved_drift_usdt == Decimal("0")

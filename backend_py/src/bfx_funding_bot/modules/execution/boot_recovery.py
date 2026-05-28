@@ -56,6 +56,8 @@ class ReconcileResult:
     reserved_usdt: Decimal = Decimal("0")
     realized_usdt: Decimal = Decimal("0")
     n_credits: int = 0
+    reserved_drift_usdt: Decimal = Decimal("0")
+    realized_drift_usdt: Decimal = Decimal("0")
 
 
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
@@ -244,7 +246,7 @@ class BootRecovery:
             for ev in actions:
                 await self._store.append(session, ev)
             # Direct-write absolute position snapshot (not through delta accumulator).
-            await self._store.set_position_snapshot(
+            drift = await self._store.set_position_snapshot(
                 session,
                 account_id=self._ctx.account_id,
                 reserved_usdt=reserved_usdt,
@@ -286,6 +288,8 @@ class BootRecovery:
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
             reserved_usdt=reserved_usdt, realized_usdt=realized_usdt,
             n_credits=len(venue_credits),
+            reserved_drift_usdt=drift.reserved_drift,
+            realized_drift_usdt=drift.realized_drift,
         )
 
     async def _fetch_offers(self) -> list[ActiveFundingOffer]:
