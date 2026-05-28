@@ -49,7 +49,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 logger = logging.getLogger("run_oos_profitability")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
-DEFAULT_N_TRIALS = 9  # MeanReversion grid (6) + RatePercentile (3) per cell in the Phase 3b sweep
+DEFAULT_N_TRIALS = 9  # Phase 3b sweep tried 9 configs/cell (6 MR + 3 RP); the deflated-Sharpe factor
 CANARY_YAML = Path("configs/cells.canary.yaml")
 
 
@@ -199,7 +199,11 @@ async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> C
     windows = compute_wfo_windows(candles)
     if not windows:
         raise SystemExit(f"No WFO windows for {cell.cell_id}; candle series too short?")
+
     def _make_strategy() -> Strategy:
+        # build_strategy is annotated -> _Strategy (registry's Protocol); Strategy
+        # is the ABC evaluate_oos_windows expects. Concrete strategies subclass the
+        # ABC, so this is safe at runtime — the registry just keeps a looser contract.
         return build_strategy(cell)  # type: ignore[return-value]
 
     strat_outcomes, base_outcomes = evaluate_oos_windows(
