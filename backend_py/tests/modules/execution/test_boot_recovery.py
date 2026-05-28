@@ -203,12 +203,14 @@ class _StubStore:
         return True
 
     async def set_position_snapshot(
-        self, session, *, account_id, reserved_usdt, realized_usdt, n_credits, occurred_at_ms
+        self, session, *, account_id, reserved_usdt, realized_usdt,
+        n_offers, n_credits, occurred_at_ms,
     ):
         self.snapshot_calls.append({
             "account_id": account_id,
             "reserved_usdt": reserved_usdt,
             "realized_usdt": realized_usdt,
+            "n_offers": n_offers,
             "n_credits": n_credits,
             "occurred_at_ms": occurred_at_ms,
         })

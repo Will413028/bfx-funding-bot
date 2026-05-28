@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +18,16 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     OfferClaimRow,
     PositionStateRow,
+    ReconcileObservationRow,
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotDrift:
+    reserved_drift: Decimal
+    realized_drift: Decimal
+
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
 # NOTE: dedup for events with venue_seq IS NULL is app-level only — the
@@ -232,16 +241,29 @@ class PostgresEventStore:
         account_id: str,
         reserved_usdt: Decimal,
         realized_usdt: Decimal,
+        n_offers: int,
         n_credits: int,
         occurred_at_ms: int,
-    ) -> None:
-        """Direct-write position_state with absolute venue snapshot values.
+    ) -> SnapshotDrift:
+        """Absolute venue snapshot. Overwrites the live position_state view,
+        appends an immutable reconcile_observation checkpoint (with the event_log
+        fence), and returns drift vs the prior materialized belief.
 
-        NOT through the delta accumulator — this is a SET, not an ADD.
-        Called by reconcile (boot + periodic) after fetching both offers and
-        credits. Does not append to event_log; PositionReconciled is in-process
-        pub/sub only.
+        NOT a delta. NOT through the accumulator. Single-writer for exposure at
+        reconcile time.
+
+        n_offers is persisted in the checkpoint row only (audit); position_state
+        carries n_credits but has no n_offers column.
         """
+        fence: int = (
+            await session.execute(
+                select(func.coalesce(func.max(EventLogRow.event_seq), 0)).where(
+                    EventLogRow.account_id == account_id,
+                    EventLogRow.deployment_environment == self._env,
+                )
+            )
+        ).scalar_one()
+
         ps = (
             await session.execute(
                 select(PositionStateRow).where(
@@ -250,6 +272,8 @@ class PostgresEventStore:
                 )
             )
         ).scalar_one_or_none()
+        prior_reserved = Decimal(str(ps.reserved_usdt)) if ps is not None else Decimal("0")
+        prior_realized = Decimal(str(ps.realized_usdt)) if ps is not None else Decimal("0")
         if ps is None:
             ps = PositionStateRow(
                 account_id=account_id,
@@ -263,8 +287,25 @@ class PostgresEventStore:
         ps.reserved_usdt = reserved_usdt
         ps.realized_usdt = realized_usdt
         ps.last_updated_ms = occurred_at_ms
+        ps.last_event_seq = fence
         ps.last_reconciled_at = occurred_at_ms
         ps.n_credits = n_credits
+
+        session.add(ReconcileObservationRow(
+            account_id=account_id,
+            deployment_environment=self._env,
+            reserved_usdt=reserved_usdt,
+            realized_usdt=realized_usdt,
+            n_offers=n_offers,
+            n_credits=n_credits,
+            observed_at_ms=occurred_at_ms,
+            event_seq_fence=fence,
+        ))
+
+        return SnapshotDrift(
+            reserved_drift=abs(reserved_usdt - prior_reserved),
+            realized_drift=abs(realized_usdt - prior_realized),
+        )
 
     async def rebuild_snapshot_from_log(
         self, session: AsyncSession, *, account_id: str, deployment_environment: str
