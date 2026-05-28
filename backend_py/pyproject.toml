@@ -23,6 +23,7 @@ dependencies = [
     # deploy time after container ModuleNotFoundError.
     "numpy>=2.4.4",
     "pandas>=3.0.2",
+    "ruamel.yaml>=0.18",
 ]
 
 [dependency-groups]
