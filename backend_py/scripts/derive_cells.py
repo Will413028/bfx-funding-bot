@@ -9,6 +9,8 @@ Usage:
     cd backend_py
     uv run python scripts/derive_cells.py --write   # operator, before deploy
     uv run python scripts/derive_cells.py --check    # CI / pre-commit
+
+Exit codes: 0 = OK; 1 = --check found drift; 2 = --write found no candles for a cell.
 """
 from __future__ import annotations
 
