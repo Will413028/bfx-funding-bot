@@ -501,3 +501,47 @@ async def test_run_threads_drift_from_snapshot_into_result():
 
     assert result.realized_drift_usdt == Decimal("150")
     assert result.reserved_drift_usdt == Decimal("0")
+
+
+# ── Single-writer: registry routing (Task 5) ─────────────────────────────────
+
+
+class _StubRegistry:
+    def __init__(self):
+        self.handled: list = []
+
+    async def handle(self, event):
+        self.handled.append(event)
+
+
+@pytest.mark.asyncio
+async def test_run_routes_recovery_actions_to_registry_not_bus():
+    """With an offer_registry wired: PositionReconciled goes to the bus (ledger),
+    recovery ReservationClaimed goes to the registry — NOT the bus. This prevents
+    the double-count once the ledger subscribes to PositionReconciled."""
+    registry = _StubRegistry()
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, offer_registry=registry)
+
+    await rec.run()
+
+    # bus carries the snapshot signal only
+    assert any(isinstance(e, PositionReconciled) for e in bus.published)
+    assert not any(isinstance(e, ReservationClaimed) for e in bus.published)
+    # registry receives the orphan claim (FSM)
+    assert any(isinstance(e, ReservationClaimed) for e in registry.handled)
+
+
+@pytest.mark.asyncio
+async def test_run_falls_back_to_bus_when_no_registry():
+    """No registry → recovery actions still reach the bus (legacy path)."""
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)  # no offer_registry
+
+    await rec.run()
+
+    assert any(isinstance(e, ReservationClaimed) for e in bus.published)

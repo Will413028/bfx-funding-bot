@@ -184,6 +184,13 @@ class _Bus(Protocol):
     async def publish(self, event: Any) -> None: ...
 
 
+class _FsmSink(Protocol):
+    # Distinct from _Bus on purpose: recovery FSM events are delivered DIRECTLY to
+    # the OfferRegistry (which satisfies .handle), bypassing the bus so reconcile-time
+    # exposure stays single-writer (only PositionReconciled reaches the ledger's bus).
+    async def handle(self, event: Any) -> None: ...
+
+
 class BootRecovery:
     """Boot orchestration: venue reconcile + resolve crash-mid-flight PENDING.
 
@@ -204,6 +211,7 @@ class BootRecovery:
         account_ctx: AccountContext,
         deployment_environment: str,
         bus: _Bus,
+        offer_registry: _FsmSink | None = None,
         is_simulated: bool = False,
         symbol: str = "fUSD",
         grace_ms: int = 120_000,
@@ -218,6 +226,7 @@ class BootRecovery:
         self._ctx = account_ctx
         self._env = deployment_environment
         self._bus = bus
+        self._offer_registry = offer_registry
         self._is_simulated = is_simulated
         self._symbol = symbol
         self._grace_ms = grace_ms
@@ -265,16 +274,17 @@ class BootRecovery:
             n_credits=len(venue_credits),
             occurred_at_ms=now_ms,
         )
+        # Snapshot signal → bus (the ledger's sole exposure authority at reconcile).
         await self._safe_publish(position_reconciled)
 
         n_claim = n_release = n_fail = 0
         for ev in actions:
             if isinstance(ev, ReservationClaimed):
                 n_claim += 1
-                await self._safe_publish(ev)
+                await self._route_fsm(ev)
             elif isinstance(ev, ReservationReleased):
                 n_release += 1
-                await self._safe_publish(ev)
+                await self._route_fsm(ev)
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
         log.info(
@@ -375,3 +385,18 @@ class BootRecovery:
                 "boot_recovery_publish_failed event=%s err=%r — projection lost, SoT persisted",
                 type(event).__name__, exc,
             )
+
+    async def _route_fsm(self, event: object) -> None:
+        """Recovery FSM events go to the registry directly (NOT the ledger's bus),
+        so reconcile-time exposure stays single-writer (PositionReconciled).
+        Falls back to the bus when no registry is wired."""
+        if self._offer_registry is not None:
+            try:
+                await self._offer_registry.handle(event)
+            except Exception as exc:
+                log.critical(
+                    "boot_recovery_fsm_route_failed event=%s err=%r — FSM projection lost, SoT persisted",
+                    type(event).__name__, exc,
+                )
+        else:
+            await self._safe_publish(event)
