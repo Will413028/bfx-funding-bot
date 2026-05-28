@@ -10,6 +10,7 @@ point. See docs/superpowers/specs/2026-05-28-tier2-deployment-safety-design.md.
 """
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -65,6 +66,7 @@ def select_winner(scored: list[ScoredCombo]) -> dict[str, Any]:
         raise NoDistinguishableComboError(
             "no grid combo is distinguishable from passive AlwaysFRR"
         )
+    # Negate span/sigma so max() prefers the smallest values on a mean_active tie.
     return max(
         eligible,
         key=lambda pm: (pm[1], -int(pm[0]["ema_span"]), -pm[0]["threshold_sigma"]),
@@ -110,11 +112,10 @@ def derive_cell_params(candles: list[FundingCandle]) -> DerivedCell:
 
     scored: list[ScoredCombo] = []
     for params in grid:
-        factory = (lambda p: lambda: _make_strategy(p))(params)
         strat_out, base_out = evaluate_oos_windows(
             candles,
             windows,
-            make_strategy=factory,
+            make_strategy=functools.partial(_make_strategy, params),
         )
         active = active_return_summary(strat_out, base_out)
         scored.append((
@@ -125,6 +126,8 @@ def derive_cell_params(candles: list[FundingCandle]) -> DerivedCell:
         ))
 
     winner = select_winner(scored)
+    # select_winner returns the same params dict object stored in scored, so
+    # identity (`is`) recovers that combo's stats without re-matching on value.
     winner_stats = next(
         (ma, ir, pct) for (p, ma, ir, pct) in scored if p is winner
     )
