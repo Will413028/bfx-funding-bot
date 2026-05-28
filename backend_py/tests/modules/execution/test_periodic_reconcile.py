@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from decimal import Decimal
 
 import pytest
 
@@ -218,3 +219,24 @@ async def test_resync_requested_before_loop_start_is_honored():
 
     await asyncio.gather(pr.run_loop(stop), _drive())
     assert recovery._i >= 2  # tick 1 (loop start) + the pre-set resync tick
+
+
+@pytest.mark.asyncio
+async def test_realized_drift_sets_degraded_even_without_offer_actions():
+    probe = _FakeProbe()
+    # no claims/releases, but realized drifted by $150 (WS credit path missed)
+    recovery = _FakeRecovery(results=[
+        ReconcileResult(0, 0, 0, realized_drift_usdt=Decimal("150")),
+    ])
+    pr = PeriodicReconcile(recovery=recovery, probe=probe, interval_s=0.01,
+                           max_consecutive_failures=3)
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+
+    assert any(t == HealthTarget.RECONCILE and s == HealthStatus.DEGRADED
+               for (t, s, _f) in probe.updates)
