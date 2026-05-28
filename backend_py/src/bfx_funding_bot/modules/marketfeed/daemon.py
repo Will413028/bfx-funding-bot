@@ -59,6 +59,7 @@ from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
     OrderFilled,
+    PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
 )
@@ -160,6 +161,7 @@ class Daemon:
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
     ledger: PaperPositionLedger
+    bus: DomainEventBus
     smoke_runner: SmokeRunner | None = None
     fill_tracker: RestPollingFillTracker | None = None
     offer_registry: OfferRegistry | None = None
@@ -807,6 +809,7 @@ async def build_daemon(
             account_ctx=account_ctx,
             deployment_environment=env_str,
             bus=bus,
+            offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
             symbol=first_cell.symbol,
         )
@@ -827,6 +830,7 @@ async def build_daemon(
             account_ctx=account_ctx,
             deployment_environment=env_str,
             bus=bus,
+            offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
             symbol=first_cell.symbol,
             action_grace_ms=120_000,
@@ -862,6 +866,11 @@ async def build_daemon(
     # 3b: cancel lifecycle → diagnostics (CANCEL_AUDIT). Forensic, best-effort.
     bus.subscribe(CancelRequested,     diagnostics.handle_cancel_requested)
     bus.subscribe(CancelAcknowledged,  diagnostics.handle_cancel_acknowledged)
+    # Credit-aware reconcile: PositionReconciled is the ledger's sole exposure
+    # authority at reconcile time (recovery FSM events are routed to the registry,
+    # not the bus — see BootRecovery._route_fsm). Wiring both together is required:
+    # subscribing here without the registry routing would double-count orphans.
+    bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
 
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
@@ -1103,6 +1112,7 @@ async def build_daemon(
         safety_chain=safety_chain,
         account_ctx=account_ctx,
         ledger=ledger,
+        bus=bus,
         smoke_runner=smoke_runner,
         fill_tracker=fill_tracker,
         offer_registry=offer_registry,
