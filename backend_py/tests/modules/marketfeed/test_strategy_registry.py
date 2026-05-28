@@ -23,7 +23,7 @@ def _cell_mr() -> CellConfig:
     return CellConfig.model_validate({
         "strategy": "mean_reversion", "symbol": "fUSD", "period_agg": "a30",
         "timeframe": "1h",
-        "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_alpha": 0.02},
+        "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100},
         "reference_amount_usdt": 150.0,
     })
 
@@ -159,3 +159,31 @@ def test_build_strategy_at_boundary_empty_history():
     assert result.observed_count == 0
     assert isinstance(result.strategy, RatePercentileStrategy)
     assert list(result.strategy._window) == []  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# ema_span schema tests (Tier 2 param pipeline: drop ema_alpha round-trip)
+# ---------------------------------------------------------------------------
+
+from pydantic import ValidationError  # noqa: E402 (after stdlib imports is fine)
+
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName  # noqa: E402
+
+
+def test_build_mean_reversion_reads_ema_span():
+    cell = CellConfig(
+        strategy=StrategyName.MEAN_REVERSION, symbol="fUST", period_agg="a30",
+        params={"ema_span": 24, "threshold_sigma": 0.5, "ratio_sigma": 0.9915},
+    )
+    strat = build_strategy(cell)
+    # MeanReversionStrategy stores _ema_span directly; no alpha round-trip.
+    assert strat._ema_span == 24  # type: ignore[attr-defined]
+    assert strat._threshold_sigma == Decimal("0.5")  # type: ignore[attr-defined]
+
+
+def test_cell_config_rejects_legacy_ema_alpha():
+    with pytest.raises(ValidationError):
+        CellConfig(
+            strategy=StrategyName.MEAN_REVERSION, symbol="fUST", period_agg="a30",
+            params={"ema_alpha": 0.01183, "threshold_sigma": 1.0, "ratio_sigma": 0.99},
+        )

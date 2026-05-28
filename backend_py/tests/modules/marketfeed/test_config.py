@@ -24,7 +24,7 @@ def _valid_yaml() -> dict:
                 "symbol": "fUSD",
                 "period_agg": "a30",
                 "timeframe": "1h",
-                "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_alpha": 0.02},
+                "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100},
                 "reference_amount_usdt": 150.0,
             },
             {
@@ -182,7 +182,7 @@ def test_mr_fust_p30_warn_but_not_fatal(tmp_path: Path, monkeypatch: pytest.Monk
         "symbol": "fUST",
         "period_agg": "p30",
         "timeframe": "1h",
-        "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_alpha": 0.02},
+        "params": {"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
         "reference_amount_usdt": 150.0,
     })
     yaml_path = _write_yaml(tmp_path, bad)
@@ -377,7 +377,7 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
     reference_amount_usdt: 150.0
 """
     )
@@ -412,7 +412,7 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
     reference_amount_usdt: 150.0
 """
     )
@@ -440,7 +440,7 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
     reference_amount_usdt: 150.0
   - strategy: rate_percentile
     symbol: fUSD
@@ -474,7 +474,7 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
     reference_amount_usdt: 150.0
     staleness_budget_hours: -1
 """
@@ -500,7 +500,7 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_alpha: 0.01183}
+    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
     reference_amount_usdt: 150.0
 """
     )

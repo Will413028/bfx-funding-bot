@@ -38,7 +38,7 @@ class MeanReversionParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     threshold_sigma: float = Field(gt=0)
     ratio_sigma: float = Field(gt=0)
-    ema_alpha: float = Field(gt=0, lt=1)
+    ema_span: int = Field(ge=1)
 
 
 class RatePercentileParams(BaseModel):
@@ -264,3 +264,15 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         if cell.staleness_budget_hours is None:
             cell.staleness_budget_hours = config.staleness_budget_hours_default
     return config
+
+
+def load_cells_only(cells_yaml_path: Path) -> list[CellConfig]:
+    """Parse just the `cells:` list from a YAML file, no env vars, no daemon config.
+
+    For tooling (derive_cells, run_oos_profitability) and the deploy gate that
+    need the deployed cell definitions without the full daemon environment.
+    """
+    if not cells_yaml_path.exists():
+        raise FileNotFoundError(f"cells.yaml not found at {cells_yaml_path}")
+    raw = yaml.safe_load(cells_yaml_path.read_text())
+    return [CellConfig.model_validate(c) for c in raw.get("cells", [])]

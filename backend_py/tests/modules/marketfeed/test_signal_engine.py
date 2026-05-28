@@ -187,7 +187,7 @@ def test_resolve_budget_seconds_raises_if_staleness_not_resolved() -> None:
         symbol="fUSD",
         period_agg="p30",
         timeframe="1h",
-        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_alpha": 0.01},
+        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_span": 168},
         reference_amount_usdt=150.0,
         staleness_budget_hours=None,  # simulate loader bypass
     )
@@ -226,7 +226,7 @@ def test_resolve_staleness_budget_hours_raises_if_not_resolved() -> None:
         symbol="fUSD",
         period_agg="p30",
         timeframe="1h",
-        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_alpha": 0.01},
+        params={"threshold_sigma": 1.0, "ratio_sigma": 0.5, "ema_span": 168},
         reference_amount_usdt=150.0,
         staleness_budget_hours=None,
     )

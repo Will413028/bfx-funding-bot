@@ -3,9 +3,8 @@
 Strategy plugin abstraction is Phase 5+ scope.
 Phase 4.1: hardcoded if/elif for 2 strategy enums.
 
-MeanReversionStrategy takes ema_span: int (EMA window length),
-but cells.yaml / CellConfig stores ema_alpha: float (smoothing factor).
-Conversion: alpha = 2 / (span + 1)  ->  span = round(2 / alpha - 1).
+MeanReversionStrategy takes ema_span: int (EMA window length).
+cells.yaml / CellConfig stores ema_span directly (int).
 """
 from __future__ import annotations
 
@@ -39,21 +38,12 @@ class StrategyBuildResult:
     observed_count: int
 
 
-def _ema_alpha_to_span(alpha: float) -> int:
-    """Convert EMA smoothing factor to equivalent span (rounds to nearest int).
-
-    alpha = 2 / (span + 1)  →  span = 2/alpha - 1
-    """
-    return max(1, round(2.0 / alpha - 1))
-
-
 def build_strategy(cell: CellConfig) -> _Strategy:
     """Instantiate the correct Strategy subclass from a CellConfig."""
     if cell.strategy == StrategyName.MEAN_REVERSION:
         p = cell.params
-        ema_span = _ema_alpha_to_span(float(p["ema_alpha"]))
         return MeanReversionStrategy(
-            ema_span=ema_span,
+            ema_span=int(p["ema_span"]),
             threshold_sigma=Decimal(str(p["threshold_sigma"])),
             ratio_sigma=Decimal(str(p["ratio_sigma"])),
         )
