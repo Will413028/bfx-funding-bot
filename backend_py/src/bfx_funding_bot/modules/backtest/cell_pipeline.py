@@ -26,7 +26,8 @@ CANARY_YAML = CONFIGS / "cells.canary.yaml"
 FIXTURES = Path("fixtures/candles")
 
 # MeanReversion cells to derive (RatePercentile is static, not EDA-derived).
-MR_CELLS = [
+# Items are (symbol, period_agg, timeframe) — NOT CellKey-shaped.
+MR_CELLS: list[tuple[str, str, str]] = [
     ("fUST", "a30", "1h"),
     ("fUST", "p2", "1h"),
     ("fUSD", "a30", "1h"),
@@ -157,6 +158,8 @@ def check_against_fixture(
             ("ratio_sigma", float(d.ratio_sigma)),
         ):
             got = params.get(field)
+            # Values are exact YAML float round-trips (ruamel uses repr), so a
+            # matching cell diffs by 0.0; 1e-9 is a generous guard, not a budget.
             if got is None or abs(float(got) - float(want)) > 1e-9:
                 problems.append(
                     f"{key[1]}_{key[2]} {field}: committed {got!r} != derived {want!r}"
@@ -171,10 +174,9 @@ def check_against_fixture(
                 problems.append(f"canary cell {key} not in {main.name}")
                 continue
             for field in ("ema_span", "threshold_sigma", "ratio_sigma"):
-                if (
-                    abs(float(cparams.get(field, 0)) - float(mparams.get(field, 0)))
-                    > 1e-9
-                ):
+                cgot = cparams.get(field)
+                mgot = mparams.get(field)
+                if cgot is None or mgot is None or abs(float(cgot) - float(mgot)) > 1e-9:
                     problems.append(
                         f"canary {key[1]}_{key[2]} {field} != {main.name}"
                     )

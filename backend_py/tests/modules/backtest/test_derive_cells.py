@@ -87,3 +87,20 @@ def test_check_fails_on_fixture_hash_mismatch(tmp_path: Path) -> None:
     )
     problems = check_against_fixture(fixtures, [cells_yaml], canary_path=None)
     assert any("data_hash" in p for p in problems)
+
+
+def test_check_fails_on_canary_param_drift(tmp_path: Path) -> None:
+    fixtures, cells_yaml = _setup(tmp_path)
+    # Canary starts as a copy of the main file, then one param is diverged.
+    from ruamel.yaml import YAML  # type: ignore[import-untyped]
+
+    canary_yaml = tmp_path / "cells.canary.yaml"
+    ruamel = YAML()
+    doc = ruamel.load(cells_yaml.read_text())
+    doc["cells"][0]["params"]["threshold_sigma"] = 9.9
+    with canary_yaml.open("w") as fh:
+        ruamel.dump(doc, fh)
+    problems = check_against_fixture(
+        fixtures, [cells_yaml, canary_yaml], canary_path=canary_yaml
+    )
+    assert any("canary" in p and "threshold_sigma" in p for p in problems)
