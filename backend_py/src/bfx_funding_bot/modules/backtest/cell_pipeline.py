@@ -67,6 +67,12 @@ def write_outputs(
 
     ruamel = YAML()
     ruamel.preserve_quotes = True
+    # Match the existing config style (block list `  - ` at offset 2) so a
+    # param patch is a minimal diff, not a whole-file re-indent.
+    ruamel.indent(mapping=2, sequence=4, offset=2)
+    # Keep flow-style `params: {...}` maps on one line (default width=80 wraps
+    # the longest ratio_sigma onto a continuation line).
+    ruamel.width = 4096
 
     prov_cells: dict[str, dict[str, Any]] = {}
     for (_strat, _sym, _pa), d in derived.items():
