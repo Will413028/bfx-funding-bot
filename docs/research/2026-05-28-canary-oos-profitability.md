@@ -1,14 +1,14 @@
 # Canary OOS Profitability — fUST MeanReversion (a30, p2)
 
-**Run date**: 2026-05-27T23:35:48.291676+00:00
+**Run date**: 2026-05-28T05:51:19.544117+00:00
 **Data window**: 2022-01 .. now
 **Config**: `configs/cells.canary.yaml` (deployed params, fixed — not re-swept)
 **Fill model**: linear (deterministic) — see methodology.
 
 ## TL;DR
 
-- **fUST_a30** (49 months): strat median 0.4951%/mo (annualized 6.26%), baseline 0.4951%/mo; active median 0.0000%/mo, IR 0; worst-month 0.1687%, idle 0.00%; deflated-Sharpe 1.0000.
-- **fUST_p2** (49 months): strat median 0.4816%/mo (annualized 6.13%), baseline 0.4816%/mo; active median 0.0000%/mo, IR 0; worst-month 0.2646%, idle 0.00%; deflated-Sharpe 1.0000.
+- **fUST_a30** (49 months): strat median 0.5547%/mo (annualized 7.20%), baseline 0.4951%/mo; active median 0.0628%/mo, IR 1.016275821228169796986813166; worst-month 0.2404%, idle 0.00%; deflated-Sharpe 1.0000.
+- **fUST_p2** (49 months): strat median 0.5430%/mo (annualized 7.31%), baseline 0.4816%/mo; active median 0.0678%/mo, IR 0.7384548648752518865367471980; worst-month 0.3054%, idle 0.00%; deflated-Sharpe 1.0000.
 
 ## OOS honesty caveat
 
@@ -18,22 +18,22 @@ Deployed params were chosen by a sweep over this same 2022-2026 history, so thes
 
 | Metric | Strategy | Baseline (AlwaysFRR) |
 |---|---|---|
-| median monthly % | 0.4951 | 0.4951 |
-| p25 monthly % | 0.4140 | 0.4140 |
-| worst month % | 0.1687 | 0.1687 |
-| best month % | 0.8520 | 0.8520 |
-| annualized % | 6.26 | 6.26 |
+| median monthly % | 0.5547 | 0.4951 |
+| p25 monthly % | 0.4690 | 0.4140 |
+| worst month % | 0.2404 | 0.1687 |
+| best month % | 1.1371 | 0.8520 |
+| annualized % | 7.20 | 6.26 |
 | Sortino (monthly) | Infinity | Infinity |
 | idle rate | 0.00% | 0.00% |
 | mean fill rate | 1.0000 | 1.0000 |
 
-**Strategy median monthly 95% CI (bootstrap):** [0.4552%, 0.5513%]
+**Strategy median monthly 95% CI (bootstrap):** [0.5036%, 0.6091%]
 
 ### Active return vs passive
 
-- median active: 0.0000%/mo; mean active: 0.0000%/mo
-- information ratio: 0
-- months strategy > baseline: 0.00%
+- median active: 0.0628%/mo; mean active: 0.0737%/mo
+- information ratio: 1.016275821228169796986813166
+- months strategy > baseline: 85.71%
 
 ### Selection bias
 
@@ -44,22 +44,22 @@ Deployed params were chosen by a sweep over this same 2022-2026 history, so thes
 
 | Metric | Strategy | Baseline (AlwaysFRR) |
 |---|---|---|
-| median monthly % | 0.4816 | 0.4816 |
-| p25 monthly % | 0.4047 | 0.4047 |
-| worst month % | 0.2646 | 0.2646 |
-| best month % | 0.8550 | 0.8550 |
-| annualized % | 6.13 | 6.13 |
+| median monthly % | 0.5430 | 0.4816 |
+| p25 monthly % | 0.4632 | 0.4047 |
+| worst month % | 0.3054 | 0.2646 |
+| best month % | 1.1402 | 0.8550 |
+| annualized % | 7.31 | 6.13 |
 | Sortino (monthly) | Infinity | Infinity |
 | idle rate | 0.00% | 0.00% |
 | mean fill rate | 1.0000 | 1.0000 |
 
-**Strategy median monthly 95% CI (bootstrap):** [0.4227%, 0.5373%]
+**Strategy median monthly 95% CI (bootstrap):** [0.4884%, 0.5792%]
 
 ### Active return vs passive
 
-- median active: 0.0000%/mo; mean active: 0.0000%/mo
-- information ratio: 0
-- months strategy > baseline: 0.00%
+- median active: 0.0678%/mo; mean active: 0.0924%/mo
+- information ratio: 0.7384548648752518865367471980
+- months strategy > baseline: 83.67%
 
 ### Selection bias
 
