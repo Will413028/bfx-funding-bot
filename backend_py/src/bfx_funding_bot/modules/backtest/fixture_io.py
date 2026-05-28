@@ -19,6 +19,8 @@ _SUFFIX = ".jsonl.gz"
 
 
 def _series_path(directory: Path, symbol: str, period_agg: str, timeframe: str) -> Path:
+    # Assumes symbol/period_agg/timeframe contain no "_" (current key space:
+    # fUST/fUSD, a30/p2/p30, 1h). load_candles splits the stem on "_" into 3.
     return directory / f"{symbol}_{period_agg}_{timeframe}{_SUFFIX}"
 
 
@@ -42,14 +44,18 @@ def freeze_candles(
         payload = ("\n".join(rows) + "\n").encode("utf-8")
         # BytesIO + mtime=0 + no stored filename -> byte-identical archive
         # for identical content (GzipFile filename= stores in header, not path).
+        # compresslevel pinned so a future CPython default change can't shift
+        # the bytes. NOTE: the deflate stream is still zlib-version dependent,
+        # so the gate relies on freeze-once-locally + commit; CI only READS the
+        # committed .jsonl.gz bytes (via fixture_data_hash), never re-freezes.
         buf = io.BytesIO()
-        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0, compresslevel=9) as gz:
             gz.write(payload)
         path.write_bytes(buf.getvalue())
 
 
 def load_candles(path: Path) -> list[FundingCandle]:
-    """Load one frozen series. (symbol, period_agg, timeframe) from filename."""
+    """Load one frozen series; symbol/period_agg/timeframe are parsed from the filename."""
     stem = path.name[: -len(_SUFFIX)] if path.name.endswith(_SUFFIX) else path.stem
     parts = stem.split("_")
     if len(parts) != 3:
