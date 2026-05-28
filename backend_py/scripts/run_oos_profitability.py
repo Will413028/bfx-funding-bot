@@ -28,8 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import run_backtest
+from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     ActiveReturnSummary,
     OosSummary,
@@ -41,41 +40,17 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     sharpe_skew_kurt,
     summarize_oos,
 )
-from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
+from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 
 logger = logging.getLogger("run_oos_profitability")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
 DEFAULT_N_TRIALS = 9  # MeanReversion grid (6) + RatePercentile (3) per cell in the Phase 3b sweep
-LINEAR_CONFIG = BacktestConfig(fill_model="linear")
-
-
-@dataclass(frozen=True)
-class CanaryCell:
-    strategy: str
-    symbol: str
-    period_agg: str
-    timeframe: str
-    threshold_sigma: Decimal
-    ratio_sigma: Decimal
-    ema_alpha: Decimal
-
-    @property
-    def label(self) -> str:
-        return f"{self.symbol}_{self.period_agg}"
-
-
-# Mirrors configs/cells.canary.yaml (single source of truth for deployed params).
-CANARY_CELLS: list[CanaryCell] = [
-    CanaryCell("mean_reversion", "fUST", "a30", "1h",
-               Decimal("1.0"), Decimal("0.9915"), Decimal("0.01183")),
-    CanaryCell("mean_reversion", "fUST", "p2", "1h",
-               Decimal("1.0"), Decimal("0.9543"), Decimal("0.01183")),
-]
+CANARY_YAML = Path("configs/cells.canary.yaml")
 
 
 @dataclass(frozen=True)
@@ -90,24 +65,8 @@ class CellReport:
     n_trials: int
 
 
-def alpha_to_ema_span(alpha: Decimal) -> int:
-    """Invert _alpha = 2/(ema_span+1) used by MeanReversionStrategy. 0.01183 -> 168."""
-    if alpha <= 0:
-        raise ValueError(f"alpha_to_ema_span: alpha must be > 0, got {alpha}")
-    return int((Decimal("2") / alpha - Decimal("1")).to_integral_value(rounding="ROUND_HALF_UP"))
-
-
-def _outcome(result: BacktestResult, month_mts: int) -> WindowOutcome:
-    return WindowOutcome(
-        month_mts=month_mts,
-        net_monthly=result.net_monthly_return_pct,
-        n_trades=result.n_trades,
-        fill_rate=result.fill_rate,
-    )
-
-
 def build_cell_report(
-    cell: CanaryCell,
+    cell: CellConfig,
     strat_outcomes: list[WindowOutcome],
     base_outcomes: list[WindowOutcome],
     n_trials: int,
@@ -125,7 +84,7 @@ def build_cell_report(
     sr, skew, kurt = sharpe_skew_kurt([m / Decimal("100") for m in monthly])
     dsr = deflated_sharpe(sr, n_trials=n_trials, n_obs=len(monthly), skew=skew, kurtosis=kurt)
     return CellReport(
-        cell_label=cell.label,
+        cell_label=cell.cell_id,
         n_windows=len(strat_outcomes),
         strat_summary=strat_summary,
         base_summary=base_summary,
@@ -229,33 +188,24 @@ def _report_to_json(reports: list[CellReport]) -> dict:  # type: ignore[type-arg
     }
 
 
-async def _run_cell(session: AsyncSession, cell: CanaryCell, n_trials: int) -> CellReport:
+async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> CellReport:
     end_mts = int(datetime.now(UTC).timestamp() * 1000)
     candles = await get_candles_in_range(
         session, symbol=cell.symbol, timeframe=cell.timeframe,
         period_agg=cell.period_agg, start_mts=START_MTS, end_mts=end_mts,
     )
     if not candles:
-        raise SystemExit(f"No candles for {cell.label}; run scripts/backfill_candles.py")
+        raise SystemExit(f"No candles for {cell.cell_id}; run scripts/backfill_candles.py")
     windows = compute_wfo_windows(candles)
     if not windows:
-        raise SystemExit(f"No WFO windows for {cell.label}; candle series too short?")
-    ema_span = alpha_to_ema_span(cell.ema_alpha)
+        raise SystemExit(f"No WFO windows for {cell.cell_id}; candle series too short?")
+    def _make_strategy() -> Strategy:
+        return build_strategy(cell)  # type: ignore[return-value]
 
-    strat_outcomes: list[WindowOutcome] = []
-    base_outcomes: list[WindowOutcome] = []
-    for w in windows:
-        slice_ = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
-        strat = MeanReversionStrategy(
-            ema_span=ema_span, threshold_sigma=cell.threshold_sigma, ratio_sigma=cell.ratio_sigma
-        )
-        base = AlwaysFRRStrategy(period_days=2)
-        rs = run_backtest(slice_, strat, LINEAR_CONFIG, w.test_start_mts, w.test_end_mts)
-        rb = run_backtest(slice_, base, LINEAR_CONFIG, w.test_start_mts, w.test_end_mts)
-        strat_outcomes.append(_outcome(rs, w.test_start_mts))
-        base_outcomes.append(_outcome(rb, w.test_start_mts))
-
-    logger.info("%s: %d windows", cell.label, len(windows))
+    strat_outcomes, base_outcomes = evaluate_oos_windows(
+        candles, windows, make_strategy=_make_strategy
+    )
+    logger.info("%s: %d windows", cell.cell_id, len(windows))
     return build_cell_report(cell, strat_outcomes, base_outcomes, n_trials)
 
 
@@ -275,7 +225,7 @@ async def _amain() -> int:
 
     reports: list[CellReport] = []
     try:
-        for cell in CANARY_CELLS:
+        for cell in load_cells_only(CANARY_YAML):
             async with session_scope(session_factory) as session:
                 reports.append(await _run_cell(session, cell, args.n_trials))
     except Exception:

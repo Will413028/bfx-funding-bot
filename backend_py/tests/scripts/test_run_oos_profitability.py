@@ -3,8 +3,6 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_oos_profitability.py"
 _SPEC = importlib.util.spec_from_file_location("run_oos_profitability", _SCRIPT_PATH)
 mod = importlib.util.module_from_spec(_SPEC)  # type: ignore[arg-type]
@@ -13,23 +11,13 @@ sys.modules["run_oos_profitability"] = mod  # needed so @dataclass can resolve _
 _SPEC.loader.exec_module(mod)  # type: ignore[union-attr]
 
 
-def test_alpha_to_ema_span():
-    # 0.01183 -> round(2/0.01183 - 1) = round(168.06) = 168
-    assert mod.alpha_to_ema_span(Decimal("0.01183")) == 168
-    # 0.5 -> round(2/0.5 - 1) = round(3) = 3
-    assert mod.alpha_to_ema_span(Decimal("0.5")) == 3
-
-
-def test_alpha_to_ema_span_invalid_raises():
-    with pytest.raises(ValueError):
-        mod.alpha_to_ema_span(Decimal("0"))
-
-
-def test_canary_cells_match_config():
-    cells = mod.CANARY_CELLS
+def test_canary_yaml_loads_cells():
+    # CANARY_YAML resolves relative to cwd (backend_py/); load via absolute path
+    yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.canary.yaml"
+    cells = mod.load_cells_only(yaml_path)
     assert len(cells) == 2
     assert {c.period_agg for c in cells} == {"a30", "p2"}
-    assert all(c.symbol == "fUST" and c.strategy == "mean_reversion" for c in cells)
+    assert all(c.symbol == "fUST" and c.strategy.value == "mean_reversion" for c in cells)
 
 
 def test_render_markdown_handles_infinity_sortino_and_ir():
