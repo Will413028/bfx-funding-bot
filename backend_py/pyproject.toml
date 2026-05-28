@@ -95,4 +95,5 @@ markers = [
     "property: hypothesis-based property tests; CI default 100 iter, nightly 1k, pre-ship manual 10k",
     "live: requires real Bitfinex / Axiom credentials; never runs in CI",
     "benchmark: performance gates (R4.1.1 replay budget) — run manually",
+    "gate: deployment sanity gate; offline but slow (reads the committed candle fixture); runs as its own CI job",
 ]
