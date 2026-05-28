@@ -37,7 +37,7 @@ def _make_history(n: int) -> list[FundingCandle]:
 @pytest.mark.benchmark
 @pytest.mark.parametrize("strategy_name,params", [
     ("rate_percentile", {"percentile": 75, "lookback_hours": 168}),
-    ("mean_reversion", {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_alpha": 0.02}),
+    ("mean_reversion", {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100}),
 ])
 def test_replay_under_500ms_for_11_cells_168_candles(strategy_name: str, params: dict) -> None:
     cell = CellConfig.model_validate({
