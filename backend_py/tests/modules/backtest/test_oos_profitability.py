@@ -11,6 +11,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     active_return_summary,
     bootstrap_ci,
     deflated_sharpe,
+    paired_active_returns,
     percentile,
     sharpe_skew_kurt,
     summarize_oos,
@@ -246,3 +247,14 @@ def test_deflated_sharpe_below_half_when_sr_below_sr0():
         Decimal("0.1"), n_trials=5, n_obs=50, skew=Decimal("0"), kurtosis=Decimal("3")
     )
     assert d < Decimal("0.5")
+
+
+def test_paired_active_returns_aligned():
+    strat = [_w(1, "0.6"), _w(2, "0.5")]
+    base = [_w(1, "0.5"), _w(2, "0.5")]
+    assert paired_active_returns(strat, base) == [Decimal("0.1"), Decimal("0.0")]
+
+
+def test_paired_active_returns_misaligned_raises():
+    with pytest.raises(ValueError):
+        paired_active_returns([_w(1, "0.6")], [_w(2, "0.5")])
