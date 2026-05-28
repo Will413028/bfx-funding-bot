@@ -14,14 +14,14 @@ cells:
     symbol: fUSD
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4554, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.3450137927640065, ema_span: 24}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUSD
     period_agg: p30
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.6019, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.3074991391594143, ema_span: 24}
     reference_amount_usdt: 150.0
     staleness_budget_hours: 12   # Phase 4.3 LOCF — p30 sparse override
 
@@ -29,21 +29,21 @@ cells:
     symbol: fUSD
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.4796, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.3766563427150627, ema_span: 24}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: p2
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.9543, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.4062263004196277, ema_span: 24}
     reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: a30
     timeframe: 1h
-    params: {threshold_sigma: 1.0, ratio_sigma: 0.9915, ema_span: 168}
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.42049266874194213, ema_span: 24}
     reference_amount_usdt: 150.0
 
   # -- RatePercentile (6 cells, all qualified)
@@ -92,3 +92,50 @@ cells:
     reference_amount_usdt: 150.0
 
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
+_provenance:
+  data_hash: 11d2236482e6646cac41249f1ac66b7353ea05e629a3a42253fcd0ff3def8e17
+  derived_at: '2026-05-28T05:27:51.374458+00:00'
+  fixture_window:
+    start: '2022-01-01'
+    end: '2026-05-28'
+  cells:
+    fUST/a30:
+      ema_span: 24
+      threshold_sigma: 0.5
+      ratio_sigma: 0.42049266874194213
+      mean_active: 0.0736852070786317
+      information_ratio: 1.0162758212281697
+      pct_outperform: 0.8571428571428571
+      n_windows: 49
+    fUST/p2:
+      ema_span: 24
+      threshold_sigma: 0.5
+      ratio_sigma: 0.4062263004196277
+      mean_active: 0.092358341501253
+      information_ratio: 0.7384548648752519
+      pct_outperform: 0.8367346938775511
+      n_windows: 49
+    fUSD/a30:
+      ema_span: 24
+      threshold_sigma: 0.5
+      ratio_sigma: 0.3766563427150627
+      mean_active: 0.09640566478416797
+      information_ratio: 0.7536157151595161
+      pct_outperform: 0.8163265306122449
+      n_windows: 49
+    fUSD/p2:
+      ema_span: 24
+      threshold_sigma: 0.5
+      ratio_sigma: 0.3450137927640065
+      mean_active: 0.0855194391802282
+      information_ratio: 0.6502078951053647
+      pct_outperform: 0.8571428571428571
+      n_windows: 49
+    fUSD/p30:
+      ema_span: 24
+      threshold_sigma: 0.5
+      ratio_sigma: 0.3074991391594143
+      mean_active: 0.0626685513110618
+      information_ratio: 0.692908220439583
+      pct_outperform: 0.7083333333333334
+      n_windows: 48
