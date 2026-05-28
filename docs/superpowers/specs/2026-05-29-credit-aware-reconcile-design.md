@@ -1,7 +1,7 @@
 # Credit-Aware Snapshot Reconcile — Design
 
 **Date:** 2026-05-29
-**Status:** Approved (design agreed 2026-05-29)
+**Status:** Approved (design agreed 2026-05-29; architecture decisions resolved 2026-05-29)
 **Context:** First funded canary run surfaced that the runtime reconcile
 under-counts deployed capital. The wallet holds $450, fully lent by the bot
 across 3 funding credits, but `position_state.realized_usdt = 300` (2 credits).
@@ -112,17 +112,35 @@ deltas in between; each reconcile re-establishes truth. The per-offer
 but **exposure no longer depends on accumulating them correctly** — the snapshot
 set is the backstop.
 
+## Architecture Decisions (resolved 2026-05-29)
+
+**Reconcile is a snapshot, not a domain event.**
+
+`PositionReconciled` is an **in-process pub/sub signal only** — it is never appended to `event_log`. This resolves three design review findings (C1/C2/I2):
+
+- `event_log` stays a pure domain-event stream (fills, releases, claims) — delta-only, immutable, cleanly replayable.
+- `position_state` is updated by a direct-write `store.set_position_snapshot()` call — not through the delta accumulator — so absolute-set semantics are unambiguous.
+- `rebuild_snapshot_from_log` remains correct: it only replays domain deltas. After any rebuild the first reconcile corrects to venue truth (this is already the boot behaviour).
+- No serialization changes needed.
+
+Audit trail: `position_state` gains `last_reconciled_at` + `n_credits`; structured log records each reconcile tick. A separate `reconcile_log` table is deferred (log is sufficient for now).
+
+**Pre-trade balance gate deferred to follow-on PR.** The `10001` noise stops once `realized` is correct and the cap is aligned — the gate is defense-in-depth for future over-allocation scenarios. Bundling it into this PR adds blast radius with zero current benefit.
+
+**Boot credits-fetch failure = fail-fast.** Credits-fetch failure at boot raises (same path as offers-fetch failure). `BootRecovery` receives a single object satisfying both `_ActiveOffersQuery` and `_ActiveCreditsQuery` (since `BitfinexAuthREST` implements both).
+
 ## Components & changes
 
 | Component | File | Change |
 |---|---|---|
 | **Active credits query (NEW)** | `external/bitfinex/auth_rest.py` (+ `_ActiveCreditsQuery` Protocol) | `get_active_funding_credits(ctx, symbol) -> list[ActiveFundingCredit]` hitting `/v2/auth/r/funding/credits/{symbol}`. Reuse the verified funding-array layout + retry/transient classification already used for offers. |
-| **`PositionReconciled` event (NEW)** | `modules/execution/events.py` | Carries `reserved_usdt`, `realized_usdt`, `account_id`, `n_offers`, `n_credits`, `occurred_at_ms`. Audit + drives the absolute ledger set. |
-| **Ledger absolute set (NEW handler)** | `modules/execution/ledger.py` | `on_position_reconciled`: set `self._reserved`, `self._realized` to the snapshot values (not delta). `current_exposure` unchanged (`reserved + realized`). Persisted via snapshot so it survives restart. |
-| **Reconcile convergence** | `boot_recovery.py::run` | After fetching offers, also fetch credits; compute `Σ offers`, `Σ credits`; append one `PositionReconciled` per run. Keep `compute_recovery_actions` for the per-offer audit events, but it is **no longer the sole exposure authority**. Drop the implicit "missing offer ⇒ capital freed" assumption from the *exposure* path. |
-| **`ReconcileResult` extension** | `boot_recovery.py` | Add `reserved_usdt`, `realized_usdt`, `n_credits` so `PeriodicReconcile` can log/health-signal drift on the realized dimension too (divergence = snapshot set differed from prior ledger). |
-| **Pre-trade balance gate (NEW)** | submit path (`live_executor` / safety chain) | Before submit, require venue funding available ≥ offer size; else skip with a structured log (no doomed venue call). Available comes from the reconcile snapshot (or a cheap wallet read), not a per-submit extra round-trip where avoidable. |
-| **daemon wiring** | `daemon.py` | `BootRecovery` / `PeriodicReconcile` gain the credits query dep; subscribe ledger `on_position_reconciled`. No new sub-task (reuses the existing reconcile loop). |
+| **`PositionReconciled` event (NEW)** | `modules/execution/events.py` | In-process pub/sub signal only — **not persisted to `event_log`**. Carries `reserved_usdt`, `realized_usdt`, `account_id`, `n_offers`, `n_credits`, `occurred_at_ms`. |
+| **`store.set_position_snapshot()` (NEW)** | `modules/execution/store.py` | Direct-write to `position_state` (not through delta accumulator): sets `reserved_usdt`, `realized_usdt`, `last_reconciled_at`, `n_credits`. Called by reconcile after emitting `PositionReconciled`. |
+| **`position_state` schema extension** | Alembic migration | Add `last_reconciled_at` (bigint ms), `n_credits` (int) columns. |
+| **Ledger absolute set (NEW handler)** | `modules/execution/ledger.py` | `on_position_reconciled`: set `self._reserved`, `self._realized` to snapshot values (not delta). `current_exposure` unchanged (`reserved + realized`). |
+| **Reconcile convergence** | `boot_recovery.py::run` | After fetching offers, also fetch credits (fail-fast if either fetch fails); compute `Σ offers`, `Σ credits`; emit `PositionReconciled`; call `store.set_position_snapshot()`. Keep `compute_recovery_actions` for per-offer audit events — it is **no longer the sole exposure authority**. |
+| **`ReconcileResult` extension** | `boot_recovery.py` | Add `reserved_usdt`, `realized_usdt`, `n_credits`. `PeriodicReconcile._tick` logs drift on realized dimension (prior ledger vs. snapshot). |
+| **daemon wiring** | `daemon.py` | `BootRecovery` / `PeriodicReconcile` gain the credits query dep; subscribe ledger `on_position_reconciled`. No new sub-task. |
 
 Account is bot-only and single-currency (fUST), so **`realized = Σ(all active
 fUST credits)` needs no credit→offer mapping** — it side-steps the Bitfinex
@@ -159,12 +177,19 @@ real funded amount before deploy).
 
 - Credits fetch: same transient-retry → fail-safe path as offers
   (`_fetch_offers`). Either fetch failing fails the run → degrade.
-- Idempotency: `PositionReconciled` is an absolute set; replaying it is a no-op.
-  Safe to overlap with WS deltas (the next set corrects any interim drift).
-- Grace: a freshly-placed offer not yet visible in the snapshot must not collapse
-  `reserved` — keep the existing `action_grace_ms` window concept on the offer
-  dimension; for the absolute set, exclude in-flight PENDING from the diff or run
-  the set on a short grace so a just-submitted offer isn't briefly dropped.
+- Idempotency: `store.set_position_snapshot()` is an upsert (SET not ADD); safe
+  to call multiple times — each call overwrites with the latest snapshot. WS
+  deltas that arrive between two reconcile ticks may temporarily diverge from
+  `position_state`; the next reconcile tick re-establishes truth.
+- Stale-snapshot race: if WS `fcn` fires `realized +=` and a reconcile fires
+  simultaneously with a snapshot that doesn't yet include the new credit (REST
+  lag), the absolute set temporarily under-counts. The next reconcile corrects
+  this. Worst outcome: one over-offer attempt that Bitfinex rejects (no financial
+  loss). This is accepted latency drift — not worth a grace window on the credits
+  dimension given the 90-second reconcile interval.
+- Grace (offer dimension, unchanged): freshly-placed PENDING offers not yet
+  visible in the venue snapshot are excluded from the `reserved = Σ offers` set
+  via the existing `action_grace_ms` window.
 
 ## Testing (TDD; real-fixture methodology per 2026-05-25)
 
@@ -173,8 +198,9 @@ real funded amount before deploy).
 | **unit — reproduce the bug (RED first)** | claimed offer matched into a credit + WS foc missed → reconcile keeps `realized = credit size` (NOT released to 0). Asserts `current_exposure` = offers+credits. |
 | unit — credit fetch/parse | `/funding/credits` array → `ActiveFundingCredit`; real-payload fast-contract + gated-live-contract |
 | unit — ledger | `on_position_reconciled` sets reserved/realized absolutely; survives `from_snapshot` round-trip |
+| unit — ledger delta-after-reconcile | WS delta arrives after reconcile (fill already in snapshot) → next reconcile corrects; no double-count |
 | unit — convergence | Σcredits up (fill) → realized up; credit gone (matured) → realized down; offer gone unfilled → reserved down, realized flat |
-| unit — pre-trade gate | available < size → submit skipped (no venue call); available ≥ size → proceeds |
+| unit — store.set_position_snapshot | upsert is idempotent; `position_state` reflects last call's values |
 | **integration (reproduces incident)** | venue: 0 offers + N credits; ledger drifted low → one reconcile → `realized=Σcredits`, exposure hits cap, hourly over-lend stops |
 
 Commit gate: `cd backend_py && uv run pytest -m "not integration"` green + mypy +
@@ -182,12 +208,14 @@ ruff. Live-contract excluded by default.
 
 ## Rollout
 
-1. Land code; commit gate green.
-2. Align `BFX_ALLOCATION_CAP_USDT=450` on Koyeb canary.
-3. Deploy via manual `scripts/deploy-koyeb.sh canary` (auto-deploy disabled).
-4. First reconcile: `realized` → $450, exposure = cap, `10001` noise stops; verify
-   `event_log` shows `PositionReconciled(realized=450)` and `position_state.realized_usdt=450`.
-5. Watch the first credit maturity: `realized` decrements, bot redeploys the freed
+1. Land code; commit gate green (pytest + mypy + ruff).
+2. Run `alembic upgrade head` locally; verify `position_state` has `last_reconciled_at` + `n_credits` columns.
+3. **Before deploying**: check the current `BFX_ALLOCATION_CAP_USDT` value on Koyeb console (do not assume from YAML comment — the comment says 150 but may be stale). Update to 450 in Koyeb env vars.
+4. Also update `safety.canary.yaml` comment from "150" to "450" in the same commit.
+5. Deploy via manual `scripts/deploy-koyeb.sh canary` (auto-deploy disabled). Cap alignment and new code land together in the same deploy.
+6. First reconcile: `realized` → $450, exposure = cap, `10001` noise stops; verify
+   `position_state.realized_usdt=450` and `last_reconciled_at` is set.
+7. Watch the first credit maturity: `realized` decrements, bot redeploys the freed
    capital next tick (the previously-broken path).
 
 ## Non-goals / deferred

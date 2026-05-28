@@ -100,5 +100,7 @@ class PositionStateRow(Base):
     # last_event_seq vs the event_log head, not a wall-clock timestamp.
     last_updated_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    last_reconciled_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    n_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (PrimaryKeyConstraint("account_id", "deployment_environment"),)

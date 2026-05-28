@@ -138,6 +138,26 @@ class CancelRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionReconciled:
+    """Periodic venue snapshot result — in-process pub/sub signal ONLY.
+
+    NOT persisted to event_log. Emitted by BootRecovery / PeriodicReconcile
+    after fetching both /funding/offers and /funding/credits. Drives the
+    absolute set in PaperPositionLedger.on_position_reconciled(); the
+    store.set_position_snapshot() direct write persists to position_state.
+
+    reserved_usdt = Σ(active offers)  — venue snapshot, not event accumulation.
+    realized_usdt = Σ(active credits) — venue snapshot; the bug fix.
+    """
+    account_id: str
+    reserved_usdt: Decimal
+    realized_usdt: Decimal
+    n_offers: int
+    n_credits: int
+    occurred_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class CancelAcknowledged:
     """Bitfinex REST cancel API returned (success OR already-terminal).
 

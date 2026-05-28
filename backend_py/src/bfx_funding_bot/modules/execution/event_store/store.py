@@ -225,6 +225,47 @@ class PostgresEventStore:
         ps.last_updated_ms = occurred_at_ms
         ps.last_event_seq = event_seq
 
+    async def set_position_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        reserved_usdt: Decimal,
+        realized_usdt: Decimal,
+        n_credits: int,
+        occurred_at_ms: int,
+    ) -> None:
+        """Direct-write position_state with absolute venue snapshot values.
+
+        NOT through the delta accumulator — this is a SET, not an ADD.
+        Called by reconcile (boot + periodic) after fetching both offers and
+        credits. Does not append to event_log; PositionReconciled is in-process
+        pub/sub only.
+        """
+        ps = (
+            await session.execute(
+                select(PositionStateRow).where(
+                    PositionStateRow.account_id == account_id,
+                    PositionStateRow.deployment_environment == self._env,
+                )
+            )
+        ).scalar_one_or_none()
+        if ps is None:
+            ps = PositionStateRow(
+                account_id=account_id,
+                deployment_environment=self._env,
+                reserved_usdt=Decimal("0"),
+                realized_usdt=Decimal("0"),
+                last_updated_ms=0,
+                last_event_seq=0,
+            )
+            session.add(ps)
+        ps.reserved_usdt = reserved_usdt
+        ps.realized_usdt = realized_usdt
+        ps.last_updated_ms = occurred_at_ms
+        ps.last_reconciled_at = occurred_at_ms
+        ps.n_credits = n_credits
+
     async def rebuild_snapshot_from_log(
         self, session: AsyncSession, *, account_id: str, deployment_environment: str
     ) -> None:
