@@ -508,19 +508,6 @@ class Daemon:
             # Loop continues → tries `candles()` again with new client
 
 
-def _resolve_event_replay_days() -> int:
-    """Resolve event replay window days with backward-compat fallback.
-
-    Preferred: BFX_EVENT_REPLAY_DAYS (Phase 4.4b D4)
-    Fallback: BFX_LEDGER_REPLAY_DAYS (pre-4.4b — transition for 1 deploy cycle)
-    Default: 30
-    """
-    return int(
-        os.environ.get("BFX_EVENT_REPLAY_DAYS")
-        or os.environ.get("BFX_LEDGER_REPLAY_DAYS", "30"),
-    )
-
-
 async def _emit_locf_degraded(
     stdout_sink: StdoutEventSink,
     config: MarketfeedConfig,
