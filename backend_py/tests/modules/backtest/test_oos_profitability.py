@@ -258,3 +258,8 @@ def test_paired_active_returns_aligned():
 def test_paired_active_returns_misaligned_raises():
     with pytest.raises(ValueError):
         paired_active_returns([_w(1, "0.6")], [_w(2, "0.5")])
+
+
+def test_paired_active_returns_length_mismatch_raises():
+    with pytest.raises(ValueError, match="length mismatch"):
+        paired_active_returns([_w(1, "0.5")], [_w(1, "0.5"), _w(2, "0.5")])
