@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
     MeanReversionStrategy,
@@ -12,6 +13,7 @@ from bfx_funding_bot.modules.backtest.strategies.rate_percentile import (
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
     build_strategy,
@@ -164,10 +166,6 @@ def test_build_strategy_at_boundary_empty_history():
 # ---------------------------------------------------------------------------
 # ema_span schema tests (Tier 2 param pipeline: drop ema_alpha round-trip)
 # ---------------------------------------------------------------------------
-
-from pydantic import ValidationError  # noqa: E402 (after stdlib imports is fine)
-
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName  # noqa: E402
 
 
 def test_build_mean_reversion_reads_ema_span():
