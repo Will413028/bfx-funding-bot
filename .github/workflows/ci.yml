@@ -95,7 +95,28 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run ruff check
       - run: uv run mypy --strict src
-      - run: uv run pytest -m "not integration" -q
+      - run: uv run pytest -m "not integration and not gate" -q
+
+  backend_py_gate:
+    name: Backend (Python) — deploy gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    needs: backend_py_unit
+    defaults:
+      run:
+        working-directory: backend_py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - name: Param drift check (committed YAML == re-derive(fixture))
+        run: uv run python scripts/derive_cells.py --check
+      - name: Deploy sanity gate (deployed cells beat AlwaysFRR)
+        run: uv run pytest -m gate -q
 
   backend_py_integration:
     name: Backend (Python) — integration
