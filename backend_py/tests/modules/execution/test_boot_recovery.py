@@ -193,12 +193,25 @@ def test_action_grace_zero_preserves_boot_behaviour():
 
 
 class _StubStore:
-    """Minimal PostgresEventStore stub — records appended events, no DB."""
+    """Minimal PostgresEventStore stub — records appended events + snapshot calls, no DB."""
     def __init__(self):
         self.appended: list = []
+        self.snapshot_calls: list[dict] = []
+
     async def append(self, session, event):
         self.appended.append(event)
         return True
+
+    async def set_position_snapshot(
+        self, session, *, account_id, reserved_usdt, realized_usdt, n_credits, occurred_at_ms
+    ):
+        self.snapshot_calls.append({
+            "account_id": account_id,
+            "reserved_usdt": reserved_usdt,
+            "realized_usdt": realized_usdt,
+            "n_credits": n_credits,
+            "occurred_at_ms": occurred_at_ms,
+        })
 
 
 class _StubSession:
@@ -239,10 +252,16 @@ class _StubBus:
 
 
 class _StubAuthRest:
-    def __init__(self, offers):
+    """Offers+credits stub; credits defaults to [] for tests focused on offer reconciliation."""
+    def __init__(self, offers, credits=None):
         self._offers = offers
+        self._credits = credits if credits is not None else []
+
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
+
+    async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+        return self._credits
 
 
 def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
@@ -284,8 +303,9 @@ async def test_run_returns_reconcile_result_for_orphan_claim():
     assert result.n_claimed == 1
     assert result.n_released == 0
     assert result.n_failed == 0
-    assert len(bus.published) == 1
-    assert isinstance(bus.published[0], ReservationClaimed)
+    # PositionReconciled is published first, then domain events
+    assert any(isinstance(e, ReservationClaimed) for e in bus.published)
+    assert any(isinstance(e, PositionReconciled) for e in bus.published)
 
 
 @pytest.mark.asyncio
@@ -335,3 +355,124 @@ async def test_fetch_offers_reraises_after_transient_exhaustion():
     with pytest.raises(BitfinexAPIError):
         await rec._fetch_offers()
     assert auth.calls == 3  # exhausted max_attempts
+
+
+# ── Credit-aware reconcile (Phase 4.4d / 2026-05-29) ─────────────────────────
+
+
+from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit  # noqa: E402
+from bfx_funding_bot.modules.execution.events import PositionReconciled  # noqa: E402
+
+
+def _credit(credit_id: str = "1", amount: str = "150") -> ActiveFundingCredit:
+    return ActiveFundingCredit(
+        credit_id=credit_id, symbol="fUST",
+        amount=Decimal(amount), rate=0.0003, period_days=2, status="ACTIVE",
+    )
+
+
+class _StubAuthRestFull:
+    """Satisfies both _ActiveOffersQuery and _ActiveCreditsQuery protocols."""
+    def __init__(self, offers, credits):
+        self._offers = offers
+        self._credits = credits
+
+    async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+        return self._offers
+
+    async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+        return self._credits
+
+
+@pytest.mark.asyncio
+async def test_run_emits_position_reconciled_with_credit_sum():
+    """run() fetches credits and publishes PositionReconciled(realized=Σcredits)."""
+    credits = [_credit("1", "150"), _credit("2", "150"), _credit("3", "150")]
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=credits)
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    await rec.run()
+
+    pr_events = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert len(pr_events) == 1
+    pr = pr_events[0]
+    assert pr.realized_usdt == Decimal("450")
+    assert pr.reserved_usdt == Decimal("0")
+    assert pr.n_credits == 3
+    assert pr.n_offers == 0
+
+
+@pytest.mark.asyncio
+async def test_run_calls_set_position_snapshot_with_credit_sum():
+    """run() calls store.set_position_snapshot with absolute venue values."""
+    credits = [_credit("1", "300")]
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=credits)
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    await rec.run()
+
+    assert len(store.snapshot_calls) == 1
+    call = store.snapshot_calls[0]
+    assert call["realized_usdt"] == Decimal("300")
+    assert call["reserved_usdt"] == Decimal("0")
+    assert call["n_credits"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_position_reconciled_includes_offer_reserved():
+    """reserved = Σ(active offers) from venue, not from event accumulation."""
+    offers = [_offer(voi="555", amount="100")]
+    credits = [_credit("1", "200")]
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=offers, credits=credits)
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    await rec.run()
+
+    pr_events = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert len(pr_events) == 1
+    pr = pr_events[0]
+    assert pr.reserved_usdt == Decimal("100")
+    assert pr.realized_usdt == Decimal("200")
+    assert pr.n_offers == 1
+    assert pr.n_credits == 1
+
+
+@pytest.mark.asyncio
+async def test_run_credits_fetch_failure_raises():
+    """Credits fetch failure at boot → fail-fast (same as offers-fetch failure)."""
+    class _FailCredits:
+        async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+            return []
+
+        async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+            raise BitfinexAPIError(status_code=401, message="auth error")
+
+    store = _StubStore()
+    bus = _StubBus()
+    rec = _full_boot_recovery(_FailCredits(), store, _StubSessionFactory(), bus)
+
+    with pytest.raises(BitfinexAPIError):
+        await rec.run()
+
+
+@pytest.mark.asyncio
+async def test_run_reconcile_result_includes_credit_dimensions():
+    """ReconcileResult carries realized_usdt, reserved_usdt, n_credits."""
+    credits = [_credit("1", "200")]
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=credits)
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    result = await rec.run()
+
+    assert isinstance(result, ReconcileResult)
+    assert result.realized_usdt == Decimal("200")
+    assert result.reserved_usdt == Decimal("0")
+    assert result.n_credits == 1

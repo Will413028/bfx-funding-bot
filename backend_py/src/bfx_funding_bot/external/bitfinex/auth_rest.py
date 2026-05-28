@@ -57,8 +57,50 @@ def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveFundingCredit:
+    credit_id: str
+    symbol: str
+    amount: Decimal     # absolute size (positive for lender)
+    rate: float  # display/audit-only; float precision acceptable
+    period_days: int
+    status: str
+
+
+_CREDIT_MIN_ROW_LEN = 11  # period is at index 10
+
+
+def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
+    """Parse Bitfinex auth funding-credits response -> list[ActiveFundingCredit].
+
+    Credits array layout (0-indexed):
+      [0]=ID [1]=SYMBOL [2]=SIDE [3]=MTS_CREATE [4]=MTS_UPDATE [5]=AMOUNT
+      [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=RATE [10]=PERIOD ...
+    """
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(
+            f"expected list of funding credits, got {type(raw).__name__}: {raw!r}"
+        )
+    out: list[ActiveFundingCredit] = []
+    for o in raw:
+        if not isinstance(o, list) or len(o) < _CREDIT_MIN_ROW_LEN:
+            raise BitfinexShapeError(f"funding credit row malformed: {o!r}")
+        rate = o[9]
+        period = o[10]
+        out.append(ActiveFundingCredit(
+            credit_id=str(o[0]),
+            symbol=str(o[1]),
+            amount=abs(Decimal(str(o[5]))),
+            status=str(o[7]),
+            rate=float(rate) if rate is not None else 0.0,
+            period_days=int(period) if period is not None else 0,
+        ))
+    return out
+
+
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
+_FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
 
 
 class BitfinexAuthREST:
@@ -121,3 +163,35 @@ class BitfinexAuthREST:
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
         raw = await self.fetch_funding_offers_raw(ctx=ctx, symbol=symbol)
         return parse_active_funding_offers(raw)
+
+    async def get_active_funding_credits(
+        self, *, ctx: AccountContext, symbol: str = "fUSD",
+    ) -> list[ActiveFundingCredit]:
+        """POST /v2/auth/r/funding/credits/{symbol} (signed). Returns parsed
+        active credits. Raises BitfinexAPIError / BitfinexShapeError."""
+        path = f"{_FUNDING_CREDITS_PATH}/{symbol}"
+        body_bytes = json.dumps({}).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        try:
+            raw = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in funding-credits response: {e}") from e
+        return parse_active_funding_credits(raw)

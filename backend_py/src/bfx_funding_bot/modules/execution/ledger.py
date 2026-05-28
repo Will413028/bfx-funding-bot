@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
+    PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
 )
@@ -112,6 +113,18 @@ class PaperPositionLedger:
                 event.cid, event.venue_offer_id,
                 float(event.size_usdt), float(delta), event.reason,
             )
+
+    async def on_position_reconciled(self, event: PositionReconciled) -> None:
+        """Absolute set from venue snapshot — NOT a delta.
+
+        Overwrites reserved/realized with the authoritative venue values.
+        Called after each reconcile tick (boot + periodic). The next WS delta
+        that arrives will temporarily diverge; the next reconcile corrects it.
+        """
+        if event.account_id != self.account_id:
+            return
+        self._reserved = event.reserved_usdt
+        self._realized = event.realized_usdt
 
     # ---------- public getters ----------
 

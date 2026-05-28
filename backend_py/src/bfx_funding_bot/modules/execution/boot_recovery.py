@@ -29,12 +29,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
-from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import (
+    PositionReconciled,
     ReservationClaimed,
     ReservationFailed,
     ReservationReleased,
@@ -52,6 +53,9 @@ class ReconcileResult:
     n_claimed: int
     n_released: int
     n_failed: int
+    reserved_usdt: Decimal = Decimal("0")
+    realized_usdt: Decimal = Decimal("0")
+    n_credits: int = 0
 
 
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
@@ -164,6 +168,16 @@ class _ActiveOffersQuery(Protocol):
     ) -> list[ActiveFundingOffer]: ...
 
 
+class _ActiveCreditsQuery(Protocol):
+    async def get_active_funding_credits(
+        self, *, ctx: AccountContext, symbol: str = "fUSD",
+    ) -> list[ActiveFundingCredit]: ...
+
+
+class _AuthRestQuery(_ActiveOffersQuery, _ActiveCreditsQuery, Protocol):
+    """Combined protocol: satisfies both offers and credits queries."""
+
+
 class _Bus(Protocol):
     async def publish(self, event: Any) -> None: ...
 
@@ -184,7 +198,7 @@ class BootRecovery:
         *,
         store: PostgresEventStore,
         session_factory: async_sessionmaker[AsyncSession],
-        auth_rest: _ActiveOffersQuery,
+        auth_rest: _AuthRestQuery,
         account_ctx: AccountContext,
         deployment_environment: str,
         bus: _Bus,
@@ -211,18 +225,45 @@ class BootRecovery:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> ReconcileResult:
-        venue_offers = await self._fetch_offers()  # may raise -> daemon fail-safe (no trade w/o venue truth)
+        # Both fetches may raise → daemon fail-safe (never trade without venue truth).
+        venue_offers = await self._fetch_offers()
+        venue_credits = await self._fetch_credits()
+
+        reserved_usdt = sum((o.amount for o in venue_offers), Decimal("0"))
+        realized_usdt = sum((c.amount for c in venue_credits), Decimal("0"))
+        now_ms = self._clock()
+
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
             actions = compute_recovery_actions(
                 venue_offers=venue_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
-                now_ms=self._clock(), grace_ms=self._grace_ms,
+                now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
             )
             for ev in actions:
                 await self._store.append(session, ev)
-        # publish in-memory projection events AFTER durable commit
+            # Direct-write absolute position snapshot (not through delta accumulator).
+            await self._store.set_position_snapshot(
+                session,
+                account_id=self._ctx.account_id,
+                reserved_usdt=reserved_usdt,
+                realized_usdt=realized_usdt,
+                n_credits=len(venue_credits),
+                occurred_at_ms=now_ms,
+            )
+
+        # Publish in-memory projection events AFTER durable commit.
+        position_reconciled = PositionReconciled(
+            account_id=self._ctx.account_id,
+            reserved_usdt=reserved_usdt,
+            realized_usdt=realized_usdt,
+            n_offers=len(venue_offers),
+            n_credits=len(venue_credits),
+            occurred_at_ms=now_ms,
+        )
+        await self._safe_publish(position_reconciled)
+
         n_claim = n_release = n_fail = 0
         for ev in actions:
             if isinstance(ev, ReservationClaimed):
@@ -234,10 +275,17 @@ class BootRecovery:
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
         log.info(
-            "reconcile_complete venue_offers=%d orphans_claimed=%d released=%d pending_failed=%d",
-            len(venue_offers), n_claim, n_release, n_fail,
+            "reconcile_complete venue_offers=%d venue_credits=%d "
+            "reserved=%.2f realized=%.2f orphans_claimed=%d released=%d pending_failed=%d",
+            len(venue_offers), len(venue_credits),
+            float(reserved_usdt), float(realized_usdt),
+            n_claim, n_release, n_fail,
         )
-        return ReconcileResult(n_claimed=n_claim, n_released=n_release, n_failed=n_fail)
+        return ReconcileResult(
+            n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
+            reserved_usdt=reserved_usdt, realized_usdt=realized_usdt,
+            n_credits=len(venue_credits),
+        )
 
     async def _fetch_offers(self) -> list[ActiveFundingOffer]:
         """Fetch venue offers with bounded retry on TRANSIENT failures only.
@@ -265,6 +313,35 @@ class BootRecovery:
                     )
                     await asyncio.sleep(backoff)
         log.error("boot_recovery_venue_unreachable after %d attempts — failing startup", self._max_attempts)
+        assert last_exc is not None
+        raise last_exc
+
+    async def _fetch_credits(self) -> list[ActiveFundingCredit]:
+        """Fetch venue credits with bounded retry on TRANSIENT failures only.
+        4xx re-raises immediately; transient exhaustion re-raises too.
+        Fail-fast: never trade without knowing realized exposure."""
+        last_exc: BitfinexAPIError | None = None
+        for attempt in range(self._max_attempts):
+            try:
+                return await self._auth_rest.get_active_funding_credits(
+                    ctx=self._ctx, symbol=self._symbol,
+                )
+            except BitfinexAPIError as e:
+                if not _is_transient_status(e.status_code):
+                    log.error(
+                        "boot_recovery_credits_fetch_fatal status=%d err=%r — failing startup",
+                        e.status_code, e,
+                    )
+                    raise
+                last_exc = e
+                if attempt + 1 < self._max_attempts:
+                    backoff = self._backoff_base_s * (2 ** attempt)
+                    log.warning(
+                        "boot_recovery_credits_fetch_transient attempt=%d/%d status=%d backoff=%.1fs",
+                        attempt + 1, self._max_attempts, e.status_code, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+        log.error("boot_recovery_credits_unreachable after %d attempts — failing startup", self._max_attempts)
         assert last_exc is not None
         raise last_exc
 
