@@ -79,6 +79,10 @@ def derive_cell_params(candles: list[FundingCandle]) -> DerivedCell:
     Deterministic given `candles`. ratio_sigma per ema_span is computed from
     EDA on the train portion only (no look-ahead); each grid combo is then
     evaluated fixed over all rolling WFO windows.
+
+    Selection uses mean_active + distinguishability only; it does NOT run the
+    bootstrap not_worse check. The CI gate (pytest -m gate) is the downstream
+    guard, so `--write` can succeed yet CI fail if a winner's CI low dips < 0.
     """
     if not candles:
         raise ValueError("derive_cell_params: empty candles")
