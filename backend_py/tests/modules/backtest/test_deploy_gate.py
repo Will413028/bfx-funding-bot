@@ -11,6 +11,7 @@ def test_inert_config_fails_distinguishability():
     )
     assert r.passed is False
     assert r.distinguishable is False
+    assert r.not_worse is True  # ci_low==0 passes the default >= 0 floor; criteria are orthogonal
 
 
 def test_worse_than_passive_fails_not_worse():

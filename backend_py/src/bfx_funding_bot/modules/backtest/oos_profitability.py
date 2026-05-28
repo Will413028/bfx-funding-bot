@@ -125,7 +125,7 @@ def paired_active_returns(
     if not strat:
         raise ValueError("paired_active_returns: no outcomes")
     out: list[Decimal] = []
-    for s, b in zip(strat, base, strict=True):
+    for s, b in zip(strat, base, strict=True):  # strict=True is belt-and-suspenders; length guarded above
         if s.month_mts != b.month_mts:
             raise ValueError(f"paired_active_returns: misaligned month {s.month_mts} != {b.month_mts}")
         out.append(s.net_monthly - b.net_monthly)
