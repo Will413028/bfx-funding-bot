@@ -81,3 +81,7 @@ def test_derive_cell_params_is_deterministic_and_distinguishable() -> None:
     )
     assert d1.information_ratio != 0  # selected combo actually acts
     assert isinstance(d1, DerivedCell)
+    # Lock in the winner for the documented regime: a grid/regime change that
+    # shifts the winner should fail loudly here, not pass silently.
+    assert d1.ema_span == 24
+    assert d1.threshold_sigma == Decimal("0.5")
