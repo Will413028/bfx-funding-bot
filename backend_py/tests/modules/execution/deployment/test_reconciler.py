@@ -182,3 +182,26 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
     assert tracker.deployed("fUST_a30") == D("0")
     assert tracker.deployed("fUST_p2") == D("171")
     assert len(safety.calls) == 2  # both cells consulted
+
+
+class _RejectingExecutor:
+    """Live-executor behaviour on a venue reject (e.g. 10001 not-enough-balance):
+    returns a SubmittedOrder with status="failed" rather than raising."""
+
+    def __init__(self) -> None:
+        self.submitted: list = []
+
+    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        self.submitted.append(decision)
+        return SubmittedOrder(cid=1, venue_offer_id=None, status="failed", raw_response=None)
+
+
+async def test_venue_rejected_submit_not_recorded_as_deployed():
+    # status="failed" (venue reject, no exception) must NOT record intent and
+    # must NOT count as a deployment_submitted success.
+    rec, ex, tracker, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_RejectingExecutor(),
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1            # attempted once
+    assert tracker.deployed("fUST_a30") == D("0")  # but not recorded as deployed

@@ -123,9 +123,20 @@ class DeploymentReconciler:
                 )
                 continue
             try:
-                await self._executor.submit(decision, self._ctx)
+                result = await self._executor.submit(decision, self._ctx)
             except Exception:
-                log.exception("deployment_submit_failed cell=%s amount=%s", cell_id, amount)
+                log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
+                continue
+            # The live executor does NOT raise on a venue reject (e.g. 10001
+            # "not enough balance"): it returns a SubmittedOrder with status
+            # "failed". Only record intent + log success when the offer actually
+            # landed — otherwise we'd track phantom capital + emit a false
+            # deployment_submitted. Next reconcile re-evaluates the gap.
+            if result.status == "failed":
+                log.warning(
+                    "deployment_submit_rejected cell=%s amount=%s status=%s",
+                    cell_id, amount, result.status,
+                )
                 continue
             self._tracker.record_deploy(cell_id, amount)
             log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
