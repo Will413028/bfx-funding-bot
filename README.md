@@ -22,11 +22,10 @@ bfx-funding-bot/
 ├── backend_py/                # Python 後端（放貸 daemon）— active
 │   └── ARCHITECTURE.md        # 現行 runtime 架構（執行/對帳/放貸演算法）
 ├── frontend_architecture.md   # 前端架構設計文件
-├── backend_architecture.md    # SaaS 平台層設計（產品願景；Go-era 語法僅歷史參考）
 └── strategy_specification.md  # 策略設計規範
 ```
 
-> Go `backend/` 已於 Phase 0 重寫至 `backend_py/` 後封存並移除（2026-05-29），歷史見 git。
+> Go `backend/` 與 Go-era `backend_architecture.md`（SaaS 平台層藍本）已於 2026-05-29 移除（重寫至 `backend_py/` 後成死碼）；歷史見 git，Phase 5+ SaaS 方向見 `ROADMAP.md`。
 
 ## 開發
 
@@ -51,5 +50,4 @@ uv run bfx-shadow                  # 跑 daemon（phase 由 BFX_PHASE 控制）
 
 - [後端 runtime 架構（現行）](backend_py/ARCHITECTURE.md)
 - [前端架構設計文件](frontend_architecture.md)
-- [SaaS 平台層設計（產品願景）](backend_architecture.md)
 - [策略設計規範](strategy_specification.md)

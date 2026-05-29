@@ -1,7 +1,7 @@
 # 開發路線圖
 
 > 最後更新：2026-05-29（canary 已入金 ~$450 USDT、實際放貸中（3 筆 fUST credit）；近期真錢 incident 修復鏈見「當前位置」）
-> 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
+> 參考文件：`backend_py/ARCHITECTURE.md`（runtime 架構）, `frontend_architecture.md`, `strategy_specification.md`
 > 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
 
 > **現行後端為 `backend_py/`（Python）。** 下方「已完成功能」「DB Schema」「API Endpoints」
@@ -66,7 +66,8 @@ canary 真錢 daemon 上線後（2026-05-25），帳戶於 **2026-05-26 入金 ~
 
 下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
 Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。
-Phase 5 = 解 cap / 多 cells / 多策略 scale-up。
+Phase 5 = SaaS 多租戶化 + scale-up：解 cap / 多 cells / 多策略；per-tenant 帳號（vault 載入加密 API key，取代現 hardcoded `account_id='default'`）+ 用戶 API/dashboard（JWT RS256 auth、AES-256-GCM API key 加密、billing/訂閱方案、per-user API quota）+ 單體→多機(Redis pub/sub)→微服務(API/Lending/Billing/Notification) scale path。
+> 原 Go-era SaaS 平台設計藍本（完整 API/CRUD/多租戶/auth/billing 設計）見 git 歷史 `backend_architecture.md`（移除前最後版本 commit `1992b99`：`git show 1992b99:backend_architecture.md`），供 Phase 5+ 在 Python event-sourced 基礎上重新設計時參考。
 
 ---
 
