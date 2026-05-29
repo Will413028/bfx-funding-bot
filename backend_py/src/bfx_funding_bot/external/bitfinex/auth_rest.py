@@ -98,9 +98,46 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class FundingWallet:
+    wallet_type: str   # "funding" / "exchange" / "margin"
+    currency: str      # "UST" / "USD" / ...
+    balance: Decimal
+    available: Decimal  # AVAILABLE_BALANCE; deposit-wallet free portion
+
+
+_WALLET_MIN_ROW_LEN = 5  # AVAILABLE_BALANCE at index 4
+
+
+def parse_wallets(raw: Any) -> list[FundingWallet]:
+    """Parse Bitfinex /v2/auth/r/wallets response -> list[FundingWallet].
+
+    Layout: [0]=WALLET_TYPE [1]=CURRENCY [2]=BALANCE [3]=UNSETTLED_INTEREST
+            [4]=AVAILABLE_BALANCE ... AVAILABLE_BALANCE may be null (venue has
+    not computed it) -> treated as 0 (conservative: never deploy on unknown funds).
+    """
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(
+            f"expected list of wallets, got {type(raw).__name__}: {raw!r}"
+        )
+    out: list[FundingWallet] = []
+    for w in raw:
+        if not isinstance(w, list) or len(w) < _WALLET_MIN_ROW_LEN:
+            raise BitfinexShapeError(f"wallet row malformed: {w!r}")
+        available_raw = w[4]
+        out.append(FundingWallet(
+            wallet_type=str(w[0]),
+            currency=str(w[1]),
+            balance=Decimal(str(w[2])),
+            available=Decimal(str(available_raw)) if available_raw is not None else Decimal("0"),
+        ))
+    return out
+
+
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
+_WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
 
 
 class BitfinexAuthREST:
@@ -195,3 +232,42 @@ class BitfinexAuthREST:
         except json.JSONDecodeError as e:
             raise BitfinexShapeError(f"invalid JSON in funding-credits response: {e}") from e
         return parse_active_funding_credits(raw)
+
+    async def get_funding_available(
+        self, *, ctx: AccountContext, currency: str,
+    ) -> Decimal:
+        """POST /v2/auth/r/wallets (signed). Returns Σ available of FUNDING
+        wallets for `currency` (0 if none). Same error contract as offers/credits:
+        raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
+        invalid JSON / shape."""
+        path = _WALLETS_PATH
+        body_bytes = json.dumps({}).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        try:
+            raw = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in wallets response: {e}") from e
+        wallets = parse_wallets(raw)
+        return sum(
+            (w.available for w in wallets
+             if w.wallet_type == "funding" and w.currency == currency),
+            Decimal("0"),
+        )
