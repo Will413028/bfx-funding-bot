@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
@@ -20,7 +21,6 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
-    TransientRetryMiddleware,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -53,6 +53,20 @@ class _PaperInner:
         )
 
 
+class _TransientInner:
+    """Inner executor that always raises a transient error — used to prove the
+    chain attempts a financial submit exactly once (no retry)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+    ) -> SubmittedOrder:
+        self.calls += 1
+        raise ExecutorTransientError("network_blip")
+
+
 def _decision() -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST,
@@ -73,7 +87,12 @@ def _ctx() -> AccountContext:
 
 def _build_chain(
     ledger: PaperPositionLedger,
+    inner: Any | None = None,
 ) -> tuple[HeartbeatMiddleware, HealthProbe, DomainEventBus]:
+    """Mirror the daemon's production executor chain (daemon.build_daemon).
+
+    Keep this in lockstep with daemon.py's wrapped_executor composition.
+    """
     bus = DomainEventBus()
     probe = HealthProbe()
     bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
@@ -81,7 +100,7 @@ def _build_chain(
     bus.subscribe(ReservationReleased, ledger.on_reservation_released)
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
-            TransientRetryMiddleware(_PaperInner()), bus=bus,
+            inner or _PaperInner(), bus=bus,
             persister=NoopEventPersister(),
         ),
         probe=probe,
@@ -96,8 +115,29 @@ async def test_wired_chain_types() -> None:
     assert isinstance(executor, HeartbeatMiddleware)
     inner1 = executor._inner  # type: ignore[attr-defined]
     assert isinstance(inner1, ReservationEmittingMiddleware)
+    # No retry wrapper: ReservationEmitting wraps the executor directly (submit
+    # is a once-only financial write — see test_chain_does_not_retry_submit_on_transient).
     inner2 = inner1._inner  # type: ignore[attr-defined]
-    assert isinstance(inner2, TransientRetryMiddleware)
+    assert isinstance(inner2, _PaperInner)
+
+
+@pytest.mark.asyncio
+async def test_chain_does_not_retry_submit_on_transient() -> None:
+    """Regression guard (real-money double-offer): a funding-offer submit is a
+    financial write and must be attempted exactly ONCE.
+
+    Bitfinex funding offers have no client cid dedup (only trading orders do),
+    so any retry around submit risks a duplicate live offer. The executor chain
+    must add no retry — a transient error propagates after a single attempt.
+    """
+    ledger = PaperPositionLedger(account_id="default")
+    inner = _TransientInner()
+    executor, _probe, _bus = _build_chain(ledger, inner=inner)
+
+    with pytest.raises(ExecutorTransientError):
+        await executor.submit(_decision(), _ctx())
+
+    assert inner.calls == 1
 
 
 @pytest.mark.asyncio
@@ -159,7 +199,7 @@ async def test_sad_path_failing_subscriber_does_not_break_ledger() -> None:
 
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
-            TransientRetryMiddleware(_PaperInner()), bus=bus,
+            _PaperInner(), bus=bus,
             persister=NoopEventPersister(),
         ),
         probe=probe,
