@@ -52,6 +52,9 @@ from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -782,6 +785,10 @@ async def build_daemon(
     # bus created before build_executor so live executor gets it at construction.
     bus = DomainEventBus()
 
+    quote_store = StandingQuoteStore(
+        ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
+    )
+
     # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
     # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
     spec = build_executor(
@@ -835,12 +842,6 @@ async def build_daemon(
             symbol=first_cell.symbol,
             action_grace_ms=120_000,
         )
-        periodic_reconcile = PeriodicReconcile(
-            recovery=runtime_recovery,
-            probe=probe,
-            interval_s=reconcile_interval_s,
-            min_resync_interval_s=resync_min_interval_s,
-        )
 
     fill_tracker: RestPollingFillTracker | None = None
     if spec.fill_tracker_enabled:
@@ -881,6 +882,30 @@ async def build_daemon(
         ),
         probe=probe,
     )
+
+    # DeploymentReconciler needs wrapped_executor — constructed here (after
+    # wrapped_executor) and injected into PeriodicReconcile.
+    if not spec.is_simulated:
+        deployment_reconciler = DeploymentReconciler(
+            store=quote_store,
+            tracker=CellDeploymentTracker(),
+            ledger=ledger,
+            safety_chain=safety_chain,
+            executor=wrapped_executor,
+            account_ctx=account_ctx,
+            cells=config.cells,
+            venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
+            min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
+            concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
+            clock=lambda: int(time.time() * 1000),
+        )
+        periodic_reconcile = PeriodicReconcile(
+            recovery=runtime_recovery,
+            probe=probe,
+            interval_s=reconcile_interval_s,
+            min_resync_interval_s=resync_min_interval_s,
+            deployment=deployment_reconciler,
+        )
 
     # ---- Phase 4.4 prework: SmokeRunner ----
     from bfx_funding_bot.modules.admin.pg_event_log_query import PostgresEventLogQueryAdapter
@@ -931,9 +956,8 @@ async def build_daemon(
         event_sink=stdout_sink,
         diagnostics=diagnostics,
         candles_repo=_CandlesRepoBridge(),
-        safety_chain=safety_chain,
-        executor=wrapped_executor,
-        account_ctx=account_ctx,
+        quote_store=quote_store,
+        clock=lambda: int(time.time() * 1000),
     )
 
     async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
