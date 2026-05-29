@@ -5,8 +5,8 @@ Bitfinex 自動放貸 SaaS 平台。
 ## 專案結構
 
 - `backend_py/` — Python 3.13 後端（FastAPI + SQLAlchemy 2.0 async + httpx + Alembic）— **active**
-- `backend/` — Go 1.25 後端（Gin + fx + zap）— **封存**（Phase 0 重寫至 Python 後不再開發）
 - `frontend/` — Next.js 16 前端
+- ~~`backend/` — Go 1.25 後端~~ — **已移除**（Phase 0 重寫至 `backend_py/` 後封存並刪除，2026-05-29；歷史見 git）
 - `backend_py/ARCHITECTURE.md` — **現行 runtime 架構 source of truth**（event-sourced execution、reconcile 骨幹、deployment reconciler、放貸演算法、event model、phases/部署、key invariants；含 mermaid 架構/資料流圖）
 - `backend_architecture.md` — SaaS **平台層**設計（產品願景、分層哲學、多租戶隔離、API/CRUD schema）；Go-era 語法僅歷史參考，放貸 daemon 的執行/對帳/演算法以 `backend_py/ARCHITECTURE.md` 為準
 
@@ -33,7 +33,7 @@ Bitfinex 自動放貸 SaaS 平台。
 
 備註：`backend_py/` 必須 cd 進去才會走 uv 管的 Python 3.13；從 repo root 直接跑會撞 pyenv 3.12 的 sqlalchemy。`.env` 是 repo root 的 symlink（worktree 重建後要 `ln -sf ../.env backend_py/.env`）。
 
-Go `backend/` 的 atlas/sqlc/go test 已封存，不再使用。
+Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 
 ## 開發規範
 
@@ -55,8 +55,7 @@ Go `backend/` 的 atlas/sqlc/go test 已封存，不再使用。
 
 - **每個 change 必須包含對應的單元測試**，不可只寫程式不寫測試
 - **套用 migration 一律使用 `cd backend_py && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
-- 後端架構、測試慣例、SQLAlchemy/Alembic 工作流詳見 `backend_py/CLAUDE.md`（待建；目前散見各 module 註解）
-- Go `backend/CLAUDE.md` 是封存版本，不再為現行開發指引
+- 後端架構詳見 `backend_py/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例、SQLAlchemy/Alembic 工作流詳見 `backend_py/CLAUDE.md`（待建；目前散見各 module 註解）
 - 前端測試指令、架構慣例詳見 `frontend/CLAUDE.md`
 
 ### Commit 訊息格式

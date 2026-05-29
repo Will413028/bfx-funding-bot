@@ -1,5 +1,7 @@
-# Lefthook for monorepo: backend/ (go) + frontend/ (nextjs+biome)
+# Lefthook: frontend/ (nextjs+biome)
 # 套到：bfx-funding-bot
+# 註：Go backend/ 已移除（重寫至 backend_py/ 後封存並刪除，2026-05-29）。
+# backend_py 的 lint/test 由 CI（backend_py_* jobs）把關，未掛 pre-commit hook。
 pre-commit:
   parallel: true
   commands:
@@ -7,7 +9,3 @@ pre-commit:
       root: "frontend/"
       glob: "*.{js,ts,jsx,tsx,json,css}"
       run: npx @biomejs/biome check --write --staged {staged_files}
-    backend-check:
-      root: "backend/"
-      glob: "*.go"
-      run: golangci-lint run --fix
