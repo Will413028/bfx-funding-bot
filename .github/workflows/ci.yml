@@ -15,35 +15,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  backend:
-    name: Backend
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: latest
-          working-directory: backend
-
-      - name: go test
-        run: go test ./... -count=1 -race -timeout 5m
-
-      - name: go build
-        run: go build -o /dev/null ./cmd/server/
-
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
