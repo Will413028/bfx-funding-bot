@@ -79,9 +79,8 @@ action   = 補上 gap（若 standing_quote 非 SKIP 且 gap_fill ≥ venue minim
 3. **每筆候選 offer 過 guards（皆 fail → skip 該筆並記明確 reason）**
    - StandingQuote 為 SKIP / 無 quote → 不部署該 cell。
    - **TTL**：`candle_mts` 不在當根 candle → quote 過期，不部署。
-   - **Minimum guard**：`gap_fill_usdt < effective_min_usdt` → skip（杜絕靜默 `10001`），其中
-     `effective_min_usdt = ceil(150 × (1 + 0.02) / usdt_usd_price)`。
-   - **Rate sanity band**：standing quote 的 `rate` 低於當前 best-ask 超過 `rate_drift_tolerance_pct`（可設，預設 0.20）→ skip（避免 quote 過時、市場急漲後以明顯偏低價賤借；偏高則自然 rest 於 book，無害不擋）。canary 期可調。
+   - **Minimum guard**：`gap_fill_usdt < effective_min_usdt` → skip（杜絕靜默 `10001`）。**v1 用靜態式** `effective_min_usdt = ceil(150 × (1 + 0.02)) = 153`——buffer 同時吸收 USDT de-peg 與精度（假設 USDT ≥ 1−buffer，歷史成立）。**不 fetch USDT/USD 行情**（與 balance fetch 同屬 future venue-call）。de-peg 跌破 0.98 才會誤拒，屆時調高 buffer 即可。
+   - **Rate sanity band → v1 deferred**：原意防 quote 過時、市場移動後以偏離價補單。但 **TTL 已把 quote 年齡限制在當根 candle 內**，而同一根 candle 的市場利率依定義即該 candle 的利率 → rate sanity 與 TTL 基本冗餘，且需 best-ask 行情 fetch（同屬 future venue-call）。v1 靠 TTL，rate sanity 列 future。
    - **safety_chain.evaluate**：manual_kill / auth_health / heartbeat / allocation_cap —— safety gate 從 signal 層**移到此處**，維持單一 gate。
 
 4. **通過才 `executor.submit()`**，並更新 intent ledger 的 per-cell 已部署量。
@@ -94,7 +93,8 @@ greedy + 70% 需要 per-cell exposure，但 venue credit→cell 歸屬正是 `fc
 
 - venue 全域 reconcile 仍是 **total exposure 與 drift 的真相來源**（cap 判定用全域數字）。
 - per-cell intent 只用於**分配決策**（greedy + 70%）。
-- 兩者輕微背離在 canary 規模可接受；drift 由 reconcile v2 既有的 `RECONCILE DEGRADED` 訊號監控。
+- **一致性維持（不需 venue→cell 歸屬）**：(a) deployment 送單成功 → `deployed[cell] += gap_fill`；(b) 每次 reconcile 後，已知全域真相 `E_total`，令 `S = Σ deployed`，若 `S > 0` 則 **按比例校正** `deployed[c] *= E_total / S`——offer 過期 / credit 關閉造成的全域下降會等比例反映到各 cell，無需逐筆歸屬。
+- **Boot edge**：`S = 0` 但 `E_total > 0`（重啟時已有 credit、尚無 intent）→ 無法歸屬，per-cell `deployed` 維持 0，集中度上限暫失效（best-effort，post-boot 自然恢復）；全域 cap 仍由 venue 真相 + `AllocationCapGuard` 嚴格守住。canary 規模可接受。
 
 ---
 
