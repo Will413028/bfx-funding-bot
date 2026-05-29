@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.event_store.tables import ReconcileObservationRow
