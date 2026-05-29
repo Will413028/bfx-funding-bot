@@ -14,10 +14,11 @@
 # Params identical to configs/cells.yaml (do not re-tune here).
 # Select at deploy time: BFX_CELLS_YAML=configs/cells.canary.yaml
 #
-# Sizing note (first real-money validation run): reference_amount_usdt=150 with
-# BFX_ALLOCATION_CAP_USDT=450 -> up to ~3 concurrent $150 positions, bounded
-# first-run downside. Ramp the cap up after a few clean offer->fill->renew->close
-# cycles validate the live pipeline.
+# Sizing (deployment reconciler, spec 2026-05-29-deployment-reconciler):
+# Single-order size is no longer set here. The deployment reconciler fills the
+# gap toward target_exposure (= BFX_ALLOCATION_CAP_USDT, set 570 on Koyeb) using
+# greedy emptiest-first allocation, per-cell capped at 70% of target, each offer
+# >= effective_min (ceil(150*1.02)=153 USDT) to clear the venue USD minimum.
 
 cells:
   - strategy: mean_reversion
@@ -25,13 +26,11 @@ cells:
     period_agg: a30
     timeframe: 1h
     params: {threshold_sigma: 0.5, ratio_sigma: 0.42049266874194213, ema_span: 24}
-    reference_amount_usdt: 150.0
 
   - strategy: mean_reversion
     symbol: fUST
     period_agg: p2
     timeframe: 1h
     params: {threshold_sigma: 0.5, ratio_sigma: 0.4062263004196277, ema_span: 24}
-    reference_amount_usdt: 150.0
 
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md
