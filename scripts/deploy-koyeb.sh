@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/deploy-koyeb.sh paper      # 1hr smoke run (simulated)
 #   scripts/deploy-koyeb.sh shadow     # 2-4 週 long run, simulated, no auto-exit
-#   scripts/deploy-koyeb.sh canary     # ⚠️ REAL MONEY: bitfinex_live, $150 cap
+#   scripts/deploy-koyeb.sh canary     # ⚠️ REAL MONEY: bitfinex_live, $450 cap
 #
 # Behaviour:
 #   - Idempotent: app/service created if missing, env vars upserted if exists.

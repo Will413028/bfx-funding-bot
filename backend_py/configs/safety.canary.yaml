@@ -18,7 +18,7 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
-    enabled: true            # cap from BFX_ALLOCATION_CAP_USDT (set 150)
+    enabled: true            # cap from BFX_ALLOCATION_CAP_USDT (set 450, matches funded wallet)
 
 calibrated_guards:
   realized_loss_24h:
