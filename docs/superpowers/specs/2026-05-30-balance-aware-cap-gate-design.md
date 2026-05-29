@@ -106,7 +106,7 @@ reads `ledger.current_exposure()`.
 |---|---|---|
 | **New** `FundingWallet` + `parse_wallets()` + `get_wallets(ctx, currency)` | `external/bitfinex/auth_rest.py` | POST `/v2/auth/r/wallets` (signed), reuse offers/credits signing pattern; filter `type=="funding" and currency==…`; return available |
 | **New** `_fetch_wallets()` + sum available | `modules/execution/boot_recovery.py` | mirror `_fetch_offers`/`_fetch_credits` (3-attempt backoff); `available_usdt = funding-wallet available for the symbol's currency` |
-| **Extend** `ReconcileResult` | `periodic_reconcile.py` (defn per structural map; returned by `BootRecovery.run()`) | add `available_usdt: Decimal = Decimal("0")` |
+| **Extend** `ReconcileResult` | `boot_recovery.py:51` (defn; returned by `BootRecovery.run()`) | add `available_usdt: Decimal = Decimal("0")` |
 | **Extend** `PositionReconciled` event | events module | add `available_usdt: Decimal` |
 | **Extend** ledger | `modules/execution/ledger.py` | add `_available: Decimal`; set in `on_position_reconciled`; getter `available_balance() -> Decimal`. No PG column. |
 | **Change** `allocate_gap` | `modules/execution/deployment/sizing.py` | add param `available_headroom: Decimal`; `gap = min(target − current_exposure, available_headroom)`. Pure. |
