@@ -70,7 +70,6 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
-    TransientRetryMiddleware,
 )
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
@@ -557,7 +556,8 @@ async def _emit_locf_degraded(
 # PG from_snapshot (ledger reads position_state; registry reads offer_claims).
 
 # _LedgerWrappedExecutor deleted in Phase 4.3 Task 10.
-# Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(TransientRetryMiddleware(executor), bus), probe)
+# Replaced by: HeartbeatMiddleware(ReservationEmittingMiddleware(executor), probe)
+# (no retry wrapper — submit is a once-only financial write; see wrapped_executor).
 # Ledger + OfferRegistry subscribe to DomainEventBus in build_daemon.
 
 
@@ -873,9 +873,14 @@ async def build_daemon(
     # subscribing here without the registry routing would double-count orphans.
     bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
 
+    # NO retry wrapper around submit: a funding-offer submit is a financial write
+    # that must be attempted exactly once. Bitfinex funding offers have no client
+    # cid dedup (only trading orders do), so retrying a submit would risk a real
+    # duplicate live offer. Transient failures are recovered by the periodic
+    # reconcile, not by re-submitting. (cancel retries internally — it's idempotent.)
     wrapped_executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
-            TransientRetryMiddleware(executor),
+            executor,
             bus=bus,
             persister=persister,
             is_simulated=spec.is_simulated,

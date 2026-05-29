@@ -73,11 +73,13 @@ def build_offer_payload(
     amount_usdt: float,
     rate: float,
     period_days: int,
-    cid: int,
 ) -> dict[str, Any]:
     """Build Bitfinex POST /v2/auth/w/funding/offer/submit body.
 
-    Per https://docs.bitfinex.com/reference/rest-auth-submit-funding-offer
+    Per https://docs.bitfinex.com/reference/rest-auth-submit-funding-offer —
+    the funding-offer submit API accepts only type/symbol/amount/rate/period/flags.
+    There is NO cid field (unlike trading-order submit), so no client-side dedup;
+    the internal cid lives only in our event log, never in this payload.
     """
     return {
         "type": "LIMIT",
@@ -208,7 +210,6 @@ class BitfinexLiveExecutor:
             amount_usdt=decision.offer_amount_usdt or 0.0,
             rate=decision.offer_rate or 0.0,
             period_days=decision.offer_duration_days or 2,
-            cid=cid,
         )
         body_bytes = json.dumps(payload).encode("utf-8")
 

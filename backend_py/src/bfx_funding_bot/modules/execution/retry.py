@@ -1,11 +1,16 @@
 """Transient-only retry decorator for executor calls.
 
+Used ONLY for the cancel path (BitfinexLiveExecutor.cancel), which is idempotent
+(already-filled / already-cancelled offers return "not found"/"not active" and are
+treated as success). submit is deliberately NOT retried: a funding-offer submit is
+a once-only financial write and Bitfinex funding offers have no client cid dedup
+(only trading orders do), so re-submitting would risk a real duplicate live offer.
+Transient submit failures are recovered by the periodic reconcile instead.
+
 Policy (spec section "Error Handling Policy"):
 - Retry: ExecutorTransientError (httpx.NetworkError / TimeoutException / 5xx)
 - DO NOT retry: ExecutorFatalError / ExecutorAuthError (4xx / auth)
 - Backoff: 1s / 2s / 4s; total cap ~7s
-- Date for cid is captured ONCE at submit() entry, so retries reuse same cid
-  (Bitfinex auto-dedupes — see CC2 in spec).
 """
 from __future__ import annotations
 

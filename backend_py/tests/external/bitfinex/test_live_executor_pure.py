@@ -27,7 +27,7 @@ def test_build_offer_payload_small_rate_is_fixed_point() -> None:
     # Regression: fUST mean-reversion rate (~5.5e-05) must not serialize as
     # scientific notation (caused live submit 500s, 2026-05-26).
     payload = build_offer_payload(
-        symbol="fUST", amount_usdt=150.0, rate=5.531e-05, period_days=2, cid=1,
+        symbol="fUST", amount_usdt=150.0, rate=5.531e-05, period_days=2,
     )
     assert payload["rate"] == "0.00005531"
     assert "e" not in payload["rate"].lower()
@@ -36,7 +36,7 @@ def test_build_offer_payload_small_rate_is_fixed_point() -> None:
 
 def test_build_offer_payload_structure() -> None:
     payload = build_offer_payload(
-        symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2, cid=12345,
+        symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2,
     )
     assert payload["type"] == "LIMIT"
     assert payload["symbol"] == "fUSD"
@@ -46,10 +46,11 @@ def test_build_offer_payload_structure() -> None:
     assert payload["flags"] == 0
 
 
-def test_build_offer_payload_deterministic() -> None:
-    p1 = build_offer_payload(symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2, cid=1)
-    p2 = build_offer_payload(symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2, cid=1)
-    assert p1 == p2
+def test_build_offer_payload_has_no_cid_field() -> None:
+    # Bitfinex funding offers have no cid field — the internal cid must never
+    # leak into the venue payload (would imply a venue dedup that doesn't exist).
+    payload = build_offer_payload(symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2)
+    assert "cid" not in payload
 
 
 def test_parse_offer_response_submitted() -> None:

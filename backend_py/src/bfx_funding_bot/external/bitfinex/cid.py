@@ -1,12 +1,17 @@
-"""Deterministic Bitfinex cid generator.
+"""Deterministic internal correlation id ("cid") generator.
 
 cid = int(blake2b(correlation_id_bytes + utc_date_iso_bytes, digest_size=8)) & 0x7FFF_FFFF_FFFF_FFFF
 
-Bitfinex cid is a positive int with daily uniqueness window. Hash includes
-the UTC date so cross-day reuse generates a fresh cid naturally.
+NOT sent to Bitfinex: the funding-offer submit API has no cid field (only trading
+orders do), so this is purely an internal idempotency/correlation key. It ties a
+write-ahead ReservationIntent to its outcome (CLAIMED/FAILED) — see
+ReservationEmittingMiddleware (A2). The int63 / positive shape mirrors Bitfinex's
+historical cid format for consistency, nothing more.
 
-CRITICAL: Date must be captured ONCE at executor.submit() entry, not regenerated
-per retry attempt — see spec CC2 (midnight boundary race).
+Determinism: same (correlation_id, UTC date) → same cid, so a crashed submit's
+PENDING intent is recoverable at boot. The UTC date gives a daily window (cross-day
+reuse yields a fresh cid). CRITICAL: capture the date ONCE at submit() entry, not
+per attempt — see spec CC2 (midnight boundary race).
 """
 from __future__ import annotations
 
@@ -23,11 +28,10 @@ def generate_cid(correlation_id: UUID, submit_date: date) -> int:
 
     Args:
         correlation_id: Strategy decision correlation UUID. Stable per signal cycle.
-        submit_date: UTC date captured at executor.submit() entry — immutable across
-                     tenacity retries (CC2 midnight race fix).
+        submit_date: UTC date captured ONCE at submit() entry (CC2 midnight race fix).
 
     Returns:
-        Positive int63 cid suitable for Bitfinex offer/new cid field.
+        Positive int63 internal correlation id (NOT sent to Bitfinex — see module docstring).
     """
     digest = hashlib.blake2b(
         correlation_id.bytes + submit_date.isoformat().encode(),
