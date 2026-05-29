@@ -79,6 +79,10 @@ class DeploymentReconciler:
         # concentration cap is enforced inside allocate_gap, not incrementally as
         # we record each submit below. Correct within a tick (sum of fills <= gap,
         # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
+        # If a WS fill/claim lands mid-tick making this snapshot stale, the per-offer
+        # AllocationCapGuard re-checks current_exposure+offer against the live ledger
+        # and blocks any now-excess offer — so a stale snapshot can only under-deploy
+        # (safe), never over-deploy.
         fills = allocate_gap(
             target=self._ctx.allocation_cap_usdt,
             current_exposure=e_total,
@@ -89,6 +93,16 @@ class DeploymentReconciler:
         )
         if not fills:
             return
+
+        gap = self._ctx.allocation_cap_usdt - e_total
+        allocated = sum(fills.values(), Decimal("0"))
+        stranded = gap - allocated
+        if stranded >= self._min_fill:
+            log.info(
+                "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
+                "(concentration cap %s/cell or no further active cell) active=%s",
+                gap, allocated, stranded, self._concentration_pct, active,
+            )
 
         for cell_id, amount in fills.items():
             quote = self._store.get_active(cell_id, now_ms=now)
