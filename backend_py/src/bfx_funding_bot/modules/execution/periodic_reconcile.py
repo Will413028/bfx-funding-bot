@@ -19,12 +19,15 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Protocol
 
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
 log = logging.getLogger(__name__)
+
+_DRIFT_EPSILON = Decimal("0.01")
 
 
 class _Recovery(Protocol):
@@ -130,17 +133,26 @@ class PeriodicReconcile:
                 HealthTarget.EXECUTOR, HealthStatus.HEALTHY,
                 error_message="venue reconcile recovered",
             )
-        if result.n_released > 0 or result.n_claimed > 0:
+        drifted = (
+            result.realized_drift_usdt > _DRIFT_EPSILON
+            or result.reserved_drift_usdt > _DRIFT_EPSILON
+        )
+        if result.n_released > 0 or result.n_claimed > 0 or drifted:
             log.warning(
                 "periodic_reconcile_divergence released=%d claimed=%d failed=%d "
+                "realized_drift=%s reserved_drift=%s "
                 "— WS lifecycle path missed events",
                 result.n_released, result.n_claimed, result.n_failed,
+                result.realized_drift_usdt, result.reserved_drift_usdt,
             )
             self._divergence_flagged = True
             self._probe.update(
                 HealthTarget.RECONCILE, HealthStatus.DEGRADED,
                 error_message=(
-                    f"reconcile drift released={result.n_released} claimed={result.n_claimed}"
+                    f"reconcile drift released={result.n_released} "
+                    f"claimed={result.n_claimed} "
+                    f"realized_drift={result.realized_drift_usdt} "
+                    f"reserved_drift={result.reserved_drift_usdt}"
                 ),
             )
         elif self._divergence_flagged:

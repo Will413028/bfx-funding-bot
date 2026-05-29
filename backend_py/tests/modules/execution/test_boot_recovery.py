@@ -203,15 +203,19 @@ class _StubStore:
         return True
 
     async def set_position_snapshot(
-        self, session, *, account_id, reserved_usdt, realized_usdt, n_credits, occurred_at_ms
+        self, session, *, account_id, reserved_usdt, realized_usdt,
+        n_offers, n_credits, occurred_at_ms,
     ):
+        from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
         self.snapshot_calls.append({
             "account_id": account_id,
             "reserved_usdt": reserved_usdt,
             "realized_usdt": realized_usdt,
+            "n_offers": n_offers,
             "n_credits": n_credits,
             "occurred_at_ms": occurred_at_ms,
         })
+        return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
 
 
 class _StubSession:
@@ -476,3 +480,68 @@ async def test_run_reconcile_result_includes_credit_dimensions():
     assert result.realized_usdt == Decimal("200")
     assert result.reserved_usdt == Decimal("0")
     assert result.n_credits == 1
+
+
+@pytest.mark.asyncio
+async def test_run_threads_drift_from_snapshot_into_result():
+    """ReconcileResult carries realized_drift/reserved_drift from set_position_snapshot."""
+    from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
+
+    class _DriftStore(_StubStore):
+        async def set_position_snapshot(self, session, **kw):
+            await super().set_position_snapshot(session, **kw)
+            return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("150"))
+
+    store = _DriftStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=[_credit("1", "450")])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    result = await rec.run()
+
+    assert result.realized_drift_usdt == Decimal("150")
+    assert result.reserved_drift_usdt == Decimal("0")
+
+
+# ── Single-writer: registry routing (Task 5) ─────────────────────────────────
+
+
+class _StubRegistry:
+    def __init__(self):
+        self.handled: list = []
+
+    async def handle(self, event):
+        self.handled.append(event)
+
+
+@pytest.mark.asyncio
+async def test_run_routes_recovery_actions_to_registry_not_bus():
+    """With an offer_registry wired: PositionReconciled goes to the bus (ledger),
+    recovery ReservationClaimed goes to the registry — NOT the bus. This prevents
+    the double-count once the ledger subscribes to PositionReconciled."""
+    registry = _StubRegistry()
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, offer_registry=registry)
+
+    await rec.run()
+
+    # bus carries the snapshot signal only
+    assert any(isinstance(e, PositionReconciled) for e in bus.published)
+    assert not any(isinstance(e, ReservationClaimed) for e in bus.published)
+    # registry receives the orphan claim (FSM)
+    assert any(isinstance(e, ReservationClaimed) for e in registry.handled)
+
+
+@pytest.mark.asyncio
+async def test_run_falls_back_to_bus_when_no_registry():
+    """No registry → recovery actions still reach the bus (legacy path)."""
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)  # no offer_registry
+
+    await rec.run()
+
+    assert any(isinstance(e, ReservationClaimed) for e in bus.published)

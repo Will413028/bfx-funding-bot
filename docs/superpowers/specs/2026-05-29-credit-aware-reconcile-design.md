@@ -114,16 +114,31 @@ set is the backstop.
 
 ## Architecture Decisions (resolved 2026-05-29)
 
+> **v2 (best-practice refactor, implemented):** a second design review of the v1
+> implementation found a latent **dual-writer double-count** (the planned
+> `bus.subscribe(PositionReconciled, ledger)` wiring would have counted an orphan
+> offer twice — once via the absolute snapshot, once via the recovery
+> `ReservationClaimed` delta) plus two gaps (credit-dimension drift never
+> surfaced; reconciliation history not persisted). The refactor is specified and
+> executed in `docs/superpowers/plans/2026-05-29-credit-reconcile-v2-best-practice.md`.
+> The notes below are the v1 decisions; the v2 deltas are: single-writer exposure,
+> append-only `reconcile_observation` checkpoints with delta-tail rebuild, and a
+> drift-based `RECONCILE DEGRADED` signal.
+
 **Reconcile is a snapshot, not a domain event.**
 
 `PositionReconciled` is an **in-process pub/sub signal only** — it is never appended to `event_log`. This resolves three design review findings (C1/C2/I2):
 
 - `event_log` stays a pure domain-event stream (fills, releases, claims) — delta-only, immutable, cleanly replayable.
 - `position_state` is updated by a direct-write `store.set_position_snapshot()` call — not through the delta accumulator — so absolute-set semantics are unambiguous.
-- `rebuild_snapshot_from_log` remains correct: it only replays domain deltas. After any rebuild the first reconcile corrects to venue truth (this is already the boot behaviour).
+- `rebuild_snapshot_from_log` rebuilds exposure as **latest `reconcile_observation` checkpoint ⊕ domain events with `event_seq > fence`** (v2); the no-checkpoint path falls back to the genesis fold.
 - No serialization changes needed.
 
-Audit trail: `position_state` gains `last_reconciled_at` + `n_credits`; structured log records each reconcile tick. A separate `reconcile_log` table is deferred (log is sufficient for now).
+**Single-writer exposure (v2):** at reconcile time `PositionReconciled` is the SOLE authority for the in-memory ledger's `reserved`/`realized`. The orphan/missing recovery `ReservationClaimed`/`ReservationReleased` events are routed **directly to the `OfferRegistry`** (`BootRecovery._route_fsm`), bypassing the bus the ledger listens on — closing the double-count vector. `venue_seq` could not discriminate (submit-path claims also lack it), so routing separation is structural, not a runtime check.
+
+Audit trail (v2): each reconcile appends an immutable `reconcile_observation` row (absolute venue snapshot + `event_seq_fence`); `position_state` also gains `last_reconciled_at` + `n_credits`. The reconcile_log table is **no longer deferred** — it is `reconcile_observation`.
+
+**Credit-dimension drift signal (v2):** `PeriodicReconcile._tick` flags `RECONCILE DEGRADED` when `realized_drift`/`reserved_drift` (snapshot vs prior materialized belief) exceeds `_DRIFT_EPSILON` — so a silently-broken WS credit path surfaces instead of self-healing invisibly. Expect one DEGRADED blip on the first post-deploy reconcile as realized converges $300→$450; it clears on the next clean tick.
 
 **Pre-trade balance gate deferred to follow-on PR.** The `10001` noise stops once `realized` is correct and the cap is aligned — the gate is defense-in-depth for future over-allocation scenarios. Bundling it into this PR adds blast radius with zero current benefit.
 
