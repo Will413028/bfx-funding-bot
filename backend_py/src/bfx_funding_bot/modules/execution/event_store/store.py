@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,8 +18,16 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     OfferClaimRow,
     PositionStateRow,
+    ReconcileObservationRow,
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotDrift:
+    reserved_drift: Decimal
+    realized_drift: Decimal
+
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
 # NOTE: dedup for events with venue_seq IS NULL is app-level only — the
@@ -232,16 +241,29 @@ class PostgresEventStore:
         account_id: str,
         reserved_usdt: Decimal,
         realized_usdt: Decimal,
+        n_offers: int,
         n_credits: int,
         occurred_at_ms: int,
-    ) -> None:
-        """Direct-write position_state with absolute venue snapshot values.
+    ) -> SnapshotDrift:
+        """Absolute venue snapshot. Overwrites the live position_state view,
+        appends an immutable reconcile_observation checkpoint (with the event_log
+        fence), and returns drift vs the prior materialized belief.
 
-        NOT through the delta accumulator — this is a SET, not an ADD.
-        Called by reconcile (boot + periodic) after fetching both offers and
-        credits. Does not append to event_log; PositionReconciled is in-process
-        pub/sub only.
+        NOT a delta. NOT through the accumulator. Single-writer for exposure at
+        reconcile time.
+
+        n_offers is persisted in the checkpoint row only (audit); position_state
+        carries n_credits but has no n_offers column.
         """
+        fence: int = (
+            await session.execute(
+                select(func.coalesce(func.max(EventLogRow.event_seq), 0)).where(
+                    EventLogRow.account_id == account_id,
+                    EventLogRow.deployment_environment == self._env,
+                )
+            )
+        ).scalar_one()
+
         ps = (
             await session.execute(
                 select(PositionStateRow).where(
@@ -250,6 +272,8 @@ class PostgresEventStore:
                 )
             )
         ).scalar_one_or_none()
+        prior_reserved = Decimal(str(ps.reserved_usdt)) if ps is not None else Decimal("0")
+        prior_realized = Decimal(str(ps.realized_usdt)) if ps is not None else Decimal("0")
         if ps is None:
             ps = PositionStateRow(
                 account_id=account_id,
@@ -263,13 +287,35 @@ class PostgresEventStore:
         ps.reserved_usdt = reserved_usdt
         ps.realized_usdt = realized_usdt
         ps.last_updated_ms = occurred_at_ms
+        ps.last_event_seq = fence
         ps.last_reconciled_at = occurred_at_ms
         ps.n_credits = n_credits
+
+        session.add(ReconcileObservationRow(
+            account_id=account_id,
+            deployment_environment=self._env,
+            reserved_usdt=reserved_usdt,
+            realized_usdt=realized_usdt,
+            n_offers=n_offers,
+            n_credits=n_credits,
+            observed_at_ms=occurred_at_ms,
+            event_seq_fence=fence,
+        ))
+
+        return SnapshotDrift(
+            reserved_drift=abs(reserved_usdt - prior_reserved),
+            realized_drift=abs(realized_usdt - prior_realized),
+        )
 
     async def rebuild_snapshot_from_log(
         self, session: AsyncSession, *, account_id: str, deployment_environment: str
     ) -> None:
-        """Delete + recompute snapshot rows for (account, env) by folding event_log."""
+        """Rebuild snapshots for (account, env).
+
+        offer_claims: folded from the full event_log (FSM, cheap).
+        position_state: latest reconcile_observation checkpoint ⊕ domain events
+        with event_seq > fence. Falls back to genesis fold if no checkpoint.
+        """
         await session.execute(delete(OfferClaimRow).where(
             OfferClaimRow.account_id == account_id,
             OfferClaimRow.deployment_environment == deployment_environment))
@@ -277,15 +323,71 @@ class PostgresEventStore:
             PositionStateRow.account_id == account_id,
             PositionStateRow.deployment_environment == deployment_environment))
         await session.flush()
+
         rows = (await session.execute(
             select(EventLogRow).where(
                 EventLogRow.account_id == account_id,
                 EventLogRow.deployment_environment == deployment_environment,
             ).order_by(EventLogRow.event_seq.asc())
         )).scalars().all()
+
+        # offer_claims: full fold.
         for r in rows:
             event = deserialize_event(r.event_type, r.payload)
             await self._project_offer_claims(session, event, account_id)
-            await self._project_position_state(
-                session, r.event_type, account_id,
-                getattr(event, "size_usdt", None), r.event_seq, r.occurred_at_ms)
+
+        # position_state: checkpoint + tail.
+        checkpoint = (await session.execute(
+            select(ReconcileObservationRow).where(
+                ReconcileObservationRow.account_id == account_id,
+                ReconcileObservationRow.deployment_environment == deployment_environment,
+            ).order_by(ReconcileObservationRow.id.desc()).limit(1)
+        )).scalar_one_or_none()
+
+        if checkpoint is None:
+            fence = 0
+            base_reserved = Decimal("0")
+            base_realized = Decimal("0")
+            base_seq = 0
+            base_ms = 0
+        else:
+            fence = checkpoint.event_seq_fence
+            base_reserved = Decimal(str(checkpoint.reserved_usdt))
+            base_realized = Decimal(str(checkpoint.realized_usdt))
+            base_seq = checkpoint.event_seq_fence
+            base_ms = checkpoint.observed_at_ms
+
+        ps = PositionStateRow(
+            account_id=account_id,
+            deployment_environment=deployment_environment,
+            reserved_usdt=base_reserved,
+            realized_usdt=base_realized,
+            last_updated_ms=base_ms,
+            last_event_seq=base_seq,
+            last_reconciled_at=(checkpoint.observed_at_ms if checkpoint else None),
+            n_credits=(checkpoint.n_credits if checkpoint else None),
+        )
+        session.add(ps)
+
+        reserved = base_reserved
+        realized = base_realized
+        for r in rows:
+            if r.event_seq <= fence:
+                continue
+            # Raw payload read (no deserialize_event) — intentional: the tail fold
+            # only needs size_usdt and stays decoupled from domain event objects.
+            # If a new event type gains a non-string-serialized size_usdt, sync
+            # this with serialization.py.
+            size = Decimal(str((r.payload or {}).get("size_usdt", 0) or 0))
+            if r.event_type == "RESERVATION_CLAIMED":
+                reserved += size
+            elif r.event_type == "ORDER_FILL":
+                delta = min(reserved, size)
+                reserved -= delta
+                realized += size
+            elif r.event_type == "RESERVATION_RELEASED":
+                reserved -= min(reserved, size)
+            ps.reserved_usdt = reserved
+            ps.realized_usdt = realized
+            ps.last_updated_ms = r.occurred_at_ms
+            ps.last_event_seq = r.event_seq

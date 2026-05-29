@@ -104,3 +104,30 @@ class PositionStateRow(Base):
     n_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (PrimaryKeyConstraint("account_id", "deployment_environment"),)
+
+
+class ReconcileObservationRow(Base):
+    """Append-only checkpoint: one row per reconcile tick. Immutable audit of
+    venue truth at observation time + the event_log fence it was taken at.
+    position_state = latest ReconcileObservationRow ⊕ domain events with
+    event_seq > event_seq_fence (see store.rebuild_snapshot_from_log)."""
+
+    __tablename__ = "reconcile_observation"
+
+    id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    realized_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    n_offers: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_seq_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_NOW
+    )
+
+    __table_args__ = (
+        Index("idx_reconcile_obs_acct_env_id",
+              "account_id", "deployment_environment", "id"),
+    )

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from decimal import Decimal
 from pathlib import Path
 
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
@@ -144,3 +146,67 @@ cells:
     # SQLite path doesn't apply pool config the same way; the key regression guard
     # is the make_async_engine_from_url call above with the real postgresql URL.
     assert daemon.db_engine is not None
+
+
+async def test_ledger_subscribes_to_position_reconciled(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """Behavioral: bus.publish(PositionReconciled) must update ledger.realized_exposure().
+
+    Wires the same paper daemon as the smoke test (BFX_PHASE=paper, sqlite),
+    then publishes a PositionReconciled on the daemon's bus and asserts the ledger
+    reflects the authoritative venue snapshot.  This guards the atomicity
+    requirement: both the subscription and the offer_registry routing to
+    BootRecovery must land in a single commit (see daemon.py wiring comment).
+    """
+    yaml_path = tmp_path / "cells.yaml"
+    yaml_path.write_text("""
+cells:
+  - strategy: rate_percentile
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {percentile: 75, lookback_hours: 5}
+    reference_amount_usdt: 150.0
+phase3b_wfo_results_ref: x
+""")
+    monkeypatch.setenv("BFX_PHASE", "paper")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    db_path = tmp_path / "daemon_pr.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
+        is_reusable=True, is_optional=True,
+    )
+
+    daemon = await build_daemon(cells_yaml_path=yaml_path, skip_ws=True)
+
+    # Publish an authoritative venue snapshot via PositionReconciled.
+    # The subscription bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
+    # must route this to the ledger; without the wiring realized_exposure() stays 0.
+    event = PositionReconciled(
+        account_id=daemon.ledger.account_id,
+        reserved_usdt=Decimal("0"),
+        realized_usdt=Decimal("450"),
+        n_offers=0,
+        n_credits=3,
+        occurred_at_ms=1,
+    )
+    await daemon.bus.publish(event)
+
+    assert daemon.ledger.realized_exposure() == Decimal("450"), (
+        "ledger.realized_exposure() should reflect PositionReconciled.realized_usdt "
+        "after bus.publish — subscription missing or account_id mismatch"
+    )

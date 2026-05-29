@@ -9,6 +9,7 @@ def test_event_store_tables_registered() -> None:
     assert "event_log" in tables
     assert "offer_claims" in tables
     assert "position_state" in tables
+    assert "reconcile_observation" in tables
 
 
 def test_event_log_columns() -> None:
