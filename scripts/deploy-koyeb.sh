@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/deploy-koyeb.sh paper      # 1hr smoke run (simulated)
 #   scripts/deploy-koyeb.sh shadow     # 2-4 週 long run, simulated, no auto-exit
-#   scripts/deploy-koyeb.sh canary     # ⚠️ REAL MONEY: bitfinex_live, $570 cap
+#   scripts/deploy-koyeb.sh canary     # ⚠️ REAL MONEY: bitfinex_live, $550 cap
 #
 # Behaviour:
 #   - Idempotent: app/service created if missing, env vars upserted if exists.
@@ -67,7 +67,7 @@ say "Phase: $PHASE"
 
 # ---------- 0. Real-money confirmation (canary only) ----------
 if [[ "$PHASE" == "canary" ]]; then
-  warn "CANARY = REAL MONEY. bitfinex_live will place real funding offers (\$570 cap, fUST/USDT)."
+  warn "CANARY = REAL MONEY. bitfinex_live will place real funding offers (\$550 cap, fUST/USDT)."
   warn "Confirm the Pre-live Gate in docs/deploy/koyeb-canary.md is complete"
   warn "(API key submit/cancel scope, funding-wallet balance, G2 audit)."
   if [[ "${BFX_CANARY_CONFIRM:-}" != "yes" ]]; then
@@ -155,7 +155,12 @@ case "$PHASE" in
       --env "BFX_WS_CLIENT_ENABLED=true"
       --env 'BFX_API_KEY={{secret.bfx-api-key}}'
       --env 'BFX_API_SECRET={{secret.bfx-api-secret}}'
-      --env "BFX_ALLOCATION_CAP_USDT=570"
+      # STOPGAP 2026-05-29: cap 570 > actual funding-wallet total (~$557) → after a
+      # credit matured, reconciler computed gap=163.11 (>min_fill 153) but wallet free
+      # ~$150 < gap → 90s failed-submit loop (10001 not-enough-balance). 550 makes
+      # gap=550-406.89=143.11 < min_fill → allocate_gap returns [] (sleeps). Revert to
+      # 570 once the balance-aware cap gate clamps target to min(cap, free-buffer).
+      --env "BFX_ALLOCATION_CAP_USDT=550"
       --env "BFX_CELLS_YAML=/app/configs/cells.canary.yaml"
       --env "BFX_SAFETY_CONFIG=/app/configs/safety.canary.yaml"
       --env '!BFX_RUN_DURATION_HOURS'
