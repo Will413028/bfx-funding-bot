@@ -75,6 +75,10 @@ class DeploymentReconciler:
         active = [c.cell_id for c in self._cells
                   if self._store.get_active(c.cell_id, now_ms=now) is not None]
 
+        # Fills are pre-computed from this single pre-loop snapshot; the per-cell
+        # concentration cap is enforced inside allocate_gap, not incrementally as
+        # we record each submit below. Correct within a tick (sum of fills <= gap,
+        # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
         fills = allocate_gap(
             target=self._ctx.allocation_cap_usdt,
             current_exposure=e_total,

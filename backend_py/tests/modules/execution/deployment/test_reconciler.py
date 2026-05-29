@@ -74,14 +74,30 @@ def _post_quote(cell_id: str) -> StandingQuote:
     )
 
 
-def _build(*, exposure, quotes, safety_allowed=True, executor=None):
+class _SeqSafety:
+    """Safety fake whose allow/deny verdict is controlled per-call by a sequence."""
+
+    def __init__(self, allowed_seq: list[bool]) -> None:
+        self._seq = list(allowed_seq)
+        self.calls: list = []
+
+    async def evaluate(self, decision, ctx) -> GuardResult:
+        self.calls.append(decision)
+        allowed = self._seq.pop(0) if self._seq else True
+        return GuardResult(
+            allowed=allowed, guard_name="seq",
+            reason=None if allowed else "blocked",
+        )
+
+
+def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
         store.update(q)
     tracker = CellDeploymentTracker()
     ex = executor or _FakeExecutor()
-    safety = _FakeSafety(allowed=safety_allowed)
+    safety = safety if safety is not None else _FakeSafety(allowed=safety_allowed)
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=_FakeLedger(exposure),
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
@@ -135,3 +151,34 @@ async def test_submit_failure_does_not_record_intent():
     )
     await rec.deploy()  # must not raise
     assert tracker.deployed("fUST_a30") == D("0")
+
+
+async def test_two_active_cells_split_when_gap_exceeds_cap():
+    # gap=570, cap_per_cell=0.70*570=399; greedy emptiest-first (tiebreak cell_id):
+    # a30 -> 399 (hits cap), p2 -> 171 (remainder)
+    rec, ex, tracker, _ = _build(
+        exposure=D("0"),
+        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 2
+    assert tracker.deployed("fUST_a30") == D("399")
+    assert tracker.deployed("fUST_p2") == D("171")
+    amounts = sorted(d.offer_amount_usdt for d in ex.submitted)
+    assert amounts == [171.0, 399.0]
+
+
+async def test_per_cell_safety_block_does_not_stop_other_cell():
+    # gap=570 -> a30=399 (blocked), p2=171 (allowed); exactly one submit
+    seq_safety = _SeqSafety([False, True])
+    rec, ex, tracker, safety = _build(
+        exposure=D("0"),
+        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+        safety=seq_safety,
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_amount_usdt == 171.0
+    assert tracker.deployed("fUST_a30") == D("0")
+    assert tracker.deployed("fUST_p2") == D("171")
+    assert len(safety.calls) == 2  # both cells consulted
