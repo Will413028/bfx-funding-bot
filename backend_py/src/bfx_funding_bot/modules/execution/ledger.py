@@ -132,6 +132,16 @@ class PaperPositionLedger:
         """For AllocationCapGuard: reserved + realized = capital committed at venue."""
         return self._reserved + self._realized
 
+    def reserved_exposure(self) -> Decimal:
+        """Pending open-offer capital only (placed but not yet matched).
+
+        Used by CellDeploymentTracker.reconcile_to_total to rescale per-cell
+        intent to the reserved total — NOT to current_exposure. Realized credits
+        are committed and unattributable to any specific cell; including them in
+        the rescale factor would inflate per-cell intent past cap_per_cell.
+        """
+        return self._reserved
+
     def realized_exposure(self) -> Decimal:
         """For L2 guards (DrawdownGuard etc., Phase 4.4): matched credits only."""
         return self._realized

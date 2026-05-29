@@ -1,6 +1,8 @@
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
@@ -20,11 +22,17 @@ D = Decimal
 
 
 class _FakeLedger:
-    def __init__(self, exposure: Decimal) -> None:
+    def __init__(self, exposure: Decimal, reserved: Decimal | None = None) -> None:
         self._e = exposure
+        # Default: reserved == exposure (all capital is reserved / open offers).
+        # Pass reserved explicitly when simulating realized-only or mixed scenarios.
+        self._reserved = reserved if reserved is not None else exposure
 
     def current_exposure(self) -> Decimal:
         return self._e
+
+    def reserved_exposure(self) -> Decimal:
+        return self._reserved
 
 
 class _FakeSafety:
@@ -205,3 +213,49 @@ async def test_venue_rejected_submit_not_recorded_as_deployed():
     await rec.deploy()
     assert len(ex.submitted) == 1            # attempted once
     assert tracker.deployed("fUST_a30") == D("0")  # but not recorded as deployed
+
+
+# ---------------------------------------------------------------------------
+# C1 regression: orphan realized credits must not inflate/starve cells
+# ---------------------------------------------------------------------------
+
+def _build_with_split_ledger(*, reserved, realized, quotes):
+    """Build reconciler with explicit reserved / realized split."""
+    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    for q in quotes:
+        store.update(q)
+    tracker = CellDeploymentTracker()
+    exposure = reserved + realized
+    ledger = _FakeLedger(exposure=exposure, reserved=reserved)
+    ex = _FakeExecutor()
+    safety = _FakeSafety(allowed=True)
+    rec = DeploymentReconciler(
+        store=store, tracker=tracker, ledger=ledger,
+        safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
+        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        concentration_pct=D("0.70"), clock=lambda: 1_000,
+    )
+    return rec, ex, tracker, safety
+
+
+async def test_orphan_realized_credits_do_not_starve_cell():
+    """C1 regression: ledger reserved=$100 (one open offer), realized=$300 (orphan).
+    total_exposure=$400 — but reconcile_to_total must use reserved=$100, not $400.
+    The cell has recorded intent=$100; factor should be 1.0, NOT 4.0.
+    The gap = 570-400 = 170 → the cell is NOT starved; it should get ~170 allocated.
+    """
+    # Pre-seed the tracker with the open offer we own
+    rec, ex, tracker, _ = _build_with_split_ledger(
+        reserved=D("100"), realized=D("300"),
+        quotes=[_post_quote("fUST_a30")],
+    )
+    # Simulate the tracker already recorded our $100 open offer
+    tracker.record_deploy("fUST_a30", D("100"))
+    await rec.deploy()
+    # gap = 570 - 400 = 170; cap_per_cell = 0.70*570 = 399; cell has 100 deployed
+    # headroom = min(399, 570) - 100 = 299 >= 170 -> fills 170
+    assert len(ex.submitted) == 1, "cell should NOT be starved by orphan realized credits"
+    assert ex.submitted[0].offer_amount_usdt == pytest.approx(170.0)
+    # tracker recorded the new submit on top of the existing 100
+    assert tracker.deployed("fUST_a30") == D("270")
