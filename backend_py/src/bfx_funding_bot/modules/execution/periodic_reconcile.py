@@ -39,6 +39,10 @@ class _Probe(Protocol):
     def update(self, target: HealthTarget, status: HealthStatus, **fields: object) -> None: ...
 
 
+class _Deployment(Protocol):
+    async def deploy(self) -> None: ...
+
+
 class PeriodicReconcile:
     SUB_TASK = "periodic_reconcile"
 
@@ -51,6 +55,7 @@ class PeriodicReconcile:
         max_consecutive_failures: int = 3,
         min_resync_interval_s: float = 10.0,
         monotonic: Callable[[], float] | None = None,
+        deployment: _Deployment | None = None,
     ) -> None:
         self._recovery = recovery
         self._probe = probe
@@ -58,6 +63,7 @@ class PeriodicReconcile:
         self._max_failures = max_consecutive_failures
         self._min_resync_interval_s = min_resync_interval_s
         self._monotonic = monotonic or time.monotonic
+        self._deployment = deployment
         self._consecutive_failures = 0
         self._tripped_down = False  # this loop owns the EXECUTOR DOWN it sets
         self._divergence_flagged = False  # this loop owns HealthTarget.RECONCILE
@@ -161,3 +167,8 @@ class PeriodicReconcile:
                 HealthTarget.RECONCILE, HealthStatus.HEALTHY,
                 error_message="reconcile drift cleared",
             )
+        if self._deployment is not None:
+            try:
+                await self._deployment.deploy()
+            except Exception:  # deployment must never crash the reconcile backbone
+                log.exception("deployment_phase_failed")
