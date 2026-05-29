@@ -1,6 +1,6 @@
 # 開發路線圖
 
-> 最後更新：2026-05-26（Python rewrite Phase 2–4 完成；canary 已上線 2026-05-25，空跑待入金）
+> 最後更新：2026-05-29（canary 已入金 ~$450 USDT、實際放貸中（3 筆 fUST credit）；近期真錢 incident 修復鏈見「當前位置」）
 > 參考文件：`backend_architecture.md`, `frontend_architecture.md`, `strategy_specification.md`
 > 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
 
@@ -24,26 +24,41 @@
 | 4.2 | Real-money safety + executor 抽象 — hexagonal Executor ports + SafetyGuardChain（hard + calibrated guards） | ✅ 2026-05-21 |
 | 4.3 | LOCF + per-cell staleness budget（sparse p30 cells）；backtest 驗證通過 | ✅（G2 calibration audit 待 ~2026-06-10） |
 | 4.4 live infra | Bitfinex live executor + WS dispatcher + OfferRegistry FSM（event-sourcing baseline，env flag 控制，paper-preserving） | ✅ Koyeb HEALTHY |
-| 4.4 canary | `BFX_PHASE=canary` 啟用 + all-guards invariant + canary deploy config（`cells.canary.yaml` / `safety.canary.yaml`） | ✅ 已上線 2026-05-25 22:31（deployment d824ee7a，HEALTHY，空跑待入金）|
+| 4.4 canary | `BFX_PHASE=canary` 啟用 + all-guards invariant + canary deploy config（`cells.canary.yaml` / `safety.canary.yaml`） | ✅ 已上線、已入金 ~$450 USDT、實際放貸中（fUST，cap $450）|
 
-### 當前位置：canary 已上線，空跑待入金
+### 當前位置：canary 已入金、實際放貸中（真錢營運 + incident 修復收斂）
 
-canary 真錢 daemon 於 **2026-05-25 22:31 上線**（Koyeb deployment `d824ee7a`，instance HEALTHY，
-`BFX_PHASE=canary` + `BFX_EXECUTOR=bitfinex_live` + `$150` cap）。前置已備：WFO backtest ✅ /
-paper ✅ / shadow ✅ / venue reconcile wire+auth ✅ / PG SoT ✅ / canary 程式碼 ✅。
+canary 真錢 daemon 上線後（2026-05-25），帳戶於 **2026-05-26 入金 ~$450 USDT**，cap 對齊 $450
+（`BFX_ALLOCATION_CAP_USDT=450`）。目前**實際放貸中**：3 筆 active fUST credit ≈ $450 全數借出。
+前置全備：WFO backtest ✅ / paper ✅ / shadow ✅ / venue reconcile wire+auth ✅ / PG SoT ✅。
 
-**目前狀態：空跑（帳戶未入金）。** 零 `order_submit`、零 `order_fill`、venue offers=0 — 無財務風險。
+入金後從「空跑」進入真錢營運，首次真錢路徑暴露一連串只有真錢才會觸發的 bug，已逐一修復收斂：
 
-待辦（user action）：
-- [ ] **帳戶入金**可放貸 USD（≤ $150 cap）— 入金後才會實際掛單
-- [ ] 驗 submit/cancel scope（目前 smoke L2 boot 的真實 submit 回 500，疑似餘額不足；入金後可分辨是 scope 還是 balance）
+- ✅ **live submit 路徑（2026-05-26, `ae2c59d`）**：首次真錢才驗證的 submit code path——symbol 寫死
+  fUSD、`str(float)` 產生科學記號 rate、吞掉 venue 回應 body。
+- ✅ **post-submit lifecycle（2026-05-27）**：送單後 fill/release/reconcile 從不收斂 → ledger 卡 cap、
+  閒置資本誤判已部署。Root cause = WS `foc` 索引錯 + `fcn` 無法映射 credit→offer + reconcile 只在開機跑。
+  修法 = **週期對帳骨幹**（`PeriodicReconcile`，`BFX_RECONCILE_INTERVAL_S=90`，venue = SoT、WS 為可失敗的
+  延遲優化）+ WS foc 單一來源 parser。Plan 1+2 已部署。
+- ✅ **credit-aware reconcile v2（2026-05-29，Koyeb `76f7cd40`）**：上一版 offers-only reconcile 反向過修——
+  把撮合成 credit 的 offer 誤 release → `realized` 少記（venue $450 / bot 認 $300），每小時重試過量放貸
+  （`10001`）。修法 = reconcile 收斂到**完整** venue 快照（`reserved=Σoffers`、`realized=Σcredits`），
+  並重構成 best-practice：single-writer exposure（recovery 事件路由 OfferRegistry 不走 ledger bus）+
+  append-only `reconcile_observation` checkpoint（checkpoint ⊕ event-tail rebuild）+ credit 維度
+  `RECONCILE DEGRADED` drift 訊號。部署後驗證：`realized` $300→$450、`10001` 噪音停。
+  spec `docs/superpowers/specs/2026-05-29-credit-aware-reconcile-design.md`、
+  plan `docs/superpowers/plans/2026-05-29-credit-reconcile-v2-best-practice.md`。
+- ✅ **executor liveness（2026-05-26, `fix/executor-liveness-health`）**：空跑時 executor heartbeat 累積
+  stale（>360s）→ `/healthz` 503 → daemon 重啟。Root cause：executor/safety_chain 是 reactive（只在 POST
+  decision 時 bump），不該當 liveness。修法：移出 liveness，HeartbeatGuard 改 watch `ws`（安靜市場靠 hb
+  frame 保持 fresh）。見 `docs/superpowers/plans/2026-05-26-executor-liveness-health-refactor.md`。
 
-✅ **已修（2026-05-26，branch `fix/executor-liveness-health`）**：空跑時 executor heartbeat
-無交易活動曾累積 stale（>360s）→ `/healthz` 503 → daemon 重啟（觀測 2026-05-25 22:39）。
-Root cause：executor/safety_chain 是 reactive（只在 POST decision 時 bump），不該當 liveness。
-修法：兩者移出 liveness（`/healthz` + `scan_staleness` fatal），HeartbeatGuard 改 watch `ws`
-（market-data liveness，安靜市場靠 hb frame 保持 fresh）。
-見 `docs/superpowers/plans/2026-05-26-executor-liveness-health-refactor.md`。
+**已知未收尾（loose ends，非 blocker）：**
+- `realized_loss_24h` / `drawdown_from_peak` 兩個 calibrated guard 目前接 `_StubPnLSource`（回傳 0）→
+  空轉；真 PnLLedger（aggregates realized P&L from order_fill events）待接。放貸利息恆正、本金有平台
+  liquidation 保護，realized loss 在正常運作下幾近不可能，故低優先（真接上後再定 threshold）。
+- **sub-account 隔離**（credit-aware reconcile 的 next step）：讓「venue 所有 credit = bot 的」嚴格成立，
+  使 `realized=Σcredits` 不變式不依賴「帳戶 bot 專用」假設。
 
 下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
 Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。
