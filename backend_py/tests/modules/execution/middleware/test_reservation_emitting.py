@@ -45,8 +45,9 @@ class _RecordingPersister:
     def __init__(self) -> None:
         self.txns: list[tuple[object, ...]] = []
 
-    async def persist(self, *events: object) -> None:
+    async def persist(self, *events: object) -> list[bool]:
         self.txns.append(events)
+        return [True] * len(events)
 
 
 class _StubInner:

@@ -227,13 +227,27 @@ class BitfinexLiveWSDispatcher:
     async def _persist_then_publish(self, ev: Any) -> None:
         """Durable SoT write before in-memory fanout. WS events carry venue_seq
         so re-delivery is deduped by the store; on persist failure we skip
-        publish to keep in-memory projections from drifting ahead of PG."""
+        publish to keep in-memory projections from drifting ahead of PG.
+
+        Dedup path: if store.append() returned False (event already in PG),
+        persist() propagates [False] here → we skip bus.publish so in-memory
+        projections never see a phantom event that has no new PG row backing it.
+        """
         try:
-            await self._persister.persist(ev)
+            statuses = await self._persister.persist(ev)
         except Exception as e:
             log.critical(
                 "ws_dispatcher_persist_failed err=%r event=%s — SoT write lost, skipping publish",
                 e, type(ev).__name__,
+            )
+            return
+        # statuses is a 1-element list (we persist one event per call here).
+        # False means the store silently deduped (same venue_seq already in PG).
+        if statuses and not statuses[0]:
+            log.debug(
+                "ws_event_deduped_skip_publish event=%s venue_seq=%s",
+                type(ev).__name__,
+                getattr(ev, "venue_seq", None),
             )
             return
         try:
