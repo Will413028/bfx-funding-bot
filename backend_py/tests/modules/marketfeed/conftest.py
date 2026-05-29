@@ -1,4 +1,4 @@
-"""Shared fixtures for marketfeed phase 4.2 tests."""
+"""Shared fixtures for marketfeed signal_engine tests."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -7,17 +7,11 @@ from typing import Any
 import pytest
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    Credentials,
-    GuardResult,
-    SubmittedOrder,
+from bfx_funding_bot.modules.execution.deployment.standing_quote import (
+    StandingQuoteStore,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
-    Phase,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import Phase
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
@@ -33,27 +27,6 @@ class _EventCapture:
         self.events.append(ev)
 
 
-class _AllowChain:
-    async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
-        return GuardResult(allowed=True, guard_name="ok")
-
-
-class _BlockChain:
-    async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
-        return GuardResult(allowed=False, guard_name="cap", reason="over_cap")
-
-
-class _SpyExecutor:
-    def __init__(self) -> None:
-        self.calls: list[DecisionPayload] = []
-
-    async def submit(self, d: DecisionPayload, c: AccountContext) -> SubmittedOrder:
-        self.calls.append(d)
-        return SubmittedOrder(
-            cid=1, venue_offer_id="paper_x", status="filled", raw_response=None,
-        )
-
-
 class _StubCandlesRepo:
     """Returns a small history so DivergenceReporter has enough data to run.
 
@@ -62,10 +35,6 @@ class _StubCandlesRepo:
     """
     async def get_up_to(self, **kw: Any) -> list[FundingCandle]:
         return _history(8)
-
-
-def _ctx() -> AccountContext:
-    return AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
 
 def _cell() -> CellConfig:
@@ -113,33 +82,71 @@ def _make_registry(cell: CellConfig) -> StrategyRegistry:
 
 @pytest.fixture
 def capture_engine() -> tuple:
-    """Engine wired with _AllowChain — safety eval passes, executor.submit called."""
+    """Engine with a StandingQuoteStore; produces POST decisions (rate_percentile
+    strategy on ascending-rate history resolves to POST)."""
     axiom = _EventCapture()
     diagnostics = _EventCapture()
-    chain = _AllowChain()
-    executor = _SpyExecutor()
+    store = StandingQuoteStore(ttl_ms=3_900_000)
     cell = _cell()
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
-        safety_chain=chain, executor=executor, account_ctx=_ctx(),
+        quote_store=store,
+        clock=lambda: 5_000,
     )
     registry = _make_registry(cell)
-    return engine, axiom, diagnostics, executor, chain, cell, _candle(), registry
+    return engine, axiom, diagnostics, store, cell, _candle(), registry
 
 
 @pytest.fixture
 def capture_engine_blocked() -> tuple:
-    """Engine wired with _BlockChain — safety eval blocks, executor NOT called."""
+    """Engine with a StandingQuoteStore; strategy on high-rate history resolves
+    to SKIP because the boundary candle rate is well below the 75th-percentile
+    threshold of the warm-up window.
+
+    Window filled with 0.0009 (lookback_hours=5); boundary candle = 0.0001,
+    so threshold = 0.0009 and decide() returns None → SKIP/below_threshold.
+
+    Note: safety-block behavior (POST→SKIP via safety_chain) has moved to
+    DeploymentReconciler and is tested in the deployment reconciler test suite.
+    This fixture simulates a genuine strategy-level SKIP (below_threshold).
+    """
     axiom = _EventCapture()
     diagnostics = _EventCapture()
-    chain = _BlockChain()
-    executor = _SpyExecutor()
+    store = StandingQuoteStore(ttl_ms=3_900_000)
     cell = _cell()
     engine = SignalEngine(
         phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
         candles_repo=_StubCandlesRepo(),
-        safety_chain=chain, executor=executor, account_ctx=_ctx(),
+        quote_store=store,
+        clock=lambda: 5_000,
     )
-    registry = _make_registry(cell)
-    return engine, axiom, diagnostics, executor, chain, cell, _candle(), registry
+    # Build a registry where the strategy window is filled with HIGH rates so
+    # the 75th-percentile threshold is high, then the boundary candle has a LOW
+    # rate that is clearly below threshold → strategy emits None → SKIP/below_threshold.
+    reg = StrategyRegistry()
+    strategy = build_strategy(cell)
+    # 7 warm-up candles at high rate (last 5 fill the lookback_hours=5 window
+    # with 0.0009); boundary candle at 0.0001 → close(0.0001) < threshold(0.0009)
+    # → decide() returns None → SKIP/below_threshold.
+    high_candles = [
+        FundingCandle(
+            symbol="fUSD", timeframe="1h", period_agg="a30",
+            mts=1747584000000 + i * 3600_000,
+            open=Decimal("0.0009"), close=Decimal("0.0009"),
+            high=Decimal("0.0009"), low=Decimal("0.0009"),
+            volume=Decimal("100"),
+        )
+        for i in range(7)
+    ]
+    boundary_candle = FundingCandle(
+        symbol="fUSD", timeframe="1h", period_agg="a30",
+        mts=1747584000000 + 7 * 3600_000,
+        open=Decimal("0.0001"), close=Decimal("0.0001"),
+        high=Decimal("0.0001"), low=Decimal("0.0001"),
+        volume=Decimal("100"),
+    )
+    for c in high_candles:
+        strategy.observe(c)
+    reg.put(cell, strategy)
+    return engine, axiom, diagnostics, store, cell, boundary_candle, reg

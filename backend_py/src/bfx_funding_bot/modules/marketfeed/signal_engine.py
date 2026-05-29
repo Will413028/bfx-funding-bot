@@ -1,19 +1,24 @@
 """Signal engine: observe -> emit signal -> divergence check -> emit decision.
 
 設計依據: phase4.1-paper-shadow-infra-design.md Section "Data Flow" Flow 2
+
+Decoupling (2026-05-29): SignalEngine only records strategy *intent* as a
+StandingQuote. Safety evaluation and venue submission are handled exclusively
+by the DeploymentReconciler (single-writer pattern).
 """
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    ExecutorPort,
-    GuardResult,
+from bfx_funding_bot.modules.execution.deployment.standing_quote import (
+    StandingQuote,
+    StandingQuoteStore,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
@@ -87,12 +92,6 @@ class _CandlesRepoProtocol(Protocol):
     ) -> list[FundingCandle]: ...
 
 
-class _SafetyChainProtocol(Protocol):
-    async def evaluate(
-        self, decision: DecisionPayload, ctx: AccountContext,
-    ) -> GuardResult: ...
-
-
 class SignalEngine:
     def __init__(
         self,
@@ -102,18 +101,16 @@ class SignalEngine:
         diagnostics: _DiagnosticsProtocol,
         candles_repo: _CandlesRepoProtocol,
         reporter: DivergenceReporter | None = None,
-        safety_chain: _SafetyChainProtocol | None = None,
-        executor: ExecutorPort | None = None,
-        account_ctx: AccountContext | None = None,
+        quote_store: StandingQuoteStore | None = None,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         self.phase = phase
         self._events = event_sink
         self.diagnostics = diagnostics
         self.candles_repo = candles_repo
         self.reporter = reporter or DivergenceReporter()
-        self.safety_chain = safety_chain
-        self.executor = executor
-        self.account_ctx = account_ctx
+        self.quote_store = quote_store
+        self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def process_candle(
         self,
@@ -165,27 +162,25 @@ class SignalEngine:
         except Exception:
             log.exception("divergence_check_exception cell=%s", cell.pair_id)
 
-        # Phase 4.2 Task 19: defer DECISION emit until post-safety-eval.
-        # Build tentative decision (post-strategy, pre-safety).
-        tentative = self._build_tentative_decision(
+        # Signal layer: build strategy decision and record intent as a StandingQuote.
+        # Safety evaluation and venue submission are handled by the
+        # DeploymentReconciler (single-writer pattern) — not here.
+        decision = self._build_tentative_decision(
             correlation_id, cell, live_signal,
             is_stale=is_stale, stale_seconds=stale_seconds,
         )
 
-        final = await self._apply_safety_eval(tentative)
+        await self._emit_decision_final(correlation_id, cell, decision)
 
-        await self._emit_decision_final(correlation_id, cell, final)
-
-        if (
-            final.decision_outcome == DecisionOutcome.POST
-            and self.executor is not None
-            and self.account_ctx is not None
-        ):
-            try:
-                await self.executor.submit(final, self.account_ctx)
-            except Exception:
-                log.exception("executor_submit_exception cell=%s", cell.pair_id)
-                raise
+        if self.quote_store is not None:
+            self.quote_store.update(StandingQuote(
+                cell_id=cell.cell_id,
+                outcome=decision.decision_outcome,
+                rate=decision.offer_rate,
+                period_days=decision.offer_duration_days,
+                signal_correlation_id=correlation_id,
+                created_at_ms=self._clock(),
+            ))
 
     async def _emit_signal(
         self,
@@ -278,39 +273,15 @@ class SignalEngine:
             is_stale=is_stale, stale_seconds=stale_seconds, budget_seconds=budget_seconds,
         )
 
-    async def _apply_safety_eval(self, tentative: DecisionPayload) -> DecisionPayload:
-        """Run safety_chain.evaluate; downgrade POST→SKIP/safety_block if denied.
-
-        No-op (returns tentative) when:
-        - safety_chain or account_ctx is not wired (4.1 fallback / fixture-less tests)
-        - tentative is already SKIP (strategy didn't post — nothing to block)
-        """
-        if self.safety_chain is None or self.account_ctx is None:
-            return tentative
-        if tentative.decision_outcome != DecisionOutcome.POST:
-            return tentative
-        result = await self.safety_chain.evaluate(tentative, self.account_ctx)
-        if result.allowed:
-            return tentative
-        return DecisionPayload(
-            decision_outcome=DecisionOutcome.SKIP,
-            signal_correlation_id=tentative.signal_correlation_id,
-            skip_reason=SkipReason.SAFETY_BLOCK,
-            skip_reason_detail=result.reason,
-            is_stale=tentative.is_stale,
-            stale_seconds=tentative.stale_seconds,
-            budget_seconds=tentative.budget_seconds,
-        )
-
     async def _emit_decision_final(
         self, correlation_id: UUID, cell: CellConfig, decision: DecisionPayload,
     ) -> None:
         """Single immutable DECISION emit per cycle (event-sourcing best practice).
 
         Envelope: standard event fields (timestamp/level/phase/strategy/cell/
-        event_type/correlation_id) + account_id (Task 1 schema addition,
-        sourced from account_ctx or 'default' fallback) + payload from the
-        post-safety-eval DecisionPayload model_dump.
+        event_type/correlation_id) + account_id ('default'; account binding
+        is resolved at submit time by the DeploymentReconciler) + payload from
+        the strategy-level DecisionPayload model_dump.
         """
         await self.diagnostics.emit({
             "timestamp": datetime.now(UTC).isoformat(),
@@ -320,7 +291,7 @@ class SignalEngine:
             "cell": cell.cell_id,
             "event_type": EventType.DECISION.value,
             "correlation_id": str(correlation_id),
-            "account_id": getattr(self.account_ctx, "account_id", "default"),
+            "account_id": "default",
             "payload": decision.model_dump(mode="json"),
         })
 
