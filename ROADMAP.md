@@ -59,6 +59,10 @@ canary 真錢 daemon 上線後（2026-05-25），帳戶於 **2026-05-26 入金 ~
   liquidation 保護，realized loss 在正常運作下幾近不可能，故低優先（真接上後再定 threshold）。
 - **sub-account 隔離**（credit-aware reconcile 的 next step）：讓「venue 所有 credit = bot 的」嚴格成立，
   使 `realized=Σcredits` 不變式不依賴「帳戶 bot 專用」假設。
+- **balance-aware cap**（deployment reconciler 的 future enhancement）：目前 bot 無 available_balance fetch，
+  `target_exposure` 直接用靜態 `BFX_ALLOCATION_CAP_USDT` ceiling（5% buffer 變 operator 維持錢包餘額的隱性責任）。
+  之後接 Bitfinex `/v2/auth/r/wallets` 動態算 `target = min(ceiling, balance×(1−buffer))`，自動跟隨入金 / 利息複利。
+  見 deployment reconciler spec 的 Out-of-Scope 段。
 
 下一個自動化 gate：**G2 calibration audit**（~2026-06-10，shadow 觀察窗結束後）。
 Phase 4 結束 = G3 pass（real-money P&L tracking error vs shadow 在 acceptable range）+ Phase 4 results doc。
