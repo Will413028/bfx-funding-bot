@@ -17,10 +17,12 @@ def test_effective_min_rounds_up():
     assert effective_min_usdt(D("150"), D("0.015")) == D("153")
 
 
-def _alloc(target, exposure, deployed, active, conc=D("0.70"), min_fill=D("153")):
+def _alloc(target, exposure, deployed, active, conc=None, min_fill=None):
     return allocate_gap(
         target=target, current_exposure=exposure, deployed=deployed,
-        active_cells=active, concentration_pct=conc, min_fill=min_fill,
+        active_cells=active,
+        concentration_pct=conc if conc is not None else D("0.70"),
+        min_fill=min_fill if min_fill is not None else D("153"),
     )
 
 

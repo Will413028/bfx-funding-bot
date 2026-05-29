@@ -146,7 +146,7 @@ async def test_submit_failure_does_not_record_intent():
         async def submit(self, decision, ctx, *, cid=None):
             raise RuntimeError("venue 500")
 
-    rec, ex, tracker, _ = _build(
+    rec, _ex, tracker, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_Boom(),
     )
     await rec.deploy()  # must not raise
