@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 class _LedgerProtocol(Protocol):
     def current_exposure(self) -> Decimal: ...
+    def reserved_exposure(self) -> Decimal: ...
 
 
 class _SafetyChainProtocol(Protocol):
@@ -69,8 +70,16 @@ class DeploymentReconciler:
     async def deploy(self) -> None:
         now = self._clock()
         e_total = self._ledger.current_exposure()
-        # Keep per-cell intent consistent with the authoritative venue truth.
-        self._tracker.reconcile_to_total(e_total)
+        # Rescale per-cell intent to the *reserved* total (pending open offers),
+        # NOT to current_exposure (reserved + realized). Realized credits are
+        # committed to the venue and unattributable to any cell — using e_total
+        # here would inflate per-cell intent past cap_per_cell (factor > 1) and
+        # silently starve cells via negative allocate_gap headroom.
+        cap_per_cell = self._concentration_pct * self._ctx.allocation_cap_usdt
+        self._tracker.reconcile_to_total(
+            self._ledger.reserved_exposure(),
+            cap_per_cell=cap_per_cell,
+        )
 
         active = [c.cell_id for c in self._cells
                   if self._store.get_active(c.cell_id, now_ms=now) is not None]
@@ -80,9 +89,12 @@ class DeploymentReconciler:
         # we record each submit below. Correct within a tick (sum of fills <= gap,
         # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
         # If a WS fill/claim lands mid-tick making this snapshot stale, the per-offer
-        # AllocationCapGuard re-checks current_exposure+offer against the live ledger
-        # and blocks any now-excess offer — so a stale snapshot can only under-deploy
-        # (safe), never over-deploy.
+        # AllocationCapGuard is evaluated ONCE per offer before submit (not at the
+        # moment of submission). A fill landing in the narrow window between guard-eval
+        # and submit is NOT re-checked, so a brief over-cap is possible but
+        # self-corrects on the next ~90 s reconcile. Bitfinex enforces only account
+        # balance, not our internal cap. A stale snapshot can only under-deploy
+        # (safe), never materially over-deploy.
         fills = allocate_gap(
             target=self._ctx.allocation_cap_usdt,
             current_exposure=e_total,
@@ -102,6 +114,12 @@ class DeploymentReconciler:
                 "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
                 "(concentration cap %s/cell or no further active cell) active=%s",
                 gap, allocated, stranded, self._concentration_pct, active,
+            )
+        elif stranded > 0:
+            log.info(
+                "deployment_capital_stranded_sub_min gap=%s allocated=%s stranded=%s "
+                "(below venue floor, not submitted) active=%s",
+                gap, allocated, stranded, active,
             )
 
         for cell_id, amount in fills.items():

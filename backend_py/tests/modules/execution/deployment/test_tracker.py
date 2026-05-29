@@ -25,7 +25,7 @@ def test_reconcile_to_total_scales_proportionally():
     t = CellDeploymentTracker()
     t.record_deploy("a", D("300"))
     t.record_deploy("b", D("100"))
-    # venue truth dropped to 200 (S=400) -> factor 0.5
+    # reserved dropped to 200 (S=400) -> factor 0.5 (e.g. partial release/fill)
     t.reconcile_to_total(D("200"))
     assert t.deployed("a") == D("150")
     assert t.deployed("b") == D("50")
@@ -33,13 +33,55 @@ def test_reconcile_to_total_scales_proportionally():
 
 def test_reconcile_to_total_noop_when_no_intent():
     t = CellDeploymentTracker()
-    # S = 0 but venue has exposure -> cannot attribute, leave per-cell at 0
+    # S = 0 but venue has reserved -> cannot attribute, leave per-cell at 0
     t.reconcile_to_total(D("450"))
     assert t.snapshot() == {}
 
 
-def test_reconcile_to_total_scales_up():
+def test_reconcile_to_total_reserved_equals_intent_is_noop():
+    # reserved == recorded intent -> factor == 1, no change (the normal case:
+    # all our open offers are still pending, nothing filled/released yet)
     t = CellDeploymentTracker()
     t.record_deploy("a", D("100"))
-    t.reconcile_to_total(D("150"))
-    assert t.deployed("a") == D("150")
+    t.reconcile_to_total(D("100"))
+    assert t.deployed("a") == D("100")
+
+
+# ---------------------------------------------------------------------------
+# C1 regression: realized (orphan) credits must NOT inflate per-cell intent
+# ---------------------------------------------------------------------------
+
+def test_realized_credits_do_not_inflate_cells():
+    """Scenario: ledger shows reserved=$100, realized=$300 (orphan/pre-existing).
+    reconcile_to_total receives reserved_total=$100 (NOT $400 total exposure).
+    Cell intent must stay at $100, NOT jump to $400.
+    This is the C1 fix regression guard.
+    """
+    t = CellDeploymentTracker()
+    t.record_deploy("a", D("100"))
+    # Only pass reserved to reconcile_to_total (not reserved+realized)
+    t.reconcile_to_total(D("100"))   # reserved_total=$100; realized=$300 is NOT passed
+    assert t.deployed("a") == D("100"), (
+        "realized/orphan credits must not inflate cell intent (C1)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I2: cap_per_cell clamp behavior
+# ---------------------------------------------------------------------------
+
+def test_reconcile_to_total_clamps_to_cap_per_cell():
+    """After rescaling, deployed must be clamped to cap_per_cell if provided."""
+    t = CellDeploymentTracker()
+    t.record_deploy("a", D("500"))
+    # reserved_total == sum -> factor==1, but cap_per_cell=399 should clamp
+    t.reconcile_to_total(D("500"), cap_per_cell=D("399"))
+    assert t.deployed("a") == D("399")
+
+
+def test_reconcile_to_total_no_clamp_without_cap():
+    """Without cap_per_cell, no clamping occurs."""
+    t = CellDeploymentTracker()
+    t.record_deploy("a", D("500"))
+    t.reconcile_to_total(D("500"))
+    assert t.deployed("a") == D("500")
