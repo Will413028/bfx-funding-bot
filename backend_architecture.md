@@ -10,6 +10,8 @@
 > - **Tooling**：見下方 Tech Stack 改寫；Atlas/sqlc/go test 已換成 Alembic/SQLAlchemy ORM/pytest。
 >
 > Phase 0 重寫的決策過程見 `docs/superpowers/specs/2026-05-10-python-rewrite-day3-stack-decisions.md`。
+>
+> 📐 **現行 runtime 架構**（Phase 2–4 長出來的：event-sourced execution、reconcile 骨幹、deployment reconciler、放貸演算法、phases/部署）見 **`backend_py/ARCHITECTURE.md`**。本文件聚焦 SaaS 平台層設計（產品願景、分層哲學、多租戶隔離、API/CRUD schema）；放貸 daemon 的執行/對帳/演算法以該文件為準。
 
 ---
 

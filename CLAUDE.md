@@ -7,7 +7,8 @@ Bitfinex 自動放貸 SaaS 平台。
 - `backend_py/` — Python 3.13 後端（FastAPI + SQLAlchemy 2.0 async + httpx + Alembic）— **active**
 - `backend/` — Go 1.25 後端（Gin + fx + zap）— **封存**（Phase 0 重寫至 Python 後不再開發）
 - `frontend/` — Next.js 16 前端
-- `backend_architecture.md` — **架構設計 source of truth**（功能規劃、分層架構、DB schema、API endpoints）
+- `backend_py/ARCHITECTURE.md` — **現行 runtime 架構 source of truth**（event-sourced execution、reconcile 骨幹、deployment reconciler、放貸演算法、event model、phases/部署、key invariants；含 mermaid 架構/資料流圖）
+- `backend_architecture.md` — SaaS **平台層**設計（產品願景、分層哲學、多租戶隔離、API/CRUD schema）；Go-era 語法僅歷史參考，放貸 daemon 的執行/對帳/演算法以 `backend_py/ARCHITECTURE.md` 為準
 
 ## 部署架構
 
