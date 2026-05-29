@@ -221,6 +221,79 @@ async def test_resync_requested_before_loop_start_is_honored():
     assert recovery._i >= 2  # tick 1 (loop start) + the pre-set resync tick
 
 
+class _FakeDeployment:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def deploy(self) -> None:
+        self.calls += 1
+
+
+@pytest.mark.asyncio
+async def test_deployment_called_after_clean_reconcile():
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    deployment = _FakeDeployment()
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=0.02,
+        max_consecutive_failures=3, deployment=deployment,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.03)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+    assert deployment.calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_deployment_not_called_on_reconcile_failure():
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[RuntimeError("venue down")])
+    deployment = _FakeDeployment()
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=0.02,
+        max_consecutive_failures=3, deployment=deployment,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.03)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+    assert deployment.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deployment_exception_does_not_crash_loop():
+    class _BoomDeployment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def deploy(self) -> None:
+            self.calls += 1
+            raise RuntimeError("deploy boom")
+
+    probe = _FakeProbe()
+    recovery = _FakeRecovery(results=[ReconcileResult(0, 0, 0)])
+    deployment = _BoomDeployment()
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=0.02,
+        max_consecutive_failures=3, deployment=deployment,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+    assert deployment.calls >= 1  # loop kept ticking despite the exception
+
+
 @pytest.mark.asyncio
 async def test_realized_drift_sets_degraded_even_without_offer_actions():
     probe = _FakeProbe()

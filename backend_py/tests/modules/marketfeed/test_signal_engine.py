@@ -4,8 +4,9 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import Envelope, Phase
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, Envelope, Phase
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import (
     StrategyRegistry,
@@ -248,3 +249,43 @@ def test_resolve_staleness_budget_hours_correct_value() -> None:
         staleness_budget_hours=12,
     )
     assert _resolve_staleness_budget_hours(cell) == 12
+
+
+async def test_process_candle_writes_standing_quote():
+    """Signal layer writes a StandingQuote on POST decision.
+
+    Decoupling: SignalEngine no longer submits to venue; it records pure
+    strategy intent in the StandingQuoteStore. The DeploymentReconciler
+    reads these quotes and handles safety + venue submit.
+    """
+    axiom = MagicMock()
+    axiom.emit = AsyncMock()
+    diagnostics = MagicMock()
+    diagnostics.emit = AsyncMock()
+    candles_repo = MagicMock()
+    candles_repo.get_up_to = AsyncMock(return_value=_history(8))
+
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    cell = _cell()
+    engine = SignalEngine(
+        phase=Phase.PAPER, event_sink=axiom, diagnostics=diagnostics,
+        candles_repo=candles_repo,
+        quote_store=store,
+        clock=lambda: 5_000,
+    )
+
+    reg = StrategyRegistry()
+    strategy = build_strategy(cell)
+    for c in _history(7):
+        strategy.observe(c)
+    reg.put(cell, strategy)
+
+    await engine.process_candle(cell=cell, candle=_history(8)[-1], registry=reg)
+
+    # Ascending-rate history → rate_percentile strategy emits POST
+    quote = store.get_active(cell.cell_id, now_ms=5_000)
+    assert quote is not None
+    assert quote.outcome == DecisionOutcome.POST
+    assert quote.rate is not None
+    assert quote.period_days is not None
+    assert quote.created_at_ms == 5_000
