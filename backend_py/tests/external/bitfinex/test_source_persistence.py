@@ -161,11 +161,11 @@ class _FlakyPersister:
     def __init__(self, inner):
         self._inner = inner
         self.calls = 0
-    async def persist(self, *events):
+    async def persist(self, *events) -> list[bool]:
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("transient pg down")
-        await self._inner.persist(*events)
+        return await self._inner.persist(*events)
 
 
 @pytest.mark.asyncio
