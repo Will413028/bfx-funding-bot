@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.backtest.oos_profitability import (
     summarize_oos,
 )
 from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
@@ -71,7 +71,7 @@ async def _amain() -> None:
             base_oc: list[WindowOutcome] = []
             for w in windows:
                 sl = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
-                rb = run_backtest(sl, AlwaysFRRStrategy(period_days=2), LINEAR,
+                rb = run_backtest(sl, AlwaysMarketRateStrategy(period_days=2), LINEAR,
                                   w.test_start_mts, w.test_end_mts)
                 base_oc.append(_oc(rb, w.test_start_mts))
             base_med = summarize_oos(base_oc).median_monthly

@@ -13,7 +13,7 @@ from typing import Any
 
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -189,7 +189,7 @@ def run_cell_wfo(
 
     for w in wfo_windows:
         baseline_result = run_backtest(
-            candles, AlwaysFRRStrategy(period_days=2),
+            candles, AlwaysMarketRateStrategy(period_days=2),
             record_start_mts=w.test_start_mts,
             record_end_mts=w.test_end_mts,
         )

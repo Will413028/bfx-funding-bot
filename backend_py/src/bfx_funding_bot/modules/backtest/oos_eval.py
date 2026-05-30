@@ -14,7 +14,7 @@ from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -52,7 +52,7 @@ def evaluate_oos_windows(
             strategy instance (prevents cross-window state leakage).
         config: BacktestConfig to use. Defaults to linear fill model to match
             the OOS research script (run_oos_profitability.py).
-        baseline_period_days: period_days for AlwaysFRRStrategy. Default 2.
+        baseline_period_days: period_days for AlwaysMarketRateStrategy. Default 2.
     """
     # Construct inside the function to avoid shared mutable default state.
     # "linear" matches the OOS research script (run_oos_profitability.py) which
@@ -65,7 +65,7 @@ def evaluate_oos_windows(
         sliced = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
         rs = run_backtest(sliced, make_strategy(), effective_config, w.test_start_mts, w.test_end_mts)
         rb = run_backtest(
-            sliced, AlwaysFRRStrategy(period_days=baseline_period_days),
+            sliced, AlwaysMarketRateStrategy(period_days=baseline_period_days),
             effective_config, w.test_start_mts, w.test_end_mts,
         )
         strat_outcomes.append(_outcome(rs, w.test_start_mts))

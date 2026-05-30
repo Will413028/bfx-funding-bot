@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -43,7 +43,7 @@ def test_evaluate_oos_windows_pairs_outcomes_per_window() -> None:
                   test_start_mts=500_000_000, test_end_mts=900_000_000),
     ]
     strat_out, base_out = evaluate_oos_windows(
-        candles, windows, make_strategy=lambda: AlwaysFRRStrategy(period_days=2)
+        candles, windows, make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2)
     )
     assert len(strat_out) == len(base_out) == 1
     assert strat_out[0].month_mts == base_out[0].month_mts == 500_000_000
@@ -54,7 +54,7 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
     """Candidate arm and baseline arm run independently and can differ.
 
     The candidate is _NeverLendsStrategy (always returns None -> zero trades
-    -> net_monthly == 0). The baseline is AlwaysFRRStrategy(period_days=2)
+    -> net_monthly == 0). The baseline is AlwaysMarketRateStrategy(period_days=2)
     which lends at every non-cooldown candle -> n_trades > 0 -> net_monthly > 0.
 
     Mechanism: the engine only accumulates equity when decide() returns a
