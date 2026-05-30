@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 
@@ -195,3 +196,78 @@ def check_nav_anchor(
         relative_divergence=div,
         within_tolerance=div <= tol,
     )
+
+
+class VerdictState(Enum):
+    PASS = "PASS"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    FAIL = "FAIL"
+    UNRELIABLE = "UNRELIABLE"
+
+
+@dataclass(frozen=True)
+class G3Verdict:
+    state: VerdictState
+    headline_active_spread: Decimal
+    n_windows: int
+    ci_lo: Decimal
+    ci_hi: Decimal
+    reasons: list[str]
+
+
+def decide_verdict(
+    *,
+    headline_active_spread: Decimal,
+    n_windows: int,
+    total_capital_days: Decimal,
+    ci_lo: Decimal,
+    ci_hi: Decimal,
+    deployment_anchor: DeploymentAnchorResult,
+    nav_anchor: NavAnchorResult,
+    min_windows: int,
+    min_capital_days: Decimal,
+) -> G3Verdict:
+    """Pure four-state decision table. See plan Task 7 for evaluation order."""
+    reasons: list[str] = []
+
+    def verdict(state: VerdictState) -> G3Verdict:
+        return G3Verdict(
+            state=state,
+            headline_active_spread=headline_active_spread,
+            n_windows=n_windows,
+            ci_lo=ci_lo,
+            ci_hi=ci_hi,
+            reasons=reasons,
+        )
+
+    if not deployment_anchor.within_tolerance:
+        reasons.append(
+            f"deployment anchor diverged: attributed {deployment_anchor.attributed_deployed} "
+            f"vs observed {deployment_anchor.observed_realized}"
+        )
+        return verdict(VerdictState.UNRELIABLE)
+    if not nav_anchor.within_tolerance:
+        reasons.append(
+            f"NAV anchor diverged: ΔNAV {nav_anchor.nav_delta} "
+            f"vs attributed interest {nav_anchor.attributed_interest}"
+        )
+        return verdict(VerdictState.UNRELIABLE)
+
+    if n_windows < min_windows:
+        reasons.append(f"only {n_windows} weekly windows (need >= {min_windows})")
+        return verdict(VerdictState.INSUFFICIENT_DATA)
+    if total_capital_days < min_capital_days:
+        reasons.append(
+            f"deployed {total_capital_days} capital-days (need >= {min_capital_days})"
+        )
+        return verdict(VerdictState.INSUFFICIENT_DATA)
+
+    if ci_hi < 0:
+        reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] entirely below 0")
+        return verdict(VerdictState.FAIL)
+    if ci_lo > 0:
+        reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] entirely above 0")
+        return verdict(VerdictState.PASS)
+
+    reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] straddles 0 — inconclusive")
+    return verdict(VerdictState.INSUFFICIENT_DATA)
