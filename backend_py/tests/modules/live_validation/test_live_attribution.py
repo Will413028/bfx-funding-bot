@@ -56,7 +56,8 @@ def test_fillrecord_is_frozen():
 
 def test_frrpoint_is_frozen():
     p = FrrPoint(mts=0, frr=Decimal("0.0002"), avg_period=Decimal("30"))
-    assert p.frr == Decimal("0.0002")
+    with pytest.raises(FrozenInstanceError):
+        p.frr = Decimal("0.9")  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +176,25 @@ def test_attribute_active_zero_fill_window_is_idle():
     assert out[0].net_monthly == Decimal("0")
     assert out[0].n_trades == 0
     assert out[0].fill_rate == Decimal("0")
+
+
+def test_attribute_active_zero_capital_raises():
+    with pytest.raises(ValueError, match="capital must be positive"):
+        attribute_active([], capital=Decimal("0"), window_bounds=[(0, WEEK)])
+
+
+def test_attribute_active_routes_fill_to_correct_window():
+    f1 = _fill(100, "570", "0.0003", "2")            # window 1
+    f2 = _fill(WEEK + 100, "570", "0.0003", "2")     # window 2
+    out = attribute_active([f1, f2], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
+    assert out[0].n_trades == 1
+    assert out[1].n_trades == 1
+
+
+def test_attribute_active_fill_outside_all_windows_ignored():
+    f = _fill(3 * WEEK, "570", "0.0003", "2")
+    out = attribute_active([f], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
+    assert all(o.n_trades == 0 for o in out)
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +359,8 @@ def test_verdict_unreliable_takes_priority_over_insufficient():
     )
     v = decide_verdict(**_kw(n_windows=2, deployment_anchor=bad))
     assert v.state is VerdictState.UNRELIABLE
+
+
+def test_verdict_pass_at_exactly_min_windows():
+    v = decide_verdict(**_kw(n_windows=8))
+    assert v.state is VerdictState.PASS

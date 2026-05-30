@@ -39,7 +39,7 @@ class FrrPoint:
 
     mts: int
     frr: Decimal  # daily flash-return-rate
-    avg_period: Decimal  # auto-period length in days
+    avg_period: Decimal  # auto-period length in days; used by the loader for cell_period_days, NOT by attribute_passive
 
 
 def cell_period_days(period_agg: str, frr_avg_period: Decimal) -> Decimal:
@@ -88,6 +88,8 @@ def attribute_active(
     A fill belongs to the window containing its fill_ts_ms. Per window:
     net_monthly = sum(size * rate * duration_days) / capital * 100.
     """
+    if capital <= 0:
+        raise ValueError(f"capital must be positive, got {capital!r}")
     out: list[WindowOutcome] = []
     for lo, hi in window_bounds:
         wf = [f for f in fills if lo <= f.fill_ts_ms < hi]
@@ -95,6 +97,7 @@ def attribute_active(
             (f.size_usdt * f.rate * _fill_duration_days(f) for f in wf), Decimal("0")
         )
         rates = [f.rate for f in wf]
+        # unweighted mean matched rate — diagnostic only, not used in the yield sum
         mean_rate = (
             sum(rates, Decimal("0")) / Decimal(len(rates)) if rates else Decimal("0")
         )
@@ -176,7 +179,10 @@ class NavAnchorResult:
 def check_nav_anchor(
     *, nav_delta: Decimal | None, attributed_interest: Decimal, tol: Decimal
 ) -> NavAnchorResult:
-    """Best-effort ΔNAV vs Σ attributed interest. Unavailable -> within_tolerance True."""
+    """Best-effort ΔNAV vs Σ attributed interest. Unavailable -> within_tolerance True.
+
+    When attributed_interest == 0: divergence is 0 if nav_delta is also 0, else treated as fully divergent.
+    """
     if nav_delta is None:
         return NavAnchorResult(
             available=False,
