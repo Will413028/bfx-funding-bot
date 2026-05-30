@@ -1,6 +1,8 @@
 from decimal import Decimal
 
-from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
+    AlwaysMarketRateStrategy,
+)
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
@@ -18,27 +20,27 @@ def _candle(close: str | None) -> FundingCandle:
     )
 
 
-def test_always_frr_lends_at_close_rate() -> None:
-    s = AlwaysFRRStrategy(period_days=2)
+def test_always_market_rate_lends_at_close_rate() -> None:
+    s = AlwaysMarketRateStrategy(period_days=2)
     decision = s.decide(_candle("0.000123"))
     assert decision is not None
     assert decision.rate == Decimal("0.000123")
     assert decision.period_days == 2
 
 
-def test_always_frr_skips_candle_with_no_close() -> None:
-    s = AlwaysFRRStrategy(period_days=2)
+def test_always_market_rate_skips_candle_with_no_close() -> None:
+    s = AlwaysMarketRateStrategy(period_days=2)
     assert s.decide(_candle(None)) is None
 
 
-def test_always_frr_name() -> None:
-    s = AlwaysFRRStrategy(period_days=2)
-    assert s.name == "always_frr_p2"
+def test_always_market_rate_name() -> None:
+    s = AlwaysMarketRateStrategy(period_days=2)
+    assert s.name == "always_market_rate_p2"
 
 
-def test_always_frr_respects_period() -> None:
-    s = AlwaysFRRStrategy(period_days=30)
+def test_always_market_rate_respects_period() -> None:
+    s = AlwaysMarketRateStrategy(period_days=30)
     decision = s.decide(_candle("0.001"))
     assert decision is not None
     assert decision.period_days == 30
-    assert s.name == "always_frr_p30"
+    assert s.name == "always_market_rate_p30"

@@ -101,7 +101,9 @@ def run_cell_wfo_with_locf(
     from bfx_funding_bot.modules.backtest.engine import run_backtest
     from bfx_funding_bot.modules.backtest.matrix import WindowOutcome
     from bfx_funding_bot.modules.backtest.schemas import BacktestResult
-    from bfx_funding_bot.modules.backtest.strategies.always_frr import AlwaysFRRStrategy
+    from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
+        AlwaysMarketRateStrategy,
+    )
 
     window_outcomes: list[WindowOutcome] = []
     baseline_results: list[BacktestResult] = []
@@ -113,7 +115,7 @@ def run_cell_wfo_with_locf(
 
         # Baseline uses LOCF-preprocessed test candles
         baseline_result = run_backtest(
-            test_locf, AlwaysFRRStrategy(period_days=2),
+            test_locf, AlwaysMarketRateStrategy(period_days=2),
             record_start_mts=w.test_start_mts,
             record_end_mts=w.test_end_mts,
         )

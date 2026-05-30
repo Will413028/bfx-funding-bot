@@ -3,12 +3,14 @@ from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
-class AlwaysFRRStrategy(Strategy):
-    """Baseline: at every candle with a close rate, lend at that rate for
-    `period_days`. Naive — no awareness of FRR vs offered rate, no order book.
+class AlwaysMarketRateStrategy(Strategy):
+    """Baseline: at every candle with a close rate, lend at that market rate
+    (funding_candles.close, the canonical per-day market funding rate) for
+    `period_days`. Naive — no order-book awareness, no offered-vs-market spread.
 
-    Exists ONLY to validate that the backtest engine produces a number
-    end-to-end (Checkpoint 2 pass).
+    This is the passive benchmark the active strategy arms are scored against
+    (and it validates the backtest engine end-to-end — Checkpoint 2). It lends at
+    the market rate, NOT funding_stats.frr, which is not a market-rate proxy.
     """
 
     def __init__(self, period_days: int = 2) -> None:
@@ -16,7 +18,7 @@ class AlwaysFRRStrategy(Strategy):
 
     @property
     def name(self) -> str:
-        return f"always_frr_p{self._period_days}"
+        return f"always_market_rate_p{self._period_days}"
 
     def decide(self, candle: FundingCandle) -> LendDecision | None:
         if candle.close is None:
