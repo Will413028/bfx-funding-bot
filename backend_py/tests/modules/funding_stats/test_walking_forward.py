@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.backfill.errors import BackfillCursorStuck
 from bfx_funding_bot.modules.funding_stats.repository import upsert_funding_stats
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.service import (
@@ -159,3 +160,37 @@ async def test_forward_fill_multi_page_stops_at_db_max(
     call2_kwargs = mock_client.get_funding_stats.await_args_list[1].kwargs
     expected_end = min(s.mts for s in page1) - 1
     assert call2_kwargs["end"] == expected_end
+
+
+# ---------------------------------------------------------------------------
+# Test 4: cursor stuck — empty DB, full page whose oldest_mts == end_ms
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_forward_fill_raises_when_cursor_stuck(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """BackfillCursorStuck is raised when db_max is None and a full page
+    makes no progress (oldest_mts >= end_ms) — the short-page break cannot
+    pre-empt because the page is exactly page_limit rows long."""
+    now_ms = 1717000000000
+
+    # Full page (3 rows == page_limit) whose minimum mts equals now_ms,
+    # so oldest_mts >= end_ms fires before the short-page check.
+    stuck_page = [
+        _stat(now_ms),
+        _stat(now_ms),
+        _stat(now_ms),
+    ]
+    mock_client: Any = AsyncMock()
+    mock_client.get_funding_stats.return_value = stuck_page
+
+    with pytest.raises(BackfillCursorStuck):
+        await backfill_funding_stats_to_latest(
+            client=mock_client,
+            session=sqlite_session,
+            symbol="fUSD",
+            page_limit=3,
+            now_ms=now_ms,
+        )
