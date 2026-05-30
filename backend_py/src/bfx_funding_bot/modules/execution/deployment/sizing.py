@@ -26,6 +26,7 @@ def allocate_gap(
     active_cells: list[str],
     concentration_pct: Decimal,
     min_fill: Decimal,
+    available_headroom: Decimal = Decimal("Infinity"),
 ) -> dict[str, Decimal]:
     """Distribute the funding gap across active cells.
 
@@ -33,8 +34,13 @@ def allocate_gap(
     capped at concentration_pct * target. Fills below min_fill are dropped to
     avoid sub-minimum dust (would be rejected by the venue minimum anyway).
     Total allocated <= gap, so the global allocation cap is never exceeded.
+
+    The gap is clamped to available_headroom (= venue free balance − buffer) so
+    the reconciler never sizes an offer larger than the funds physically present;
+    default Infinity = no balance constraint (only the policy cap binds).
+    cap_per_cell stays bound to the POLICY target, not the balance-clamped gap.
     """
-    gap = target - current_exposure
+    gap = min(target - current_exposure, available_headroom)
     if gap < min_fill or not active_cells:
         return {}
 
