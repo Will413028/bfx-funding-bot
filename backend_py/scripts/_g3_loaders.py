@@ -137,7 +137,7 @@ async def build_verdict_from_neon(
     # When a fill has no cell identity, spec mandates conservative p2 path.
     # avg_period is only needed if we ever call cell_period_days("a30", ...).
     # For conservative attribution we always call cell_period_days("p2", placeholder).
-    conservative_period = cell_period_days("p2", Decimal("2"))  # always Decimal("2")
+    conservative_period = cell_period_days("p2", Decimal("2"))  # p2 path ignores frr_avg_period; always 2 days (conservative — see above)
 
     # ── 6. Build FillRecord list ──────────────────────────────────────────────
     fills: list[FillRecord] = []
@@ -201,11 +201,9 @@ async def build_verdict_from_neon(
         )
         total_capital_days = total_cap_days_raw / capital if capital > 0 else Decimal("0")
 
-        # attributed_deployed: total interest earned (proxy for deployed principal)
-        # = Σ(size_i * rate_i * duration_i) to compare against observed_realized.
-        # We use realized interest, NOT principal directly, since principal is unknown
-        # without a live position snapshot. But spec says "mean open principal ≈
-        # total_capital_days*capital / span_days" — use that formula.
+        # attributed_deployed = mean open principal = Σ(size_i * duration_i) / span_days.
+        # Compared against observed_realized from position_state, which also tracks deployed
+        # PRINCIPAL (not cumulative interest) — so the two are directly comparable.
         span_days = Decimal(max_ts - min_ts) / MS_PER_DAY if max_ts > min_ts else Decimal("1")
         attributed_deployed = (total_cap_days_raw / span_days) if span_days > 0 else Decimal("0")
 
@@ -221,9 +219,10 @@ async def build_verdict_from_neon(
         ci_lo, ci_hi = Decimal("0"), Decimal("0")
         headline_active_spread = Decimal("0")
         total_capital_days = Decimal("0")
-        # Set attributed_deployed = observed_realized so anchor is trivially within tol
-        # when realized == 0 (new canary, nothing happened yet).
-        attributed_deployed = observed_realized
+        # No attributed deployment when there are no fills. If observed_realized is
+        # nonetheless > 0, event_log (the SoT) is missing fills it should contain —
+        # let the anchor diverge to UNRELIABLE rather than fabricate agreement.
+        attributed_deployed = Decimal("0")
         attributed_interest = Decimal("0")
 
     n_windows = len(bounds)
