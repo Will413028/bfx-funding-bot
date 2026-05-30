@@ -77,7 +77,7 @@ def test_compute_verdict_frr_scale_points_degrade_to_unreliable():
     # flips this to UNRELIABLE, isolating the new behavior.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("1.1e-06")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    verdict, _window, n_fills = _compute_verdict(
+    verdict, _window, n_fills, _clamp = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert verdict.state is VerdictState.UNRELIABLE
@@ -90,7 +90,7 @@ def test_compute_verdict_legit_points_no_band_override():
     # window stays data-driven (INSUFFICIENT_DATA), never UNRELIABLE-by-band.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    verdict, _window, n_fills = _compute_verdict(
+    verdict, _window, n_fills, _clamp = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert not any("plausible per-day band" in r for r in verdict.reasons)
@@ -99,12 +99,37 @@ def test_compute_verdict_legit_points_no_band_override():
 
 
 def test_compute_verdict_empty_is_insufficient_no_crash():
-    verdict, window, n_fills = _compute_verdict(
+    verdict, window, n_fills, _clamp = _compute_verdict(
         fills=[], market_rate_points=[], observed_realized=Decimal("0"), capital=C
     )
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
     assert n_fills == 0
     assert window == "n/a"
+
+
+def test_compute_verdict_capital_days_is_usdt_days_not_divided():
+    # One full-budget fill held 2 days → 570*2 = 1140 USDT·days (NOT /570 ≈ 2).
+    pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
+    fills = [_fill(1000, "570", "0.0003")]
+    _verdict, _window, _n, clamp = _compute_verdict(
+        fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
+    )
+    # clamp diagnostic carries the un-clamped figures; no over-deploy for 1 fill
+    assert clamp.peak_concurrent == Decimal("570")
+    assert clamp.over_deployed is False
+
+
+def test_compute_verdict_over_deploy_populates_diagnostic():
+    # 3 fills 300 each = 900 concurrent > 570 → over-deploy diagnostic set.
+    pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
+    fills = [_fill(1000, "300", "0.0003") for _ in range(3)]
+    _verdict, _window, _n, clamp = _compute_verdict(
+        fills=fills, market_rate_points=pts, observed_realized=Decimal("900"), capital=C
+    )
+    assert clamp.peak_concurrent == Decimal("900")
+    assert clamp.over_deployed is True
+    assert clamp.raw_interest > clamp.clamped_interest
+    assert clamp.cap == C
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +174,7 @@ async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
         await upsert_candles(s, target + decoys)
         await s.commit()
 
-    verdict, _window, n_fills = await build_verdict_from_neon(
+    verdict, _window, n_fills, _clamp = await build_verdict_from_neon(
         capital=C, session_factory=g3_factory
     )
     assert verdict.state is VerdictState.UNRELIABLE
@@ -169,7 +194,7 @@ async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factor
         await upsert_candles(s, candles)
         await s.commit()
 
-    verdict, _window, n_fills = await build_verdict_from_neon(
+    verdict, _window, n_fills, _clamp = await build_verdict_from_neon(
         capital=C, session_factory=g3_factory
     )
     assert verdict.state is VerdictState.INSUFFICIENT_DATA

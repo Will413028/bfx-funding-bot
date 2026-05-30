@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from itertools import pairwise
 
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 
@@ -150,6 +151,35 @@ class ClampedWindow:
     peak_concurrent: Decimal
 
 
+@dataclass(frozen=True)
+class ClampDiagnostic:
+    """Over-deploy transparency for the report.
+
+    cap is the budget; peak_concurrent the max instantaneous open principal; raw
+    vs clamped interest the excess the clamp removed.
+    """
+
+    cap: Decimal
+    peak_concurrent: Decimal
+    raw_interest: Decimal
+    clamped_interest: Decimal
+
+    @property
+    def over_deployed(self) -> bool:
+        return self.peak_concurrent > self.cap
+
+    @property
+    def over_deploy_factor(self) -> Decimal:
+        return self.peak_concurrent / self.cap if self.cap > 0 else Decimal("0")
+
+    @property
+    def excess_return_pct(self) -> Decimal:
+        # interest the clamp removed, as a % of budget (same unit as headline)
+        if self.cap <= 0:
+            return Decimal("0")
+        return (self.raw_interest - self.clamped_interest) / self.cap * Decimal("100")
+
+
 def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWindow:
     """Sweep-line attribution with concurrent-principal clamped to `cap`.
 
@@ -173,7 +203,7 @@ def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWind
     scaled_ms = [Decimal("0")] * len(intervals)
     clipped_ms = [0] * len(intervals)
     peak = Decimal("0")
-    for a, b in zip(points, points[1:]):
+    for a, b in pairwise(points):
         dt = b - a
         if dt <= 0:
             continue
