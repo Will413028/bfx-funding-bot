@@ -1,0 +1,17 @@
+{
+  "state": "INSUFFICIENT_DATA",
+  "headline_active_spread": "0.00926380962900422270287591125",
+  "n_windows": 1,
+  "ci_lo": "0",
+  "ci_hi": "0",
+  "reasons": [
+    "only 1 weekly windows (need >= 8)"
+  ],
+  "over_deploy": {
+    "cap": "570",
+    "peak_concurrent": "570.0",
+    "raw_interest": "0.2461440326321848",
+    "clamped_interest": "0.2461440326321848",
+    "detected": false
+  }
+}
