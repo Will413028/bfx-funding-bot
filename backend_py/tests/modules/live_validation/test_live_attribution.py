@@ -243,6 +243,16 @@ def test_attribute_active_fill_outside_all_windows_ignored():
     assert all(o.n_trades == 0 for o in out)
 
 
+def test_attribute_active_clamps_overlap_over_cap():
+    # 4 fills, 250 each = 1000 concurrent > 570 cap, same window, same span.
+    fills = [_fill(0, "250", "0.0003", "2") for _ in range(4)]
+    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+    raw = Decimal("4") * (Decimal("250") * Decimal("0.0003") * Decimal("2"))
+    clamped = raw * (C / Decimal("1000"))
+    assert out[0].net_monthly == clamped / C * Decimal("100")
+    assert out[0].n_trades == 4  # n_trades unchanged: count by fill_ts
+
+
 # ---------------------------------------------------------------------------
 # Task 5: deployment anchor
 # ---------------------------------------------------------------------------
