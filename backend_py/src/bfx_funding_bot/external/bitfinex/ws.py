@@ -103,7 +103,10 @@ class BitfinexWSClient:
         self.hb_timeout_s = hb_timeout_s
         self._on_disconnect = on_disconnect
         self._ws: ClientConnection | None = None
-        self._candle_q: asyncio.Queue[CandleMessage] = asyncio.Queue()
+        # None is the disconnect sentinel: _recv_loop enqueues it when the
+        # connection ends so candles() terminates and the daemon's reconnect
+        # loop (driven by the iterator returning) can run.
+        self._candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
         self._stop = False
         self.reconnect_attempts = 0
         self._reconnect_history: deque[float] = deque(maxlen=1000)
@@ -115,6 +118,11 @@ class BitfinexWSClient:
         await self._ensure_connected()
         while not self._stop:
             msg = await self._candle_q.get()
+            if msg is None:
+                # Disconnect sentinel: the connection ended (peer close, hb
+                # watchdog, or library ping timeout). Terminate the iterator so
+                # the daemon's reconnect loop runs instead of blocking forever.
+                return
             yield msg
 
     def reconnect_count_last_hour(self) -> int:
@@ -196,9 +204,20 @@ class BitfinexWSClient:
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
-        with contextlib.suppress(websockets.ConnectionClosed, asyncio.CancelledError):
+        try:
             async for raw in self._ws:
                 self._handle_raw(raw)
+        except asyncio.CancelledError:
+            # Shutdown (close() cancels this task) — no reconnect signal; close()
+            # sets _stop and the consumer is being torn down.
+            raise
+        except websockets.ConnectionClosed:
+            pass
+        # The connection ended (peer close, hb watchdog closing _ws, or the
+        # websockets library's ping-timeout). Signal candles() to terminate so
+        # the daemon reconnect loop runs. Skipped during shutdown (_stop set).
+        if not self._stop:
+            self._candle_q.put_nowait(None)
 
     def _handle_raw(self, raw: str | bytes) -> None:
         try:
