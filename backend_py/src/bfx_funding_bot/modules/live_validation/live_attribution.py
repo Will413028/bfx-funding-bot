@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
+
 MS_PER_DAY = Decimal(24 * 60 * 60 * 1000)
 
 
@@ -65,3 +67,30 @@ def weekly_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
         bounds.append((lo, hi))
         lo = hi
     return bounds
+
+
+def attribute_passive(
+    frr_points: list[FrrPoint], *, window_bounds: list[tuple[int, int]]
+) -> list[WindowOutcome]:
+    """AlwaysFRR arm: full-budget lending at mean FRR over each window.
+
+    net_monthly = mean(FRR in window) * window_days * 100  (capital cancels).
+    """
+    out: list[WindowOutcome] = []
+    for lo, hi in window_bounds:
+        pts = [p for p in frr_points if lo <= p.mts < hi]
+        days = Decimal(hi - lo) / MS_PER_DAY
+        mean_frr = (
+            sum((p.frr for p in pts), Decimal("0")) / Decimal(len(pts))
+            if pts
+            else Decimal("0")
+        )
+        out.append(
+            WindowOutcome(
+                month_mts=lo,
+                net_monthly=mean_frr * days * Decimal("100"),
+                n_trades=len(pts),
+                fill_rate=mean_frr,
+            )
+        )
+    return out
