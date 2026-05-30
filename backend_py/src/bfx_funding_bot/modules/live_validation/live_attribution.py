@@ -133,3 +133,31 @@ def attribute_passive(
             )
         )
     return out
+
+
+@dataclass(frozen=True)
+class DeploymentAnchorResult:
+    attributed_deployed: Decimal
+    observed_realized: Decimal
+    relative_divergence: Decimal
+    within_tolerance: bool
+
+
+def check_deployment_anchor(
+    *, attributed_deployed: Decimal, observed_realized: Decimal, tol: Decimal
+) -> DeploymentAnchorResult:
+    """Relative divergence of attributed vs venue-observed deployed principal.
+
+    When observed_realized == 0: divergence is 0 if attributed is also 0,
+    else treated as fully divergent (infinite -> beyond any finite tolerance).
+    """
+    if observed_realized == 0:
+        div = Decimal("0") if attributed_deployed == 0 else Decimal("Infinity")
+    else:
+        div = abs(attributed_deployed - observed_realized) / observed_realized
+    return DeploymentAnchorResult(
+        attributed_deployed=attributed_deployed,
+        observed_realized=observed_realized,
+        relative_divergence=div,
+        within_tolerance=div <= tol,
+    )
