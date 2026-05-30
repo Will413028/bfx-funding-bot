@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     check_deployment_anchor,
     check_nav_anchor,
     decide_verdict,
+    open_principal_at,
     weekly_window_bounds,
 )
 
@@ -364,3 +365,67 @@ def test_verdict_unreliable_takes_priority_over_insufficient():
 def test_verdict_pass_at_exactly_min_windows():
     v = decide_verdict(**_kw(n_windows=8))
     assert v.state is VerdictState.PASS
+
+
+# ---------------------------------------------------------------------------
+# open_principal_at: point-in-time open principal
+# ---------------------------------------------------------------------------
+
+DAY_MS = 24 * 60 * 60 * 1000
+
+
+def test_open_principal_at_fill_held_to_term_counted():
+    """Fill started before as_of with period extending past as_of → counted."""
+    # fill at t=0, period=2 days, effective_end = 2*DAY_MS
+    f = _fill(0, "300", "0.0003", "2")  # release=None
+    as_of = DAY_MS  # 1 day in — still open (end = 2*DAY_MS > as_of)
+    assert open_principal_at([f], as_of) == Decimal("300")
+
+
+def test_open_principal_at_matured_fill_not_counted():
+    """Fill whose fill_ts + period is at/before as_of (matured) → NOT counted."""
+    # fill at t=0, period=2 days, effective_end = 2*DAY_MS
+    f = _fill(0, "300", "0.0003", "2")
+    as_of = 2 * DAY_MS  # exact end — effective_end is NOT strictly after as_of
+    assert open_principal_at([f], as_of) == Decimal("0")
+
+
+def test_open_principal_at_released_fill_before_as_of_not_counted():
+    """Released fill where release_ts <= as_of → closed, NOT counted."""
+    # release at 1 day, as_of at 1.5 days
+    f = _fill(0, "200", "0.0003", "2", release=DAY_MS)
+    as_of = DAY_MS + DAY_MS // 2
+    assert open_principal_at([f], as_of) == Decimal("0")
+
+
+def test_open_principal_at_released_fill_after_as_of_counted():
+    """Released fill where release_ts > as_of → still open at as_of → counted."""
+    # release at 1.5 days, as_of at 1 day
+    f = _fill(0, "200", "0.0003", "2", release=DAY_MS + DAY_MS // 2)
+    as_of = DAY_MS
+    assert open_principal_at([f], as_of) == Decimal("200")
+
+
+def test_open_principal_at_future_fill_not_counted():
+    """Fill with fill_ts > as_of → NOT counted (not yet filled)."""
+    f = _fill(2 * DAY_MS, "500", "0.0003", "2")
+    as_of = DAY_MS
+    assert open_principal_at([f], as_of) == Decimal("0")
+
+
+def test_open_principal_at_empty_list_returns_zero():
+    """Empty list → Decimal('0')."""
+    assert open_principal_at([], 0) == Decimal("0")
+
+
+def test_open_principal_at_multiple_fills_sums_only_open():
+    """Multiple fills: only open ones contribute; matured/future ones don't."""
+    # open: fill at 0, period=3 days, as_of = 2*DAY_MS → open (end=3*DAY_MS > as_of)
+    f_open = _fill(0, "400", "0.0003", "3")
+    # matured: fill at 0, period=1 day, as_of = 2*DAY_MS → end=DAY_MS <= as_of
+    f_matured = _fill(0, "100", "0.0003", "1")
+    # future: fill at 3*DAY_MS → after as_of
+    f_future = _fill(3 * DAY_MS, "250", "0.0003", "2")
+    as_of = 2 * DAY_MS
+    result = open_principal_at([f_open, f_matured, f_future], as_of)
+    assert result == Decimal("400")
