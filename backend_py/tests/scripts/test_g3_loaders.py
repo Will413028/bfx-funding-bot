@@ -108,13 +108,16 @@ def test_compute_verdict_empty_is_insufficient_no_crash():
 
 
 def test_compute_verdict_capital_days_is_usdt_days_not_divided():
-    # One full-budget fill held 2 days → 570*2 = 1140 USDT·days (NOT /570 ≈ 2).
+    # _compute_verdict feeds total_capital_days (USDT·days, NOT the old /capital
+    # 'days') to decide_verdict but does not return it; the exact value
+    # (570*2 = 1140 USDT·days) is pinned at the primitive level by
+    # test_clamp_single_fill_equals_legacy_formula. Here we pin the loader-level
+    # diagnostic: one full-budget fill peaks at the cap with no over-deploy.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
     _verdict, _window, _n, clamp = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
-    # clamp diagnostic carries the un-clamped figures; no over-deploy for 1 fill
     assert clamp.peak_concurrent == Decimal("570")
     assert clamp.over_deployed is False
 

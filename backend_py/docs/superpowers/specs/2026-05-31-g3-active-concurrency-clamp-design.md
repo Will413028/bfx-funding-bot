@@ -47,9 +47,19 @@ credited beyond `C` in the **budget-normalized return comparison**.
    return comparison. Clamping the anchors would mis-flag a real over-deploy as
    model drift.
 
-3. **Cross-window fills split.** The sweep clips interest to window bounds, so
-   interest accrues in the window where the time passes. `n_trades` /
-   `fill_rate` stay bucketed by `fill_ts` (diagnostics only).
+3. **Per-window bucketing (no window-end clipping).** *(Refined during
+   implementation — supersedes an earlier "sweep clips to window bounds / split
+   cross-window fills" draft.)* The caller buckets fills by `fill_ts` (legacy
+   semantics: a fill belongs wholly to the window containing its `fill_ts`), and
+   `clamp_active_window` sweeps each bucket over the fills' **full held-to-term**
+   intervals with no clipping to the window's upper bound. This preserves the
+   held-to-term assumption and makes the no-clamp path bit-exact with the legacy
+   `Σ(size·rate·duration)`. Consequence: the full-span headline and
+   `total_capital_days` use a single all-fills bucket and ARE jointly clamped;
+   only the per-window bootstrap-CI buckets do not jointly clamp concurrency that
+   straddles a week boundary (a bounded approximation that matters only at
+   `n_windows ≥ 8`; revisit in a later stage if needed). `n_trades` / `fill_rate`
+   stay bucketed by `fill_ts` (diagnostics only).
 
 ## Components
 
@@ -63,26 +73,28 @@ class ClampedWindow:
     raw_interest: Decimal    # un-clamped Σ(size·rate·duration) — for over-deploy diagnostic
     peak_concurrent: Decimal # max instantaneous open principal — for over-deploy diagnostic
 
-def clamp_active_window(
-    fills: list[FillRecord], *, cap: Decimal, lo: int, hi: int
-) -> ClampedWindow:
-    """Sweep-line over [lo, hi). Each fill's interest-accruing interval is
-    [fill_ts, fill_ts + _fill_duration_days·MS_PER_DAY), clipped to [lo, hi).
-    At each sub-interval: S = Σ open sizes; scale = min(1, cap/S) (0 if S==0);
+def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWindow:
+    """Sweep-line over the given fills' full held-to-term intervals (the caller
+    pre-buckets by fill_ts; NO window-end clipping). Each fill occupies
+    [fill_ts, fill_ts + _fill_duration_days·MS_PER_DAY). At each sub-interval:
+    S = Σ open sizes; scale = min(1, cap/S) (0 if S==0);
     interest += scale·Σ(size·rate)·dt/day; capital_days += min(S, cap)·dt/day.
-    Accumulate sub-interval durations as integer ms; divide by MS_PER_DAY once
-    so the no-clamp case is bit-exact with the legacy Σ(size·rate·duration)."""
+    Accumulate sub-interval durations PER FILL as integer ms; divide by
+    MS_PER_DAY once so the no-clamp case is bit-exact with the legacy
+    Σ(size·rate·duration)."""
 ```
 
 ### `attribute_active` (changed)
 
-Per window: `net_monthly = clamp_active_window(fills, cap=capital, lo, hi).interest / capital · 100`.
-`n_trades` / `fill_rate` unchanged (still bucketed by `fill_ts`).
+Per window: bucket `wf = [f for f in fills if lo <= f.fill_ts < hi]`, then
+`net_monthly = clamp_active_window(wf, cap=capital).interest / capital · 100`.
+`n_trades` / `fill_rate` unchanged (bucketed by `fill_ts`).
 
 ### `_compute_verdict` (`scripts/_g3_loaders.py`, changed)
 
-- `total_capital_days` = `clamp_active_window(fills, cap=capital, min_ts, max_ts).capital_days`
-  (USDT·days; **drop the `/ capital`**). Naturally ≤ cap × span_days.
+- `total_capital_days` = `clamp_active_window(fills, cap=capital).capital_days`
+  (all fills as one bucket; USDT·days; **drop the `/ capital`**). Naturally
+  ≤ cap × held-to-term-span_days.
 - `attributed_interest` stays RAW: `Σ(size·rate·_fill_duration_days)` (NAV anchor).
 - `attributed_deployed` stays RAW: `open_principal_at(fills, max_ts)` (deployment anchor).
 - Build an over-deploy diagnostic from the full-span `ClampedWindow`
