@@ -142,16 +142,19 @@ class PositionReconciled:
     """Periodic venue snapshot result — in-process pub/sub signal ONLY.
 
     NOT persisted to event_log. Emitted by BootRecovery / PeriodicReconcile
-    after fetching both /funding/offers and /funding/credits. Drives the
+    after fetching /funding/offers, /funding/credits and /wallets. Drives the
     absolute set in PaperPositionLedger.on_position_reconciled(); the
-    store.set_position_snapshot() direct write persists to position_state.
+    store.set_position_snapshot() direct write persists reserved/realized to
+    position_state (available is in-memory only — not persisted).
 
-    reserved_usdt = Σ(active offers)  — venue snapshot, not event accumulation.
-    realized_usdt = Σ(active credits) — venue snapshot; the bug fix.
+    reserved_usdt  = Σ(active offers)  — venue snapshot, not event accumulation.
+    realized_usdt  = Σ(active credits) — venue snapshot.
+    available_usdt = funding-wallet available balance (deposit-wallet free funds).
     """
     account_id: str
     reserved_usdt: Decimal
     realized_usdt: Decimal
+    available_usdt: Decimal
     n_offers: int
     n_credits: int
     occurred_at_ms: int

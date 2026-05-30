@@ -200,6 +200,7 @@ phase3b_wfo_results_ref: x
         account_id=daemon.ledger.account_id,
         reserved_usdt=Decimal("0"),
         realized_usdt=Decimal("450"),
+        available_usdt=Decimal("0"),
         n_offers=0,
         n_credits=3,
         occurred_at_ms=1,
