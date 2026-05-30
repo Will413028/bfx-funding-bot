@@ -82,6 +82,41 @@ async def test_build_daemon_wires_paper_executor_by_default(
 
 
 @pytest.mark.asyncio
+async def test_build_daemon_simulated_excludes_buying_power_guard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """BuyingPowerGuard is a live-only backstop. It reads funding-wallet
+    available balance, which is 0 until the first live reconcile — in the
+    simulated path that would block every POST. The safety chain is inert in
+    sim today only because its sole evaluator (DeploymentReconciler.deploy) is
+    live-only; gate the guard explicitly so that contract is local, not an
+    emergent invariant a future sim-path chain evaluation could violate.
+
+    AllocationCapGuard (policy, balance-independent) stays in both paths."""
+    await _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_EXECUTOR", raising=False)  # default paper -> simulated
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+    _add_bitfinex_mock(httpx_mock)
+
+    from bfx_funding_bot.modules.execution.safety.hard_guards import (
+        AllocationCapGuard,
+        BuyingPowerGuard,
+    )
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    daemon = await build_daemon(
+        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+    )
+
+    types = {type(g) for g in daemon.safety_chain.guards}
+    assert BuyingPowerGuard not in types  # live-only — excluded in sim
+    assert AllocationCapGuard in types    # policy guard — present in both paths
+
+
+@pytest.mark.asyncio
 async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
