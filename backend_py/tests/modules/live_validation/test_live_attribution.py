@@ -65,3 +65,37 @@ def test_weekly_window_bounds_single_short_span():
 def test_weekly_window_bounds_empty_when_end_le_start():
     assert weekly_window_bounds(5000, 5000) == []
     assert weekly_window_bounds(5000, 4000) == []
+
+
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    MS_PER_DAY,
+    attribute_passive,
+)
+
+
+def test_attribute_passive_single_full_week():
+    pts = [FrrPoint(mts=1000, frr=Decimal("0.0003"), avg_period=Decimal("30"))]
+    bounds = [(0, WEEK)]
+    out = attribute_passive(pts, window_bounds=bounds)
+    assert len(out) == 1
+    assert out[0].month_mts == 0
+    assert out[0].n_trades == 1
+    assert out[0].net_monthly == Decimal("0.0003") * Decimal(WEEK) / MS_PER_DAY * Decimal("100")
+
+
+def test_attribute_passive_averages_frr_in_window():
+    pts = [
+        FrrPoint(mts=10, frr=Decimal("0.0002"), avg_period=Decimal("30")),
+        FrrPoint(mts=20, frr=Decimal("0.0004"), avg_period=Decimal("30")),
+    ]
+    out = attribute_passive(pts, window_bounds=[(0, WEEK)])
+    expected = Decimal("0.0003") * Decimal(WEEK) / MS_PER_DAY * Decimal("100")
+    assert out[0].net_monthly == expected
+    assert out[0].fill_rate == Decimal("0.0003")
+
+
+def test_attribute_passive_zero_frr_points_in_window():
+    out = attribute_passive([], window_bounds=[(0, WEEK)])
+    assert out[0].net_monthly == Decimal("0")
+    assert out[0].n_trades == 0
+    assert out[0].fill_rate == Decimal("0")
