@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
@@ -72,15 +73,25 @@ def _candles_to_market_rate_points(candles: list[FundingCandle]) -> list[MarketR
 
 
 async def build_verdict_from_neon(
-    *, capital: Decimal
+    *,
+    capital: Decimal,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[G3Verdict, str, int]:
-    """Query Neon and run G3 attribution.  Returns (verdict, data_window_str, n_fills)."""
+    """Query Neon and run G3 attribution.  Returns (verdict, data_window_str, n_fills).
+
+    I/O shell only: fetches fills/releases/candles/position_state, builds the
+    FillRecord + MarketRatePoint domain lists, then delegates to the pure
+    _compute_verdict. Pass `session_factory` to run against an injected DB
+    (used by the seeded unit test); otherwise a Neon engine is built from env.
+    """
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
     deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
 
-    settings = Settings()
-    engine = make_engine(settings)
-    session_factory = make_session_factory(engine)
+    engine = None
+    if session_factory is None:
+        settings = Settings()
+        engine = make_engine(settings)
+        session_factory = make_session_factory(engine)
 
     try:
         async with session_scope(session_factory) as session:
@@ -148,45 +159,67 @@ async def build_verdict_from_neon(
                 Decimal(str(pos_row.realized_usdt)) if pos_row is not None else Decimal("0")
             )
 
+            # ── 5. Build domain lists (frozen dataclasses, session-detached) ──
+            market_rate_points = _candles_to_market_rate_points(candles)
+            # Fills carry no cell identity, so the spec mandates the conservative
+            # p2 path: held-to-term = 2 days (cell_period_days("p2", …) ignores
+            # its second arg).
+            conservative_period = cell_period_days("p2", Decimal("2"))
+            fills: list[FillRecord] = []
+            for row in fill_rows:
+                payload = row.payload
+                size_usdt = Decimal(str(payload.get("size_usdt", "0")))
+                # fill_rate is stored as float in OrderFilled; Decimal(str(float))
+                # avoids scientific-notation issues (live executor fix ae2c59d).
+                fill_rate = Decimal(str(payload.get("fill_rate", "0")))
+                venue_offer_id = str(
+                    payload.get("venue_offer_id") or row.venue_offer_id or ""
+                )
+                fills.append(
+                    FillRecord(
+                        venue_offer_id=venue_offer_id,
+                        fill_ts_ms=row.occurred_at_ms,
+                        size_usdt=size_usdt,
+                        rate=fill_rate,
+                        period_days=conservative_period,
+                        release_ts_ms=release_map.get(venue_offer_id),
+                    )
+                )
     finally:
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
 
-    # ── 5. Build market-rate points (passive AlwaysMarketRate arm) ────────────
-    market_rate_points = _candles_to_market_rate_points(candles)
-    # Fail loud if the series is the wrong scale (e.g. funding_stats.frr ~1e-6
-    # re-introduced) — a silent unit bug would fabricate a positive active spread.
-    assert_market_rate_band([p.rate for p in market_rate_points])
+    return _compute_verdict(
+        fills=fills,
+        market_rate_points=market_rate_points,
+        observed_realized=observed_realized,
+        capital=capital,
+    )
 
-    # Fills carry no cell identity, so the spec mandates the conservative p2 path:
-    # held-to-term = 2 days (cell_period_days("p2", …) ignores the second arg).
-    conservative_period = cell_period_days("p2", Decimal("2"))
 
-    # ── 6. Build FillRecord list ──────────────────────────────────────────────
-    fills: list[FillRecord] = []
-    for row in fill_rows:
-        payload = row.payload
-        size_usdt = Decimal(str(payload.get("size_usdt", "0")))
-        # fill_rate is stored as float in OrderFilled; Decimal(str(float)) avoids
-        # scientific-notation issues (same pattern as the live executor fix ae2c59d).
-        fill_rate = Decimal(str(payload.get("fill_rate", "0")))
-        venue_offer_id = str(payload.get("venue_offer_id") or row.venue_offer_id or "")
-        fill_ts_ms = row.occurred_at_ms
-        release_ts_ms = release_map.get(venue_offer_id)
+def _compute_verdict(
+    *,
+    fills: list[FillRecord],
+    market_rate_points: list[MarketRatePoint],
+    observed_realized: Decimal,
+    capital: Decimal,
+) -> tuple[G3Verdict, str, int]:
+    """Pure G3 verdict over already-built domain lists. No I/O.
 
-        fills.append(
-            FillRecord(
-                venue_offer_id=venue_offer_id,
-                fill_ts_ms=fill_ts_ms,
-                size_usdt=size_usdt,
-                rate=fill_rate,
-                period_days=conservative_period,
-                release_ts_ms=release_ts_ms,
-            )
-        )
+    Returns (verdict, data_window_str, n_fills).
+    """
+    # Band guard: a wrong-scale passive series (funding_stats.frr ~1e-6, or a
+    # percentage-scaled rate) makes the active spread meaningless. Capture the
+    # violation and degrade to UNRELIABLE below rather than crashing the report.
+    band_reason: str | None = None
+    try:
+        assert_market_rate_band([p.rate for p in market_rate_points])
+    except ValueError as exc:
+        band_reason = str(exc)
 
     n_fills = len(fills)
 
-    # ── 7. Compute windows + attribution ─────────────────────────────────────
+    # ── Compute windows + attribution ────────────────────────────────────────
     if fills or market_rate_points:
         all_mts = (
             [f.fill_ts_ms for f in fills]
@@ -298,6 +331,21 @@ async def build_verdict_from_neon(
             ci_lo=verdict.ci_lo,
             ci_hi=verdict.ci_hi,
             reasons=[no_rate_reason, *verdict.reasons],
+        )
+
+    # ── Band-violation override (top priority) ────────────────────────────────
+    # A wrong-scale passive series ⇒ the entire active spread is untrustworthy.
+    # Degrade to UNRELIABLE (same class as a diverged anchor) and surface the band
+    # message so the operator fixes the attribution source rather than reading a
+    # bogus spread — and crucially the report still renders instead of crashing.
+    if band_reason is not None:
+        verdict = G3Verdict(
+            state=VerdictState.UNRELIABLE,
+            headline_active_spread=verdict.headline_active_spread,
+            n_windows=verdict.n_windows,
+            ci_lo=verdict.ci_lo,
+            ci_hi=verdict.ci_hi,
+            reasons=[band_reason, *verdict.reasons],
         )
 
     # Human-readable data window

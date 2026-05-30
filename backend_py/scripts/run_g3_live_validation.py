@@ -1,7 +1,7 @@
 """G3 — live active-vs-passive validation of the deployed canary MR config.
 
-Loads live fills (event_log), FRR series (funding_stats), and reconcile state from
-Neon; attributes active vs passive yield (modules/live_validation), reuses the
+Loads live fills (event_log), market-rate series (funding_candles.close), and
+reconcile state from Neon; attributes active vs passive yield (modules/live_validation), reuses the
 oos_profitability metrics, and writes a markdown + JSON report with a four-state verdict.
 
 Run from backend_py/:

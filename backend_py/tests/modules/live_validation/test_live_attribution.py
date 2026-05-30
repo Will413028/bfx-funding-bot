@@ -149,6 +149,20 @@ def test_assert_market_rate_band_empty_is_noop():
     assert assert_market_rate_band([]) is None
 
 
+def test_assert_market_rate_band_boundaries_are_inclusive():
+    # Pin the exact constants: both edges (1e-5, 0.05) must NOT raise (<=, <=).
+    assert assert_market_rate_band([Decimal("1e-5")]) is None
+    assert assert_market_rate_band([Decimal("0.05")]) is None
+
+
+def test_assert_market_rate_band_just_outside_boundaries_trip():
+    # Just below the floor and just above the ceiling must raise — pins the band width.
+    with pytest.raises(ValueError, match="outside plausible per-day band"):
+        assert_market_rate_band([Decimal("9.9e-6")])
+    with pytest.raises(ValueError, match="outside plausible per-day band"):
+        assert_market_rate_band([Decimal("0.0501")])
+
+
 # ---------------------------------------------------------------------------
 # Task 4: attribute_active
 # ---------------------------------------------------------------------------
