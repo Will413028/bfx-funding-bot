@@ -176,7 +176,7 @@ def run_cell_wfo(
     """Run sweep + OOS eval for one (strategy, cell) across all WFO windows.
 
     For each window:
-      1. Run baseline (AlwaysFRR period=2) over the test segment.
+      1. Run baseline (AlwaysMarketRate period=2) over the test segment.
       2. Build the strategy's param grid via param_grid_for_cell(eda_cell).
       3. Sweep each variant on the train segment; filter via pick_sweep_winner.
       4. If a winner exists, run OOS on the test segment with the winning params.

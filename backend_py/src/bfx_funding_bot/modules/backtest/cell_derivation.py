@@ -64,7 +64,7 @@ def select_winner(scored: list[ScoredCombo]) -> dict[str, Any]:
     ]
     if not eligible:
         raise NoDistinguishableComboError(
-            "no grid combo is distinguishable from passive AlwaysFRR"
+            "no grid combo is distinguishable from passive AlwaysMarketRate"
         )
     # Negate span/sigma so max() prefers the smallest values on a mean_active tie.
     return max(
