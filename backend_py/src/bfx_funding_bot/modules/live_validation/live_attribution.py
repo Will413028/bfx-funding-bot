@@ -69,6 +69,45 @@ def weekly_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
     return bounds
 
 
+def _fill_duration_days(f: FillRecord) -> Decimal:
+    """Held-to-term, capped by actual lifetime when a release exists."""
+    if f.release_ts_ms is None:
+        return f.period_days
+    actual = Decimal(f.release_ts_ms - f.fill_ts_ms) / MS_PER_DAY
+    if actual < 0:
+        actual = Decimal("0")
+    return min(f.period_days, actual)
+
+
+def attribute_active(
+    fills: list[FillRecord], *, capital: Decimal, window_bounds: list[tuple[int, int]]
+) -> list[WindowOutcome]:
+    """Strategy arm: realized lending interest normalized to the capital budget.
+
+    A fill belongs to the window containing its fill_ts_ms. Per window:
+    net_monthly = sum(size * rate * duration_days) / capital * 100.
+    """
+    out: list[WindowOutcome] = []
+    for lo, hi in window_bounds:
+        wf = [f for f in fills if lo <= f.fill_ts_ms < hi]
+        interest = sum(
+            (f.size_usdt * f.rate * _fill_duration_days(f) for f in wf), Decimal("0")
+        )
+        rates = [f.rate for f in wf]
+        mean_rate = (
+            sum(rates, Decimal("0")) / Decimal(len(rates)) if rates else Decimal("0")
+        )
+        out.append(
+            WindowOutcome(
+                month_mts=lo,
+                net_monthly=interest / capital * Decimal("100"),
+                n_trades=len(wf),
+                fill_rate=mean_rate,
+            )
+        )
+    return out
+
+
 def attribute_passive(
     frr_points: list[FrrPoint], *, window_bounds: list[tuple[int, int]]
 ) -> list[WindowOutcome]:

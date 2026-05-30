@@ -99,3 +99,65 @@ def test_attribute_passive_zero_frr_points_in_window():
     assert out[0].net_monthly == Decimal("0")
     assert out[0].n_trades == 0
     assert out[0].fill_rate == Decimal("0")
+
+
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    attribute_active,
+)
+
+C = Decimal("570")
+
+
+def _fill(ts, size, rate, period, release=None):
+    return FillRecord(
+        venue_offer_id=str(ts),
+        fill_ts_ms=ts,
+        size_usdt=Decimal(size),
+        rate=Decimal(rate),
+        period_days=Decimal(period),
+        release_ts_ms=release,
+    )
+
+
+def test_attribute_active_held_to_term():
+    fills = [_fill(1000, "570", "0.0003", "2")]
+    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+    assert out[0].n_trades == 1
+    expected = Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
+    assert out[0].net_monthly == expected
+    assert out[0].fill_rate == Decimal("0.0003")
+
+
+def test_attribute_active_release_caps_duration():
+    one_day = 24 * 60 * 60 * 1000
+    fills = [_fill(0, "570", "0.0003", "2", release=one_day)]
+    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+    expected = Decimal("570") * Decimal("0.0003") * Decimal("1") / C * Decimal("100")
+    assert out[0].net_monthly == expected
+
+
+def test_attribute_active_release_longer_than_period_uses_period():
+    five_days = 5 * 24 * 60 * 60 * 1000
+    fills = [_fill(0, "570", "0.0003", "2", release=five_days)]
+    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+    expected = Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
+    assert out[0].net_monthly == expected
+
+
+def test_attribute_active_multiple_fills_one_window():
+    fills = [_fill(100, "200", "0.0003", "2"), _fill(200, "300", "0.0005", "2")]
+    out = attribute_active(fills, capital=C, window_bounds=[(0, WEEK)])
+    interest = (
+        Decimal("200") * Decimal("0.0003") * Decimal("2")
+        + Decimal("300") * Decimal("0.0005") * Decimal("2")
+    )
+    assert out[0].net_monthly == interest / C * Decimal("100")
+    assert out[0].n_trades == 2
+    assert out[0].fill_rate == (Decimal("0.0003") + Decimal("0.0005")) / Decimal("2")
+
+
+def test_attribute_active_zero_fill_window_is_idle():
+    out = attribute_active([], capital=C, window_bounds=[(0, WEEK)])
+    assert out[0].net_monthly == Decimal("0")
+    assert out[0].n_trades == 0
+    assert out[0].fill_rate == Decimal("0")
