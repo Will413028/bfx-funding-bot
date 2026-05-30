@@ -161,3 +161,48 @@ def test_attribute_active_zero_fill_window_is_idle():
     assert out[0].net_monthly == Decimal("0")
     assert out[0].n_trades == 0
     assert out[0].fill_rate == Decimal("0")
+
+
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    DeploymentAnchorResult,
+    check_deployment_anchor,
+)
+
+
+def test_deployment_anchor_within_tolerance():
+    r = check_deployment_anchor(
+        attributed_deployed=Decimal("300"),
+        observed_realized=Decimal("310"),
+        tol=Decimal("0.05"),
+    )
+    assert isinstance(r, DeploymentAnchorResult)
+    assert r.within_tolerance is True
+    assert r.relative_divergence == abs(Decimal("300") - Decimal("310")) / Decimal("310")
+
+
+def test_deployment_anchor_beyond_tolerance():
+    r = check_deployment_anchor(
+        attributed_deployed=Decimal("300"),
+        observed_realized=Decimal("100"),
+        tol=Decimal("0.05"),
+    )
+    assert r.within_tolerance is False
+
+
+def test_deployment_anchor_zero_observed_is_within_when_attributed_zero():
+    r = check_deployment_anchor(
+        attributed_deployed=Decimal("0"),
+        observed_realized=Decimal("0"),
+        tol=Decimal("0.05"),
+    )
+    assert r.within_tolerance is True
+    assert r.relative_divergence == Decimal("0")
+
+
+def test_deployment_anchor_zero_observed_nonzero_attributed_diverges():
+    r = check_deployment_anchor(
+        attributed_deployed=Decimal("50"),
+        observed_realized=Decimal("0"),
+        tol=Decimal("0.05"),
+    )
+    assert r.within_tolerance is False
