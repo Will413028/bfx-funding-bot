@@ -3,16 +3,44 @@
 The DB-backed build_verdict_from_neon path is covered by
 test_g3_loaders_integration.py (marked integration, skipped by the commit gate).
 """
+from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.live_validation.live_attribution import MarketRatePoint
-from scripts._g3_loaders import _candles_to_market_rate_points
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    FillRecord,
+    MarketRatePoint,
+    VerdictState,
+)
+from scripts._g3_loaders import (
+    _candles_to_market_rate_points,
+    _compute_verdict,
+    build_verdict_from_neon,
+)
+
+C = Decimal("570")
 
 
 def _candle(mts: int, close: Decimal | None) -> FundingCandle:
     return FundingCandle(
         symbol="fUST", timeframe="1h", period_agg="p2", mts=mts, close=close
+    )
+
+
+def _fill(ts: int, size: str, rate: str) -> FillRecord:
+    return FillRecord(
+        venue_offer_id=str(ts),
+        fill_ts_ms=ts,
+        size_usdt=Decimal(size),
+        rate=Decimal(rate),
+        period_days=Decimal("2"),
+        release_ts_ms=None,
     )
 
 
@@ -33,3 +61,117 @@ def test_candles_to_market_rate_points_skips_none_close():
 
 def test_candles_to_market_rate_points_empty():
     assert _candles_to_market_rate_points([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _compute_verdict: pure verdict core (band-violation degradation + empties).
+# A wrong-scale passive series must NOT crash the report — it degrades to
+# UNRELIABLE with the band message so the operator sees the attribution is
+# broken rather than getting a traceback.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_verdict_frr_scale_points_degrade_to_unreliable():
+    # frr-scale (~1e-6) passive series is the wrong source. observed_realized
+    # matches attributed (570) so the anchors are clean — only the band guard
+    # flips this to UNRELIABLE, isolating the new behavior.
+    pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("1.1e-06")) for i in range(5)]
+    fills = [_fill(1000, "570", "0.0003")]
+    verdict, _window, n_fills = _compute_verdict(
+        fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
+    )
+    assert verdict.state is VerdictState.UNRELIABLE
+    assert any("plausible per-day band" in r for r in verdict.reasons)
+    assert n_fills == 1
+
+
+def test_compute_verdict_legit_points_no_band_override():
+    # Realistic candle-close baseline → no band override; near-idle single
+    # window stays data-driven (INSUFFICIENT_DATA), never UNRELIABLE-by-band.
+    pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
+    fills = [_fill(1000, "570", "0.0003")]
+    verdict, _window, n_fills = _compute_verdict(
+        fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
+    )
+    assert not any("plausible per-day band" in r for r in verdict.reasons)
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert n_fills == 1
+
+
+def test_compute_verdict_empty_is_insufficient_no_crash():
+    verdict, window, n_fills = _compute_verdict(
+        fills=[], market_rate_points=[], observed_realized=Decimal("0"), capital=C
+    )
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert n_fills == 0
+    assert window == "n/a"
+
+
+# ---------------------------------------------------------------------------
+# build_verdict_from_neon wiring (seeded in-memory sqlite, session-injected).
+# Pins the passive-arm candle query (symbol/timeframe/period_agg + bounds) and
+# the band-guard-in-loader path against silent regressions the commit gate
+# would otherwise miss.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def g3_factory(sqlite_engine: AsyncEngine) -> async_sessionmaker:
+    async with sqlite_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return async_sessionmaker(sqlite_engine, expire_on_commit=False)
+
+
+def _recent_candle(
+    symbol: str, timeframe: str, period_agg: str, mts: int, close: str
+) -> FundingCandle:
+    return FundingCandle(
+        symbol=symbol, timeframe=timeframe, period_agg=period_agg, mts=mts, close=Decimal(close)
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
+    """The passive arm must read ONLY fUST/p2/1h candles; decoys with another
+    symbol / period_agg / timeframe are excluded. Proven via the band guard: the
+    target cell is seeded frr-scale (~1e-6) while every decoy is legit (2e-4), so
+    a correct query trips the band → UNRELIABLE; a leaky query would not."""
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    base = now_ms - 5 * 24 * 3600 * 1000  # within the 30-day no-fills fallback window
+    hour = 3600 * 1000
+    target = [_recent_candle("fUST", "1h", "p2", base + i * hour, "1.1e-6") for i in range(12)]
+    decoys = (
+        [_recent_candle("fUST", "1h", "a30", base + i * hour, "0.0002") for i in range(12)]
+        + [_recent_candle("fUSD", "1h", "p2", base + i * hour, "0.0002") for i in range(12)]
+        + [_recent_candle("fUST", "15m", "p2", base + i * hour, "0.0002") for i in range(12)]
+    )
+    async with g3_factory() as s:
+        await upsert_candles(s, target + decoys)
+        await s.commit()
+
+    verdict, _window, n_fills = await build_verdict_from_neon(
+        capital=C, session_factory=g3_factory
+    )
+    assert verdict.state is VerdictState.UNRELIABLE
+    assert any("plausible per-day band" in r for r in verdict.reasons)
+    assert n_fills == 0
+
+
+@pytest.mark.asyncio
+async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factory):
+    """Legit fUST/p2/1h closes with no fills → INSUFFICIENT_DATA (idle canary):
+    no band trip, no crash — the end-to-end happy path through the I/O shell."""
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    base = now_ms - 5 * 24 * 3600 * 1000
+    hour = 3600 * 1000
+    candles = [_recent_candle("fUST", "1h", "p2", base + i * hour, "0.0002") for i in range(12)]
+    async with g3_factory() as s:
+        await upsert_candles(s, candles)
+        await s.commit()
+
+    verdict, _window, n_fills = await build_verdict_from_neon(
+        capital=C, session_factory=g3_factory
+    )
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert not any("plausible per-day band" in r for r in verdict.reasons)
+    assert n_fills == 0
