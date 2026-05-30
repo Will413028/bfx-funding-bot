@@ -64,3 +64,71 @@ def test_already_deployed_reduces_headroom():
 
 def test_no_active_cells_returns_empty():
     assert _alloc(D("570"), D("0"), {}, []) == {}
+
+
+def test_allocate_gap_clamps_to_available_headroom():
+    # cap gap = 600 - 400 = 200, but only 140 deployable → gap clamps to 140.
+    fills = allocate_gap(
+        target=Decimal("600"),
+        current_exposure=Decimal("400"),
+        available_headroom=Decimal("140"),
+        deployed={},
+        active_cells=["fUST_a30"],
+        concentration_pct=Decimal("0.70"),
+        min_fill=Decimal("153"),
+    )
+    # 140 < min_fill(153) → nothing deployed (sleep).
+    assert fills == {}
+
+
+def test_allocate_gap_deploys_when_headroom_allows():
+    fills = allocate_gap(
+        target=Decimal("600"),
+        current_exposure=Decimal("400"),
+        available_headroom=Decimal("200"),   # >= cap gap 200
+        deployed={},
+        active_cells=["fUST_a30"],
+        concentration_pct=Decimal("0.70"),
+        min_fill=Decimal("153"),
+    )
+    assert fills == {"fUST_a30": Decimal("200")}
+
+
+def test_allocate_gap_headroom_binds_below_cap_gap():
+    # cap gap = 300, headroom 160 → deploy 160 (headroom binds, >= min_fill).
+    fills = allocate_gap(
+        target=Decimal("700"),
+        current_exposure=Decimal("400"),
+        available_headroom=Decimal("160"),
+        deployed={},
+        active_cells=["fUST_a30"],
+        concentration_pct=Decimal("0.70"),
+        min_fill=Decimal("153"),
+    )
+    assert fills == {"fUST_a30": Decimal("160")}
+
+
+def test_allocate_gap_negative_headroom_sleeps():
+    fills = allocate_gap(
+        target=Decimal("600"),
+        current_exposure=Decimal("400"),
+        available_headroom=Decimal("-5"),
+        deployed={},
+        active_cells=["fUST_a30"],
+        concentration_pct=Decimal("0.70"),
+        min_fill=Decimal("153"),
+    )
+    assert fills == {}
+
+
+def test_allocate_gap_default_headroom_is_unbounded():
+    # No available_headroom passed → behaves as before (cap gap only).
+    fills = allocate_gap(
+        target=Decimal("600"),
+        current_exposure=Decimal("400"),
+        deployed={},
+        active_cells=["fUST_a30"],
+        concentration_pct=Decimal("0.70"),
+        min_fill=Decimal("153"),
+    )
+    assert fills == {"fUST_a30": Decimal("200")}
