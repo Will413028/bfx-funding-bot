@@ -256,3 +256,56 @@ async def test_buying_power_missing_amount_blocks() -> None:
     )
     res = await guard.evaluate(decision, _bp_ctx())
     assert res.allowed is False
+
+
+# ---------------------------------------------------------------------------
+# float↔Decimal bridge invariant
+#
+# The reconciler sizes offers as Decimal then crosses the DecisionPayload float
+# field (reconciler.py: `offer_amount_usdt=float(amount)`); the balance/cap
+# guards reconstruct the Decimal via `Decimal(str(decision.offer_amount_usdt))`
+# (hard_guards.py). Pin that this float→str→Decimal round-trip is exact at
+# operating magnitudes so the guards compare the *sized* amount, never a
+# precision-drifted one. The str() step is load-bearing: Decimal(float_value)
+# would drift (e.g. Decimal(406.89) == 406.8899999999999863...).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sized",
+    [
+        Decimal("200"), Decimal("399"), Decimal("171"), Decimal("317"),
+        Decimal("247"), Decimal("553.50"), Decimal("406.89"), Decimal("163.11"),
+        Decimal("549.99"), Decimal("0.01"),
+    ],
+)
+def test_offer_amount_float_bridge_is_lossless(sized: Decimal) -> None:
+    # Mirrors reconciler write (float) + guard read (Decimal(str(...))). The
+    # fractional params (406.89, 163.11, 549.99, 0.01) are the ones a direct
+    # Decimal(float_value) read would drift on — they give this invariant teeth.
+    bridged = Decimal(str(float(sized)))
+    assert bridged == sized
+
+
+def decimal_to_payload_float(amount: Decimal) -> float:
+    """The exact write-side step the reconciler performs (reconciler.py:141)."""
+    return float(amount)
+
+
+@pytest.mark.asyncio
+async def test_buying_power_exact_at_fractional_boundary_via_float_bridge() -> None:
+    # available 409.89, buffer 3 -> deployable 406.89 (exact Decimal math). An
+    # offer sized at exactly 406.89, after the float bridge, must be allowed; one
+    # cent over must block. Exercises the real guard at a *fractional* boundary
+    # (existing boundary tests only used integer amounts).
+    guard = BuyingPowerGuard(
+        ledger=_FakeBalanceLedger(Decimal("409.89")), buffer_usdt=Decimal("3"),
+    )
+    at = await guard.evaluate(
+        _post_decision(decimal_to_payload_float(Decimal("406.89"))), _bp_ctx(),
+    )
+    assert at.allowed is True
+    over = await guard.evaluate(
+        _post_decision(decimal_to_payload_float(Decimal("406.90"))), _bp_ctx(),
+    )
+    assert over.allowed is False
