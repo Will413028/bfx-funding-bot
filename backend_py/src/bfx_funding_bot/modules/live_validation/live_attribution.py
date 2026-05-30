@@ -70,6 +70,27 @@ def weekly_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
     return bounds
 
 
+def open_principal_at(fills: list[FillRecord], as_of_ms: int) -> Decimal:
+    """Total principal still lent at `as_of_ms` (held-to-term, release-aware).
+
+    A fill is open at `as_of_ms` if it was filled at/before then and its effective
+    end (release time if released, else fill_ts + period) is strictly after then.
+    This is directly comparable to a point-in-time venue realized-principal snapshot,
+    unlike a time-averaged deployed figure.
+    """
+    total = Decimal("0")
+    for f in fills:
+        if f.fill_ts_ms > as_of_ms:
+            continue
+        if f.release_ts_ms is not None:
+            effective_end = f.release_ts_ms
+        else:
+            effective_end = f.fill_ts_ms + int(f.period_days * MS_PER_DAY)
+        if effective_end > as_of_ms:
+            total += f.size_usdt
+    return total
+
+
 def _fill_duration_days(f: FillRecord) -> Decimal:
     """Held-to-term, capped by actual lifetime when a release exists."""
     if f.release_ts_ms is None:
