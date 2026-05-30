@@ -46,3 +46,22 @@ def cell_period_days(period_agg: str, frr_avg_period: Decimal) -> Decimal:
     if period_agg == "a30":
         return frr_avg_period
     raise ValueError(f"unknown period_agg: {period_agg!r}")
+
+
+WEEK_MS = 7 * 24 * 60 * 60 * 1000
+
+
+def weekly_window_bounds(start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+    """Calendar-week [lo, hi) bins covering [start_ms, end_ms).
+
+    The trailing bin is truncated to end_ms. Empty if end_ms <= start_ms.
+    """
+    if end_ms <= start_ms:
+        return []
+    bounds: list[tuple[int, int]] = []
+    lo = start_ms
+    while lo < end_ms:
+        hi = min(lo + WEEK_MS, end_ms)
+        bounds.append((lo, hi))
+        lo = hi
+    return bounds
