@@ -16,11 +16,27 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-from bfx_funding_bot.modules.live_validation.live_attribution import G3Verdict
+from bfx_funding_bot.modules.live_validation.live_attribution import ClampDiagnostic, G3Verdict
 
 
-def render_markdown(*, verdict: G3Verdict, data_window: str, n_fills: int) -> str:
+def render_markdown(
+    *, verdict: G3Verdict, data_window: str, n_fills: int, clamp_diag: ClampDiagnostic
+) -> str:
     """Pure renderer — unit-testable without a DB."""
+    honesty = [
+        "## Honesty caveats",
+        "- Held-to-term duration assumption (matured credits have no close event).",
+        "- Fills attributed with the conservative shorter period when cell identity is absent.",
+        "- Deployed params are in-sample to the 2022–2026 selection sweep; the live canary is the true OOS.",
+        "- Platform/credit tail (Bitfinex/Tether) is uncapturable here — mitigated by the cap.",
+    ]
+    if clamp_diag.over_deployed:
+        honesty.append(
+            f"- Active arm clamped to budget C={clamp_diag.cap}: raw concurrent "
+            f"principal peaked at {clamp_diag.peak_concurrent} "
+            f"({clamp_diag.over_deploy_factor:.2f}x cap) → "
+            f"{clamp_diag.excess_return_pct:.4f}% over-deploy excess removed."
+        )
     lines = [
         "# G3 Live Validation — fUST MeanReversion (a30, p2), deployed ema_span=24/thr=0.5",
         "",
@@ -34,11 +50,7 @@ def render_markdown(*, verdict: G3Verdict, data_window: str, n_fills: int) -> st
         "### Reasons",
         *[f"- {r}" for r in verdict.reasons],
         "",
-        "## Honesty caveats",
-        "- Held-to-term duration assumption (matured credits have no close event).",
-        "- Fills attributed with the conservative shorter period when cell identity is absent.",
-        "- Deployed params are in-sample to the 2022–2026 selection sweep; the live canary is the true OOS.",
-        "- Platform/credit tail (Bitfinex/Tether) is uncapturable here — mitigated by the cap.",
+        *honesty,
         "",
         "## Recommendation",
         "- PASS: live alpha confirmed; scale-up is the operator's call.",
@@ -49,7 +61,7 @@ def render_markdown(*, verdict: G3Verdict, data_window: str, n_fills: int) -> st
     return "\n".join(lines)
 
 
-def _verdict_to_json(v: G3Verdict) -> dict[str, object]:
+def _verdict_to_json(v: G3Verdict, clamp_diag: ClampDiagnostic) -> dict[str, object]:
     return {
         "state": v.state.value,
         "headline_active_spread": str(v.headline_active_spread),
@@ -57,6 +69,13 @@ def _verdict_to_json(v: G3Verdict) -> dict[str, object]:
         "ci_lo": str(v.ci_lo),
         "ci_hi": str(v.ci_hi),
         "reasons": v.reasons,
+        "over_deploy": {
+            "cap": str(clamp_diag.cap),
+            "peak_concurrent": str(clamp_diag.peak_concurrent),
+            "raw_interest": str(clamp_diag.raw_interest),
+            "clamped_interest": str(clamp_diag.clamped_interest),
+            "detected": clamp_diag.over_deployed,
+        },
     }
 
 
@@ -68,11 +87,17 @@ async def _amain() -> int:
 
     from scripts._g3_loaders import build_verdict_from_neon
 
-    verdict, data_window, n_fills = await build_verdict_from_neon(capital=Decimal(args.capital))
+    verdict, data_window, n_fills, clamp_diag = await build_verdict_from_neon(
+        capital=Decimal(args.capital)
+    )
 
     out = Path(args.out)
-    out.write_text(render_markdown(verdict=verdict, data_window=data_window, n_fills=n_fills))
-    out.with_suffix(".json").write_text(json.dumps(_verdict_to_json(verdict), indent=2))
+    out.write_text(
+        render_markdown(
+            verdict=verdict, data_window=data_window, n_fills=n_fills, clamp_diag=clamp_diag
+        )
+    )
+    out.with_suffix(".json").write_text(json.dumps(_verdict_to_json(verdict, clamp_diag), indent=2))
     print(f"wrote {out} and {out.with_suffix('.json')}")
     return 0
 
