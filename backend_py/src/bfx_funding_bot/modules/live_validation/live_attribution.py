@@ -1,12 +1,16 @@
 """Live active-vs-passive attribution for the canary MeanReversion config.
 
-Pure, I/O-free. Turns live fills + FRR series + reconcile checkpoints into
-WindowOutcome lists (strategy arm + passive AlwaysFRR arm) feeding the existing
-modules/backtest/oos_profitability metrics, plus a four-state verdict.
+Pure, I/O-free. Turns live fills + market-rate series (funding_candles.close) +
+reconcile checkpoints into WindowOutcome lists (strategy arm + passive
+AlwaysMarketRate arm) feeding the existing modules/backtest/oos_profitability
+metrics, plus a four-state verdict.
 
 Both arms normalize to a fixed capital budget C (the canary allocation cap):
     active_return_pct  = sum(size_i * rate_i * duration_i) / C * 100
-    passive_return_pct = mean(FRR over window) * window_days * 100   # C cancels
+    passive_return_pct = mean(market_rate over window) * window_days * 100  # C cancels
+The passive baseline is the per-day market funding rate (funding_candles.close),
+matching the backtest AlwaysMarketRateStrategy. funding_stats.frr is NOT a
+market-rate proxy (it is ~1e-6, ~185x too small); see assert_market_rate_band.
 Idle drag is automatic: a strategy that deploys fewer capital-days than the
 full-budget passive arm falls below it and the active spread goes negative.
 """
@@ -34,12 +38,39 @@ class FillRecord:
 
 
 @dataclass(frozen=True)
-class FrrPoint:
-    """One funding_stats sample for the canary symbol."""
+class MarketRatePoint:
+    """One funding_candles.close sample (per-day market funding rate) for the cell."""
 
     mts: int
-    frr: Decimal  # daily flash-return-rate
-    avg_period: Decimal  # auto-period length in days; used by the loader for cell_period_days, NOT by attribute_passive
+    rate: Decimal  # per-day market funding rate (funding_candles close)
+
+
+# Plausible per-day market funding-rate band for the canary cell. funding_candles
+# .close lives around 1e-4..1e-3; funding_stats.frr (the old, wrong source) is
+# ~1e-6 — ~185x smaller. This guard fails the G3 loader loudly if a future change
+# feeds frr-scale (or percentage-scale) values into the passive baseline again.
+_MIN_PLAUSIBLE_DAILY_RATE = Decimal("1e-5")
+_MAX_PLAUSIBLE_DAILY_RATE = Decimal("0.05")
+
+
+def assert_market_rate_band(rates: list[Decimal]) -> None:
+    """Raise if the mean of `rates` falls outside the plausible per-day band.
+
+    A no-op on an empty list (no coverage → nothing to assert; the loader's
+    coverage guard handles that). Checks the mean rather than each point so a
+    single legitimate funding spike does not trip it, while a systematic unit
+    error (every point ~1e-6) does.
+    """
+    if not rates:
+        return
+    mean_rate = sum(rates, Decimal("0")) / Decimal(len(rates))
+    if not (_MIN_PLAUSIBLE_DAILY_RATE <= mean_rate <= _MAX_PLAUSIBLE_DAILY_RATE):
+        raise ValueError(
+            f"market rate {mean_rate} outside plausible per-day band "
+            f"[{_MIN_PLAUSIBLE_DAILY_RATE}, {_MAX_PLAUSIBLE_DAILY_RATE}] — "
+            f"wrong data source? funding_stats.frr (~1e-6) is not a market rate; "
+            f"use funding_candles.close"
+        )
 
 
 def cell_period_days(period_agg: str, frr_avg_period: Decimal) -> Decimal:
@@ -134,27 +165,27 @@ def attribute_active(
 
 
 def attribute_passive(
-    frr_points: list[FrrPoint], *, window_bounds: list[tuple[int, int]]
+    points: list[MarketRatePoint], *, window_bounds: list[tuple[int, int]]
 ) -> list[WindowOutcome]:
-    """AlwaysFRR arm: full-budget lending at mean FRR over each window.
+    """AlwaysMarketRate arm: full-budget lending at mean market rate per window.
 
-    net_monthly = mean(FRR in window) * window_days * 100  (capital cancels).
+    net_monthly = mean(market_rate in window) * window_days * 100  (capital cancels).
     """
     out: list[WindowOutcome] = []
     for lo, hi in window_bounds:
-        pts = [p for p in frr_points if lo <= p.mts < hi]
+        pts = [p for p in points if lo <= p.mts < hi]
         days = Decimal(hi - lo) / MS_PER_DAY
-        mean_frr = (
-            sum((p.frr for p in pts), Decimal("0")) / Decimal(len(pts))
+        mean_rate = (
+            sum((p.rate for p in pts), Decimal("0")) / Decimal(len(pts))
             if pts
             else Decimal("0")
         )
         out.append(
             WindowOutcome(
                 month_mts=lo,
-                net_monthly=mean_frr * days * Decimal("100"),
+                net_monthly=mean_rate * days * Decimal("100"),
                 n_trades=len(pts),
-                fill_rate=mean_frr,
+                fill_rate=mean_rate,
             )
         )
     return out

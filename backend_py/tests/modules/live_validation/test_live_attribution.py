@@ -7,10 +7,11 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     MS_PER_DAY,
     DeploymentAnchorResult,
     FillRecord,
-    FrrPoint,
     G3Verdict,
+    MarketRatePoint,
     NavAnchorResult,
     VerdictState,
+    assert_market_rate_band,
     attribute_active,
     attribute_passive,
     cell_period_days,
@@ -25,7 +26,7 @@ WEEK = 7 * 24 * 60 * 60 * 1000
 C = Decimal("570")
 
 # ---------------------------------------------------------------------------
-# Task 1: scaffold — FillRecord / FrrPoint / cell_period_days
+# Task 1: scaffold — FillRecord / MarketRatePoint / cell_period_days
 # ---------------------------------------------------------------------------
 
 
@@ -55,10 +56,10 @@ def test_fillrecord_is_frozen():
         f.size_usdt = Decimal("200")  # type: ignore[misc]
 
 
-def test_frrpoint_is_frozen():
-    p = FrrPoint(mts=0, frr=Decimal("0.0002"), avg_period=Decimal("30"))
+def test_marketratepoint_is_frozen():
+    p = MarketRatePoint(mts=0, rate=Decimal("0.0002"))
     with pytest.raises(FrozenInstanceError):
-        p.frr = Decimal("0.9")  # type: ignore[misc]
+        p.rate = Decimal("0.9")  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +88,12 @@ def test_weekly_window_bounds_empty_when_end_le_start():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: attribute_passive
+# Task 3: attribute_passive (AlwaysMarketRate arm — lends at funding_candles.close)
 # ---------------------------------------------------------------------------
 
 
 def test_attribute_passive_single_full_week():
-    pts = [FrrPoint(mts=1000, frr=Decimal("0.0003"), avg_period=Decimal("30"))]
+    pts = [MarketRatePoint(mts=1000, rate=Decimal("0.0003"))]
     bounds = [(0, WEEK)]
     out = attribute_passive(pts, window_bounds=bounds)
     assert len(out) == 1
@@ -101,10 +102,10 @@ def test_attribute_passive_single_full_week():
     assert out[0].net_monthly == Decimal("0.0003") * Decimal(WEEK) / MS_PER_DAY * Decimal("100")
 
 
-def test_attribute_passive_averages_frr_in_window():
+def test_attribute_passive_averages_rate_in_window():
     pts = [
-        FrrPoint(mts=10, frr=Decimal("0.0002"), avg_period=Decimal("30")),
-        FrrPoint(mts=20, frr=Decimal("0.0004"), avg_period=Decimal("30")),
+        MarketRatePoint(mts=10, rate=Decimal("0.0002")),
+        MarketRatePoint(mts=20, rate=Decimal("0.0004")),
     ]
     out = attribute_passive(pts, window_bounds=[(0, WEEK)])
     expected = Decimal("0.0003") * Decimal(WEEK) / MS_PER_DAY * Decimal("100")
@@ -112,11 +113,40 @@ def test_attribute_passive_averages_frr_in_window():
     assert out[0].fill_rate == Decimal("0.0003")
 
 
-def test_attribute_passive_zero_frr_points_in_window():
+def test_attribute_passive_zero_points_in_window():
     out = attribute_passive([], window_bounds=[(0, WEEK)])
     assert out[0].net_monthly == Decimal("0")
     assert out[0].n_trades == 0
     assert out[0].fill_rate == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# C1 regression: passive baseline must be the per-day MARKET rate
+# (funding_candles.close ~1e-4), never funding_stats.frr (~1e-6, ~185x too small).
+# assert_market_rate_band guards the loader against re-introducing that unit bug.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_market_rate_band_accepts_candle_close_scale():
+    # Real fUST/p2 candle-close daily rates live around 1e-4..1e-3.
+    assert_market_rate_band([Decimal("0.0002"), Decimal("0.0003"), Decimal("0.00015")])
+
+
+def test_assert_market_rate_band_rejects_frr_scale():
+    # The exact bug: funding_stats.frr sample (fUSD, 2026-05-10) = 1.12e-06.
+    with pytest.raises(ValueError, match="outside plausible per-day band"):
+        assert_market_rate_band([Decimal("1.12e-06"), Decimal("1.0e-06")])
+
+
+def test_assert_market_rate_band_rejects_above_band():
+    # A percentage-vs-fraction mixup (0.0003 stored as 0.03 etc.) must also trip.
+    with pytest.raises(ValueError, match="outside plausible per-day band"):
+        assert_market_rate_band([Decimal("0.5")])
+
+
+def test_assert_market_rate_band_empty_is_noop():
+    # No coverage in window → nothing to assert; the loader's coverage guard handles it.
+    assert assert_market_rate_band([]) is None
 
 
 # ---------------------------------------------------------------------------
