@@ -17,9 +17,24 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, StrategyName
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    EventType,
+    Phase,
+    StrategyName,
+)
 
 D = Decimal
+
+
+class _CapturingSink:
+    """Captures structured events emitted to the operational stdout port."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def emit(self, event: dict) -> None:
+        self.events.append(event)
 
 
 class _FakeLedger:
@@ -108,7 +123,7 @@ class _SeqSafety:
 
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
-           available=None):
+           available=None, event_sink=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -122,6 +137,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000,
+        event_sink=event_sink if event_sink is not None else _CapturingSink(),
+        phase=Phase.CANARY,
     )
     return rec, ex, tracker, safety
 
@@ -227,6 +244,48 @@ async def test_venue_rejected_submit_not_recorded_as_deployed():
 
 
 # ---------------------------------------------------------------------------
+# #5 observability: the live submit path emits structured ORDER_SUBMIT events
+# (parity with SIGNAL/DECISION and the paper executor) so a structured-event
+# dashboard can see live deploys, not just plain log.info.
+# ---------------------------------------------------------------------------
+
+
+async def test_successful_submit_emits_order_submit_structured_event():
+    sink = _CapturingSink()
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], event_sink=sink,
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    submits = [e for e in sink.events
+               if e["event_type"] == EventType.ORDER_SUBMIT.value]
+    assert len(submits) == 1
+    ev = submits[0]
+    assert ev["cell"] == "fUST_a30"
+    payload = ev["payload"]
+    assert payload["is_simulated"] is False  # live deploy, distinguishes from paper
+    assert payload["status"] == "submitted"
+    assert payload["offer_amount_usdt"] == 200.0
+    assert payload["cid"] == 1
+    assert payload["offer_id"] == "x"
+
+
+async def test_venue_rejected_submit_emits_failed_order_submit_event():
+    sink = _CapturingSink()
+    rec, _ex, tracker, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        executor=_RejectingExecutor(), event_sink=sink,
+    )
+    await rec.deploy()
+    submits = [e for e in sink.events
+               if e["event_type"] == EventType.ORDER_SUBMIT.value]
+    assert len(submits) == 1
+    assert submits[0]["payload"]["status"] == "failed"
+    assert submits[0]["payload"]["is_simulated"] is False
+    assert tracker.deployed("fUST_a30") == D("0")  # reject still not deployed
+
+
+# ---------------------------------------------------------------------------
 # Balance-aware cap gate: clamp deploy to available − buffer
 # ---------------------------------------------------------------------------
 
@@ -319,6 +378,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000,
+        event_sink=_CapturingSink(), phase=Phase.CANARY,
     )
     return rec, ex, tracker, safety
 
