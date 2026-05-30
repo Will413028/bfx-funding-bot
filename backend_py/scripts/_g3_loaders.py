@@ -24,10 +24,10 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 )
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
 from bfx_funding_bot.modules.live_validation.live_attribution import (
-    MS_PER_DAY,
     FillRecord,
     FrrPoint,
     G3Verdict,
+    VerdictState,
     _fill_duration_days,
     attribute_active,
     attribute_passive,
@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     check_deployment_anchor,
     check_nav_anchor,
     decide_verdict,
+    open_principal_at,
     weekly_window_bounds,
 )
 
@@ -201,11 +202,13 @@ async def build_verdict_from_neon(
         )
         total_capital_days = total_cap_days_raw / capital if capital > 0 else Decimal("0")
 
-        # attributed_deployed = mean open principal = Σ(size_i * duration_i) / span_days.
-        # Compared against observed_realized from position_state, which also tracks deployed
-        # PRINCIPAL (not cumulative interest) — so the two are directly comparable.
-        span_days = Decimal(max_ts - min_ts) / MS_PER_DAY if max_ts > min_ts else Decimal("1")
-        attributed_deployed = (total_cap_days_raw / span_days) if span_days > 0 else Decimal("0")
+        # attributed_deployed = open principal at the end of the data window.
+        # Uses point-in-time snapshot (credits still open at max_ts) so it is
+        # directly comparable to observed_realized from position_state, which is
+        # also a point-in-time snapshot — not a time-average. The old mean-open
+        # (Σsize·duration/span_days ≈ 776) diverged spuriously from the snapshot
+        # (550) when fills were uniformly spread over the window.
+        attributed_deployed = open_principal_at(fills, max_ts)
 
         # attributed_interest for nav anchor
         attributed_interest = sum(
@@ -250,6 +253,29 @@ async def build_verdict_from_neon(
         min_windows=_MIN_WINDOWS,
         min_capital_days=min_capital_days,
     )
+
+    # ── FRR coverage guard ────────────────────────────────────────────────────
+    # When no FRR points cover the data window the passive benchmark is all-zero,
+    # making headline_active_spread equal to the active return rather than a real
+    # spread against AlwaysFRR. Override to INSUFFICIENT_DATA with an explicit
+    # reason so the caller is not misled by a spurious "active spread" figure.
+    # headline_active_spread is preserved for diagnostic purposes.
+    window_frr_points = (
+        [p for p in frr_points if min_ts <= p.mts <= max_ts] if (fills or frr_points) else []
+    )
+    if len(window_frr_points) == 0:
+        no_frr_reason = (
+            "passive benchmark unavailable: no FRR coverage in window — "
+            "'active spread' reflects active return only"
+        )
+        verdict = G3Verdict(
+            state=VerdictState.INSUFFICIENT_DATA,
+            headline_active_spread=verdict.headline_active_spread,
+            n_windows=verdict.n_windows,
+            ci_lo=verdict.ci_lo,
+            ci_hi=verdict.ci_hi,
+            reasons=[no_frr_reason, *verdict.reasons],
+        )
 
     # Human-readable data window
     if fills or frr_points:
