@@ -256,16 +256,20 @@ class _StubBus:
 
 
 class _StubAuthRest:
-    """Offers+credits stub; credits defaults to [] for tests focused on offer reconciliation."""
-    def __init__(self, offers, credits=None):
+    """Offers+credits+wallet-available stub for run() tests."""
+    def __init__(self, offers, credits=None, available=Decimal("0")):
         self._offers = offers
         self._credits = credits if credits is not None else []
+        self._available = available
 
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
 
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         return self._credits
+
+    async def get_funding_available(self, *, ctx, currency):
+        return self._available
 
 
 def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
@@ -376,16 +380,20 @@ def _credit(credit_id: str = "1", amount: str = "150") -> ActiveFundingCredit:
 
 
 class _StubAuthRestFull:
-    """Satisfies both _ActiveOffersQuery and _ActiveCreditsQuery protocols."""
-    def __init__(self, offers, credits):
+    """Satisfies offers + credits + wallet-available queries."""
+    def __init__(self, offers, credits, available=Decimal("0")):
         self._offers = offers
         self._credits = credits
+        self._available = available
 
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
 
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         return self._credits
+
+    async def get_funding_available(self, *, ctx, currency):
+        return self._available
 
 
 @pytest.mark.asyncio
@@ -545,3 +553,43 @@ async def test_run_falls_back_to_bus_when_no_registry():
     await rec.run()
 
     assert any(isinstance(e, ReservationClaimed) for e in bus.published)
+
+
+# ── Balance-aware cap gate: wallet available in reconcile pass (Task 4) ───────
+
+
+@pytest.mark.asyncio
+async def test_run_populates_available_from_wallets():
+    """run() threads wallet available into ReconcileResult + published event."""
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRest(offers=[], credits=[], available=Decimal("147.5"))
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
+
+    result = await rec.run()
+
+    assert result.available_usdt == Decimal("147.5")
+    published = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert published and published[-1].available_usdt == Decimal("147.5")
+    # available is NOT persisted: set_position_snapshot has no available_usdt kwarg.
+    assert "available_usdt" not in store.snapshot_calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_fetch_available_does_not_retry_4xx():
+    class _FailingWallets:
+        def __init__(self):
+            self.calls = 0
+        async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+            return []
+        async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+            return []
+        async def get_funding_available(self, *, ctx, currency):
+            self.calls += 1
+            raise BitfinexAPIError(status_code=401, message="boom")
+
+    auth = _FailingWallets()
+    rec = _boot_recovery(auth)
+    with pytest.raises(BitfinexAPIError):
+        await rec._fetch_available()
+    assert auth.calls == 1  # no retry on 4xx (fail-closed, same as offers/credits)
