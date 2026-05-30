@@ -1,12 +1,31 @@
+from dataclasses import FrozenInstanceError
 from decimal import Decimal
 
 import pytest
 
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    MS_PER_DAY,
+    DeploymentAnchorResult,
     FillRecord,
     FrrPoint,
+    G3Verdict,
+    NavAnchorResult,
+    VerdictState,
+    attribute_active,
+    attribute_passive,
     cell_period_days,
+    check_deployment_anchor,
+    check_nav_anchor,
+    decide_verdict,
+    weekly_window_bounds,
 )
+
+WEEK = 7 * 24 * 60 * 60 * 1000
+C = Decimal("570")
+
+# ---------------------------------------------------------------------------
+# Task 1: scaffold — FillRecord / FrrPoint / cell_period_days
+# ---------------------------------------------------------------------------
 
 
 def test_cell_period_days_p2_is_two():
@@ -31,7 +50,7 @@ def test_fillrecord_is_frozen():
         period_days=Decimal("2"),
         release_ts_ms=None,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         f.size_usdt = Decimal("200")  # type: ignore[misc]
 
 
@@ -40,11 +59,9 @@ def test_frrpoint_is_frozen():
     assert p.frr == Decimal("0.0002")
 
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    weekly_window_bounds,
-)
-
-WEEK = 7 * 24 * 60 * 60 * 1000
+# ---------------------------------------------------------------------------
+# Task 2: weekly_window_bounds
+# ---------------------------------------------------------------------------
 
 
 def test_weekly_window_bounds_exact_two_weeks():
@@ -67,10 +84,9 @@ def test_weekly_window_bounds_empty_when_end_le_start():
     assert weekly_window_bounds(5000, 4000) == []
 
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    MS_PER_DAY,
-    attribute_passive,
-)
+# ---------------------------------------------------------------------------
+# Task 3: attribute_passive
+# ---------------------------------------------------------------------------
 
 
 def test_attribute_passive_single_full_week():
@@ -101,11 +117,9 @@ def test_attribute_passive_zero_frr_points_in_window():
     assert out[0].fill_rate == Decimal("0")
 
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    attribute_active,
-)
-
-C = Decimal("570")
+# ---------------------------------------------------------------------------
+# Task 4: attribute_active
+# ---------------------------------------------------------------------------
 
 
 def _fill(ts, size, rate, period, release=None):
@@ -163,10 +177,9 @@ def test_attribute_active_zero_fill_window_is_idle():
     assert out[0].fill_rate == Decimal("0")
 
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    DeploymentAnchorResult,
-    check_deployment_anchor,
-)
+# ---------------------------------------------------------------------------
+# Task 5: deployment anchor
+# ---------------------------------------------------------------------------
 
 
 def test_deployment_anchor_within_tolerance():
@@ -208,10 +221,9 @@ def test_deployment_anchor_zero_observed_nonzero_attributed_diverges():
     assert r.within_tolerance is False
 
 
-from bfx_funding_bot.modules.live_validation.live_attribution import (
-    NavAnchorResult,
-    check_nav_anchor,
-)
+# ---------------------------------------------------------------------------
+# Task 6: NAV anchor
+# ---------------------------------------------------------------------------
 
 
 def test_nav_anchor_unavailable():
@@ -245,3 +257,85 @@ def test_nav_anchor_zero_attributed_zero_delta_within():
     )
     assert r.available is True
     assert r.within_tolerance is True
+
+
+# ---------------------------------------------------------------------------
+# Task 7: G3Verdict / decide_verdict
+# ---------------------------------------------------------------------------
+
+
+def _kw(**over):
+    base = {
+        "headline_active_spread": Decimal("0.06"),
+        "n_windows": 10,
+        "total_capital_days": Decimal("4000"),
+        "ci_lo": Decimal("0.01"),
+        "ci_hi": Decimal("0.10"),
+        "deployment_anchor": check_deployment_anchor(
+            attributed_deployed=Decimal("300"),
+            observed_realized=Decimal("300"),
+            tol=Decimal("0.05"),
+        ),
+        "nav_anchor": check_nav_anchor(
+            nav_delta=None, attributed_interest=Decimal("0"), tol=Decimal("0.1")
+        ),
+        "min_windows": 8,
+        "min_capital_days": Decimal("3990"),
+    }
+    base.update(over)
+    return base
+
+
+def test_verdict_pass():
+    v = decide_verdict(**_kw())
+    assert isinstance(v, G3Verdict)
+    assert v.state is VerdictState.PASS
+
+
+def test_verdict_fail_when_ci_hi_negative():
+    v = decide_verdict(**_kw(ci_lo=Decimal("-0.10"), ci_hi=Decimal("-0.01")))
+    assert v.state is VerdictState.FAIL
+
+
+def test_verdict_insufficient_when_few_windows():
+    v = decide_verdict(**_kw(n_windows=7))
+    assert v.state is VerdictState.INSUFFICIENT_DATA
+
+
+def test_verdict_insufficient_when_low_capital_days():
+    v = decide_verdict(**_kw(total_capital_days=Decimal("100")))
+    assert v.state is VerdictState.INSUFFICIENT_DATA
+
+
+def test_verdict_insufficient_when_ci_straddles_zero():
+    v = decide_verdict(**_kw(ci_lo=Decimal("-0.02"), ci_hi=Decimal("0.05")))
+    assert v.state is VerdictState.INSUFFICIENT_DATA
+    assert "straddles" in " ".join(v.reasons).lower()
+
+
+def test_verdict_unreliable_when_deployment_anchor_diverges():
+    bad = check_deployment_anchor(
+        attributed_deployed=Decimal("300"),
+        observed_realized=Decimal("50"),
+        tol=Decimal("0.05"),
+    )
+    v = decide_verdict(**_kw(deployment_anchor=bad))
+    assert v.state is VerdictState.UNRELIABLE
+
+
+def test_verdict_unreliable_when_nav_anchor_diverges():
+    bad = check_nav_anchor(
+        nav_delta=Decimal("5"), attributed_interest=Decimal("1"), tol=Decimal("0.1")
+    )
+    v = decide_verdict(**_kw(nav_anchor=bad))
+    assert v.state is VerdictState.UNRELIABLE
+
+
+def test_verdict_unreliable_takes_priority_over_insufficient():
+    bad = check_deployment_anchor(
+        attributed_deployed=Decimal("300"),
+        observed_realized=Decimal("50"),
+        tol=Decimal("0.05"),
+    )
+    v = decide_verdict(**_kw(n_windows=2, deployment_anchor=bad))
+    assert v.state is VerdictState.UNRELIABLE
