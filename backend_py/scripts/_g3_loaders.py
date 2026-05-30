@@ -205,9 +205,9 @@ async def build_verdict_from_neon(
         # attributed_deployed = open principal at the end of the data window.
         # Uses point-in-time snapshot (credits still open at max_ts) so it is
         # directly comparable to observed_realized from position_state, which is
-        # also a point-in-time snapshot — not a time-average. The old mean-open
-        # (Σsize·duration/span_days ≈ 776) diverged spuriously from the snapshot
-        # (550) when fills were uniformly spread over the window.
+        # also a point-in-time snapshot — not a time-average. The old time-averaged
+        # formula Σsize·duration / window-span ≈ 776 diverged from the 550 snapshot
+        # when fills were uniformly spread over the window.
         attributed_deployed = open_principal_at(fills, max_ts)
 
         # attributed_interest for nav anchor
@@ -261,9 +261,9 @@ async def build_verdict_from_neon(
     # reason so the caller is not misled by a spurious "active spread" figure.
     # headline_active_spread is preserved for diagnostic purposes.
     window_frr_points = (
-        [p for p in frr_points if min_ts <= p.mts <= max_ts] if (fills or frr_points) else []
+        [p for p in frr_points if min_ts <= p.mts < max_ts] if (fills or frr_points) else []
     )
-    if len(window_frr_points) == 0:
+    if len(window_frr_points) == 0 and verdict.state is not VerdictState.UNRELIABLE:
         no_frr_reason = (
             "passive benchmark unavailable: no FRR coverage in window — "
             "'active spread' reflects active return only"
