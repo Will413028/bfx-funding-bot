@@ -737,6 +737,23 @@ async def build_daemon(
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
     balance_buffer_usdt = Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
+
+    # Executor is built before the guard chain so guard composition can branch on
+    # spec.is_simulated (BuyingPowerGuard is live-only — see allocation_cap block).
+    # bus is the live executor's construction dependency, so it is created here.
+    # Env-driven via registry (CC4 invariant — paper + fill_tracker rejected;
+    # bitfinex_live rejected in 4.2; 4.4 enables live path).
+    bus = DomainEventBus()
+    spec = build_executor(
+        event_sink=stdout_sink,
+        phase=config.phase,
+        strategy=first_cell.strategy,
+        symbol=first_cell.symbol,
+        cell=first_cell.cell_id,
+        http=bitfinex_http,
+        bus=bus,
+    )
+
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
         guards.append(ManualKillGuard())
@@ -756,7 +773,14 @@ async def build_daemon(
         ))
     if hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(ledger=ledger))
-        guards.append(BuyingPowerGuard(ledger=ledger, buffer_usdt=balance_buffer_usdt))
+        # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
+        # reads funding-wallet available (0 until the first live reconcile), so in
+        # the simulated path it would block every POST. The chain is inert in sim
+        # today only because its sole evaluator (DeploymentReconciler.deploy) is
+        # live-only; gate here so that contract is local to the guard rather than
+        # an emergent invariant a future sim-path chain evaluation could violate.
+        if not spec.is_simulated:
+            guards.append(BuyingPowerGuard(ledger=ledger, buffer_usdt=balance_buffer_usdt))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
@@ -788,24 +812,12 @@ async def build_daemon(
     )
 
     # ---- Phase 4.3/4.4a executor middleware chain wiring ----
-    # bus created before build_executor so live executor gets it at construction.
-    bus = DomainEventBus()
-
+    # bus + spec (executor) are built above the guard chain (guard composition
+    # branches on spec.is_simulated).
     quote_store = StandingQuoteStore(
         ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
     )
 
-    # Executor: env-driven via registry (CC4 invariant — paper + fill_tracker
-    # rejected; bitfinex_live rejected in 4.2; 4.4 enables live path).
-    spec = build_executor(
-        event_sink=stdout_sink,
-        phase=config.phase,
-        strategy=first_cell.strategy,
-        symbol=first_cell.symbol,
-        cell=first_cell.cell_id,
-        http=bitfinex_http,
-        bus=bus,
-    )
     executor: ExecutorPort = spec.executor
 
     # 3a-recovery: live-only venue reconciliation. Paper/shadow have no real
