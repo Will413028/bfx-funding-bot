@@ -144,3 +144,48 @@ class AllocationCapGuard:
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)
+
+
+class _BalanceLedgerProtocol(Protocol):
+    def available_balance(self) -> Decimal: ...
+
+
+class BuyingPowerGuard:
+    """Block POST when offer_amount > available funding-wallet balance − buffer.
+
+    Physical-funds twin of AllocationCapGuard (which enforces the policy cap).
+    Defense-in-depth: the DeploymentReconciler's sizing clamp is the precise
+    cumulative control; this is a per-offer backstop so an over-balance offer
+    never leaves the process (avoids relying on the venue's 10001 rejection).
+    SKIP/CANCEL bypass; exactly-at-(available−buffer) allows.
+    """
+
+    name = "buying_power"
+    is_calibrated = False
+
+    def __init__(self, *, ledger: _BalanceLedgerProtocol, buffer_usdt: Decimal) -> None:
+        self.ledger = ledger
+        self.buffer_usdt = buffer_usdt
+
+    async def evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> GuardResult:
+        if decision.decision_outcome != DecisionOutcome.POST:
+            return GuardResult(allowed=True, guard_name=self.name)
+        if decision.offer_amount_usdt is None:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason="POST decision missing offer_amount_usdt",
+            )
+        available = self.ledger.available_balance()
+        deployable = available - self.buffer_usdt
+        offer = Decimal(str(decision.offer_amount_usdt))
+        if offer > deployable:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason=(
+                    f"offer={offer} > available={available}−buffer={self.buffer_usdt}"
+                    f"={deployable}"
+                ),
+            )
+        return GuardResult(allowed=True, guard_name=self.name)

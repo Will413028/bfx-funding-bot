@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
+    BuyingPowerGuard,
     HeartbeatGuard,
     ManualKillGuard,
 )
@@ -183,3 +184,75 @@ async def test_allocation_cap_skip_decision_always_allowed() -> None:
     )
     r = await g.evaluate(skip, ctx)
     assert r.allowed is True  # SKIP decisions never consume cap
+
+
+class _FakeBalanceLedger:
+    def __init__(self, available: Decimal) -> None:
+        self._a = available
+
+    def available_balance(self) -> Decimal:
+        return self._a
+
+
+def _post_decision(amount: float | None) -> DecisionPayload:
+    return DecisionPayload(
+        decision_outcome=DecisionOutcome.POST,
+        signal_correlation_id=uuid4(),
+        offer_rate=0.00012,
+        offer_amount_usdt=amount,
+        offer_duration_days=2,
+    )
+
+
+def _bp_ctx() -> AccountContext:
+    return AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=Decimal("570"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_buying_power_blocks_over_available() -> None:
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("150")), buffer_usdt=Decimal("3"))
+    # deployable = 150 - 3 = 147; offer 160 > 147 -> block
+    res = await guard.evaluate(_post_decision(160.0), _bp_ctx())
+    assert res.allowed is False
+    assert res.guard_name == "buying_power"
+
+
+@pytest.mark.asyncio
+async def test_buying_power_allows_within_available() -> None:
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("250")), buffer_usdt=Decimal("3"))
+    res = await guard.evaluate(_post_decision(200.0), _bp_ctx())
+    assert res.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_buying_power_skip_bypasses() -> None:
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("0")), buffer_usdt=Decimal("3"))
+    decision = DecisionPayload(
+        decision_outcome=DecisionOutcome.SKIP,
+        signal_correlation_id=uuid4(),
+        skip_reason="below_threshold",
+        offer_rate=None, offer_amount_usdt=None, offer_duration_days=None,
+    )
+    res = await guard.evaluate(decision, _bp_ctx())
+    assert res.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_buying_power_missing_amount_blocks() -> None:
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("250")), buffer_usdt=Decimal("3"))
+    # A POST DecisionPayload normally can't carry a None amount (model validator
+    # rejects it); model_construct bypasses validation to exercise the guard's
+    # defensive missing-amount branch directly.
+    decision = DecisionPayload.model_construct(
+        decision_outcome=DecisionOutcome.POST,
+        signal_correlation_id=uuid4(),
+        offer_rate=0.00012,
+        offer_amount_usdt=None,
+        offer_duration_days=2,
+    )
+    res = await guard.evaluate(decision, _bp_ctx())
+    assert res.allowed is False
