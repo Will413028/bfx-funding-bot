@@ -118,11 +118,24 @@ class DeploymentReconciler:
         allocated = sum(fills.values(), Decimal("0"))
         stranded = gap - allocated
         if stranded >= self._min_fill:
-            log.info(
-                "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
-                "(concentration cap %s/cell or no further active cell) active=%s",
-                gap, allocated, stranded, self._concentration_pct, active,
-            )
+            # Attribute the stranded capital to its true cause. When the
+            # funding-wallet headroom (available − buffer) binds below the policy
+            # gap, the idle capital is balance-limited (cap > balance), not held
+            # back by the concentration cap — mislabelling it as concentration
+            # sends a partial-deployment operator down the wrong diagnostic path.
+            if headroom < gap:
+                log.info(
+                    "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
+                    "headroom=%s (balance-limited: available−buffer < policy gap) "
+                    "active=%s",
+                    gap, allocated, stranded, headroom, active,
+                )
+            else:
+                log.info(
+                    "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
+                    "(concentration cap %s/cell or no further active cell) active=%s",
+                    gap, allocated, stranded, self._concentration_pct, active,
+                )
         elif stranded > 0:
             log.info(
                 "deployment_capital_stranded_sub_min gap=%s allocated=%s stranded=%s "

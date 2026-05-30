@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 from uuid import uuid4
 
@@ -259,6 +260,42 @@ async def test_available_headroom_binds_below_cap_gap():
     await rec.deploy()
     assert len(ex.submitted) == 1
     assert ex.submitted[0].offer_amount_usdt == 317.0
+
+
+# ---------------------------------------------------------------------------
+# Stranded-capital log attribution: balance-limited vs concentration
+# ---------------------------------------------------------------------------
+
+
+async def test_stranded_log_names_balance_limit_when_headroom_binds(caplog):
+    # gap = cap - exposure = 570 - 0 = 570; available 203, buffer 3 -> headroom 200.
+    # headroom (200) binds below the policy gap (570) but is >= min_fill (153), so a
+    # single cell deploys 200 and 370 is stranded. The real cause is insufficient
+    # funding-wallet balance, NOT the concentration cap — the log must say so.
+    rec, _ex, _, _ = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("203"),
+    )
+    with caplog.at_level(logging.INFO):
+        await rec.deploy()
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "deployment_capital_stranded" in msg
+    assert "balance-limited" in msg
+    assert "concentration cap" not in msg
+
+
+async def test_stranded_log_names_concentration_when_balance_ample(caplog):
+    # gap = 570; available is effectively unbounded so balance never binds. A single
+    # active cell caps at concentration 0.70*570 = 399, leaving 171 stranded — the
+    # genuine concentration/no-further-active-cell case must keep its label.
+    rec, _ex, _, _ = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("1000000"),
+    )
+    with caplog.at_level(logging.INFO):
+        await rec.deploy()
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "deployment_capital_stranded" in msg
+    assert "concentration cap" in msg
+    assert "balance-limited" not in msg
 
 
 # ---------------------------------------------------------------------------
