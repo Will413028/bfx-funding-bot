@@ -5,6 +5,7 @@ import pytest
 
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     MS_PER_DAY,
+    ClampDiagnostic,
     DeploymentAnchorResult,
     FillRecord,
     G3Verdict,
@@ -566,3 +567,69 @@ def test_clamp_empty_is_zero():
 def test_clamp_zero_cap_raises():
     with pytest.raises(ValueError, match="cap must be positive"):
         clamp_active_window([_fill(0, "100", "0.0003", "2")], cap=Decimal("0"))
+
+
+def test_attribute_active_per_window_bucketing_no_cross_window_join():
+    # Per-window bucketing (by fill_ts), NOT a span-clipped sweep: a fill filled
+    # late in window 1 keeps its FULL held-to-term interest in window 1, and
+    # window 2 clamps only its own fills. The two 400-fills are concurrent in
+    # time but live in different buckets, so their 800 sum is NOT jointly clamped.
+    # This pins the implemented behavior (full-span headline + capital_days use a
+    # single bucket and ARE jointly clamped; only the per-window CI buckets split).
+    f1 = _fill(WEEK - 1, "400", "0.0003", "2")  # spans into window 2
+    f2 = _fill(WEEK + 1, "400", "0.0003", "2")
+    out = attribute_active([f1, f2], capital=C, window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
+    full = Decimal("400") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
+    assert out[0].n_trades == 1
+    assert out[1].n_trades == 1
+    assert out[0].net_monthly == full  # un-clamped: 400 < cap alone
+    assert out[1].net_monthly == full
+
+
+# ---------------------------------------------------------------------------
+# ClampDiagnostic derived properties (over_deploy detection + report figures)
+# ---------------------------------------------------------------------------
+
+
+def test_clamp_diagnostic_excess_return_pct_formula():
+    d = ClampDiagnostic(
+        cap=Decimal("1000"),
+        peak_concurrent=Decimal("1200"),
+        raw_interest=Decimal("100"),
+        clamped_interest=Decimal("80"),
+    )
+    # (100 - 80) / 1000 * 100 = 2.0
+    assert d.excess_return_pct == Decimal("2")
+    assert d.over_deployed is True
+
+
+def test_clamp_diagnostic_over_deploy_factor_formula():
+    d = ClampDiagnostic(
+        cap=Decimal("570"),
+        peak_concurrent=Decimal("855"),
+        raw_interest=Decimal("0.5"),
+        clamped_interest=Decimal("0.33"),
+    )
+    assert d.over_deploy_factor == Decimal("1.5")  # 855 / 570
+
+
+def test_clamp_diagnostic_at_cap_is_not_over_deployed():
+    d = ClampDiagnostic(
+        cap=Decimal("570"),
+        peak_concurrent=Decimal("570"),
+        raw_interest=Decimal("0.2"),
+        clamped_interest=Decimal("0.2"),
+    )
+    assert d.over_deployed is False  # peak == cap is within budget (strict >)
+    assert d.excess_return_pct == Decimal("0")
+
+
+def test_clamp_diagnostic_zero_cap_guards_are_zero():
+    d = ClampDiagnostic(
+        cap=Decimal("0"),
+        peak_concurrent=Decimal("0"),
+        raw_interest=Decimal("0"),
+        clamped_interest=Decimal("0"),
+    )
+    assert d.over_deploy_factor == Decimal("0")
+    assert d.excess_return_pct == Decimal("0")

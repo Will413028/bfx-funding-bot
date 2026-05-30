@@ -78,3 +78,18 @@ def test_render_markdown_no_over_deploy_line_when_within_budget():
     v = _verdict({"n_windows": 1})
     md = render_markdown(verdict=v, data_window="x", n_fills=1, clamp_diag=_diag("400"))
     assert "clamped to budget" not in md
+
+
+def test_verdict_to_json_includes_over_deploy_block():
+    from scripts.run_g3_live_validation import _verdict_to_json
+
+    v = _verdict({"n_windows": 1})
+    j = _verdict_to_json(v, _diag("863"))
+    assert "over_deploy" in j
+    od = j["over_deploy"]
+    assert od["cap"] == "570"
+    assert od["peak_concurrent"] == "863"
+    assert od["detected"] is True
+    # within-budget → detected False
+    j2 = _verdict_to_json(v, _diag("400"))
+    assert j2["over_deploy"]["detected"] is False
