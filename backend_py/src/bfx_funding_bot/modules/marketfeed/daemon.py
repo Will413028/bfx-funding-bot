@@ -90,6 +90,7 @@ from bfx_funding_bot.modules.execution.safety.config import SafetyConfig, load_s
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
+    BuyingPowerGuard,
     HeartbeatGuard,
     ManualKillGuard,
 )
@@ -732,6 +733,10 @@ async def build_daemon(
     assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
+    # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
+    # the cumulative DeploymentReconciler clamp — read once so both consume the
+    # same value (no double subtraction).
+    balance_buffer_usdt = Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
         guards.append(ManualKillGuard())
@@ -751,6 +756,7 @@ async def build_daemon(
         ))
     if hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(ledger=ledger))
+        guards.append(BuyingPowerGuard(ledger=ledger, buffer_usdt=balance_buffer_usdt))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
@@ -902,7 +908,7 @@ async def build_daemon(
             venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
             min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
             concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
-            balance_buffer_usdt=Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3")),
+            balance_buffer_usdt=balance_buffer_usdt,
             clock=lambda: int(time.time() * 1000),
         )
         periodic_reconcile = PeriodicReconcile(
