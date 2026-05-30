@@ -75,6 +75,10 @@ async def backfill_funding_stats_to_latest(
     backward from `now_ms` (defaults to wall clock) and STOPS once a page's
     oldest mts has reached/passed the stored max (db_max), so it only fetches
     the [db_max, now] gap. Caller manages session commit/rollback.
+
+    Note: returns a BackfillStats whose `earliest_mts` field carries the
+    *latest* (max) stored mts after the run — the field name reflects the
+    backward-fill variant; for forward fill it acts as the newest watermark.
     """
     db_max = await get_max_mts(session, symbol=symbol)
     end_ms = now_ms if now_ms is not None else int(time.time() * 1000)
