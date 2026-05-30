@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from bfx_funding_bot.modules.execution.deployment.sizing import (
     allocate_gap,
@@ -18,13 +18,20 @@ from bfx_funding_bot.modules.execution.deployment.sizing import (
 )
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
+from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
     GuardResult,
+    SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    DecisionPayload,
+    Phase,
+    StrategyName,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +46,10 @@ class _SafetyChainProtocol(Protocol):
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> GuardResult: ...
+
+
+class _EventSinkProtocol(Protocol):
+    async def emit(self, event: dict[str, Any]) -> None: ...
 
 
 class DeploymentReconciler:
@@ -57,6 +68,8 @@ class DeploymentReconciler:
         concentration_pct: Decimal,
         balance_buffer_usdt: Decimal,
         clock: Callable[[], int],
+        event_sink: _EventSinkProtocol,
+        phase: Phase,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -69,6 +82,12 @@ class DeploymentReconciler:
         self._concentration_pct = concentration_pct
         self._balance_buffer = balance_buffer_usdt
         self._clock = clock
+        self._event_sink = event_sink
+        self._phase = phase
+        # cell_id → strategy, for the structured ORDER_SUBMIT event envelope.
+        self._cell_strategy: dict[str, StrategyName] = {
+            c.cell_id: c.strategy for c in cells
+        }
 
     async def deploy(self) -> None:
         now = self._clock()
@@ -176,6 +195,35 @@ class DeploymentReconciler:
                     "deployment_submit_rejected cell=%s amount=%s status=%s",
                     cell_id, amount, result.status,
                 )
+                await self._emit_submit(cell_id, decision, result)
                 continue
             self._tracker.record_deploy(cell_id, amount)
             log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
+            await self._emit_submit(cell_id, decision, result)
+
+    async def _emit_submit(
+        self, cell_id: str, decision: DecisionPayload, result: SubmittedOrder,
+    ) -> None:
+        """Structured ORDER_SUBMIT event for the live deploy path — parity with
+        SIGNAL/DECISION + the paper executor, so a structured-event dashboard can
+        see live deploys (and venue rejects), not just plain log lines. The
+        reconciler is the single live writer (built only when not simulated), so
+        is_simulated is always False here."""
+        # OrderSubmitPayload requires a failure_reason whenever status != submitted.
+        failure_reason = (
+            None if result.status == "submitted"
+            else (str(result.raw_response) if result.raw_response else "venue_rejected")
+        )
+        await emit_order_submit(
+            event_sink=self._event_sink,
+            phase=self._phase,
+            strategy=self._cell_strategy[cell_id],
+            cell=cell_id,
+            decision=decision,
+            ctx=self._ctx,
+            cid=result.cid,
+            offer_id=result.venue_offer_id,
+            is_simulated=False,
+            status=result.status,
+            failure_reason=failure_reason,
+        )

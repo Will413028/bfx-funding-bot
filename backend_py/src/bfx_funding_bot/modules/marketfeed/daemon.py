@@ -918,6 +918,8 @@ async def build_daemon(
             concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
             balance_buffer_usdt=balance_buffer_usdt,
             clock=lambda: int(time.time() * 1000),
+            event_sink=stdout_sink,
+            phase=config.phase,
         )
         periodic_reconcile = PeriodicReconcile(
             recovery=runtime_recovery,
