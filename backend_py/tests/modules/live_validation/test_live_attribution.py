@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     cell_period_days,
     check_deployment_anchor,
     check_nav_anchor,
+    clamp_active_window,
     decide_verdict,
     open_principal_at,
     weekly_window_bounds,
@@ -473,3 +474,85 @@ def test_open_principal_at_multiple_fills_sums_only_open():
     as_of = 2 * DAY_MS
     result = open_principal_at([f_open, f_matured, f_future], as_of)
     assert result == Decimal("400")
+
+
+# ---------------------------------------------------------------------------
+# clamp_active_window: concurrency-clamped interest + capital-days
+# ---------------------------------------------------------------------------
+
+DAY = 24 * 60 * 60 * 1000
+
+
+def test_clamp_single_fill_equals_legacy_formula():
+    # No overlap → bit-exact with Σ size·rate·duration.
+    f = _fill(0, "570", "0.0003", "2")
+    cw = clamp_active_window([f], cap=C)
+    assert cw.interest == Decimal("570") * Decimal("0.0003") * Decimal("2")
+    assert cw.raw_interest == cw.interest
+    assert cw.capital_days == Decimal("570") * Decimal("2")
+    assert cw.peak_concurrent == Decimal("570")
+
+
+def test_clamp_two_overlapping_under_cap_no_scaling():
+    # 200 + 300 = 500 < 570 → no clamp, full held-to-term interest each.
+    f1 = _fill(100, "200", "0.0003", "2")
+    f2 = _fill(200, "300", "0.0005", "2")
+    cw = clamp_active_window([f1, f2], cap=C)
+    expected = (
+        Decimal("200") * Decimal("0.0003") * Decimal("2")
+        + Decimal("300") * Decimal("0.0005") * Decimal("2")
+    )
+    assert cw.interest == expected
+    assert cw.raw_interest == expected
+    assert cw.peak_concurrent == Decimal("500")
+
+
+def test_clamp_overlap_over_cap_scales_proportionally():
+    # Two simultaneous fills 400 + 400 = 800 > 570, same window, identical span.
+    # While both open, scale = 570/800; interest is clamped, raw is not.
+    f1 = _fill(0, "400", "0.0003", "2")
+    f2 = _fill(0, "400", "0.0003", "2")
+    cw = clamp_active_window([f1, f2], cap=C)
+    raw = Decimal("2") * (Decimal("400") * Decimal("0.0003") * Decimal("2"))
+    assert cw.raw_interest == raw
+    # both fully overlap for the whole 2 days → uniform scale 570/800
+    assert cw.interest == raw * (C / Decimal("800"))
+    assert cw.capital_days == C * Decimal("2")  # min(800, 570) for 2 days
+    assert cw.peak_concurrent == Decimal("800")
+
+
+def test_clamp_partial_overlap_only_clamps_overlap_region():
+    # f1 [0, 2d) size 400; f2 [1d, 3d) size 400. Overlap [1d,2d): 800>570 clamp.
+    # Non-overlap regions ([0,1d) f1 only, [2d,3d) f2 only) stay full.
+    f1 = _fill(0, "400", "0.0003", "2")
+    f2 = _fill(DAY, "400", "0.0003", "2")
+    cw = clamp_active_window([f1, f2], cap=C)
+    rate = Decimal("0.0003")
+    scale = C / Decimal("800")
+    # f1: [0,1d) full 400 + [1d,2d) scaled 400*570/800
+    # f2: [1d,2d) scaled 400*570/800 + [2d,3d) full 400
+    f1_int = Decimal("400") * rate * Decimal("1") + Decimal("400") * scale * rate * Decimal("1")
+    f2_int = Decimal("400") * scale * rate * Decimal("1") + Decimal("400") * rate * Decimal("1")
+    assert cw.interest == f1_int + f2_int
+    assert cw.peak_concurrent == Decimal("800")
+
+
+def test_clamp_release_caps_duration():
+    # release at 1 day → 1-day interest, like _fill_duration_days.
+    f = _fill(0, "570", "0.0003", "2", release=DAY)
+    cw = clamp_active_window([f], cap=C)
+    assert cw.interest == Decimal("570") * Decimal("0.0003") * Decimal("1")
+    assert cw.capital_days == Decimal("570") * Decimal("1")
+
+
+def test_clamp_empty_is_zero():
+    cw = clamp_active_window([], cap=C)
+    assert cw.interest == Decimal("0")
+    assert cw.capital_days == Decimal("0")
+    assert cw.raw_interest == Decimal("0")
+    assert cw.peak_concurrent == Decimal("0")
+
+
+def test_clamp_zero_cap_raises():
+    with pytest.raises(ValueError, match="cap must be positive"):
+        clamp_active_window([_fill(0, "100", "0.0003", "2")], cap=Decimal("0"))

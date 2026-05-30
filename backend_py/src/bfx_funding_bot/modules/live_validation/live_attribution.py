@@ -132,6 +132,79 @@ def _fill_duration_days(f: FillRecord) -> Decimal:
     return min(f.period_days, actual)
 
 
+@dataclass(frozen=True)
+class ClampedWindow:
+    """Concurrency-clamped attribution over a set of fills (one bucket).
+
+    interest / capital_days reflect the budget ceiling: at every instant the
+    open principal is clamped to `cap` (all open fills scaled by cap/Σopen when
+    over budget). raw_interest / peak_concurrent are the un-clamped figures kept
+    for the over-deploy diagnostic. No window-end clipping — fills accrue their
+    full held-to-term lifetime, so the no-clamp case is bit-exact with the
+    legacy Σ(size·rate·duration).
+    """
+
+    interest: Decimal
+    capital_days: Decimal
+    raw_interest: Decimal
+    peak_concurrent: Decimal
+
+
+def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWindow:
+    """Sweep-line attribution with concurrent-principal clamped to `cap`.
+
+    Each fill occupies [fill_ts, fill_ts + _fill_duration_days·MS_PER_DAY).
+    Per sub-interval: S = Σ open sizes; scale = min(1, cap/S). Durations are
+    accumulated per fill in integer milliseconds (scale==1) so a non-clamped
+    bucket divides by MS_PER_DAY exactly once → identical to the old formula.
+    """
+    if cap <= 0:
+        raise ValueError(f"cap must be positive, got {cap!r}")
+    intervals: list[tuple[int, int, FillRecord]] = []
+    for f in fills:
+        start = f.fill_ts_ms
+        end = start + int(_fill_duration_days(f) * MS_PER_DAY)
+        if end > start:
+            intervals.append((start, end, f))
+    if not intervals:
+        return ClampedWindow(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"))
+
+    points = sorted({p for s, e, _ in intervals for p in (s, e)})
+    scaled_ms = [Decimal("0")] * len(intervals)
+    clipped_ms = [0] * len(intervals)
+    peak = Decimal("0")
+    for a, b in zip(points, points[1:]):
+        dt = b - a
+        if dt <= 0:
+            continue
+        open_idx = [i for i, (s, e, _) in enumerate(intervals) if s <= a < e]
+        total_open = sum((intervals[i][2].size_usdt for i in open_idx), Decimal("0"))
+        if total_open > peak:
+            peak = total_open
+        if total_open <= 0:
+            continue
+        scale = cap / total_open if total_open > cap else Decimal("1")
+        for i in open_idx:
+            scaled_ms[i] += scale * dt
+            clipped_ms[i] += dt
+
+    interest = Decimal("0")
+    capital_days = Decimal("0")
+    raw_interest = Decimal("0")
+    for i, (_s, _e, f) in enumerate(intervals):
+        sm = scaled_ms[i]
+        cm = Decimal(clipped_ms[i])
+        interest += f.size_usdt * f.rate * sm / MS_PER_DAY
+        capital_days += f.size_usdt * sm / MS_PER_DAY
+        raw_interest += f.size_usdt * f.rate * cm / MS_PER_DAY
+    return ClampedWindow(
+        interest=interest,
+        capital_days=capital_days,
+        raw_interest=raw_interest,
+        peak_concurrent=peak,
+    )
+
+
 def attribute_active(
     fills: list[FillRecord], *, capital: Decimal, window_bounds: list[tuple[int, int]]
 ) -> list[WindowOutcome]:
