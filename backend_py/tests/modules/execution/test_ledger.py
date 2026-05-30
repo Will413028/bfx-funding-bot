@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
+    PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
 )
@@ -56,3 +57,33 @@ async def test_handler_processes_matching_account_id_unchanged() -> None:
     )
     await ledger.on_reservation_claimed(matching)
     assert ledger.current_exposure() == Decimal("100")
+
+
+async def test_available_balance_default_zero():
+    led = PaperPositionLedger(account_id="default")
+    assert led.available_balance() == Decimal("0")
+
+
+async def test_on_position_reconciled_sets_available():
+    led = PaperPositionLedger(account_id="default")
+    await led.on_position_reconciled(PositionReconciled(
+        account_id="default",
+        reserved_usdt=Decimal("0"),
+        realized_usdt=Decimal("406.89"),
+        available_usdt=Decimal("147.5"),
+        n_offers=0,
+        n_credits=2,
+        occurred_at_ms=1_000,
+    ))
+    assert led.available_balance() == Decimal("147.5")
+    assert led.current_exposure() == Decimal("406.89")
+
+
+async def test_on_position_reconciled_other_account_ignored():
+    led = PaperPositionLedger(account_id="default")
+    await led.on_position_reconciled(PositionReconciled(
+        account_id="other",
+        reserved_usdt=Decimal("1"), realized_usdt=Decimal("1"),
+        available_usdt=Decimal("99"), n_offers=1, n_credits=1, occurred_at_ms=1,
+    ))
+    assert led.available_balance() == Decimal("0")

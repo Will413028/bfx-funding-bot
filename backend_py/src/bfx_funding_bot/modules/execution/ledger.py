@@ -37,6 +37,7 @@ class PaperPositionLedger:
         self.account_id = account_id
         self._reserved = Decimal("0")
         self._realized = Decimal("0")
+        self._available = Decimal("0")
         self.replay_floor_hit_count = 0
         self._processed_fills: set[tuple[str, int | None]] = set()
         self._processed_releases: set[tuple[str, int | None]] = set()
@@ -125,6 +126,7 @@ class PaperPositionLedger:
             return
         self._reserved = event.reserved_usdt
         self._realized = event.realized_usdt
+        self._available = event.available_usdt
 
     # ---------- public getters ----------
 
@@ -145,5 +147,12 @@ class PaperPositionLedger:
     def realized_exposure(self) -> Decimal:
         """For L2 guards (DrawdownGuard etc., Phase 4.4): matched credits only."""
         return self._realized
+
+    def available_balance(self) -> Decimal:
+        """Funding-wallet available balance from the last reconcile (in-memory;
+        not persisted). 0 until the first reconcile populates it — fail-closed
+        (the reconciler deploys nothing on unknown funds). Read by the
+        DeploymentReconciler balance clamp and BuyingPowerGuard."""
+        return self._available
 
 

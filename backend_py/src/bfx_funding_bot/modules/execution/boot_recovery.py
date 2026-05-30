@@ -270,6 +270,7 @@ class BootRecovery:
             account_id=self._ctx.account_id,
             reserved_usdt=reserved_usdt,
             realized_usdt=realized_usdt,
+            available_usdt=Decimal("0"),  # Task 4 wires the fetched funding-wallet available
             n_offers=len(venue_offers),
             n_credits=len(venue_credits),
             occurred_at_ms=now_ms,
