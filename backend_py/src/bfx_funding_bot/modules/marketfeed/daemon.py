@@ -902,6 +902,7 @@ async def build_daemon(
             venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
             min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
             concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
+            balance_buffer_usdt=Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3")),
             clock=lambda: int(time.time() * 1000),
         )
         periodic_reconcile = PeriodicReconcile(

@@ -22,17 +22,25 @@ D = Decimal
 
 
 class _FakeLedger:
-    def __init__(self, exposure: Decimal, reserved: Decimal | None = None) -> None:
+    def __init__(
+        self, exposure: Decimal, reserved: Decimal | None = None,
+        available: Decimal | None = None,
+    ) -> None:
         self._e = exposure
         # Default: reserved == exposure (all capital is reserved / open offers).
         # Pass reserved explicitly when simulating realized-only or mixed scenarios.
         self._reserved = reserved if reserved is not None else exposure
+        # Default: effectively unbounded so existing cap-driven tests are unaffected.
+        self._available = available if available is not None else Decimal("1000000")
 
     def current_exposure(self) -> Decimal:
         return self._e
 
     def reserved_exposure(self) -> Decimal:
         return self._reserved
+
+    def available_balance(self) -> Decimal:
+        return self._available
 
 
 class _FakeSafety:
@@ -98,7 +106,8 @@ class _SeqSafety:
         )
 
 
-def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None):
+def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
+           available=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -107,10 +116,11 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None)
     ex = executor or _FakeExecutor()
     safety = safety if safety is not None else _FakeSafety(allowed=safety_allowed)
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=_FakeLedger(exposure),
+        store=store, tracker=tracker, ledger=_FakeLedger(exposure, available=available),
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), clock=lambda: 1_000,
+        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        clock=lambda: 1_000,
     )
     return rec, ex, tracker, safety
 
@@ -216,6 +226,42 @@ async def test_venue_rejected_submit_not_recorded_as_deployed():
 
 
 # ---------------------------------------------------------------------------
+# Balance-aware cap gate: clamp deploy to available − buffer
+# ---------------------------------------------------------------------------
+
+async def test_clamps_deploy_to_available_minus_buffer():
+    # cap gap = 570 - 406.89 = 163.11; available 150, buffer 3 -> headroom 147
+    # < min_fill 153 -> sleep (the incident scenario).
+    rec, ex, tracker, _ = _build(
+        exposure=D("406.89"), quotes=[_post_quote("fUST_a30")], available=D("150"),
+    )
+    await rec.deploy()
+    assert ex.submitted == []
+    assert tracker.deployed("fUST_a30") == D("0")
+
+
+async def test_deploys_when_available_sufficient():
+    # cap gap = 570 - 370 = 200; available 250, buffer 3 -> headroom 247 >= 200
+    # -> deploy full cap gap 200.
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], available=D("250"),
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_amount_usdt == 200.0
+
+
+async def test_available_headroom_binds_below_cap_gap():
+    # cap gap = 570 - 200 = 370; available 320, buffer 3 -> headroom 317 -> deploy 317.
+    rec, ex, _, _ = _build(
+        exposure=D("200"), quotes=[_post_quote("fUST_a30")], available=D("320"),
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_amount_usdt == 317.0
+
+
+# ---------------------------------------------------------------------------
 # C1 regression: orphan realized credits must not inflate/starve cells
 # ---------------------------------------------------------------------------
 
@@ -234,7 +280,8 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), clock=lambda: 1_000,
+        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        clock=lambda: 1_000,
     )
     return rec, ex, tracker, safety
 

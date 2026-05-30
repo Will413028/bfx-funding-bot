@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 class _LedgerProtocol(Protocol):
     def current_exposure(self) -> Decimal: ...
     def reserved_exposure(self) -> Decimal: ...
+    def available_balance(self) -> Decimal: ...
 
 
 class _SafetyChainProtocol(Protocol):
@@ -54,6 +55,7 @@ class DeploymentReconciler:
         venue_floor_usd: Decimal,
         min_offer_buffer_pct: Decimal,
         concentration_pct: Decimal,
+        balance_buffer_usdt: Decimal,
         clock: Callable[[], int],
     ) -> None:
         self._store = store
@@ -65,11 +67,16 @@ class DeploymentReconciler:
         self._cells = cells
         self._min_fill = effective_min_usdt(venue_floor_usd, min_offer_buffer_pct)
         self._concentration_pct = concentration_pct
+        self._balance_buffer = balance_buffer_usdt
         self._clock = clock
 
     async def deploy(self) -> None:
         now = self._clock()
         e_total = self._ledger.current_exposure()
+        # Clamp the deployable gap to funds physically present in the funding
+        # wallet (available − buffer) so the reconciler never sizes an offer the
+        # venue must reject for insufficient balance (cap>balance loop, 2026-05-29).
+        headroom = max(Decimal("0"), self._ledger.available_balance() - self._balance_buffer)
         # Rescale per-cell intent to the *reserved* total (pending open offers),
         # NOT to current_exposure (reserved + realized). Realized credits are
         # committed to the venue and unattributable to any cell — using e_total
@@ -98,6 +105,7 @@ class DeploymentReconciler:
         fills = allocate_gap(
             target=self._ctx.allocation_cap_usdt,
             current_exposure=e_total,
+            available_headroom=headroom,
             deployed=self._tracker.snapshot(),
             active_cells=active,
             concentration_pct=self._concentration_pct,
