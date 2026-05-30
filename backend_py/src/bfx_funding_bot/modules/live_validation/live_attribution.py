@@ -161,3 +161,37 @@ def check_deployment_anchor(
         relative_divergence=div,
         within_tolerance=div <= tol,
     )
+
+
+@dataclass(frozen=True)
+class NavAnchorResult:
+    available: bool
+    nav_delta: Decimal | None
+    attributed_interest: Decimal
+    relative_divergence: Decimal | None
+    within_tolerance: bool
+
+
+def check_nav_anchor(
+    *, nav_delta: Decimal | None, attributed_interest: Decimal, tol: Decimal
+) -> NavAnchorResult:
+    """Best-effort ΔNAV vs Σ attributed interest. Unavailable -> within_tolerance True."""
+    if nav_delta is None:
+        return NavAnchorResult(
+            available=False,
+            nav_delta=None,
+            attributed_interest=attributed_interest,
+            relative_divergence=None,
+            within_tolerance=True,
+        )
+    if attributed_interest == 0:
+        div = Decimal("0") if nav_delta == 0 else Decimal("Infinity")
+    else:
+        div = abs(nav_delta - attributed_interest) / abs(attributed_interest)
+    return NavAnchorResult(
+        available=True,
+        nav_delta=nav_delta,
+        attributed_interest=attributed_interest,
+        relative_divergence=div,
+        within_tolerance=div <= tol,
+    )

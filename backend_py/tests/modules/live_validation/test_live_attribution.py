@@ -206,3 +206,42 @@ def test_deployment_anchor_zero_observed_nonzero_attributed_diverges():
         tol=Decimal("0.05"),
     )
     assert r.within_tolerance is False
+
+
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    NavAnchorResult,
+    check_nav_anchor,
+)
+
+
+def test_nav_anchor_unavailable():
+    r = check_nav_anchor(
+        nav_delta=None, attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
+    )
+    assert isinstance(r, NavAnchorResult)
+    assert r.available is False
+    assert r.within_tolerance is True
+
+
+def test_nav_anchor_within_tolerance():
+    r = check_nav_anchor(
+        nav_delta=Decimal("1.05"), attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
+    )
+    assert r.available is True
+    assert r.within_tolerance is True
+
+
+def test_nav_anchor_beyond_tolerance():
+    r = check_nav_anchor(
+        nav_delta=Decimal("2.0"), attributed_interest=Decimal("1.0"), tol=Decimal("0.1")
+    )
+    assert r.available is True
+    assert r.within_tolerance is False
+
+
+def test_nav_anchor_zero_attributed_zero_delta_within():
+    r = check_nav_anchor(
+        nav_delta=Decimal("0"), attributed_interest=Decimal("0"), tol=Decimal("0.1")
+    )
+    assert r.available is True
+    assert r.within_tolerance is True
