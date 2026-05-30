@@ -4,7 +4,7 @@ Data window: 2026-05-27..2026-05-30 | fills: 4 | weekly windows: 1
 
 ## TL;DR
 - **Verdict: INSUFFICIENT_DATA**
-- Headline active spread (since inception): 0.04302068075857043274853801170%
+- Headline active spread (since inception): 0.00947080301204265497076023392%
 - Active-spread 95% CI: [0, 0]
 
 ### Reasons
