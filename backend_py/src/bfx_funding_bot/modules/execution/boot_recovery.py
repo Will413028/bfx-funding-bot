@@ -55,6 +55,7 @@ class ReconcileResult:
     n_failed: int
     reserved_usdt: Decimal = Decimal("0")
     realized_usdt: Decimal = Decimal("0")
+    available_usdt: Decimal = Decimal("0")
     n_credits: int = 0
     reserved_drift_usdt: Decimal = Decimal("0")
     realized_drift_usdt: Decimal = Decimal("0")
@@ -176,8 +177,14 @@ class _ActiveCreditsQuery(Protocol):
     ) -> list[ActiveFundingCredit]: ...
 
 
-class _AuthRestQuery(_ActiveOffersQuery, _ActiveCreditsQuery, Protocol):
-    """Combined protocol: satisfies both offers and credits queries."""
+class _WalletsQuery(Protocol):
+    async def get_funding_available(
+        self, *, ctx: AccountContext, currency: str,
+    ) -> Decimal: ...
+
+
+class _AuthRestQuery(_ActiveOffersQuery, _ActiveCreditsQuery, _WalletsQuery, Protocol):
+    """Combined protocol: offers + credits + wallet-available queries."""
 
 
 class _Bus(Protocol):
@@ -236,9 +243,10 @@ class BootRecovery:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> ReconcileResult:
-        # Both fetches may raise → daemon fail-safe (never trade without venue truth).
+        # All fetches may raise → daemon fail-safe (never trade without venue truth).
         venue_offers = await self._fetch_offers()
         venue_credits = await self._fetch_credits()
+        available_usdt = await self._fetch_available()
 
         reserved_usdt = sum((o.amount for o in venue_offers), Decimal("0"))
         realized_usdt = sum((c.amount for c in venue_credits), Decimal("0"))
@@ -270,7 +278,7 @@ class BootRecovery:
             account_id=self._ctx.account_id,
             reserved_usdt=reserved_usdt,
             realized_usdt=realized_usdt,
-            available_usdt=Decimal("0"),  # Task 4 wires the fetched funding-wallet available
+            available_usdt=available_usdt,
             n_offers=len(venue_offers),
             n_credits=len(venue_credits),
             occurred_at_ms=now_ms,
@@ -290,14 +298,16 @@ class BootRecovery:
                 n_fail += 1
         log.info(
             "reconcile_complete venue_offers=%d venue_credits=%d "
-            "reserved=%.2f realized=%.2f orphans_claimed=%d released=%d pending_failed=%d",
+            "reserved=%.2f realized=%.2f available=%.2f "
+            "orphans_claimed=%d released=%d pending_failed=%d",
             len(venue_offers), len(venue_credits),
-            float(reserved_usdt), float(realized_usdt),
+            float(reserved_usdt), float(realized_usdt), float(available_usdt),
             n_claim, n_release, n_fail,
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
             reserved_usdt=reserved_usdt, realized_usdt=realized_usdt,
+            available_usdt=available_usdt,
             n_credits=len(venue_credits),
             reserved_drift_usdt=drift.reserved_drift,
             realized_drift_usdt=drift.realized_drift,
@@ -358,6 +368,38 @@ class BootRecovery:
                     )
                     await asyncio.sleep(backoff)
         log.error("boot_recovery_credits_unreachable after %d attempts — failing startup", self._max_attempts)
+        assert last_exc is not None
+        raise last_exc
+
+    async def _fetch_available(self) -> Decimal:
+        """Fetch funding-wallet available balance with bounded retry on TRANSIENT
+        failures only. 4xx re-raises immediately; transient exhaustion re-raises.
+        Same fail-safe contract as offers/credits: a persistent failure aborts the
+        reconcile tick, so deploy() is skipped (never size against unknown funds).
+        Currency = symbol minus the leading 'f' (fUST -> UST)."""
+        currency = self._symbol[1:] if self._symbol.startswith("f") else self._symbol
+        last_exc: BitfinexAPIError | None = None
+        for attempt in range(self._max_attempts):
+            try:
+                return await self._auth_rest.get_funding_available(
+                    ctx=self._ctx, currency=currency,
+                )
+            except BitfinexAPIError as e:
+                if not _is_transient_status(e.status_code):
+                    log.error(
+                        "boot_recovery_wallets_fetch_fatal status=%d err=%r — failing reconcile",
+                        e.status_code, e,
+                    )
+                    raise
+                last_exc = e
+                if attempt + 1 < self._max_attempts:
+                    backoff = self._backoff_base_s * (2 ** attempt)
+                    log.warning(
+                        "boot_recovery_wallets_fetch_transient attempt=%d/%d status=%d backoff=%.1fs",
+                        attempt + 1, self._max_attempts, e.status_code, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+        log.error("boot_recovery_wallets_unreachable after %d attempts — failing reconcile", self._max_attempts)
         assert last_exc is not None
         raise last_exc
 
