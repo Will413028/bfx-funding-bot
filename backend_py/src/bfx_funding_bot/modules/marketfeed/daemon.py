@@ -94,6 +94,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     HeartbeatGuard,
     ManualKillGuard,
 )
+from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
@@ -562,18 +563,6 @@ async def _emit_locf_degraded(
 # Ledger + OfferRegistry subscribe to DomainEventBus in build_daemon.
 
 
-class _StubPnLSource:
-    """4.2 stub — disabled L2 guards never reach this (enabled=False short-circuits).
-    4.4 wires real PnLLedger that aggregates realized P&L from order_fill events.
-    """
-
-    def realized_loss_24h(self) -> Decimal:
-        return Decimal("0")
-
-    def drawdown_pct(self) -> float:
-        return 0.0
-
-
 class _StubDivergenceSource:
     """4.2 stub — disabled DivergenceRateGuard never reaches this.
     4.4 wires a real source backed by `signal_divergence_warn` event counts."""
@@ -715,7 +704,11 @@ async def build_daemon(
     )
     safety_cfg = load_safety_config(safety_cfg_path)
 
-    pnl_source = _StubPnLSource()
+    # L2 loss-limiter source: account NAV (available + reserved + realized)
+    # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
+    # RealizedLossGuard / DrawdownGuard can actually trip. Subscribed to
+    # PositionReconciled below (alongside the ledger).
+    pnl_source = ReconcileNavTracker(account_id=account_id)
     div_source = _StubDivergenceSource()
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
@@ -890,6 +883,9 @@ async def build_daemon(
     # not the bus — see BootRecovery._route_fsm). Wiring both together is required:
     # subscribing here without the registry routing would double-count orphans.
     bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
+    # Same snapshot feeds the L2 loss-limiter source: NAV peak + 24h window drive
+    # RealizedLossGuard / DrawdownGuard (no-op stub before this — see #4).
+    bus.subscribe(PositionReconciled, pnl_source.on_position_reconciled)
 
     # NO retry wrapper around submit: a funding-offer submit is a financial write
     # that must be attempted exactly once. Bitfinex funding offers have no client
