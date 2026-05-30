@@ -210,17 +210,17 @@ def attribute_active(
 ) -> list[WindowOutcome]:
     """Strategy arm: realized lending interest normalized to the capital budget.
 
-    A fill belongs to the window containing its fill_ts_ms. Per window:
-    net_monthly = sum(size * rate * duration_days) / capital * 100.
+    A fill belongs to the window containing its fill_ts_ms. Per window the
+    bucket's realized interest is concurrency-clamped to the budget
+    (clamp_active_window) so the active arm cannot "deploy" more than the cap the
+    passive arm is normalized to: net_monthly = clamped_interest / capital * 100.
     """
     if capital <= 0:
         raise ValueError(f"capital must be positive, got {capital!r}")
     out: list[WindowOutcome] = []
     for lo, hi in window_bounds:
         wf = [f for f in fills if lo <= f.fill_ts_ms < hi]
-        interest = sum(
-            (f.size_usdt * f.rate * _fill_duration_days(f) for f in wf), Decimal("0")
-        )
+        clamped = clamp_active_window(wf, cap=capital)
         rates = [f.rate for f in wf]
         # unweighted mean matched rate — diagnostic only, not used in the yield sum
         mean_rate = (
@@ -229,7 +229,7 @@ def attribute_active(
         out.append(
             WindowOutcome(
                 month_mts=lo,
-                net_monthly=interest / capital * Decimal("100"),
+                net_monthly=clamped.interest / capital * Decimal("100"),
                 n_trades=len(wf),
                 fill_rate=mean_rate,
             )
