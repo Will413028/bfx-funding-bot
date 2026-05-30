@@ -1,7 +1,7 @@
 """Canary OOS profitability characterization (backlog #4, reframed).
 
 Runs the deployed canary config (MeanReversion x fUST x {a30,p2}) over rolling
-1-month OOS windows vs the AlwaysFRR passive benchmark, and writes a research doc
+1-month OOS windows vs the AlwaysMarketRate passive benchmark, and writes a research doc
 with bootstrap CIs + a selection-bias deflated-Sharpe check.
 
 Spec:  docs/superpowers/specs/2026-05-28-canary-oos-profitability-validation-design.md
@@ -129,7 +129,7 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
     for r in reports:
         s, b = r.strat_summary, r.base_summary
         lines.append(f"## Cell {r.cell_label}\n")
-        lines.append("| Metric | Strategy | Baseline (AlwaysFRR) |")
+        lines.append("| Metric | Strategy | Baseline (AlwaysMarketRate) |")
         lines.append("|---|---|---|")
         lines.append(f"| median monthly % | {s.median_monthly:.4f} | {b.median_monthly:.4f} |")
         lines.append(f"| p25 monthly % | {s.p25_monthly:.4f} | {b.p25_monthly:.4f} |")

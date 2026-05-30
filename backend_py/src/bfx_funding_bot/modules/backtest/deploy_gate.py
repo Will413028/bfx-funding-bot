@@ -1,6 +1,6 @@
 """Deterministic deploy sanity gate for yield/carry cells.
 
-A deployed config must (a) be distinguishable from the passive AlwaysFRR
+A deployed config must (a) be distinguishable from the passive AlwaysMarketRate
 baseline (it actually acts) and (b) not be worse than passive (mean active
 return's bootstrap CI lower bound >= 0). Catches the canary-mr-config-inert
 failure mode where a shipped config collapses to passive. See

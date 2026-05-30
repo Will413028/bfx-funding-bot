@@ -1,7 +1,7 @@
 """Fixed-param rolling out-of-sample evaluation.
 
 For each WFO window: slice candles to [train_start, test_end] (EMA warmup +
-test month), run the strategy and the AlwaysFRR baseline recording only the
+test month), run the strategy and the AlwaysMarketRate baseline recording only the
 test month, and emit one paired WindowOutcome each. Params are FIXED (no
 per-window re-fit) -- this is the evaluation the deploy gate, the derivation
 sweep, and the OOS research script all share. No DB.
@@ -37,7 +37,7 @@ def evaluate_oos_windows(
     config: BacktestConfig | None = None,
     baseline_period_days: int = 2,
 ) -> tuple[list[WindowOutcome], list[WindowOutcome]]:
-    """Run a fixed-param strategy and AlwaysFRR over rolling test months.
+    """Run a fixed-param strategy and AlwaysMarketRate over rolling test months.
 
     `make_strategy` is called once per window (strategy state is per-window:
     fresh EMA warmed only on that window's slice -> no cross-window leakage).

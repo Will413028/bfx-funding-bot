@@ -21,7 +21,7 @@ class _NeverLendsStrategy(Strategy):
 
     Used to verify that evaluate_oos_windows runs candidate and baseline
     arms independently — a strategy that produces zero trades gives
-    net_monthly=0, which must differ from AlwaysFRR's positive return.
+    net_monthly=0, which must differ from AlwaysMarketRate's positive return.
     """
 
     @property
@@ -33,7 +33,7 @@ class _NeverLendsStrategy(Strategy):
 
 
 def test_evaluate_oos_windows_pairs_outcomes_per_window() -> None:
-    # one window, flat rate; AlwaysFRR for both arms -> identical outcomes,
+    # one window, flat rate; AlwaysMarketRate for both arms -> identical outcomes,
     # one WindowOutcome per window, aligned by month_mts.
     # _candles(0, 1000, ...) spans mts 0..999*3_600_000 = 3_596_400_000
     # window test range 500_000_000..900_000_000 is fully within that span.
@@ -59,7 +59,7 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
 
     Mechanism: the engine only accumulates equity when decide() returns a
     LendDecision. _NeverLendsStrategy never fires, so net_equity stays at 1.0
-    and net_monthly_return_pct stays at exactly 0. AlwaysFRR fires repeatedly
+    and net_monthly_return_pct stays at exactly 0. AlwaysMarketRate fires repeatedly
     (cooldown = 2*24 + 1 = 49 candles per trade; the ~111-hour test window
     contains several non-cooldown candles) and compounds positive returns.
 
@@ -91,7 +91,7 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
     assert strat_out[0].net_monthly == Decimal("0")
     assert strat_out[1].net_monthly == Decimal("0")
 
-    # Baseline (AlwaysFRR) -> fills repeatedly -> positive net_monthly in both windows.
+    # Baseline (AlwaysMarketRate) -> fills repeatedly -> positive net_monthly in both windows.
     assert base_out[0].n_trades > 0
     assert base_out[1].n_trades > 0
     assert base_out[0].net_monthly > Decimal("0")

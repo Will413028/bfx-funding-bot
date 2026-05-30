@@ -1,7 +1,7 @@
 """One-off investigation: MR fixed-param sensitivity on fUST cells (backlog #4 reconciliation).
 
 Question: the deployed canary config (ema_span=168, threshold_sigma=1.0) is inert on
-fUST (ratio_sigma~0.99 -> lower_band ~ -0.99 -> never pauses -> == passive AlwaysFRR).
+fUST (ratio_sigma~0.99 -> lower_band ~ -0.99 -> never pauses -> == passive AlwaysMarketRate).
 Does ANY other FIXED MR combo (the 6-cell Phase 3b grid) actually pause and beat passive
 on fUST_a30 / fUST_p2? Distinguishes "deployed the wrong fixed combo (recoverable alpha)"
 from "no fixed-param edge; WFO margin was adaptive-selection overfitting".

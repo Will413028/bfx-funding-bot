@@ -47,7 +47,7 @@ def test_run_backtest_constant_rate_produces_expected_monthly_return() -> None:
     assert abs(result.gross_monthly_return_pct - Decimal("0.3")) < Decimal("0.01")
     assert result.n_trades == 15
     assert result.max_drawdown_pct == Decimal("0")
-    # AlwaysFRR posts at candle close -> spread=0 -> fill_prob=1
+    # AlwaysMarketRate posts at candle close -> spread=0 -> fill_prob=1
     assert result.fill_rate == Decimal("1.0")
 
 
@@ -190,7 +190,7 @@ def test_run_backtest_sortino_with_multi_month_series_positive_finite() -> None:
 def test_run_backtest_spread_above_market_reduces_fill() -> None:
     """Strategy posts 10% above candle close -> spread_pct=0.10.
     With default fill_alpha=5: fill_prob = 1 - 5*0.10 = 0.5.
-    So gross = 0.5 * what AlwaysFRR-at-1.10x would have been.
+    So gross = 0.5 * what AlwaysMarketRate-at-1.10x would have been.
     """
     candles = _candles_constant_rate("0.0001", n=720)
 
