@@ -7,6 +7,7 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.funding_stats.repository import (
     get_frr_at_or_before_mts,
     get_in_range,
+    get_max_mts,
     get_min_mts,
     upsert_funding_stats,
 )
@@ -189,3 +190,31 @@ async def test_upsert_funding_stats_chunks_large_input(
         end_mts=1700000000000 + 5000 * 3600000,
     )
     assert len(fetched) == 5000
+
+
+@pytest.mark.asyncio
+async def test_get_max_mts_returns_none_for_unknown_symbol(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    result = await get_max_mts(sqlite_session, symbol="fUSD")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_max_mts_returns_largest(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    await upsert_funding_stats(
+        sqlite_session,
+        [
+            _make("fUSD", 1700003600000),
+            _make("fUSD", 1700000000000),
+            _make("fUSD", 1700007200000),
+            _make("fUST", 1900000000000),  # different symbol — must not bleed across
+        ],
+    )
+    await sqlite_session.commit()
+    assert await get_max_mts(sqlite_session, symbol="fUSD") == 1700007200000
+    assert await get_max_mts(sqlite_session, symbol="fUST") == 1900000000000
