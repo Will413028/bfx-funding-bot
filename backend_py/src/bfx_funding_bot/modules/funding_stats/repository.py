@@ -120,6 +120,13 @@ async def get_min_mts(session: AsyncSession, *, symbol: str) -> int | None:
     return result.scalar_one_or_none()
 
 
+async def get_max_mts(session: AsyncSession, *, symbol: str) -> int | None:
+    """Return largest mts for symbol, or None if no rows."""
+    stmt = select(func.max(FundingStatRow.mts)).where(FundingStatRow.symbol == symbol)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 async def get_frr_at_or_before_mts(
     session: AsyncSession,
     *,
