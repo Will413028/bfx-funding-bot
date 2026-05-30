@@ -26,6 +26,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
 )
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    ClampDiagnostic,
     FillRecord,
     G3Verdict,
     MarketRatePoint,
@@ -37,6 +38,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     cell_period_days,
     check_deployment_anchor,
     check_nav_anchor,
+    clamp_active_window,
     decide_verdict,
     open_principal_at,
     weekly_window_bounds,
@@ -76,8 +78,8 @@ async def build_verdict_from_neon(
     *,
     capital: Decimal,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> tuple[G3Verdict, str, int]:
-    """Query Neon and run G3 attribution.  Returns (verdict, data_window_str, n_fills).
+) -> tuple[G3Verdict, str, int, ClampDiagnostic]:
+    """Query Neon and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag).
 
     I/O shell only: fetches fills/releases/candles/position_state, builds the
     FillRecord + MarketRatePoint domain lists, then delegates to the pure
@@ -203,10 +205,10 @@ def _compute_verdict(
     market_rate_points: list[MarketRatePoint],
     observed_realized: Decimal,
     capital: Decimal,
-) -> tuple[G3Verdict, str, int]:
+) -> tuple[G3Verdict, str, int, ClampDiagnostic]:
     """Pure G3 verdict over already-built domain lists. No I/O.
 
-    Returns (verdict, data_window_str, n_fills).
+    Returns (verdict, data_window_str, n_fills, clamp_diag).
     """
     # Band guard: a wrong-scale passive series (funding_stats.frr ~1e-6, or a
     # percentage-scaled rate) makes the active spread meaningless. Capture the
@@ -250,11 +252,18 @@ def _compute_verdict(
         single_base = attribute_passive(market_rate_points, window_bounds=[(min_ts, max_ts)])
         headline_active_spread = single_strat[0].net_monthly - single_base[0].net_monthly
 
-        # total_capital_days = Σ(size_i * duration_i) / capital
-        total_cap_days_raw = sum(
-            (f.size_usdt * _fill_duration_days(f) for f in fills), Decimal("0")
+        # Budget-clamped capital-days (USDT·days) and over-deploy diagnostic come
+        # from one full-span sweep. total_capital_days is USDT·days to match
+        # decide_verdict's contract (min_capital_days = capital*7); the old
+        # `/ capital` made it 'days' and mismatched the threshold.
+        full_clamp = clamp_active_window(fills, cap=capital)
+        total_capital_days = full_clamp.capital_days
+        clamp_diag = ClampDiagnostic(
+            cap=capital,
+            peak_concurrent=full_clamp.peak_concurrent,
+            raw_interest=full_clamp.raw_interest,
+            clamped_interest=full_clamp.interest,
         )
-        total_capital_days = total_cap_days_raw / capital if capital > 0 else Decimal("0")
 
         # attributed_deployed = open principal at the end of the data window.
         # Uses point-in-time snapshot (credits still open at max_ts) so it is
@@ -281,6 +290,12 @@ def _compute_verdict(
         # let the anchor diverge to UNRELIABLE rather than fabricate agreement.
         attributed_deployed = Decimal("0")
         attributed_interest = Decimal("0")
+        clamp_diag = ClampDiagnostic(
+            cap=capital,
+            peak_concurrent=Decimal("0"),
+            raw_interest=Decimal("0"),
+            clamped_interest=Decimal("0"),
+        )
 
     n_windows = len(bounds)
     min_capital_days = capital * Decimal("7")
@@ -356,4 +371,4 @@ def _compute_verdict(
     else:
         data_window = "n/a"
 
-    return verdict, data_window, n_fills
+    return verdict, data_window, n_fills, clamp_diag
