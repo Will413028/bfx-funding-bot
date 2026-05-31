@@ -245,6 +245,11 @@ async def test_smoke_runner_present_for_simulated_paper(
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
     assert daemon.smoke_runner is not None  # simulated → smoke chain self-test wired
+    # Paper/shadow MUST never construct or contend a single-writer advisory lock:
+    # build_daemon gates writer_lock on `not spec.is_simulated`, so two shadow/paper
+    # instances provably can't contend a lock (and the writer_lock liveness sub-task
+    # is skipped in run()). Pin it so a future wiring change can't silently flip it.
+    assert daemon.writer_lock is None
 
 
 @pytest.mark.asyncio
