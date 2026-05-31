@@ -61,24 +61,28 @@ class ExtractedSignal:
 def _strategy_attributes(
     cell: CellConfig, strategy: Any, candle: FundingCandle, ld: LendDecision | None,
 ) -> dict[str, Any]:
-    """Per-strategy attribute extraction.
+    """Per-strategy attribute extraction for divergence comparison.
 
-    TODO(phase-4.3): Current placeholder reads only static inputs (config + candle.close)
-    — cannot detect strategy *internal state* divergence (e.g., RP deque drift,
-    MR EMA accumulator off-by-one). For true silent-divergence detection, expose
-    strategy state via @property accessors on RatePercentileStrategy /
-    MeanReversionStrategy (e.g., `last_threshold`, `last_ema`) and include here.
-    This limits 4.1's divergence reporter to direction-flip detection only.
+    Includes decision-determining internal state (MR ema/deviation, RP
+    threshold/window-filled) at Decimal precision so silent accumulator drift is
+    detectable even when the resulting direction matches (G2 state-parity).
+    Reads strategy state AFTER ExtractedSignal.extract has called observe+decide,
+    so the cached deviation/threshold reflect this boundary candle. Decimal values
+    are kept un-cast — a float cast would mask sub-Decimal drift.
     """
     if cell.strategy == StrategyName.RATE_PERCENTILE:
         return {
             "percentile": float(cell.params["percentile"]),
             "last_close": float(candle.close) if candle.close is not None else 0.0,
+            "last_threshold": strategy.last_threshold,
+            "window_filled": strategy.window_filled,
         }
     if cell.strategy == StrategyName.MEAN_REVERSION:
         return {
             "rate": float(candle.close) if candle.close is not None else 0.0,
             "threshold_sigma": float(cell.params["threshold_sigma"]),
+            "ema_current": strategy.ema_current,
+            "last_deviation": strategy.last_deviation,
         }
     return {}
 
