@@ -67,6 +67,7 @@ class ClaimRecord:
     state: RegistryState
     occurred_at_ms: int
     last_updated_ms: int
+    symbol: str = "fUSD"  # populated from ReservationClaimed.symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,7 @@ def transition(
             state=RegistryState.CLAIMED,
             occurred_at_ms=occurred,
             last_updated_ms=now_ms,
+            symbol=incoming.symbol,
         )
         return {**snapshot, voi: record}, []
 
