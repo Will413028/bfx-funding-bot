@@ -117,7 +117,7 @@ def test_replay_byte_equivalent_with_locf_on_sparse_input():
     ]
     ref_mts = base_mts + 15 * one_hour_ms  # T+15h; 6h gap after the last dense
     gap_terminator = _candle(ref_mts, Decimal("0.0006"))
-    raw_candles = dense_candles + [gap_terminator]
+    raw_candles = [*dense_candles, gap_terminator]
 
     locf_filled = reindex_and_ffill(
         raw_candles, ref_mts=ref_mts, max_gap_hours=budget_hours,
