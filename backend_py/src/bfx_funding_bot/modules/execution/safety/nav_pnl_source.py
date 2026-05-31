@@ -53,6 +53,10 @@ class ReconcileNavTracker:
     async def on_position_reconciled(self, event: PositionReconciled) -> None:
         if event.account_id != self.account_id:
             return
+        # _resolve_position_fields guarantees these are non-None at runtime
+        assert event.available_usdt is not None
+        assert event.reserved_usdt is not None
+        assert event.realized_usdt is not None
         nav = event.available_usdt + event.reserved_usdt + event.realized_usdt
         self._samples.append((event.occurred_at_ms, nav))
         if self._peak is None or nav > self._peak:
