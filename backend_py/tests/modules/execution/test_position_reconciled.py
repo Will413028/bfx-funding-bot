@@ -57,13 +57,13 @@ async def test_offer_filled_into_credit_but_ws_missed_reconcile_sets_realized():
     With the fix: PositionReconciled(realized=150) → realized = $150.
     """
     ledger = PaperPositionLedger(account_id=_ACC)
-    ledger._reserved = Decimal("150")  # stale: offer was "reserved"
-    ledger._realized = Decimal("0")    # WS fill was missed
+    ledger._reserved["fUSD"] = Decimal("150")  # stale: offer was "reserved"
+    ledger._realized["fUSD"] = Decimal("0")    # WS fill was missed
 
     await ledger.on_position_reconciled(_reconciled(reserved="0", realized="150", n_credits=1))
 
-    assert ledger._reserved == Decimal("0")
-    assert ledger._realized == Decimal("150")
+    assert ledger._reserved["fUSD"] == Decimal("0")
+    assert ledger._realized["fUSD"] == Decimal("150")
     assert ledger.current_exposure() == Decimal("150")
 
 
@@ -71,12 +71,12 @@ async def test_offer_filled_into_credit_but_ws_missed_reconcile_sets_realized():
 async def test_three_credits_reconcile_corrects_full_canary_incident():
     """Full $450 canary scenario: 3 credits, ledger drifted to $300."""
     ledger = PaperPositionLedger(account_id=_ACC)
-    ledger._reserved = Decimal("0")
-    ledger._realized = Decimal("300")  # bot thinks only 2 credits
+    ledger._reserved["fUSD"] = Decimal("0")
+    ledger._realized["fUSD"] = Decimal("300")  # bot thinks only 2 credits
 
     await ledger.on_position_reconciled(_reconciled(realized="450", n_credits=3))
 
-    assert ledger._realized == Decimal("450")
+    assert ledger._realized["fUSD"] == Decimal("450")
     assert ledger.current_exposure() == Decimal("450")
 
 
@@ -90,8 +90,8 @@ async def test_on_position_reconciled_overwrites_previous_state():
     await ledger.on_position_reconciled(_reconciled(reserved="500", realized="300"))
     await ledger.on_position_reconciled(_reconciled(reserved="50", realized="400"))
 
-    assert ledger._reserved == Decimal("50")
-    assert ledger._realized == Decimal("400")
+    assert ledger._reserved["fUSD"] == Decimal("50")
+    assert ledger._realized["fUSD"] == Decimal("400")
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_on_position_reconciled_ignores_foreign_account():
     ledger = PaperPositionLedger(account_id=_ACC)
     await ledger.on_position_reconciled(_reconciled(realized="999", account_id="other"))
 
-    assert ledger._realized == Decimal("0")  # unchanged
+    assert ledger._realized == {}  # unchanged — dict stays empty
 
 
 # ── Convergence scenarios ─────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ async def test_credit_matured_reconcile_decrements_realized():
     await ledger.on_position_reconciled(_reconciled(realized="450", n_credits=3))
     await ledger.on_position_reconciled(_reconciled(realized="300", n_credits=2))
 
-    assert ledger._realized == Decimal("300")
+    assert ledger._realized["fUSD"] == Decimal("300")
     assert ledger.current_exposure() == Decimal("300")
 
 
@@ -141,8 +141,8 @@ async def test_offer_cancelled_unfilled_reserved_drops_realized_flat():
         _reconciled(reserved="0", realized="200", n_offers=0, n_credits=1)
     )
 
-    assert ledger._reserved == Decimal("0")
-    assert ledger._realized == Decimal("200")
+    assert ledger._reserved["fUSD"] == Decimal("0")
+    assert ledger._realized["fUSD"] == Decimal("200")
 
 
 # ── WS delta interaction ──────────────────────────────────────────────────────
@@ -175,5 +175,5 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
         _reconciled(reserved="0", realized="300", n_credits=2)
     )
 
-    assert ledger._realized == Decimal("300")  # not 450
+    assert ledger._realized["fUSD"] == Decimal("300")  # not 450
     assert ledger.current_exposure() == Decimal("300")
