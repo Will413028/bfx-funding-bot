@@ -23,6 +23,25 @@ from uuid import UUID
 __SCHEMA_VERSION__ = 2
 
 
+def _resolve_amount(ev: object) -> None:
+    """Reconcile transitional `size_usdt` with canonical `amount` on frozen events.
+
+    Exactly one of the two must be provided by the caller. We mirror the value
+    into BOTH attributes so `.amount` (canonical) and `.size_usdt` (legacy read
+    path in ledger/smoke_runner) agree until all callsites migrate to `amount`.
+    """
+    amount = getattr(ev, "amount", None)
+    size_usdt = getattr(ev, "size_usdt", None)
+    if amount is None and size_usdt is None:
+        raise TypeError(
+            f"{type(ev).__name__} requires `amount` (or transitional `size_usdt`)"
+        )
+    if amount is None:
+        object.__setattr__(ev, "amount", size_usdt)
+    if size_usdt is None:
+        object.__setattr__(ev, "size_usdt", amount)
+
+
 @dataclass(frozen=True, slots=True)
 class ReservationIntent:
     """A2 write-ahead intent — durable record BEFORE the venue REST submit.
@@ -66,59 +85,87 @@ class ReservationFailed:
 class ReservationClaimed:
     """Submit returned status ∈ {submitted, filled} — capital reserved at venue.
 
-    Ledger effect: _reserved += size_usdt.
+    Ledger effect: reserved[symbol] += amount (native units).
+
+    `symbol` is the offer currency (e.g. "fUST"); defaults to the legacy
+    single-currency fallback "fUSD". `amount` is the native reserve size;
+    `size_usdt` is a transitional read alias + back-compat constructor kwarg
+    kept until producers migrate (Phase 1 per-symbol ledger work).
     """
     cid: int
     venue_offer_id: str
-    size_usdt: Decimal
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
+    amount: Decimal | None = None
+    symbol: str = "fUSD"
+    size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _resolve_amount(self)
+
+    @property
+    def amount_native(self) -> Decimal:
+        assert self.amount is not None
+        return self.amount
 
 
 @dataclass(frozen=True, slots=True)
 class OrderFilled:
     """Offer → credit transition (paper synchronous OR live WS `foc` EXECUTED).
 
-    Ledger effect: _reserved -= size_usdt; _realized += size_usdt.
+    Ledger effect: reserved[symbol] -= amount; realized[symbol] += amount.
     `credit_id` is None for paper (no real credit) and for live (the `foc`
     EXECUTED frame carries no credit id; the fill is keyed by venue_offer_id).
+
+    `symbol`/`amount`/`size_usdt`: see ReservationClaimed.
     """
     cid: int
     venue_offer_id: str
     credit_id: str | None
-    size_usdt: Decimal
     fill_rate: float
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
+    amount: Decimal | None = None
+    symbol: str = "fUSD"
+    size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _resolve_amount(self)
 
 
 @dataclass(frozen=True, slots=True)
 class ReservationReleased:
     """Offer cancelled / expired without fill.
 
-    Ledger effect: _reserved -= size_usdt (floor at 0; emits warning + counts).
+    Ledger effect: reserved[symbol] -= amount (floor at 0; emits warning + counts).
+    `symbol`/`amount`/`size_usdt`: see ReservationClaimed.
     """
     cid: int
     venue_offer_id: str
-    size_usdt: Decimal
     reason: str  # "venue_cancel" / "user_cancel" / "expired" / "missing_from_venue"
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
+    amount: Decimal | None = None
+    symbol: str = "fUSD"
+    size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _resolve_amount(self)
 
 
 @dataclass(frozen=True, slots=True)

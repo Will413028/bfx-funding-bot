@@ -76,7 +76,8 @@ class PaperPositionLedger:
     async def on_reservation_claimed(self, event: ReservationClaimed) -> None:
         if event.account_id != self.account_id:
             return
-        self._reserved += event.size_usdt
+        assert event.amount is not None  # invariant: _resolve_amount guarantees this
+        self._reserved += event.amount
 
     async def on_order_filled(self, event: OrderFilled) -> None:
         if event.account_id != self.account_id:
@@ -86,16 +87,17 @@ class PaperPositionLedger:
             log.debug("ledger_dedup filled %s", key)
             return
         self._processed_fills.add(key)
-        delta = min(self._reserved, event.size_usdt)
+        assert event.amount is not None  # invariant: _resolve_amount guarantees this
+        delta = min(self._reserved, event.amount)
         self._reserved -= delta
-        if delta < event.size_usdt:
+        if delta < event.amount:
             self.replay_floor_hit_count += 1
             log.warning(
                 "order_filled_without_claim cid=%d offer=%s expected=%.2f applied=%.2f",
                 event.cid, event.venue_offer_id,
-                float(event.size_usdt), float(delta),
+                float(event.amount), float(delta),
             )
-        self._realized += event.size_usdt
+        self._realized += event.amount
 
     async def on_reservation_released(self, event: ReservationReleased) -> None:
         if event.account_id != self.account_id:
@@ -105,14 +107,15 @@ class PaperPositionLedger:
             log.debug("ledger_dedup released %s", key)
             return
         self._processed_releases.add(key)
-        delta = min(self._reserved, event.size_usdt)
+        assert event.amount is not None  # invariant: _resolve_amount guarantees this
+        delta = min(self._reserved, event.amount)
         self._reserved -= delta
-        if delta < event.size_usdt:
+        if delta < event.amount:
             self.replay_floor_hit_count += 1
             log.warning(
                 "reservation_release_without_claim cid=%d offer=%s expected=%.2f applied=%.2f reason=%s",
                 event.cid, event.venue_offer_id,
-                float(event.size_usdt), float(delta), event.reason,
+                float(event.amount), float(delta), event.reason,
             )
 
     async def on_position_reconciled(self, event: PositionReconciled) -> None:

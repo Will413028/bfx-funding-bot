@@ -27,7 +27,7 @@ _FIELDS: dict[type, list[str]] = {
     cls: [f.name for f in dataclasses.fields(cls)]
     for cls in _CLASS_BY_TYPE.values()
 }
-_DECIMAL_FIELDS = {"size_usdt"}
+_DECIMAL_FIELDS = {"size_usdt", "amount"}
 _UUID_FIELDS = {"signal_correlation_id"}
 
 
