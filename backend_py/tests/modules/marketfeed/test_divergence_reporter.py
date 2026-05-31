@@ -246,3 +246,47 @@ def test_cp1_byte_equivalence_property(n: int, seed: int):
 
     # Byte-equivalence: same input sequence -> same extracted signal
     assert live_signal == replay_signal
+
+
+def test_signal_score_mr_is_continuous_deviation():
+    """MR signal_score is the continuous (close-ema)/ema margin, not ±1.0."""
+    cell = CellConfig.model_validate({
+        "strategy": "mean_reversion", "symbol": "fUSD", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {"ema_span": 24, "threshold_sigma": 0.5, "ratio_sigma": 0.05},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
+    })
+    strat = build_strategy(cell)
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(5)]
+    for c in history[:-1]:
+        strat.observe(c)
+    sig = ExtractedSignal.extract(cell, strat, history[-1])
+    assert sig.signal_score == float(strat.last_deviation)
+    assert sig.signal_score != 1.0  # no longer the binary placeholder
+
+
+def test_signal_score_rp_is_percentile_rank():
+    """RP signal_score is the 0-100 rank of close within the window."""
+    cell = _cell_rp()  # percentile=75, lookback=8
+    history = [_candle(1747584000000 + i * 3600_000, Decimal(f"0.000{i + 1}"))
+               for i in range(9)]
+    strat = build_strategy(cell)
+    for c in history[:-1]:
+        strat.observe(c)
+    sig = ExtractedSignal.extract(cell, strat, history[-1])
+    # boundary close (0.0009) >= every value in the post-observe window → 100.0
+    assert sig.signal_score == 100.0
+
+
+def test_signal_score_zero_when_window_not_filled():
+    """RP score is 0.0 while the window is still warming up (not filled)."""
+    cell = _cell_rp()  # lookback=8
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(3)]  # only 3 < 8 → never fills
+    strat = build_strategy(cell)
+    for c in history[:-1]:
+        strat.observe(c)
+    sig = ExtractedSignal.extract(cell, strat, history[-1])
+    assert sig.signal_score == 0.0
