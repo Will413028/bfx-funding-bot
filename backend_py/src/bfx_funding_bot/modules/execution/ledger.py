@@ -1,13 +1,17 @@
-"""PaperPositionLedger — in-memory dual counter loaded from PostgreSQL snapshot.
+"""PaperPositionLedger — in-memory per-symbol counters loaded from PostgreSQL snapshot.
 
 PostgreSQL event_log is SoT. On daemon startup, from_snapshot reads
-position_state (reserved_usdt / realized_usdt) to rebuild in-memory
-counters. Subscribe to DomainEventBus for live updates.
+position_state (reserved / realized) to rebuild in-memory per-symbol
+dicts. Subscribe to DomainEventBus for live updates.
 
 reserved: open reservations (offer placed, no match yet). AllocationCap
 uses reserved+realized for pre-trade reservation check.
 realized: matched credits (actual exposure earning APR). L2 guards
 (DrawdownGuard / DivergenceRateGuard, Phase 4.4) use realized only.
+
+Counters are keyed by symbol (e.g. "fUST", "fUSD"). Each symbol bucket
+is isolated — cross-symbol sums are available via the no-arg getter path
+(transitional back-compat; removed once all callers pass symbol explicitly).
 
 floor-at-0 on RELEASE without prior CLAIM: edge case where CLAIMED
 event not yet reflected in snapshot. Tracked via replay_floor_hit_count;
@@ -35,9 +39,11 @@ log = logging.getLogger(__name__)
 class PaperPositionLedger:
     def __init__(self, account_id: str) -> None:
         self.account_id = account_id
-        self._reserved = Decimal("0")
-        self._realized = Decimal("0")
-        self._available = Decimal("0")
+        # Per-symbol dicts keyed by offer currency (e.g. "fUST", "fUSD").
+        # Missing key → 0; use .get(sym, Decimal("0")) everywhere.
+        self._reserved: dict[str, Decimal] = {}
+        self._realized: dict[str, Decimal] = {}
+        self._available: dict[str, Decimal] = {}
         self.replay_floor_hit_count = 0
         self._processed_fills: set[tuple[str, int | None]] = set()
         self._processed_releases: set[tuple[str, int | None]] = set()
@@ -52,23 +58,26 @@ class PaperPositionLedger:
         account_id: str,
         deployment_environment: str,
     ) -> PaperPositionLedger:
-        """Load ledger counters from the position_state snapshot table (no replay)."""
+        """Load per-symbol ledger counters from the position_state snapshot
+        table (no replay). Loads ALL rows for (account, env) — one per symbol —
+        into the per-symbol dicts. `available` is never persisted (in-memory,
+        populated by the first reconcile), so it stays empty here."""
         from sqlalchemy import select
 
         from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
 
         ledger = cls(account_id=account_id)
-        row = (
+        rows = (
             await session.execute(
                 select(PositionStateRow).where(
                     PositionStateRow.account_id == account_id,
                     PositionStateRow.deployment_environment == deployment_environment,
                 )
             )
-        ).scalar_one_or_none()
-        if row is not None:
-            ledger._reserved = Decimal(str(row.reserved))
-            ledger._realized = Decimal(str(row.realized))
+        ).scalars().all()
+        for row in rows:
+            ledger._reserved[row.symbol] = Decimal(str(row.reserved))
+            ledger._realized[row.symbol] = Decimal(str(row.realized))
         return ledger
 
     # ---------- live update handlers (DomainEventBus subscribers) ----------
@@ -76,8 +85,9 @@ class PaperPositionLedger:
     async def on_reservation_claimed(self, event: ReservationClaimed) -> None:
         if event.account_id != self.account_id:
             return
-        assert event.amount is not None  # invariant: _resolve_amount guarantees this
-        self._reserved += event.amount
+        amount = event.amount
+        assert amount is not None  # invariant: _resolve_amount guarantees this
+        self._reserved[event.symbol] = self._reserved.get(event.symbol, Decimal("0")) + amount
 
     async def on_order_filled(self, event: OrderFilled) -> None:
         if event.account_id != self.account_id:
@@ -87,17 +97,21 @@ class PaperPositionLedger:
             log.debug("ledger_dedup filled %s", key)
             return
         self._processed_fills.add(key)
-        assert event.amount is not None  # invariant: _resolve_amount guarantees this
-        delta = min(self._reserved, event.amount)
-        self._reserved -= delta
-        if delta < event.amount:
+        amount = event.amount
+        assert amount is not None  # invariant: _resolve_amount guarantees this
+        reserved = self._reserved.get(event.symbol, Decimal("0"))
+        delta = min(reserved, amount)
+        self._reserved[event.symbol] = reserved - delta
+        if delta < amount:
             self.replay_floor_hit_count += 1
             log.warning(
-                "order_filled_without_claim cid=%d offer=%s expected=%.2f applied=%.2f",
-                event.cid, event.venue_offer_id,
-                float(event.amount), float(delta),
+                "order_filled_without_claim cid=%d offer=%s symbol=%s expected=%.2f applied=%.2f",
+                event.cid, event.venue_offer_id, event.symbol,
+                float(amount), float(delta),
             )
-        self._realized += event.amount
+        self._realized[event.symbol] = (
+            self._realized.get(event.symbol, Decimal("0")) + amount
+        )
 
     async def on_reservation_released(self, event: ReservationReleased) -> None:
         if event.account_id != self.account_id:
@@ -107,59 +121,100 @@ class PaperPositionLedger:
             log.debug("ledger_dedup released %s", key)
             return
         self._processed_releases.add(key)
-        assert event.amount is not None  # invariant: _resolve_amount guarantees this
-        delta = min(self._reserved, event.amount)
-        self._reserved -= delta
-        if delta < event.amount:
+        amount = event.amount
+        assert amount is not None  # invariant: _resolve_amount guarantees this
+        reserved = self._reserved.get(event.symbol, Decimal("0"))
+        delta = min(reserved, amount)
+        self._reserved[event.symbol] = reserved - delta
+        if delta < amount:
             self.replay_floor_hit_count += 1
             log.warning(
-                "reservation_release_without_claim cid=%d offer=%s expected=%.2f applied=%.2f reason=%s",
-                event.cid, event.venue_offer_id,
-                float(event.amount), float(delta), event.reason,
+                "reservation_release_without_claim cid=%d offer=%s symbol=%s expected=%.2f applied=%.2f reason=%s",
+                event.cid, event.venue_offer_id, event.symbol,
+                float(amount), float(delta), event.reason,
             )
 
     async def on_position_reconciled(self, event: PositionReconciled) -> None:
         """Absolute set from venue snapshot — NOT a delta.
 
-        Overwrites reserved/realized with the authoritative venue values.
-        Called after each reconcile tick (boot + periodic). The next WS delta
-        that arrives will temporarily diverge; the next reconcile corrects it.
+        Overwrites THIS symbol's reserved/realized/available with the
+        authoritative venue values. Called once per configured symbol after
+        each reconcile tick (boot + periodic). Other symbols' buckets are left
+        intact; each carries its own PositionReconciled. The next WS delta that
+        arrives will temporarily diverge; the next reconcile corrects it.
         """
         if event.account_id != self.account_id:
             return
-        # _resolve_position_fields guarantees these are non-None at runtime
-        assert event.reserved_usdt is not None
-        assert event.realized_usdt is not None
-        assert event.available_usdt is not None
-        self._reserved = event.reserved_usdt
-        self._realized = event.realized_usdt
-        self._available = event.available_usdt
+        reserved = event.reserved
+        realized = event.realized
+        available = event.available
+        assert reserved is not None and realized is not None and available is not None
+        self._reserved[event.symbol] = reserved
+        self._realized[event.symbol] = realized
+        self._available[event.symbol] = available
 
     # ---------- public getters ----------
 
-    def current_exposure(self) -> Decimal:
-        """For AllocationCapGuard: reserved + realized = capital committed at venue."""
-        return self._reserved + self._realized
+    def current_exposure(self, symbol: str | None = None) -> Decimal:
+        """For AllocationCapGuard: reserved + realized for THIS symbol (native
+        units; never cross-symbol). `symbol=None` returns the cross-symbol SUM —
+        a transitional back-compat path for un-migrated callers; the deferred
+        cleanup makes `symbol` required and drops the None branch."""
+        if symbol is None:
+            total = Decimal("0")
+            for v in self._reserved.values():
+                total += v
+            for v in self._realized.values():
+                total += v
+            return total
+        return self._reserved.get(symbol, Decimal("0")) + self._realized.get(
+            symbol, Decimal("0")
+        )
 
-    def reserved_exposure(self) -> Decimal:
+    def reserved_exposure(self, symbol: str | None = None) -> Decimal:
         """Pending open-offer capital only (placed but not yet matched).
 
         Used by CellDeploymentTracker.reconcile_to_total to rescale per-cell
         intent to the reserved total — NOT to current_exposure. Realized credits
         are committed and unattributable to any specific cell; including them in
         the rescale factor would inflate per-cell intent past cap_per_cell.
+
+        `symbol=None` → cross-symbol SUM (transitional back-compat for
+        un-migrated callers; deferred cleanup makes `symbol` required).
         """
-        return self._reserved
+        if symbol is None:
+            total = Decimal("0")
+            for v in self._reserved.values():
+                total += v
+            return total
+        return self._reserved.get(symbol, Decimal("0"))
 
-    def realized_exposure(self) -> Decimal:
-        """For L2 guards (DrawdownGuard etc., Phase 4.4): matched credits only."""
-        return self._realized
+    def realized_exposure(self, symbol: str | None = None) -> Decimal:
+        """Matched credits only, for this symbol.
 
-    def available_balance(self) -> Decimal:
+        For L2 guards (DrawdownGuard etc., Phase 4.4): matched credits only.
+        `symbol=None` → cross-symbol SUM (transitional).
+        """
+        if symbol is None:
+            total = Decimal("0")
+            for v in self._realized.values():
+                total += v
+            return total
+        return self._realized.get(symbol, Decimal("0"))
+
+    def available_balance(self, symbol: str | None = None) -> Decimal:
         """Funding-wallet available balance from the last reconcile (in-memory;
         not persisted). 0 until the first reconcile populates it — fail-closed
         (the reconciler deploys nothing on unknown funds). Read by the
-        DeploymentReconciler balance clamp and BuyingPowerGuard."""
-        return self._available
+        DeploymentReconciler balance clamp and BuyingPowerGuard.
+
+        `symbol=None` → cross-symbol SUM (transitional back-compat).
+        """
+        if symbol is None:
+            total = Decimal("0")
+            for v in self._available.values():
+                total += v
+            return total
+        return self._available.get(symbol, Decimal("0"))
 
 
