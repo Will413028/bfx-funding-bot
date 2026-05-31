@@ -33,7 +33,7 @@ These OVERRIDE anything in the per-cluster prose below where they conflict:
 
 ## Real-money guardrail (Phase-1 branch)
 
-Do **not** deploy the canary from this branch until Phase 1 is COMPLETE (all producers pass `symbol=`, i.e. through Task 16). Mid-branch, events emitted without `symbol=` fall back to the `"fUSD"` default and bucket under fUSD; the O2 no-arg sum keeps TOTALS (and therefore tests + the existing global guards) correct, but per-symbol buckets are provisional until producers migrate. Koyeb auto-deploy is off and deploys are manual, so this is a guardrail, not a live risk — just never run the deploy script from a mid-Phase-1 commit.
+Do **not** deploy the canary from this branch until Phase 1 is COMPLETE — specifically until BOTH (a) every live producer threads `symbol=` (Cluster A2, **Tasks 3A–3D**) AND (b) the per-symbol ledger/guards/reconcile are wired (through Task 20). Mid-branch, events emitted without `symbol=` fall back to the `"fUSD"` default and bucket under fUSD; once the ledger is per-symbol (Cluster B) and guards read a concrete symbol (Cluster E), a mid-branch deploy that has NOT yet completed A2 would make exposure/balance gating blind to intra-tick fUST events until the next ~90s reconcile absolute-set. The unit suite stays green regardless (fixtures pass `symbol=`), so this is not test-visible. Koyeb auto-deploy is off and deploys are manual, so this is a guardrail, not a live risk — just never run the deploy script from a mid-Phase-1 commit.
 
 ---
 
@@ -671,6 +671,218 @@ class DecisionPayload(BaseModel):
   `git add src/bfx_funding_bot/modules/marketfeed/schemas.py tests/modules/marketfeed/test_schemas.py`
   `git commit -m "✨ Feat: add symbol (offer currency) to DecisionPayload, default fUSD"`
 
+
+---
+
+# Cluster A2 — Live producer symbol threading
+
+> **Execute these (Tasks 3A–3D) AFTER Task 3 and BEFORE Task 4.** They close the critical gap the plan review found: every LIVE producer that constructs an execution event currently passes no `symbol=`, so events default to `"fUSD"` while the canary runs fUST cells. Once the ledger buckets by `event.symbol` (Cluster B) and guards read a concrete symbol (Cluster E), that default would make exposure/balance gating blind to intra-tick fUST events until the next ~90s reconcile absolute-set — a real-money correctness gap (not a test failure; the suite stays green because fixtures pass `symbol=`). These tasks thread the REAL symbol at each site. Only ADD `symbol=<source>`; keep the existing `size_usdt=` argument as-is (O1 alias). Full unit gate `cd backend_py && uv run pytest -m "not integration"` stays green after each.
+
+**Symbol source audit (verified against current code):**
+- `reservation_emitting.py`: `decision.symbol` — `DecisionPayload` is in scope (after Task 3).
+- `ws_dispatcher.py` (`_translate_foc`): `foc.symbol` — `FocEvent` already carries `.symbol`; no new threading.
+- `fill_tracker.py`: `ClaimRecord` has no `symbol` and none is reachable at the construction site → add `ClaimRecord.symbol` (default `"fUSD"`), populate it from `ReservationClaimed.symbol` in `registry_offers.transition()`, then read `claim.symbol`.
+- `boot_recovery.compute_recovery_actions`: orphan path uses `offer.symbol` (`ActiveFundingOffer` carries it); missing-claim path uses the reconciler-level `BootRecovery._symbol` (because `LocalClaim`/`OfferClaimRow` have no symbol — a per-claim symbol would need an `offer_claims` column, deferred).
+
+### Task 3A: `reservation_emitting.py` — thread `decision.symbol` into `ReservationClaimed` + `OrderFilled`
+
+**Files:**
+- `src/bfx_funding_bot/modules/execution/middleware/reservation_emitting.py` — L86–L99
+- `tests/modules/execution/middleware/test_reservation_emitting.py` (extend)
+
+- [ ] **Step 1: Write failing tests.** Append to `tests/modules/execution/middleware/test_reservation_emitting.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_symbol_threaded_from_decision_into_claimed_and_filled() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("filled", "paper_sym", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
+    decision = DecisionPayload(
+        decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
+        offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2, symbol="fUST",
+    )
+    await mw.submit(decision, _ctx())
+    claimed = persister.txns[1][0]
+    filled = persister.txns[1][1]
+    assert claimed.symbol == "fUST"
+    assert filled.symbol == "fUST"
+    bus_claimed = next(e for e in seen if isinstance(e, ReservationClaimed))
+    bus_filled = next(e for e in seen if isinstance(e, OrderFilled))
+    assert bus_claimed.symbol == "fUST"
+    assert bus_filled.symbol == "fUST"
+
+
+@pytest.mark.asyncio
+async def test_symbol_defaults_to_fusd_when_not_set() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("submitted", "999", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    await mw.submit(_decision(), _ctx())  # _decision() does not set symbol
+    assert persister.txns[1][0].symbol == "fUSD"
+```
+
+- [ ] **Step 2: Run — expect FAIL.** `cd backend_py && uv run pytest tests/modules/execution/middleware/test_reservation_emitting.py -k symbol -x` → assertion error on `.symbol` (still default `"fUSD"`).
+
+- [ ] **Step 3: Implement.** In `reservation_emitting.py`, add `symbol=decision.symbol` to BOTH constructors (L86–L99):
+
+OLD:
+```python
+        if result.status in ("submitted", "filled"):
+            claimed = ReservationClaimed(
+                cid=cid, venue_offer_id=result.venue_offer_id or "",
+                size_usdt=size, signal_correlation_id=scid,
+                account_id=ctx.account_id, is_simulated=self._is_simulated,
+                occurred_at_ms=outcome_ms,
+            )
+            filled: OrderFilled | None = None
+            if result.status == "filled":
+                filled = OrderFilled(
+                    cid=cid, venue_offer_id=result.venue_offer_id or "", credit_id=None,
+                    size_usdt=size, fill_rate=decision.offer_rate or 0.0,
+                    signal_correlation_id=scid, account_id=ctx.account_id,
+                    is_simulated=self._is_simulated, occurred_at_ms=outcome_ms,
+                )
+```
+NEW: add `symbol=decision.symbol,` as the last kwarg of each (`ReservationClaimed(..., occurred_at_ms=outcome_ms, symbol=decision.symbol)` and `OrderFilled(..., occurred_at_ms=outcome_ms, symbol=decision.symbol)`).
+
+- [ ] **Step 4: Run — expect PASS.** `cd backend_py && uv run pytest tests/modules/execution/middleware/test_reservation_emitting.py -x`.
+- [ ] **Step 5: Full gate.** `cd backend_py && uv run pytest -m "not integration" -q` → green.
+- [ ] **Step 6: Commit.** `git add src/bfx_funding_bot/modules/execution/middleware/reservation_emitting.py tests/modules/execution/middleware/test_reservation_emitting.py && git commit -m "✨ Feat: thread decision.symbol into ReservationClaimed + OrderFilled (reservation_emitting)"`
+
+### Task 3B: `ws_dispatcher.py` — thread `foc.symbol` into `OrderFilled` + `ReservationReleased`
+
+**Files:**
+- `src/bfx_funding_bot/external/bitfinex/ws_dispatcher.py` — `_translate_foc` (L92–L132)
+- `tests/external/bitfinex/test_ws_dispatcher_translate.py` (extend)
+
+- [ ] **Step 1: Write failing tests.** Append to `tests/external/bitfinex/test_ws_dispatcher_translate.py`:
+
+```python
+def test_foc_executed_orderfilled_carries_foc_symbol() -> None:
+    claim = _claim_record("v1")
+    foc = FocEvent(venue_offer_id="v1", symbol="fUST", mts_create=1000, mts_update=2000,
+                   amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)", rate=0.0005,
+                   period_days=2, raw_seq=7, raw=[])
+    events, _, _ = translate_bfx_event(foc, {"v1": claim}, {}, now_ms=2500)
+    assert isinstance(events[0], OrderFilled) and events[0].symbol == "fUST"
+
+
+def test_foc_canceled_reservation_released_carries_foc_symbol() -> None:
+    claim = _claim_record("v1")
+    foc = FocEvent(venue_offer_id="v1", symbol="fUST", mts_create=1000, mts_update=2000,
+                   amount=Decimal("100"), status="CANCELED", rate=0.0005, period_days=2,
+                   raw_seq=8, raw=[])
+    events, _, _ = translate_bfx_event(foc, {"v1": claim}, {}, now_ms=2500)
+    assert isinstance(events[0], ReservationReleased) and events[0].symbol == "fUST"
+```
+
+- [ ] **Step 2: Run — expect FAIL.** `cd backend_py && uv run pytest tests/external/bitfinex/test_ws_dispatcher_translate.py -k symbol -x`.
+- [ ] **Step 3: Implement.** In `_translate_foc`, add `symbol=foc.symbol,` as the last kwarg of the `OrderFilled(...)` block (~L92–103) and the `ReservationReleased(...)` block (~L122–132). No other change.
+- [ ] **Step 4: Run — expect PASS.** `cd backend_py && uv run pytest tests/external/bitfinex/test_ws_dispatcher_translate.py -x`.
+- [ ] **Step 5: Full gate.** `cd backend_py && uv run pytest -m "not integration" -q` → green.
+- [ ] **Step 6: Commit.** `git add src/bfx_funding_bot/external/bitfinex/ws_dispatcher.py tests/external/bitfinex/test_ws_dispatcher_translate.py && git commit -m "✨ Feat: thread foc.symbol into OrderFilled + ReservationReleased (ws_dispatcher)"`
+
+### Task 3C: `fill_tracker.py` — thread symbol via `ClaimRecord.symbol`
+
+**Files:**
+- `src/bfx_funding_bot/modules/execution/registry_offers.py` — `ClaimRecord` (L60–L69) + `transition()`
+- `src/bfx_funding_bot/external/bitfinex/fill_tracker.py` — L208–L217 (`_diff_and_emit`)
+- `tests/modules/execution/test_registry.py` (extend), `tests/external/bitfinex/test_fill_tracker_registry_aware.py` (extend)
+
+- [ ] **Step 1: Write failing tests.** Add to `tests/modules/execution/test_registry.py`:
+
+```python
+def test_claim_record_carries_symbol_from_reservation_claimed() -> None:
+    from bfx_funding_bot.modules.execution.registry_offers import transition, ClaimRecord
+    from bfx_funding_bot.modules.execution.events import ReservationClaimed
+    from decimal import Decimal
+    from uuid import uuid4
+    ev = ReservationClaimed(cid=10, venue_offer_id="voi-1", size_usdt=Decimal("100"),
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        occurred_at_ms=1000, symbol="fUST")
+    new_snapshot, _ = transition({}, ev, now_ms=2000)
+    assert isinstance(new_snapshot["voi-1"], ClaimRecord)
+    assert new_snapshot["voi-1"].symbol == "fUST"
+
+
+def test_claim_record_symbol_defaults_to_fusd_when_not_set() -> None:
+    from bfx_funding_bot.modules.execution.registry_offers import transition
+    from bfx_funding_bot.modules.execution.events import ReservationClaimed
+    from decimal import Decimal
+    from uuid import uuid4
+    ev = ReservationClaimed(cid=11, venue_offer_id="voi-2", size_usdt=Decimal("50"),
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        occurred_at_ms=1000)  # no symbol → default
+    new_snapshot, _ = transition({}, ev, now_ms=2000)
+    assert new_snapshot["voi-2"].symbol == "fUSD"
+```
+
+- [ ] **Step 2: Run — expect FAIL.** `cd backend_py && uv run pytest tests/modules/execution/test_registry.py -k symbol -x` → `ClaimRecord` has no `symbol`.
+
+- [ ] **Step 3: Implement — add `symbol` to `ClaimRecord`.** In `registry_offers.py`, add a field to `ClaimRecord` (frozen, slots dataclass):
+
+OLD (L60–69) — fields end with `last_updated_ms: int`. NEW: append one defaulted field:
+```python
+    symbol: str = "fUSD"  # populated from ReservationClaimed.symbol
+```
+Then locate the `ClaimRecord(...)` construction inside `transition()` (run `grep -n "ClaimRecord(" src/bfx_funding_bot/modules/execution/registry_offers.py`) and add `symbol=incoming.symbol,` to that constructor call (where `incoming` is the `ReservationClaimed` event being handled — match the local variable name in that branch).
+
+- [ ] **Step 4: Implement — use `claim.symbol` in `fill_tracker.py`.** In `_diff_and_emit` (L208–217), add `symbol=claim.symbol,` as the last kwarg of the `ReservationReleased(...)` constructor.
+
+- [ ] **Step 5: Add the fill_tracker test.** Add to `tests/external/bitfinex/test_fill_tracker_registry_aware.py` a test that claims an fUST offer via the registry, then drives `_tick()` with the offer missing, and asserts the emitted `ReservationReleased.symbol == "fUST"` (mirror the existing registry-aware test setup in that file; pass `symbol="fUST"` on the seeding `ReservationClaimed`).
+
+- [ ] **Step 6: Run — expect PASS.** `cd backend_py && uv run pytest tests/modules/execution/test_registry.py tests/external/bitfinex/test_fill_tracker_registry_aware.py -x`.
+- [ ] **Step 7: Full gate.** `cd backend_py && uv run pytest -m "not integration" -q` → green.
+- [ ] **Step 8: Commit.** `git add src/bfx_funding_bot/modules/execution/registry_offers.py src/bfx_funding_bot/external/bitfinex/fill_tracker.py tests/modules/execution/test_registry.py tests/external/bitfinex/test_fill_tracker_registry_aware.py && git commit -m "✨ Feat: thread symbol through ClaimRecord → fill_tracker ReservationReleased"`
+
+### Task 3D: `boot_recovery.py` — thread `offer.symbol` (orphan) + `self._symbol` (missing-claim)
+
+**Files:**
+- `src/bfx_funding_bot/modules/execution/boot_recovery.py` — `compute_recovery_actions` (L102–L158), `run()` (L256–L262)
+- `tests/modules/execution/test_boot_recovery.py` (extend)
+
+- [ ] **Step 1: Write failing tests.** Add to `tests/modules/execution/test_boot_recovery.py`:
+
+```python
+def test_orphan_claimed_carries_offer_symbol() -> None:
+    offer = ActiveFundingOffer(venue_offer_id="555", symbol="fUST", amount=Decimal("100"),
+        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE")
+    acts = compute_recovery_actions(venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST")
+    assert isinstance(acts[0], ReservationClaimed) and acts[0].symbol == "fUST"
+
+
+def test_missing_claim_released_carries_reconciler_symbol() -> None:
+    claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80")
+    acts = compute_recovery_actions(venue_offers=[], local_claims=[claim], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST")
+    assert isinstance(acts[0], ReservationReleased) and acts[0].symbol == "fUST"
+
+
+def test_compute_recovery_actions_symbol_defaults_to_fusd() -> None:
+    offer = ActiveFundingOffer(venue_offer_id="111", symbol="fUSD", amount=Decimal("50"),
+        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE")
+    acts = compute_recovery_actions(venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000)  # no symbol → default
+    assert acts[0].symbol == "fUSD"
+```
+
+- [ ] **Step 2: Run — expect FAIL.** `cd backend_py && uv run pytest tests/modules/execution/test_boot_recovery.py -k symbol -x` → `compute_recovery_actions()` has no `symbol` kwarg.
+
+- [ ] **Step 3: Implement.** In `boot_recovery.py`:
+  - Add `symbol: str = "fUSD",` to the end of the `compute_recovery_actions(*, ...)` keyword-only signature (L102–111).
+  - Orphan `ReservationClaimed` (L131–135): add `symbol=offer.symbol,` (the venue offer's authoritative symbol).
+  - Missing-claim `ReservationReleased` (L143–147): add `symbol=symbol,` (the reconciler-level symbol).
+  - In `run()` (L257–262), add `symbol=self._symbol,` to the `compute_recovery_actions(...)` call.
+
+- [ ] **Step 4: Run — expect PASS.** `cd backend_py && uv run pytest tests/modules/execution/test_boot_recovery.py -x`.
+- [ ] **Step 5: Full gate.** `cd backend_py && uv run pytest -m "not integration" -q` → green.
+- [ ] **Step 6: Commit.** `git add src/bfx_funding_bot/modules/execution/boot_recovery.py tests/modules/execution/test_boot_recovery.py && git commit -m "✨ Feat: thread offer.symbol + reconciler symbol into boot_recovery recovery actions"`
+
+**Threading notes:** `fill_tracker` and the boot-recovery missing-claim path needed a new symbol source (`ClaimRecord.symbol`; `BootRecovery._symbol`). The latter is correct for the current single-symbol reconciler; a future multi-symbol reconciler would need a `symbol` column on `offer_claims` (deferred). All other sites passed an already-present field.
 
 ---
 
@@ -3726,4 +3938,5 @@ git commit -m "✅ Test: end-to-end per-symbol ledger isolation (per-currency Ph
 
 - **Alias removal cleanup** (tidiness, zero functional change): drop the transitional `size_usdt`/`*_usdt` kwargs+properties (O1), make `amount`/`reserved`/`realized`/`available` required (reorder fields), make the ledger getter `symbol` required and drop the `None`-sum branch (O2), make `DecisionPayload.symbol` required, and switch the two `store.py` reads to `.amount` (O5). Best done once all producers pass `symbol=`/`amount=` — sweep `external/bitfinex/ws_dispatcher.py`, `fill_tracker.py`, `modules/execution/middleware/reservation_emitting.py`, `boot_recovery.py`, `store.py`, `smoke_runner.py` and their tests.
 - **Phase 2** (separate spec/plan): native per-currency config maps (`caps`/`buffers`/loss-drawdown thresholds) + `default_cap`/`default_buffer` + back-compat env fallbacks; enable fUSD/fADA at `cap = 0`; per-symbol loss/drawdown thresholds. Source `configured_symbols` from the caps-map keys (O3).
+- **`reconcile_observation` + `rebuild_snapshot_from_log` stay single-symbol-correct-only** (spec §4.4 asked to evaluate this): `ReconcileObservationRow` keeps no `symbol` column and aggregate `*_usdt` names (O4), and `rebuild_snapshot_from_log` selects the latest checkpoint without a symbol filter and folds the event-log tail across all symbols into one symbol's row. Harmless in Phase 1 (single active fUST; fUSD/fADA at `cap=0`) and `rebuild_snapshot_from_log` is test-only (live boot uses `from_snapshot`), but it is tracked debt: making `reconcile_observation` per-symbol is a Phase-2 item alongside the config maps.
 - **Phase 3+ (per spec §7, deferred):** unified USD-equivalent exposure overlay / cross-currency ceiling (needs a price feed); per-symbol FSM if `offer_claims` gains a symbol column.
