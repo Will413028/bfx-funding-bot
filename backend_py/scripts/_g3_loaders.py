@@ -30,10 +30,10 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     FillRecord,
     G3Verdict,
     MarketRatePoint,
-    VerdictState,
     _fill_duration_days,
     assert_market_rate_band,
     attribute_active,
+    attribute_idle,
     attribute_passive,
     cell_period_days,
     check_deployment_anchor,
@@ -210,23 +210,11 @@ def _compute_verdict(
 
     Returns (verdict, data_window_str, n_fills, clamp_diag).
     """
-    # Band guard: a wrong-scale passive series (funding_stats.frr ~1e-6, or a
-    # percentage-scaled rate) makes the active spread meaningless. Capture the
-    # violation and degrade to UNRELIABLE below rather than crashing the report.
-    band_reason: str | None = None
-    try:
-        assert_market_rate_band([p.rate for p in market_rate_points])
-    except ValueError as exc:
-        band_reason = str(exc)
-
     n_fills = len(fills)
 
     # ── Compute windows + attribution ────────────────────────────────────────
     if fills or market_rate_points:
-        all_mts = (
-            [f.fill_ts_ms for f in fills]
-            + [p.mts for p in market_rate_points]
-        )
+        all_mts = [f.fill_ts_ms for f in fills] + [p.mts for p in market_rate_points]
         min_ts = min(all_mts)
         max_ts = max(all_mts)
     else:
@@ -237,25 +225,43 @@ def _compute_verdict(
 
     bounds = weekly_window_bounds(min_ts, max_ts)
 
+    mean_fn = lambda xs: sum(xs, Decimal("0")) / Decimal(len(xs))  # noqa: E731
+
+    # window-coverage of the passive arm decides the MR-alpha diagnostic only.
+    window_rate_points = (
+        [p for p in market_rate_points if min_ts <= p.mts < max_ts]
+        if (fills or market_rate_points)
+        else []
+    )
+
     if fills and bounds:
         strat_outcomes = attribute_active(fills, capital=capital, window_bounds=bounds)
+        idle_outcomes = attribute_idle(window_bounds=bounds)
         base_outcomes = attribute_passive(market_rate_points, window_bounds=bounds)
-        actives = paired_active_returns(strat_outcomes, base_outcomes)
-        if len(actives) >= 2:
-            mean_fn = lambda xs: sum(xs, Decimal("0")) / Decimal(len(xs))  # noqa: E731
-            ci_lo, ci_hi = bootstrap_ci(actives, mean_fn)
+
+        # Primary: bot-vs-idle = active − idle (idle ≡ 0) → absolute active return.
+        bot_vs_idle = paired_active_returns(strat_outcomes, idle_outcomes)
+        if len(bot_vs_idle) >= 2:
+            ci_lo, ci_hi = bootstrap_ci(bot_vs_idle, mean_fn)
         else:
             ci_lo, ci_hi = Decimal("0"), Decimal("0")
 
-        # Headline: single-window attribution over full span
+        # Headline: single-window absolute active return over the full span.
         single_strat = attribute_active(fills, capital=capital, window_bounds=[(min_ts, max_ts)])
         single_base = attribute_passive(market_rate_points, window_bounds=[(min_ts, max_ts)])
-        headline_active_spread = single_strat[0].net_monthly - single_base[0].net_monthly
+        headline_bot_vs_idle = single_strat[0].net_monthly
 
-        # Budget-clamped capital-days (USDT·days) and over-deploy diagnostic come
-        # from one full-span sweep. total_capital_days is USDT·days to match
-        # decide_verdict's contract (min_capital_days = capital*7); the old
-        # `/ capital` made it 'days' and mismatched the threshold.
+        # Secondary diagnostic: MR alpha = active − AlwaysMarketRate.
+        mr_actives = paired_active_returns(strat_outcomes, base_outcomes)
+        if len(mr_actives) >= 2:
+            mr_alpha_ci_lo, mr_alpha_ci_hi = bootstrap_ci(mr_actives, mean_fn)
+        else:
+            mr_alpha_ci_lo, mr_alpha_ci_hi = Decimal("0"), Decimal("0")
+        mr_alpha_spread = single_strat[0].net_monthly - single_base[0].net_monthly
+        # MR-alpha is trustworthy only with real market-rate coverage and an
+        # in-band series. The band check is deferred to band_reason below.
+        mr_alpha_available = len(window_rate_points) > 0
+
         full_clamp = clamp_active_window(fills, cap=capital)
         total_capital_days = full_clamp.capital_days
         clamp_diag = ClampDiagnostic(
@@ -265,29 +271,20 @@ def _compute_verdict(
             clamped_interest=full_clamp.interest,
         )
 
-        # attributed_deployed = open principal at the end of the data window.
-        # Uses point-in-time snapshot (credits still open at max_ts) so it is
-        # directly comparable to observed_realized from position_state, which is
-        # also a point-in-time snapshot — not a time-average. The old time-averaged
-        # formula Σsize·duration / window-span ≈ 776 diverged from the 550 snapshot
-        # when fills were uniformly spread over the window.
+        # attributed_deployed = open principal at the end of the data window
+        # (point-in-time, comparable to the position_state realized snapshot).
         attributed_deployed = open_principal_at(fills, max_ts)
-
-        # attributed_interest for nav anchor
         attributed_interest = sum(
             (f.size_usdt * f.rate * _fill_duration_days(f) for f in fills), Decimal("0")
         )
-
     else:
-        # No fills (expected for an idle canary): make verdict data-driven.
-        strat_outcomes = []
-        base_outcomes = []
+        # No fills (idle canary): no active arm → no bot-vs-idle, no MR-alpha.
         ci_lo, ci_hi = Decimal("0"), Decimal("0")
-        headline_active_spread = Decimal("0")
+        headline_bot_vs_idle = Decimal("0")
+        mr_alpha_spread = Decimal("0")
+        mr_alpha_ci_lo, mr_alpha_ci_hi = Decimal("0"), Decimal("0")
+        mr_alpha_available = False
         total_capital_days = Decimal("0")
-        # No attributed deployment when there are no fills. If observed_realized is
-        # nonetheless > 0, event_log (the SoT) is missing fills it should contain —
-        # let the anchor diverge to UNRELIABLE rather than fabricate agreement.
         attributed_deployed = Decimal("0")
         attributed_interest = Decimal("0")
         clamp_diag = ClampDiagnostic(
@@ -296,6 +293,16 @@ def _compute_verdict(
             raw_interest=Decimal("0"),
             clamped_interest=Decimal("0"),
         )
+
+    # Band guard: a wrong-scale market series corrupts the MR-alpha diagnostic
+    # only — bot-vs-idle (idle ≡ 0) needs no market-rate data, so the primary
+    # verdict is unaffected. Mark MR-alpha unavailable and surface the message.
+    band_reason: str | None = None
+    try:
+        assert_market_rate_band([p.rate for p in window_rate_points])
+    except ValueError as exc:
+        band_reason = str(exc)
+        mr_alpha_available = False
 
     n_windows = len(bounds)
     min_capital_days = capital * Decimal("7")
@@ -312,7 +319,7 @@ def _compute_verdict(
     )
 
     verdict = decide_verdict(
-        headline_active_spread=headline_active_spread,
+        headline_bot_vs_idle=headline_bot_vs_idle,
         n_windows=n_windows,
         total_capital_days=total_capital_days,
         ci_lo=ci_lo,
@@ -321,46 +328,35 @@ def _compute_verdict(
         nav_anchor=nav_anchor,
         min_windows=_MIN_WINDOWS,
         min_capital_days=min_capital_days,
+        mr_alpha_spread=mr_alpha_spread,
+        mr_alpha_ci_lo=mr_alpha_ci_lo,
+        mr_alpha_ci_hi=mr_alpha_ci_hi,
+        mr_alpha_available=mr_alpha_available,
     )
 
-    # ── Market-rate coverage guard ────────────────────────────────────────────
-    # When no market-rate points cover the data window the passive benchmark is
-    # all-zero, making headline_active_spread equal to the active return rather
-    # than a real spread against AlwaysMarketRate. Override to INSUFFICIENT_DATA
-    # with an explicit reason so the caller is not misled by a spurious "active
-    # spread" figure. headline_active_spread is preserved for diagnostic purposes.
-    window_rate_points = (
-        [p for p in market_rate_points if min_ts <= p.mts < max_ts]
-        if (fills or market_rate_points)
-        else []
-    )
-    if len(window_rate_points) == 0 and verdict.state is not VerdictState.UNRELIABLE:
-        no_rate_reason = (
-            "passive benchmark unavailable: no market-rate coverage in window — "
-            "'active spread' reflects active return only"
-        )
-        verdict = G3Verdict(
-            state=VerdictState.INSUFFICIENT_DATA,
-            headline_active_spread=verdict.headline_active_spread,
-            n_windows=verdict.n_windows,
-            ci_lo=verdict.ci_lo,
-            ci_hi=verdict.ci_hi,
-            reasons=[no_rate_reason, *verdict.reasons],
-        )
-
-    # ── Band-violation override (top priority) ────────────────────────────────
-    # A wrong-scale passive series ⇒ the entire active spread is untrustworthy.
-    # Degrade to UNRELIABLE (same class as a diverged anchor) and surface the band
-    # message so the operator fixes the attribution source rather than reading a
-    # bogus spread — and crucially the report still renders instead of crashing.
+    # MR-alpha unavailability caveats are informational — they do NOT change the
+    # primary bot-vs-idle state (decoupled from passive-arm data quality). Prepend
+    # so the operator sees why the secondary diagnostic is missing.
+    caveats: list[str] = []
     if band_reason is not None:
+        caveats.append(band_reason)
+    elif len(window_rate_points) == 0 and (fills or market_rate_points):
+        caveats.append(
+            "MR-alpha diagnostic unavailable: no market-rate coverage in window — "
+            "bot-vs-idle (idle ≡ 0) is unaffected"
+        )
+    if caveats:
         verdict = G3Verdict(
-            state=VerdictState.UNRELIABLE,
-            headline_active_spread=verdict.headline_active_spread,
+            state=verdict.state,
+            headline_bot_vs_idle=verdict.headline_bot_vs_idle,
             n_windows=verdict.n_windows,
             ci_lo=verdict.ci_lo,
             ci_hi=verdict.ci_hi,
-            reasons=[band_reason, *verdict.reasons],
+            reasons=[*caveats, *verdict.reasons],
+            mr_alpha_spread=verdict.mr_alpha_spread,
+            mr_alpha_ci_lo=verdict.mr_alpha_ci_lo,
+            mr_alpha_ci_hi=verdict.mr_alpha_ci_hi,
+            mr_alpha_available=verdict.mr_alpha_available,
         )
 
     # Human-readable data window
