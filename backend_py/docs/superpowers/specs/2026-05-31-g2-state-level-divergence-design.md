@@ -77,6 +77,29 @@ Minimal-intrusion: cache the value `decide()` already computes; don't change the
 These are pure read-accessors over existing state; the cache assignments are the
 only `decide()` edits and do not change its return value.
 
+### B′. Bounded vs unbounded state — comparison semantics (added post-review)
+
+An adversarial review surfaced that **byte-equality is the right invariant only
+for BOUNDED state, not unbounded accumulators.** RP's window is a `maxlen` deque
+that forgets old data exactly, so live (warmup-seeded, incrementally observed) and
+replay (rebuilt from a lookback window each tick) are byte-equal. MR's `_ema` is an
+**unbounded accumulator**: live is seeded once at warmup and drifts forward; replay
+re-seeds at `ref_mts − lookback` every tick. The seed's exponential tail
+(`(1−α)^lookback ≈ 5.6e-8` for span=24, lookback=200) is benign convergence noise
+but **never reaches 0 in Decimal** — so exact comparison of `ema_current` would
+flag MR divergence on essentially every steady-state tick (the deployed canary is
+MR span=24).
+
+Fix (standard online/offline parity practice): compare accumulator-derived fields
+(`ema_current`, `last_deviation`, MR `signal_score`) with a **relative tolerance
+`1e-4`** (≈140× above the span=24 noise floor, ≈100× below real-drift magnitude
+~1e-2); keep bounded/discrete fields (RP state, config, `signal_direction`) exact.
+`_diff_fields` drives the divergence decision (not dataclass `==`). Quantization
+was rejected — a rounding grid has a boundary artifact (values ~1e-8 apart
+straddling an edge falsely diverge). **Deferred:** span=168 cells do not converge
+within lookback=200 (~9% floor); they need a larger lookback to be
+tolerance-comparable — not deployed.
+
 ### B. Include derived state in `_strategy_attributes` (the divergence vector)
 
 `divergence_reporter._strategy_attributes` adds the new state fields per strategy,
