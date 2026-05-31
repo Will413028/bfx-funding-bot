@@ -36,6 +36,11 @@ def _resolve_amount(ev: object) -> None:
         raise TypeError(
             f"{type(ev).__name__} requires `amount` (or transitional `size_usdt`)"
         )
+    if amount is not None and size_usdt is not None and amount != size_usdt:
+        raise TypeError(
+            f"{type(ev).__name__}: amount={amount!r} and size_usdt={size_usdt!r} "
+            "disagree — pass only one"
+        )
     if amount is None:
         object.__setattr__(ev, "amount", size_usdt)
     if size_usdt is None:
@@ -107,11 +112,6 @@ class ReservationClaimed:
 
     def __post_init__(self) -> None:
         _resolve_amount(self)
-
-    @property
-    def amount_native(self) -> Decimal:
-        assert self.amount is not None
-        return self.amount
 
 
 @dataclass(frozen=True, slots=True)

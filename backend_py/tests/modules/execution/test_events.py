@@ -278,3 +278,27 @@ def test_reservation_released_back_compat_size_usdt_kwarg() -> None:
     )
     assert e.amount == Decimal("30")
     assert e.symbol == "fUSD"
+
+
+def test_resolve_amount_rejects_conflicting_amount_and_size_usdt() -> None:
+    with pytest.raises(TypeError):
+        ReservationClaimed(
+            cid=1,
+            venue_offer_id="v1",
+            amount=Decimal("100"),
+            size_usdt=Decimal("999"),
+            signal_correlation_id=uuid4(),
+            account_id="default",
+            is_simulated=False,
+        )
+
+
+def test_resolve_amount_rejects_when_both_missing() -> None:
+    with pytest.raises(TypeError):
+        ReservationClaimed(
+            cid=1,
+            venue_offer_id="v1",
+            signal_correlation_id=uuid4(),
+            account_id="default",
+            is_simulated=False,
+        )
