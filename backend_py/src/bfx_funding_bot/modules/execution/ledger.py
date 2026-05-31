@@ -161,12 +161,7 @@ class PaperPositionLedger:
         a transitional back-compat path for un-migrated callers; the deferred
         cleanup makes `symbol` required and drops the None branch."""
         if symbol is None:
-            total = Decimal("0")
-            for v in self._reserved.values():
-                total += v
-            for v in self._realized.values():
-                total += v
-            return total
+            return sum(self._reserved.values(), Decimal("0")) + sum(self._realized.values(), Decimal("0"))
         return self._reserved.get(symbol, Decimal("0")) + self._realized.get(
             symbol, Decimal("0")
         )
@@ -183,10 +178,7 @@ class PaperPositionLedger:
         un-migrated callers; deferred cleanup makes `symbol` required).
         """
         if symbol is None:
-            total = Decimal("0")
-            for v in self._reserved.values():
-                total += v
-            return total
+            return sum(self._reserved.values(), Decimal("0"))
         return self._reserved.get(symbol, Decimal("0"))
 
     def realized_exposure(self, symbol: str | None = None) -> Decimal:
@@ -196,10 +188,7 @@ class PaperPositionLedger:
         `symbol=None` → cross-symbol SUM (transitional).
         """
         if symbol is None:
-            total = Decimal("0")
-            for v in self._realized.values():
-                total += v
-            return total
+            return sum(self._realized.values(), Decimal("0"))
         return self._realized.get(symbol, Decimal("0"))
 
     def available_balance(self, symbol: str | None = None) -> Decimal:
@@ -211,10 +200,7 @@ class PaperPositionLedger:
         `symbol=None` → cross-symbol SUM (transitional back-compat).
         """
         if symbol is None:
-            total = Decimal("0")
-            for v in self._available.values():
-                total += v
-            return total
+            return sum(self._available.values(), Decimal("0"))
         return self._available.get(symbol, Decimal("0"))
 
 
