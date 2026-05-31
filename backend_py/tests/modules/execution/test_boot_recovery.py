@@ -203,14 +203,15 @@ class _StubStore:
         return True
 
     async def set_position_snapshot(
-        self, session, *, account_id, reserved_usdt, realized_usdt,
+        self, session, *, account_id, symbol, reserved_usdt, realized_usdt,
         n_offers, n_credits, occurred_at_ms,
     ):
         from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
         self.snapshot_calls.append({
             "account_id": account_id,
-            "reserved_usdt": reserved_usdt,
-            "realized_usdt": realized_usdt,
+            "symbol": symbol,
+            "reserved": reserved_usdt,
+            "realized": realized_usdt,
             "n_offers": n_offers,
             "n_credits": n_credits,
             "occurred_at_ms": occurred_at_ms,
@@ -343,7 +344,7 @@ async def test_fetch_offers_does_not_retry_4xx():
     auth = _FailingAuthRest(status_code=401)
     rec = _boot_recovery(auth)
     with pytest.raises(BitfinexAPIError):
-        await rec._fetch_offers()
+        await rec._fetch_offers("fUSD")
     assert auth.calls == 1  # no retry on auth error
 
 
@@ -351,7 +352,7 @@ async def test_fetch_offers_does_not_retry_4xx():
 async def test_fetch_offers_retries_5xx_then_succeeds():
     auth = _FailingAuthRest(status_code=503, succeed_after=3)
     rec = _boot_recovery(auth)
-    result = await rec._fetch_offers()
+    result = await rec._fetch_offers("fUSD")
     assert result == []
     assert auth.calls == 3  # retried twice, succeeded on 3rd
 
@@ -361,7 +362,7 @@ async def test_fetch_offers_reraises_after_transient_exhaustion():
     auth = _FailingAuthRest(status_code=0)  # transport error, never succeeds
     rec = _boot_recovery(auth)
     with pytest.raises(BitfinexAPIError):
-        await rec._fetch_offers()
+        await rec._fetch_offers("fUSD")
     assert auth.calls == 3  # exhausted max_attempts
 
 
@@ -429,8 +430,8 @@ async def test_run_calls_set_position_snapshot_with_credit_sum():
 
     assert len(store.snapshot_calls) == 1
     call = store.snapshot_calls[0]
-    assert call["realized_usdt"] == Decimal("300")
-    assert call["reserved_usdt"] == Decimal("0")
+    assert call["realized"] == Decimal("300")
+    assert call["reserved"] == Decimal("0")
     assert call["n_credits"] == 1
 
 
@@ -591,7 +592,7 @@ async def test_fetch_available_does_not_retry_4xx():
     auth = _FailingWallets()
     rec = _boot_recovery(auth)
     with pytest.raises(BitfinexAPIError):
-        await rec._fetch_available()
+        await rec._fetch_available("fUSD")
     assert auth.calls == 1  # no retry on 4xx (fail-closed, same as offers/credits)
 
 
@@ -629,3 +630,72 @@ def test_compute_recovery_actions_symbol_defaults_to_fusd() -> None:
         is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbol → default
     )
     assert acts[0].symbol == "fUSD"
+
+
+# ── Per-symbol plumbing (Cluster D Task 1) ───────────────────────────────────
+
+
+def _boot_recovery_symbols(auth_rest, store, session_factory, bus, *, symbols, **kw):
+    """BootRecovery wired with the new `symbols` list arg (run() tests)."""
+    return BootRecovery(
+        store=store,
+        session_factory=session_factory,
+        auth_rest=auth_rest,
+        account_ctx=AccountContext(
+            account_id="default",
+            credentials=Credentials(api_key="k", api_secret="s"),
+            allocation_cap_usdt=Decimal("1"),
+        ),
+        deployment_environment="ci",
+        bus=bus,
+        max_attempts=1,
+        backoff_base_s=0,
+        clock=lambda: _NOW,
+        symbols=symbols,
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_symbol_list_reproduces_current_event():
+    """One configured symbol → exactly one PositionReconciled, identical natives."""
+    offers = [_offer(voi="555", amount="100")]
+    credits = [_credit("1", "200")]
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=offers, credits=credits, available=Decimal("47.5"))
+    rec = _boot_recovery_symbols(
+        auth, store, _StubSessionFactory(), bus, symbols=["fUST"],
+    )
+
+    result = await rec.run()
+
+    pr = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert len(pr) == 1
+    assert pr[0].symbol == "fUST"
+    assert pr[0].reserved == Decimal("100")
+    assert pr[0].realized == Decimal("200")
+    assert pr[0].available == Decimal("47.5")
+    assert pr[0].n_offers == 1
+    assert pr[0].n_credits == 1
+    # result keeps the aggregate dims (single symbol == today)
+    assert result.reserved_usdt == Decimal("100")
+    assert result.realized_usdt == Decimal("200")
+    assert result.available_usdt == Decimal("47.5")
+    assert result.n_credits == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_symbol_kwarg_still_constructs_single_symbol():
+    """Back-compat: passing the old `symbol=` kwarg yields a 1-element symbol list."""
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRestFull(offers=[], credits=[_credit("1", "150")])
+    rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, symbol="fUST")
+
+    await rec.run()
+
+    pr = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert len(pr) == 1
+    assert pr[0].symbol == "fUST"
+    assert pr[0].realized == Decimal("150")
