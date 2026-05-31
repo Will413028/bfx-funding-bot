@@ -1,7 +1,7 @@
 # Koyeb Canary Deploy Runbook (Phase 4.4 — first real money)
 
 > ⚠️ **這是真錢上線**：`BFX_PHASE=canary` + `BFX_EXECUTOR=bitfinex_live` 會對
-> Bitfinex 帳戶真的掛 funding offer。第一次跑 $150 cap、單策略 2 cells。
+> Bitfinex 帳戶真的掛 funding offer。$570 cap、單策略 2 cells。
 > 上線前**每一條 Pre-live Gate 都要過**，不要跳。
 >
 > 用途：shadow 觀察完 → 首次 canary 真錢 → Phase 4 results doc → Phase 5 scale-up。
@@ -26,7 +26,7 @@
 |---|---|---|---|
 | 1 | **API key 有 submit/cancel scope** | Bitfinex 網站 → API → 該 key 的 permissions，確認 **Funding** 類別有 **write/create + cancel**（不只 read）。2026-05-25 venue reconcile 只驗過 read | ⬜ user action |
 | 2 | API key signed round-trip 通 | 跑下方「Scope 驗證」live contract test，確認 HMAC 簽章被 venue 接受、回應能 parse | ⬜ |
-| 3 | 帳戶有可放貸 USD 餘額 | Bitfinex funding wallet 有 ≥ $150 USD（cap 上限）| ⬜ user action |
+| 3 | 帳戶有可放貸 USD 餘額 | Bitfinex funding wallet 有 ≥ $570 USD（cap 上限）| ⬜ user action |
 | 4 | shadow 已跑完觀察窗 | 承接 paper/shadow runbook，shadow 2–4 週數據已進 Phase 4.3 calibration | ⬜ |
 | 5 | **G2 calibration audit pass** | Phase 4.3 的 G2 門檻校準（~2026-06-10 觀察窗結束後）| ⬜ gate |
 | 6 | main 最新 commit 含 canary config | `git log --oneline -1`，且 `git push origin main`（Koyeb 從 origin/main build）| ⬜ |
@@ -79,7 +79,7 @@ shadow → canary 是**同一個 service 改 env 後 redeploy**。canary 的完�
 | `BFX_WS_CLIENT_ENABLED` | `true` | `registry.py:64` | live 必須開，否則 `ExecutorConfigError`（stale exposure）|
 | `BFX_API_KEY` | `{{secret.bfx-api-key}}` | `registry.py:91` | live 缺則拒啟動 |
 | `BFX_API_SECRET` | `{{secret.bfx-api-secret}}` | `registry.py:91` | 同上 |
-| `BFX_ALLOCATION_CAP_USDT` | `150` | `daemon.py:682`（default 500）| 全帳戶 exposure 上限，AllocationCapGuard 強制 |
+| `BFX_ALLOCATION_CAP_USDT` | `570` | `daemon.py:682`（default 500）| 全帳戶 exposure 上限，AllocationCapGuard 強制 |
 | `BFX_CELLS_YAML` | `/app/configs/cells.canary.yaml` | `config.py:165` | 2 cells（MR fUSD a30/p2）。image 內建（Dockerfile `COPY configs/`）|
 | `BFX_SAFETY_CONFIG` | `/app/configs/safety.canary.yaml` | `daemon.py:712`（default `configs/safety.yaml`）| 6 guards 全開，過 canary invariant |
 | `DATABASE_URL` | `{{secret.bfx-database-url}}` | 同 paper | ⚠️ 必須 `postgresql+asyncpg://`，見 paper runbook |
@@ -110,7 +110,7 @@ koyeb service update bfx-funding-bot/marketfeed \
   --env "BFX_WS_CLIENT_ENABLED=true" \
   --env 'BFX_API_KEY={{secret.bfx-api-key}}' \
   --env 'BFX_API_SECRET={{secret.bfx-api-secret}}' \
-  --env "BFX_ALLOCATION_CAP_USDT=150" \
+  --env "BFX_ALLOCATION_CAP_USDT=570" \
   --env "BFX_CELLS_YAML=/app/configs/cells.canary.yaml" \
   --env "BFX_SAFETY_CONFIG=/app/configs/safety.canary.yaml" \
   --env 'DATABASE_URL={{secret.bfx-database-url}}' \
@@ -141,7 +141,7 @@ koyeb service logs bfx-funding-bot/marketfeed -f
    - runtime log 應看到 live executor 對 Bitfinex 掛單的 `order_submit` / `ORDER_FILL` 結構化 stdout
    - ✅ submit 成功 = key 有 write scope（Gate 1 實證）
    - ❌ 若噴 venue scope/permission error → 立刻 Kill Switch，回去修 API key 權限
-2. **AllocationCapGuard 生效** — 確認 open exposure 不超過 $150（log 會有 cap block 訊息若超）
+2. **AllocationCapGuard 生效** — 確認 open exposure 不超過 $570（log 會有 cap block 訊息若超）
 3. **L3 smoke**（PG read-your-writes，確認 execution chain 落地）：
    ```bash
    curl -X POST "https://<service-url>/smoke-test?level=L3" -H "Authorization: Bearer <admin-token>"
@@ -184,7 +184,7 @@ koyeb service update bfx-funding-bot/marketfeed --env "BFX_KILL_SWITCH=true"
 | exit 1 `ExecutorConfigError: ...without BFX_WS_CLIENT_ENABLED=true` | live 沒開 WS | 補 `BFX_WS_CLIENT_ENABLED=true` |
 | exit 1 `unknown BFX_EXECUTOR=...` | executor 值打錯 | 必須字面 `bitfinex_live` |
 | log 第一筆 submit 噴 venue permission/scope error | API key 缺 funding write/cancel scope | Kill Switch → Bitfinex 補權限 → 重新 deploy |
-| open exposure 想跑兩 cells 並行但被 cap 卡住 | `reference_amount_usdt=150` × cap 150 = 同時只能一筆 | 調低 `cells.canary.yaml` 的 `reference_amount_usdt`（commit→push→redeploy）|
+| open exposure 想跑兩 cells 並行但被 cap 卡住 | `reference_amount_usdt=150` × cap 570 = 同時只能一筆 | 調低 `cells.canary.yaml` 的 `reference_amount_usdt`（commit→push→redeploy）|
 | 空跑（無成交）時 instance 反覆 unhealthy / daemon 重啟 | executor 無交易活動 → heartbeat stale >360s → `executor degraded` → Koyeb `/healthz` fail | **daemon robustness bug**：executor「正常但無活動」被判 degraded。觀測到 2026-05-25 22:39 重啟一次。**已修 2026-05-26**（branch `fix/executor-liveness-health`）：executor/safety_chain 移出 liveness，HeartbeatGuard 改 watch `ws` |
 | smoke L2 boot `smoke_boot_failed` CRITICAL + `offer/submit` 回 500 | 帳戶未入金 → 真實 submit 被 venue 拒（daemon 設計上 continues，非 fatal）| 入金後即消失；若入金後仍 500，才是 API scope/簽章問題 |
 
