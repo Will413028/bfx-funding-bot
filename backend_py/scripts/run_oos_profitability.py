@@ -138,8 +138,9 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
     )
     lines.append(
         "- A positive bot-vs-idle backtest asserts the bot beats an idle balance "
-        "(earns the market rate on budget), NOT that MR timing beats always-lending "
-        "— that is the separate MR timing alpha diagnostic below.\n"
+        "(earns the market rate on the filled portion of budget — see idle rate / "
+        "mean fill rate per cell), NOT that MR timing beats always-lending — that is "
+        "the separate MR timing alpha diagnostic below.\n"
     )
 
     for r in reports:
@@ -164,6 +165,8 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
         lines.append(
             "- Diagnostic only — does NOT gate the bot-vs-idle headline. Near 0 means "
             "MR timing adds little over always-lending; the product value is bot-vs-idle.\n"
+        )
+        lines.append(
             f"- median active: {r.active.median_active:.4f}%/mo; "
             f"mean active: {r.active.mean_active:.4f}%/mo\n"
             f"- information ratio: {r.active.information_ratio}\n"
