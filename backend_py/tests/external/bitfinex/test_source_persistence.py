@@ -90,8 +90,8 @@ async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_f
             PositionStateRow.account_id == _ACC,
             PositionStateRow.deployment_environment == _ENV))).scalar_one()
     assert n == 1
-    assert Decimal(str(ps.reserved_usdt)) == Decimal("0")    # reserved -= 100
-    assert Decimal(str(ps.realized_usdt)) == Decimal("100")  # realized += 100
+    assert Decimal(str(ps.reserved)) == Decimal("0")    # reserved -= 100
+    assert Decimal(str(ps.realized)) == Decimal("100")  # realized += 100
 
 
 _ACC_FT = "src_ft"
@@ -153,7 +153,7 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
             PositionStateRow.account_id == _ACC_FT,
             PositionStateRow.deployment_environment == _ENV))).scalar_one()
     assert n == 1
-    assert Decimal(str(ps.reserved_usdt)) == Decimal("0")
+    assert Decimal(str(ps.reserved)) == Decimal("0")
 
 
 class _FlakyPersister:
@@ -226,4 +226,4 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
             PositionStateRow.account_id == acc,
             PositionStateRow.deployment_environment == _ENV))).scalar_one()
     assert n == 1            # exactly one release persisted after retry (no dup)
-    assert Decimal(str(ps.reserved_usdt)) == Decimal("0")
+    assert Decimal(str(ps.reserved)) == Decimal("0")

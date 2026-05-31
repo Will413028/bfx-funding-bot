@@ -65,6 +65,6 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
         ps = (await session.execute(select(PositionStateRow).where(
             PositionStateRow.account_id == "a"))).scalar_one()
 
-    assert ps.realized_usdt == Decimal("500")   # 450 checkpoint + 50 tail
-    assert ps.reserved_usdt == Decimal("0")
+    assert ps.realized == Decimal("500")   # 450 checkpoint + 50 tail
+    assert ps.reserved == Decimal("0")
     await engine.dispose()
