@@ -240,6 +240,8 @@ def _compute_verdict(
         base_outcomes = attribute_passive(market_rate_points, window_bounds=bounds)
 
         # Primary: bot-vs-idle = active − idle (idle ≡ 0) → absolute active return.
+        # bootstrap_ci requires >= 2 samples; a single window cannot give a CI, so
+        # zero it (→ straddles 0 → INSUFFICIENT_DATA, also gated by min_windows).
         bot_vs_idle = paired_active_returns(strat_outcomes, idle_outcomes)
         if len(bot_vs_idle) >= 2:
             ci_lo, ci_hi = bootstrap_ci(bot_vs_idle, mean_fn)
@@ -248,7 +250,7 @@ def _compute_verdict(
 
         # Headline: single-window absolute active return over the full span.
         single_strat = attribute_active(fills, capital=capital, window_bounds=[(min_ts, max_ts)])
-        single_base = attribute_passive(market_rate_points, window_bounds=[(min_ts, max_ts)])
+        single_base = attribute_passive(market_rate_points, window_bounds=[(min_ts, max_ts)])  # consumed by mr_alpha_spread below
         headline_bot_vs_idle = single_strat[0].net_monthly
 
         # Secondary diagnostic: MR alpha = active − AlwaysMarketRate.
