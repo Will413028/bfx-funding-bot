@@ -132,9 +132,9 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     assert (await dd_guard.evaluate(_post(), ctx)).allowed is True
 
     # (B) subscribed to the daemon bus → (C) a NAV drop makes both guards block.
-    #     100 → 80 = $20 loss (> $15 threshold) and 20% drawdown (> 15% threshold).
+    #     100 → 40 = $60 loss (> 57 threshold) and 60% drawdown (> 15% threshold).
     await daemon.bus.publish(_reconciled("100", 1_000))
-    await daemon.bus.publish(_reconciled("80", 2_000))
+    await daemon.bus.publish(_reconciled("40", 2_000))
 
     loss_result = await loss_guard.evaluate(_post(), ctx)
     dd_result = await dd_guard.evaluate(_post(), ctx)
