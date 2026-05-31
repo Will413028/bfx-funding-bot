@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
@@ -128,14 +129,17 @@ class DivergenceReporter:
         build_strategy_at_boundary primitive, extract on boundary_candle,
         compare to live_signal.
 
-        Returns None if byte-equal; dict with diff detail otherwise.
+        Returns None if equal (within tolerance); dict with diff detail otherwise.
 
-        Phase 4.3 LOCF symmetry: this function and warmup.warmup_cell BOTH
-        call build_strategy_at_boundary with their respective (history,
-        ref_mts, budget_hours). That single function is the source of
-        truth — given the same inputs it produces deterministically equal
-        Strategy state, so live (warmup-derived) and replay (this
-        function) cannot drift by construction.
+        Phase 4.3 LOCF symmetry: this function and warmup.warmup_cell BOTH call
+        build_strategy_at_boundary. For BOUNDED state (RP's maxlen deque) live
+        (warmup-derived, incrementally observed) and replay (this function) are
+        byte-equal — the bounded window forgets old data exactly. For UNBOUNDED
+        accumulators (MR's EMA) they only CONVERGE: live is seeded once at warmup
+        and drifts forward while replay re-seeds at ref_mts-lookback each tick, so
+        the seed's exponential tail (~(1-alpha)^lookback) differs at a noise-floor
+        level that never reaches 0 in Decimal. _diff_fields compares those
+        accumulator-derived fields with a relative tolerance, exact otherwise.
         """
         if len(raw_history) < 2:
             return None
@@ -145,7 +149,8 @@ class DivergenceReporter:
         )
         replay_signal = ExtractedSignal.extract(cell, result.strategy, boundary_candle)
 
-        if replay_signal == live_signal:
+        diff_fields = _diff_fields(live_signal, replay_signal)
+        if not diff_fields:
             return None
         log.warning(
             "divergence_detected cell=%s live=%r replay=%r",
@@ -154,7 +159,7 @@ class DivergenceReporter:
         return {
             "live": _to_dict(live_signal),
             "replay": _to_dict(replay_signal),
-            "diff_fields": _diff_fields(live_signal, replay_signal),
+            "diff_fields": diff_fields,
         }
 
 
@@ -166,12 +171,56 @@ def _to_dict(s: ExtractedSignal) -> dict[str, Any]:
     }
 
 
+# Accumulator-derived attributes compared with relative tolerance (vs exact).
+# MR's EMA is an unbounded accumulator: warmup-seeded live and window-seeded
+# replay converge but never byte-match (the seed's exponential tail never reaches
+# 0 in Decimal). Bounded/discrete fields (RP deque-derived, config, direction)
+# stay exact. The tolerance sits ~140x above the span=24 noise floor (~7e-7
+# steady-state, lookback=200) and ~100x below real-drift magnitude (~1e-2). NOTE:
+# span=168 cells do NOT converge within lookback=200 (~9% floor) — they need a
+# larger lookback to be tolerance-comparable; not deployed (canary is span=24),
+# deferred.
+_APPROX_ATTR_KEYS = frozenset({"ema_current", "last_deviation"})
+_REL_TOL = Decimal("1e-4")
+
+
+def _approx_equal(a: Any, b: Any) -> bool:
+    """Relative-tolerance equality for continuous accumulator values.
+
+    Exact match short-circuits True. None matches only None. Otherwise compares
+    |a-b| / max(|a|, |b|) <= _REL_TOL (both ~0 → equal).
+    """
+    if a == b:
+        return True
+    if a is None or b is None:
+        return False
+    da, db = Decimal(str(a)), Decimal(str(b))
+    scale = max(abs(da), abs(db))
+    if scale == 0:
+        return True
+    return abs(da - db) / scale <= _REL_TOL
+
+
+def _attrs_diverge(a_attrs: Any, b_attrs: Any) -> bool:
+    """Per-key attribute comparison: tolerance on accumulator keys, exact else."""
+    da, db = dict(a_attrs), dict(b_attrs)
+    if set(da) != set(db):
+        return True
+    for k in da:
+        if k in _APPROX_ATTR_KEYS:
+            if not _approx_equal(da[k], db[k]):
+                return True
+        elif da[k] != db[k]:
+            return True
+    return False
+
+
 def _diff_fields(a: ExtractedSignal, b: ExtractedSignal) -> list[str]:
     diffs: list[str] = []
-    if a.signal_score != b.signal_score:
+    if not _approx_equal(a.signal_score, b.signal_score):
         diffs.append("signal_score")
     if a.signal_direction != b.signal_direction:
         diffs.append("signal_direction")
-    if a.strategy_attributes != b.strategy_attributes:
+    if _attrs_diverge(a.strategy_attributes, b.strategy_attributes):
         diffs.append("strategy_attributes")
     return diffs

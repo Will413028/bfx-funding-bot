@@ -12,8 +12,13 @@ from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.divergence_reporter import (
     DivergenceReporter,
     ExtractedSignal,
+    _diff_fields,
 )
-from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
+from bfx_funding_bot.modules.marketfeed.strategy_registry import (
+    build_strategy,
+    build_strategy_at_boundary,
+)
 
 
 def _cell_rp() -> CellConfig:
@@ -290,3 +295,107 @@ def test_signal_score_zero_when_window_not_filled():
         strat.observe(c)
     sig = ExtractedSignal.extract(cell, strat, history[-1])
     assert sig.signal_score == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Continuous-accumulator tolerance: MR's EMA is unbounded, so live (warmup-seeded,
+# drifting) and replay (re-seeded at T-lookback each tick) converge but never
+# byte-match. _diff_fields compares accumulator-derived fields (ema_current,
+# last_deviation, signal_score) with a relative tolerance, exact otherwise.
+# ---------------------------------------------------------------------------
+
+
+def _mr_signal(ema: str, dev: str, score: float, direction=SignalDirection.POST):
+    return ExtractedSignal(
+        signal_score=score,
+        signal_direction=direction,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.00011412,
+            "threshold_sigma": 0.5,
+            "ema_current": Decimal(ema),
+            "last_deviation": Decimal(dev),
+        }.items())),
+        lend_decision=None,
+    )
+
+
+def test_diff_fields_mr_ema_sub_tolerance_not_flagged():
+    # The real warmup-vs-window divergence measured empirically (~9e-9 relative).
+    live = _mr_signal("0.0002135358306077083662106630005",
+                      "-0.4655697843531819142686270719", -0.4655697843531819)
+    replay = _mr_signal("0.0002135358325517000949927015409",
+                        "-0.4655697892185382641312486931", -0.46556978921853825)
+    assert _diff_fields(live, replay) == []  # within tolerance → no divergence
+
+
+def test_diff_fields_mr_ema_beyond_tolerance_flagged():
+    # A real drift (off-by-one observe) shifts ema by ~4% — far above tolerance.
+    live = _mr_signal("0.000213536", "-0.46557", -0.46557)
+    replay = _mr_signal("0.000222836", "-0.40000", -0.40000)
+    diffs = _diff_fields(live, replay)
+    assert "strategy_attributes" in diffs
+    assert "signal_score" in diffs
+
+
+def test_diff_fields_exact_field_no_tolerance():
+    # Non-accumulator fields (rate, threshold_sigma) are compared EXACTLY: even a
+    # tiny difference flags, because those are deterministic from config+candle.
+    live = _mr_signal("0.000213536", "-0.46557", -0.46557)
+    replay = ExtractedSignal(
+        signal_score=-0.46557,
+        signal_direction=SignalDirection.POST,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.00011413,  # differs in the last digit — exact field
+            "threshold_sigma": 0.5,
+            "ema_current": Decimal("0.000213536"),
+            "last_deviation": Decimal("-0.46557"),
+        }.items())),
+        lend_decision=None,
+    )
+    assert "strategy_attributes" in _diff_fields(live, replay)
+
+
+def test_diff_fields_direction_always_exact():
+    live = _mr_signal("0.000213536", "-0.46557", -0.46557, direction=SignalDirection.POST)
+    replay = _mr_signal("0.000213536", "-0.46557", -0.46557, direction=SignalDirection.SKIP)
+    assert "signal_direction" in _diff_fields(live, replay)
+
+
+def test_mr_warmup_drift_no_false_divergence():
+    """Faithful production scenario: the live MR strategy is warmed once then
+    drifts forward via per-tick observes; the reporter rebuilds replay from a
+    lookback window each tick. Their EMAs converge but differ at ~1e-8 — this must
+    NOT be flagged as divergence (the bug the adversarial review surfaced)."""
+    base, hour = 1747584000000, 3600_000
+    import random
+    rng = random.Random(7)
+    candles = [_candle(base + i * hour,
+                       Decimal(str(round(0.00005 + rng.random() * 0.0003, 8))))
+               for i in range(260)]
+    cell = CellConfig.model_validate({
+        "strategy": "mean_reversion", "symbol": "fUSD", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {"ema_span": 24, "threshold_sigma": 0.5, "ratio_sigma": 0.05},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 200,
+    })
+
+    def up_to(mts, lb):
+        return [c for c in candles if c.mts <= mts][-lb:]
+
+    # Live: warmup at idx 200, then observe ticks 200..205 (drift past warmup).
+    live = build_strategy_at_boundary(
+        cell=cell, history=up_to(candles[200].mts, 201),
+        ref_mts=candles[200].mts, budget_hours=200,
+    ).strategy
+    for idx in range(200, 206):
+        live_signal = ExtractedSignal.extract(cell, live, candles[idx])
+
+    reporter = DivergenceReporter()
+    divergence = reporter.check(
+        cell=cell, raw_history=up_to(candles[205].mts, 201),
+        boundary_candle=candles[205], budget_hours=200, live_signal=live_signal,
+    )
+    assert divergence is None, (
+        f"MR EMA convergence noise must not be flagged as divergence; got: {divergence}"
+    )
