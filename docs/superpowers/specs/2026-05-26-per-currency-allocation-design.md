@@ -1,7 +1,13 @@
 # Per-Currency Allocation (Independent USD / USDT Limits) — Design
 
 **Date:** 2026-05-26
-**Status:** Approved design → implementation deferred (see §8 dependency)
+**Status:** SUPERSEDED by `2026-05-31-per-currency-native-allocation-design.md` (2026-05-31).
+This version assumed USDT-denominated caps and treated balance-awareness as deferred;
+the successor reframes to native-unit denomination (required once fADA, a volatile
+crypto, is a target currency) and folds in the now-live balance-aware cap. Kept for
+history.
+
+**Status (original):** Approved design → implementation deferred (see §8 dependency)
 **Trigger:** Operator funded the account with USDT and observed that the bot would
 treat USD and USDT against one shared cap. USD and USDT are independent wallets;
 allocation exposure and limits must be judged independently per currency.
