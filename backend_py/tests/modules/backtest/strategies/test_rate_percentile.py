@@ -82,3 +82,51 @@ def test_param_grid_for_cell_with_acf_fail_drops_720_lookback() -> None:
     assert len(grid) == 3
     looks = {p["lookback_hours"] for p in grid}
     assert looks == {168}
+
+
+def _rp(percentile: int = 75, lookback: int = 3) -> RatePercentileStrategy:
+    return RatePercentileStrategy(percentile=percentile, lookback_hours=lookback)
+
+
+def test_window_filled_false_until_lookback_reached() -> None:
+    rp = _rp(lookback=3)
+    assert rp.window_filled is False
+    rp.observe(_c(0, "0.0001"))
+    rp.observe(_c(1, "0.0002"))
+    assert rp.window_filled is False
+    rp.observe(_c(2, "0.0003"))
+    assert rp.window_filled is True
+
+
+def test_last_threshold_none_during_warmup() -> None:
+    rp = _rp(lookback=3)
+    rp.observe(_c(0, "0.0001"))
+    cand = _c(1, "0.0002")
+    rp.observe(cand)
+    rp.decide(cand)  # window not full -> decide returns early, no threshold cached
+    assert rp.last_threshold is None
+
+
+def test_last_threshold_caches_decide_value() -> None:
+    import numpy as np
+
+    rp = _rp(percentile=50, lookback=3)
+    for i, v in enumerate(["0.0001", "0.0003", "0.0002"]):
+        rp.observe(_c(i, v))
+    cand = _c(3, "0.0002")
+    rp.observe(cand)  # window now [0.0003, 0.0002, 0.0002] (maxlen=3)
+    rp.decide(cand)
+    assert rp.last_threshold is not None
+    win = [0.0003, 0.0002, 0.0002]
+    expected = Decimal(str(float(np.percentile(win, 50))))
+    assert rp.last_threshold == expected
+
+
+def test_window_values_returns_current_window_snapshot() -> None:
+    rp = _rp(lookback=3)
+    rp.observe(_c(0, "0.0001"))
+    rp.observe(_c(1, "0.0002"))
+    assert rp.window_values == (Decimal("0.0001"), Decimal("0.0002"))
+    rp.observe(_c(2, "0.0003"))
+    rp.observe(_c(3, "0.0004"))
+    assert rp.window_values == (Decimal("0.0002"), Decimal("0.0003"), Decimal("0.0004"))
