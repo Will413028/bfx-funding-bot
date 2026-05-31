@@ -20,7 +20,7 @@ def _diag(peak: str) -> ClampDiagnostic:
 
 def _verdict(state_kwargs):  # type: ignore[no-untyped-def]
     base: dict = {
-        "headline_active_spread": Decimal("0.06"),
+        "headline_bot_vs_idle": Decimal("0.06"),
         "n_windows": 10,
         "total_capital_days": Decimal("4000"),
         "ci_lo": Decimal("0.01"),
@@ -35,6 +35,10 @@ def _verdict(state_kwargs):  # type: ignore[no-untyped-def]
         ),
         "min_windows": 8,
         "min_capital_days": Decimal("3990"),
+        "mr_alpha_spread": Decimal("0.0"),
+        "mr_alpha_ci_lo": Decimal("-0.01"),
+        "mr_alpha_ci_hi": Decimal("0.02"),
+        "mr_alpha_available": True,
     }
     base.update(state_kwargs)
     return decide_verdict(**base)
@@ -49,7 +53,29 @@ def test_render_markdown_contains_verdict_and_headline():
     )
     assert "PASS" in md
     assert "0.06" in md
+    assert "bot-vs-idle" in md
     assert "G3 Live Validation" in md
+
+
+def test_render_markdown_mr_alpha_section_available():
+    from scripts.run_g3_live_validation import render_markdown
+
+    v = _verdict({})  # mr_alpha_available True by default
+    md = render_markdown(verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"))
+    assert "MR timing alpha" in md
+    assert "secondary diagnostic" in md
+    assert "0% by construction" in md
+    # the diagnostic numbers render when available
+    assert "0.02" in md  # mr_alpha_ci_hi
+
+
+def test_render_markdown_mr_alpha_section_unavailable():
+    from scripts.run_g3_live_validation import render_markdown
+
+    v = _verdict({"mr_alpha_available": False})
+    md = render_markdown(verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"))
+    assert "MR timing alpha" in md
+    assert "unavailable" in md
 
 
 def test_render_markdown_insufficient_data_states_caveat():
@@ -90,6 +116,12 @@ def test_verdict_to_json_includes_over_deploy_block():
     assert od["cap"] == "570"
     assert od["peak_concurrent"] == "863"
     assert od["detected"] is True
-    # within-budget → detected False
     j2 = _verdict_to_json(v, _diag("400"))
     assert j2["over_deploy"]["detected"] is False
+    # reframed keys
+    assert j["headline_bot_vs_idle"] == "0.06"
+    assert "headline_active_spread" not in j
+    assert j["mr_alpha"]["available"] is True
+    assert j["mr_alpha"]["spread"] == "0.0"
+    assert j["mr_alpha"]["ci_lo"] == "-0.01"
+    assert j["mr_alpha"]["ci_hi"] == "0.02"
