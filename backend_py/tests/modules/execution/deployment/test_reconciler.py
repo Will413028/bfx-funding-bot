@@ -41,6 +41,7 @@ class _FakeLedger:
     def __init__(
         self, exposure: Decimal, reserved: Decimal | None = None,
         available: Decimal | None = None,
+        available_by_symbol: dict[str, Decimal] | None = None,
     ) -> None:
         self._e = exposure
         # Default: reserved == exposure (all capital is reserved / open offers).
@@ -48,14 +49,17 @@ class _FakeLedger:
         self._reserved = reserved if reserved is not None else exposure
         # Default: effectively unbounded so existing cap-driven tests are unaffected.
         self._available = available if available is not None else Decimal("1000000")
+        self._available_by_symbol = available_by_symbol or {}
 
-    def current_exposure(self) -> Decimal:
+    def current_exposure(self, symbol: str) -> Decimal:
         return self._e
 
-    def reserved_exposure(self) -> Decimal:
+    def reserved_exposure(self, symbol: str) -> Decimal:
         return self._reserved
 
-    def available_balance(self) -> Decimal:
+    def available_balance(self, symbol: str) -> Decimal:
+        if symbol in self._available_by_symbol:
+            return self._available_by_symbol[symbol]
         return self._available
 
 
@@ -403,3 +407,45 @@ async def test_orphan_realized_credits_do_not_starve_cell():
     assert ex.submitted[0].offer_amount_usdt == pytest.approx(170.0)
     # tracker recorded the new submit on top of the existing 100
     assert tracker.deployed("fUST_a30") == D("270")
+
+
+# ---------------------------------------------------------------------------
+# Cluster D: decision carries the cell symbol; headroom is per-symbol
+# ---------------------------------------------------------------------------
+
+
+async def test_decision_carries_cell_symbol():
+    safety = _FakeSafety(allowed=True)
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], safety=safety,
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    # both the decision handed to safety AND to the executor carry the symbol
+    assert safety.calls[0].symbol == "fUST"
+    assert ex.submitted[0].symbol == "fUST"
+
+
+async def test_headroom_uses_cell_symbol_available():
+    # cap gap = 570 - 370 = 200. The cell symbol fUST has available 250 (buffer 3
+    # → headroom 247 >= 200), while the global default is starved (0). Reading the
+    # per-symbol balance is what lets the deploy proceed.
+    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    store.update(_post_quote("fUST_a30"))
+    tracker = CellDeploymentTracker()
+    ledger = _FakeLedger(
+        exposure=D("370"), available=D("0"),
+        available_by_symbol={"fUST": D("250")},
+    )
+    ex = _FakeExecutor()
+    rec = DeploymentReconciler(
+        store=store, tracker=tracker, ledger=ledger,
+        safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
+        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_amount_usdt == 200.0

@@ -37,9 +37,9 @@ log = logging.getLogger(__name__)
 
 
 class _LedgerProtocol(Protocol):
-    def current_exposure(self) -> Decimal: ...
-    def reserved_exposure(self) -> Decimal: ...
-    def available_balance(self) -> Decimal: ...
+    def current_exposure(self, symbol: str) -> Decimal: ...
+    def reserved_exposure(self, symbol: str) -> Decimal: ...
+    def available_balance(self, symbol: str) -> Decimal: ...
 
 
 class _SafetyChainProtocol(Protocol):
@@ -88,14 +88,22 @@ class DeploymentReconciler:
         self._cell_strategy: dict[str, StrategyName] = {
             c.cell_id: c.strategy for c in cells
         }
+        # cell_id → symbol (offer currency), threaded onto the per-offer decision
+        # so the per-symbol guards (allocation cap / buying power) can read it, and
+        # used for the per-symbol balance clamp.
+        self._cell_symbol: dict[str, str] = {c.cell_id: c.symbol for c in cells}
 
     async def deploy(self) -> None:
         now = self._clock()
-        e_total = self._ledger.current_exposure()
+        # Phase 1: all configured cells share one currency (fUST today). Exposure,
+        # reserved, and the wallet balance clamp are read for that symbol; the
+        # global gap/sizing math is unchanged (per-symbol gap pools are Phase 2).
+        symbol = self._cell_symbol[self._cells[0].cell_id]
+        e_total = self._ledger.current_exposure(symbol)
         # Clamp the deployable gap to funds physically present in the funding
         # wallet (available − buffer) so the reconciler never sizes an offer the
         # venue must reject for insufficient balance (cap>balance loop, 2026-05-29).
-        headroom = max(Decimal("0"), self._ledger.available_balance() - self._balance_buffer)
+        headroom = max(Decimal("0"), self._ledger.available_balance(symbol) - self._balance_buffer)
         # Rescale per-cell intent to the *reserved* total (pending open offers),
         # NOT to current_exposure (reserved + realized). Realized credits are
         # committed to the venue and unattributable to any cell — using e_total
@@ -103,7 +111,7 @@ class DeploymentReconciler:
         # silently starve cells via negative allocate_gap headroom.
         cap_per_cell = self._concentration_pct * self._ctx.allocation_cap_usdt
         self._tracker.reconcile_to_total(
-            self._ledger.reserved_exposure(),
+            self._ledger.reserved_exposure(symbol),
             cap_per_cell=cap_per_cell,
         )
 
@@ -172,6 +180,7 @@ class DeploymentReconciler:
                 offer_rate=quote.rate,
                 offer_amount_usdt=float(amount),
                 offer_duration_days=quote.period_days,
+                symbol=self._cell_symbol[cell_id],
             )
             guard = await self._safety.evaluate(decision, self._ctx)
             if not guard.allowed:

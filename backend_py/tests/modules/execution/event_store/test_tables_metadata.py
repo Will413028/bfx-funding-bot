@@ -21,9 +21,9 @@ def test_event_log_columns() -> None:
     assert cols["event_seq"].primary_key is True
 
 
-def test_position_state_pk_is_account_env() -> None:
+def test_position_state_pk_is_account_env_symbol() -> None:
     pk = {c.name for c in Base.metadata.tables["position_state"].primary_key.columns}
-    assert pk == {"account_id", "deployment_environment"}
+    assert pk == {"account_id", "deployment_environment", "symbol"}
 
 
 def test_registry_state_has_failed() -> None:

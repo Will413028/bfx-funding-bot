@@ -67,6 +67,7 @@ class ClaimRecord:
     state: RegistryState
     occurred_at_ms: int
     last_updated_ms: int
+    symbol: str = "fUSD"  # populated from ReservationClaimed.symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,15 +116,17 @@ def transition(
             # Idempotent dedup — already claimed
             return snapshot, []
         occurred = incoming.occurred_at_ms if incoming.occurred_at_ms is not None else now_ms
+        assert incoming.amount is not None  # invariant: _resolve_amount guarantees this
         record = ClaimRecord(
             venue_offer_id=voi,
             cid=incoming.cid,
             signal_correlation_id=incoming.signal_correlation_id,
-            size_usdt=incoming.size_usdt,
+            size_usdt=incoming.amount,
             account_id=incoming.account_id,
             state=RegistryState.CLAIMED,
             occurred_at_ms=occurred,
             last_updated_ms=now_ms,
+            symbol=incoming.symbol,
         )
         return {**snapshot, voi: record}, []
 

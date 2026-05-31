@@ -101,8 +101,9 @@ async def test_claimed_updates_same_cid_row(pg_session_factory) -> None:
         ps = (await s.execute(select(PositionStateRow).where(
             PositionStateRow.account_id == acct,
             PositionStateRow.deployment_environment == _ENV,
+            PositionStateRow.symbol == "fUST",
         ))).scalar_one()
-        assert ps.reserved_usdt == Decimal("100")   # CLAIMED reserved += size
+        assert ps.reserved == Decimal("100")   # CLAIMED reserved += size
 
 
 async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
@@ -123,8 +124,9 @@ async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
         ps = (await s.execute(select(PositionStateRow).where(
             PositionStateRow.account_id == acct,
             PositionStateRow.deployment_environment == _ENV,
+            PositionStateRow.symbol == "fUST",
         ))).scalar_one()
-        assert ps.reserved_usdt == Decimal("0")     # FAILED never reserves
+        assert ps.reserved == Decimal("0")     # FAILED never reserves
 
 
 async def test_crash_mid_flight_leaves_pending(pg_session_factory) -> None:

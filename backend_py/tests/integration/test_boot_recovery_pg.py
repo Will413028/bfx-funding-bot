@@ -70,9 +70,10 @@ async def _reserved(session_factory, account_id) -> Decimal:
             select(PositionStateRow).where(
                 PositionStateRow.deployment_environment == _ENV,
                 PositionStateRow.account_id == account_id,
+                PositionStateRow.symbol == "fUST",
             )
         )).scalar_one_or_none()
-        return Decimal(str(row.reserved_usdt)) if row else Decimal("0")
+        return Decimal(str(row.reserved)) if row else Decimal("0")
 
 
 @pytest.mark.asyncio

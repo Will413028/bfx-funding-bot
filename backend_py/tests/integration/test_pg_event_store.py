@@ -58,11 +58,14 @@ async def test_position_state_reserved_realized(pg_session_factory) -> None:
     async with pg_session_factory() as s:
         row = (
             await s.execute(
-                select(PositionStateRow).where(PositionStateRow.account_id == "acct")
+                select(PositionStateRow).where(
+                    PositionStateRow.account_id == "acct",
+                    PositionStateRow.symbol == "fUST",
+                )
             )
         ).scalar_one()
-        assert row.reserved_usdt == Decimal("6")  # 10 - 4
-        assert row.realized_usdt == Decimal("4")
+        assert row.reserved == Decimal("6")  # 10 - 4
+        assert row.realized == Decimal("4")
         assert row.last_event_seq > 0
 
 
@@ -100,10 +103,13 @@ async def test_fill_redelivery_does_not_double_count(pg_session_factory) -> None
     async with pg_session_factory() as s:
         row = (
             await s.execute(
-                select(PositionStateRow).where(PositionStateRow.account_id == "acct2")
+                select(PositionStateRow).where(
+                    PositionStateRow.account_id == "acct2",
+                    PositionStateRow.symbol == "fUST",
+                )
             )
         ).scalar_one()
-        assert row.realized_usdt == Decimal("3")  # not 6
+        assert row.realized == Decimal("3")  # not 6
 
 
 async def test_ledger_from_snapshot(pg_session_factory) -> None:
@@ -162,17 +168,21 @@ async def test_rebuild_matches_incremental(pg_session_factory) -> None:
         await s.commit()
     async with pg_session_factory() as s:
         incr = (await s.execute(select(PositionStateRow).where(
-            PositionStateRow.account_id == "R"))).scalar_one()
-        incr_reserved, incr_realized = Decimal(str(incr.reserved_usdt)), Decimal(str(incr.realized_usdt))
+            PositionStateRow.account_id == "R",
+            PositionStateRow.symbol == "fUST",
+        ))).scalar_one()
+        incr_reserved, incr_realized = Decimal(str(incr.reserved)), Decimal(str(incr.realized))
         incr_claims = await _claims(s)
     async with pg_session_factory() as s:
         await store.rebuild_snapshot_from_log(s, account_id="R", deployment_environment="ci")
         await s.commit()
     async with pg_session_factory() as s:
         rb = (await s.execute(select(PositionStateRow).where(
-            PositionStateRow.account_id == "R"))).scalar_one()
-        assert Decimal(str(rb.reserved_usdt)) == incr_reserved == Decimal("6")
-        assert Decimal(str(rb.realized_usdt)) == incr_realized == Decimal("4")
+            PositionStateRow.account_id == "R",
+            PositionStateRow.symbol == "fUST",
+        ))).scalar_one()
+        assert Decimal(str(rb.reserved)) == incr_reserved == Decimal("6")
+        assert Decimal(str(rb.realized)) == incr_realized == Decimal("4")
         # offer_claims must also match incremental vs rebuild
         rb_claims = await _claims(s)
         assert len(incr_claims) == 2

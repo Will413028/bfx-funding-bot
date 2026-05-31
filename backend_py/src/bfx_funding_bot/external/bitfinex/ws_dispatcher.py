@@ -100,6 +100,7 @@ def _translate_foc(
             is_simulated=False,
             venue_seq=foc.raw_seq,
             occurred_at_ms=foc.mts_update,
+            symbol=foc.symbol,
         )
         return [fill], [RegistryMutation(
             venue_offer_id=voi,
@@ -129,6 +130,7 @@ def _translate_foc(
         is_simulated=False,
         venue_seq=foc.raw_seq,
         occurred_at_ms=foc.mts_update,
+        symbol=foc.symbol,
     )
     mutation = RegistryMutation(
         venue_offer_id=voi,
