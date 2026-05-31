@@ -85,14 +85,20 @@ class OfferClaimRow(Base):
 
 
 class PositionStateRow(Base):
-    """Snapshot: ledger projection. One row per (account, env)."""
+    """Snapshot: ledger projection. One row per (account, env, symbol).
+
+    Native units per symbol: `reserved`/`realized` are in the symbol's own
+    currency (fUST -> USDT), never summed across symbols. The symbol column +
+    composite PK let multiple funding currencies coexist for one tenant.
+    """
 
     __tablename__ = "position_state"
 
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
-    reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
-    realized_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    reserved: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
+    realized: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
     # Event/domain time of the latest projected event (epoch ms, from the event's
     # occurred_at_ms) — mirrors offer_claims.last_updated_ms. NOT wall-clock: a
     # projection is a deterministic function of the event stream, so rebuild
@@ -103,7 +109,9 @@ class PositionStateRow(Base):
     last_reconciled_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     n_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    __table_args__ = (PrimaryKeyConstraint("account_id", "deployment_environment"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("account_id", "deployment_environment", "symbol"),
+    )
 
 
 class ReconcileObservationRow(Base):

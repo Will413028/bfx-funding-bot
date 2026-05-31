@@ -27,8 +27,8 @@ async def test_set_position_snapshot_writes_state_observation_and_returns_drift(
     async with sm() as session:
         # seed prior belief: realized=300 (the drifted-low ledger)
         session.add(PositionStateRow(
-            account_id="a", deployment_environment="ci",
-            reserved_usdt=Decimal("0"), realized_usdt=Decimal("300"),
+            account_id="a", deployment_environment="ci", symbol="fUST",
+            reserved=Decimal("0"), realized=Decimal("300"),
             last_updated_ms=1, last_event_seq=5))
         # an event_log head at seq=5
         session.add(EventLogRow(
@@ -47,7 +47,7 @@ async def test_set_position_snapshot_writes_state_observation_and_returns_drift(
         obs = (await session.execute(select(ReconcileObservationRow).where(
             ReconcileObservationRow.account_id == "a"))).scalars().all()
 
-    assert ps.realized_usdt == Decimal("450")        # live view overwritten
+    assert ps.realized == Decimal("450")        # live view overwritten
     assert ps.n_credits == 3
     assert ps.last_event_seq == 1                     # fence = current head (the seeded row's seq)
     assert len(obs) == 1                              # append-only checkpoint written

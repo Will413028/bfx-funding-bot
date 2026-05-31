@@ -174,11 +174,13 @@ async def test_rebuild_reproduces_identical_position_state(sqlite_session: Async
         PositionStateRow.account_id == "acct"))).scalar_one()
     assert before.last_updated_ms == 1007
 
+    # ReservationClaimed.symbol defaults to "fUSD"; rebuild must match.
     await store.rebuild_snapshot_from_log(
-        sqlite_session, account_id="acct", deployment_environment="ci")
+        sqlite_session, account_id="acct", deployment_environment="ci", symbol="fUSD")
     await sqlite_session.flush()
     after = (await sqlite_session.execute(select(PositionStateRow).where(
-        PositionStateRow.account_id == "acct"))).scalar_one()
+        PositionStateRow.account_id == "acct",
+        PositionStateRow.symbol == "fUSD"))).scalar_one()
     assert after.last_updated_ms == 1007  # identical — no wall-clock drift
 
 
@@ -198,5 +200,5 @@ async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session
     assert claim.state == "failed"
     ps = (await sqlite_session.execute(
         select(PositionStateRow).where(PositionStateRow.account_id == "acctF"))).scalar_one()
-    assert ps.reserved_usdt == Decimal("0")   # FAILED never reserved capital
+    assert ps.reserved == Decimal("0")   # FAILED never reserved capital
     assert ps.last_event_seq > 0              # high-water mark still advances

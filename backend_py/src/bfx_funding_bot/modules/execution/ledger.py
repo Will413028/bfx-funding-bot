@@ -67,8 +67,8 @@ class PaperPositionLedger:
             )
         ).scalar_one_or_none()
         if row is not None:
-            ledger._reserved = Decimal(str(row.reserved_usdt))
-            ledger._realized = Decimal(str(row.realized_usdt))
+            ledger._reserved = Decimal(str(row.reserved))
+            ledger._realized = Decimal(str(row.realized))
         return ledger
 
     # ---------- live update handlers (DomainEventBus subscribers) ----------
