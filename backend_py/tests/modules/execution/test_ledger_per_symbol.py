@@ -130,3 +130,14 @@ async def test_reconciled_other_account_ignored() -> None:
     await led.on_position_reconciled(_reconciled("fUST", "1", "1", "99", account_id="other"))
     assert led.available_balance("fUST") == Decimal("0")
     assert led.current_exposure("fUST") == Decimal("0")
+
+
+async def test_no_arg_getters_return_cross_symbol_sum() -> None:
+    led = PaperPositionLedger(account_id="default")
+    await led.on_reservation_claimed(_claim("fUST", "100"))
+    await led.on_reservation_claimed(_claim("fUSD", "30"))
+    await led.on_order_filled(_fill("fUST", "40", venue_offer_id="o-ust", venue_seq=1))
+    # transitional None-path: sum across both symbols
+    assert led.reserved_exposure() == Decimal("90")    # (100-40) fUST + 30 fUSD
+    assert led.realized_exposure() == Decimal("40")    # 40 fUST + 0 fUSD
+    assert led.current_exposure() == Decimal("130")    # reserved 90 + realized 40
