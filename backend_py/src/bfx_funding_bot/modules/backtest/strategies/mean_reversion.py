@@ -31,10 +31,19 @@ class MeanReversionStrategy(Strategy):
         self._ratio_sigma = ratio_sigma
         self._alpha = Decimal(2) / Decimal(ema_span + 1)
         self._ema: Decimal | None = None
+        self._last_deviation: Decimal | None = None
 
     @property
     def name(self) -> str:
         return f"mean_reversion_ema{self._ema_span}_sigma{self._threshold_sigma}"
+
+    @property
+    def ema_current(self) -> Decimal | None:
+        return self._ema
+
+    @property
+    def last_deviation(self) -> Decimal | None:
+        return self._last_deviation
 
     def observe(self, candle: FundingCandle) -> None:
         if candle.close is None:
@@ -51,6 +60,7 @@ class MeanReversionStrategy(Strategy):
         if candle.close is None or self._ema is None or self._ema == 0:
             return None
         deviation = (candle.close - self._ema) / self._ema
+        self._last_deviation = deviation
         lower_band = -self._threshold_sigma * self._ratio_sigma
         if deviation < lower_band:
             return None
