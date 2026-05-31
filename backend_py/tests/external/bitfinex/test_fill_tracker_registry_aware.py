@@ -127,3 +127,39 @@ async def test_fill_tracker_skips_when_voi_not_in_registry() -> None:
     await tracker._tick()
 
     assert len(captured) == 0  # no event for unknown voi
+
+
+@pytest.mark.asyncio
+async def test_fill_tracker_reservation_released_carries_claim_symbol() -> None:
+    """Symbol from ReservationClaimed threads through to emitted ReservationReleased."""
+    bus = DomainEventBus(clock=lambda: 5000)
+    registry = OfferRegistry(clock=lambda: 5000)
+    bus.subscribe(ReservationClaimed, registry.handle)
+
+    sig_id = uuid4()
+    await bus.publish(ReservationClaimed(
+        cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
+        signal_correlation_id=sig_id, account_id="default", is_simulated=False,
+        occurred_at_ms=1000, symbol="fUST",
+    ))
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json=[])),
+        base_url="https://api.bitfinex.com",
+    )
+    captured: list = []
+    async def capture(ev: ReservationReleased) -> None:
+        captured.append(ev)
+    bus.subscribe(ReservationReleased, capture)
+
+    tracker = RestPollingFillTracker(
+        http=http, event_sink=_EventCapture(), probe=HealthProbe(),
+        bus=bus, phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        cell="C-1", account_id="default", registry=registry,
+    )
+    tracker._last_state = {"42": {"cid": 42, "status": "ACTIVE", "size": 100.0}}
+    await tracker._tick()
+
+    assert len(captured) == 1
+    # symbol must be threaded from claim, not fall back to default "fUSD"
+    assert captured[0].symbol == "fUST"

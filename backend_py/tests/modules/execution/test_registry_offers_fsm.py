@@ -142,3 +142,24 @@ def test_event_missing_venue_offer_id_emits_warn_diag_no_mutation() -> None:
     assert len(diags) == 1
     assert diags[0].level == "warn"
     assert "venue_offer_id" in diags[0].message
+
+
+def test_claim_record_carries_symbol_from_reservation_claimed() -> None:
+    ev = ReservationClaimed(
+        cid=10, venue_offer_id="voi-1", size_usdt=Decimal("100"),
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        occurred_at_ms=1000, symbol="fUST",
+    )
+    new_snapshot, _ = transition({}, ev, now_ms=2000)
+    assert isinstance(new_snapshot["voi-1"], ClaimRecord)
+    assert new_snapshot["voi-1"].symbol == "fUST"
+
+
+def test_claim_record_symbol_defaults_to_fusd_when_not_set() -> None:
+    ev = ReservationClaimed(
+        cid=11, venue_offer_id="voi-2", size_usdt=Decimal("50"),
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        occurred_at_ms=1000,  # no symbol → default
+    )
+    new_snapshot, _ = transition({}, ev, now_ms=2000)
+    assert new_snapshot["voi-2"].symbol == "fUSD"
