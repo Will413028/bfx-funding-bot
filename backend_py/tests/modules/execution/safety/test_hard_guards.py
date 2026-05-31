@@ -17,6 +17,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     BuyingPowerGuard,
     HeartbeatGuard,
     ManualKillGuard,
+    WriterLockGuard,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -346,3 +347,28 @@ async def test_buying_power_isolates_buckets_per_symbol() -> None:
 
     allowed = await guard.evaluate(_post_decision(100.0, symbol="fUSD"), _bp_ctx())
     assert allowed.allowed is True   # 250 - 3 = 247; 100 <= 247 → allow
+
+
+class _FakeLock:
+    def __init__(self, held: bool) -> None:
+        self._held = held
+
+    async def verify_held(self) -> bool:
+        return self._held
+
+
+@pytest.mark.asyncio
+async def test_writer_lock_guard_blocks_when_lock_lost() -> None:
+    guard = WriterLockGuard(lock=_FakeLock(held=False))
+    r = await guard.evaluate(_post(), _ctx())
+    assert r.allowed is False
+    assert r.guard_name == "writer_lock"
+    assert r.reason is not None
+
+
+@pytest.mark.asyncio
+async def test_writer_lock_guard_allows_when_held() -> None:
+    guard = WriterLockGuard(lock=_FakeLock(held=True))
+    r = await guard.evaluate(_post(), _ctx())
+    assert r.allowed is True
+    assert r.guard_name == "writer_lock"

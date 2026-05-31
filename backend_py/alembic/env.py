@@ -8,6 +8,7 @@ Side-effect imports register tables with Base.metadata so autogenerate
 sees a unified schema.
 """
 
+import hashlib
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -34,6 +35,13 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# Session-level advisory lock that serializes concurrent `alembic upgrade` runs
+# (e.g. during VM cutover). Distinct namespace from the daemon writer lock so the
+# two never false-share. blake2b -> signed 64-bit int (pg advisory-lock key type).
+_MIGRATE_LOCK_KEY = int.from_bytes(
+    hashlib.blake2b(b"bfx-migrate:alembic", digest_size=8).digest(), "big", signed=True
+)
+
 
 def include_object(object, name, type_, reflected, compare_to):
     """Filter out legacy Atlas revision-tracking table from autogenerate."""
@@ -41,15 +49,55 @@ def include_object(object, name, type_, reflected, compare_to):
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        compare_type=True,
-        compare_server_default=True,
-        include_object=include_object,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
+    # Capture the connection's transactional default isolation level (e.g.
+    # "READ COMMITTED") so we can restore it for the migration after running the
+    # setup under AUTOCOMMIT. NOTE: use ``default_isolation_level`` (the DBAPI
+    # session default) rather than ``get_isolation_level()`` — the latter does
+    # NOT reflect the SQLAlchemy AUTOCOMMIT execution option, so it would not
+    # round-trip correctly.
+    original_isolation = connection.default_isolation_level
+    # Run the session-scoped setup (timeouts + advisory lock) under AUTOCOMMIT so
+    # they don't open a lingering outer transaction. SET and pg_try_advisory_lock
+    # attach to the underlying DBAPI session, so they SURVIVE switching the
+    # connection's isolation level back to transactional below.
+    connection.execution_options(isolation_level="AUTOCOMMIT")
+    # Bounded timeouts so a contended/blocked migration fails fast instead of
+    # hanging (e.g. during VM cutover): wait at most 5s for a lock, abort any
+    # single statement after 60s.
+    connection.exec_driver_sql("SET lock_timeout = '5s'")
+    connection.exec_driver_sql("SET statement_timeout = '60s'")
+    # Serialize concurrent migrations on a session-level advisory lock; bail out
+    # immediately if another migration already holds it.
+    got = connection.exec_driver_sql(
+        f"SELECT pg_try_advisory_lock({_MIGRATE_LOCK_KEY})"
+    ).scalar()
+    if not got:
+        raise RuntimeError("another migration is already running (advisory lock held)")
+    try:
+        # Clear the SQLAlchemy-level logical transaction that autobegan on the
+        # setup statements above; isolation level may not be altered while a
+        # Transaction object is active. Then restore the TRANSACTIONAL isolation
+        # so the migration runs ATOMICALLY (all DDL in one txn, rolled back on a
+        # mid-migration failure). The session SET timeouts + advisory lock survive.
+        connection.rollback()
+        connection.execution_options(isolation_level=original_isolation)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
+            include_object=include_object,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        # Release on a non-transactional path so the unlock takes effect
+        # immediately with no dangling txn before the (NullPool) connection
+        # closes. rollback() clears any active SQLAlchemy txn first (required
+        # before switching isolation level).
+        connection.rollback()
+        connection.execution_options(isolation_level="AUTOCOMMIT")
+        connection.exec_driver_sql(f"SELECT pg_advisory_unlock({_MIGRATE_LOCK_KEY})")
 
 
 def run_migrations_offline() -> None:

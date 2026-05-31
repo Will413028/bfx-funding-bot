@@ -6,7 +6,7 @@
 # optional/off (no validated threshold yet).
 #
 # Select at deploy time: BFX_SAFETY_CONFIG=configs/safety.canary.yaml
-# Thresholds match the conservative $150 canary profile (~10% loss / 15% drawdown).
+# Thresholds match the conservative 570 USDT canary profile (~10% loss / 15% drawdown).
 # No hot reload -- change here = redeploy.
 
 hard_guards:
@@ -18,12 +18,12 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
-    enabled: true            # cap from BFX_ALLOCATION_CAP_USDT (set 450, matches funded wallet)
+    enabled: true            # informational only -- real cap comes from BFX_ALLOCATION_CAP_USDT env (570)
 
 calibrated_guards:
   realized_loss_24h:
     enabled: true
-    threshold_usdt: 15.0     # halt if 24h realized loss exceeds ~10% of $150 cap
+    threshold_usdt: 57       # halt if 24h realized loss exceeds ~10% of the 570 USDT cap
   drawdown_from_peak:
     enabled: true
     threshold_pct: 15.0      # halt at 15% peak-to-trough drawdown

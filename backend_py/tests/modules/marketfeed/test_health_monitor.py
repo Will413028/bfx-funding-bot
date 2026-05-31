@@ -263,6 +263,26 @@ class TestStalenessScan:
         assert len(fake_sink.emitted) == 1
         assert fake_sink.emitted[0]["payload"]["check_target"] == "ws"
 
+    async def test_writer_lock_stale_never_fatal(self, monitor, fake_sink):
+        """writer_lock heartbeat is observability+recovery ONLY — a stale beat
+        (lock genuinely lost, refresh() returning False) must NEVER raise
+        FatalError. The authoritative fail-closed gate is the per-submit
+        WriterLockGuard.verify_held(); refresh() handles recovery. Tying this
+        beat to fatal staleness would re-create the 2026-05-26 reactive
+        restart-loop anti-pattern. Stale well past 3× threshold → emit only."""
+        # writer_lock threshold 90s; age 600s >> 3× (270s) → would be fatal for
+        # a liveness task, but writer_lock is activity-class → must not raise.
+        monitor.probe.last_active_ts["writer_lock"] = (
+            datetime.now(UTC) - timedelta(seconds=600)
+        )
+        result = await monitor.scan_staleness()  # must NOT raise
+        assert len(result) == 1
+        assert result[0]["sub_task"] == "writer_lock"
+        assert result[0]["severity"] == "down"  # >2× threshold
+        assert len(fake_sink.emitted) == 1
+        assert fake_sink.emitted[0]["payload"]["check_target"] == "writer_lock"
+        assert fake_sink.emitted[0]["payload"]["status"] == "down"
+
     # ── Phase 4.3 Task 5: scan_staleness carve-out ───────────────────────────
 
     async def test_no_fatal_escalation_for_signal_pipeline_stale_exceeded(
