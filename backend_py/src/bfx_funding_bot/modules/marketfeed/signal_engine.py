@@ -261,6 +261,7 @@ class SignalEngine:
             return DecisionPayload(
                 decision_outcome=DecisionOutcome.POST,
                 signal_correlation_id=correlation_id,
+                symbol=cell.symbol,
                 offer_rate=float(sig.lend_decision.rate),
                 offer_amount_usdt=cell.reference_amount_usdt,
                 offer_duration_days=int(sig.lend_decision.period_days),
@@ -269,6 +270,7 @@ class SignalEngine:
         return DecisionPayload(
             decision_outcome=DecisionOutcome.SKIP,
             signal_correlation_id=correlation_id,
+            symbol=cell.symbol,
             skip_reason=SkipReason.BELOW_THRESHOLD,
             is_stale=is_stale, stale_seconds=stale_seconds, budget_seconds=budget_seconds,
         )
