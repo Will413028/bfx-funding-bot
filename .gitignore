@@ -15,6 +15,10 @@ tmp/
 .env.*.local
 .env.chaos-bak*
 
+# VM deploy (assembled runtime env + operator secrets — never commit)
+.env.runtime
+bot.env
+
 # Keys
 *.pem
 bfx.txt
