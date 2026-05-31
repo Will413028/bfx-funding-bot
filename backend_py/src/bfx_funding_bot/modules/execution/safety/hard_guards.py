@@ -13,6 +13,7 @@ from typing import Protocol
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     GuardResult,
+    WriterLockHandle,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -189,3 +190,26 @@ class BuyingPowerGuard:
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)
+
+
+class WriterLockGuard:
+    """Fail-closed single-writer guard. Refuses every real-money submit unless
+    this process still holds the Postgres advisory writer lock, verified LIVE
+    against the dedicated connection (no stale-flag window)."""
+
+    name = "writer_lock"
+    is_calibrated = False
+
+    def __init__(self, *, lock: WriterLockHandle) -> None:
+        self._lock = lock
+
+    async def evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> GuardResult:
+        if await self._lock.verify_held():
+            return GuardResult(allowed=True, guard_name=self.name)
+        return GuardResult(
+            allowed=False,
+            guard_name=self.name,
+            reason="writer advisory lock not held — failing closed (refusing real-money submit)",
+        )

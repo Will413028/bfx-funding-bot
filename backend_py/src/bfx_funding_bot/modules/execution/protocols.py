@@ -59,6 +59,11 @@ class GuardRule(Protocol):
     ) -> GuardResult: ...
 
 
+class WriterLockHandle(Protocol):
+    """Anything that can live-verify whether this process holds the writer lock."""
+    async def verify_held(self) -> bool: ...
+
+
 class ExecutorPort(Protocol):
     """Venue executor (Echo paper / Bitfinex live).
 
