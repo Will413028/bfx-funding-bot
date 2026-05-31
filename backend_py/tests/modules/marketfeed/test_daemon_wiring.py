@@ -289,3 +289,53 @@ async def test_smoke_runner_gated_off_for_live_executor(
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
     assert daemon.smoke_runner is None  # live → smoke self-test disabled (no real-venue probe)
+
+
+@pytest.mark.asyncio
+async def test_canary_build_wires_writer_lock_and_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Live (canary/bitfinex_live) build constructs the WriterLock and appends
+    the fail-closed writer_lock guard to the safety chain. On a sqlite
+    DATABASE_URL the lock is CONSTRUCTED but never ACQUIRED (acquire is
+    Postgres-only) — so this asserts wiring without touching a real lock.
+    Paper/shadow leave writer_lock None (covered implicitly by the sibling
+    paper test which exercises the simulated path)."""
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+
+    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
+    db_path = tmp_path / "writer_lock_wiring.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with _eng.begin() as _c:
+        await _c.run_sync(Base.metadata.create_all)
+    await _eng.dispose()
+
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[],
+        is_reusable=True, is_optional=True,
+    )
+
+    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+    # Constructed in the live block (but NOT acquired, since sqlite).
+    assert daemon.writer_lock is not None
+    # Fail-closed guard appended whenever live.
+    assert any(g.name == "writer_lock" for g in daemon.safety_chain.guards)
