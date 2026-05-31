@@ -358,4 +358,14 @@ def test_position_reconciled_back_compat_usdt_kwargs() -> None:
     assert e.reserved == Decimal("300")
     assert e.realized == Decimal("450")
     assert e.available == Decimal("19.10")
-    assert e.symbol == "fUSD"
+
+
+def test_position_reconciled_rejects_conflicting_canonical_and_usdt() -> None:
+    from bfx_funding_bot.modules.execution.events import PositionReconciled
+
+    with pytest.raises(TypeError, match="disagree"):
+        PositionReconciled(
+            account_id="default", n_offers=0, n_credits=0, occurred_at_ms=0,
+            reserved=Decimal("300"), reserved_usdt=Decimal("350"),
+            realized=Decimal("0"), available=Decimal("0"),
+        )
