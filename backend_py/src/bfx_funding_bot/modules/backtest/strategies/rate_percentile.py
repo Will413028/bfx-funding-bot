@@ -23,10 +23,24 @@ class RatePercentileStrategy(Strategy):
         self._percentile = percentile
         self._lookback_hours = lookback_hours
         self._window: deque[Decimal] = deque(maxlen=lookback_hours)
+        self._last_threshold: Decimal | None = None
 
     @property
     def name(self) -> str:
         return f"rate_percentile_p{self._percentile}_n{self._lookback_hours}"
+
+    @property
+    def last_threshold(self) -> Decimal | None:
+        return self._last_threshold
+
+    @property
+    def window_filled(self) -> bool:
+        return len(self._window) >= self._lookback_hours
+
+    @property
+    def window_values(self) -> tuple[Decimal, ...]:
+        """Read-only snapshot of the rolling window (for parity diagnostics)."""
+        return tuple(self._window)
 
     def observe(self, candle: FundingCandle) -> None:
         if candle.close is not None:
@@ -40,6 +54,7 @@ class RatePercentileStrategy(Strategy):
         threshold = Decimal(str(float(
             np.percentile([float(x) for x in self._window], self._percentile)
         )))
+        self._last_threshold = threshold
         if candle.close >= threshold:
             return LendDecision(mts=candle.mts, rate=candle.close, period_days=2)
         return None
