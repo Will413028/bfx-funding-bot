@@ -294,6 +294,26 @@ def attribute_passive(
     return out
 
 
+def attribute_idle(*, window_bounds: list[tuple[int, int]]) -> list[WindowOutcome]:
+    """AlwaysIdle arm: capital sits idle, earning 0 by construction.
+
+    One zero WindowOutcome per window. The bot-vs-idle paired difference
+    (attribute_active − attribute_idle) therefore equals the active arm's
+    absolute per-window return — the product's primary success metric (earn the
+    market rate vs leave the balance idle). Mirrors attribute_passive's shape so
+    paired_active_returns aligns the two arms 1:1 by month_mts.
+    """
+    return [
+        WindowOutcome(
+            month_mts=lo,
+            net_monthly=Decimal("0"),
+            n_trades=0,
+            fill_rate=Decimal("0"),
+        )
+        for lo, _hi in window_bounds
+    ]
+
+
 @dataclass(frozen=True)
 class DeploymentAnchorResult:
     attributed_deployed: Decimal

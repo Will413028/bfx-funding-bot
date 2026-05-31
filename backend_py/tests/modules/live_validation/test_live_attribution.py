@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     VerdictState,
     assert_market_rate_band,
     attribute_active,
+    attribute_idle,
     attribute_passive,
     cell_period_days,
     check_deployment_anchor,
@@ -252,6 +253,33 @@ def test_attribute_active_clamps_overlap_over_cap():
     clamped = raw * (C / Decimal("1000"))
     assert out[0].net_monthly == clamped / C * Decimal("100")
     assert out[0].n_trades == 4  # n_trades unchanged: count by fill_ts
+
+
+# ---------------------------------------------------------------------------
+# attribute_idle (AlwaysIdle arm — capital sits idle, earns 0 by construction)
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_idle_zero_return_per_window():
+    out = attribute_idle(window_bounds=[(0, WEEK), (WEEK, 2 * WEEK)])
+    assert len(out) == 2
+    assert [o.month_mts for o in out] == [0, WEEK]
+    assert all(o.net_monthly == Decimal("0") for o in out)
+    assert all(o.n_trades == 0 for o in out)
+    assert all(o.fill_rate == Decimal("0") for o in out)
+
+
+def test_attribute_idle_aligns_with_active_month_mts():
+    # bot-vs-idle relies on attribute_idle aligning 1:1 by month_mts with
+    # attribute_active so paired_active_returns can subtract arm-by-arm.
+    bounds = [(0, WEEK), (WEEK, 2 * WEEK)]
+    active = attribute_active([], capital=C, window_bounds=bounds)
+    idle = attribute_idle(window_bounds=bounds)
+    assert [o.month_mts for o in active] == [o.month_mts for o in idle]
+
+
+def test_attribute_idle_empty_bounds():
+    assert attribute_idle(window_bounds=[]) == []
 
 
 # ---------------------------------------------------------------------------
