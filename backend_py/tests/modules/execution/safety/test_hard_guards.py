@@ -204,20 +204,21 @@ async def test_allocation_cap_isolates_buckets_per_symbol() -> None:
 
 
 class _FakeBalanceLedger:
-    def __init__(self, available: Decimal) -> None:
-        self._a = available
+    def __init__(self, balances: dict[str, Decimal] | None = None) -> None:
+        self._balances = balances or {}
 
-    def available_balance(self) -> Decimal:
-        return self._a
+    def available_balance(self, symbol: str) -> Decimal:
+        return self._balances.get(symbol, Decimal("0"))
 
 
-def _post_decision(amount: float | None) -> DecisionPayload:
+def _post_decision(amount: float | None, symbol: str = "fUST") -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST,
         signal_correlation_id=uuid4(),
         offer_rate=0.00012,
         offer_amount_usdt=amount,
         offer_duration_days=2,
+        symbol=symbol,
     )
 
 
@@ -231,7 +232,7 @@ def _bp_ctx() -> AccountContext:
 
 @pytest.mark.asyncio
 async def test_buying_power_blocks_over_available() -> None:
-    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("150")), buffer_usdt=Decimal("3"))
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger({"fUST": Decimal("150")}), buffer_usdt=Decimal("3"))
     # deployable = 150 - 3 = 147; offer 160 > 147 -> block
     res = await guard.evaluate(_post_decision(160.0), _bp_ctx())
     assert res.allowed is False
@@ -240,19 +241,20 @@ async def test_buying_power_blocks_over_available() -> None:
 
 @pytest.mark.asyncio
 async def test_buying_power_allows_within_available() -> None:
-    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("250")), buffer_usdt=Decimal("3"))
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger({"fUST": Decimal("250")}), buffer_usdt=Decimal("3"))
     res = await guard.evaluate(_post_decision(200.0), _bp_ctx())
     assert res.allowed is True
 
 
 @pytest.mark.asyncio
 async def test_buying_power_skip_bypasses() -> None:
-    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("0")), buffer_usdt=Decimal("3"))
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger({"fUST": Decimal("0")}), buffer_usdt=Decimal("3"))
     decision = DecisionPayload(
         decision_outcome=DecisionOutcome.SKIP,
         signal_correlation_id=uuid4(),
         skip_reason="below_threshold",
         offer_rate=None, offer_amount_usdt=None, offer_duration_days=None,
+        symbol="fUST",
     )
     res = await guard.evaluate(decision, _bp_ctx())
     assert res.allowed is True
@@ -260,7 +262,7 @@ async def test_buying_power_skip_bypasses() -> None:
 
 @pytest.mark.asyncio
 async def test_buying_power_missing_amount_blocks() -> None:
-    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger(Decimal("250")), buffer_usdt=Decimal("3"))
+    guard = BuyingPowerGuard(ledger=_FakeBalanceLedger({"fUST": Decimal("250")}), buffer_usdt=Decimal("3"))
     # A POST DecisionPayload normally can't carry a None amount (model validator
     # rejects it); model_construct bypasses validation to exercise the guard's
     # defensive missing-amount branch directly.
@@ -270,6 +272,7 @@ async def test_buying_power_missing_amount_blocks() -> None:
         offer_rate=0.00012,
         offer_amount_usdt=None,
         offer_duration_days=2,
+        symbol="fUST",
     )
     res = await guard.evaluate(decision, _bp_ctx())
     assert res.allowed is False
@@ -316,7 +319,7 @@ async def test_buying_power_exact_at_fractional_boundary_via_float_bridge() -> N
     # cent over must block. Exercises the real guard at a *fractional* boundary
     # (existing boundary tests only used integer amounts).
     guard = BuyingPowerGuard(
-        ledger=_FakeBalanceLedger(Decimal("409.89")), buffer_usdt=Decimal("3"),
+        ledger=_FakeBalanceLedger({"fUST": Decimal("409.89")}), buffer_usdt=Decimal("3"),
     )
     at = await guard.evaluate(
         _post_decision(decimal_to_payload_float(Decimal("406.89"))), _bp_ctx(),
@@ -326,3 +329,19 @@ async def test_buying_power_exact_at_fractional_boundary_via_float_bridge() -> N
         _post_decision(decimal_to_payload_float(Decimal("406.90"))), _bp_ctx(),
     )
     assert over.allowed is False
+
+
+@pytest.mark.asyncio
+async def test_buying_power_isolates_buckets_per_symbol() -> None:
+    # fUST funding wallet is empty but fUSD has funds: a fUST POST must block
+    # while a fUSD POST of the same size is allowed. The guard reads ONLY
+    # decision.symbol's available balance — never a cross-symbol sum.
+    guard = BuyingPowerGuard(
+        ledger=_FakeBalanceLedger({"fUSD": Decimal("250")}),  # fUST absent → 0
+        buffer_usdt=Decimal("3"),
+    )
+    blocked = await guard.evaluate(_post_decision(100.0, symbol="fUST"), _bp_ctx())
+    assert blocked.allowed is False  # 0 - 3 = -3; 100 > -3 → block
+
+    allowed = await guard.evaluate(_post_decision(100.0, symbol="fUSD"), _bp_ctx())
+    assert allowed.allowed is True   # 250 - 3 = 247; 100 <= 247 → allow
