@@ -334,20 +334,35 @@ class Daemon:
         log.info("sub_task_exit name=db_keepalive")
 
     async def _writer_lock_liveness_loop(self) -> None:
-        """Background recovery + observability for the single-writer advisory lock.
+        """OBSERVABILITY + RECOVERY ONLY for the single-writer advisory lock.
 
         Every 30s: refresh() (re-acquires if a dropped connection lost the lock
-        server-side, while nobody else holds it) and record a heartbeat on
-        success. The guard's per-submit verify_held() is the authoritative
-        fail-closed gate — this loop is recovery/observability only. refresh and
-        verify_held serialize on the same internal lock, so the 30s interval
-        stays safely above submit cadence (no contention with live submits)."""
+        server-side, while nobody else holds it) and record a heartbeat on a
+        SUCCESSFUL refresh. The heartbeat is NON-FATAL: a lost lock makes this
+        beat go stale, but health_monitor classifies "writer_lock" as
+        activity-class (ACTIVITY_THRESHOLDS) so scan_staleness emits a WARN/down
+        observability event and NEVER escalates to FatalError / daemon restart.
+
+        The authoritative fail-closed gate is the per-submit
+        WriterLockGuard.verify_held(): if the lock isn't held, every real-money
+        submit is blocked — safety is preserved without restarting. Tying this
+        recovery loop to liveness would re-create the 2026-05-26 reactive
+        restart-loop anti-pattern.
+
+        Wait-first shape mirrors the sibling loops (_heartbeat_scan_loop,
+        _ws_heartbeat_poll_loop): wait on the stop event with a 30s timeout, then
+        do work. refresh and verify_held serialize on the same internal lock, so
+        the 30s interval stays safely above submit cadence (no contention)."""
         assert self.writer_lock is not None
         while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
+                log.info("sub_task_exit name=writer_lock")
+                return  # stop requested
+            except TimeoutError:
+                pass
             if await self.writer_lock.refresh():
                 self.probe.record_heartbeat("writer_lock")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
         log.info("sub_task_exit name=writer_lock")
 
     async def _healthz_server_loop(self) -> None:

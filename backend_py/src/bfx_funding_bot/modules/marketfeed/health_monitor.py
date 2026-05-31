@@ -55,6 +55,21 @@ LIVENESS_THRESHOLDS: dict[str, int] = {
 ACTIVITY_THRESHOLDS: dict[str, int] = {
     "safety_chain": 6 * 60,
     "executor": 6 * 60,
+    # writer_lock liveness loop (daemon._writer_lock_liveness_loop) refreshes the
+    # single-writer advisory lock every 30s and beats only on a SUCCESSFUL
+    # refresh. This beat is OBSERVABILITY + RECOVERY ONLY — it must NEVER drive a
+    # fatal escalation / daemon restart:
+    #   - The authoritative fail-closed gate is the per-submit
+    #     WriterLockGuard.verify_held(): if the lock isn't held, every real-money
+    #     submit is blocked, so safety is preserved without any restart.
+    #   - refresh() already attempts recovery (reconnect/re-acquire) each 30s.
+    #   - A reactive restart loop (liveness keyed on a recovery task) is the
+    #     documented 2026-05-26 canary anti-pattern.
+    # Declared here (activity-class, NOT liveness) so a lost lock emits a WARN/down
+    # observability event but is gated out of the fatal branch — never the silent
+    # _DEFAULT_THRESHOLD_S=60 fallback. 90s comfortably exceeds the 30s loop cadence
+    # so a healthy loop never trips (matches the "ws" 90s = 3-missed-beats budget).
+    "writer_lock": 90,
 }
 
 # Merged view: scan_staleness needs a threshold for both classes to emit. The
