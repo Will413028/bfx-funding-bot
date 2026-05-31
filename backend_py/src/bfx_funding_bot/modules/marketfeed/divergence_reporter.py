@@ -90,13 +90,28 @@ def _strategy_attributes(
 def _normalize_signal_score(
     cell: CellConfig, strategy: Any, candle: FundingCandle, ld: LendDecision | None,
 ) -> float:
-    """Cross-strategy comparable normalized score.
+    """Continuous, strategy-specific signal-strength score (replaces the old
+    direction-only ±1.0 placeholder). Same-strategy live vs replay must be equal.
 
-    TODO(phase-4.3): G2 calibration formula. Current placeholder is direction-only.
-    Future: read strategy internals (EMA distance, percentile rank).
+    - MR: the (close-ema)/ema deviation margin (negative = skip region).
+    - RP: the 0-100 percentile rank of close within the current window.
+    0.0 when the underlying state is unavailable (warmup / no ema). Reads the
+    cached state populated by ExtractedSignal.extract's observe+decide.
+    Cross-strategy normalization is intentionally deferred to the G2 audit (D).
     """
-    del strategy, candle  # placeholder intentionally ignores state
-    return 1.0 if ld is not None else -1.0
+    del ld  # score derives from cached state, not the decision object
+    if cell.strategy == StrategyName.MEAN_REVERSION:
+        dev = strategy.last_deviation
+        return float(dev) if dev is not None else 0.0
+    if cell.strategy == StrategyName.RATE_PERCENTILE:
+        if candle.close is None or not strategy.window_filled:
+            return 0.0
+        window = strategy.window_values  # read-only snapshot, post-observe
+        if not window:
+            return 0.0
+        close = candle.close
+        return 100.0 * sum(1 for w in window if w <= close) / len(window)
+    return 0.0
 
 
 class DivergenceReporter:
