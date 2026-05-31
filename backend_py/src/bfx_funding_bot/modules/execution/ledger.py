@@ -127,6 +127,10 @@ class PaperPositionLedger:
         """
         if event.account_id != self.account_id:
             return
+        # _resolve_position_fields guarantees these are non-None at runtime
+        assert event.reserved_usdt is not None
+        assert event.realized_usdt is not None
+        assert event.available_usdt is not None
         self._reserved = event.reserved_usdt
         self._realized = event.realized_usdt
         self._available = event.available_usdt

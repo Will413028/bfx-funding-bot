@@ -302,3 +302,60 @@ def test_resolve_amount_rejects_when_both_missing() -> None:
             account_id="default",
             is_simulated=False,
         )
+
+
+def test_position_reconciled_has_symbol_and_native_fields() -> None:
+    from bfx_funding_bot.modules.execution.events import PositionReconciled
+
+    e = PositionReconciled(
+        account_id="default",
+        symbol="fUST",
+        reserved=Decimal("300"),
+        realized=Decimal("450"),
+        available=Decimal("19.10"),
+        n_offers=2,
+        n_credits=3,
+        occurred_at_ms=1000,
+    )
+    assert e.symbol == "fUST"
+    assert e.reserved == Decimal("300")
+    assert e.realized == Decimal("450")
+    assert e.available == Decimal("19.10")
+    # transitional read aliases still resolve
+    assert e.reserved_usdt == Decimal("300")
+    assert e.realized_usdt == Decimal("450")
+    assert e.available_usdt == Decimal("19.10")
+
+
+def test_position_reconciled_symbol_defaults_to_fusd() -> None:
+    from bfx_funding_bot.modules.execution.events import PositionReconciled
+
+    e = PositionReconciled(
+        account_id="default",
+        reserved=Decimal("300"),
+        realized=Decimal("450"),
+        available=Decimal("19.10"),
+        n_offers=2,
+        n_credits=3,
+        occurred_at_ms=1000,
+    )
+    assert e.symbol == "fUSD"
+
+
+def test_position_reconciled_back_compat_usdt_kwargs() -> None:
+    from bfx_funding_bot.modules.execution.events import PositionReconciled
+
+    # legacy producer (boot_recovery) still passes *_usdt= until it migrates
+    e = PositionReconciled(
+        account_id="default",
+        reserved_usdt=Decimal("300"),
+        realized_usdt=Decimal("450"),
+        available_usdt=Decimal("19.10"),
+        n_offers=2,
+        n_credits=3,
+        occurred_at_ms=1000,
+    )
+    assert e.reserved == Decimal("300")
+    assert e.realized == Decimal("450")
+    assert e.available == Decimal("19.10")
+    assert e.symbol == "fUSD"
