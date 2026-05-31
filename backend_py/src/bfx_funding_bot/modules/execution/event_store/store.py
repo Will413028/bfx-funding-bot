@@ -397,6 +397,10 @@ class PostgresEventStore:
             # only needs size_usdt and stays decoupled from domain event objects.
             # If a new event type gains a non-string-serialized size_usdt, sync
             # this with serialization.py.
+            # Phase 1 only: a single funding currency is live, so every event in
+            # the log belongs to `symbol` and the fold is unfiltered. Phase 2 (two
+            # symbols coexisting in one event_log) MUST filter on
+            # payload["symbol"] == symbol here, or fUSD/fUST deltas mix into one row.
             size = Decimal(str((r.payload or {}).get("size_usdt", 0) or 0))
             if r.event_type == "RESERVATION_CLAIMED":
                 reserved += size
