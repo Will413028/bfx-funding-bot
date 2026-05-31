@@ -1,8 +1,11 @@
 """Canary OOS profitability characterization (backlog #4, reframed).
 
 Runs the deployed canary config (MeanReversion x fUST x {a30,p2}) over rolling
-1-month OOS windows vs the AlwaysMarketRate passive benchmark, and writes a research doc
-with bootstrap CIs + a selection-bias deflated-Sharpe check.
+1-month OOS windows. Primary metric is the bot's absolute monthly return on budget
+— i.e. bot-vs-idle, since an idle balance earns 0%. The AlwaysMarketRate comparison
+(active return / information ratio) is a secondary, non-gating MR-timing-alpha
+diagnostic. Writes a research doc with bootstrap CIs + a selection-bias
+deflated-Sharpe check.
 
 Spec:  docs/superpowers/specs/2026-05-28-canary-oos-profitability-validation-design.md
 Plan:  docs/superpowers/plans/2026-05-28-canary-oos-profitability.md
@@ -105,16 +108,24 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
     lines.append("**Fill model**: linear (deterministic) — see methodology.\n")
 
     lines.append("## TL;DR\n")
+    lines.append(
+        "- Primary metric = **bot-vs-idle**: the strategy's absolute monthly return "
+        "on budget. An idle balance earns 0%, so this return *is* the bot-vs-idle "
+        "edge (idle arm = 0% by construction)."
+    )
     for r in reports:
-        s, b = r.strat_summary, r.base_summary
+        s = r.strat_summary
         lines.append(
-            f"- **{r.cell_label}** ({r.n_windows} months): strat median "
-            f"{s.median_monthly:.4f}%/mo (annualized {s.annualized_pct:.2f}%), "
-            f"baseline {b.median_monthly:.4f}%/mo; active median "
-            f"{r.active.median_active:.4f}%/mo, IR {r.active.information_ratio}; "
-            f"worst-month {s.worst_monthly:.4f}%, idle {s.idle_rate:.2%}; "
+            f"- **{r.cell_label}** ({r.n_windows} months): bot-vs-idle median "
+            f"{s.median_monthly:.4f}%/mo (annualized {s.annualized_pct:.2f}%); "
+            f"worst-month {s.worst_monthly:.4f}%; idle {s.idle_rate:.2%}; "
             f"deflated-Sharpe {r.deflated_sharpe:.4f}."
         )
+    lines.append(
+        "- MR timing alpha (active vs AlwaysMarketRate) is a **secondary diagnostic** "
+        "— near 0 means MR timing adds little over always-lending; it does NOT gate "
+        "the bot-vs-idle headline. See per-cell sections."
+    )
     lines.append("")
 
     lines.append("## OOS honesty caveat\n")
@@ -125,11 +136,16 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
         "quantifies the selection-bias haircut. The only true out-of-sample test is the "
         "live canary itself.\n"
     )
+    lines.append(
+        "- A positive bot-vs-idle backtest asserts the bot beats an idle balance "
+        "(earns the market rate on budget), NOT that MR timing beats always-lending "
+        "— that is the separate MR timing alpha diagnostic below.\n"
+    )
 
     for r in reports:
         s, b = r.strat_summary, r.base_summary
         lines.append(f"## Cell {r.cell_label}\n")
-        lines.append("| Metric | Strategy | Baseline (AlwaysMarketRate) |")
+        lines.append("| Metric | Strategy (= bot-vs-idle) | Baseline (AlwaysMarketRate) |")
         lines.append("|---|---|---|")
         lines.append(f"| median monthly % | {s.median_monthly:.4f} | {b.median_monthly:.4f} |")
         lines.append(f"| p25 monthly % | {s.p25_monthly:.4f} | {b.p25_monthly:.4f} |")
@@ -141,11 +157,13 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
         lines.append(f"| mean fill rate | {s.mean_fill_rate:.4f} | {b.mean_fill_rate:.4f} |")
         lines.append("")
         lines.append(
-            f"**Strategy median monthly 95% CI (bootstrap):** "
+            f"**bot-vs-idle median monthly 95% CI (bootstrap):** "
             f"[{r.median_ci[0]:.4f}%, {r.median_ci[1]:.4f}%]\n"
         )
-        lines.append("### Active return vs passive\n")
+        lines.append("### MR timing alpha vs passive (secondary diagnostic)\n")
         lines.append(
+            "- Diagnostic only — does NOT gate the bot-vs-idle headline. Near 0 means "
+            "MR timing adds little over always-lending; the product value is bot-vs-idle.\n"
             f"- median active: {r.active.median_active:.4f}%/mo; "
             f"mean active: {r.active.mean_active:.4f}%/mo\n"
             f"- information ratio: {r.active.information_ratio}\n"
