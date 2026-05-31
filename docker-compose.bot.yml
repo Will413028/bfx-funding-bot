@@ -1,0 +1,43 @@
+name: bfx
+
+services:
+  migrate:
+    image: bfx-bot:local
+    command: ["sh", "-c", "alembic upgrade head"]
+    working_dir: /app
+    env_file: .env.runtime
+    restart: "no"
+
+  bot:
+    build:
+      context: backend_py
+      dockerfile: Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: bfx-bot:local
+    container_name: bfx-bot
+    command: ["bfx-shadow"]
+    env_file: .env.runtime
+    restart: unless-stopped
+    stop_grace_period: 30s
+    labels:
+      autoheal: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "30"
+      AUTOHEAL_START_PERIOD: "180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
