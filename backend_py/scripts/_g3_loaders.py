@@ -280,7 +280,9 @@ def _compute_verdict(
             (f.size_usdt * f.rate * _fill_duration_days(f) for f in fills), Decimal("0")
         )
     else:
-        # No fills (idle canary): no active arm → no bot-vs-idle, no MR-alpha.
+        # No active arm (idle canary with no fills, or a single instant → empty
+        # window bounds): no bot-vs-idle, no MR-alpha. Not reachable via the live
+        # build_verdict_from_neon (it always pulls candles to now → non-empty bounds).
         ci_lo, ci_hi = Decimal("0"), Decimal("0")
         headline_bot_vs_idle = Decimal("0")
         mr_alpha_spread = Decimal("0")

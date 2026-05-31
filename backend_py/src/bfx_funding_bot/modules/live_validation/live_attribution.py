@@ -1,18 +1,26 @@
-"""Live active-vs-passive attribution for the canary MeanReversion config.
+"""Live bot-vs-idle attribution for the canary MeanReversion config.
 
 Pure, I/O-free. Turns live fills + market-rate series (funding_candles.close) +
-reconcile checkpoints into WindowOutcome lists (strategy arm + passive
-AlwaysMarketRate arm) feeding the existing modules/backtest/oos_profitability
-metrics, plus a four-state verdict.
+reconcile checkpoints into WindowOutcome lists for three arms — strategy
+(active), AlwaysIdle, AlwaysMarketRate — feeding the existing
+modules/backtest/oos_profitability metrics, plus a four-state verdict.
 
-Both arms normalize to a fixed capital budget C (the canary allocation cap):
-    active_return_pct  = sum(size_i * rate_i * duration_i) / C * 100
+All arms normalize to a fixed capital budget C (the canary allocation cap):
+    active_return_pct  = sum(size_i * rate_i * duration_i) / C * 100  # idle drag baked in
+    idle_return_pct    = 0                                            # by construction
     passive_return_pct = mean(market_rate over window) * window_days * 100  # C cancels
+
+PRIMARY gate (the product's success criterion): bot-vs-idle = active − idle. Since
+idle ≡ 0, this equals the active arm's absolute return on budget — "does the bot
+earn the market rate on the user's capital vs leaving it idle?". Idle drag is
+automatic: active_return_pct already counts undeployed capital as earning 0.
+
+SECONDARY diagnostic (reported, NEVER gating): MR alpha = active − AlwaysMarketRate.
 The passive baseline is the per-day market funding rate (funding_candles.close),
 matching the backtest AlwaysMarketRateStrategy. funding_stats.frr is NOT a
-market-rate proxy (it is ~1e-6, ~185x too small); see assert_market_rate_band.
-Idle drag is automatic: a strategy that deploys fewer capital-days than the
-full-budget passive arm falls below it and the active spread goes negative.
+market-rate proxy (it is ~1e-6, ~185x too small); see assert_market_rate_band. A
+wrong-scale or absent passive series only marks the MR-alpha diagnostic
+unavailable — it does not affect the bot-vs-idle verdict (idle needs no market data).
 """
 from __future__ import annotations
 
