@@ -161,6 +161,7 @@ async def test_allocation_cap_blocks_over_cap() -> None:
     r = await g.evaluate(decision, ctx)
     assert r.allowed is False
     assert "cap" in (r.reason or "")
+    assert "symbol=fUST" in (r.reason or "")
 
 
 @pytest.mark.asyncio

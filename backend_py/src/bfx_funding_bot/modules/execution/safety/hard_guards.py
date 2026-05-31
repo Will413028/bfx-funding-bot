@@ -140,7 +140,7 @@ class AllocationCapGuard:
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"symbol={decision.symbol} exposure={exposure}+offer={offer}"
-                    f"={projected} > cap={ctx.allocation_cap_usdt}"
+                    f" → {projected} > cap={ctx.allocation_cap_usdt}"
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)
