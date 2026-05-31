@@ -144,6 +144,19 @@ def _require_env(name: str) -> str:
     return val
 
 
+def configured_symbols(cells: list[CellConfig]) -> list[str]:
+    """Distinct cell symbols, order-preserving — the per-currency reconcile loop's
+    symbol set. Single-currency cells.yaml → a 1-element list (parity with the
+    historic single-symbol BootRecovery)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cells:
+        if c.symbol not in seen:
+            seen.add(c.symbol)
+            out.append(c.symbol)
+    return out
+
+
 @dataclass
 class Daemon:
     config: MarketfeedConfig
@@ -829,7 +842,7 @@ async def build_daemon(
             bus=bus,
             offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
-            symbol=first_cell.symbol,
+            symbols=configured_symbols(config.cells),
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -850,7 +863,7 @@ async def build_daemon(
             bus=bus,
             offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
-            symbol=first_cell.symbol,
+            symbols=configured_symbols(config.cells),
             action_grace_ms=120_000,
         )
 
