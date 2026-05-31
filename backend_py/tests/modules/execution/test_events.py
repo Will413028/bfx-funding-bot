@@ -173,3 +173,108 @@ def test_reservation_failed_fields() -> None:
     )
     assert ev.reason == "submit_failed"
     assert ev.is_simulated is False
+
+
+def test_reservation_claimed_has_symbol_and_amount() -> None:
+    e = ReservationClaimed(
+        cid=1,
+        venue_offer_id="v1",
+        amount=Decimal("100"),
+        symbol="fUST",
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("100")
+    assert e.symbol == "fUST"
+    # transitional read alias still resolves to amount
+    assert e.size_usdt == Decimal("100")
+
+
+def test_reservation_claimed_symbol_defaults_to_fusd() -> None:
+    e = ReservationClaimed(
+        cid=1,
+        venue_offer_id="v1",
+        amount=Decimal("100"),
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.symbol == "fUSD"
+
+
+def test_reservation_claimed_back_compat_size_usdt_kwarg() -> None:
+    # legacy producers still pass size_usdt= until they migrate; it maps to amount
+    e = ReservationClaimed(
+        cid=1,
+        venue_offer_id="v1",
+        size_usdt=Decimal("250"),
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("250")
+    assert e.size_usdt == Decimal("250")
+    assert e.symbol == "fUSD"
+
+
+def test_order_filled_has_symbol_and_amount() -> None:
+    e = OrderFilled(
+        cid=1,
+        venue_offer_id="v1",
+        credit_id="C-1",
+        amount=Decimal("100"),
+        symbol="fUST",
+        fill_rate=0.0005,
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("100")
+    assert e.symbol == "fUST"
+    assert e.size_usdt == Decimal("100")
+
+
+def test_order_filled_back_compat_size_usdt_kwarg() -> None:
+    e = OrderFilled(
+        cid=1,
+        venue_offer_id="v1",
+        credit_id=None,
+        size_usdt=Decimal("70"),
+        fill_rate=0.0005,
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("70")
+    assert e.symbol == "fUSD"
+
+
+def test_reservation_released_has_symbol_and_amount() -> None:
+    e = ReservationReleased(
+        cid=1,
+        venue_offer_id="v1",
+        amount=Decimal("100"),
+        symbol="fUST",
+        reason="user_cancel",
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("100")
+    assert e.symbol == "fUST"
+    assert e.size_usdt == Decimal("100")
+
+
+def test_reservation_released_back_compat_size_usdt_kwarg() -> None:
+    e = ReservationReleased(
+        cid=1,
+        venue_offer_id="v1",
+        size_usdt=Decimal("30"),
+        reason="expired",
+        signal_correlation_id=uuid4(),
+        account_id="default",
+        is_simulated=False,
+    )
+    assert e.amount == Decimal("30")
+    assert e.symbol == "fUSD"
