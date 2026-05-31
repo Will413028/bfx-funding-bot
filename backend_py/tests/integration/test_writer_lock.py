@@ -46,3 +46,15 @@ async def test_verify_held_false_after_release(pg_engine) -> None:
     await lock.acquire()
     await lock.release()
     assert await lock.verify_held() is False
+
+
+async def test_refresh_reacquires_after_transient_loss(pg_engine) -> None:
+    acct = f"wl-{uuid4().hex[:8]}"
+    lock = WriterLock(database_url=_url(pg_engine), key=derive_lock_key(acct, "prod"))
+    await lock.acquire()
+    # Simulate a dropped connection: closing ends the server-side session, which
+    # releases the session-scoped advisory lock.
+    await lock._close()
+    assert await lock.refresh() is True
+    assert await lock.verify_held() is True
+    await lock.release()
