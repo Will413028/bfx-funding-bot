@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
@@ -59,6 +59,15 @@ class ReconcileResult:
     n_credits: int = 0
     reserved_drift_usdt: Decimal = Decimal("0")
     realized_drift_usdt: Decimal = Decimal("0")
+
+
+class _SymbolSnapshot(NamedTuple):
+    symbol: str
+    offers: list[ActiveFundingOffer]
+    credits: list[ActiveFundingCredit]
+    available: Decimal
+    reserved: Decimal
+    realized: Decimal
 
 
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
@@ -266,13 +275,20 @@ class BootRecovery:
         # and be spuriously released. ReconcileResult aggregates across symbols (the
         # PeriodicReconcile divergence/drift logic is per-tick, not per-symbol).
         now_ms = self._clock()
-        per_symbol: list[tuple[str, list[ActiveFundingOffer], list[ActiveFundingCredit], Decimal]] = []
+        per_symbol: list[_SymbolSnapshot] = []
         all_offers: list[ActiveFundingOffer] = []
         for symbol in self._symbols:
             offers = await self._fetch_offers(symbol)
             credits = await self._fetch_credits(symbol)
             available = await self._fetch_available(symbol)
-            per_symbol.append((symbol, offers, credits, available))
+            per_symbol.append(_SymbolSnapshot(
+                symbol=symbol,
+                offers=offers,
+                credits=credits,
+                available=available,
+                reserved=sum((o.amount for o in offers), Decimal("0")),
+                realized=sum((c.amount for c in credits), Decimal("0")),
+            ))
             all_offers.extend(offers)
 
         agg_reserved = Decimal("0")
@@ -285,49 +301,48 @@ class BootRecovery:
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
             # GLOBAL FSM diff against the union of all symbols' venue offers.
+            # missing-claim releases stamp the primary symbol; LocalClaim has no
+            # per-claim symbol yet (Phase 2: offer_claims.symbol).
             actions = compute_recovery_actions(
                 venue_offers=all_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
+                symbol=self._symbols[0],
             )
             for ev in actions:
                 await self._store.append(session, ev)
             # Per-symbol absolute position snapshot (single-writer per symbol).
-            for symbol, offers, credits, _avail in per_symbol:
-                reserved = sum((o.amount for o in offers), Decimal("0"))
-                realized = sum((c.amount for c in credits), Decimal("0"))
+            for snap in per_symbol:
                 drift = await self._store.set_position_snapshot(
                     session,
                     account_id=self._ctx.account_id,
-                    symbol=symbol,
-                    reserved_usdt=reserved,
-                    realized_usdt=realized,
-                    n_offers=len(offers),
-                    n_credits=len(credits),
+                    symbol=snap.symbol,
+                    reserved_usdt=snap.reserved,
+                    realized_usdt=snap.realized,
+                    n_offers=len(snap.offers),
+                    n_credits=len(snap.credits),
                     occurred_at_ms=now_ms,
                 )
                 agg_reserved_drift += drift.reserved_drift
                 agg_realized_drift += drift.realized_drift
 
         # Publish one PositionReconciled per symbol AFTER durable commit.
-        for symbol, offers, credits, available in per_symbol:
-            reserved = sum((o.amount for o in offers), Decimal("0"))
-            realized = sum((c.amount for c in credits), Decimal("0"))
+        for snap in per_symbol:
             await self._safe_publish(PositionReconciled(
                 account_id=self._ctx.account_id,
-                symbol=symbol,
-                reserved=reserved,
-                realized=realized,
-                available=available,
-                n_offers=len(offers),
-                n_credits=len(credits),
+                symbol=snap.symbol,
+                reserved=snap.reserved,
+                realized=snap.realized,
+                available=snap.available,
+                n_offers=len(snap.offers),
+                n_credits=len(snap.credits),
                 occurred_at_ms=now_ms,
             ))
-            agg_reserved += reserved
-            agg_realized += realized
-            agg_available += available
-            agg_n_credits += len(credits)
+            agg_reserved += snap.reserved
+            agg_realized += snap.realized
+            agg_available += snap.available
+            agg_n_credits += len(snap.credits)
 
         n_claim = n_release = n_fail = 0
         for ev in actions:
