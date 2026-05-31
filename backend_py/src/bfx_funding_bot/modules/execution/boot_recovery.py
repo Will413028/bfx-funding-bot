@@ -224,6 +224,7 @@ class BootRecovery:
         offer_registry: _FsmSink | None = None,
         is_simulated: bool = False,
         symbol: str = "fUSD",
+        symbols: list[str] | None = None,
         grace_ms: int = 120_000,
         action_grace_ms: int = 0,
         max_attempts: int = 3,
@@ -238,7 +239,16 @@ class BootRecovery:
         self._bus = bus
         self._offer_registry = offer_registry
         self._is_simulated = is_simulated
-        self._symbol = symbol
+        # Configured symbols drive the per-symbol reconcile loop. Back-compat:
+        # the legacy single `symbol` kwarg maps to a 1-element list. Dedup while
+        # preserving order so a misconfigured duplicate cell can't fire twice.
+        raw = symbols if symbols is not None else [symbol]
+        seen: set[str] = set()
+        self._symbols: list[str] = []
+        for s in raw:
+            if s not in seen:
+                seen.add(s)
+                self._symbols.append(s)
         self._grace_ms = grace_ms
         self._action_grace_ms = action_grace_ms
         self._max_attempts = max_attempts
@@ -247,9 +257,13 @@ class BootRecovery:
 
     async def run(self) -> ReconcileResult:
         # All fetches may raise → daemon fail-safe (never trade without venue truth).
-        venue_offers = await self._fetch_offers()
-        venue_credits = await self._fetch_credits()
-        available_usdt = await self._fetch_available()
+        # Phase 1: the single configured symbol drives the fetch (multi-symbol loop
+        # arrives in the per-symbol reconcile task). With one symbol this is identical
+        # to the historic global reconcile.
+        symbol = self._symbols[0]
+        venue_offers = await self._fetch_offers(symbol)
+        venue_credits = await self._fetch_credits(symbol)
+        available_usdt = await self._fetch_available(symbol)
 
         reserved_usdt = sum((o.amount for o in venue_offers), Decimal("0"))
         realized_usdt = sum((c.amount for c in venue_credits), Decimal("0"))
@@ -262,7 +276,6 @@ class BootRecovery:
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
-                symbol=self._symbol,
             )
             for ev in actions:
                 await self._store.append(session, ev)
@@ -270,6 +283,7 @@ class BootRecovery:
             drift = await self._store.set_position_snapshot(
                 session,
                 account_id=self._ctx.account_id,
+                symbol=symbol,
                 reserved_usdt=reserved_usdt,
                 realized_usdt=realized_usdt,
                 n_offers=len(venue_offers),
@@ -280,9 +294,10 @@ class BootRecovery:
         # Publish in-memory projection events AFTER durable commit.
         position_reconciled = PositionReconciled(
             account_id=self._ctx.account_id,
-            reserved_usdt=reserved_usdt,
-            realized_usdt=realized_usdt,
-            available_usdt=available_usdt,
+            symbol=symbol,
+            reserved=reserved_usdt,
+            realized=realized_usdt,
+            available=available_usdt,
             n_offers=len(venue_offers),
             n_credits=len(venue_credits),
             occurred_at_ms=now_ms,
@@ -317,7 +332,7 @@ class BootRecovery:
             realized_drift_usdt=drift.realized_drift,
         )
 
-    async def _fetch_offers(self) -> list[ActiveFundingOffer]:
+    async def _fetch_offers(self, symbol: str) -> list[ActiveFundingOffer]:
         """Fetch venue offers with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too. Either way
         the daemon fails to start (fail-safe: never trade without venue truth)."""
@@ -325,7 +340,7 @@ class BootRecovery:
         for attempt in range(self._max_attempts):
             try:
                 return await self._auth_rest.get_active_funding_offers(
-                    ctx=self._ctx, symbol=self._symbol,
+                    ctx=self._ctx, symbol=symbol,
                 )
             except BitfinexAPIError as e:
                 if not _is_transient_status(e.status_code):
@@ -346,7 +361,7 @@ class BootRecovery:
         assert last_exc is not None
         raise last_exc
 
-    async def _fetch_credits(self) -> list[ActiveFundingCredit]:
+    async def _fetch_credits(self, symbol: str) -> list[ActiveFundingCredit]:
         """Fetch venue credits with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too.
         Fail-fast: never trade without knowing realized exposure."""
@@ -354,7 +369,7 @@ class BootRecovery:
         for attempt in range(self._max_attempts):
             try:
                 return await self._auth_rest.get_active_funding_credits(
-                    ctx=self._ctx, symbol=self._symbol,
+                    ctx=self._ctx, symbol=symbol,
                 )
             except BitfinexAPIError as e:
                 if not _is_transient_status(e.status_code):
@@ -375,13 +390,13 @@ class BootRecovery:
         assert last_exc is not None
         raise last_exc
 
-    async def _fetch_available(self) -> Decimal:
+    async def _fetch_available(self, symbol: str) -> Decimal:
         """Fetch funding-wallet available balance with bounded retry on TRANSIENT
         failures only. 4xx re-raises immediately; transient exhaustion re-raises.
         Same fail-safe contract as offers/credits: a persistent failure aborts the
         reconcile tick, so deploy() is skipped (never size against unknown funds).
         Currency = symbol minus the leading 'f' (fUST -> UST)."""
-        currency = self._symbol[1:] if self._symbol.startswith("f") else self._symbol
+        currency = symbol[1:] if symbol.startswith("f") else symbol
         last_exc: BitfinexAPIError | None = None
         for attempt in range(self._max_attempts):
             try:
