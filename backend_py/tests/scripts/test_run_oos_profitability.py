@@ -79,3 +79,11 @@ def test_render_markdown_contains_key_sections():
     assert "Non-backtestable risk register" in md
     assert "fUST_a30" in md
     assert "Selection bias" in md
+    # bot-vs-idle reframe: headline is the primary metric, MR alpha is secondary
+    assert "bot-vs-idle" in md
+    assert "MR timing alpha" in md
+    assert "secondary diagnostic" in md
+    # the demoted active section no longer leads with the old heading
+    assert "### Active return vs passive" not in md
+    # idle arm is 0% by construction note is present
+    assert "idle arm" in md.lower()
