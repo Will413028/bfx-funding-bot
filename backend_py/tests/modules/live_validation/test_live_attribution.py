@@ -371,7 +371,7 @@ def test_nav_anchor_zero_attributed_zero_delta_within():
 
 def _kw(**over):
     base = {
-        "headline_active_spread": Decimal("0.06"),
+        "headline_bot_vs_idle": Decimal("0.06"),
         "n_windows": 10,
         "total_capital_days": Decimal("4000"),
         "ci_lo": Decimal("0.01"),
@@ -386,6 +386,10 @@ def _kw(**over):
         ),
         "min_windows": 8,
         "min_capital_days": Decimal("3990"),
+        "mr_alpha_spread": Decimal("0.0"),
+        "mr_alpha_ci_lo": Decimal("-0.01"),
+        "mr_alpha_ci_hi": Decimal("0.02"),
+        "mr_alpha_available": True,
     }
     base.update(over)
     return base
@@ -449,6 +453,30 @@ def test_verdict_unreliable_takes_priority_over_insufficient():
 def test_verdict_pass_at_exactly_min_windows():
     v = decide_verdict(**_kw(n_windows=8))
     assert v.state is VerdictState.PASS
+
+
+def test_verdict_carries_mr_alpha_without_gating():
+    # A negative MR-alpha CI (MR loses to AlwaysMarketRate) must NOT change a
+    # bot-vs-idle PASS — alpha is diagnostic only.
+    v = decide_verdict(
+        **_kw(mr_alpha_spread=Decimal("-0.5"), mr_alpha_ci_lo=Decimal("-0.9"), mr_alpha_ci_hi=Decimal("-0.1"))
+    )
+    assert v.state is VerdictState.PASS
+    assert v.mr_alpha_spread == Decimal("-0.5")
+    assert v.mr_alpha_ci_lo == Decimal("-0.9")
+    assert v.mr_alpha_ci_hi == Decimal("-0.1")
+    assert v.mr_alpha_available is True
+
+
+def test_verdict_exposes_headline_bot_vs_idle():
+    v = decide_verdict(**_kw(headline_bot_vs_idle=Decimal("1.23")))
+    assert v.headline_bot_vs_idle == Decimal("1.23")
+
+
+def test_verdict_mr_alpha_unavailable_flag_carried():
+    v = decide_verdict(**_kw(mr_alpha_available=False))
+    assert v.state is VerdictState.PASS  # unavailability does not gate
+    assert v.mr_alpha_available is False
 
 
 # ---------------------------------------------------------------------------

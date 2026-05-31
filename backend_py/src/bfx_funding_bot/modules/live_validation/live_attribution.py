@@ -389,16 +389,23 @@ class VerdictState(Enum):
 @dataclass(frozen=True)
 class G3Verdict:
     state: VerdictState
-    headline_active_spread: Decimal
+    headline_bot_vs_idle: Decimal  # absolute active return on budget; bot-vs-idle (idle ≡ 0)
     n_windows: int
-    ci_lo: Decimal
+    ci_lo: Decimal  # bot-vs-idle 95% CI (primary gate)
     ci_hi: Decimal
     reasons: list[str]
+    # Secondary MR-timing-alpha diagnostic (active − AlwaysMarketRate). Reported,
+    # never gating. mr_alpha_available is False when market-rate coverage/band
+    # makes the passive arm untrustworthy → render as "unavailable".
+    mr_alpha_spread: Decimal
+    mr_alpha_ci_lo: Decimal
+    mr_alpha_ci_hi: Decimal
+    mr_alpha_available: bool
 
 
 def decide_verdict(
     *,
-    headline_active_spread: Decimal,
+    headline_bot_vs_idle: Decimal,
     n_windows: int,
     total_capital_days: Decimal,
     ci_lo: Decimal,
@@ -407,18 +414,32 @@ def decide_verdict(
     nav_anchor: NavAnchorResult,
     min_windows: int,
     min_capital_days: Decimal,
+    mr_alpha_spread: Decimal,
+    mr_alpha_ci_lo: Decimal,
+    mr_alpha_ci_hi: Decimal,
+    mr_alpha_available: bool,
 ) -> G3Verdict:
-    """Pure four-state decision table. See plan Task 7 for evaluation order."""
+    """Pure four-state decision. Primary gate = bot-vs-idle CI (ci_lo/ci_hi).
+
+    MR-alpha fields are stamped onto the result for the report but never change
+    the state — the product's success criterion is absolute return vs idle, not
+    timing alpha vs AlwaysMarketRate. Anchor divergence (attribution-vs-venue
+    truth) still forces UNRELIABLE regardless of the primary metric.
+    """
     reasons: list[str] = []
 
     def verdict(state: VerdictState) -> G3Verdict:
         return G3Verdict(
             state=state,
-            headline_active_spread=headline_active_spread,
+            headline_bot_vs_idle=headline_bot_vs_idle,
             n_windows=n_windows,
             ci_lo=ci_lo,
             ci_hi=ci_hi,
             reasons=reasons,
+            mr_alpha_spread=mr_alpha_spread,
+            mr_alpha_ci_lo=mr_alpha_ci_lo,
+            mr_alpha_ci_hi=mr_alpha_ci_hi,
+            mr_alpha_available=mr_alpha_available,
         )
 
     if not deployment_anchor.within_tolerance:
@@ -444,11 +465,11 @@ def decide_verdict(
         return verdict(VerdictState.INSUFFICIENT_DATA)
 
     if ci_hi < 0:
-        reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] entirely below 0")
+        reasons.append(f"bot-vs-idle CI [{ci_lo}, {ci_hi}] entirely below 0")
         return verdict(VerdictState.FAIL)
     if ci_lo > 0:
-        reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] entirely above 0")
+        reasons.append(f"bot-vs-idle CI [{ci_lo}, {ci_hi}] entirely above 0")
         return verdict(VerdictState.PASS)
 
-    reasons.append(f"active-spread CI [{ci_lo}, {ci_hi}] straddles 0 — inconclusive")
+    reasons.append(f"bot-vs-idle CI [{ci_lo}, {ci_hi}] straddles 0 — inconclusive")
     return verdict(VerdictState.INSUFFICIENT_DATA)
