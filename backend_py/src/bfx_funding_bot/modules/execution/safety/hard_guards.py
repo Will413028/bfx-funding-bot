@@ -105,7 +105,7 @@ class HeartbeatGuard:
 
 
 class _LedgerProtocol(Protocol):
-    def current_exposure(self) -> Decimal: ...
+    def current_exposure(self, symbol: str) -> Decimal: ...
 
 
 class AllocationCapGuard:
@@ -132,15 +132,15 @@ class AllocationCapGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
-        exposure = self.ledger.current_exposure()
+        exposure = self.ledger.current_exposure(decision.symbol)
         offer = Decimal(str(decision.offer_amount_usdt))
         projected = exposure + offer
         if projected > ctx.allocation_cap_usdt:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
-                    f"exposure={exposure}+offer={offer}={projected} > "
-                    f"cap={ctx.allocation_cap_usdt}"
+                    f"symbol={decision.symbol} exposure={exposure}+offer={offer}"
+                    f"={projected} > cap={ctx.allocation_cap_usdt}"
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)

@@ -31,11 +31,12 @@ def _ctx() -> AccountContext:
     return AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
 
-def _post() -> DecisionPayload:
+def _post(symbol: str = "fUST") -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST,
         signal_correlation_id=uuid4(),
         offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
+        symbol=symbol,
     )
 
 
@@ -134,19 +135,19 @@ async def test_heartbeat_edge_at_exactly_threshold() -> None:
 
 
 class _FakeLedger:
-    def __init__(self, exposure: Decimal) -> None:
-        self._exposure = exposure
+    def __init__(self, exposures: dict[str, Decimal] | None = None) -> None:
+        self._exposures = exposures or {}
 
-    def current_exposure(self) -> Decimal:
-        return self._exposure
+    def current_exposure(self, symbol: str) -> Decimal:
+        return self._exposures.get(symbol, Decimal("0"))
 
 
 @pytest.mark.asyncio
 async def test_allocation_cap_allows_under_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
-    ledger = _FakeLedger(Decimal("100"))
+    ledger = _FakeLedger({"fUST": Decimal("100")})
     g = AllocationCapGuard(ledger=ledger)
-    decision = _post()  # offer_amount_usdt=100
+    decision = _post()  # offer_amount_usdt=100, symbol=fUST
     r = await g.evaluate(decision, ctx)
     assert r.allowed is True
 
@@ -154,7 +155,7 @@ async def test_allocation_cap_allows_under_cap() -> None:
 @pytest.mark.asyncio
 async def test_allocation_cap_blocks_over_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
-    ledger = _FakeLedger(Decimal("450"))
+    ledger = _FakeLedger({"fUST": Decimal("450")})
     g = AllocationCapGuard(ledger=ledger)
     decision = _post()  # 100 → 450+100=550 > 500
     r = await g.evaluate(decision, ctx)
@@ -165,7 +166,7 @@ async def test_allocation_cap_blocks_over_cap() -> None:
 @pytest.mark.asyncio
 async def test_allocation_cap_edge_at_exactly_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
-    ledger = _FakeLedger(Decimal("400"))  # 400 + 100 = 500 (exactly)
+    ledger = _FakeLedger({"fUST": Decimal("400")})  # 400 + 100 = 500 (exactly)
     g = AllocationCapGuard(ledger=ledger)
     r = await g.evaluate(_post(), ctx)
     # Exactly at cap = allowed; strictly over blocks.
@@ -175,15 +176,31 @@ async def test_allocation_cap_edge_at_exactly_cap() -> None:
 @pytest.mark.asyncio
 async def test_allocation_cap_skip_decision_always_allowed() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("100"))
-    ledger = _FakeLedger(Decimal("99999"))
+    ledger = _FakeLedger({"fUST": Decimal("99999")})
     g = AllocationCapGuard(ledger=ledger)
     skip = DecisionPayload(
         decision_outcome=DecisionOutcome.SKIP,
         signal_correlation_id=uuid4(),
         skip_reason="below_threshold",
+        symbol="fUST",
     )
     r = await g.evaluate(skip, ctx)
     assert r.allowed is True  # SKIP decisions never consume cap
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_isolates_buckets_per_symbol() -> None:
+    # fUST bucket is full (over cap) but the empty fUSD bucket must allow a
+    # fUSD POST: the guard reads ONLY decision.symbol's exposure, never a sum.
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
+    ledger = _FakeLedger({"fUST": Decimal("500")})  # fUSD absent → reads 0
+    g = AllocationCapGuard(ledger=ledger)
+
+    blocked = await g.evaluate(_post(symbol="fUST"), ctx)  # 500+100=600 > 500
+    assert blocked.allowed is False
+
+    allowed = await g.evaluate(_post(symbol="fUSD"), ctx)  # 0+100=100 <= 500
+    assert allowed.allowed is True
 
 
 class _FakeBalanceLedger:
