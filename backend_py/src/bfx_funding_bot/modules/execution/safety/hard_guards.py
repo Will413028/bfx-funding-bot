@@ -147,7 +147,7 @@ class AllocationCapGuard:
 
 
 class _BalanceLedgerProtocol(Protocol):
-    def available_balance(self) -> Decimal: ...
+    def available_balance(self, symbol: str) -> Decimal: ...
 
 
 class BuyingPowerGuard:
@@ -177,15 +177,15 @@ class BuyingPowerGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
-        available = self.ledger.available_balance()
+        available = self.ledger.available_balance(decision.symbol)
         deployable = available - self.buffer_usdt
         offer = Decimal(str(decision.offer_amount_usdt))
         if offer > deployable:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
-                    f"offer={offer} > available={available}−buffer={self.buffer_usdt}"
-                    f"={deployable}"
+                    f"symbol={decision.symbol} offer={offer} > "
+                    f"available={available}−buffer={self.buffer_usdt}={deployable}"
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)
