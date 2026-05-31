@@ -64,28 +64,29 @@ def test_candles_to_market_rate_points_empty():
 
 
 # ---------------------------------------------------------------------------
-# _compute_verdict: pure verdict core (band-violation degradation + empties).
-# A wrong-scale passive series must NOT crash the report — it degrades to
-# UNRELIABLE with the band message so the operator sees the attribution is
-# broken rather than getting a traceback.
+# _compute_verdict: pure verdict core (band/coverage guards decouple from primary).
+# Band-violation now only marks MR-alpha unavailable; the primary bot-vs-idle
+# CI (idle ≡ 0) is unaffected by passive-arm data quality.
 # ---------------------------------------------------------------------------
 
 
-def test_compute_verdict_frr_scale_points_degrade_to_unreliable():
-    # frr-scale (~1e-6) passive series is the wrong source. observed_realized
-    # matches attributed (570) so the anchors are clean — only the band guard
-    # flips this to UNRELIABLE, isolating the new behavior.
+def test_compute_verdict_frr_scale_points_mark_mr_alpha_unavailable_not_unreliable():
+    # frr-scale (~1e-6) passive series is the wrong source for the MR-alpha
+    # diagnostic, but bot-vs-idle (idle ≡ 0) needs no market-rate data. The band
+    # guard now ONLY marks MR-alpha unavailable + leaves a caveat; the primary
+    # verdict stays data-driven (1 window → INSUFFICIENT_DATA), never UNRELIABLE.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("1.1e-06")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
     verdict, _window, n_fills, _clamp = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
-    assert verdict.state is VerdictState.UNRELIABLE
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert verdict.mr_alpha_available is False
     assert any("plausible per-day band" in r for r in verdict.reasons)
     assert n_fills == 1
 
 
-def test_compute_verdict_legit_points_no_band_override():
+def test_compute_verdict_legit_points_mr_alpha_available():
     # Realistic candle-close baseline → no band override; near-idle single
     # window stays data-driven (INSUFFICIENT_DATA), never UNRELIABLE-by-band.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
@@ -94,8 +95,35 @@ def test_compute_verdict_legit_points_no_band_override():
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert not any("plausible per-day band" in r for r in verdict.reasons)
+    assert verdict.mr_alpha_available is True
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
     assert n_fills == 1
+
+
+def test_compute_verdict_headline_is_absolute_active_return():
+    # One full-budget 2-day fill at rate 3e-4, cap 570: bot-vs-idle headline =
+    # active net_monthly = 570*3e-4*2 / 570 * 100 = 0.06 (idle subtracts 0).
+    pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
+    fills = [_fill(1000, "570", "0.0003")]
+    verdict, _window, _n, _clamp = _compute_verdict(
+        fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
+    )
+    assert verdict.headline_bot_vs_idle == Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
+
+
+def test_compute_verdict_no_coverage_marks_mr_alpha_unavailable_primary_unblocked():
+    # Fills present but ZERO market-rate points → MR-alpha cannot be computed, but
+    # bot-vs-idle is unaffected. Primary stays data-driven (INSUFFICIENT: no windows,
+    # since min_ts == max_ts with one fill and no rate points), mr_alpha_available
+    # False, no band reason (band guard no-ops on empty list).
+    # observed_realized=0 keeps the anchor clean (no fills→attributed_deployed=0).
+    fills = [_fill(1000, "570", "0.0003")]
+    verdict, _window, _n, _clamp = _compute_verdict(
+        fills=fills, market_rate_points=[], observed_realized=Decimal("0"), capital=C
+    )
+    assert verdict.mr_alpha_available is False
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert not any("plausible per-day band" in r for r in verdict.reasons)
 
 
 def test_compute_verdict_empty_is_insufficient_no_crash():
@@ -180,7 +208,11 @@ async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
     verdict, _window, n_fills, _clamp = await build_verdict_from_neon(
         capital=C, session_factory=g3_factory
     )
-    assert verdict.state is VerdictState.UNRELIABLE
+    # A correct fUST/p2/1h query reads the frr-scale target → band caveat fires
+    # (proving cell targeting). Band no longer forces UNRELIABLE: idle canary
+    # (0 fills) → INSUFFICIENT_DATA with mr_alpha unavailable.
+    assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert verdict.mr_alpha_available is False
     assert any("plausible per-day band" in r for r in verdict.reasons)
     assert n_fills == 0
 
@@ -203,3 +235,4 @@ async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factor
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
     assert not any("plausible per-day band" in r for r in verdict.reasons)
     assert n_fills == 0
+    assert verdict.mr_alpha_available is False
