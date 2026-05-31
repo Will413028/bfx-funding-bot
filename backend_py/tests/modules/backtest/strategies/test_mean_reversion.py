@@ -72,6 +72,43 @@ def test_decide_returns_none_when_close_is_none() -> None:
     assert s.decide(cand) is None
 
 
+def _mr() -> MeanReversionStrategy:
+    return MeanReversionStrategy(
+        ema_span=24, threshold_sigma=Decimal("0.5"), ratio_sigma=Decimal("0.05"),
+    )
+
+
+def test_ema_current_none_before_first_observe() -> None:
+    assert _mr().ema_current is None
+
+
+def test_ema_current_tracks_accumulator() -> None:
+    mr = _mr()
+    mr.observe(_c(0, "0.0003"))
+    assert mr.ema_current == Decimal("0.0003")  # first observe seeds ema
+    mr.observe(_c(3600_000, "0.0005"))
+    alpha = Decimal(2) / Decimal(24 + 1)
+    expected = alpha * Decimal("0.0005") + (Decimal("1") - alpha) * Decimal("0.0003")
+    assert mr.ema_current == expected
+
+
+def test_last_deviation_none_before_decide() -> None:
+    mr = _mr()
+    mr.observe(_c(0, "0.0003"))
+    assert mr.last_deviation is None
+
+
+def test_last_deviation_caches_most_recent_decide() -> None:
+    mr = _mr()
+    mr.observe(_c(0, "0.0003"))
+    cand = _c(3600_000, "0.0004")
+    mr.observe(cand)
+    mr.decide(cand)
+    ema = mr.ema_current
+    assert ema is not None
+    assert mr.last_deviation == (Decimal("0.0004") - ema) / ema
+
+
 def test_param_grid_for_cell_uses_eda_ratio_sigma() -> None:
     grid = MeanReversionStrategy.param_grid_for_cell(
         symbol="fUST", period_agg="p2",
