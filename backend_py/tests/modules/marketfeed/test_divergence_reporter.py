@@ -89,49 +89,51 @@ def test_divergence_detected_when_live_signal_differs_from_replay():
 
 
 def test_replay_byte_equivalent_with_locf_on_sparse_input():
-    """Sparse p30 candle fixture: daemon LOCF path + replay LOCF path produce
-    byte-equivalent SignalPayload (no divergence_detected emit).
+    """Sparse p30 fixture: daemon LOCF path + replay LOCF path produce a
+    byte-equivalent SignalPayload (no divergence), now verified at STATE level
+    (window/threshold), not just direction.
 
     Phase 4.1 CP1 invariant extends to LOCF: both live and replay paths must see
     the same LOCF-filled candles (via reindex_and_ffill) → same ExtractedSignal.
 
-    Setup:
-    - 10 dense candles from base_mts, then 6h gap (sparse), then ref_mts
-    - budget=12h → gap < budget → LOCF soft-tier fills the gap with last known candle
-    - live strategy observes LOCF-processed candles (same as daemon path)
-    - replay path (what signal_engine now passes to reporter) also gets LOCF history
-    - DivergenceReporter.check() must return None (byte-equal)
-
-    Regression guard: without Phase 4.3 fix, reporter would receive raw candles
-    (gap slot missing), replay would see 10 candles while live saw 16 → mismatch.
+    Faithful gap scenario: 10 dense candles, a 6h gap, then a REAL gap-terminating
+    candle at T+15h. The daemon delivers that real candle as the boundary; live
+    (warmup-equivalent) and replay both reindex raw history to its mts (=T+15h),
+    LOCF-filling T+10..T+14. NOTE: an earlier version used a LOCF *fill* as the
+    boundary — but LOCF fills carry their SOURCE candle's mts (T+9h), so the
+    boundary's mts disagreed with the live reindex anchor (T+15h) and the two
+    paths' windows silently diverged. The old direction-only comparison missed
+    that; the state-level (last_threshold) comparison now catches it, so the
+    fixture uses a real terminator to model the real daemon.
     """
     base_mts = 1747584000000  # 2026-05-18 12:00 UTC
     one_hour_ms = 3_600_000
     budget_hours = 12
 
-    # Dense candles at T+0h … T+9h (10 candles), then a 6h gap, ref at T+15h.
+    # Dense candles at T+0h … T+9h, a 6h gap, then a REAL candle at T+15h.
     dense_candles = [
         _candle(base_mts + i * one_hour_ms, Decimal(f"0.000{(i % 5) + 1}"))
         for i in range(10)
     ]
-    last_dense_mts = base_mts + 9 * one_hour_ms
-    ref_mts = last_dense_mts + 6 * one_hour_ms  # T+15h; 6h gap in raw candles
+    ref_mts = base_mts + 15 * one_hour_ms  # T+15h; 6h gap after the last dense
+    gap_terminator = _candle(ref_mts, Decimal("0.0006"))
+    raw_candles = dense_candles + [gap_terminator]
 
-    # Simulate what signal_engine now does: apply LOCF to raw history.
     locf_filled = reindex_and_ffill(
-        dense_candles, ref_mts=ref_mts, max_gap_hours=budget_hours,
+        raw_candles, ref_mts=ref_mts, max_gap_hours=budget_hours,
     )
     # Soft-tier: gap (6h) < budget (12h) → all slots filled, no None entries.
     assert all(fc.candle is not None for fc in locf_filled), (
         "all slots should be soft-tier filled (gap < budget)"
     )
-    # ref_mts slot is LOCF-filled from last dense candle.
-    assert locf_filled[-1].is_stale is True
-    assert locf_filled[-1].stale_seconds == 6 * 3600
+    # The boundary slot (T+15h) is the REAL terminator (not stale); the gap
+    # interior (e.g. T+12h, index 12) is LOCF-filled from the last dense candle.
+    assert locf_filled[-1].is_stale is False
+    assert locf_filled[12].is_stale is True
+    assert locf_filled[12].stale_seconds == 3 * 3600  # T+12h sourced from T+9h
 
     locf_history = [fc.candle for fc in locf_filled if fc.candle is not None]
     assert len(locf_history) == len(locf_filled)  # all slots populated (verify)
-    latest_candle = locf_history[-1]
 
     # Cell with staleness_budget_hours resolved (simulates load_config()).
     cell = CellConfig.model_validate({
@@ -142,27 +144,67 @@ def test_replay_byte_equivalent_with_locf_on_sparse_input():
         "staleness_budget_hours": budget_hours,
     })
 
-    # Live path: observe history[:-1] then extract at history[-1].
+    # Live path: observe LOCF history[:-1] then extract at the REAL boundary.
     live = build_strategy(cell)
     for c in locf_history[:-1]:
         live.observe(c)
-    live_signal = ExtractedSignal.extract(cell, live, latest_candle)
+    live_signal = ExtractedSignal.extract(cell, live, gap_terminator)
 
-    # Replay path: pass RAW dense_candles + boundary_candle + budget.
-    # reporter internally calls build_strategy_at_boundary which applies
-    # LOCF over raw_history with ref_mts=boundary_candle.mts. Live path
-    # above already observed LOCF-filled locf_history[:-1] + extract on
-    # latest_candle, so the live state matches what reporter will rebuild
-    # → no divergence.
+    # Replay path: reporter rebuilds via build_strategy_at_boundary over RAW
+    # history with ref_mts=boundary.mts (=T+15h) — an independent reconstruction
+    # that must produce a byte-equal window/threshold.
     reporter = DivergenceReporter()
     divergence = reporter.check(
-        cell=cell, raw_history=dense_candles, boundary_candle=latest_candle,
+        cell=cell, raw_history=raw_candles, boundary_candle=gap_terminator,
         budget_hours=budget_hours, live_signal=live_signal,
     )
 
     assert divergence is None, (
         f"CP1 byte-equivalence must hold with LOCF sparse input; got: {divergence}"
     )
+
+
+def test_state_drift_detected_even_when_direction_matches():
+    """The headline G2 invariant: live and replay agree on direction (POST) but
+    the MR ema accumulator silently drifted → must surface as strategy_attributes
+    divergence. The old direction-only reporter missed this."""
+    from bfx_funding_bot.modules.marketfeed.schemas import SignalDirection
+
+    cell = CellConfig.model_validate({
+        "strategy": "mean_reversion", "symbol": "fUSD", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {"ema_span": 24, "threshold_sigma": 0.5, "ratio_sigma": 0.05},
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
+    })
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(10)]
+
+    # Live signal AGREES on direction (POST) but carries a drifted ema_current.
+    fake_live = ExtractedSignal(
+        signal_score=0.0,
+        signal_direction=SignalDirection.POST,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.0003,
+            "threshold_sigma": 0.5,
+            "ema_current": Decimal("0.0009"),   # drifted vs the true ~0.0003
+            "last_deviation": Decimal("0"),
+        }.items())),
+        lend_decision=None,
+    )
+    reporter = DivergenceReporter()
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=2, live_signal=fake_live,
+    )
+    assert result is not None, "state drift must be detected even with matching direction"
+    assert "strategy_attributes" in result["diff_fields"]
+    assert "signal_direction" not in result["diff_fields"]  # directions agreed
+    # Pin the FEATURE (not an incidental key mismatch): replay must EMIT the real
+    # ema_current, and it must differ from the drifted live value.
+    replay_attrs = dict(result["replay"]["strategy_attributes"])
+    assert "ema_current" in replay_attrs, "replay must expose ema_current"
+    assert Decimal(str(replay_attrs["ema_current"])) != Decimal("0.0009")
 
 
 @pytest.mark.property
