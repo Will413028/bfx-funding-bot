@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import logging
@@ -41,8 +42,19 @@ class WriterLock:
         self._key = key
         self._engine: AsyncEngine | None = None
         self._conn: AsyncConnection | None = None
+        # asyncpg connections are NOT safe for concurrent ops. Serialize every
+        # access to self._conn / self._engine so a background refresh() tick can
+        # never overlap a per-submit verify_held() (which would raise
+        # InterfaceError and fail the safety guard closed). Non-reentrant: public
+        # methods hold it; internal helpers (_acquire_locked/_verify_held_locked/
+        # _close) run UNLOCKED and are only called from already-locked contexts.
+        self._conn_lock = asyncio.Lock()
 
     async def acquire(self) -> None:
+        async with self._conn_lock:
+            await self._acquire_locked()
+
+    async def _acquire_locked(self) -> None:
         kwargs = _prepare_engine_kwargs(self._database_url)
         url = cast(str, kwargs["url"])
         connect_args = cast("dict[str, object]", kwargs.get("connect_args", {}))
@@ -66,6 +78,10 @@ class WriterLock:
         """Live check: a successful query proves the session (and its session-scoped
         advisory lock) is still alive. Any failure ⇒ not held ⇒ caller fails closed.
         """
+        async with self._conn_lock:
+            return await self._verify_held_locked()
+
+    async def _verify_held_locked(self) -> bool:
         if self._conn is None:
             return False
         try:
@@ -79,20 +95,25 @@ class WriterLock:
         """Background recovery: if the lock was lost, drop the dead conn and try to
         re-acquire. Returns the resulting held state.
         """
-        if await self.verify_held():
-            return True
-        await self._close()
-        try:
-            await self.acquire()
-            log.warning("writer_lock_reacquired key=%s", self._key)
-            return True
-        except WriterLockUnacquired:
-            return False
-        except Exception:
-            return False
+        async with self._conn_lock:
+            if await self._verify_held_locked():
+                return True
+            await self._close()
+            try:
+                await self._acquire_locked()
+                log.warning("writer_lock_reacquired key=%s", self._key)
+                return True
+            except WriterLockUnacquired:
+                # Another live writer grabbed the lock — single-writer contention.
+                log.warning("writer_lock_reacquire_failed_contended key=%s", self._key)
+                return False
+            except Exception:
+                log.error("writer_lock_reacquire_failed key=%s", self._key)
+                return False
 
     async def release(self) -> None:
-        await self._close()
+        async with self._conn_lock:
+            await self._close()
 
     async def _close(self) -> None:
         if self._conn is not None:
