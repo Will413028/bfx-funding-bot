@@ -699,3 +699,127 @@ async def test_legacy_symbol_kwarg_still_constructs_single_symbol():
     assert len(pr) == 1
     assert pr[0].symbol == "fUST"
     assert pr[0].realized == Decimal("150")
+
+
+# ── Multi-symbol reconcile loop (Cluster D Task 2) ───────────────────────────
+
+
+def _offer_sym(symbol, voi, amount):
+    return ActiveFundingOffer(
+        venue_offer_id=voi, symbol=symbol, amount=Decimal(amount),
+        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
+    )
+
+
+def _credit_sym(symbol, credit_id, amount):
+    return ActiveFundingCredit(
+        credit_id=credit_id, symbol=symbol, amount=Decimal(amount),
+        rate=0.0003, period_days=2, status="ACTIVE",
+    )
+
+
+class _StubAuthPerSymbol:
+    """Per-symbol offers/credits/available keyed by symbol."""
+    def __init__(self, offers_by_sym, credits_by_sym, available_by_sym):
+        self._offers = offers_by_sym
+        self._credits = credits_by_sym
+        self._available = available_by_sym
+        self.offer_calls: list[str] = []
+        self.credit_calls: list[str] = []
+        self.wallet_calls: list[str] = []
+
+    async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+        self.offer_calls.append(symbol)
+        return self._offers.get(symbol, [])
+
+    async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+        self.credit_calls.append(symbol)
+        return self._credits.get(symbol, [])
+
+    async def get_funding_available(self, *, ctx, currency):
+        self.wallet_calls.append(currency)
+        return self._available.get(currency, Decimal("0"))
+
+
+@pytest.mark.asyncio
+async def test_two_symbols_fire_two_position_reconciled_with_per_symbol_natives():
+    auth = _StubAuthPerSymbol(
+        offers_by_sym={
+            "fUST": [_offer_sym("fUST", "1", "100")],
+            "fUSD": [_offer_sym("fUSD", "2", "40")],
+        },
+        credits_by_sym={
+            "fUST": [_credit_sym("fUST", "c1", "200")],
+            "fUSD": [],
+        },
+        available_by_sym={"UST": Decimal("17.5"), "USD": Decimal("9")},
+    )
+    store = _StubStore()
+    bus = _StubBus()
+    rec = _boot_recovery_symbols(
+        auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
+    )
+
+    await rec.run()
+
+    pr = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert len(pr) == 2
+    by_sym = {e.symbol: e for e in pr}
+    assert by_sym["fUST"].reserved == Decimal("100")
+    assert by_sym["fUST"].realized == Decimal("200")
+    assert by_sym["fUST"].available == Decimal("17.5")
+    assert by_sym["fUST"].n_offers == 1 and by_sym["fUST"].n_credits == 1
+    assert by_sym["fUSD"].reserved == Decimal("40")
+    assert by_sym["fUSD"].realized == Decimal("0")
+    assert by_sym["fUSD"].available == Decimal("9")
+    assert by_sym["fUSD"].n_offers == 1 and by_sym["fUSD"].n_credits == 0
+    # one wallet read per symbol's currency (no cross-symbol sum)
+    assert auth.wallet_calls == ["UST", "USD"]
+
+
+@pytest.mark.asyncio
+async def test_two_symbols_write_per_symbol_snapshot_rows():
+    auth = _StubAuthPerSymbol(
+        offers_by_sym={"fUST": [_offer_sym("fUST", "1", "100")], "fUSD": []},
+        credits_by_sym={"fUST": [], "fUSD": [_credit_sym("fUSD", "c1", "55")]},
+        available_by_sym={"UST": Decimal("1"), "USD": Decimal("2")},
+    )
+    store = _StubStore()
+    bus = _StubBus()
+    rec = _boot_recovery_symbols(
+        auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
+    )
+
+    await rec.run()
+
+    assert len(store.snapshot_calls) == 2
+    by_sym = {c["symbol"]: c for c in store.snapshot_calls}
+    assert by_sym["fUST"]["reserved"] == Decimal("100")
+    assert by_sym["fUST"]["realized"] == Decimal("0")
+    assert by_sym["fUSD"]["reserved"] == Decimal("0")
+    assert by_sym["fUSD"]["realized"] == Decimal("55")
+
+
+@pytest.mark.asyncio
+async def test_multi_symbol_result_aggregates_dims():
+    auth = _StubAuthPerSymbol(
+        offers_by_sym={"fUST": [_offer_sym("fUST", "1", "100")], "fUSD": []},
+        credits_by_sym={
+            "fUST": [_credit_sym("fUST", "c1", "200")],
+            "fUSD": [_credit_sym("fUSD", "c2", "30")],
+        },
+        available_by_sym={"UST": Decimal("5"), "USD": Decimal("7")},
+    )
+    store = _StubStore()
+    bus = _StubBus()
+    rec = _boot_recovery_symbols(
+        auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
+    )
+
+    result = await rec.run()
+
+    # aggregate across symbols (PeriodicReconcile divergence/drift unchanged)
+    assert result.reserved_usdt == Decimal("100")
+    assert result.realized_usdt == Decimal("230")
+    assert result.available_usdt == Decimal("12")
+    assert result.n_credits == 2
