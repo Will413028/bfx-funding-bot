@@ -593,3 +593,39 @@ async def test_fetch_available_does_not_retry_4xx():
     with pytest.raises(BitfinexAPIError):
         await rec._fetch_available()
     assert auth.calls == 1  # no retry on 4xx (fail-closed, same as offers/credits)
+
+
+# ── Task 3D: thread offer.symbol + reconciler symbol into recovery actions ─────
+
+
+def test_orphan_claimed_carries_offer_symbol() -> None:
+    offer = ActiveFundingOffer(
+        venue_offer_id="555", symbol="fUST", amount=Decimal("100"),
+        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
+    )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST",
+    )
+    assert isinstance(acts[0], ReservationClaimed) and acts[0].symbol == "fUST"
+
+
+def test_missing_claim_released_carries_reconciler_symbol() -> None:
+    claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80")
+    acts = compute_recovery_actions(
+        venue_offers=[], local_claims=[claim], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST",
+    )
+    assert isinstance(acts[0], ReservationReleased) and acts[0].symbol == "fUST"
+
+
+def test_compute_recovery_actions_symbol_defaults_to_fusd() -> None:
+    offer = ActiveFundingOffer(
+        venue_offer_id="111", symbol="fUSD", amount=Decimal("50"),
+        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
+    )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbol → default
+    )
+    assert acts[0].symbol == "fUSD"
