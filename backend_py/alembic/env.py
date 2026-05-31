@@ -8,6 +8,7 @@ Side-effect imports register tables with Base.metadata so autogenerate
 sees a unified schema.
 """
 
+import hashlib
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -34,6 +35,13 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# Session-level advisory lock that serializes concurrent `alembic upgrade` runs
+# (e.g. during VM cutover). Distinct namespace from the daemon writer lock so the
+# two never false-share. blake2b -> signed 64-bit int (pg advisory-lock key type).
+_MIGRATE_LOCK_KEY = int.from_bytes(
+    hashlib.blake2b(b"bfx-migrate:alembic", digest_size=8).digest(), "big", signed=True
+)
+
 
 def include_object(object, name, type_, reflected, compare_to):
     """Filter out legacy Atlas revision-tracking table from autogenerate."""
@@ -41,15 +49,35 @@ def include_object(object, name, type_, reflected, compare_to):
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        compare_type=True,
-        compare_server_default=True,
-        include_object=include_object,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
+    # Run the session-scoped setup (timeouts + advisory lock) under AUTOCOMMIT so
+    # they don't open a lingering outer transaction that would swallow alembic's
+    # own migration commit. SET and pg_try_advisory_lock attach to the underlying
+    # DBAPI connection/session, so they persist for the migration that follows.
+    setup = connection.execution_options(isolation_level="AUTOCOMMIT")
+    # Bounded timeouts so a contended/blocked migration fails fast instead of
+    # hanging (e.g. during VM cutover): wait at most 5s for a lock, abort any
+    # single statement after 60s.
+    setup.exec_driver_sql("SET lock_timeout = '5s'")
+    setup.exec_driver_sql("SET statement_timeout = '60s'")
+    # Serialize concurrent migrations on a session-level advisory lock; bail out
+    # immediately if another migration already holds it.
+    got = setup.exec_driver_sql(
+        f"SELECT pg_try_advisory_lock({_MIGRATE_LOCK_KEY})"
+    ).scalar()
+    if not got:
+        raise RuntimeError("another migration is already running (advisory lock held)")
+    try:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
+            include_object=include_object,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        setup.exec_driver_sql(f"SELECT pg_advisory_unlock({_MIGRATE_LOCK_KEY})")
 
 
 def run_migrations_offline() -> None:
