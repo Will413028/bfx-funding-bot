@@ -391,8 +391,8 @@ class G3Verdict:
     state: VerdictState
     headline_bot_vs_idle: Decimal  # absolute active return on budget; bot-vs-idle (idle ≡ 0)
     n_windows: int
-    ci_lo: Decimal  # bot-vs-idle 95% CI (primary gate)
-    ci_hi: Decimal
+    ci_lo: Decimal  # bot-vs-idle 95% CI lower bound (primary gate)
+    ci_hi: Decimal  # upper bound
     reasons: list[str]
     # Secondary MR-timing-alpha diagnostic (active − AlwaysMarketRate). Reported,
     # never gating. mr_alpha_available is False when market-rate coverage/band
