@@ -40,6 +40,10 @@ def render_markdown(
             f"{clamp_diag.excess_return_pct:.4f}% over-deploy excess removed."
         )
 
+    idle_arm_note = (
+        "- idle arm = 0% by construction; the headline is the bot's own realized"
+        " return on the allocated budget."
+    )
     if verdict.mr_alpha_available:
         mr_alpha = [
             "## MR timing alpha (secondary diagnostic)",
@@ -47,16 +51,14 @@ def render_markdown(
             f"- MR alpha 95% CI: [{verdict.mr_alpha_ci_lo}, {verdict.mr_alpha_ci_hi}]",
             "- Diagnostic only — does NOT gate the verdict. Near 0 means MR timing adds"
             " little over always-lending; the product value is bot-vs-idle.",
-            "- idle arm = 0% by construction; the headline is the bot's own realized"
-            " return on the allocated budget.",
+            idle_arm_note,
         ]
     else:
         mr_alpha = [
             "## MR timing alpha (secondary diagnostic)",
             "- unavailable — no in-band market-rate coverage in window (see reasons)."
             " bot-vs-idle (idle ≡ 0) is unaffected.",
-            "- idle arm = 0% by construction; the headline is the bot's own realized"
-            " return on the allocated budget.",
+            idle_arm_note,
         ]
 
     lines = [

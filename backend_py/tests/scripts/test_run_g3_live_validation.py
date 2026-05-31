@@ -65,8 +65,9 @@ def test_render_markdown_mr_alpha_section_available():
     assert "MR timing alpha" in md
     assert "secondary diagnostic" in md
     assert "0% by construction" in md
-    # the diagnostic numbers render when available
-    assert "0.02" in md  # mr_alpha_ci_hi
+    # pin the full CI line (label + both bounds) so it only passes when the
+    # available branch rendered — not on a coincidental "0.02" substring elsewhere.
+    assert "MR alpha 95% CI: [-0.01, 0.02]" in md
 
 
 def test_render_markdown_mr_alpha_section_unavailable():
@@ -76,6 +77,7 @@ def test_render_markdown_mr_alpha_section_unavailable():
     md = render_markdown(verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"))
     assert "MR timing alpha" in md
     assert "unavailable" in md
+    assert "MR alpha spread" not in md  # numeric lines must NOT render when unavailable
 
 
 def test_render_markdown_insufficient_data_states_caveat():
