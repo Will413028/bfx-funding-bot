@@ -256,54 +256,78 @@ class BootRecovery:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> ReconcileResult:
-        # All fetches may raise → daemon fail-safe (never trade without venue truth).
-        # Phase 1: the single configured symbol drives the fetch (multi-symbol loop
-        # arrives in the per-symbol reconcile task). With one symbol this is identical
-        # to the historic global reconcile.
-        symbol = self._symbols[0]
-        venue_offers = await self._fetch_offers(symbol)
-        venue_credits = await self._fetch_credits(symbol)
-        available_usdt = await self._fetch_available(symbol)
-
-        reserved_usdt = sum((o.amount for o in venue_offers), Decimal("0"))
-        realized_usdt = sum((c.amount for c in venue_credits), Decimal("0"))
+        # Per-symbol reconcile: each configured currency is an independent wallet
+        # (native units), so offers/credits/available are queried per symbol and a
+        # PositionReconciled is published per symbol. The FSM recovery diff
+        # (orphan-claim / missing-release of offer_claims) stays GLOBAL: offer_claims
+        # carries no symbol and venue_offer_id is globally unique on Bitfinex, so we
+        # union venue offers across symbols before diffing local claims — otherwise a
+        # claim for symbol B would look "missing_from_venue" while reconciling symbol A
+        # and be spuriously released. ReconcileResult aggregates across symbols (the
+        # PeriodicReconcile divergence/drift logic is per-tick, not per-symbol).
         now_ms = self._clock()
+        per_symbol: list[tuple[str, list[ActiveFundingOffer], list[ActiveFundingCredit], Decimal]] = []
+        all_offers: list[ActiveFundingOffer] = []
+        for symbol in self._symbols:
+            offers = await self._fetch_offers(symbol)
+            credits = await self._fetch_credits(symbol)
+            available = await self._fetch_available(symbol)
+            per_symbol.append((symbol, offers, credits, available))
+            all_offers.extend(offers)
+
+        agg_reserved = Decimal("0")
+        agg_realized = Decimal("0")
+        agg_available = Decimal("0")
+        agg_n_credits = 0
+        agg_reserved_drift = Decimal("0")
+        agg_realized_drift = Decimal("0")
 
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
+            # GLOBAL FSM diff against the union of all symbols' venue offers.
             actions = compute_recovery_actions(
-                venue_offers=venue_offers, local_claims=local_claims,
+                venue_offers=all_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
             )
             for ev in actions:
                 await self._store.append(session, ev)
-            # Direct-write absolute position snapshot (not through delta accumulator).
-            drift = await self._store.set_position_snapshot(
-                session,
+            # Per-symbol absolute position snapshot (single-writer per symbol).
+            for symbol, offers, credits, _avail in per_symbol:
+                reserved = sum((o.amount for o in offers), Decimal("0"))
+                realized = sum((c.amount for c in credits), Decimal("0"))
+                drift = await self._store.set_position_snapshot(
+                    session,
+                    account_id=self._ctx.account_id,
+                    symbol=symbol,
+                    reserved_usdt=reserved,
+                    realized_usdt=realized,
+                    n_offers=len(offers),
+                    n_credits=len(credits),
+                    occurred_at_ms=now_ms,
+                )
+                agg_reserved_drift += drift.reserved_drift
+                agg_realized_drift += drift.realized_drift
+
+        # Publish one PositionReconciled per symbol AFTER durable commit.
+        for symbol, offers, credits, available in per_symbol:
+            reserved = sum((o.amount for o in offers), Decimal("0"))
+            realized = sum((c.amount for c in credits), Decimal("0"))
+            await self._safe_publish(PositionReconciled(
                 account_id=self._ctx.account_id,
                 symbol=symbol,
-                reserved_usdt=reserved_usdt,
-                realized_usdt=realized_usdt,
-                n_offers=len(venue_offers),
-                n_credits=len(venue_credits),
+                reserved=reserved,
+                realized=realized,
+                available=available,
+                n_offers=len(offers),
+                n_credits=len(credits),
                 occurred_at_ms=now_ms,
-            )
-
-        # Publish in-memory projection events AFTER durable commit.
-        position_reconciled = PositionReconciled(
-            account_id=self._ctx.account_id,
-            symbol=symbol,
-            reserved=reserved_usdt,
-            realized=realized_usdt,
-            available=available_usdt,
-            n_offers=len(venue_offers),
-            n_credits=len(venue_credits),
-            occurred_at_ms=now_ms,
-        )
-        # Snapshot signal → bus (the ledger's sole exposure authority at reconcile).
-        await self._safe_publish(position_reconciled)
+            ))
+            agg_reserved += reserved
+            agg_realized += realized
+            agg_available += available
+            agg_n_credits += len(credits)
 
         n_claim = n_release = n_fail = 0
         for ev in actions:
@@ -316,20 +340,20 @@ class BootRecovery:
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
         log.info(
-            "reconcile_complete venue_offers=%d venue_credits=%d "
+            "reconcile_complete symbols=%d venue_offers=%d "
             "reserved=%.2f realized=%.2f available=%.2f "
             "orphans_claimed=%d released=%d pending_failed=%d",
-            len(venue_offers), len(venue_credits),
-            float(reserved_usdt), float(realized_usdt), float(available_usdt),
+            len(self._symbols), len(all_offers),
+            float(agg_reserved), float(agg_realized), float(agg_available),
             n_claim, n_release, n_fail,
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
-            reserved_usdt=reserved_usdt, realized_usdt=realized_usdt,
-            available_usdt=available_usdt,
-            n_credits=len(venue_credits),
-            reserved_drift_usdt=drift.reserved_drift,
-            realized_drift_usdt=drift.realized_drift,
+            reserved_usdt=agg_reserved, realized_usdt=agg_realized,
+            available_usdt=agg_available,
+            n_credits=agg_n_credits,
+            reserved_drift_usdt=agg_reserved_drift,
+            realized_drift_usdt=agg_realized_drift,
         )
 
     async def _fetch_offers(self, symbol: str) -> list[ActiveFundingOffer]:
