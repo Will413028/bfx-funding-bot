@@ -206,3 +206,39 @@ def test_health_check_payload_accepts_reason_taxonomy() -> None:
     )
     assert p2.reason is None
     assert p2.stale_seconds is None
+
+
+def test_decision_payload_has_symbol_default_fusd() -> None:
+    """symbol defaults to the legacy single-currency fallback so existing
+    producers that do not yet set it keep validating."""
+    p = DecisionPayload(
+        decision_outcome="post",
+        signal_correlation_id=str(uuid4()),
+        offer_rate=0.0001,
+        offer_amount_usdt=150.0,
+        offer_duration_days=2,
+    )
+    assert p.symbol == "fUSD"
+
+
+def test_decision_payload_accepts_explicit_symbol() -> None:
+    p = DecisionPayload(
+        decision_outcome="post",
+        signal_correlation_id=str(uuid4()),
+        offer_rate=0.0001,
+        offer_amount_usdt=150.0,
+        offer_duration_days=2,
+        symbol="fUST",
+    )
+    assert p.symbol == "fUST"
+
+
+def test_decision_payload_skip_carries_symbol() -> None:
+    p = DecisionPayload(
+        decision_outcome="skip",
+        signal_correlation_id=str(uuid4()),
+        skip_reason="below_threshold",
+        symbol="fUST",
+    )
+    assert p.symbol == "fUST"
+    assert p.decision_outcome.value == "skip"

@@ -313,3 +313,47 @@ async def test_realized_drift_sets_degraded_even_without_offer_actions():
 
     assert any(t == HealthTarget.RECONCILE and s == HealthStatus.DEGRADED
                for (t, s, _f) in probe.updates)
+
+
+# ── Per-symbol recovery is driven by the loop (Cluster D Task 3) ─────────────
+
+
+class _MultiSymbolRecovery:
+    """Fake recovery that records how many times run() was driven and returns an
+    aggregate ReconcileResult (as BootRecovery does after the per-symbol loop)."""
+    def __init__(self, result):
+        self._result = result
+        self.runs = 0
+
+    async def run(self) -> ReconcileResult:
+        self.runs += 1
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_loop_drives_aggregate_recovery_and_flags_drift():
+    probe = _FakeProbe()
+    # aggregate result with realized drift above epsilon → divergence flagged
+    agg = ReconcileResult(
+        n_claimed=0, n_released=0, n_failed=0,
+        reserved_usdt=Decimal("100"), realized_usdt=Decimal("230"),
+        available_usdt=Decimal("12"), n_credits=2,
+        reserved_drift_usdt=Decimal("0"), realized_drift_usdt=Decimal("5"),
+    )
+    recovery = _MultiSymbolRecovery(agg)
+    pr = PeriodicReconcile(
+        recovery=recovery, probe=probe, interval_s=0.01, max_consecutive_failures=3,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_soon():
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    await asyncio.gather(pr.run_loop(stop), _stop_soon())
+
+    assert recovery.runs >= 1  # the loop owns driving the (now per-symbol) recovery
+    assert any(
+        t == HealthTarget.RECONCILE and s == HealthStatus.DEGRADED
+        for (t, s, _f) in probe.updates
+    )

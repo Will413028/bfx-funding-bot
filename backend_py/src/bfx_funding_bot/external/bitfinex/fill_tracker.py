@@ -214,6 +214,7 @@ class RestPollingFillTracker:
                 account_id=self.account_id,
                 is_simulated=False,
                 occurred_at_ms=int(time.time() * 1000),
+                symbol=claim.symbol,
             )
             try:
                 await self._persister.persist(release)

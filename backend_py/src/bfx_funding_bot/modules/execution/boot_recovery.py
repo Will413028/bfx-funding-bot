@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
@@ -59,6 +59,15 @@ class ReconcileResult:
     n_credits: int = 0
     reserved_drift_usdt: Decimal = Decimal("0")
     realized_drift_usdt: Decimal = Decimal("0")
+
+
+class _SymbolSnapshot(NamedTuple):
+    symbol: str
+    offers: list[ActiveFundingOffer]
+    credits: list[ActiveFundingCredit]
+    available: Decimal
+    reserved: Decimal
+    realized: Decimal
 
 
 # Fixed namespace for deterministic synthetic correlation ids on reconciled
@@ -108,6 +117,7 @@ def compute_recovery_actions(
     now_ms: int,
     grace_ms: int,
     action_grace_ms: int = 0,
+    symbol: str = "fUSD",
 ) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append.
 
@@ -132,6 +142,7 @@ def compute_recovery_actions(
             cid=synth_orphan_cid(voi), venue_offer_id=voi,
             size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+            symbol=offer.symbol,
         ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
@@ -144,6 +155,7 @@ def compute_recovery_actions(
             cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+            symbol=symbol,
         ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
@@ -221,6 +233,7 @@ class BootRecovery:
         offer_registry: _FsmSink | None = None,
         is_simulated: bool = False,
         symbol: str = "fUSD",
+        symbols: list[str] | None = None,
         grace_ms: int = 120_000,
         action_grace_ms: int = 0,
         max_attempts: int = 3,
@@ -235,7 +248,16 @@ class BootRecovery:
         self._bus = bus
         self._offer_registry = offer_registry
         self._is_simulated = is_simulated
-        self._symbol = symbol
+        # Configured symbols drive the per-symbol reconcile loop. Back-compat:
+        # the legacy single `symbol` kwarg maps to a 1-element list. Dedup while
+        # preserving order so a misconfigured duplicate cell can't fire twice.
+        raw = symbols if symbols is not None else [symbol]
+        seen: set[str] = set()
+        self._symbols: list[str] = []
+        for s in raw:
+            if s not in seen:
+                seen.add(s)
+                self._symbols.append(s)
         self._grace_ms = grace_ms
         self._action_grace_ms = action_grace_ms
         self._max_attempts = max_attempts
@@ -243,48 +265,84 @@ class BootRecovery:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> ReconcileResult:
-        # All fetches may raise → daemon fail-safe (never trade without venue truth).
-        venue_offers = await self._fetch_offers()
-        venue_credits = await self._fetch_credits()
-        available_usdt = await self._fetch_available()
-
-        reserved_usdt = sum((o.amount for o in venue_offers), Decimal("0"))
-        realized_usdt = sum((c.amount for c in venue_credits), Decimal("0"))
+        # Per-symbol reconcile: each configured currency is an independent wallet
+        # (native units), so offers/credits/available are queried per symbol and a
+        # PositionReconciled is published per symbol. The FSM recovery diff
+        # (orphan-claim / missing-release of offer_claims) stays GLOBAL: offer_claims
+        # carries no symbol and venue_offer_id is globally unique on Bitfinex, so we
+        # union venue offers across symbols before diffing local claims — otherwise a
+        # claim for symbol B would look "missing_from_venue" while reconciling symbol A
+        # and be spuriously released. ReconcileResult aggregates across symbols (the
+        # PeriodicReconcile divergence/drift logic is per-tick, not per-symbol).
         now_ms = self._clock()
+        per_symbol: list[_SymbolSnapshot] = []
+        all_offers: list[ActiveFundingOffer] = []
+        for symbol in self._symbols:
+            offers = await self._fetch_offers(symbol)
+            credits = await self._fetch_credits(symbol)
+            available = await self._fetch_available(symbol)
+            per_symbol.append(_SymbolSnapshot(
+                symbol=symbol,
+                offers=offers,
+                credits=credits,
+                available=available,
+                reserved=sum((o.amount for o in offers), Decimal("0")),
+                realized=sum((c.amount for c in credits), Decimal("0")),
+            ))
+            all_offers.extend(offers)
+
+        agg_reserved = Decimal("0")
+        agg_realized = Decimal("0")
+        agg_available = Decimal("0")
+        agg_n_credits = 0
+        agg_reserved_drift = Decimal("0")
+        agg_realized_drift = Decimal("0")
 
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
+            # GLOBAL FSM diff against the union of all symbols' venue offers.
+            # missing-claim releases stamp the primary symbol; LocalClaim has no
+            # per-claim symbol yet (Phase 2: offer_claims.symbol).
             actions = compute_recovery_actions(
-                venue_offers=venue_offers, local_claims=local_claims,
+                venue_offers=all_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
+                symbol=self._symbols[0],
             )
             for ev in actions:
                 await self._store.append(session, ev)
-            # Direct-write absolute position snapshot (not through delta accumulator).
-            drift = await self._store.set_position_snapshot(
-                session,
-                account_id=self._ctx.account_id,
-                reserved_usdt=reserved_usdt,
-                realized_usdt=realized_usdt,
-                n_offers=len(venue_offers),
-                n_credits=len(venue_credits),
-                occurred_at_ms=now_ms,
-            )
+            # Per-symbol absolute position snapshot (single-writer per symbol).
+            for snap in per_symbol:
+                drift = await self._store.set_position_snapshot(
+                    session,
+                    account_id=self._ctx.account_id,
+                    symbol=snap.symbol,
+                    reserved_usdt=snap.reserved,
+                    realized_usdt=snap.realized,
+                    n_offers=len(snap.offers),
+                    n_credits=len(snap.credits),
+                    occurred_at_ms=now_ms,
+                )
+                agg_reserved_drift += drift.reserved_drift
+                agg_realized_drift += drift.realized_drift
 
-        # Publish in-memory projection events AFTER durable commit.
-        position_reconciled = PositionReconciled(
-            account_id=self._ctx.account_id,
-            reserved_usdt=reserved_usdt,
-            realized_usdt=realized_usdt,
-            available_usdt=available_usdt,
-            n_offers=len(venue_offers),
-            n_credits=len(venue_credits),
-            occurred_at_ms=now_ms,
-        )
-        # Snapshot signal → bus (the ledger's sole exposure authority at reconcile).
-        await self._safe_publish(position_reconciled)
+        # Publish one PositionReconciled per symbol AFTER durable commit.
+        for snap in per_symbol:
+            await self._safe_publish(PositionReconciled(
+                account_id=self._ctx.account_id,
+                symbol=snap.symbol,
+                reserved=snap.reserved,
+                realized=snap.realized,
+                available=snap.available,
+                n_offers=len(snap.offers),
+                n_credits=len(snap.credits),
+                occurred_at_ms=now_ms,
+            ))
+            agg_reserved += snap.reserved
+            agg_realized += snap.realized
+            agg_available += snap.available
+            agg_n_credits += len(snap.credits)
 
         n_claim = n_release = n_fail = 0
         for ev in actions:
@@ -297,23 +355,23 @@ class BootRecovery:
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
         log.info(
-            "reconcile_complete venue_offers=%d venue_credits=%d "
+            "reconcile_complete symbols=%d venue_offers=%d "
             "reserved=%.2f realized=%.2f available=%.2f "
             "orphans_claimed=%d released=%d pending_failed=%d",
-            len(venue_offers), len(venue_credits),
-            float(reserved_usdt), float(realized_usdt), float(available_usdt),
+            len(self._symbols), len(all_offers),
+            float(agg_reserved), float(agg_realized), float(agg_available),
             n_claim, n_release, n_fail,
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
-            reserved_usdt=reserved_usdt, realized_usdt=realized_usdt,
-            available_usdt=available_usdt,
-            n_credits=len(venue_credits),
-            reserved_drift_usdt=drift.reserved_drift,
-            realized_drift_usdt=drift.realized_drift,
+            reserved_usdt=agg_reserved, realized_usdt=agg_realized,
+            available_usdt=agg_available,
+            n_credits=agg_n_credits,
+            reserved_drift_usdt=agg_reserved_drift,
+            realized_drift_usdt=agg_realized_drift,
         )
 
-    async def _fetch_offers(self) -> list[ActiveFundingOffer]:
+    async def _fetch_offers(self, symbol: str) -> list[ActiveFundingOffer]:
         """Fetch venue offers with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too. Either way
         the daemon fails to start (fail-safe: never trade without venue truth)."""
@@ -321,7 +379,7 @@ class BootRecovery:
         for attempt in range(self._max_attempts):
             try:
                 return await self._auth_rest.get_active_funding_offers(
-                    ctx=self._ctx, symbol=self._symbol,
+                    ctx=self._ctx, symbol=symbol,
                 )
             except BitfinexAPIError as e:
                 if not _is_transient_status(e.status_code):
@@ -342,7 +400,7 @@ class BootRecovery:
         assert last_exc is not None
         raise last_exc
 
-    async def _fetch_credits(self) -> list[ActiveFundingCredit]:
+    async def _fetch_credits(self, symbol: str) -> list[ActiveFundingCredit]:
         """Fetch venue credits with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too.
         Fail-fast: never trade without knowing realized exposure."""
@@ -350,7 +408,7 @@ class BootRecovery:
         for attempt in range(self._max_attempts):
             try:
                 return await self._auth_rest.get_active_funding_credits(
-                    ctx=self._ctx, symbol=self._symbol,
+                    ctx=self._ctx, symbol=symbol,
                 )
             except BitfinexAPIError as e:
                 if not _is_transient_status(e.status_code):
@@ -371,13 +429,13 @@ class BootRecovery:
         assert last_exc is not None
         raise last_exc
 
-    async def _fetch_available(self) -> Decimal:
+    async def _fetch_available(self, symbol: str) -> Decimal:
         """Fetch funding-wallet available balance with bounded retry on TRANSIENT
         failures only. 4xx re-raises immediately; transient exhaustion re-raises.
         Same fail-safe contract as offers/credits: a persistent failure aborts the
         reconcile tick, so deploy() is skipped (never size against unknown funds).
         Currency = symbol minus the leading 'f' (fUST -> UST)."""
-        currency = self._symbol[1:] if self._symbol.startswith("f") else self._symbol
+        currency = symbol[1:] if symbol.startswith("f") else symbol
         last_exc: BitfinexAPIError | None = None
         for attempt in range(self._max_attempts):
             try:

@@ -38,6 +38,12 @@ class SnapshotDrift:
 # skips vois already in CLAIMED state), not by this store-level dedup.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
+# Phase 1: a single funding currency is live (fUST). All position_state rows
+# are keyed by symbol; until callers (boot/reconcile) pass an explicit symbol,
+# they default to this so single-currency behavior is unchanged. Phase 2 makes
+# the configured symbol set first-class.
+DEFAULT_RECONCILE_SYMBOL = "fUST"
+
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
 # transition() (registry_offers.py) is reserved for the in-memory OfferRegistry's
 # fill-tracking; this snapshot is keyed by cid (stable across the whole lifecycle).
@@ -93,6 +99,7 @@ class PostgresEventStore:
         await self._project_position_state(
             session, etype, account_id, getattr(_ev, "size_usdt", None),
             row.event_seq, occurred_at_ms,
+            symbol=getattr(_ev, "symbol", None) or DEFAULT_RECONCILE_SYMBOL,
         )
         return True
 
@@ -199,6 +206,8 @@ class PostgresEventStore:
         size_usdt: Any,
         event_seq: int,
         occurred_at_ms: int,
+        *,
+        symbol: str = DEFAULT_RECONCILE_SYMBOL,
     ) -> None:
         size = Decimal(str(size_usdt)) if size_usdt is not None else Decimal("0")
         ps = (
@@ -206,6 +215,7 @@ class PostgresEventStore:
                 select(PositionStateRow).where(
                     PositionStateRow.account_id == account_id,
                     PositionStateRow.deployment_environment == self._env,
+                    PositionStateRow.symbol == symbol,
                 )
             )
         ).scalar_one_or_none()
@@ -213,14 +223,15 @@ class PostgresEventStore:
             ps = PositionStateRow(
                 account_id=account_id,
                 deployment_environment=self._env,
-                reserved_usdt=Decimal("0"),
-                realized_usdt=Decimal("0"),
+                symbol=symbol,
+                reserved=Decimal("0"),
+                realized=Decimal("0"),
                 last_updated_ms=0,
                 last_event_seq=0,
             )
             session.add(ps)
-        reserved = Decimal(str(ps.reserved_usdt))
-        realized = Decimal(str(ps.realized_usdt))
+        reserved = Decimal(str(ps.reserved))
+        realized = Decimal(str(ps.realized))
         if etype == "RESERVATION_CLAIMED":
             reserved += size
         elif etype == "ORDER_FILL":
@@ -229,8 +240,8 @@ class PostgresEventStore:
             realized += size
         elif etype == "RESERVATION_RELEASED":
             reserved -= min(reserved, size)
-        ps.reserved_usdt = reserved
-        ps.realized_usdt = realized
+        ps.reserved = reserved
+        ps.realized = realized
         ps.last_updated_ms = occurred_at_ms
         ps.last_event_seq = event_seq
 
@@ -244,16 +255,19 @@ class PostgresEventStore:
         n_offers: int,
         n_credits: int,
         occurred_at_ms: int,
+        symbol: str = DEFAULT_RECONCILE_SYMBOL,
     ) -> SnapshotDrift:
-        """Absolute venue snapshot. Overwrites the live position_state view,
-        appends an immutable reconcile_observation checkpoint (with the event_log
-        fence), and returns drift vs the prior materialized belief.
+        """Absolute venue snapshot for one symbol. Overwrites that symbol's live
+        position_state view, appends an immutable reconcile_observation checkpoint
+        (with the event_log fence), and returns drift vs the prior materialized
+        belief.
 
         NOT a delta. NOT through the accumulator. Single-writer for exposure at
         reconcile time.
 
         n_offers is persisted in the checkpoint row only (audit); position_state
-        carries n_credits but has no n_offers column.
+        carries n_credits but has no n_offers column. The reserved_usdt/realized_usdt
+        PARAMS are native units of `symbol` (the name is legacy; never cross-symbol).
         """
         fence: int = (
             await session.execute(
@@ -269,23 +283,25 @@ class PostgresEventStore:
                 select(PositionStateRow).where(
                     PositionStateRow.account_id == account_id,
                     PositionStateRow.deployment_environment == self._env,
+                    PositionStateRow.symbol == symbol,
                 )
             )
         ).scalar_one_or_none()
-        prior_reserved = Decimal(str(ps.reserved_usdt)) if ps is not None else Decimal("0")
-        prior_realized = Decimal(str(ps.realized_usdt)) if ps is not None else Decimal("0")
+        prior_reserved = Decimal(str(ps.reserved)) if ps is not None else Decimal("0")
+        prior_realized = Decimal(str(ps.realized)) if ps is not None else Decimal("0")
         if ps is None:
             ps = PositionStateRow(
                 account_id=account_id,
                 deployment_environment=self._env,
-                reserved_usdt=Decimal("0"),
-                realized_usdt=Decimal("0"),
+                symbol=symbol,
+                reserved=Decimal("0"),
+                realized=Decimal("0"),
                 last_updated_ms=0,
                 last_event_seq=0,
             )
             session.add(ps)
-        ps.reserved_usdt = reserved_usdt
-        ps.realized_usdt = realized_usdt
+        ps.reserved = reserved_usdt
+        ps.realized = realized_usdt
         ps.last_updated_ms = occurred_at_ms
         ps.last_event_seq = fence
         ps.last_reconciled_at = occurred_at_ms
@@ -308,7 +324,8 @@ class PostgresEventStore:
         )
 
     async def rebuild_snapshot_from_log(
-        self, session: AsyncSession, *, account_id: str, deployment_environment: str
+        self, session: AsyncSession, *, account_id: str, deployment_environment: str,
+        symbol: str = DEFAULT_RECONCILE_SYMBOL,
     ) -> None:
         """Rebuild snapshots for (account, env).
 
@@ -321,7 +338,8 @@ class PostgresEventStore:
             OfferClaimRow.deployment_environment == deployment_environment))
         await session.execute(delete(PositionStateRow).where(
             PositionStateRow.account_id == account_id,
-            PositionStateRow.deployment_environment == deployment_environment))
+            PositionStateRow.deployment_environment == deployment_environment,
+            PositionStateRow.symbol == symbol))
         await session.flush()
 
         rows = (await session.execute(
@@ -360,8 +378,9 @@ class PostgresEventStore:
         ps = PositionStateRow(
             account_id=account_id,
             deployment_environment=deployment_environment,
-            reserved_usdt=base_reserved,
-            realized_usdt=base_realized,
+            symbol=symbol,
+            reserved=base_reserved,
+            realized=base_realized,
             last_updated_ms=base_ms,
             last_event_seq=base_seq,
             last_reconciled_at=(checkpoint.observed_at_ms if checkpoint else None),
@@ -378,6 +397,10 @@ class PostgresEventStore:
             # only needs size_usdt and stays decoupled from domain event objects.
             # If a new event type gains a non-string-serialized size_usdt, sync
             # this with serialization.py.
+            # Phase 1 only: a single funding currency is live, so every event in
+            # the log belongs to `symbol` and the fold is unfiltered. Phase 2 (two
+            # symbols coexisting in one event_log) MUST filter on
+            # payload["symbol"] == symbol here, or fUSD/fUST deltas mix into one row.
             size = Decimal(str((r.payload or {}).get("size_usdt", 0) or 0))
             if r.event_type == "RESERVATION_CLAIMED":
                 reserved += size
@@ -387,7 +410,7 @@ class PostgresEventStore:
                 realized += size
             elif r.event_type == "RESERVATION_RELEASED":
                 reserved -= min(reserved, size)
-            ps.reserved_usdt = reserved
-            ps.realized_usdt = realized
+            ps.reserved = reserved
+            ps.realized = realized
             ps.last_updated_ms = r.occurred_at_ms
             ps.last_event_seq = r.event_seq

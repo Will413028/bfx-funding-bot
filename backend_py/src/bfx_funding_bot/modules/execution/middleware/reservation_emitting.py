@@ -87,7 +87,7 @@ class ReservationEmittingMiddleware:
                 cid=cid, venue_offer_id=result.venue_offer_id or "",
                 size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
-                occurred_at_ms=outcome_ms,
+                occurred_at_ms=outcome_ms, symbol=decision.symbol,
             )
             filled: OrderFilled | None = None
             if result.status == "filled":
@@ -96,6 +96,7 @@ class ReservationEmittingMiddleware:
                     size_usdt=size, fill_rate=decision.offer_rate or 0.0,
                     signal_correlation_id=scid, account_id=ctx.account_id,
                     is_simulated=self._is_simulated, occurred_at_ms=outcome_ms,
+                    symbol=decision.symbol,
                 )
             # txn2: outcome (event_log + snapshot, atomic)
             if filled is not None:

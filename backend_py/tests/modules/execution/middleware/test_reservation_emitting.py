@@ -151,3 +151,34 @@ async def test_inner_raise_after_intent_propagates() -> None:
         await mw.submit(_decision(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert len(persister.txns) == 1
+
+
+@pytest.mark.asyncio
+async def test_symbol_threaded_from_decision_into_claimed_and_filled() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("filled", "paper_sym", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
+    decision = DecisionPayload(
+        decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
+        offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2, symbol="fUST",
+    )
+    await mw.submit(decision, _ctx())
+    claimed = persister.txns[1][0]
+    filled = persister.txns[1][1]
+    assert claimed.symbol == "fUST"
+    assert filled.symbol == "fUST"
+    bus_claimed = next(e for e in seen if isinstance(e, ReservationClaimed))
+    bus_filled = next(e for e in seen if isinstance(e, OrderFilled))
+    assert bus_claimed.symbol == "fUST"
+    assert bus_filled.symbol == "fUST"
+
+
+@pytest.mark.asyncio
+async def test_symbol_defaults_to_fusd_when_not_set() -> None:
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner("submitted", "999", persister=persister)
+    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    await mw.submit(_decision(), _ctx())  # _decision() does not set symbol
+    assert persister.txns[1][0].symbol == "fUSD"

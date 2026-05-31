@@ -8,9 +8,13 @@ NAV (account equity) is sampled from each PositionReconciled venue snapshot:
     NAV = available + reserved + realized
 
 i.e. total funding-wallet capital for the account's currency — idle funds + open
-offers + lent principal. A maturing credit returns principal to `available` so
-NAV is unchanged; interest paid raises `available` → NAV up; capital lost for ANY
-reason (a bug burning funds, a platform socialised loss, a withdrawal) → NAV down.
+offers + lent principal. With multiple active symbols the global NAV sample is
+the SUM of the latest per-symbol NAV (native units kept separate per bucket; the
+sum is a pure equity total, never used as a per-symbol cap). A single active
+symbol (fUST today) makes the global metrics identical to the scalar tracker. A
+maturing credit returns principal to `available` so NAV is unchanged; interest
+paid raises `available` → NAV up; capital lost for ANY reason (a bug burning
+funds, a platform socialised loss, a withdrawal) → NAV down.
 
 Two metrics over two horizons (both fed to the guards synchronously):
 
@@ -47,13 +51,26 @@ class ReconcileNavTracker:
     def __init__(self, account_id: str) -> None:
         self.account_id = account_id
         self._peak: Decimal | None = None
-        # (occurred_at_ms, nav), oldest first, trimmed to the 24h window.
+        # (occurred_at_ms, global_nav), oldest first, trimmed to the 24h window.
+        # global_nav = Σ over the latest-known NAV of every symbol seen so far.
         self._samples: deque[tuple[int, Decimal]] = deque()
+        # Latest NAV component per symbol; summed to form each global sample.
+        # Single active symbol today (fUST) ⇒ one bucket ⇒ global == that bucket.
+        self._nav_by_symbol: dict[str, Decimal] = {}
 
     async def on_position_reconciled(self, event: PositionReconciled) -> None:
         if event.account_id != self.account_id:
             return
-        nav = event.available_usdt + event.reserved_usdt + event.realized_usdt
+        # _resolve_position_fields guarantees these are non-None at runtime.
+        # Narrow from Decimal | None so mypy accepts the arithmetic.
+        available = event.available
+        reserved = event.reserved
+        realized = event.realized
+        assert available is not None and reserved is not None and realized is not None
+        self._nav_by_symbol[event.symbol] = available + reserved + realized
+        # Global NAV sample = Σ latest-per-symbol NAV. A single active symbol
+        # makes this identical to the pre-per-symbol scalar NAV.
+        nav = sum(self._nav_by_symbol.values(), Decimal("0"))
         self._samples.append((event.occurred_at_ms, nav))
         if self._peak is None or nav > self._peak:
             self._peak = nav

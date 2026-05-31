@@ -130,3 +130,25 @@ def test_fcu_event_is_no_op() -> None:
     events, mutations, _ = translate_bfx_event(fcu, snapshot, {}, now_ms=3500)
     assert events == []
     assert mutations == []
+
+
+def test_foc_executed_orderfilled_carries_foc_symbol() -> None:
+    claim = _claim_record("v1")
+    foc = FocEvent(
+        venue_offer_id="v1", symbol="fUST", mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), status="EXECUTED @ 0.0005 (100.0)", rate=0.0005,
+        period_days=2, raw_seq=7, raw=[],
+    )
+    events, _, _ = translate_bfx_event(foc, {"v1": claim}, {}, now_ms=2500)
+    assert isinstance(events[0], OrderFilled) and events[0].symbol == "fUST"
+
+
+def test_foc_canceled_reservation_released_carries_foc_symbol() -> None:
+    claim = _claim_record("v1")
+    foc = FocEvent(
+        venue_offer_id="v1", symbol="fUST", mts_create=1000, mts_update=2000,
+        amount=Decimal("100"), status="CANCELED", rate=0.0005, period_days=2,
+        raw_seq=8, raw=[],
+    )
+    events, _, _ = translate_bfx_event(foc, {"v1": claim}, {}, now_ms=2500)
+    assert isinstance(events[0], ReservationReleased) and events[0].symbol == "fUST"

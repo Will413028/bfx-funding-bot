@@ -41,12 +41,14 @@ def _reconciled(
     realized: str = "0",
     ts: int = _T0,
     account_id: str = _ACC,
+    symbol: str = "fUST",
 ) -> PositionReconciled:
     return PositionReconciled(
         account_id=account_id,
-        reserved_usdt=Decimal(reserved),
-        realized_usdt=Decimal(realized),
-        available_usdt=Decimal(available),
+        symbol=symbol,
+        reserved=Decimal(reserved),
+        realized=Decimal(realized),
+        available=Decimal(available),
         n_offers=0,
         n_credits=0,
         occurred_at_ms=ts,
@@ -156,3 +158,42 @@ async def test_ignores_other_account() -> None:
     )
     assert t.realized_loss_24h() == Decimal("0")
     assert t.drawdown_pct() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_single_symbol_global_api_identical_to_pre_per_symbol() -> None:
+    """One active symbol ⇒ global realized_loss_24h()/drawdown_pct() behave
+    exactly as the pre-per-symbol tracker (the SUM is over the one bucket)."""
+    t = ReconcileNavTracker(account_id=_ACC)
+    await t.on_position_reconciled(
+        _reconciled(available="50", reserved="30", realized="20", ts=_T0)
+    )  # NAV(fUST) = 100
+    await t.on_position_reconciled(
+        _reconciled(
+            available="40", reserved="30", realized="20", ts=_T0 + _HOUR_MS,
+        )
+    )  # NAV(fUST) = 90
+    assert t.realized_loss_24h() == Decimal("10")
+    assert t.drawdown_pct() == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_two_symbols_global_nav_is_sum_of_latest_per_symbol() -> None:
+    """Global NAV = Σ latest-per-symbol NAV. The peak forms at the moment both
+    symbols are at their joint high; a later drop in one symbol's bucket shows
+    as a global loss/drawdown — never via cross-symbol cancellation."""
+    t = ReconcileNavTracker(account_id=_ACC)
+    # t0: fUST NAV = 100  → global = 100
+    await t.on_position_reconciled(_reconciled(available="100", ts=_T0, symbol="fUST"))
+    # t1: fUSD NAV = 100  → global = 100 (fUST) + 100 (fUSD) = 200  (joint peak)
+    await t.on_position_reconciled(
+        _reconciled(available="100", ts=_T0 + _HOUR_MS, symbol="fUSD")
+    )
+    # t2: fUST drops to 70 → global = 70 (fUST) + 100 (fUSD) = 170
+    await t.on_position_reconciled(
+        _reconciled(available="70", ts=_T0 + 2 * _HOUR_MS, symbol="fUST")
+    )
+    # window high over the three global samples (100, 200, 170) = 200; latest 170
+    assert t.realized_loss_24h() == Decimal("30")
+    # all-time peak global NAV = 200 → drawdown = (200 − 170)/200 × 100 = 15%
+    assert t.drawdown_pct() == pytest.approx(15.0)
