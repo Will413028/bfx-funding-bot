@@ -30,7 +30,13 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from bfx_funding_bot.core.db import make_async_engine_from_url
-from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED, ExecutorAuthError
+from bfx_funding_bot.core.errors import (
+    EXIT_CODE_AUTH_FAILED,
+    EXIT_CODE_WRITER_LOCKED,
+    ExecutorAuthError,
+    WriterLockUnacquired,
+)
+from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
@@ -93,6 +99,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     BuyingPowerGuard,
     HeartbeatGuard,
     ManualKillGuard,
+    WriterLockGuard,
 )
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
@@ -189,6 +196,8 @@ class Daemon:
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
+    # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
+    writer_lock: WriterLock | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self) -> None:
@@ -216,6 +225,11 @@ class Daemon:
             tg.create_task(self._heartbeat_scan_loop(), name="health_check")
             tg.create_task(self._db_keepalive_loop(),  name="db_keepalive")
             tg.create_task(self._healthz_server_loop(), name="healthz")
+            # Single-writer lock liveness (live+Postgres only; None otherwise).
+            if self.writer_lock is not None:
+                tg.create_task(
+                    self._writer_lock_liveness_loop(), name="writer_lock",
+                )
             if self.ws_client is not None:
                 tg.create_task(self._ws_consume_with_reconnect(), name="ws")
                 tg.create_task(self._ws_heartbeat_poll_loop(), name="ws_heartbeat")
@@ -318,6 +332,38 @@ class Daemon:
             on_tick=lambda _ts: self.probe.record_heartbeat("db_keepalive"),
         )
         log.info("sub_task_exit name=db_keepalive")
+
+    async def _writer_lock_liveness_loop(self) -> None:
+        """OBSERVABILITY + RECOVERY ONLY for the single-writer advisory lock.
+
+        Every 30s: refresh() (re-acquires if a dropped connection lost the lock
+        server-side, while nobody else holds it) and record a heartbeat on a
+        SUCCESSFUL refresh. The heartbeat is NON-FATAL: a lost lock makes this
+        beat go stale, but health_monitor classifies "writer_lock" as
+        activity-class (ACTIVITY_THRESHOLDS) so scan_staleness emits a WARN/down
+        observability event and NEVER escalates to FatalError / daemon restart.
+
+        The authoritative fail-closed gate is the per-submit
+        WriterLockGuard.verify_held(): if the lock isn't held, every real-money
+        submit is blocked — safety is preserved without restarting. Tying this
+        recovery loop to liveness would re-create the 2026-05-26 reactive
+        restart-loop anti-pattern.
+
+        Wait-first shape mirrors the sibling loops (_heartbeat_scan_loop,
+        _ws_heartbeat_poll_loop): wait on the stop event with a 30s timeout, then
+        do work. refresh and verify_held serialize on the same internal lock, so
+        the 30s interval stays safely above submit cadence (no contention)."""
+        assert self.writer_lock is not None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=30.0)
+                log.info("sub_task_exit name=writer_lock")
+                return  # stop requested
+            except TimeoutError:
+                pass
+            if await self.writer_lock.refresh():
+                self.probe.record_heartbeat("writer_lock")
+        log.info("sub_task_exit name=writer_lock")
 
     async def _healthz_server_loop(self) -> None:
         """Container-level liveness HTTP endpoint for Koyeb / k8s probes.
@@ -760,6 +806,22 @@ async def build_daemon(
         bus=bus,
     )
 
+    # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
+    # so paper/shadow leave it None and the guard/liveness/release are all inert.
+    # ACQUIRE only on Postgres: sqlite wiring tests construct the object but must
+    # never touch a real lock; the boot acquire raises WriterLockUnacquired on
+    # contention → propagates to main() → sys.exit(EXIT_CODE_WRITER_LOCKED). It is
+    # built here (before the guards block + the Daemon return) so the same variable
+    # is in scope at both the guard-append and the return.
+    writer_lock: WriterLock | None = None
+    if not spec.is_simulated:
+        writer_lock = WriterLock(
+            database_url=config.database_url,
+            key=derive_lock_key(account_id, env_str),
+        )
+        if config.database_url.startswith(("postgres", "postgresql")):
+            await writer_lock.acquire()  # raises WriterLockUnacquired on contention
+
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
         guards.append(ManualKillGuard())
@@ -806,6 +868,10 @@ async def build_daemon(
             window_minutes=cg.divergence_rate.window_minutes,
             source=div_source,
         ))
+    # Fail-closed single-writer guard — live-only (writer_lock is None on
+    # paper/shadow). Authoritative per-submit liveness via verify_held().
+    if writer_lock is not None:
+        guards.append(WriterLockGuard(lock=writer_lock))
 
     safety_chain = SafetyGuardChain(
         guards=guards,
@@ -1182,6 +1248,7 @@ async def build_daemon(
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
+        writer_lock=writer_lock,
     )
 
 
@@ -1192,6 +1259,15 @@ def main() -> None:
     )
     try:
         asyncio.run(_run())
+    except WriterLockUnacquired as exc:
+        # Another live writer holds the Postgres advisory lock (boot acquire in
+        # build_daemon). Fail fast with EX_TEMPFAIL so the platform staggers a
+        # retry instead of two processes contending on real-money execution.
+        log.critical(
+            "writer_lock_unacquired %s — sys.exit(EXIT_CODE_WRITER_LOCKED=75)",
+            exc,
+        )
+        sys.exit(EXIT_CODE_WRITER_LOCKED)
     except ValueError as exc:
         log.error("config_fatal %s — exit 1", exc)
         sys.exit(1)
@@ -1248,6 +1324,11 @@ async def _run() -> None:
     finally:
         # Cleanup after TaskGroup completes (close http client)
         log.info("daemon_shutdown_complete")
+        # Release the single-writer advisory lock so the next process can acquire
+        # it without waiting for the server-side session to expire (live+PG only).
+        if daemon.writer_lock is not None:
+            with contextlib.suppress(Exception):
+                await daemon.writer_lock.release()
         await daemon.bitfinex_http.aclose()
         # SmokeRunner.aclose() is a no-op for PostgresEventLogQueryAdapter (no owned client);
         # kept for forward-compatibility with adapters that may hold resources.

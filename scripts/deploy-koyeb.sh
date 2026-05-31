@@ -49,7 +49,7 @@ APP="bfx-funding-bot"
 SERVICE="marketfeed"
 GIT_REPO="github.com/Will413028/bfx-funding-bot"
 GIT_BRANCH="main"
-REGION="sin"               # match Neon ap-southeast-1
+REGION="sin"                 # Koyeb co-located w/ Neon ap-southeast-1 (<5ms). NOTE: the Oracle VM successor runs Tokyo (~60-80ms, verified non-material — DB off the order-critical path).
 INSTANCE="nano"
 
 REQUIRED_SECRETS=(bfx-database-url bfx-redis-url)

@@ -79,3 +79,9 @@ calibrated_guards:
 """)
     with pytest.raises(ValidationError, match="greater than 0"):
         load_safety_config(yaml_path)
+
+
+def test_canary_realized_loss_threshold_is_57() -> None:
+    cfg = load_safety_config(Path(__file__).parents[4] / "configs" / "safety.canary.yaml")
+    assert cfg.calibrated_guards.realized_loss_24h.enabled is True
+    assert cfg.calibrated_guards.realized_loss_24h.threshold_usdt == 57

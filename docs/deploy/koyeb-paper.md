@@ -78,7 +78,7 @@ postgresql+asyncpg://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?ssl=require
 | Dockerfile location | `backend_py/Dockerfile` |
 | Build context | `backend_py/` |
 | Instance type | `nano`（1hr paper 跑得動）或 `micro`（shadow 長跑可選） |
-| Region | `sin`（Singapore，與 Neon `ap-southeast-1` 同區，RTT < 5ms；若 Neon project 在別區改對應 Koyeb region） |
+| Region | `sin`（Singapore，與 Neon `ap-southeast-1` 同區，RTT < 5ms；若 Neon project 在別區改對應 Koyeb region）(Koyeb only; the Oracle VM migration target is Tokyo — see migration spec 2026-05-31.) |
 | Auto-deploy on push | ✅ enabled |
 | Port | `8080:tcp`（TCP protocol → 不會被 auto-create public route，mesh-internal only） |
 | Health check | HTTP `:8080/healthz`，grace period 90s（daemon 跑 alembic upgrade + warmup 約需 60s，多留 buffer） |

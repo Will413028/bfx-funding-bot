@@ -33,5 +33,10 @@ class ExecutorAuthError(ExecutorFatalError):
     """
 
 
+class WriterLockUnacquired(ExecutorFatalError):  # noqa: N818 — stable public name; not an "Error"
+    """Another live writer already holds the single-writer advisory lock."""
+
+
 # Exit codes (sysexits.h)
 EXIT_CODE_AUTH_FAILED = 78  # EX_CONFIG
+EXIT_CODE_WRITER_LOCKED = 75  # EX_TEMPFAIL — another writer holds the lock; retry later
