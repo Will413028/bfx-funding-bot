@@ -1,8 +1,10 @@
-"""G3 — live active-vs-passive validation of the deployed canary MR config.
+"""G3 — live bot-vs-idle validation of the deployed canary MR config.
 
 Loads live fills (event_log), market-rate series (funding_candles.close), and
-reconcile state from Neon; attributes active vs passive yield (modules/live_validation), reuses the
-oos_profitability metrics, and writes a markdown + JSON report with a four-state verdict.
+reconcile state from Neon; attributes the bot's absolute return on budget vs idle
+(primary) plus MR timing alpha vs AlwaysMarketRate (secondary, non-gating
+diagnostic) via modules/live_validation, reuses the oos_profitability metrics, and
+writes a markdown + JSON report with a four-state verdict.
 
 Run from backend_py/:
   uv run python scripts/run_g3_live_validation.py --out docs/research/<date>-g3-live-validation.md
