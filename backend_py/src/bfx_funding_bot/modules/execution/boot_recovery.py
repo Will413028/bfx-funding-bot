@@ -108,6 +108,7 @@ def compute_recovery_actions(
     now_ms: int,
     grace_ms: int,
     action_grace_ms: int = 0,
+    symbol: str = "fUSD",
 ) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append.
 
@@ -132,6 +133,7 @@ def compute_recovery_actions(
             cid=synth_orphan_cid(voi), venue_offer_id=voi,
             size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+            symbol=offer.symbol,
         ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
@@ -144,6 +146,7 @@ def compute_recovery_actions(
             cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
+            symbol=symbol,
         ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
@@ -259,6 +262,7 @@ class BootRecovery:
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
+                symbol=self._symbol,
             )
             for ev in actions:
                 await self._store.append(session, ev)
