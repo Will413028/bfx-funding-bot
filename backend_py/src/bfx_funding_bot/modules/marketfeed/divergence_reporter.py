@@ -216,6 +216,19 @@ def _attrs_diverge(a_attrs: Any, b_attrs: Any) -> bool:
 
 
 def _diff_fields(a: ExtractedSignal, b: ExtractedSignal) -> list[str]:
+    """Field-level divergence between two signals on the SAME boundary candle.
+
+    `lend_decision` is intentionally NOT compared: every strategy builds it as
+    LendDecision(mts=candle.mts, rate=candle.close, period_days=2) from the shared
+    boundary candle, so it is byte-identical whenever signal_direction agrees (and
+    its None-ness IS signal_direction). Comparing it would be redundant.
+
+    signal_score is always tolerance-compared: MR's score = float(deviation) needs
+    it (continuous accumulator); RP's score is a bounded-window percentile rank
+    that is byte-equal live-vs-replay, so the tolerance is a conservative no-op
+    there (a real RP drift shifts the rank by >= 100/lookback >> tol and is also
+    caught by the exact last_threshold/window_filled fields).
+    """
     diffs: list[str] = []
     if not _approx_equal(a.signal_score, b.signal_score):
         diffs.append("signal_score")
