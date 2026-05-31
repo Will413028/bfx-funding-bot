@@ -66,6 +66,11 @@ def _resolve_position_fields(ev: object) -> None:
                 f"{type(ev).__name__} requires `{canonical}` "
                 f"(or transitional `{legacy}`)"
             )
+        if c_val is not None and l_val is not None and c_val != l_val:
+            raise TypeError(
+                f"{type(ev).__name__}: {canonical}={c_val!r} and {legacy}={l_val!r} "
+                "disagree — pass only one"
+            )
         if c_val is None:
             object.__setattr__(ev, canonical, l_val)
         if l_val is None:
