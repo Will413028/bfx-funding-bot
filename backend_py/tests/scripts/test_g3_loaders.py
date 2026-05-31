@@ -112,17 +112,24 @@ def test_compute_verdict_headline_is_absolute_active_return():
 
 
 def test_compute_verdict_no_coverage_marks_mr_alpha_unavailable_primary_unblocked():
-    # Fills present but ZERO market-rate points → MR-alpha cannot be computed, but
-    # bot-vs-idle is unaffected. Primary stays data-driven (INSUFFICIENT: no windows,
-    # since min_ts == max_ts with one fill and no rate points), mr_alpha_available
-    # False, no band reason (band guard no-ops on empty list).
-    # observed_realized=0 keeps the anchor clean (no fills→attributed_deployed=0).
-    fills = [_fill(1000, "570", "0.0003")]
+    # Fills present and spanning >=2 weekly windows but ZERO market-rate points:
+    # this exercises the `fills and bounds` TRUE path (active arm IS computed) with
+    # missing MR coverage. The PRIMARY bot-vs-idle path must run unblocked
+    # (headline = absolute active return > 0, proving we did NOT fall through to the
+    # zero-data else branch), while the MR-alpha diagnostic is marked unavailable
+    # with a coverage caveat — NOT a band reason (band guard no-ops on empty list).
+    # Two fills a week apart make weekly_window_bounds non-empty (2 windows < 8 →
+    # INSUFFICIENT). observed_realized == open_principal_at(max_ts) == 285 (only the
+    # second fill is still open at max_ts) keeps the deployment anchor clean.
+    week_ms = 7 * 24 * 3600 * 1000
+    fills = [_fill(0, "285", "0.0003"), _fill(week_ms + 1000, "285", "0.0003")]
     verdict, _window, _n, _clamp = _compute_verdict(
-        fills=fills, market_rate_points=[], observed_realized=Decimal("0"), capital=C
+        fills=fills, market_rate_points=[], observed_realized=Decimal("285"), capital=C
     )
     assert verdict.mr_alpha_available is False
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
+    assert verdict.headline_bot_vs_idle > Decimal("0")  # fills-and-bounds path ran
+    assert any("no market-rate coverage" in r for r in verdict.reasons)
     assert not any("plausible per-day band" in r for r in verdict.reasons)
 
 
