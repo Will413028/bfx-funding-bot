@@ -26,5 +26,5 @@ async def test_fill_and_reconcile_are_isolated_per_symbol() -> None:
     assert led.current_exposure("fUSD") == Decimal("0")    # isolated
     assert led.available_balance("fUST") == Decimal("250")
     assert led.available_balance("fUSD") == Decimal("0")
-    # back-compat: no-arg getters sum across symbols (still fUST-only here)
-    assert led.current_exposure() == Decimal("350")
+    # explicit cross-symbol total helper (still fUST-only here)
+    assert led.total_exposure_all_symbols() == Decimal("350")

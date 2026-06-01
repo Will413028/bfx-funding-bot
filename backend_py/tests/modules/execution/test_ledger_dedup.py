@@ -41,8 +41,8 @@ async def test_duplicate_orderfilled_does_not_double_realize() -> None:
     await ledger.on_reservation_claimed(_claimed())
     await ledger.on_order_filled(_filled(venue_seq=100))
     await ledger.on_order_filled(_filled(venue_seq=100))  # duplicate
-    assert ledger.realized_exposure() == Decimal("100")
-    assert ledger.current_exposure() == Decimal("100")  # reserved 0 + realized 100
+    assert ledger.realized_exposure("fUST") == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")  # reserved 0 + realized 100
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_duplicate_reservation_released_does_not_double_decrement() -> Non
     await ledger.on_reservation_claimed(_claimed())
     await ledger.on_reservation_released(_released(venue_seq=200))
     await ledger.on_reservation_released(_released(venue_seq=200))
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.current_exposure("fUST") == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_different_venue_seq_not_dedupd() -> None:
     await ledger.on_reservation_claimed(_claimed(venue_offer_id="v2"))
     await ledger.on_order_filled(_filled(venue_seq=100, venue_offer_id="v1"))
     await ledger.on_order_filled(_filled(venue_seq=200, venue_offer_id="v2"))
-    assert ledger.realized_exposure() == Decimal("200")
+    assert ledger.realized_exposure("fUST") == Decimal("200")
 
 
 @pytest.mark.asyncio
@@ -71,4 +71,4 @@ async def test_none_venue_seq_still_dedupd_by_venue_offer_id() -> None:
     await ledger.on_reservation_claimed(_claimed())
     await ledger.on_order_filled(_filled(venue_seq=None))
     await ledger.on_order_filled(_filled(venue_seq=None))  # duplicate with None key
-    assert ledger.realized_exposure() == Decimal("100")
+    assert ledger.realized_exposure("fUST") == Decimal("100")

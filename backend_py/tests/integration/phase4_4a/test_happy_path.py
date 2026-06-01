@@ -90,7 +90,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         occurred_at_ms=1000,
     symbol="fUSD"))
 
-    assert ledger.current_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUSD") == Decimal("100")
     assert registry.snapshot()[voi].state.value == "claimed"
 
     # 3. WS pushes foc EXECUTED — dispatcher translates to OrderFilled
@@ -120,8 +120,8 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
     await fake_ws.close()
 
     # 4. Assertions: ledger / registry / event rows
-    assert ledger.realized_exposure() == Decimal("100")
-    assert ledger.current_exposure() == Decimal("100")  # 0 reserved + 100 realized
+    assert ledger.realized_exposure("fUSD") == Decimal("100")
+    assert ledger.current_exposure("fUSD") == Decimal("100")  # 0 reserved + 100 realized
     assert registry.snapshot()[voi].state.value == "released"
 
     fill_rows = [r for r in event_sink_stub.rows if r["event_type"] == "OrderFilled"]

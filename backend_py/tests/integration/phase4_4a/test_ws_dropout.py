@@ -49,7 +49,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
     symbol="fUST"))
-    assert ledger.current_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
 
     # 2. WS missed the cancel event → registry still CLAIMED.
     #    fill_tracker's REST poll returns no offers (venue says offer is gone).
@@ -71,7 +71,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
     await tracker._tick()
 
     # 3. _reserved should release; registry should reflect RELEASED via bus subscriber
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.current_exposure("fUST") == Decimal("0")
     assert registry.snapshot()[voi].state.value == "released"
 
     # 4. event rows: reason=missing_from_venue (distinct from cancel)

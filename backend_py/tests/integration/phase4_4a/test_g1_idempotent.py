@@ -72,5 +72,5 @@ async def test_duplicate_foc_executed_does_not_double_realize(
     await fake_ws.close()
 
     # G1 invariant: realized=100 NOT 200; registry RELEASED idempotent
-    assert ledger.realized_exposure() == Decimal("100")
+    assert ledger.realized_exposure("fUSD") == Decimal("100")
     assert registry.snapshot()[voi].state.value == "released"

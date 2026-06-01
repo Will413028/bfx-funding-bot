@@ -38,7 +38,7 @@ async def test_sink_then_from_snapshot_roundtrip(pg_session_factory) -> None:
         reg = await OfferRegistry.from_snapshot(
             s, account_id="acctZ", deployment_environment="ci")
 
-    assert ledger.current_exposure() == Decimal("12")   # reserved 7 + realized 5
-    assert ledger.realized_exposure() == Decimal("5")
+    assert ledger.current_exposure("fUST") == Decimal("12")   # reserved 7 + realized 5
+    assert ledger.realized_exposure("fUST") == Decimal("5")
     # OrderFilled transitions CLAIMED → RELEASED in the FSM (offer is closed once filled)
     assert reg.snapshot()["v7"].state is RegistryState.RELEASED

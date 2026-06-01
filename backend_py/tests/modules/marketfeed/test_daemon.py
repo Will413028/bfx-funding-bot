@@ -207,7 +207,7 @@ phase3b_wfo_results_ref: x
     symbol="fUST")
     await daemon.bus.publish(event)
 
-    assert daemon.ledger.realized_exposure() == Decimal("450"), (
-        "ledger.realized_exposure() should reflect PositionReconciled.realized_usdt "
+    assert daemon.ledger.realized_exposure("fUST") == Decimal("450"), (
+        "ledger.realized_exposure('fUST') should reflect PositionReconciled.realized_usdt "
         "after bus.publish — subscription missing or account_id mismatch"
     )
