@@ -9,6 +9,7 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -22,13 +23,14 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-def _make_decision() -> DecisionPayload:
+def _make_decision(*, symbol: str = "fUST") -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST,
         signal_correlation_id=uuid4(),
         offer_rate=0.0005,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
+        symbol=symbol,
     )
 
 
@@ -91,40 +93,80 @@ async def test_submit_returns_failed_on_http_error() -> None:
     assert result.venue_offer_id is None
 
 
+SUCCESS = [
+    1716383500000, "fon-req", None, None,
+    [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
+     None, None, None, 5.531e-05, 2, 0, 0, None, 0, None, None, None, 1],
+    None, "SUCCESS", None, "Submitting",
+]
+
+
 @pytest.mark.asyncio
-async def test_submit_uses_configured_symbol_and_fixed_point_rate() -> None:
-    """Regression (2026-05-26): submit() hardcoded symbol='fUSD' and serialized
-    rate via str(float). With a fUST executor + small rate, the posted payload
-    must carry symbol='fUST' and a fixed-point rate (not scientific notation)."""
-    success_response = [
-        1716383500000, "fon-req", None, None,
-        [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
-         None, None, None, 5.531e-05, 2, 0, 0, None, 0, None, None, None, 1],
-        None, "SUCCESS", None, "Submitting",
-    ]
+async def test_submit_fixed_point_rate_serialization() -> None:
+    """Regression (2026-05-26): submit() serialized rate via str(float).
+    With a small rate, the posted payload must carry a fixed-point rate
+    (not scientific notation)."""
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json=success_response)
+        return httpx.Response(200, json=SUCCESS)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
-        symbol="fUST", cell="fUST_a30",
+        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
     )
     decision = DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
         offer_rate=5.531e-05, offer_amount_usdt=150.0, offer_duration_days=2,
+        symbol="fUST",
     )
     result = await executor.submit(decision, _make_ctx())
 
     assert result.status == "submitted"
-    assert captured["body"]["symbol"] == "fUST"
     assert captured["body"]["rate"] == "0.00005531"
     assert "e" not in captured["body"]["rate"].lower()
+
+
+@pytest.mark.asyncio
+async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
+    """Task 2: executor must route to decision.symbol, not a fixed constructor symbol."""
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=SUCCESS)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    ex = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
+        cell="fUST_a30", configured_symbols=frozenset({"fUST"}),
+        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+    )
+    decision = _make_decision(symbol="fUST")
+    result = await ex.submit(decision, _make_ctx())
+    assert captured[0]["symbol"] == "fUST" == decision.symbol
+    assert result.status == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_unconfigured_symbol() -> None:
+    """Task 2: executor must raise InvariantViolation for symbol not in configured set."""
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=SUCCESS)
+    ))
+    ex = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
+        configured_symbols=frozenset({"fUST"}),
+        nonce_provider=lambda: 1, date_provider=lambda: date(2026, 5, 22),
+    )
+    with pytest.raises(InvariantViolation):
+        await ex.submit(_make_decision(symbol="fUSD"), _make_ctx())  # fUSD not configured
 
 
 @pytest.mark.asyncio
