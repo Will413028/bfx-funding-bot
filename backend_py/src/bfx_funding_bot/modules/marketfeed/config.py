@@ -266,6 +266,19 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     return config
 
 
+def configured_symbols(cells: list[CellConfig]) -> list[str]:
+    """Distinct cell symbols, order-preserving — the per-currency reconcile loop's
+    symbol set. Single-currency cells.yaml → a 1-element list (parity with the
+    historic single-symbol BootRecovery)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cells:
+        if c.symbol not in seen:
+            seen.add(c.symbol)
+            out.append(c.symbol)
+    return out
+
+
 def load_cells_only(cells_yaml_path: Path) -> list[CellConfig]:
     """Parse just the `cells:` list from a YAML file, no env vars, no daemon config.
 
