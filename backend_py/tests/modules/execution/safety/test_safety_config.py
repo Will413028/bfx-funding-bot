@@ -22,6 +22,8 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: true
+  buying_power:
+    enabled: true
 calibrated_guards:
   realized_loss_24h:
     enabled: false
@@ -48,6 +50,7 @@ hard_guards:
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
   allocation_cap: {enabled: true}
+  buying_power: {enabled: true}
 calibrated_guards:
   realized_loss_24h:
     enabled: true
@@ -72,6 +75,7 @@ hard_guards:
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: -1}
   allocation_cap: {enabled: true}
+  buying_power: {enabled: true}
 calibrated_guards:
   realized_loss_24h: {enabled: false, threshold_pct: null}
   drawdown_from_peak: {enabled: false, threshold_pct: null}
@@ -86,3 +90,37 @@ def test_canary_realized_loss_threshold_is_5pct() -> None:
     assert cfg.calibrated_guards.realized_loss_24h.enabled is True
     # percentage of NAV (auto-scales with funded capital), not an absolute USDT amount
     assert cfg.calibrated_guards.realized_loss_24h.threshold_pct == 5.0
+
+
+def test_caps_and_buffers_maps_parse(tmp_path: Path) -> None:
+    from decimal import Decimal
+    p = tmp_path / "safety.yaml"
+    p.write_text("""
+hard_guards:
+  manual_kill: {enabled: true}
+  auth_health: {enabled: true}
+  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
+  allocation_cap:
+    enabled: true
+    caps: {fUST: 3000, fUSD: 0, fADA: 0}
+    default_cap: 0
+  buying_power:
+    enabled: true
+    buffers: {fUST: 3, fUSD: 3, fADA: 0}
+    default_buffer: 0
+calibrated_guards:
+  realized_loss_24h:
+    enabled: false
+    threshold_pct: null
+  drawdown_from_peak:
+    enabled: false
+    threshold_pct: null
+  divergence_rate:
+    enabled: false
+    threshold_pct: null
+    window_minutes: null
+""")
+    cfg = load_safety_config(p)
+    assert cfg.hard_guards.allocation_cap.caps["fUST"] == Decimal("3000")
+    assert cfg.hard_guards.buying_power.buffers["fADA"] == Decimal("0")
+    assert cfg.hard_guards.allocation_cap.default_cap == Decimal("0")

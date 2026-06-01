@@ -33,6 +33,8 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: {b("allocation_cap")}
+  buying_power:
+    enabled: true
 calibrated_guards:
   realized_loss_24h:
     enabled: {b("realized_loss_24h")}

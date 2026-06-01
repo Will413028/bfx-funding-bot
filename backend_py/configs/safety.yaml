@@ -14,7 +14,13 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300  # 5-minute watchdog
   allocation_cap:
-    enabled: true            # cap_usdt sourced from AccountContext, not yaml
+    enabled: true
+    caps: {fUSD: 0, fUST: 3000, fADA: 0}
+    default_cap: 0
+  buying_power:
+    enabled: true
+    buffers: {fUSD: 3, fUST: 3, fADA: 0}
+    default_buffer: 0
 
 calibrated_guards:
   realized_loss_24h:
