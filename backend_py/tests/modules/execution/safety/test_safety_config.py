@@ -102,11 +102,11 @@ hard_guards:
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
   allocation_cap:
     enabled: true
-    caps: {fUST: 3000, fUSD: 0, fADA: 0}
+    caps: {fUST: 3000, fUSD: 0}
     default_cap: 0
   buying_power:
     enabled: true
-    buffers: {fUST: 3, fUSD: 3, fADA: 0}
+    buffers: {fUST: 3, fUSD: 3}
     default_buffer: 0
 calibrated_guards:
   realized_loss_24h:
@@ -122,6 +122,7 @@ calibrated_guards:
 """)
     cfg = load_safety_config(p)
     assert cfg.hard_guards.allocation_cap.caps["fUST"] == Decimal("3000")
-    assert cfg.hard_guards.buying_power.buffers["fADA"] == Decimal("0")
+    assert cfg.hard_guards.allocation_cap.caps["fUSD"] == Decimal("0")
+    assert cfg.hard_guards.buying_power.buffers["fUSD"] == Decimal("3")
     assert cfg.hard_guards.allocation_cap.default_cap == Decimal("0")
     assert cfg.hard_guards.buying_power.default_buffer == Decimal("0")
