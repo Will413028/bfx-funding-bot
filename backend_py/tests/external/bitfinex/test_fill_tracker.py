@@ -166,7 +166,7 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
         cid=42, venue_offer_id="111", size_usdt=Decimal("100.0"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
 
     tick_count = 0
 

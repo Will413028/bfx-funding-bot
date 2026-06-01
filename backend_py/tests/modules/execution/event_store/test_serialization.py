@@ -24,7 +24,7 @@ _SCID = UUID("11111111-1111-1111-1111-111111111111")
 def _claimed() -> ReservationClaimed:
     return ReservationClaimed(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("10.5"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=7, occurred_at_ms=1000)
+        venue_seq=7, occurred_at_ms=1000, symbol="fUST")
 
 
 def test_event_type_of() -> None:
@@ -35,10 +35,10 @@ def test_event_type_of() -> None:
     _claimed(),
     OrderFilled(cid=_CID, venue_offer_id=_VOI, credit_id="cr-1", size_usdt=Decimal("3.25"),
         fill_rate=0.0004, signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=8, occurred_at_ms=2000),
+        venue_seq=8, occurred_at_ms=2000, symbol="fUST"),
     ReservationReleased(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("2"),
         reason="missing_from_venue", signal_correlation_id=_SCID, account_id="acct",
-        is_simulated=True, venue_seq=9, occurred_at_ms=3000),
+        is_simulated=True, venue_seq=9, occurred_at_ms=3000, symbol="fUST"),
 ])
 def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)

@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from bfx_funding_bot.modules.marketfeed.config import load_config
+from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols, load_config
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 
@@ -547,3 +547,50 @@ def test_load_config_invalid_deployment_environment_raises(
 
     with pytest.raises(ValueError, match="BFX_DEPLOYMENT_ENV must be one of"):
         load_config(cells_yaml_path=yaml_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — configured_symbols co-location test
+# ---------------------------------------------------------------------------
+
+
+def test_configured_symbols_distinct_order_preserving():
+    cells = [
+        CellConfig(
+            symbol="fUST",
+            period_agg="a30",
+            strategy="mean_reversion",
+            params={"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
+        ),
+        CellConfig(
+            symbol="fUST",
+            period_agg="p2",
+            strategy="mean_reversion",
+            params={"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
+        ),
+        CellConfig(
+            symbol="fUSD",
+            period_agg="a30",
+            strategy="mean_reversion",
+            params={"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
+        ),
+    ]
+    assert configured_symbols(cells) == ["fUST", "fUSD"]
+
+
+def test_configured_symbols_single_currency():
+    cells = [
+        CellConfig(
+            symbol="fUST",
+            period_agg="a30",
+            strategy="mean_reversion",
+            params={"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
+        ),
+        CellConfig(
+            symbol="fUST",
+            period_agg="p2",
+            strategy="mean_reversion",
+            params={"threshold_sigma": 1.5, "ratio_sigma": 0.005, "ema_span": 100},
+        ),
+    ]
+    assert configured_symbols(cells) == ["fUST"]

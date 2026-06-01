@@ -74,7 +74,7 @@ def _decision() -> DecisionPayload:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 def _ctx() -> AccountContext:
@@ -150,8 +150,8 @@ async def test_paper_end_to_end_ledger_heartbeat() -> None:
 
     assert result.status == "filled"
     # Ledger: paper CLAIMED + FILLED back-to-back → reserved=0, realized=100
-    assert ledger.current_exposure() == Decimal("100")
-    assert ledger.realized_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
+    assert ledger.realized_exposure("fUST") == Decimal("100")
     # Heartbeat fired
     assert probe.last_active_ts.get("executor") is not None
 
@@ -175,7 +175,7 @@ async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
             signal_correlation_id=uuid4(),
             account_id="default",
             is_simulated=False,
-        )
+        symbol="fUST")
     )
     assert ledger.replay_floor_hit_count == 1
 
@@ -208,4 +208,4 @@ async def test_sad_path_failing_subscriber_does_not_break_ledger() -> None:
     result = await executor.submit(_decision(), _ctx())  # 不 raise
     assert result.status == "filled"
     # Ledger 仍正確 (failing subscriber 不影響 — bus.gather isolates subscribers)
-    assert ledger.realized_exposure() == Decimal("100")
+    assert ledger.realized_exposure("fUST") == Decimal("100")

@@ -33,6 +33,8 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: {b("allocation_cap")}
+  buying_power:
+    enabled: true
 calibrated_guards:
   realized_loss_24h:
     enabled: {b("realized_loss_24h")}
@@ -71,3 +73,52 @@ def test_canary_raises_when_required_guard_disabled(tmp_path: Path, guard: str) 
 def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
     cfg = _load(tmp_path, disable="allocation_cap")
     assert_canary_guard_invariant(Phase.SHADOW, cfg)  # invariant is canary-only
+
+
+# ── assert_caps_invariant (Phase 2 Task 5) ───────────────────────────────────
+from bfx_funding_bot.modules.execution.safety.config import _AllocationCapCfg  # noqa: E402
+from bfx_funding_bot.modules.marketfeed.config import CellConfig  # noqa: E402
+from bfx_funding_bot.modules.marketfeed.daemon import assert_caps_invariant  # noqa: E402
+
+_MR_PARAMS = {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100}
+
+
+def _cell(symbol: str) -> CellConfig:
+    return CellConfig(
+        symbol=symbol, period_agg="a30", strategy="mean_reversion", params=_MR_PARAMS,
+    )
+
+
+def _alloc_cfg(caps: dict[str, int]) -> _AllocationCapCfg:
+    return _AllocationCapCfg(enabled=True, caps=caps, default_cap=0)
+
+
+def test_caps_invariant_raises_when_configured_symbol_missing() -> None:
+    cells = [_cell("fUST")]
+    with pytest.raises(ValueError, match="fUST"):
+        assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUSD": 0}))
+
+
+def test_caps_invariant_raises_when_canary_cap_zero() -> None:
+    cells = [_cell("fUST")]
+    with pytest.raises(ValueError, match=r"cap.*0|> 0"):
+        assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUST": 0}))
+
+
+def test_caps_invariant_ok_for_funded_canary() -> None:
+    cells = [_cell("fUST")]
+    assert assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUST": 3000})) is None
+
+
+def test_caps_invariant_shadow_allows_zero_cap() -> None:
+    # The cap>0 rejection is CANARY-only; under shadow a configured symbol may sit
+    # at cap 0 (dark) as long as it has an explicit entry. Locks the phase asymmetry.
+    cells = [_cell("fUST")]
+    assert assert_caps_invariant(Phase.SHADOW, cells, _alloc_cfg({"fUST": 0})) is None
+
+
+def test_caps_invariant_missing_entry_raises_in_all_phases() -> None:
+    # The explicit-entry requirement is phase-independent (not gated on canary).
+    cells = [_cell("fUST")]
+    with pytest.raises(ValueError, match="fUST"):
+        assert_caps_invariant(Phase.SHADOW, cells, _alloc_cfg({"fUSD": 0}))

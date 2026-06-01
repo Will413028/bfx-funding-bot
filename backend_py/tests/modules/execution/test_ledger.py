@@ -18,9 +18,9 @@ async def test_handler_skips_foreign_account_id_claim() -> None:
     foreign = ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="smoke_test", is_simulated=True,
-    )
+    symbol="fUST")
     await ledger.on_reservation_claimed(foreign)
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.current_exposure("fUST") == Decimal("0")
 
 
 async def test_handler_skips_foreign_account_id_fill() -> None:
@@ -29,10 +29,10 @@ async def test_handler_skips_foreign_account_id_fill() -> None:
         cid=1, venue_offer_id="x", credit_id=None, size_usdt=Decimal("100"),
         fill_rate=0.0001, signal_correlation_id=uuid4(),
         account_id="smoke_test", is_simulated=True,
-    )
+    symbol="fUST")
     await ledger.on_order_filled(foreign)
-    assert ledger.realized_exposure() == Decimal("0")
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.realized_exposure("fUST") == Decimal("0")
+    assert ledger.current_exposure("fUST") == Decimal("0")
     assert ledger.replay_floor_hit_count == 0
 
 
@@ -42,9 +42,9 @@ async def test_handler_skips_foreign_account_id_release() -> None:
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
         reason="venue_cancel", signal_correlation_id=uuid4(),
         account_id="smoke_test", is_simulated=True,
-    )
+    symbol="fUST")
     await ledger.on_reservation_released(foreign)
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.current_exposure("fUST") == Decimal("0")
     assert ledger.replay_floor_hit_count == 0
 
 
@@ -54,14 +54,14 @@ async def test_handler_processes_matching_account_id_unchanged() -> None:
     matching = ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    )
+    symbol="fUST")
     await ledger.on_reservation_claimed(matching)
-    assert ledger.current_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
 
 
 async def test_available_balance_default_zero():
     led = PaperPositionLedger(account_id="default")
-    assert led.available_balance() == Decimal("0")
+    assert led.available_balance("fUST") == Decimal("0")
 
 
 async def test_on_position_reconciled_sets_available():
@@ -74,9 +74,9 @@ async def test_on_position_reconciled_sets_available():
         n_offers=0,
         n_credits=2,
         occurred_at_ms=1_000,
-    ))
-    assert led.available_balance() == Decimal("147.5")
-    assert led.current_exposure() == Decimal("406.89")
+    symbol="fUST"))
+    assert led.available_balance("fUST") == Decimal("147.5")
+    assert led.current_exposure("fUST") == Decimal("406.89")
 
 
 async def test_on_position_reconciled_other_account_ignored():
@@ -85,5 +85,5 @@ async def test_on_position_reconciled_other_account_ignored():
         account_id="other",
         reserved_usdt=Decimal("1"), realized_usdt=Decimal("1"),
         available_usdt=Decimal("99"), n_offers=1, n_credits=1, occurred_at_ms=1,
-    ))
-    assert led.available_balance() == Decimal("0")
+    symbol="fUST"))
+    assert led.available_balance("fUST") == Decimal("0")

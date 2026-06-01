@@ -6,6 +6,7 @@ defaults), but enabled=True requires non-null threshold (validator below).
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -32,6 +33,15 @@ class _HeartbeatCfg(BaseModel):
 class _AllocationCapCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
+    caps: dict[str, Decimal] = {}
+    default_cap: Decimal = Decimal("0")
+
+
+class _BuyingPowerCfg(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+    buffers: dict[str, Decimal] = {}
+    default_buffer: Decimal = Decimal("0")
 
 
 class HardGuardsCfg(BaseModel):
@@ -40,6 +50,7 @@ class HardGuardsCfg(BaseModel):
     auth_health: _AuthHealthCfg
     heartbeat: _HeartbeatCfg
     allocation_cap: _AllocationCapCfg
+    buying_power: _BuyingPowerCfg
 
 
 class _RealizedLossCfg(BaseModel):

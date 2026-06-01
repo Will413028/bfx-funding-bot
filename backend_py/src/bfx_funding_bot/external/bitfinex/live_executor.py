@@ -181,7 +181,7 @@ class BitfinexLiveExecutor:
         bus: DomainEventBus,
         phase: Phase,
         strategy: StrategyName,
-        symbol: str,
+        configured_symbols: frozenset[str],
         cell: str,
         nonce_provider: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
@@ -192,7 +192,7 @@ class BitfinexLiveExecutor:
         self._bus = bus
         self._phase = phase
         self._strategy = strategy
-        self._symbol = symbol
+        self._configured_symbols = configured_symbols
         self._cell = cell
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
         self._date_provider = date_provider or (lambda: date.today())
@@ -201,12 +201,17 @@ class BitfinexLiveExecutor:
     async def submit(
         self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
+        if not decision.symbol or decision.symbol not in self._configured_symbols:
+            raise InvariantViolation(
+                f"submit rejected: decision.symbol={decision.symbol!r} not in "
+                f"configured set {sorted(self._configured_symbols)}"
+            )
         # cid centralized by ReservationEmittingMiddleware (A2); direct callers
         # fall back to deterministic generation (CC2 capture-once date).
         if cid is None:
             cid = generate_cid(decision.signal_correlation_id, self._date_provider())
         payload = build_offer_payload(
-            symbol=self._symbol,
+            symbol=decision.symbol,
             amount_usdt=decision.offer_amount_usdt or 0.0,
             rate=decision.offer_rate or 0.0,
             period_days=decision.offer_duration_days or 2,
@@ -243,7 +248,7 @@ class BitfinexLiveExecutor:
                 raw_response={"http_status": status, "body": body},
             )
         except httpx.HTTPError as e:
-            log.warning("bitfinex_submit_network_error symbol=%s err=%r", self._symbol, e)
+            log.warning("bitfinex_submit_network_error symbol=%s err=%r", decision.symbol, e)
             return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None)
 
         parsed = parse_offer_response(resp.json())

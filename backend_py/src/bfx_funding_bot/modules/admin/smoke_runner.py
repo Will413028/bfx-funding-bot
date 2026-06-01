@@ -153,6 +153,7 @@ class SmokeRunner:
             offer_rate=SMOKE_RATE,
             offer_amount_usdt=SMOKE_SIZE_USDT,
             offer_duration_days=SMOKE_DURATION_DAYS,
+            symbol="fUST",  # synthetic smoke decision — canary currency
         )
         smoke_ctx = AccountContext(
             account_id=SMOKE_ACCOUNT_ID,

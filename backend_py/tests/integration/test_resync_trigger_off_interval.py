@@ -62,8 +62,8 @@ async def test_resync_request_reconciles_off_interval(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    ))
-    assert ledger.current_exposure() == Decimal("150")
+    symbol="fUST"))
+    assert ledger.current_exposure("fUST") == Decimal("150")
 
     claim_row = OfferClaimRow(
         cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
@@ -96,7 +96,7 @@ async def test_resync_request_reconciles_off_interval(
     async def _drive() -> None:
         await asyncio.sleep(0.05)
         assert recovery.calls == 1                       # tick 1 (loop start) only
-        assert ledger.current_exposure() == Decimal("0")  # ...and it really converged
+        assert ledger.current_exposure("fUST") == Decimal("0")  # ...and it really converged
         pr.request_resync("reconnect")                   # the trigger under test
         await asyncio.sleep(0.1)
         assert recovery.calls >= 2                        # off-interval reconcile ran

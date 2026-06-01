@@ -37,10 +37,12 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
+    # fUST: funded canary currency (caps {fUSD: 0, fUST: 3000}); canary boot now
+    # asserts cap > 0 per configured symbol (assert_caps_invariant).
     yaml_path.write_text("""
 cells:
   - strategy: rate_percentile
-    symbol: fUSD
+    symbol: fUST
     period_agg: a30
     timeframe: 1h
     params: {percentile: 75, lookback_hours: 5}
@@ -66,7 +68,7 @@ def _reconciled(available: str, ts: int) -> PositionReconciled:
         n_offers=0,
         n_credits=0,
         occurred_at_ms=ts,
-    )
+    symbol="fUST")
 
 
 def _post() -> DecisionPayload:
@@ -76,7 +78,7 @@ def _post() -> DecisionPayload:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 @pytest.mark.asyncio

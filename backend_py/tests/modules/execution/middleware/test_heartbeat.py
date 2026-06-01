@@ -24,7 +24,7 @@ def _decision() -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
         offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 def _ctx() -> AccountContext:

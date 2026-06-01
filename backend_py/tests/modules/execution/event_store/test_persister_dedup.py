@@ -42,7 +42,7 @@ def _fill(cid: int = 1, venue_offer_id: str = "v1", venue_seq: int = 10) -> Orde
         is_simulated=False,
         venue_seq=venue_seq,
         occurred_at_ms=2000,
-    )
+    symbol="fUST")
 
 
 def _release(cid: int = 2, venue_offer_id: str = "v2", venue_seq: int = 20) -> ReservationReleased:
@@ -56,7 +56,7 @@ def _release(cid: int = 2, venue_offer_id: str = "v2", venue_seq: int = 20) -> R
         is_simulated=False,
         venue_seq=venue_seq,
         occurred_at_ms=3000,
-    )
+    symbol="fUST")
 
 
 async def _make_persister(

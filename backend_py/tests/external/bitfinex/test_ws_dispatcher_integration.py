@@ -53,7 +53,7 @@ async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUSD"))
 
     foc = FocEvent(
         venue_offer_id="42", symbol="fUSD",
@@ -100,7 +100,7 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUSD"))
 
     captured: list = []
     async def capture(ev: ReservationReleased) -> None:

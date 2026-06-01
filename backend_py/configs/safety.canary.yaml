@@ -21,7 +21,13 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
-    enabled: true            # informational only -- real cap comes from BFX_ALLOCATION_CAP_USDT env (3000)
+    enabled: true
+    caps: {fUSD: 0, fUST: 3000}  # active per-symbol cap (live fUST: 3000) — guards AND reconciler sizing read caps[symbol]; BFX_ALLOCATION_CAP_USDT is only the absent-symbol fallback (dead while every configured symbol has an entry). fUSD=0 → dark.
+    default_cap: 0
+  buying_power:
+    enabled: true
+    buffers: {fUSD: 3, fUST: 3}
+    default_buffer: 0
 
 calibrated_guards:
   realized_loss_24h:

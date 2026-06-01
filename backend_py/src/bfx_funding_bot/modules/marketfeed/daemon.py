@@ -92,7 +92,11 @@ from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     RealizedLossGuard,
 )
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.config import SafetyConfig, load_safety_config
+from bfx_funding_bot.modules.execution.safety.config import (
+    SafetyConfig,
+    _AllocationCapCfg,
+    load_safety_config,
+)
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
@@ -106,6 +110,7 @@ from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
     MarketfeedConfig,
+    configured_symbols,
     load_config,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
@@ -149,19 +154,6 @@ def _require_env(name: str) -> str:
     if not val:
         raise ValueError(f"{name} env var required")
     return val
-
-
-def configured_symbols(cells: list[CellConfig]) -> list[str]:
-    """Distinct cell symbols, order-preserving — the per-currency reconcile loop's
-    symbol set. Single-currency cells.yaml → a 1-element list (parity with the
-    historic single-symbol BootRecovery)."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for c in cells:
-        if c.symbol not in seen:
-            seen.add(c.symbol)
-            out.append(c.symbol)
-    return out
 
 
 @dataclass
@@ -657,6 +649,27 @@ def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> Non
         )
 
 
+def assert_caps_invariant(
+    phase: Phase, cells: list[CellConfig], alloc_cfg: _AllocationCapCfg
+) -> None:
+    """Every configured-cell symbol needs an explicit caps entry; >0 under canary.
+
+    Config-fatal at boot (raises ValueError) — a configured currency with no
+    explicit cap (or a zero cap under real money) is an operator mistake that
+    must abort startup, not silently fall through to default_cap.
+    """
+    for symbol in configured_symbols(cells):
+        if symbol not in alloc_cfg.caps:
+            raise ValueError(
+                f"caps invariant: configured symbol {symbol!r} has no explicit caps entry"
+            )
+        if phase == Phase.CANARY and alloc_cfg.caps[symbol] <= 0:
+            raise ValueError(
+                f"caps invariant: canary symbol {symbol!r} cap must be > 0, "
+                f"got {alloc_cfg.caps[symbol]}"
+            )
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -785,6 +798,17 @@ async def build_daemon(
     assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
+    # Phase 2: every configured currency must have an explicit cap (and >0 under
+    # canary) — config-fatal otherwise. Then log the effective cap per symbol so
+    # the boot log is the authoritative record of how much real money each
+    # currency may deploy.
+    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+    log.info(
+        "effective_cap_per_symbol %s",
+        # assert_caps_invariant (above) already proved every configured symbol has
+        # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
+        {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
+    )
     # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
@@ -796,11 +820,12 @@ async def build_daemon(
     # Env-driven via registry (CC4 invariant — paper + fill_tracker rejected;
     # bitfinex_live rejected in 4.2; 4.4 enables live path).
     bus = DomainEventBus()
+    all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
-        symbol=first_cell.symbol,
+        configured_symbols=all_symbols,
         cell=first_cell.cell_id,
         http=bitfinex_http,
         bus=bus,
@@ -840,7 +865,19 @@ async def build_daemon(
             watched_sub_tasks=["ws"],
         ))
     if hg.allocation_cap.enabled:
-        guards.append(AllocationCapGuard(ledger=ledger))
+        guards.append(AllocationCapGuard(
+            ledger=ledger,
+            caps=hg.allocation_cap.caps,
+            default_cap=hg.allocation_cap.default_cap,
+            # Reuse the already-read scalar (read-once, like BuyingPowerGuard
+            # reuses balance_buffer_usdt) rather than re-reading the env var with
+            # a different default. assert_caps_invariant guarantees every
+            # configured symbol has an explicit caps entry, so this fallback is
+            # dead code for real currencies — but keeping it consistent with the
+            # reconciler's env-fallback (account_ctx.allocation_cap_usdt, also
+            # = allocation_cap) avoids a latent divergence.
+            env_fallback_cap=allocation_cap,
+        ))
         # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
         # reads funding-wallet available (0 until the first live reconcile), so in
         # the simulated path it would block every POST. The chain is inert in sim
@@ -848,7 +885,17 @@ async def build_daemon(
         # live-only; gate here so that contract is local to the guard rather than
         # an emergent invariant a future sim-path chain evaluation could violate.
         if not spec.is_simulated:
-            guards.append(BuyingPowerGuard(ledger=ledger, buffer_usdt=balance_buffer_usdt))
+            guards.append(BuyingPowerGuard(
+                ledger=ledger,
+                buffers=hg.buying_power.buffers,
+                default_buffer=hg.buying_power.default_buffer,
+                # Legacy global scalar as fallback for any symbol absent from the
+                # buffers map. Reuses the same env value the DeploymentReconciler
+                # clamp consumes (balance_buffer_usdt), so for the live
+                # single-symbol (fUST) case the resolved buffer equals the scalar
+                # and no double subtraction occurs.
+                env_fallback_buffer=balance_buffer_usdt,
+            ))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
@@ -996,6 +1043,14 @@ async def build_daemon(
             min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
             concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
             balance_buffer_usdt=balance_buffer_usdt,
+            # Phase 2: per-symbol caps/buffers so the reconciler sizes each
+            # currency against its own cap[symbol] (the real-money sizing
+            # authority). Same maps + env-fallback scalars as the per-offer
+            # guards, so sizing and guard enforcement agree on the cap.
+            caps=hg.allocation_cap.caps,
+            default_cap=hg.allocation_cap.default_cap,
+            buffers=hg.buying_power.buffers,
+            default_buffer=hg.buying_power.default_buffer,
             clock=lambda: int(time.time() * 1000),
             event_sink=stdout_sink,
             phase=config.phase,

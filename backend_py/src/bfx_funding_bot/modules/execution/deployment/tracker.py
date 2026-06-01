@@ -31,6 +31,7 @@ class CellDeploymentTracker:
         self,
         reserved_total: Decimal,
         *,
+        cells: list[str] | None = None,
         cap_per_cell: Decimal | None = None,
     ) -> None:
         """Rescale per-cell intent to match the *reserved* (pending open-offer) total.
@@ -45,30 +46,37 @@ class CellDeploymentTracker:
         When our offer fills: reserved drops (offer consumed), so the cell's
         tracked intent shrinks proportionally — correct behaviour.
 
-        S=0 (no recorded intent yet, e.g. post-restart with pre-existing credits)
-        -> no-op; per-cell stays 0 and the concentration limit is best-effort
-        until intent rebuilds via record_deploy calls.
+        cells: optional subset of cell ids to rescale. When provided (Phase 2
+        per-currency independence), only that subset is rescaled against its own
+        sum — e.g. rescaling fUST's cells must not touch fUSD's cells. reserved_total
+        is then the reserved exposure for THAT subset only. When None (default,
+        the existing behaviour), all deployed cells are rescaled together. An
+        EMPTY list (a symbol with no cells to rescale) is a no-op (S=0); note
+        cells=[] means "rescale nothing", distinct from cells=None ("rescale all").
+        Unknown cell ids in the subset contribute 0 to the sum and are skipped on
+        write (no phantom entry is planted in the deployment snapshot).
+
+        S=0 (no recorded intent for the rescaled keys, e.g. post-restart with
+        pre-existing credits) -> no-op; per-cell stays 0 and the concentration
+        limit is best-effort until intent rebuilds via record_deploy calls.
 
         cap_per_cell: optional hard clamp applied after rescaling (I2 defense-in-
         depth). Any cell whose rescaled intent exceeds cap_per_cell is clamped
         with a warning so concentration drift is immediately visible in logs.
         """
-        s = sum(self._deployed.values(), Decimal("0"))
+        keys = cells if cells is not None else list(self._deployed.keys())
+        s = sum((self._deployed.get(c, Decimal("0")) for c in keys), Decimal("0"))
         if s <= 0:
             return
         factor = reserved_total / s
-        rescaled = {c: v * factor for c, v in self._deployed.items()}
-        if cap_per_cell is not None:
-            clamped: dict[str, Decimal] = {}
-            for c, v in rescaled.items():
-                if v > cap_per_cell:
-                    log.warning(
-                        "cell_deployment_clamped cell=%s from=%s to=%s",
-                        c, v, cap_per_cell,
-                    )
-                    clamped[c] = cap_per_cell
-                else:
-                    clamped[c] = v
-            self._deployed = clamped
-        else:
-            self._deployed = rescaled
+        for c in keys:
+            if c not in self._deployed:
+                continue  # never-deployed cell: nothing to rescale, don't plant a phantom 0
+            rescaled = self._deployed[c] * factor
+            if cap_per_cell is not None and rescaled > cap_per_cell:
+                log.warning(
+                    "cell_deployment_clamped cell=%s from=%s to=%s",
+                    c, rescaled, cap_per_cell,
+                )
+                rescaled = cap_per_cell
+            self._deployed[c] = rescaled

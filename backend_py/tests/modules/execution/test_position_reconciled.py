@@ -37,6 +37,7 @@ def _reconciled(
 ) -> PositionReconciled:
     return PositionReconciled(
         account_id=account_id,
+        symbol="fUSD",
         reserved_usdt=Decimal(reserved),
         realized_usdt=Decimal(realized),
         available_usdt=Decimal(available),
@@ -64,7 +65,7 @@ async def test_offer_filled_into_credit_but_ws_missed_reconcile_sets_realized():
 
     assert ledger._reserved["fUSD"] == Decimal("0")
     assert ledger._realized["fUSD"] == Decimal("150")
-    assert ledger.current_exposure() == Decimal("150")
+    assert ledger.current_exposure("fUSD") == Decimal("150")
 
 
 @pytest.mark.asyncio
@@ -77,7 +78,7 @@ async def test_three_credits_reconcile_corrects_full_canary_incident():
     await ledger.on_position_reconciled(_reconciled(realized="450", n_credits=3))
 
     assert ledger._realized["fUSD"] == Decimal("450")
-    assert ledger.current_exposure() == Decimal("450")
+    assert ledger.current_exposure("fUSD") == Decimal("450")
 
 
 # ── Absolute set semantics ────────────────────────────────────────────────────
@@ -102,8 +103,8 @@ async def test_current_exposure_equals_offers_plus_credits():
         _reconciled(reserved="100", realized="200", n_offers=1, n_credits=2)
     )
 
-    assert ledger.current_exposure() == Decimal("300")
-    assert ledger.realized_exposure() == Decimal("200")
+    assert ledger.current_exposure("fUSD") == Decimal("300")
+    assert ledger.realized_exposure("fUSD") == Decimal("200")
 
 
 @pytest.mark.asyncio
@@ -125,7 +126,7 @@ async def test_credit_matured_reconcile_decrements_realized():
     await ledger.on_position_reconciled(_reconciled(realized="300", n_credits=2))
 
     assert ledger._realized["fUSD"] == Decimal("300")
-    assert ledger.current_exposure() == Decimal("300")
+    assert ledger.current_exposure("fUSD") == Decimal("300")
 
 
 @pytest.mark.asyncio
@@ -166,6 +167,7 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
         cid=1, venue_offer_id="v1", credit_id=None,
         size_usdt=Decimal("150"), fill_rate=0.0003,
         signal_correlation_id=uuid4(), account_id=_ACC, is_simulated=False,
+        symbol="fUSD",
     )
     await ledger.on_order_filled(fill)
     # In-memory: realized = 300 (snapshot 150 + WS delta 150)
@@ -176,4 +178,4 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
     )
 
     assert ledger._realized["fUSD"] == Decimal("300")  # not 450
-    assert ledger.current_exposure() == Decimal("300")
+    assert ledger.current_exposure("fUSD") == Decimal("300")
