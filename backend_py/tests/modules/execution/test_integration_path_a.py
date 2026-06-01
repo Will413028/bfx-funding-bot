@@ -50,10 +50,10 @@ class _EventCapture:
 
 
 class _StubPnL:
-    def realized_loss_pct_24h(self) -> float:
+    def realized_loss_pct_24h(self, symbol: str) -> float:
         return 0.0
 
-    def drawdown_pct(self) -> float:
+    def drawdown_pct(self, symbol: str) -> float:
         return 0.0
 
 
