@@ -1,12 +1,5 @@
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
-
-
-def _configured_symbols(cells: list[CellConfig]) -> list[str]:
-    """Helper under test mirrors the daemon's symbol-derivation rule:
-    distinct cell symbols, order-preserving."""
-    from bfx_funding_bot.modules.marketfeed.daemon import configured_symbols
-    return configured_symbols(cells)
 
 
 def _cell(symbol: str, period_agg: str) -> CellConfig:
@@ -20,9 +13,9 @@ def _cell(symbol: str, period_agg: str) -> CellConfig:
 
 def test_configured_symbols_dedups_preserving_order():
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2"), _cell("fUSD", "p2")]
-    assert _configured_symbols(cells) == ["fUST", "fUSD"]
+    assert configured_symbols(cells) == ["fUST", "fUSD"]
 
 
 def test_configured_symbols_single_currency():
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
-    assert _configured_symbols(cells) == ["fUST"]
+    assert configured_symbols(cells) == ["fUST"]
