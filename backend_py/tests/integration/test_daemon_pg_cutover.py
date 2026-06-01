@@ -26,11 +26,11 @@ async def test_sink_then_from_snapshot_roundtrip(pg_session_factory) -> None:
 
     await persister.persist(ReservationClaimed(
         cid=7, venue_offer_id="v7", size_usdt=Decimal("12"), signal_correlation_id=_SCID,
-        account_id="acctZ", is_simulated=True, venue_seq=1, occurred_at_ms=1000))
+        account_id="acctZ", is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST"))
     await persister.persist(OrderFilled(
         cid=7, venue_offer_id="v7", credit_id="c7", size_usdt=Decimal("5"), fill_rate=0.0,
         signal_correlation_id=_SCID, account_id="acctZ", is_simulated=True,
-        venue_seq=2, occurred_at_ms=2000))
+        venue_seq=2, occurred_at_ms=2000, symbol="fUST"))
 
     async with pg_session_factory() as s:
         ledger = await PaperPositionLedger.from_snapshot(

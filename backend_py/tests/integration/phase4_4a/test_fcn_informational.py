@@ -65,7 +65,7 @@ async def test_fcn_before_or_after_claim_produces_no_orderfilled(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=550,
-    ))
+    symbol="fUSD"))
     await asyncio.sleep(0.7)
 
     stop.set()

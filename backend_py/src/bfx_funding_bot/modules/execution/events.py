@@ -122,18 +122,19 @@ class ReservationClaimed:
 
     Ledger effect: reserved[symbol] += amount (native units).
 
-    `symbol` is the offer currency (e.g. "fUST"); defaults to the legacy
-    single-currency fallback "fUSD". `amount` is the native reserve size;
-    `size_usdt` is a transitional read alias + back-compat constructor kwarg
-    kept until producers migrate (Phase 1 per-symbol ledger work).
+    `symbol` is the offer currency (e.g. "fUST"); MANDATORY (Task 11 — no
+    default, so it can never silently land as the legacy "fUSD"). `amount` is
+    the native reserve size; `size_usdt` is a transitional read alias +
+    back-compat constructor kwarg kept until producers migrate (Phase 1
+    per-symbol ledger work).
     """
+    symbol: str  # mandatory, FIRST (frozen+slots: non-default must precede defaulted)
     cid: int
     venue_offer_id: str
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
     amount: Decimal | None = None
-    symbol: str = "fUSD"
     size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
@@ -152,8 +153,9 @@ class OrderFilled:
     `credit_id` is None for paper (no real credit) and for live (the `foc`
     EXECUTED frame carries no credit id; the fill is keyed by venue_offer_id).
 
-    `symbol`/`amount`/`size_usdt`: see ReservationClaimed.
+    `symbol`/`amount`/`size_usdt`: see ReservationClaimed (symbol mandatory).
     """
+    symbol: str  # mandatory, FIRST (frozen+slots: non-default must precede defaulted)
     cid: int
     venue_offer_id: str
     credit_id: str | None
@@ -162,7 +164,6 @@ class OrderFilled:
     account_id: str
     is_simulated: bool
     amount: Decimal | None = None
-    symbol: str = "fUSD"
     size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
@@ -178,8 +179,9 @@ class ReservationReleased:
     """Offer cancelled / expired without fill.
 
     Ledger effect: reserved[symbol] -= amount (floor at 0; emits warning + counts).
-    `symbol`/`amount`/`size_usdt`: see ReservationClaimed.
+    `symbol`/`amount`/`size_usdt`: see ReservationClaimed (symbol mandatory).
     """
+    symbol: str  # mandatory, FIRST (frozen+slots: non-default must precede defaulted)
     cid: int
     venue_offer_id: str
     reason: str  # "venue_cancel" / "user_cancel" / "expired" / "missing_from_venue"
@@ -187,7 +189,6 @@ class ReservationReleased:
     account_id: str
     is_simulated: bool
     amount: Decimal | None = None
-    symbol: str = "fUSD"
     size_usdt: Decimal | None = None  # transitional: legacy producers; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
@@ -225,19 +226,20 @@ class PositionReconciled:
     position_state (available is in-memory only — not persisted).
 
     One event is fired PER SYMBOL (native units). `symbol` is the offer
-    currency (defaults to legacy "fUSD"). reserved/realized/available are the
-    canonical native fields; `*_usdt` are transitional read aliases +
-    back-compat constructor kwargs kept until producers/consumers migrate.
+    currency; MANDATORY (Task 11 — no default, never silently "fUSD").
+    reserved/realized/available are the canonical native fields; `*_usdt` are
+    transitional read aliases + back-compat constructor kwargs kept until
+    producers/consumers migrate.
 
     reserved  = Σ(active offers in `symbol`)  — venue snapshot, not accumulation.
     realized  = Σ(active credits in `symbol`) — venue snapshot.
     available = funding-wallet available balance for `symbol`'s currency.
     """
+    symbol: str  # mandatory, FIRST (frozen+slots: non-default must precede defaulted)
     account_id: str
     n_offers: int
     n_credits: int
     occurred_at_ms: int
-    symbol: str = "fUSD"
     reserved: Decimal | None = None
     realized: Decimal | None = None
     available: Decimal | None = None

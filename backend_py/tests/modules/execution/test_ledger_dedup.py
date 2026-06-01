@@ -17,7 +17,7 @@ def _filled(venue_seq: int | None, venue_offer_id: str = "v1") -> OrderFilled:
         size_usdt=Decimal("100"), fill_rate=0.0005,
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
         venue_seq=venue_seq,
-    )
+    symbol="fUST")
 
 
 def _released(venue_seq: int | None, venue_offer_id: str = "v1") -> ReservationReleased:
@@ -25,14 +25,14 @@ def _released(venue_seq: int | None, venue_offer_id: str = "v1") -> ReservationR
         cid=42, venue_offer_id=venue_offer_id, size_usdt=Decimal("100"),
         reason="venue_cancel", signal_correlation_id=uuid4(),
         account_id="default", is_simulated=False, venue_seq=venue_seq,
-    )
+    symbol="fUST")
 
 
 def _claimed(venue_offer_id: str = "v1") -> ReservationClaimed:
     return ReservationClaimed(
         cid=42, venue_offer_id=venue_offer_id, size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-    )
+    symbol="fUST")
 
 
 @pytest.mark.asyncio

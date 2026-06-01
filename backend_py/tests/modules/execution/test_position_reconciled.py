@@ -37,6 +37,7 @@ def _reconciled(
 ) -> PositionReconciled:
     return PositionReconciled(
         account_id=account_id,
+        symbol="fUSD",
         reserved_usdt=Decimal(reserved),
         realized_usdt=Decimal(realized),
         available_usdt=Decimal(available),
@@ -166,6 +167,7 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
         cid=1, venue_offer_id="v1", credit_id=None,
         size_usdt=Decimal("150"), fill_rate=0.0003,
         signal_correlation_id=uuid4(), account_id=_ACC, is_simulated=False,
+        symbol="fUSD",
     )
     await ledger.on_order_filled(fill)
     # In-memory: realized = 300 (snapshot 150 + WS delta 150)

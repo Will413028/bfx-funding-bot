@@ -61,7 +61,7 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
         await session.commit()
 
         await store.rebuild_snapshot_from_log(
-            session, account_id="a", deployment_environment="ci")
+            session, account_id="a", deployment_environment="ci", symbol="fUST")
         await session.commit()
 
         ps = (await session.execute(select(PositionStateRow).where(

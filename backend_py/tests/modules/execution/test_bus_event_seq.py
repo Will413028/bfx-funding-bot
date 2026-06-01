@@ -13,6 +13,7 @@ def _make_filled(**overrides) -> OrderFilled:
         "venue_offer_id": "v1",
         "credit_id": None,
         "size_usdt": Decimal("100"),
+        "symbol": "fUST",
         "fill_rate": 0.0005,
         "signal_correlation_id": uuid4(),
         "account_id": "default",

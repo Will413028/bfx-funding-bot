@@ -62,7 +62,7 @@ async def test_resync_request_reconciles_off_interval(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    ))
+    symbol="fUST"))
     assert ledger.current_exposure() == Decimal("150")
 
     claim_row = OfferClaimRow(

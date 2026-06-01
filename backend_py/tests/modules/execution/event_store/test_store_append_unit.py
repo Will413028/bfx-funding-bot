@@ -33,7 +33,7 @@ async def _create_all(session: AsyncSession) -> None:
 def _claimed(seq: int) -> ReservationClaimed:
     return ReservationClaimed(cid=100 + seq, venue_offer_id=f"v{seq}", size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=seq, occurred_at_ms=1000 + seq)
+        venue_seq=seq, occurred_at_ms=1000 + seq, symbol="fUSD")
 
 
 async def test_append_inserts_event_row(sqlite_session: AsyncSession) -> None:
@@ -61,7 +61,7 @@ async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSess
 
     await store.append(sqlite_session, ReservationReleased(cid=105, venue_offer_id="v5",
         size_usdt=Decimal("5"), reason="venue_cancel", signal_correlation_id=_SCID,
-        account_id="acct", is_simulated=True, venue_seq=6, occurred_at_ms=2000))
+        account_id="acct", is_simulated=True, venue_seq=6, occurred_at_ms=2000, symbol="fUSD"))
     await sqlite_session.flush()
     row2 = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 105))).scalar_one()
@@ -73,7 +73,7 @@ async def test_append_fill_dedup_skips_duplicate(sqlite_session: AsyncSession) -
     store = PostgresEventStore(deployment_environment="ci")
     fill = OrderFilled(cid=200, venue_offer_id="v9", credit_id=None, size_usdt=Decimal("2"),
         fill_rate=0.0, signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=9, occurred_at_ms=2000)
+        venue_seq=9, occurred_at_ms=2000, symbol="fUSD")
     inserted_first = await store.append(sqlite_session, fill)
     inserted_second = await store.append(sqlite_session, fill)  # same (voi, venue_seq)
     await sqlite_session.flush()
@@ -107,7 +107,7 @@ async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSes
     await store.append(sqlite_session, ReservationClaimed(
         cid=301, venue_offer_id="v301", size_usdt=Decimal("8"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=1, occurred_at_ms=1100))
+        venue_seq=1, occurred_at_ms=1100, symbol="fUSD"))
     await sqlite_session.flush()
     rows = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 301))).scalars().all()
@@ -125,7 +125,7 @@ async def test_position_state_tracks_event_time_deterministically(sqlite_session
     await store.append(sqlite_session, ReservationClaimed(
         cid=400, venue_offer_id="v400", size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
-        venue_seq=1, occurred_at_ms=1000))
+        venue_seq=1, occurred_at_ms=1000, symbol="fUSD"))
     await sqlite_session.flush()
     ps = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctT"))).scalar_one()
@@ -135,7 +135,7 @@ async def test_position_state_tracks_event_time_deterministically(sqlite_session
     await store.append(sqlite_session, ReservationReleased(
         cid=400, venue_offer_id="v400", size_usdt=Decimal("5"), reason="venue_cancel",
         signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
-        venue_seq=2, occurred_at_ms=5000))
+        venue_seq=2, occurred_at_ms=5000, symbol="fUSD"))
     await sqlite_session.flush()
     ps2 = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctT"))).scalar_one()
@@ -151,12 +151,12 @@ async def test_last_updated_ms_follows_event_seq_not_max_time(sqlite_session: As
     await store.append(sqlite_session, ReservationClaimed(
         cid=410, venue_offer_id="v410", size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
-        venue_seq=1, occurred_at_ms=9000))
+        venue_seq=1, occurred_at_ms=9000, symbol="fUSD"))
     # appended later (higher event_seq) but with an EARLIER event time
     await store.append(sqlite_session, ReservationReleased(
         cid=410, venue_offer_id="v410", size_usdt=Decimal("5"), reason="venue_cancel",
         signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
-        venue_seq=2, occurred_at_ms=1000))
+        venue_seq=2, occurred_at_ms=1000, symbol="fUSD"))
     await sqlite_session.flush()
     ps = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctOOO"))).scalar_one()

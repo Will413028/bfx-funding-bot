@@ -38,10 +38,15 @@ class SnapshotDrift:
 # skips vois already in CLAIMED state), not by this store-level dedup.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
-# Phase 1: a single funding currency is live (fUST). All position_state rows
-# are keyed by symbol; until callers (boot/reconcile) pass an explicit symbol,
-# they default to this so single-currency behavior is unchanged. Phase 2 makes
-# the configured symbol set first-class.
+# Phase 2 / Task 11: the position-bearing events now carry a MANDATORY `symbol`
+# and the snapshot/projection methods require an explicit `symbol` param. This
+# constant survives ONLY as the projection fallback for the two symbol-less
+# claim-lifecycle events — ReservationIntent / ReservationFailed — which have no
+# `symbol` (or `amount`) field yet (adding them is a separate, later, gated
+# step; see the breadcrumb near `claim_size` in _project_offer_claims). It is
+# used solely at the append() projection call site (getattr(..., "symbol", None)
+# or DEFAULT_RECONCILE_SYMBOL); the four real position events return their own
+# symbol there, so this default never applies to them.
 DEFAULT_RECONCILE_SYMBOL = "fUST"
 
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
@@ -219,7 +224,7 @@ class PostgresEventStore:
         event_seq: int,
         occurred_at_ms: int,
         *,
-        symbol: str = DEFAULT_RECONCILE_SYMBOL,
+        symbol: str,
     ) -> None:
         size = Decimal(str(size_usdt)) if size_usdt is not None else Decimal("0")
         ps = (
@@ -267,7 +272,7 @@ class PostgresEventStore:
         n_offers: int,
         n_credits: int,
         occurred_at_ms: int,
-        symbol: str = DEFAULT_RECONCILE_SYMBOL,
+        symbol: str,
     ) -> SnapshotDrift:
         """Absolute venue snapshot for one symbol. Overwrites that symbol's live
         position_state view, appends an immutable reconcile_observation checkpoint
@@ -337,7 +342,7 @@ class PostgresEventStore:
 
     async def rebuild_snapshot_from_log(
         self, session: AsyncSession, *, account_id: str, deployment_environment: str,
-        symbol: str = DEFAULT_RECONCILE_SYMBOL,
+        symbol: str,
     ) -> None:
         """Rebuild snapshots for (account, env).
 

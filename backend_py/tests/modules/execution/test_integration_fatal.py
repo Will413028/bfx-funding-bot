@@ -43,7 +43,7 @@ async def test_executor_auth_error_is_distinct_exception_class() -> None:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     with pytest.raises(ExecutorAuthError):
         await ex.submit(decision, ctx)

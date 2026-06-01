@@ -39,7 +39,7 @@ async def test_set_position_snapshot_writes_state_observation_and_returns_drift(
         drift = await store.set_position_snapshot(
             session, account_id="a",
             reserved_usdt=Decimal("0"), realized_usdt=Decimal("450"),
-            n_offers=0, n_credits=3, occurred_at_ms=2_000)
+            n_offers=0, n_credits=3, occurred_at_ms=2_000, symbol="fUST")
         await session.commit()
 
         ps = (await session.execute(select(PositionStateRow).where(

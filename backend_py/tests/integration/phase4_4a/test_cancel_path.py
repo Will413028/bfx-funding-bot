@@ -47,7 +47,7 @@ async def test_cancel_then_foc_emits_user_cancel(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUSD"))
 
     # 2. Build dispatcher and subscribe to CancelRequested
     #    clock=2100 → foc CANCELED at mts_update=2000, requested_at_ms=2000

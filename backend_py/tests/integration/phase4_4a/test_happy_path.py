@@ -71,7 +71,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         offer_rate=0.0005,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUSD")
     ctx = AccountContext(
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
@@ -88,7 +88,7 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         cid=submitted.cid, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUSD"))
 
     assert ledger.current_exposure() == Decimal("100")
     assert registry.snapshot()[voi].state.value == "claimed"

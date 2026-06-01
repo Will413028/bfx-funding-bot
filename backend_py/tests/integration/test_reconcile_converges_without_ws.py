@@ -151,7 +151,7 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    ))
+    symbol="fUST"))
 
     # Precondition: exposure MUST be 150 before reconcile, else the test proves nothing.
     assert ledger.current_exposure() == Decimal("150")
@@ -224,7 +224,7 @@ async def test_reconcile_run_reports_the_release_as_divergence(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    ))
+    symbol="fUST"))
 
     claim_row = OfferClaimRow(
         cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
