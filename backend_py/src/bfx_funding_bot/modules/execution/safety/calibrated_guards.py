@@ -24,6 +24,10 @@ class _PnLSourceProtocol(Protocol):
     def drawdown_pct(self, symbol: str) -> float: ...
 
 
+# TODO(per-symbol): _DivergenceSourceProtocol is symbol-blind (a constant-0 stub
+# today, so no cross-symbol summing exists to fix). When a real divergence source
+# lands it will need the same per-symbol treatment as the NAV metrics above
+# (take `symbol`, guard passes decision.symbol).
 class _DivergenceSourceProtocol(Protocol):
     def divergence_rate_pct(self, window_minutes: int) -> float: ...
 

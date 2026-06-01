@@ -296,7 +296,7 @@ sequenceDiagram
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
 
-**L2 calibrated guards**：`RealizedLossGuard`（24h realized 虧損 > threshold）、`DrawdownGuard`（peak-to-trough drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。canary（`safety.canary.yaml`）開 realized_loss + drawdown（目前接 stub source 回 0，真 PnLLedger 待接）。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
+**L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
 **Kill switch**：翻 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 config（`koyeb service update ... --env BFX_KILL_SWITCH=true`）。
 
