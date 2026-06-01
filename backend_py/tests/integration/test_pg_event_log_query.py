@@ -37,7 +37,7 @@ async def test_query_returns_claimed_and_fill_for_account(pg_session_factory) ->
                 is_simulated=True,
                 venue_seq=1,
                 occurred_at_ms=int(since.timestamp() * 1000) + 1000,
-            ),
+            symbol="fUST"),
         )
         await store.append(
             s,
@@ -52,7 +52,7 @@ async def test_query_returns_claimed_and_fill_for_account(pg_session_factory) ->
                 is_simulated=True,
                 venue_seq=2,
                 occurred_at_ms=int(since.timestamp() * 1000) + 2000,
-            ),
+            symbol="fUST"),
         )
         await s.commit()
 
@@ -89,7 +89,7 @@ async def test_query_scopes_by_account_and_env(pg_session_factory) -> None:
                 is_simulated=True,
                 venue_seq=1,
                 occurred_at_ms=int(since.timestamp() * 1000) + 500,
-            ),
+            symbol="fUST"),
         )
         await store.append(
             s,
@@ -103,7 +103,7 @@ async def test_query_scopes_by_account_and_env(pg_session_factory) -> None:
                 is_simulated=True,
                 venue_seq=2,
                 occurred_at_ms=int(since.timestamp() * 1000) + 1000,
-            ),
+            symbol="fUST"),
         )
         await s.commit()
 

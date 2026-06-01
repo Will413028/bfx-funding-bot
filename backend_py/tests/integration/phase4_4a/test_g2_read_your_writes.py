@@ -23,8 +23,8 @@ async def test_after_publish_returns_ledger_already_updated(
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
 
     # Immediately after publish returns — both ledger + registry reflect
-    assert ledger.current_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
     assert "42" in registry.snapshot()

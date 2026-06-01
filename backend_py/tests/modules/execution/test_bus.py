@@ -18,7 +18,7 @@ def _make_claim() -> ReservationClaimed:
     return ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    )
+    symbol="fUST")
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_release_event_routes_separately() -> None:
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
         reason="venue_cancel", signal_correlation_id=uuid4(),
         account_id="default", is_simulated=True,
-    )
+    symbol="fUST")
     await bus.publish(rel)
     # Bus attaches event_seq and recorded_at_ms; verify core fields match.
     assert len(received) == 1

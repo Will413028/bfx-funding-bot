@@ -14,7 +14,13 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300  # 5-minute watchdog
   allocation_cap:
-    enabled: true            # cap_usdt sourced from AccountContext, not yaml
+    enabled: true
+    caps: {fUSD: 0, fUST: 3000}  # active per-symbol cap — guards AND reconciler sizing read caps[symbol]; BFX_ALLOCATION_CAP_USDT is only the absent-symbol fallback (dead while every configured symbol has an entry). fUSD=0 → dark.
+    default_cap: 0
+  buying_power:
+    enabled: true
+    buffers: {fUSD: 3, fUST: 3}
+    default_buffer: 0
 
 calibrated_guards:
   realized_loss_24h:

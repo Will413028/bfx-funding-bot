@@ -34,12 +34,12 @@ async def test_fill_tracker_skips_emit_when_registry_already_released() -> None:
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
     await bus.publish(ReservationReleased(
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         reason="user_cancel", signal_correlation_id=sig_id,
         account_id="default", is_simulated=False, occurred_at_ms=2000,
-    ))
+    symbol="fUST"))
 
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json=[])),
@@ -78,7 +78,7 @@ async def test_fill_tracker_emits_with_claim_correlation_id_not_uuid4() -> None:
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
 
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, json=[])),

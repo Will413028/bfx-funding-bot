@@ -39,7 +39,7 @@ def _decision(corr: UUID) -> DecisionPayload:
         decision_outcome=DecisionOutcome.POST,
         signal_correlation_id=corr,
         offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 @pytest.mark.asyncio

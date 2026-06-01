@@ -28,7 +28,7 @@ done
 
 # Real-money gate.
 if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
-  read -r -p "CANARY = REAL MONEY (cap 570). Type 'yes' to proceed: " ans
+  read -r -p "CANARY = REAL MONEY (per-symbol caps from the safety config; live fUST funded, fUSD dark). Type 'yes' to proceed: " ans
   [ "$ans" = yes ] || { echo "aborted"; exit 1; }
 fi
 

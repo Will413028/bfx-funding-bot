@@ -19,10 +19,13 @@ from pytest_httpx import HTTPXMock
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
+    # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several
+    # tests here build a canary daemon, which now boot-asserts cap > 0 per
+    # configured symbol (assert_caps_invariant), so fUSD (cap 0) cannot be used.
     yaml_path.write_text("""
 cells:
   - strategy: rate_percentile
-    symbol: fUSD
+    symbol: fUST
     period_agg: a30
     timeframe: 1h
     params: {percentile: 75, lookback_hours: 5}
@@ -141,10 +144,12 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
     yaml_path = tmp_path / "cells.yaml"
+    # fUST (funded canary currency) so build passes assert_caps_invariant and
+    # reaches the reconcile-interval guard under test.
     yaml_path.write_text("""
 cells:
   - strategy: rate_percentile
-    symbol: fUSD
+    symbol: fUST
     period_agg: a30
     timeframe: 1h
     params: {percentile: 75, lookback_hours: 5}

@@ -166,11 +166,11 @@ async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
     # --- Assertions ---
 
     # Venue truth: reserved=$100 (1 offer), realized=$450 (3×$150 credits).
-    assert ledger.realized_exposure() == Decimal("450"), (
-        f"realized={ledger.realized_exposure()} — expected $450 from 3 credits"
+    assert ledger.realized_exposure("fUST") == Decimal("450"), (
+        f"realized={ledger.realized_exposure('fUST')} — expected $450 from 3 credits"
     )
-    assert ledger.current_exposure() == Decimal("550"), (
-        f"current={ledger.current_exposure()} — expected $550 (reserved $100 + realized $450); "
+    assert ledger.current_exposure("fUST") == Decimal("550"), (
+        f"current={ledger.current_exposure('fUST')} — expected $550 (reserved $100 + realized $450); "
         "if $650 the orphan claim was double-applied via both delta bus AND PositionReconciled"
     )
 

@@ -46,7 +46,7 @@ async def _patched_build_daemon(*args: Any, **kwargs: Any) -> Any:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     async def _wrapped_run() -> None:
