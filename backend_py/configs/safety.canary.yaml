@@ -21,7 +21,13 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
-    enabled: true            # informational only -- real cap comes from BFX_ALLOCATION_CAP_USDT env (3000)
+    enabled: true
+    caps: {fUSD: 0, fUST: 3000, fADA: 0}
+    default_cap: 0
+  buying_power:
+    enabled: true
+    buffers: {fUSD: 3, fUST: 3, fADA: 0}
+    default_buffer: 0
 
 calibrated_guards:
   realized_loss_24h:
