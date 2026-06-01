@@ -852,7 +852,7 @@ async def build_daemon(
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
-            threshold_usdt=cg.realized_loss_24h.threshold_usdt,
+            threshold_pct=cg.realized_loss_24h.threshold_pct,
             source=pnl_source,
         ))
     if cg.drawdown_from_peak.enabled:

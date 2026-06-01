@@ -18,8 +18,9 @@ funds, a platform socialised loss, a withdrawal) → NAV down.
 
 Two metrics over two horizons (both fed to the guards synchronously):
 
-  * realized_loss_24h() = max(0, highest NAV in last 24h − latest NAV)
-      catches fast recent bleeding.
+  * realized_loss_pct_24h() = (highest NAV in last 24h − latest NAV) / that high × 100
+      catches fast recent bleeding. A PERCENTAGE so the guard auto-scales with
+      funded capital — no manual re-anchoring on deposit/withdrawal.
   * drawdown_pct()      = (all-time peak NAV − latest NAV) / all-time peak × 100
       catches slow sustained decline from the high-water mark.
 
@@ -80,12 +81,15 @@ class ReconcileNavTracker:
 
     # ---- _PnLSourceProtocol (calibrated_guards) ----
 
-    def realized_loss_24h(self) -> Decimal:
+    def realized_loss_pct_24h(self) -> float:
         if not self._samples:
-            return Decimal("0")
+            return 0.0
         latest_nav = self._samples[-1][1]
         window_high = max(nav for _, nav in self._samples)
-        return max(Decimal("0"), window_high - latest_nav)
+        if window_high <= 0:
+            return 0.0
+        loss = max(Decimal("0"), window_high - latest_nav)
+        return float(loss / window_high * 100)
 
     def drawdown_pct(self) -> float:
         if self._peak is None or self._peak <= 0:

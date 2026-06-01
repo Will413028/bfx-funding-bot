@@ -6,7 +6,10 @@
 # optional/off (no validated threshold yet).
 #
 # Select at deploy time: BFX_SAFETY_CONFIG=configs/safety.canary.yaml
-# Thresholds match the conservative 570 USDT canary profile (~10% loss / 15% drawdown).
+# Both loss-limiters are PERCENTAGES of NAV, so they AUTO-SCALE with funded capital —
+# add/withdraw funds without ever re-tuning the thresholds (5% 24h loss / 10% drawdown).
+# allocation_cap (BFX_ALLOCATION_CAP_USDT) is the only absolute USDT knob; the balance-gate
+# keeps actual lending at the funded available, so cap is just an upper bound, not in-risk size.
 # No hot reload -- change here = redeploy.
 
 hard_guards:
@@ -18,15 +21,15 @@ hard_guards:
     enabled: true
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
-    enabled: true            # informational only -- real cap comes from BFX_ALLOCATION_CAP_USDT env (570)
+    enabled: true            # informational only -- real cap comes from BFX_ALLOCATION_CAP_USDT env (3000)
 
 calibrated_guards:
   realized_loss_24h:
     enabled: true
-    threshold_usdt: 57       # halt if 24h realized loss exceeds ~10% of the 570 USDT cap
+    threshold_pct: 5.0       # 24h NAV drop from the window-high, as % (auto-scales with funded; NAV normally only rises → catches anomalies/withdrawals)
   drawdown_from_peak:
     enabled: true
-    threshold_pct: 15.0      # halt at 15% peak-to-trough drawdown
+    threshold_pct: 10.0      # peak-to-trough NAV drawdown; funding shouldn't drawdown naturally, so 10% already signals trouble
   divergence_rate:
     enabled: false           # optional; no validated threshold yet
     threshold_pct: null

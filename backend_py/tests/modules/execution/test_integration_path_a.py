@@ -50,8 +50,8 @@ class _EventCapture:
 
 
 class _StubPnL:
-    def realized_loss_24h(self) -> Decimal:
-        return Decimal("0")
+    def realized_loss_pct_24h(self) -> float:
+        return 0.0
 
     def drawdown_pct(self) -> float:
         return 0.0
@@ -84,7 +84,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
                 watched_sub_tasks=["ws"],
             ),
             AllocationCapGuard(ledger=ledger),
-            RealizedLossGuard(enabled=False, threshold_usdt=None, source=pnl),
+            RealizedLossGuard(enabled=False, threshold_pct=None, source=pnl),
             DrawdownGuard(enabled=False, threshold_pct=None, source=pnl),
             DivergenceRateGuard(
                 enabled=False,

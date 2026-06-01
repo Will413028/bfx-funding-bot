@@ -25,7 +25,7 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: false
-    threshold_usdt: null
+    threshold_pct: null
   drawdown_from_peak:
     enabled: false
     threshold_pct: null
@@ -51,11 +51,11 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: true
-    threshold_usdt: null
+    threshold_pct: null
   drawdown_from_peak: {enabled: false, threshold_pct: null}
   divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
 """)
-    with pytest.raises(ValidationError, match="threshold_usdt"):
+    with pytest.raises(ValidationError, match="threshold_pct"):
         load_safety_config(yaml_path)
 
 
@@ -73,7 +73,7 @@ hard_guards:
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: -1}
   allocation_cap: {enabled: true}
 calibrated_guards:
-  realized_loss_24h: {enabled: false, threshold_usdt: null}
+  realized_loss_24h: {enabled: false, threshold_pct: null}
   drawdown_from_peak: {enabled: false, threshold_pct: null}
   divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
 """)
@@ -81,7 +81,8 @@ calibrated_guards:
         load_safety_config(yaml_path)
 
 
-def test_canary_realized_loss_threshold_is_57() -> None:
+def test_canary_realized_loss_threshold_is_5pct() -> None:
     cfg = load_safety_config(Path(__file__).parents[4] / "configs" / "safety.canary.yaml")
     assert cfg.calibrated_guards.realized_loss_24h.enabled is True
-    assert cfg.calibrated_guards.realized_loss_24h.threshold_usdt == 57
+    # percentage of NAV (auto-scales with funded capital), not an absolute USDT amount
+    assert cfg.calibrated_guards.realized_loss_24h.threshold_pct == 5.0

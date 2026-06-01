@@ -162,7 +162,7 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: false
-    threshold_usdt: null
+    threshold_pct: null
   drawdown_from_peak:
     enabled: false
     threshold_pct: null
@@ -252,7 +252,7 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: true
-    threshold_usdt: 100.0
+    threshold_pct: 100.0
   drawdown_from_peak:
     enabled: false
     threshold_pct: null

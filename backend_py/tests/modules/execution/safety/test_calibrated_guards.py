@@ -35,13 +35,13 @@ def _post() -> DecisionPayload:
 
 
 class _FakePnLSource:
-    def __init__(self, loss_24h: Decimal, peak: Decimal, current: Decimal) -> None:
-        self.loss_24h = loss_24h
+    def __init__(self, loss_pct: float, peak: Decimal, current: Decimal) -> None:
+        self.loss_pct = loss_pct
         self.peak = peak
         self.current = current
 
-    def realized_loss_24h(self) -> Decimal:
-        return self.loss_24h
+    def realized_loss_pct_24h(self) -> float:
+        return self.loss_pct
 
     def drawdown_pct(self) -> float:
         if self.peak == 0:
@@ -59,24 +59,24 @@ class _FakeDivergenceSource:
 
 @pytest.mark.asyncio
 async def test_realized_loss_disabled_always_allows() -> None:
-    g = RealizedLossGuard(enabled=False, threshold_usdt=None,
-                          source=_FakePnLSource(Decimal("99999"), Decimal("0"), Decimal("0")))
+    g = RealizedLossGuard(enabled=False, threshold_pct=None,
+                          source=_FakePnLSource(50.0, Decimal("0"), Decimal("0")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True
 
 
 @pytest.mark.asyncio
 async def test_realized_loss_enabled_under_threshold_allows() -> None:
-    g = RealizedLossGuard(enabled=True, threshold_usdt=50.0,
-                          source=_FakePnLSource(Decimal("30"), Decimal("0"), Decimal("0")))
+    g = RealizedLossGuard(enabled=True, threshold_pct=5.0,
+                          source=_FakePnLSource(3.0, Decimal("0"), Decimal("0")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True
 
 
 @pytest.mark.asyncio
 async def test_realized_loss_enabled_over_threshold_blocks() -> None:
-    g = RealizedLossGuard(enabled=True, threshold_usdt=50.0,
-                          source=_FakePnLSource(Decimal("75"), Decimal("0"), Decimal("0")))
+    g = RealizedLossGuard(enabled=True, threshold_pct=5.0,
+                          source=_FakePnLSource(7.0, Decimal("0"), Decimal("0")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
 
@@ -84,7 +84,7 @@ async def test_realized_loss_enabled_over_threshold_blocks() -> None:
 @pytest.mark.asyncio
 async def test_drawdown_disabled_always_allows() -> None:
     g = DrawdownGuard(enabled=False, threshold_pct=None,
-                      source=_FakePnLSource(Decimal("0"), Decimal("1000"), Decimal("500")))
+                      source=_FakePnLSource(0.0, Decimal("1000"), Decimal("500")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True
 
@@ -92,7 +92,7 @@ async def test_drawdown_disabled_always_allows() -> None:
 @pytest.mark.asyncio
 async def test_drawdown_enabled_under_threshold_allows() -> None:
     g = DrawdownGuard(enabled=True, threshold_pct=0.5,
-                      source=_FakePnLSource(Decimal("0"), Decimal("1000"), Decimal("700")))
+                      source=_FakePnLSource(0.0, Decimal("1000"), Decimal("700")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True  # 30% drawdown < 50% threshold
 
@@ -100,7 +100,7 @@ async def test_drawdown_enabled_under_threshold_allows() -> None:
 @pytest.mark.asyncio
 async def test_drawdown_enabled_over_threshold_blocks() -> None:
     g = DrawdownGuard(enabled=True, threshold_pct=0.5,
-                      source=_FakePnLSource(Decimal("0"), Decimal("1000"), Decimal("400")))
+                      source=_FakePnLSource(0.0, Decimal("1000"), Decimal("400")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False  # 60% drawdown > 50%
 
@@ -131,9 +131,9 @@ async def test_divergence_enabled_over_threshold_blocks() -> None:
 
 @pytest.mark.asyncio
 async def test_all_calibrated_guards_marked_is_calibrated() -> None:
-    src = _FakePnLSource(Decimal("0"), Decimal("0"), Decimal("0"))
+    src = _FakePnLSource(0.0, Decimal("0"), Decimal("0"))
     div_src = _FakeDivergenceSource(0.0)
-    assert RealizedLossGuard(enabled=False, threshold_usdt=None, source=src).is_calibrated
+    assert RealizedLossGuard(enabled=False, threshold_pct=None, source=src).is_calibrated
     assert DrawdownGuard(enabled=False, threshold_pct=None, source=src).is_calibrated
     assert DivergenceRateGuard(
         enabled=False, threshold_pct=None, window_minutes=None, source=div_src,
