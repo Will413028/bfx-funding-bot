@@ -869,9 +869,14 @@ async def build_daemon(
             ledger=ledger,
             caps=hg.allocation_cap.caps,
             default_cap=hg.allocation_cap.default_cap,
-            env_fallback_cap=Decimal(
-                os.environ.get("BFX_ALLOCATION_CAP_USDT", "0"),
-            ),
+            # Reuse the already-read scalar (read-once, like BuyingPowerGuard
+            # reuses balance_buffer_usdt) rather than re-reading the env var with
+            # a different default. assert_caps_invariant guarantees every
+            # configured symbol has an explicit caps entry, so this fallback is
+            # dead code for real currencies — but keeping it consistent with the
+            # reconciler's env-fallback (account_ctx.allocation_cap_usdt, also
+            # = allocation_cap) avoids a latent divergence.
+            env_fallback_cap=allocation_cap,
         ))
         # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
         # reads funding-wallet available (0 until the first live reconcile), so in
@@ -1038,6 +1043,14 @@ async def build_daemon(
             min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
             concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
             balance_buffer_usdt=balance_buffer_usdt,
+            # Phase 2: per-symbol caps/buffers so the reconciler sizes each
+            # currency against its own cap[symbol] (the real-money sizing
+            # authority). Same maps + env-fallback scalars as the per-offer
+            # guards, so sizing and guard enforcement agree on the cap.
+            caps=hg.allocation_cap.caps,
+            default_cap=hg.allocation_cap.default_cap,
+            buffers=hg.buying_power.buffers,
+            default_buffer=hg.buying_power.default_buffer,
             clock=lambda: int(time.time() * 1000),
             event_sink=stdout_sink,
             phase=config.phase,

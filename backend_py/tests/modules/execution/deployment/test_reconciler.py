@@ -42,6 +42,8 @@ class _FakeLedger:
         self, exposure: Decimal, reserved: Decimal | None = None,
         available: Decimal | None = None,
         available_by_symbol: dict[str, Decimal] | None = None,
+        exposures: dict[str, Decimal] | None = None,
+        reserved_by_symbol: dict[str, Decimal] | None = None,
     ) -> None:
         self._e = exposure
         # Default: reserved == exposure (all capital is reserved / open offers).
@@ -50,11 +52,22 @@ class _FakeLedger:
         # Default: effectively unbounded so existing cap-driven tests are unaffected.
         self._available = available if available is not None else Decimal("1000000")
         self._available_by_symbol = available_by_symbol or {}
+        # Phase 2 multi-symbol: per-symbol exposure / reserved buckets. When a
+        # symbol is absent these fall back to the scalar (single-symbol parity).
+        self._exposures = exposures or {}
+        self._reserved_by_symbol = reserved_by_symbol or {}
 
     def current_exposure(self, symbol: str) -> Decimal:
+        if symbol in self._exposures:
+            return self._exposures[symbol]
         return self._e
 
     def reserved_exposure(self, symbol: str) -> Decimal:
+        if symbol in self._reserved_by_symbol:
+            return self._reserved_by_symbol[symbol]
+        # Default reserved tracks per-symbol exposure when only exposures given.
+        if symbol in self._exposures:
+            return self._exposures[symbol]
         return self._reserved
 
     def available_balance(self, symbol: str) -> Decimal:
@@ -449,3 +462,57 @@ async def test_headroom_uses_cell_symbol_available():
     await rec.deploy()
     assert len(ex.submitted) == 1
     assert ex.submitted[0].offer_amount_usdt == 200.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Task 8: independent per-symbol gap pools (reconciler is the real-money
+# sizing authority — each currency is sized against ITS own cap[symbol], and a
+# symbol with cap=0 ships dark, producing zero offers).
+# ---------------------------------------------------------------------------
+
+
+def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
+                 quotes=None, executor=None, safety=None, event_sink=None):
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    if quotes is None:
+        quotes = [_post_quote(c.cell_id) for c in cells]
+    for q in quotes:
+        store.update(q)
+    tracker = CellDeploymentTracker()
+    ex = executor or _FakeExecutor()
+    safety = safety if safety is not None else _FakeSafety(allowed=True)
+    ledger = _FakeLedger(
+        exposure=D("0"),
+        exposures=exposures,
+        available_by_symbol=available_by_symbol,
+    )
+    rec = DeploymentReconciler(
+        store=store, tracker=tracker, ledger=ledger,
+        safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
+        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        caps=caps, default_cap=D("0"), buffers=buffers, default_buffer=D("0"),
+        clock=lambda: 1_000,
+        event_sink=event_sink if event_sink is not None else _CapturingSink(),
+        phase=Phase.CANARY,
+    )
+    return rec, ex, tracker, safety
+
+
+async def test_independent_per_symbol_gap_pools():
+    cells = [_cell("fUST", "a30"), _cell("fUSD", "a30")]   # TWO symbols
+    rec, ex, _tracker, _ = _build_multi(
+        cells=cells,
+        exposures={"fUST": D("0"), "fUSD": D("0")},
+        available_by_symbol={"fUST": D("5000"), "fUSD": D("5000")},
+        caps={"fUST": D("3000"), "fUSD": D("0")},  # fUSD disabled (dark)
+        buffers={"fUST": D("3"), "fUSD": D("3")},
+    )
+    await rec.deploy()
+    submitted = ex.submitted
+    # fUST sized against its 3000 cap; fUSD cap=0 → skipped, zero offers.
+    assert submitted, "expected fUST offers"
+    assert all(s.symbol == "fUST" for s in submitted)
+    # Lock that caps["fUST"]=3000 (the map) drives sizing, NOT the 570 _ctx() env
+    # fallback — the precise global-cap divergence this task closes.
+    assert sum(s.offer_amount_usdt for s in submitted) > 570

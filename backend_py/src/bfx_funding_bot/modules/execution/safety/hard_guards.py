@@ -105,7 +105,7 @@ class HeartbeatGuard:
         return GuardResult(allowed=True, guard_name=self.name)
 
 
-def _resolve_for_symbol(
+def resolve_for_symbol(
     mapping: dict[str, Decimal],
     symbol: str,
     env_fallback: Decimal | None,
@@ -118,7 +118,10 @@ def _resolve_for_symbol(
     3. else ``default``.
 
     Used for both AllocationCapGuard's cap and BuyingPowerGuard's buffer so the
-    fallback chain stays byte-identical across the two guards.
+    fallback chain stays byte-identical across the two guards. Public (Phase 2
+    Task 8) because the DeploymentReconciler also resolves caps/buffers with this
+    exact chain — the reconciler must size to the SAME cap the guard enforces, or
+    sizing and the per-offer guard diverge (silent under/over-deployment).
     """
     v = mapping.get(symbol)
     if v is not None:
@@ -170,7 +173,7 @@ class AllocationCapGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
-        cap = _resolve_for_symbol(
+        cap = resolve_for_symbol(
             self._caps, decision.symbol, self._env_fallback, self._default_cap,
         )
         exposure = self.ledger.current_exposure(decision.symbol)
@@ -233,7 +236,7 @@ class BuyingPowerGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
-        buffer = _resolve_for_symbol(
+        buffer = resolve_for_symbol(
             self._buffers, decision.symbol, self._env_fallback, self._default_buffer,
         )
         available = self.ledger.available_balance(decision.symbol)
