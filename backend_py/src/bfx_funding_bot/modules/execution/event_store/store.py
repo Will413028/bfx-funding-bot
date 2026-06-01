@@ -97,7 +97,7 @@ class PostgresEventStore:
         # Snapshot maintenance (same txn).
         await self._project_offer_claims(session, event, account_id)
         await self._project_position_state(
-            session, etype, account_id, getattr(_ev, "size_usdt", None),
+            session, etype, account_id, getattr(_ev, "amount", None),
             row.event_seq, occurred_at_ms,
             symbol=getattr(_ev, "symbol", None) or DEFAULT_RECONCILE_SYMBOL,
         )
@@ -141,13 +141,25 @@ class PostgresEventStore:
         if cid is None:
             return  # no cid -> nothing to key on
         now_ms: int = _ev.occurred_at_ms or 0
+        # size_usdt= targets the offer_claims DB column (not renamed); the VALUE
+        # source switches to the canonical event field `amount` where it exists.
+        # ReservationIntent/ReservationFailed predate the rename and carry only
+        # `size_usdt` (no `amount` field), so fall back to it. For the Claimed-
+        # family events amount == size_usdt (see execution.events._resolve_amount),
+        # so this is value-equivalent. `is not None` (not `or`) — a legitimate
+        # Decimal("0") amount must NOT fall through to size_usdt on the money path.
+        # NOTE(Task 11 symbol-mandatory): ReservationIntent/ReservationFailed also
+        # lack a `symbol` field; making symbol mandatory must add amount+symbol to
+        # those two events FIRST, after which this size_usdt fallback can be dropped.
+        _amount = getattr(_ev, "amount", None)
+        claim_size = _amount if _amount is not None else _ev.size_usdt
         await self._upsert_claim(
             session,
             cid=cid,
             account_id=account_id,
             state=state,
             venue_offer_id=getattr(_ev, "venue_offer_id", None),
-            size_usdt=Decimal(str(_ev.size_usdt)),
+            size_usdt=Decimal(str(claim_size)),
             signal_correlation_id=str(_ev.signal_correlation_id),
             occurred_at_ms=now_ms,
             last_updated_ms=now_ms,
@@ -393,15 +405,16 @@ class PostgresEventStore:
         for r in rows:
             if r.event_seq <= fence:
                 continue
+            # Phase 2: fUSD/fUST coexist in one event_log, so the tail fold MUST
+            # filter on payload["symbol"] == symbol — otherwise the other
+            # currency's deltas mix into this symbol's position_state row.
+            if (r.payload or {}).get("symbol") != symbol:
+                continue
             # Raw payload read (no deserialize_event) — intentional: the tail fold
-            # only needs size_usdt and stays decoupled from domain event objects.
-            # If a new event type gains a non-string-serialized size_usdt, sync
-            # this with serialization.py.
-            # Phase 1 only: a single funding currency is live, so every event in
-            # the log belongs to `symbol` and the fold is unfiltered. Phase 2 (two
-            # symbols coexisting in one event_log) MUST filter on
-            # payload["symbol"] == symbol here, or fUSD/fUST deltas mix into one row.
-            size = Decimal(str((r.payload or {}).get("size_usdt", 0) or 0))
+            # only needs the native `amount` and stays decoupled from domain event
+            # objects. If a new event type gains a non-string-serialized amount,
+            # sync this with serialization.py.
+            size = Decimal(str((r.payload or {}).get("amount", 0) or 0))
             if r.event_type == "RESERVATION_CLAIMED":
                 reserved += size
             elif r.event_type == "ORDER_FILL":

@@ -37,7 +37,8 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
             session.add(EventLogRow(
                 account_id="a", deployment_environment="ci", event_type=etype,
                 cid=seq, venue_offer_id=f"v{seq}", venue_seq=seq,
-                payload={"size_usdt": str(size), "cid": seq, "venue_offer_id": f"v{seq}",
+                payload={"amount": str(size), "size_usdt": str(size), "symbol": "fUST",
+                         "cid": seq, "venue_offer_id": f"v{seq}",
                          "credit_id": None, "fill_rate": 0.0, "reason": "x",
                          "signal_correlation_id": "00000000-0000-4000-8000-000000000000",
                          "account_id": "a", "is_simulated": False},
@@ -51,7 +52,8 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
         session.add(EventLogRow(
             account_id="a", deployment_environment="ci", event_type="ORDER_FILL",
             cid=4, venue_offer_id="v4", venue_seq=4,
-            payload={"size_usdt": "50", "cid": 4, "venue_offer_id": "v4",
+            payload={"amount": "50", "size_usdt": "50", "symbol": "fUST",
+                     "cid": 4, "venue_offer_id": "v4",
                      "credit_id": None, "fill_rate": 0.0,
                      "signal_correlation_id": "00000000-0000-4000-8000-000000000000",
                      "account_id": "a", "is_simulated": False},
@@ -67,4 +69,58 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
 
     assert ps.realized == Decimal("500")   # 450 checkpoint + 50 tail
     assert ps.reserved == Decimal("0")
+    await engine.dispose()
+
+
+def _claimed_payload(*, symbol: str, amount: Decimal, seq: int) -> dict:
+    """A RESERVATION_CLAIMED payload as serialization.py persists it: carries
+    BOTH `amount` (canonical) and `symbol`. Deliberately omits `size_usdt` so
+    this test fails if the fold still reads the legacy field (would see 0)."""
+    return {
+        "amount": str(amount),
+        "symbol": symbol,
+        "cid": seq,
+        "venue_offer_id": f"v{seq}",
+        "credit_id": None,
+        "fill_rate": 0.0,
+        "reason": "x",
+        "signal_correlation_id": "00000000-0000-4000-8000-000000000000",
+        "account_id": "default",
+        "is_simulated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rebuild_folds_two_symbols_into_two_rows():
+    """Two currencies coexist in one event_log. The tail fold MUST filter by
+    payload['symbol'] so fUST and fUSD deltas land in separate position_state
+    rows (fUST=100, NOT 140). Also proves the fold reads payload['amount'] (the
+    crafted payloads carry no size_usdt — a legacy fold would compute 0)."""
+    engine, sm = await _engine()
+    store = PostgresEventStore(deployment_environment="ci")
+    async with sm() as session:
+        session.add(EventLogRow(
+            account_id="default", deployment_environment="ci",
+            event_type="RESERVATION_CLAIMED", cid=1, venue_offer_id="v1", venue_seq=1,
+            payload=_claimed_payload(symbol="fUST", amount=Decimal("100"), seq=1),
+            occurred_at_ms=1))
+        session.add(EventLogRow(
+            account_id="default", deployment_environment="ci",
+            event_type="RESERVATION_CLAIMED", cid=2, venue_offer_id="v2", venue_seq=2,
+            payload=_claimed_payload(symbol="fUSD", amount=Decimal("40"), seq=2),
+            occurred_at_ms=2))
+        await session.commit()
+
+        await store.rebuild_snapshot_from_log(
+            session, account_id="default", deployment_environment="ci", symbol="fUST")
+        await store.rebuild_snapshot_from_log(
+            session, account_id="default", deployment_environment="ci", symbol="fUSD")
+        await session.commit()
+
+        rows = (await session.execute(select(PositionStateRow).where(
+            PositionStateRow.account_id == "default",
+            PositionStateRow.deployment_environment == "ci"))).scalars().all()
+    by_symbol = {r.symbol: r for r in rows}
+    assert by_symbol["fUST"].reserved == Decimal("100")   # NOT 140 — fold filtered by symbol
+    assert by_symbol["fUSD"].reserved == Decimal("40")
     await engine.dispose()
