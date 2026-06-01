@@ -36,7 +36,7 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: {b("realized_loss_24h")}
-    threshold_usdt: {15 if on["realized_loss_24h"] else "null"}
+    threshold_pct: {15 if on["realized_loss_24h"] else "null"}
   drawdown_from_peak:
     enabled: {b("drawdown_from_peak")}
     threshold_pct: {15 if on["drawdown_from_peak"] else "null"}

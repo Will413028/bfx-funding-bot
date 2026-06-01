@@ -45,12 +45,12 @@ class HardGuardsCfg(BaseModel):
 class _RealizedLossCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
-    threshold_usdt: Annotated[float, Field(gt=0)] | None
+    threshold_pct: Annotated[float, Field(gt=0)] | None
 
     @model_validator(mode="after")
     def _check(self) -> _RealizedLossCfg:
-        if self.enabled and self.threshold_usdt is None:
-            raise ValueError("realized_loss_24h enabled=True requires threshold_usdt")
+        if self.enabled and self.threshold_pct is None:
+            raise ValueError("realized_loss_24h enabled=True requires threshold_pct")
         return self
 
 

@@ -10,8 +10,11 @@ i.e. total funding-wallet capital for the account's currency — idle funds +
 open offers + lent principal. Interest paid raises `available` → NAV up; capital
 lost for ANY reason (bug, socialized loss, withdrawal) → NAV down.
 
-  * realized_loss_24h() = max(0, highest-NAV-in-last-24h − latest NAV)
-  * drawdown_pct()      = (all-time-peak NAV − latest NAV) / all-time-peak × 100
+  * realized_loss_pct_24h() = (highest-NAV-in-last-24h − latest NAV) / that-high × 100
+  * drawdown_pct()          = (all-time-peak NAV − latest NAV) / all-time-peak × 100
+
+Both are PERCENTAGES of the relevant high-water NAV, so the guards auto-scale
+with funded capital — no manual re-anchoring when you add/withdraw funds.
 
 Two horizons on purpose: the 24h window catches fast recent bleeding; the
 all-time peak catches slow sustained decline. The 24h window is trimmed against
@@ -59,7 +62,7 @@ def test_cold_start_returns_zero_before_any_reconcile() -> None:
     """No NAV history yet → permissive (the hard guards + BuyingPowerGuard
     already gate deployment; an L2 breaker must not block on cold start)."""
     t = ReconcileNavTracker(account_id=_ACC)
-    assert t.realized_loss_24h() == Decimal("0")
+    assert t.realized_loss_pct_24h() == 0.0
     assert t.drawdown_pct() == 0.0
 
 
@@ -70,7 +73,7 @@ async def test_nav_drop_yields_drawdown_and_loss() -> None:
     await t.on_position_reconciled(
         _reconciled(available="85", ts=_T0 + _HOUR_MS)
     )
-    assert t.realized_loss_24h() == Decimal("15")
+    assert t.realized_loss_pct_24h() == pytest.approx(15.0)
     assert t.drawdown_pct() == pytest.approx(15.0)
 
 
@@ -81,7 +84,7 @@ async def test_nav_rise_is_not_a_loss_or_drawdown() -> None:
     await t.on_position_reconciled(
         _reconciled(available="110", ts=_T0 + _HOUR_MS)
     )
-    assert t.realized_loss_24h() == Decimal("0")
+    assert t.realized_loss_pct_24h() == 0.0
     assert t.drawdown_pct() == 0.0
 
 
@@ -99,7 +102,7 @@ async def test_nav_is_available_plus_reserved_plus_realized() -> None:
             available="40", reserved="30", realized="20", ts=_T0 + _HOUR_MS
         )
     )
-    assert t.realized_loss_24h() == Decimal("10")
+    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
     assert t.drawdown_pct() == pytest.approx(10.0)
 
 
@@ -116,7 +119,7 @@ async def test_24h_window_evicts_old_high_for_loss_but_peak_is_all_time() -> Non
         _reconciled(available="90", ts=_T0 + 25 * _HOUR_MS + 60_000)
     )
     # window (last 24h) high = 100, latest = 90 → 24h loss = 10
-    assert t.realized_loss_24h() == Decimal("10")
+    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
     # all-time peak = 200 → drawdown = (200 − 90) / 200 × 100 = 55%
     assert t.drawdown_pct() == pytest.approx(55.0)
 
@@ -131,7 +134,7 @@ async def test_recovery_from_trough_tracks_latest_not_trough() -> None:
     await t.on_position_reconciled(
         _reconciled(available="95", ts=_T0 + 2 * _HOUR_MS)
     )
-    assert t.realized_loss_24h() == Decimal("5")
+    assert t.realized_loss_pct_24h() == pytest.approx(5.0)
     assert t.drawdown_pct() == pytest.approx(5.0)
 
 
@@ -156,7 +159,7 @@ async def test_ignores_other_account() -> None:
     await t.on_position_reconciled(
         _reconciled(available="10", ts=_T0 + _HOUR_MS, account_id="other")
     )
-    assert t.realized_loss_24h() == Decimal("0")
+    assert t.realized_loss_pct_24h() == 0.0
     assert t.drawdown_pct() == 0.0
 
 
@@ -173,7 +176,7 @@ async def test_single_symbol_global_api_identical_to_pre_per_symbol() -> None:
             available="40", reserved="30", realized="20", ts=_T0 + _HOUR_MS,
         )
     )  # NAV(fUST) = 90
-    assert t.realized_loss_24h() == Decimal("10")
+    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
     assert t.drawdown_pct() == pytest.approx(10.0)
 
 
@@ -193,7 +196,7 @@ async def test_two_symbols_global_nav_is_sum_of_latest_per_symbol() -> None:
     await t.on_position_reconciled(
         _reconciled(available="70", ts=_T0 + 2 * _HOUR_MS, symbol="fUST")
     )
-    # window high over the three global samples (100, 200, 170) = 200; latest 170
-    assert t.realized_loss_24h() == Decimal("30")
+    # window high (24h) = 200, latest 170 -> loss pct = (200-170)/200*100 = 15%
+    assert t.realized_loss_pct_24h() == pytest.approx(15.0)
     # all-time peak global NAV = 200 → drawdown = (200 − 170)/200 × 100 = 15%
     assert t.drawdown_pct() == pytest.approx(15.0)

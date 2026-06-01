@@ -19,7 +19,7 @@ hard_guards:
 calibrated_guards:
   realized_loss_24h:
     enabled: false           # 4.3 calibrate threshold; 4.4 enable
-    threshold_usdt: null
+    threshold_pct: null      # % of NAV (auto-scales with funded capital)
   drawdown_from_peak:
     enabled: false
     threshold_pct: null

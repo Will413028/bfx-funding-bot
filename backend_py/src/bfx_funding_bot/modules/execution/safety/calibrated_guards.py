@@ -10,7 +10,6 @@ build_daemon and never reached because enabled=false short-circuits.
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Protocol
 
 from bfx_funding_bot.modules.execution.protocols import (
@@ -21,7 +20,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 
 class _PnLSourceProtocol(Protocol):
-    def realized_loss_24h(self) -> Decimal: ...
+    def realized_loss_pct_24h(self) -> float: ...
     def drawdown_pct(self) -> float: ...
 
 
@@ -34,13 +33,13 @@ class RealizedLossGuard:
     is_calibrated = True
 
     def __init__(
-        self, *, enabled: bool, threshold_usdt: float | None,
+        self, *, enabled: bool, threshold_pct: float | None,
         source: _PnLSourceProtocol,
     ) -> None:
-        if enabled and threshold_usdt is None:
-            raise ValueError("enabled=True requires threshold_usdt")
+        if enabled and threshold_pct is None:
+            raise ValueError("enabled=True requires threshold_pct")
         self.enabled = enabled
-        self.threshold_usdt = threshold_usdt
+        self.threshold_pct = threshold_pct
         self.source = source
 
     async def evaluate(
@@ -48,12 +47,12 @@ class RealizedLossGuard:
     ) -> GuardResult:
         if not self.enabled:
             return GuardResult(allowed=True, guard_name=self.name)
-        assert self.threshold_usdt is not None  # narrow for mypy
-        loss = self.source.realized_loss_24h()
-        if loss > Decimal(str(self.threshold_usdt)):
+        assert self.threshold_pct is not None  # narrow for mypy
+        loss_pct = self.source.realized_loss_pct_24h()
+        if loss_pct > self.threshold_pct:
             return GuardResult(
                 allowed=False, guard_name=self.name,
-                reason=f"realized_loss_24h={loss} > threshold={self.threshold_usdt}",
+                reason=f"realized_loss_pct_24h={loss_pct} > threshold_pct={self.threshold_pct}",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 
