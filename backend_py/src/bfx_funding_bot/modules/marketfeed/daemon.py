@@ -788,7 +788,7 @@ async def build_daemon(
         event_sink=stdout_sink,
         phase=config.phase,
         strategy=first_cell.strategy,
-        symbol=first_cell.symbol,
+        configured_symbols=frozenset(configured_symbols(config.cells)),
         cell=first_cell.cell_id,
         http=bitfinex_http,
         bus=bus,
