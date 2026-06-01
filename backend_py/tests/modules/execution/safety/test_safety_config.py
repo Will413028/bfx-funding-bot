@@ -1,6 +1,7 @@
 """SafetyConfig yaml load + validation."""
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -93,7 +94,6 @@ def test_canary_realized_loss_threshold_is_5pct() -> None:
 
 
 def test_caps_and_buffers_maps_parse(tmp_path: Path) -> None:
-    from decimal import Decimal
     p = tmp_path / "safety.yaml"
     p.write_text("""
 hard_guards:
@@ -124,3 +124,4 @@ calibrated_guards:
     assert cfg.hard_guards.allocation_cap.caps["fUST"] == Decimal("3000")
     assert cfg.hard_guards.buying_power.buffers["fADA"] == Decimal("0")
     assert cfg.hard_guards.allocation_cap.default_cap == Decimal("0")
+    assert cfg.hard_guards.buying_power.default_buffer == Decimal("0")

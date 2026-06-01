@@ -22,7 +22,7 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: true
-    caps: {fUSD: 0, fUST: 3000, fADA: 0}
+    caps: {fUSD: 0, fUST: 3000, fADA: 0}  # parsed but guard wiring pending; BFX_ALLOCATION_CAP_USDT env still the active cap (live: 3000)
     default_cap: 0
   buying_power:
     enabled: true
