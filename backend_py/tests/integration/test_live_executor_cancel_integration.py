@@ -66,7 +66,7 @@ async def test_cancel_success_full_chain_sends_signed_post() -> None:
             bus=bus,
             phase=Phase.PAPER,
             strategy=StrategyName.RATE_PERCENTILE,
-            symbol="fUSD",
+            configured_symbols=frozenset({"fUSD"}),
             cell="fUSD_p2",
             nonce_provider=lambda: 1700000000_000_000,
             date_provider=lambda: date(2026, 5, 23),

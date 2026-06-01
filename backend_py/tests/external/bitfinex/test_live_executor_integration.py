@@ -64,7 +64,7 @@ async def test_submit_returns_submitted_on_success() -> None:
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        symbol="fUSD", cell="C-1",
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
     )
@@ -84,7 +84,7 @@ async def test_submit_returns_failed_on_http_error() -> None:
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        symbol="fUSD", cell="C-1",
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
     )
@@ -180,7 +180,7 @@ async def test_submit_failure_captures_venue_response_body() -> None:
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
         phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
-        symbol="fUST", cell="fUST_a30",
+        configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_make_decision(), _make_ctx())
@@ -211,7 +211,7 @@ async def test_cancel_publishes_cancel_requested() -> None:
     executor = BitfinexLiveExecutor(
         http=http, event_sink=_EventCapture(), bus=bus,
         phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
-        symbol="fUSD", cell="C-1",
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
     )

@@ -54,7 +54,7 @@ def build_executor(
     event_sink: _EventSink,
     phase: Phase,
     strategy: StrategyName,
-    symbol: str,
+    configured_symbols: frozenset[str] | None = None,
     cell: str,
     http: httpx.AsyncClient | None = None,
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
@@ -107,7 +107,9 @@ def build_executor(
         return ExecutorSpec(
             executor=BitfinexLiveExecutor(
                 http=http, event_sink=event_sink, bus=bus,
-                phase=phase, strategy=strategy, symbol=symbol, cell=cell,
+                phase=phase, strategy=strategy,
+                configured_symbols=configured_symbols or frozenset(),
+                cell=cell,
             ),
             fill_tracker_enabled=fill_tracker_enabled,
             ws_client_enabled=ws_client_enabled,
