@@ -372,6 +372,13 @@ class PostgresEventStore:
             await self._project_offer_claims(session, event, account_id)
 
         # position_state: checkpoint + tail.
+        # NOTE(per-currency §8 deferred): ReconcileObservationRow has NO symbol column,
+        # so this checkpoint base is symbol-blind — it seeds the snapshot from the latest
+        # observation regardless of currency. Harmless today (single active currency; the
+        # tail-fold below filters payload["symbol"]==symbol) and this method has no live
+        # caller (live boot uses set_position_snapshot per-symbol). Before a 2nd currency
+        # trades, reconcile_observation must gain a symbol column and this select must
+        # filter on it — same hard gate as the deferred NAV-split.
         checkpoint = (await session.execute(
             select(ReconcileObservationRow).where(
                 ReconcileObservationRow.account_id == account_id,
