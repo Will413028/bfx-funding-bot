@@ -25,7 +25,8 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol
+from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -67,6 +68,10 @@ class DeploymentReconciler:
         min_offer_buffer_pct: Decimal,
         concentration_pct: Decimal,
         balance_buffer_usdt: Decimal,
+        caps: dict[str, Decimal] | None = None,
+        default_cap: Decimal = Decimal("0"),
+        buffers: dict[str, Decimal] | None = None,
+        default_buffer: Decimal = Decimal("0"),
         clock: Callable[[], int],
         event_sink: _EventSinkProtocol,
         phase: Phase,
@@ -81,6 +86,16 @@ class DeploymentReconciler:
         self._min_fill = effective_min_usdt(venue_floor_usd, min_offer_buffer_pct)
         self._concentration_pct = concentration_pct
         self._balance_buffer = balance_buffer_usdt
+        # Phase 2 per-symbol sizing. caps[symbol] / buffers[symbol] are resolved
+        # via resolve_for_symbol with the legacy scalars (allocation_cap_usdt /
+        # balance_buffer_usdt) as env-fallback, so the resolved cap/buffer match
+        # exactly what AllocationCapGuard / BuyingPowerGuard enforce per offer.
+        # Defaulting the maps to {} means single-symbol constructions that omit
+        # them resolve to the scalar fallbacks (byte-identical to Phase 1).
+        self._caps = caps or {}
+        self._default_cap = default_cap
+        self._buffers = buffers or {}
+        self._default_buffer = default_buffer
         self._clock = clock
         self._event_sink = event_sink
         self._phase = phase
@@ -95,120 +110,142 @@ class DeploymentReconciler:
 
     async def deploy(self) -> None:
         now = self._clock()
-        # Phase 1: all configured cells share one currency (fUST today). Exposure,
-        # reserved, and the wallet balance clamp are read for that symbol; the
-        # global gap/sizing math is unchanged (per-symbol gap pools are Phase 2).
-        symbol = self._cell_symbol[self._cells[0].cell_id]
-        e_total = self._ledger.current_exposure(symbol)
-        # Clamp the deployable gap to funds physically present in the funding
-        # wallet (available − buffer) so the reconciler never sizes an offer the
-        # venue must reject for insufficient balance (cap>balance loop, 2026-05-29).
-        headroom = max(Decimal("0"), self._ledger.available_balance(symbol) - self._balance_buffer)
-        # Rescale per-cell intent to the *reserved* total (pending open offers),
-        # NOT to current_exposure (reserved + realized). Realized credits are
-        # committed to the venue and unattributable to any cell — using e_total
-        # here would inflate per-cell intent past cap_per_cell (factor > 1) and
-        # silently starve cells via negative allocate_gap headroom.
-        cap_per_cell = self._concentration_pct * self._ctx.allocation_cap_usdt
-        self._tracker.reconcile_to_total(
-            self._ledger.reserved_exposure(symbol),
-            cap_per_cell=cap_per_cell,
-        )
-
-        active = [c.cell_id for c in self._cells
-                  if self._store.get_active(c.cell_id, now_ms=now) is not None]
-
-        # Fills are pre-computed from this single pre-loop snapshot; the per-cell
-        # concentration cap is enforced inside allocate_gap, not incrementally as
-        # we record each submit below. Correct within a tick (sum of fills <= gap,
-        # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
-        # If a WS fill/claim lands mid-tick making this snapshot stale, the per-offer
-        # AllocationCapGuard is evaluated ONCE per offer before submit (not at the
-        # moment of submission). A fill landing in the narrow window between guard-eval
-        # and submit is NOT re-checked, so a brief over-cap is possible but
-        # self-corrects on the next ~90 s reconcile. Bitfinex enforces only account
-        # balance, not our internal cap. A stale snapshot can only under-deploy
-        # (safe), never materially over-deploy.
-        fills = allocate_gap(
-            target=self._ctx.allocation_cap_usdt,
-            current_exposure=e_total,
-            available_headroom=headroom,
-            deployed=self._tracker.snapshot(),
-            active_cells=active,
-            concentration_pct=self._concentration_pct,
-            min_fill=self._min_fill,
-        )
-        if not fills:
-            return
-
-        gap = self._ctx.allocation_cap_usdt - e_total
-        allocated = sum(fills.values(), Decimal("0"))
-        stranded = gap - allocated
-        if stranded >= self._min_fill:
-            # Attribute the stranded capital to its true cause. When the
-            # funding-wallet headroom (available − buffer) binds below the policy
-            # gap, the idle capital is balance-limited (cap > balance), not held
-            # back by the concentration cap — mislabelling it as concentration
-            # sends a partial-deployment operator down the wrong diagnostic path.
-            if headroom < gap:
-                log.info(
-                    "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
-                    "headroom=%s (balance-limited: available−buffer < policy gap) "
-                    "active=%s",
-                    gap, allocated, stranded, headroom, active,
-                )
-            else:
-                log.info(
-                    "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
-                    "(concentration cap %s/cell or no further active cell) active=%s",
-                    gap, allocated, stranded, self._concentration_pct, active,
-                )
-        elif stranded > 0:
-            log.info(
-                "deployment_capital_stranded_sub_min gap=%s allocated=%s stranded=%s "
-                "(below venue floor, not submitted) active=%s",
-                gap, allocated, stranded, active,
+        # Phase 2: each configured currency is an INDEPENDENT gap pool. The
+        # reconciler is the real-money sizing authority, so the sizing math runs
+        # once per symbol against THAT symbol's cap[symbol] / buffer[symbol] /
+        # exposure / reserved / available — fUST's gap never borrows fUSD's
+        # balance and vice versa. Single-currency cells.yaml → one iteration with
+        # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
+        for symbol in configured_symbols(self._cells):
+            # Resolve cap/buffer with the SAME three-tier chain the per-offer
+            # guards use (map[symbol] → scalar env-fallback → default), so the
+            # reconciler sizes to exactly the cap AllocationCapGuard enforces.
+            cap = resolve_for_symbol(
+                self._caps, symbol, self._ctx.allocation_cap_usdt, self._default_cap,
+            )
+            if cap == 0:
+                # cap=0 ships the currency dark; the AllocationCapGuard also blocks
+                # every POST for it (defense-in-depth). Skip sizing entirely so a
+                # dark symbol produces zero offers (no wasted guard round-trips).
+                continue
+            buffer = resolve_for_symbol(
+                self._buffers, symbol, self._balance_buffer, self._default_buffer,
+            )
+            symbol_cells = [c for c in self._cells
+                            if self._cell_symbol[c.cell_id] == symbol]
+            e_total = self._ledger.current_exposure(symbol)
+            # Clamp the deployable gap to funds physically present in the funding
+            # wallet (available − buffer) so the reconciler never sizes an offer the
+            # venue must reject for insufficient balance (cap>balance loop, 2026-05-29).
+            headroom = max(Decimal("0"), self._ledger.available_balance(symbol) - buffer)
+            # Rescale per-cell intent to the *reserved* total (pending open offers),
+            # NOT to current_exposure (reserved + realized). Realized credits are
+            # committed to the venue and unattributable to any cell — using e_total
+            # here would inflate per-cell intent past cap_per_cell (factor > 1) and
+            # silently starve cells via negative allocate_gap headroom. cells= scopes
+            # the rescale to THIS symbol's cells only (Phase 2 per-currency
+            # independence): rescaling fUST's cells must not touch fUSD's.
+            cap_per_cell = self._concentration_pct * cap
+            self._tracker.reconcile_to_total(
+                self._ledger.reserved_exposure(symbol),
+                cells=[c.cell_id for c in symbol_cells],
+                cap_per_cell=cap_per_cell,
             )
 
-        for cell_id, amount in fills.items():
-            quote = self._store.get_active(cell_id, now_ms=now)
-            if quote is None:  # defensive: TTL could lapse between checks
-                continue
-            decision = DecisionPayload(
-                decision_outcome=DecisionOutcome.POST,
-                signal_correlation_id=quote.signal_correlation_id,
-                offer_rate=quote.rate,
-                offer_amount_usdt=float(amount),
-                offer_duration_days=quote.period_days,
-                symbol=self._cell_symbol[cell_id],
+            active = [c.cell_id for c in symbol_cells
+                      if self._store.get_active(c.cell_id, now_ms=now) is not None]
+
+            # Fills are pre-computed from this single pre-loop snapshot; the per-cell
+            # concentration cap is enforced inside allocate_gap, not incrementally as
+            # we record each submit below. Correct within a tick (sum of fills <= gap,
+            # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
+            # If a WS fill/claim lands mid-tick making this snapshot stale, the per-offer
+            # AllocationCapGuard is evaluated ONCE per offer before submit (not at the
+            # moment of submission). A fill landing in the narrow window between guard-eval
+            # and submit is NOT re-checked, so a brief over-cap is possible but
+            # self-corrects on the next ~90 s reconcile. Bitfinex enforces only account
+            # balance, not our internal cap. A stale snapshot can only under-deploy
+            # (safe), never materially over-deploy.
+            fills = allocate_gap(
+                target=cap,
+                current_exposure=e_total,
+                available_headroom=headroom,
+                deployed=self._tracker.snapshot(),
+                active_cells=active,
+                concentration_pct=self._concentration_pct,
+                min_fill=self._min_fill,
             )
-            guard = await self._safety.evaluate(decision, self._ctx)
-            if not guard.allowed:
+            if not fills:
+                continue  # this symbol has no gap to fill; other symbols still deploy
+
+            gap = cap - e_total
+            allocated = sum(fills.values(), Decimal("0"))
+            stranded = gap - allocated
+            if stranded >= self._min_fill:
+                # Attribute the stranded capital to its true cause. When the
+                # funding-wallet headroom (available − buffer) binds below the policy
+                # gap, the idle capital is balance-limited (cap > balance), not held
+                # back by the concentration cap — mislabelling it as concentration
+                # sends a partial-deployment operator down the wrong diagnostic path.
+                if headroom < gap:
+                    log.info(
+                        "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
+                        "headroom=%s (balance-limited: available−buffer < policy gap) "
+                        "active=%s",
+                        gap, allocated, stranded, headroom, active,
+                    )
+                else:
+                    log.info(
+                        "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
+                        "(concentration cap %s/cell or no further active cell) active=%s",
+                        gap, allocated, stranded, self._concentration_pct, active,
+                    )
+            elif stranded > 0:
                 log.info(
-                    "deployment_skip cell=%s amount=%s guard=%s reason=%s",
-                    cell_id, amount, guard.guard_name, guard.reason,
+                    "deployment_capital_stranded_sub_min gap=%s allocated=%s stranded=%s "
+                    "(below venue floor, not submitted) active=%s",
+                    gap, allocated, stranded, active,
                 )
-                continue
-            try:
-                result = await self._executor.submit(decision, self._ctx)
-            except Exception:
-                log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
-                continue
-            # The live executor does NOT raise on a venue reject (e.g. 10001
-            # "not enough balance"): it returns a SubmittedOrder with status
-            # "failed". Only record intent + log success when the offer actually
-            # landed — otherwise we'd track phantom capital + emit a false
-            # deployment_submitted. Next reconcile re-evaluates the gap.
-            if result.status == "failed":
-                log.warning(
-                    "deployment_submit_rejected cell=%s amount=%s status=%s",
-                    cell_id, amount, result.status,
+
+            for cell_id, amount in fills.items():
+                quote = self._store.get_active(cell_id, now_ms=now)
+                if quote is None:  # defensive: TTL could lapse between checks
+                    continue
+                decision = DecisionPayload(
+                    decision_outcome=DecisionOutcome.POST,
+                    signal_correlation_id=quote.signal_correlation_id,
+                    offer_rate=quote.rate,
+                    offer_amount_usdt=float(amount),
+                    offer_duration_days=quote.period_days,
+                    symbol=self._cell_symbol[cell_id],
                 )
+                guard = await self._safety.evaluate(decision, self._ctx)
+                if not guard.allowed:
+                    log.info(
+                        "deployment_skip cell=%s amount=%s guard=%s reason=%s",
+                        cell_id, amount, guard.guard_name, guard.reason,
+                    )
+                    continue
+                try:
+                    result = await self._executor.submit(decision, self._ctx)
+                except Exception:
+                    log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
+                    continue
+                # The live executor does NOT raise on a venue reject (e.g. 10001
+                # "not enough balance"): it returns a SubmittedOrder with status
+                # "failed". Only record intent + log success when the offer actually
+                # landed — otherwise we'd track phantom capital + emit a false
+                # deployment_submitted. Next reconcile re-evaluates the gap.
+                if result.status == "failed":
+                    log.warning(
+                        "deployment_submit_rejected cell=%s amount=%s status=%s",
+                        cell_id, amount, result.status,
+                    )
+                    await self._emit_submit(cell_id, decision, result)
+                    continue
+                self._tracker.record_deploy(cell_id, amount)
+                log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
                 await self._emit_submit(cell_id, decision, result)
-                continue
-            self._tracker.record_deploy(cell_id, amount)
-            log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
-            await self._emit_submit(cell_id, decision, result)
 
     async def _emit_submit(
         self, cell_id: str, decision: DecisionPayload, result: SubmittedOrder,
