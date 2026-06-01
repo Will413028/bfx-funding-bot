@@ -85,3 +85,44 @@ def test_reconcile_to_total_no_clamp_without_cap():
     t.record_deploy("a", D("500"))
     t.reconcile_to_total(D("500"))
     assert t.deployed("a") == D("500")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: per-symbol rescale partition (cells= subset, no cross-currency contamination)
+# ---------------------------------------------------------------------------
+
+def test_rescale_is_independent_per_symbol():
+    t = CellDeploymentTracker()
+    t.record_deploy("fUST_a30", D("100"))
+    t.record_deploy("fUST_p2", D("100"))
+    t.record_deploy("fUSD_a30", D("100"))
+    t.record_deploy("fUSD_p2", D("100"))
+    t.reconcile_to_total(D("50"), cells=["fUST_a30", "fUST_p2"])  # only fUST sub-pool -> 25 each
+    snap = t.snapshot()
+    assert snap["fUST_a30"] == D("25")
+    assert snap["fUST_p2"] == D("25")
+    assert snap["fUSD_a30"] == D("100")  # untouched
+    assert snap["fUSD_p2"] == D("100")  # untouched
+
+
+def test_empty_cells_subset_is_noop():
+    # cells=[] (a symbol with no cells to rescale) must rescale nothing — distinct
+    # from cells=None (rescale all). Plausible Task-8 runtime state: zero active cells.
+    t = CellDeploymentTracker()
+    t.record_deploy("fUST_a30", D("100"))
+    t.record_deploy("fUSD_a30", D("100"))
+    t.reconcile_to_total(D("50"), cells=[])
+    snap = t.snapshot()
+    assert snap["fUST_a30"] == D("100")
+    assert snap["fUSD_a30"] == D("100")
+
+
+def test_unknown_cell_id_in_subset_plants_no_phantom():
+    # Unknown ids contribute 0 to the sum and are skipped on write — no phantom
+    # 0-entry in the snapshot.
+    t = CellDeploymentTracker()
+    t.record_deploy("fUST_a30", D("100"))
+    t.reconcile_to_total(D("50"), cells=["fUST_a30", "ghost"])
+    snap = t.snapshot()
+    assert snap["fUST_a30"] == D("50")
+    assert "ghost" not in snap
