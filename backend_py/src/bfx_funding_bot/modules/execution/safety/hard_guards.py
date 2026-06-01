@@ -105,6 +105,27 @@ class HeartbeatGuard:
         return GuardResult(allowed=True, guard_name=self.name)
 
 
+def _resolve_for_symbol(
+    mapping: dict[str, Decimal],
+    symbol: str,
+    env_fallback: Decimal | None,
+    default: Decimal,
+) -> Decimal:
+    """Three-tier per-symbol value resolution shared by the per-symbol guards.
+
+    1. explicit ``mapping[symbol]`` (the Phase 2 per-symbol config map);
+    2. else ``env_fallback`` when provided (the legacy global env scalar);
+    3. else ``default``.
+
+    Used for both AllocationCapGuard's cap and BuyingPowerGuard's buffer so the
+    fallback chain stays byte-identical across the two guards.
+    """
+    v = mapping.get(symbol)
+    if v is not None:
+        return v
+    return env_fallback if env_fallback is not None else default
+
+
 class _LedgerProtocol(Protocol):
     def current_exposure(self, symbol: str) -> Decimal: ...
 
@@ -149,13 +170,9 @@ class AllocationCapGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
-        cap = self._caps.get(decision.symbol)
-        if cap is None:
-            cap = (
-                self._env_fallback
-                if self._env_fallback is not None
-                else self._default_cap
-            )
+        cap = _resolve_for_symbol(
+            self._caps, decision.symbol, self._env_fallback, self._default_cap,
+        )
         exposure = self.ledger.current_exposure(decision.symbol)
         offer = Decimal(str(decision.offer_amount_usdt))
         projected = exposure + offer
@@ -182,14 +199,29 @@ class BuyingPowerGuard:
     cumulative control; this is a per-offer backstop so an over-balance offer
     never leaves the process (avoids relying on the venue's 10001 rejection).
     SKIP/CANCEL bypass; exactly-at-(available−buffer) allows.
+
+    Phase 2: the buffer is PER-SYMBOL. ``buffers`` maps symbol → buffer (e.g.
+    {"fUST": 3, "fUSD": 3}). A symbol absent from ``buffers`` falls back to
+    ``env_fallback_buffer`` (the legacy global BFX_BALANCE_BUFFER_USDT env value)
+    when provided, else to ``default_buffer``. Available balance is read
+    per-symbol so currency funding-wallet buckets stay isolated.
     """
 
     name = "buying_power"
     is_calibrated = False
 
-    def __init__(self, *, ledger: _BalanceLedgerProtocol, buffer_usdt: Decimal) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: _BalanceLedgerProtocol,
+        buffers: dict[str, Decimal],
+        default_buffer: Decimal,
+        env_fallback_buffer: Decimal | None = None,
+    ) -> None:
         self.ledger = ledger
-        self.buffer_usdt = buffer_usdt
+        self._buffers = buffers
+        self._default_buffer = default_buffer
+        self._env_fallback = env_fallback_buffer
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -201,15 +233,18 @@ class BuyingPowerGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
+        buffer = _resolve_for_symbol(
+            self._buffers, decision.symbol, self._env_fallback, self._default_buffer,
+        )
         available = self.ledger.available_balance(decision.symbol)
-        deployable = available - self.buffer_usdt
+        deployable = available - buffer
         offer = Decimal(str(decision.offer_amount_usdt))
         if offer > deployable:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"symbol={decision.symbol} offer={offer} > "
-                    f"available={available}−buffer={self.buffer_usdt}={deployable}"
+                    f"available={available}−buffer={buffer}={deployable}"
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)

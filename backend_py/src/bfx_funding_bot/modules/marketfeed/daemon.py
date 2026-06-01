@@ -880,7 +880,17 @@ async def build_daemon(
         # live-only; gate here so that contract is local to the guard rather than
         # an emergent invariant a future sim-path chain evaluation could violate.
         if not spec.is_simulated:
-            guards.append(BuyingPowerGuard(ledger=ledger, buffer_usdt=balance_buffer_usdt))
+            guards.append(BuyingPowerGuard(
+                ledger=ledger,
+                buffers=hg.buying_power.buffers,
+                default_buffer=hg.buying_power.default_buffer,
+                # Legacy global scalar as fallback for any symbol absent from the
+                # buffers map. Reuses the same env value the DeploymentReconciler
+                # clamp consumes (balance_buffer_usdt), so for the live
+                # single-symbol (fUST) case the resolved buffer equals the scalar
+                # and no double subtraction occurs.
+                env_fallback_buffer=balance_buffer_usdt,
+            ))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
