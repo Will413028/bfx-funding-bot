@@ -55,7 +55,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     chain = SafetyGuardChain(
-        guards=[AllocationCapGuard(ledger=ledger)],
+        guards=[AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))],
         probe=probe,
         diagnostics=diagnostics,
         phase=Phase.PAPER,

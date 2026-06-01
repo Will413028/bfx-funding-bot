@@ -147,7 +147,7 @@ class _FakeLedger:
 async def test_allocation_cap_allows_under_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     ledger = _FakeLedger({"fUST": Decimal("100")})
-    g = AllocationCapGuard(ledger=ledger)
+    g = AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))
     decision = _post()  # offer_amount_usdt=100, symbol=fUST
     r = await g.evaluate(decision, ctx)
     assert r.allowed is True
@@ -157,7 +157,7 @@ async def test_allocation_cap_allows_under_cap() -> None:
 async def test_allocation_cap_blocks_over_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     ledger = _FakeLedger({"fUST": Decimal("450")})
-    g = AllocationCapGuard(ledger=ledger)
+    g = AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))
     decision = _post()  # 100 → 450+100=550 > 500
     r = await g.evaluate(decision, ctx)
     assert r.allowed is False
@@ -169,7 +169,7 @@ async def test_allocation_cap_blocks_over_cap() -> None:
 async def test_allocation_cap_edge_at_exactly_cap() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     ledger = _FakeLedger({"fUST": Decimal("400")})  # 400 + 100 = 500 (exactly)
-    g = AllocationCapGuard(ledger=ledger)
+    g = AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))
     r = await g.evaluate(_post(), ctx)
     # Exactly at cap = allowed; strictly over blocks.
     assert r.allowed is True
@@ -179,7 +179,7 @@ async def test_allocation_cap_edge_at_exactly_cap() -> None:
 async def test_allocation_cap_skip_decision_always_allowed() -> None:
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("100"))
     ledger = _FakeLedger({"fUST": Decimal("99999")})
-    g = AllocationCapGuard(ledger=ledger)
+    g = AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("100"))
     skip = DecisionPayload(
         decision_outcome=DecisionOutcome.SKIP,
         signal_correlation_id=uuid4(),
@@ -196,13 +196,49 @@ async def test_allocation_cap_isolates_buckets_per_symbol() -> None:
     # fUSD POST: the guard reads ONLY decision.symbol's exposure, never a sum.
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
     ledger = _FakeLedger({"fUST": Decimal("500")})  # fUSD absent → reads 0
-    g = AllocationCapGuard(ledger=ledger)
+    g = AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500"))
 
     blocked = await g.evaluate(_post(symbol="fUST"), ctx)  # 500+100=600 > 500
     assert blocked.allowed is False
 
     allowed = await g.evaluate(_post(symbol="fUSD"), ctx)  # 0+100=100 <= 500
     assert allowed.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_reads_per_symbol_cap() -> None:
+    # Per-symbol cap map: fUSD cap=0 (dark) blocks any POST; fUST cap=3000 allows.
+    # The map is the source of cap, not ctx.allocation_cap_usdt.
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("3000"))
+    ledger = _FakeLedger({"fUST": Decimal("100"), "fUSD": Decimal("0")})
+    g = AllocationCapGuard(
+        ledger=ledger,
+        caps={"fUST": Decimal("3000"), "fUSD": Decimal("0")},
+        default_cap=Decimal("0"),
+    )
+    # fUSD cap=0 → any POST blocked
+    r = await g.evaluate(_post_decision(10.0, symbol="fUSD"), ctx)
+    assert r.allowed is False
+    assert "fUSD" in (r.reason or "")
+    # fUST has room
+    allowed = await g.evaluate(_post_decision(10.0, symbol="fUST"), ctx)
+    assert allowed.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_allocation_cap_env_fallback_for_unlisted_symbol() -> None:
+    # A symbol absent from the caps map falls back to env_fallback_cap (not the
+    # zero default_cap), so an unlisted symbol still routes to the env global cap.
+    ctx = AccountContext("default", Credentials("k", "s"), Decimal("0"))
+    ledger = _FakeLedger({"fUST": Decimal("100")})
+    g = AllocationCapGuard(
+        ledger=ledger,
+        caps={},  # fUST not in map
+        default_cap=Decimal("0"),
+        env_fallback_cap=Decimal("3000"),
+    )
+    r = await g.evaluate(_post_decision(50.0, symbol="fUST"), ctx)
+    assert r.allowed is True  # 100 + 50 = 150 <= 3000 (env fallback)
 
 
 class _FakeBalanceLedger:
