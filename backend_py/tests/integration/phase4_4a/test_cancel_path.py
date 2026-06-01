@@ -85,7 +85,7 @@ async def test_cancel_then_foc_emits_user_cancel(
     await fake_ws.close()
 
     # 5. Assertions
-    assert ledger.current_exposure() == Decimal("0")
+    assert ledger.current_exposure("fUSD") == Decimal("0")
     assert registry.snapshot()[voi].state.value == "released"
 
     release_rows = [r for r in event_sink_stub.rows if r["event_type"] == "ReservationReleased"]

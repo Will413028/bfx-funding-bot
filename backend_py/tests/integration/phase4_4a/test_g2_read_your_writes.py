@@ -26,5 +26,5 @@ async def test_after_publish_returns_ledger_already_updated(
     symbol="fUST"))
 
     # Immediately after publish returns — both ledger + registry reflect
-    assert ledger.current_exposure() == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
     assert "42" in registry.snapshot()

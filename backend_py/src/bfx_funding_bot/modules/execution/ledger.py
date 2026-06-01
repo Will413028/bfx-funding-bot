@@ -10,8 +10,11 @@ realized: matched credits (actual exposure earning APR). L2 guards
 (DrawdownGuard / DivergenceRateGuard, Phase 4.4) use realized only.
 
 Counters are keyed by symbol (e.g. "fUST", "fUSD"). Each symbol bucket
-is isolated — cross-symbol sums are available via the no-arg getter path
-(transitional back-compat; removed once all callers pass symbol explicitly).
+is isolated; every read getter requires an explicit symbol. For a
+cross-symbol total use the explicit total_exposure_all_symbols() helper —
+never an implicit no-arg getter (that backdoor was removed so a guard /
+reconciler that forgets a symbol fails loudly instead of silently summing
+across currencies on the money path).
 
 floor-at-0 on RELEASE without prior CLAIM: edge case where CLAIMED
 event not yet reflected in snapshot. Tracked via replay_floor_hit_count;
@@ -155,18 +158,15 @@ class PaperPositionLedger:
 
     # ---------- public getters ----------
 
-    def current_exposure(self, symbol: str | None = None) -> Decimal:
+    def current_exposure(self, symbol: str) -> Decimal:
         """For AllocationCapGuard: reserved + realized for THIS symbol (native
-        units; never cross-symbol). `symbol=None` returns the cross-symbol SUM —
-        a transitional back-compat path for un-migrated callers; the deferred
-        cleanup makes `symbol` required and drops the None branch."""
-        if symbol is None:
-            return sum(self._reserved.values(), Decimal("0")) + sum(self._realized.values(), Decimal("0"))
+        units; never cross-symbol). `symbol` is required — for a cross-symbol
+        total use total_exposure_all_symbols()."""
         return self._reserved.get(symbol, Decimal("0")) + self._realized.get(
             symbol, Decimal("0")
         )
 
-    def reserved_exposure(self, symbol: str | None = None) -> Decimal:
+    def reserved_exposure(self, symbol: str) -> Decimal:
         """Pending open-offer capital only (placed but not yet matched).
 
         Used by CellDeploymentTracker.reconcile_to_total to rescale per-cell
@@ -174,33 +174,38 @@ class PaperPositionLedger:
         are committed and unattributable to any specific cell; including them in
         the rescale factor would inflate per-cell intent past cap_per_cell.
 
-        `symbol=None` → cross-symbol SUM (transitional back-compat for
-        un-migrated callers; deferred cleanup makes `symbol` required).
+        `symbol` is required — never sum across currencies implicitly.
         """
-        if symbol is None:
-            return sum(self._reserved.values(), Decimal("0"))
         return self._reserved.get(symbol, Decimal("0"))
 
-    def realized_exposure(self, symbol: str | None = None) -> Decimal:
+    def realized_exposure(self, symbol: str) -> Decimal:
         """Matched credits only, for this symbol.
 
         For L2 guards (DrawdownGuard etc., Phase 4.4): matched credits only.
-        `symbol=None` → cross-symbol SUM (transitional).
+        `symbol` is required — never sum across currencies implicitly.
         """
-        if symbol is None:
-            return sum(self._realized.values(), Decimal("0"))
         return self._realized.get(symbol, Decimal("0"))
 
-    def available_balance(self, symbol: str | None = None) -> Decimal:
+    def available_balance(self, symbol: str) -> Decimal:
         """Funding-wallet available balance from the last reconcile (in-memory;
         not persisted). 0 until the first reconcile populates it — fail-closed
         (the reconciler deploys nothing on unknown funds). Read by the
         DeploymentReconciler balance clamp and BuyingPowerGuard.
 
-        `symbol=None` → cross-symbol SUM (transitional back-compat).
+        `symbol` is required — never sum across currencies implicitly.
         """
-        if symbol is None:
-            return sum(self._available.values(), Decimal("0"))
         return self._available.get(symbol, Decimal("0"))
+
+    def total_exposure_all_symbols(self) -> Decimal:
+        """Explicit, non-hot-path cross-symbol total (reserved + realized,
+        summed over every symbol bucket).
+
+        This is the sanctioned replacement for the removed implicit no-arg
+        getter sum: when you genuinely want a total across all currencies, call
+        this by name. Hot-path guards must read a single symbol's getter.
+        """
+        return sum(self._reserved.values(), Decimal("0")) + sum(
+            self._realized.values(), Decimal("0")
+        )
 
 

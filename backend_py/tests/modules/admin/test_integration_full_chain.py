@@ -71,14 +71,14 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
         cell="bfx_USDT",
     )
 
-    before_reserved = prod_ledger.current_exposure()
-    before_realized = prod_ledger.realized_exposure()
+    # Invariant: smoke touches 0 prod state — assert the whole-ledger
+    # cross-symbol total is unchanged (explicit helper; no per-symbol intent).
+    before_total = prod_ledger.total_exposure_all_symbols()
 
     result = await runner.run_l2()
 
     assert result.status == "pass"
-    assert prod_ledger.current_exposure() == before_reserved
-    assert prod_ledger.realized_exposure() == before_realized
+    assert prod_ledger.total_exposure_all_symbols() == before_total
     assert prod_ledger.replay_floor_hit_count == 0
 
 

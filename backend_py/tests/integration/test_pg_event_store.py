@@ -122,7 +122,7 @@ async def test_ledger_from_snapshot(pg_session_factory) -> None:
     async with pg_session_factory() as s:
         ledger = await PaperPositionLedger.from_snapshot(s, account_id="snapA",
                                                          deployment_environment="ci")
-    assert ledger.current_exposure() == Decimal("7")
+    assert ledger.current_exposure("fUST") == Decimal("7")
 
 
 async def test_registry_from_snapshot(pg_session_factory) -> None:

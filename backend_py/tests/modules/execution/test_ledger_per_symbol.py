@@ -4,6 +4,8 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     PositionReconciled,
@@ -132,12 +134,25 @@ async def test_reconciled_other_account_ignored() -> None:
     assert led.current_exposure("fUST") == Decimal("0")
 
 
-async def test_no_arg_getters_return_cross_symbol_sum() -> None:
+def test_getters_require_symbol() -> None:
+    """The no-arg cross-symbol-sum backdoor is gone: a caller that forgets to
+    pass a symbol must fail loudly (TypeError), never silently get a summed-
+    across-currencies value on the money path."""
     led = PaperPositionLedger(account_id="default")
-    await led.on_reservation_claimed(_claim("fUST", "100"))
-    await led.on_reservation_claimed(_claim("fUSD", "30"))
-    await led.on_order_filled(_fill("fUST", "40", venue_offer_id="o-ust", venue_seq=1))
-    # transitional None-path: sum across both symbols
-    assert led.reserved_exposure() == Decimal("90")    # (100-40) fUST + 30 fUSD
-    assert led.realized_exposure() == Decimal("40")    # 40 fUST + 0 fUSD
-    assert led.current_exposure() == Decimal("130")    # reserved 90 + realized 40
+    with pytest.raises(TypeError):
+        led.current_exposure()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        led.reserved_exposure()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        led.realized_exposure()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        led.available_balance()  # type: ignore[call-arg]
+
+
+async def test_total_helper_is_explicit_non_hot_path() -> None:
+    """The sanctioned replacement for the removed implicit sum: cross-symbol
+    totals must go through this explicit, named method."""
+    led = PaperPositionLedger(account_id="default")
+    await led.on_reservation_claimed(_claim("fUST", "10"))
+    await led.on_reservation_claimed(_claim("fUSD", "5"))
+    assert led.total_exposure_all_symbols() == Decimal("15")
