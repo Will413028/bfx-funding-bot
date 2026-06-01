@@ -110,7 +110,13 @@ class _LedgerProtocol(Protocol):
 
 
 class AllocationCapGuard:
-    """Block POST decision when current_exposure + offer_amount > cap.
+    """Block POST decision when current_exposure + offer_amount > caps[symbol].
+
+    Phase 2: the cap is PER-SYMBOL. ``caps`` maps symbol → cap (e.g.
+    {"fUST": 3000, "fUSD": 0}); a symbol with cap=0 is dark (every POST
+    blocked). A symbol absent from ``caps`` falls back to ``env_fallback_cap``
+    (the legacy global BFX_ALLOCATION_CAP_USDT env value) when provided, else to
+    ``default_cap``. Exposure is read per-symbol so currency buckets are isolated.
 
     SKIP decisions always allowed (no cap consumption). Exactly-at-cap
     allows; strictly over blocks (so cap=500, exposure=400, offer=100 → allowed
@@ -120,8 +126,18 @@ class AllocationCapGuard:
     name = "allocation_cap"
     is_calibrated = False
 
-    def __init__(self, *, ledger: _LedgerProtocol) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: _LedgerProtocol,
+        caps: dict[str, Decimal],
+        default_cap: Decimal,
+        env_fallback_cap: Decimal | None = None,
+    ) -> None:
         self.ledger = ledger
+        self._caps = caps
+        self._default_cap = default_cap
+        self._env_fallback = env_fallback_cap
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -133,15 +149,22 @@ class AllocationCapGuard:
                 allowed=False, guard_name=self.name,
                 reason="POST decision missing offer_amount_usdt",
             )
+        cap = self._caps.get(decision.symbol)
+        if cap is None:
+            cap = (
+                self._env_fallback
+                if self._env_fallback is not None
+                else self._default_cap
+            )
         exposure = self.ledger.current_exposure(decision.symbol)
         offer = Decimal(str(decision.offer_amount_usdt))
         projected = exposure + offer
-        if projected > ctx.allocation_cap_usdt:
+        if projected > cap:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"symbol={decision.symbol} exposure={exposure}+offer={offer}"
-                    f" → {projected} > cap={ctx.allocation_cap_usdt}"
+                    f" → {projected} > cap={cap}"
                 ),
             )
         return GuardResult(allowed=True, guard_name=self.name)

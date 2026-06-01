@@ -865,7 +865,14 @@ async def build_daemon(
             watched_sub_tasks=["ws"],
         ))
     if hg.allocation_cap.enabled:
-        guards.append(AllocationCapGuard(ledger=ledger))
+        guards.append(AllocationCapGuard(
+            ledger=ledger,
+            caps=hg.allocation_cap.caps,
+            default_cap=hg.allocation_cap.default_cap,
+            env_fallback_cap=Decimal(
+                os.environ.get("BFX_ALLOCATION_CAP_USDT", "0"),
+            ),
+        ))
         # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
         # reads funding-wallet available (0 until the first live reconcile), so in
         # the simulated path it would block every POST. The chain is inert in sim
