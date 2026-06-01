@@ -186,6 +186,7 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         max_attempts=1,
         backoff_base_s=0,
         clock=lambda: _NOW,
+        symbol="fUST",
     )
 
     # 3. REAL PeriodicReconcile loop — NO ws_dispatcher, NO WS events fired.
@@ -249,6 +250,7 @@ async def test_reconcile_run_reports_the_release_as_divergence(
         max_attempts=1,
         backoff_base_s=0,
         clock=lambda: _NOW,
+        symbol="fUST",
     )
 
     result = await recovery.run()

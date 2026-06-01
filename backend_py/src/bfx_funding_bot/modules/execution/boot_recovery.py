@@ -117,7 +117,7 @@ def compute_recovery_actions(
     now_ms: int,
     grace_ms: int,
     action_grace_ms: int = 0,
-    symbol: str = "fUSD",
+    symbol: str,
 ) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append.
 
@@ -179,13 +179,13 @@ def _is_transient_status(status_code: int) -> bool:
 
 class _ActiveOffersQuery(Protocol):
     async def get_active_funding_offers(
-        self, *, ctx: AccountContext, symbol: str = "fUSD",
+        self, *, ctx: AccountContext, symbol: str,
     ) -> list[ActiveFundingOffer]: ...
 
 
 class _ActiveCreditsQuery(Protocol):
     async def get_active_funding_credits(
-        self, *, ctx: AccountContext, symbol: str = "fUSD",
+        self, *, ctx: AccountContext, symbol: str,
     ) -> list[ActiveFundingCredit]: ...
 
 
@@ -232,7 +232,7 @@ class BootRecovery:
         bus: _Bus,
         offer_registry: _FsmSink | None = None,
         is_simulated: bool = False,
-        symbol: str = "fUSD",
+        symbol: str | None = None,
         symbols: list[str] | None = None,
         grace_ms: int = 120_000,
         action_grace_ms: int = 0,
@@ -251,7 +251,12 @@ class BootRecovery:
         # Configured symbols drive the per-symbol reconcile loop. Back-compat:
         # the legacy single `symbol` kwarg maps to a 1-element list. Dedup while
         # preserving order so a misconfigured duplicate cell can't fire twice.
-        raw = symbols if symbols is not None else [symbol]
+        if symbols is not None:
+            raw = symbols
+        elif symbol is not None:
+            raw = [symbol]
+        else:
+            raise ValueError("BootRecovery requires `symbols` (preferred) or the legacy `symbol`")
         seen: set[str] = set()
         self._symbols: list[str] = []
         for s in raw:

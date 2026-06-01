@@ -50,7 +50,7 @@ def _recovery(offers, store, session_factory, account_id, *, clock=lambda: 5_000
     return BootRecovery(
         store=store, session_factory=session_factory, auth_rest=_StubAuthRest(offers),
         account_ctx=_ctx(account_id), deployment_environment=_ENV, bus=DomainEventBus(),
-        is_simulated=False, grace_ms=120_000, clock=clock,
+        is_simulated=False, grace_ms=120_000, clock=clock, symbol="fUST",
     )
 
 
