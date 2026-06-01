@@ -26,6 +26,10 @@ def _ctx() -> AccountContext:
     return AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
 
+def _post_for(symbol: str) -> DecisionPayload:
+    return _post().model_copy(update={"symbol": symbol})
+
+
 def _post() -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST,
@@ -47,6 +51,24 @@ class _FakePnLSource:
         if self.peak == 0:
             return 0.0
         return float((self.peak - self.current) / self.peak * 100)
+
+
+class _PerSymbolFakePnLSource:
+    """Returns DIFFERENT loss/drawdown per symbol, so a guard that ignored
+    decision.symbol (or hard-coded a bucket) would fail these tests."""
+    def __init__(
+        self,
+        loss_by_symbol: dict[str, float] | None = None,
+        dd_by_symbol: dict[str, float] | None = None,
+    ) -> None:
+        self.loss_by_symbol = loss_by_symbol or {}
+        self.dd_by_symbol = dd_by_symbol or {}
+
+    def realized_loss_pct_24h(self, symbol: str) -> float:
+        return self.loss_by_symbol.get(symbol, 0.0)
+
+    def drawdown_pct(self, symbol: str) -> float:
+        return self.dd_by_symbol.get(symbol, 0.0)
 
 
 class _FakeDivergenceSource:
@@ -138,3 +160,23 @@ async def test_all_calibrated_guards_marked_is_calibrated() -> None:
     assert DivergenceRateGuard(
         enabled=False, threshold_pct=None, window_minutes=None, source=div_src,
     ).is_calibrated
+
+
+@pytest.mark.asyncio
+async def test_realized_loss_blocks_only_the_breaching_symbol() -> None:
+    """fUSD over its own 24h loss threshold must NOT block fUST — and fUST,
+    with a real but under-threshold loss (3% < 5%), is still allowed."""
+    src = _PerSymbolFakePnLSource(loss_by_symbol={"fUSD": 7.0, "fUST": 3.0})
+    g = RealizedLossGuard(enabled=True, threshold_pct=5.0, source=src)
+    assert (await g.evaluate(_post_for("fUSD"), _ctx())).allowed is False
+    assert (await g.evaluate(_post_for("fUST"), _ctx())).allowed is True
+
+
+@pytest.mark.asyncio
+async def test_drawdown_blocks_only_the_breaching_symbol() -> None:
+    """fUSD over its own drawdown threshold must NOT block fUST — and fUST,
+    with a real but under-threshold drawdown (8% < 10%), is still allowed."""
+    src = _PerSymbolFakePnLSource(dd_by_symbol={"fUSD": 12.0, "fUST": 8.0})
+    g = DrawdownGuard(enabled=True, threshold_pct=10.0, source=src)
+    assert (await g.evaluate(_post_for("fUSD"), _ctx())).allowed is False
+    assert (await g.evaluate(_post_for("fUST"), _ctx())).allowed is True
