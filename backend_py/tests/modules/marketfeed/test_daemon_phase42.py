@@ -159,6 +159,8 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: {b("allocation_cap", True)}
+    caps: {{fUSD: 0, fUST: 3000}}
+    default_cap: 0
   buying_power:
     enabled: true
 calibrated_guards:
@@ -250,7 +252,7 @@ hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap: {enabled: true}
+  allocation_cap: {enabled: true, caps: {fUSD: 0, fUST: 3000}, default_cap: 0}
   buying_power: {enabled: true}
 calibrated_guards:
   realized_loss_24h:

@@ -92,7 +92,11 @@ from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     RealizedLossGuard,
 )
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.config import SafetyConfig, load_safety_config
+from bfx_funding_bot.modules.execution.safety.config import (
+    SafetyConfig,
+    _AllocationCapCfg,
+    load_safety_config,
+)
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
@@ -645,6 +649,27 @@ def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> Non
         )
 
 
+def assert_caps_invariant(
+    phase: Phase, cells: list[CellConfig], alloc_cfg: _AllocationCapCfg
+) -> None:
+    """Every configured-cell symbol needs an explicit caps entry; >0 under canary.
+
+    Config-fatal at boot (raises ValueError) — a configured currency with no
+    explicit cap (or a zero cap under real money) is an operator mistake that
+    must abort startup, not silently fall through to default_cap.
+    """
+    for symbol in configured_symbols(cells):
+        if symbol not in alloc_cfg.caps:
+            raise ValueError(
+                f"caps invariant: configured symbol {symbol!r} has no explicit caps entry"
+            )
+        if phase == Phase.CANARY and alloc_cfg.caps[symbol] <= 0:
+            raise ValueError(
+                f"caps invariant: canary symbol {symbol!r} cap must be > 0, "
+                f"got {alloc_cfg.caps[symbol]}"
+            )
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -773,6 +798,17 @@ async def build_daemon(
     assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
+    # Phase 2: every configured currency must have an explicit cap (and >0 under
+    # canary) — config-fatal otherwise. Then log the effective cap per symbol so
+    # the boot log is the authoritative record of how much real money each
+    # currency may deploy.
+    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+    log.info(
+        "effective_cap_per_symbol %s",
+        # assert_caps_invariant (above) already proved every configured symbol has
+        # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
+        {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
+    )
     # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
