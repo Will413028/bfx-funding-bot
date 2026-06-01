@@ -42,7 +42,7 @@ def _claim(cid, voi, state, size="100", scid=None, occurred=0):
 def _actions(venue, local, grace_ms=120_000, now=_NOW):
     return compute_recovery_actions(
         venue_offers=venue, local_claims=local, account_id=_ACC,
-        is_simulated=False, now_ms=now, grace_ms=grace_ms,
+        is_simulated=False, now_ms=now, grace_ms=grace_ms, symbol="fUSD",
     )
 
 
@@ -123,6 +123,10 @@ class _FailingAuthRest:
 
 
 def _boot_recovery(auth_rest, **kw):
+    # Preserve the old default-fUSD behaviour for callers that pass neither
+    # symbol nor symbols (BootRecovery now fails loud if both are absent).
+    if "symbol" not in kw and "symbols" not in kw:
+        kw["symbol"] = "fUSD"
     return BootRecovery(
         store=None, session_factory=None, auth_rest=auth_rest,  # type: ignore[arg-type]
         account_ctx=AccountContext(
@@ -144,6 +148,7 @@ def test_action_grace_skips_recent_orphan():
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        symbol="fUSD",
     )
     assert acts == []
 
@@ -153,6 +158,7 @@ def test_action_grace_skips_recent_missing_claim():
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        symbol="fUSD",
     )
     assert acts == []
 
@@ -162,6 +168,7 @@ def test_action_grace_releases_stale_missing_claim():
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        symbol="fUSD",
     )
     assert len(acts) == 1
     assert isinstance(acts[0], ReservationReleased)
@@ -176,6 +183,7 @@ def test_action_grace_claims_stale_orphan():
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        symbol="fUSD",
     )
     assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
 
@@ -187,7 +195,7 @@ def test_action_grace_zero_preserves_boot_behaviour():
     )
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUSD",
     )
     assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
 
@@ -275,6 +283,10 @@ class _StubAuthRest:
 
 def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
     """Construct a BootRecovery with all real stubs wired (for run() tests)."""
+    # Preserve the old default-fUSD behaviour for callers that pass neither
+    # symbol nor symbols (BootRecovery now fails loud if both are absent).
+    if "symbol" not in kw and "symbols" not in kw:
+        kw["symbol"] = "fUSD"
     return BootRecovery(
         store=store,
         session_factory=session_factory,
@@ -620,16 +632,18 @@ def test_missing_claim_released_carries_reconciler_symbol() -> None:
     assert isinstance(acts[0], ReservationReleased) and acts[0].symbol == "fUST"
 
 
-def test_compute_recovery_actions_symbol_defaults_to_fusd() -> None:
+def test_compute_recovery_actions_requires_symbol() -> None:
+    """fail-loud: symbol is a required kwarg (no silent fUSD default) so a
+    forgotten symbol raises instead of mis-routing capital to fUSD."""
     offer = ActiveFundingOffer(
         venue_offer_id="111", symbol="fUSD", amount=Decimal("50"),
         rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
     )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbol → default
-    )
-    assert acts[0].symbol == "fUSD"
+    with pytest.raises(TypeError):
+        compute_recovery_actions(
+            venue_offers=[offer], local_claims=[], account_id=_ACC,
+            is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbol → TypeError
+        )
 
 
 # ── Per-symbol plumbing (Cluster D Task 1) ───────────────────────────────────
@@ -699,6 +713,28 @@ async def test_legacy_symbol_kwarg_still_constructs_single_symbol():
     assert len(pr) == 1
     assert pr[0].symbol == "fUST"
     assert pr[0].realized == Decimal("150")
+
+
+def test_boot_recovery_requires_symbol_or_symbols():
+    """fail-loud: constructing with NEITHER symbol nor symbols raises (no silent
+    fUSD default) so a forgotten currency can't silently reconcile fUSD."""
+    auth = _StubAuthRestFull(offers=[], credits=[])
+    with pytest.raises(ValueError):
+        BootRecovery(
+            store=_StubStore(),
+            session_factory=_StubSessionFactory(),
+            auth_rest=auth,
+            account_ctx=AccountContext(
+                account_id="default",
+                credentials=Credentials(api_key="k", api_secret="s"),
+                allocation_cap_usdt=Decimal("1"),
+            ),
+            deployment_environment="ci",
+            bus=_StubBus(),
+            max_attempts=1,
+            backoff_base_s=0,
+            clock=lambda: _NOW,
+        )
 
 
 # ── Multi-symbol reconcile loop (Cluster D Task 2) ───────────────────────────

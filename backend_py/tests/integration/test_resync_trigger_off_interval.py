@@ -82,7 +82,7 @@ async def test_resync_request_reconciles_off_interval(
         ),
         deployment_environment=_ENV, bus=bus, is_simulated=False,
         action_grace_ms=_ACTION_GRACE_MS, max_attempts=1, backoff_base_s=0,
-        clock=lambda: _NOW,
+        clock=lambda: _NOW, symbol="fUST",
     )
     recovery = _CountingRecovery(inner)
 

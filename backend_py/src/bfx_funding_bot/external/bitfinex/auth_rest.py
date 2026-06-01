@@ -155,7 +155,7 @@ class BitfinexAuthREST:
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
 
     async def fetch_funding_offers_raw(
-        self, *, ctx: AccountContext, symbol: str = "fUSD",
+        self, *, ctx: AccountContext, symbol: str,
     ) -> Any:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns the raw
         decoded JSON body (list of positional arrays), before parsing.
@@ -194,7 +194,7 @@ class BitfinexAuthREST:
             raise BitfinexShapeError(f"invalid JSON in funding-offers response: {e}") from e
 
     async def get_active_funding_offers(
-        self, *, ctx: AccountContext, symbol: str = "fUSD",
+        self, *, ctx: AccountContext, symbol: str,
     ) -> list[ActiveFundingOffer]:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
@@ -202,7 +202,7 @@ class BitfinexAuthREST:
         return parse_active_funding_offers(raw)
 
     async def get_active_funding_credits(
-        self, *, ctx: AccountContext, symbol: str = "fUSD",
+        self, *, ctx: AccountContext, symbol: str,
     ) -> list[ActiveFundingCredit]:
         """POST /v2/auth/r/funding/credits/{symbol} (signed). Returns parsed
         active credits. Raises BitfinexAPIError / BitfinexShapeError."""
