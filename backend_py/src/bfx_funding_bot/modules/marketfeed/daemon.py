@@ -106,6 +106,7 @@ from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
     MarketfeedConfig,
+    configured_symbols,
     load_config,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
@@ -149,19 +150,6 @@ def _require_env(name: str) -> str:
     if not val:
         raise ValueError(f"{name} env var required")
     return val
-
-
-def configured_symbols(cells: list[CellConfig]) -> list[str]:
-    """Distinct cell symbols, order-preserving — the per-currency reconcile loop's
-    symbol set. Single-currency cells.yaml → a 1-element list (parity with the
-    historic single-symbol BootRecovery)."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for c in cells:
-        if c.symbol not in seen:
-            seen.add(c.symbol)
-            out.append(c.symbol)
-    return out
 
 
 @dataclass
