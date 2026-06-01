@@ -107,11 +107,11 @@ class DecisionPayload(BaseModel):
     offer_duration_days: int | None = None
     skip_reason: SkipReason | None = None
     skip_reason_detail: str | None = None
-    # ── NEW (Phase 1 per-symbol): the offer currency this decision targets. ──
-    # Guards read decision.symbol to pick the per-symbol ledger bucket. Defaults
-    # to the legacy single-currency fallback "fUSD" so producers migrate
-    # incrementally without breaking validation.
-    symbol: str = "fUSD"
+    # ── Phase 1 per-symbol: the offer currency this decision targets. ──
+    # Guards read decision.symbol to pick the per-symbol ledger bucket.
+    # MANDATORY (Task 11 — no default, so a decision can never silently land as
+    # the legacy "fUSD"); every producer must set the cell's real symbol.
+    symbol: str
     # ── NEW (Phase 4.3 LOCF): staleness dimension on the DURABLE decision record ──
     # SIGNAL carries this too but lands on the ephemeral stdout sink; persisting it
     # here (PG diagnostics) lets canary outcomes be sliced stale-vs-fresh via SQL.

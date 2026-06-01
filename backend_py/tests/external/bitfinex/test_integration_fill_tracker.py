@@ -74,7 +74,7 @@ async def test_fill_tracker_ticks_emit_status_changes() -> None:
         cid=1, venue_offer_id="111", size_usdt=Decimal("100.0"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),

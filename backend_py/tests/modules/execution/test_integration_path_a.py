@@ -114,7 +114,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
 
     result = await chain.evaluate(tentative, ctx)
     assert result.allowed is True

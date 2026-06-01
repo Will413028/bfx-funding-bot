@@ -48,7 +48,7 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUST"))
     assert ledger.current_exposure() == Decimal("100")
 
     # 2. WS missed the cancel event → registry still CLAIMED.

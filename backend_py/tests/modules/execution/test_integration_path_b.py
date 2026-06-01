@@ -51,7 +51,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         cid=1, venue_offer_id="paper_x", credit_id=None,
         size_usdt=Decimal("600"), fill_rate=0.0001,
         signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    ))
+    symbol="fUST"))
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     chain = SafetyGuardChain(
@@ -70,7 +70,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
     result = await chain.evaluate(tentative, ctx)
     assert result.allowed is False
 
@@ -86,6 +86,6 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         signal_correlation_id=tentative.signal_correlation_id,
         skip_reason=SkipReason.SAFETY_BLOCK,
         skip_reason_detail=result.reason,
-    )
+    symbol="fUST")
     assert final.skip_reason == SkipReason.SAFETY_BLOCK
     assert "cap" in (final.skip_reason_detail or "")

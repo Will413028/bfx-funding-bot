@@ -25,11 +25,11 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 
-def _decision() -> DecisionPayload:
+def _decision(symbol: str = "fUST") -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
         offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
-    )
+        symbol=symbol)
 
 
 def _ctx() -> AccountContext:
@@ -175,10 +175,12 @@ async def test_symbol_threaded_from_decision_into_claimed_and_filled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_symbol_defaults_to_fusd_when_not_set() -> None:
+async def test_symbol_propagates_from_decision() -> None:
+    # symbol is now mandatory on DecisionPayload (Task 11) and flows straight
+    # through to the emitted ReservationClaimed — no implicit "fUSD" default.
     bus, _ = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "999", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
-    await mw.submit(_decision(), _ctx())  # _decision() does not set symbol
+    await mw.submit(_decision(symbol="fUSD"), _ctx())
     assert persister.txns[1][0].symbol == "fUSD"

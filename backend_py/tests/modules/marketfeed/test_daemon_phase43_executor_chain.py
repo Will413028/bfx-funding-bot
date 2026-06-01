@@ -74,7 +74,7 @@ def _decision() -> DecisionPayload:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 def _ctx() -> AccountContext:
@@ -175,7 +175,7 @@ async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
             signal_correlation_id=uuid4(),
             account_id="default",
             is_simulated=False,
-        )
+        symbol="fUST")
     )
     assert ledger.replay_floor_hit_count == 1
 

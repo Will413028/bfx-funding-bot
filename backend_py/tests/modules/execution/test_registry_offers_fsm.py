@@ -21,7 +21,7 @@ def _claim(voi: str = "v1", size: int = 100) -> ReservationClaimed:
         cid=42, venue_offer_id=voi, size_usdt=Decimal(size),
         signal_correlation_id=uuid4(), account_id="default",
         is_simulated=False, occurred_at_ms=1000,
-    )
+    symbol="fUST")
 
 
 def _filled(voi: str = "v1", venue_seq: int = 100) -> OrderFilled:
@@ -30,7 +30,7 @@ def _filled(voi: str = "v1", venue_seq: int = 100) -> OrderFilled:
         size_usdt=Decimal("100"), fill_rate=0.0005,
         signal_correlation_id=uuid4(), account_id="default",
         is_simulated=False, venue_seq=venue_seq, occurred_at_ms=2000,
-    )
+    symbol="fUST")
 
 
 def _released(voi: str = "v1", reason: str = "user_cancel") -> ReservationReleased:
@@ -38,7 +38,7 @@ def _released(voi: str = "v1", reason: str = "user_cancel") -> ReservationReleas
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         reason=reason, signal_correlation_id=uuid4(),
         account_id="default", is_simulated=False, occurred_at_ms=3000,
-    )
+    symbol="fUST")
 
 
 def test_claim_on_empty_snapshot_adds_record() -> None:
@@ -155,11 +155,13 @@ def test_claim_record_carries_symbol_from_reservation_claimed() -> None:
     assert new_snapshot["voi-1"].symbol == "fUST"
 
 
-def test_claim_record_symbol_defaults_to_fusd_when_not_set() -> None:
+def test_claim_record_carries_fusd_symbol_through_fsm() -> None:
+    # symbol is mandatory on ReservationClaimed (Task 11); the FSM faithfully
+    # carries whatever symbol the event sets — here the legacy fUSD currency.
     ev = ReservationClaimed(
         cid=11, venue_offer_id="voi-2", size_usdt=Decimal("50"),
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-        occurred_at_ms=1000,  # no symbol → default
+        occurred_at_ms=1000, symbol="fUSD",
     )
     new_snapshot, _ = transition({}, ev, now_ms=2000)
     assert new_snapshot["voi-2"].symbol == "fUSD"

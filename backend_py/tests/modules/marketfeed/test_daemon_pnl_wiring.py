@@ -68,7 +68,7 @@ def _reconciled(available: str, ts: int) -> PositionReconciled:
         n_offers=0,
         n_credits=0,
         occurred_at_ms=ts,
-    )
+    symbol="fUST")
 
 
 def _post() -> DecisionPayload:
@@ -78,7 +78,7 @@ def _post() -> DecisionPayload:
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
         offer_duration_days=2,
-    )
+    symbol="fUST")
 
 
 @pytest.mark.asyncio

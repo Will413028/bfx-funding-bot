@@ -40,7 +40,7 @@ async def test_duplicate_foc_executed_does_not_double_realize(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    ))
+    symbol="fUSD"))
 
     # Same foc EXECUTED delivered twice — venue WS may redeliver
     foc1 = FocEvent(

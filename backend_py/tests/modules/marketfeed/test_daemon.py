@@ -204,7 +204,7 @@ phase3b_wfo_results_ref: x
         n_offers=0,
         n_credits=3,
         occurred_at_ms=1,
-    )
+    symbol="fUST")
     await daemon.bus.publish(event)
 
     assert daemon.ledger.realized_exposure() == Decimal("450"), (

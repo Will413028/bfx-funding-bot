@@ -208,17 +208,17 @@ def test_health_check_payload_accepts_reason_taxonomy() -> None:
     assert p2.stale_seconds is None
 
 
-def test_decision_payload_has_symbol_default_fusd() -> None:
-    """symbol defaults to the legacy single-currency fallback so existing
-    producers that do not yet set it keep validating."""
-    p = DecisionPayload(
-        decision_outcome="post",
-        signal_correlation_id=str(uuid4()),
-        offer_rate=0.0001,
-        offer_amount_usdt=150.0,
-        offer_duration_days=2,
-    )
-    assert p.symbol == "fUSD"
+def test_decision_payload_requires_symbol() -> None:
+    """symbol is now MANDATORY (Task 11): omitting it fails validation rather
+    than silently landing as the legacy single-currency "fUSD"."""
+    with pytest.raises(ValidationError):
+        DecisionPayload(  # type: ignore[call-arg]
+            decision_outcome="post",
+            signal_correlation_id=str(uuid4()),
+            offer_rate=0.0001,
+            offer_amount_usdt=150.0,
+            offer_duration_days=2,
+        )
 
 
 def test_decision_payload_accepts_explicit_symbol() -> None:
