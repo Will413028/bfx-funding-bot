@@ -40,13 +40,13 @@ class _FakePnLSource:
         self.peak = peak
         self.current = current
 
-    def realized_loss_pct_24h(self) -> float:
+    def realized_loss_pct_24h(self, symbol: str) -> float:
         return self.loss_pct
 
-    def drawdown_pct(self) -> float:
+    def drawdown_pct(self, symbol: str) -> float:
         if self.peak == 0:
             return 0.0
-        return float((self.peak - self.current) / self.peak)
+        return float((self.peak - self.current) / self.peak * 100)
 
 
 class _FakeDivergenceSource:
@@ -91,7 +91,7 @@ async def test_drawdown_disabled_always_allows() -> None:
 
 @pytest.mark.asyncio
 async def test_drawdown_enabled_under_threshold_allows() -> None:
-    g = DrawdownGuard(enabled=True, threshold_pct=0.5,
+    g = DrawdownGuard(enabled=True, threshold_pct=50.0,
                       source=_FakePnLSource(0.0, Decimal("1000"), Decimal("700")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True  # 30% drawdown < 50% threshold
@@ -99,7 +99,7 @@ async def test_drawdown_enabled_under_threshold_allows() -> None:
 
 @pytest.mark.asyncio
 async def test_drawdown_enabled_over_threshold_blocks() -> None:
-    g = DrawdownGuard(enabled=True, threshold_pct=0.5,
+    g = DrawdownGuard(enabled=True, threshold_pct=50.0,
                       source=_FakePnLSource(0.0, Decimal("1000"), Decimal("400")))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False  # 60% drawdown > 50%

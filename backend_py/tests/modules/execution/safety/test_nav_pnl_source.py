@@ -1,8 +1,6 @@
-"""ReconcileNavTracker — NAV-based source feeding the L2 loss-limiter guards.
+"""ReconcileNavTracker — per-symbol NAV source feeding the L2 loss-limiter guards.
 
-Replaces _StubPnLSource (which returned 0/0, making RealizedLossGuard +
-DrawdownGuard no-ops on the real-money canary). NAV (account equity) is sampled
-from each PositionReconciled venue snapshot:
+NAV (account equity) is sampled from each PositionReconciled venue snapshot:
 
     NAV = available + reserved + realized
 
@@ -10,8 +8,10 @@ i.e. total funding-wallet capital for the account's currency — idle funds +
 open offers + lent principal. Interest paid raises `available` → NAV up; capital
 lost for ANY reason (bug, socialized loss, withdrawal) → NAV down.
 
-  * realized_loss_pct_24h() = (highest-NAV-in-last-24h − latest NAV) / that-high × 100
-  * drawdown_pct()          = (all-time-peak NAV − latest NAV) / all-time-peak × 100
+Metrics are PER SYMBOL — each currency is measured against its OWN history.
+
+  * realized_loss_pct_24h(symbol) = (highest-NAV-in-last-24h − latest NAV) / that-high × 100
+  * drawdown_pct(symbol)          = (all-time-peak NAV − latest NAV) / all-time-peak × 100
 
 Both are PERCENTAGES of the relevant high-water NAV, so the guards auto-scale
 with funded capital — no manual re-anchoring when you add/withdraw funds.
@@ -62,8 +62,8 @@ def test_cold_start_returns_zero_before_any_reconcile() -> None:
     """No NAV history yet → permissive (the hard guards + BuyingPowerGuard
     already gate deployment; an L2 breaker must not block on cold start)."""
     t = ReconcileNavTracker(account_id=_ACC)
-    assert t.realized_loss_pct_24h() == 0.0
-    assert t.drawdown_pct() == 0.0
+    assert t.realized_loss_pct_24h("fUST") == 0.0
+    assert t.drawdown_pct("fUST") == 0.0
 
 
 @pytest.mark.asyncio
@@ -73,8 +73,8 @@ async def test_nav_drop_yields_drawdown_and_loss() -> None:
     await t.on_position_reconciled(
         _reconciled(available="85", ts=_T0 + _HOUR_MS)
     )
-    assert t.realized_loss_pct_24h() == pytest.approx(15.0)
-    assert t.drawdown_pct() == pytest.approx(15.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(15.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(15.0)
 
 
 @pytest.mark.asyncio
@@ -84,8 +84,8 @@ async def test_nav_rise_is_not_a_loss_or_drawdown() -> None:
     await t.on_position_reconciled(
         _reconciled(available="110", ts=_T0 + _HOUR_MS)
     )
-    assert t.realized_loss_pct_24h() == 0.0
-    assert t.drawdown_pct() == 0.0
+    assert t.realized_loss_pct_24h("fUST") == 0.0
+    assert t.drawdown_pct("fUST") == 0.0
 
 
 @pytest.mark.asyncio
@@ -102,8 +102,8 @@ async def test_nav_is_available_plus_reserved_plus_realized() -> None:
             available="40", reserved="30", realized="20", ts=_T0 + _HOUR_MS
         )
     )
-    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
-    assert t.drawdown_pct() == pytest.approx(10.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(10.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
@@ -119,9 +119,9 @@ async def test_24h_window_evicts_old_high_for_loss_but_peak_is_all_time() -> Non
         _reconciled(available="90", ts=_T0 + 25 * _HOUR_MS + 60_000)
     )
     # window (last 24h) high = 100, latest = 90 → 24h loss = 10
-    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(10.0)
     # all-time peak = 200 → drawdown = (200 − 90) / 200 × 100 = 55%
-    assert t.drawdown_pct() == pytest.approx(55.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(55.0)
 
 
 @pytest.mark.asyncio
@@ -134,8 +134,8 @@ async def test_recovery_from_trough_tracks_latest_not_trough() -> None:
     await t.on_position_reconciled(
         _reconciled(available="95", ts=_T0 + 2 * _HOUR_MS)
     )
-    assert t.realized_loss_pct_24h() == pytest.approx(5.0)
-    assert t.drawdown_pct() == pytest.approx(5.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(5.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(5.0)
 
 
 @pytest.mark.asyncio
@@ -145,11 +145,11 @@ async def test_new_peak_after_recovery_resets_drawdown() -> None:
     await t.on_position_reconciled(
         _reconciled(available="120", ts=_T0 + _HOUR_MS)
     )  # new high-water mark
-    assert t.drawdown_pct() == 0.0
+    assert t.drawdown_pct("fUST") == 0.0
     await t.on_position_reconciled(
         _reconciled(available="108", ts=_T0 + 2 * _HOUR_MS)
     )
-    assert t.drawdown_pct() == pytest.approx(10.0)  # (120 − 108) / 120 × 100
+    assert t.drawdown_pct("fUST") == pytest.approx(10.0)  # (120 − 108) / 120 × 100
 
 
 @pytest.mark.asyncio
@@ -159,14 +159,14 @@ async def test_ignores_other_account() -> None:
     await t.on_position_reconciled(
         _reconciled(available="10", ts=_T0 + _HOUR_MS, account_id="other")
     )
-    assert t.realized_loss_pct_24h() == 0.0
-    assert t.drawdown_pct() == 0.0
+    assert t.realized_loss_pct_24h("fUST") == 0.0
+    assert t.drawdown_pct("fUST") == 0.0
 
 
 @pytest.mark.asyncio
 async def test_single_symbol_global_api_identical_to_pre_per_symbol() -> None:
-    """One active symbol ⇒ global realized_loss_24h()/drawdown_pct() behave
-    exactly as the pre-per-symbol tracker (the SUM is over the one bucket)."""
+    """One active symbol ⇒ per-symbol realized_loss_24h("fUST")/drawdown_pct("fUST")
+    behave exactly as the pre-per-symbol tracker (the bucket IS the only bucket)."""
     t = ReconcileNavTracker(account_id=_ACC)
     await t.on_position_reconciled(
         _reconciled(available="50", reserved="30", realized="20", ts=_T0)
@@ -176,27 +176,54 @@ async def test_single_symbol_global_api_identical_to_pre_per_symbol() -> None:
             available="40", reserved="30", realized="20", ts=_T0 + _HOUR_MS,
         )
     )  # NAV(fUST) = 90
-    assert t.realized_loss_pct_24h() == pytest.approx(10.0)
-    assert t.drawdown_pct() == pytest.approx(10.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(10.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
-async def test_two_symbols_global_nav_is_sum_of_latest_per_symbol() -> None:
-    """Global NAV = Σ latest-per-symbol NAV. The peak forms at the moment both
-    symbols are at their joint high; a later drop in one symbol's bucket shows
-    as a global loss/drawdown — never via cross-symbol cancellation."""
+async def test_two_symbols_isolated_no_cross_masking() -> None:
+    """Per-symbol: a fUST drop is measured against fUST's OWN peak/window only;
+    fUSD (unchanged) reads 0%. No cross-symbol summing — a profitable fUSD can
+    never mask a losing fUST, nor vice versa (the D4 risk-isolation invariant)."""
     t = ReconcileNavTracker(account_id=_ACC)
-    # t0: fUST NAV = 100  → global = 100
-    await t.on_position_reconciled(_reconciled(available="100", ts=_T0, symbol="fUST"))
-    # t1: fUSD NAV = 100  → global = 100 (fUST) + 100 (fUSD) = 200  (joint peak)
+    await t.on_position_reconciled(
+        _reconciled(available="100", ts=_T0, symbol="fUST")
+    )
     await t.on_position_reconciled(
         _reconciled(available="100", ts=_T0 + _HOUR_MS, symbol="fUSD")
     )
-    # t2: fUST drops to 70 → global = 70 (fUST) + 100 (fUSD) = 170
+    # fUST drops 100 → 70 in its OWN bucket; fUSD untouched.
     await t.on_position_reconciled(
         _reconciled(available="70", ts=_T0 + 2 * _HOUR_MS, symbol="fUST")
     )
-    # window high (24h) = 200, latest 170 -> loss pct = (200-170)/200*100 = 15%
-    assert t.realized_loss_pct_24h() == pytest.approx(15.0)
-    # all-time peak global NAV = 200 → drawdown = (200 − 170)/200 × 100 = 15%
-    assert t.drawdown_pct() == pytest.approx(15.0)
+    # fUST vs fUST's own peak/window: 30% loss + 30% drawdown.
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(30.0)
+    assert t.drawdown_pct("fUST") == pytest.approx(30.0)
+    # fUSD never dropped from its own peak: 0% (NOT the old summed 15%).
+    assert t.realized_loss_pct_24h("fUSD") == 0.0
+    assert t.drawdown_pct("fUSD") == 0.0
+    # Other masking direction: a RISING fUSD must not lift or dilute fUST's
+    # metrics (a buggy cross-sum would mask fUST's drop under fUSD's gain).
+    await t.on_position_reconciled(
+        _reconciled(available="200", ts=_T0 + 3 * _HOUR_MS, symbol="fUSD")
+    )
+    assert t.drawdown_pct("fUST") == pytest.approx(30.0)
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_unseen_symbol_is_permissive_while_another_has_history() -> None:
+    """Cold-start is PER-BUCKET: a never-reconciled symbol returns 0.0 even when
+    another symbol already has a drawdown (must not gate a freshly-funded 2nd
+    currency on the first currency's history)."""
+    t = ReconcileNavTracker(account_id=_ACC)
+    await t.on_position_reconciled(
+        _reconciled(available="100", ts=_T0, symbol="fUST")
+    )
+    await t.on_position_reconciled(
+        _reconciled(available="60", ts=_T0 + _HOUR_MS, symbol="fUST")
+    )
+    assert t.realized_loss_pct_24h("fUST") == pytest.approx(40.0)
+    # fUSD never seen → permissive, NOT gated on fUST's 40% drop.
+    assert t.realized_loss_pct_24h("fUSD") == 0.0
+    assert t.drawdown_pct("fUSD") == 0.0

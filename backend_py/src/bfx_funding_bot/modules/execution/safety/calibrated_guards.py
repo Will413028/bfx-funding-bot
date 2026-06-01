@@ -20,8 +20,8 @@ from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 
 class _PnLSourceProtocol(Protocol):
-    def realized_loss_pct_24h(self) -> float: ...
-    def drawdown_pct(self) -> float: ...
+    def realized_loss_pct_24h(self, symbol: str) -> float: ...
+    def drawdown_pct(self, symbol: str) -> float: ...
 
 
 class _DivergenceSourceProtocol(Protocol):
@@ -48,11 +48,11 @@ class RealizedLossGuard:
         if not self.enabled:
             return GuardResult(allowed=True, guard_name=self.name)
         assert self.threshold_pct is not None  # narrow for mypy
-        loss_pct = self.source.realized_loss_pct_24h()
+        loss_pct = self.source.realized_loss_pct_24h(decision.symbol)
         if loss_pct > self.threshold_pct:
             return GuardResult(
                 allowed=False, guard_name=self.name,
-                reason=f"realized_loss_pct_24h={loss_pct} > threshold_pct={self.threshold_pct}",
+                reason=f"realized_loss_pct_24h[{decision.symbol}]={loss_pct} > threshold_pct={self.threshold_pct}",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 
@@ -77,11 +77,11 @@ class DrawdownGuard:
         if not self.enabled:
             return GuardResult(allowed=True, guard_name=self.name)
         assert self.threshold_pct is not None
-        dd = self.source.drawdown_pct()
+        dd = self.source.drawdown_pct(decision.symbol)
         if dd > self.threshold_pct:
             return GuardResult(
                 allowed=False, guard_name=self.name,
-                reason=f"drawdown={dd:.4f} > threshold={self.threshold_pct}",
+                reason=f"drawdown[{decision.symbol}]={dd:.4f} > threshold={self.threshold_pct}",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 
