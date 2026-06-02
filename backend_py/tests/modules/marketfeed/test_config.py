@@ -594,3 +594,41 @@ def test_configured_symbols_single_currency():
         ),
     ]
     assert configured_symbols(cells) == ["fUST"]
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePeriod strategy — enum + params validator
+# ---------------------------------------------------------------------------
+
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
+
+
+def _ap_params() -> dict:
+    return {"ema_span": 24, "ratio_sigma": 0.42, "t1": 0.5, "t2": 1.5, "p_mid": 7, "p_long": 30}
+
+
+def test_adaptive_period_enum_value() -> None:
+    assert StrategyName.ADAPTIVE_PERIOD.value == "adaptive_period"
+
+
+def test_cellconfig_accepts_valid_adaptive_period_params() -> None:
+    c = CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=_ap_params())
+    assert c.pair_id == "adaptive_period:fUST_a30"
+
+
+def test_cellconfig_rejects_t2_not_greater_than_t1() -> None:
+    bad = _ap_params() | {"t1": 1.5, "t2": 1.5}
+    with pytest.raises(ValidationError):
+        CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=bad)
+
+
+def test_cellconfig_rejects_p_long_less_than_p_mid() -> None:
+    bad = _ap_params() | {"p_mid": 30, "p_long": 7}
+    with pytest.raises(ValidationError):
+        CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=bad)
+
+
+def test_cellconfig_rejects_extra_param_key() -> None:
+    bad = _ap_params() | {"bogus": 1}
+    with pytest.raises(ValidationError):
+        CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=bad)
