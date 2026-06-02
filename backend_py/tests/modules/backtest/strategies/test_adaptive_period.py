@@ -247,3 +247,17 @@ def test_build_strategy_is_deterministic() -> None:
     assert da is not None and db is not None
     assert da.period_days == db.period_days == 30
     assert da.rate == db.rate
+
+
+def test_experimental_cells_yaml_loads_and_builds() -> None:
+    from pathlib import Path
+    from bfx_funding_bot.modules.marketfeed.config import load_cells_only
+    from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+
+    cells = load_cells_only(Path("configs/cells.experimental.yaml"))
+    assert len(cells) == 4
+    assert all(c.strategy.value == "adaptive_period" for c in cells)
+    assert {c.cell_id for c in cells} == {"fUST_a30", "fUST_p2", "fUSD_a30", "fUSD_p2"}
+    for c in cells:
+        s = build_strategy(c)
+        assert s.name.startswith("adaptive_period_")
