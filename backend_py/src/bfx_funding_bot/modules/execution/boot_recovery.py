@@ -83,6 +83,7 @@ class LocalClaim:
     size_usdt: Decimal
     signal_correlation_id: UUID
     occurred_at_ms: int
+    symbol: str
 
 
 def synth_orphan_cid(venue_offer_id: str) -> int:
@@ -479,7 +480,7 @@ class BootRecovery:
                 cid=r.cid, venue_offer_id=r.venue_offer_id,
                 state=RegistryState(r.state), size_usdt=Decimal(str(r.size_usdt)),
                 signal_correlation_id=UUID(r.signal_correlation_id),
-                occurred_at_ms=r.occurred_at_ms,
+                occurred_at_ms=r.occurred_at_ms, symbol=r.symbol,
             )
             for r in rows
         ]

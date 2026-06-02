@@ -253,6 +253,7 @@ class OfferRegistry:
                 state=RegistryState(r.state),
                 occurred_at_ms=r.occurred_at_ms,
                 last_updated_ms=r.last_updated_ms,
+                symbol=r.symbol,
             )
         return reg
 
