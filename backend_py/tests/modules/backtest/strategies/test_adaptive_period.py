@@ -158,3 +158,41 @@ def test_decide_rate_always_equals_close() -> None:
         cand = _c(2, close)
         d = s.decide(cand)
         assert d is not None and d.rate == Decimal(close)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: engine order (observe THEN decide on the SAME candle)
+# ---------------------------------------------------------------------------
+
+def test_integrated_spike_emits_p_long_under_engine_order() -> None:
+    # Engine calls observe(candle) then decide(candle) for the SAME candle.
+    # ema_span=24 (alpha=2/25); warm flat at 0.0010 so ema=0.0010, then a +20%
+    # candle. After observe: ema≈0.001016, deviation≈0.181 > band2 (0.15) -> p_long.
+    s = _ap(ema_span=24, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=30)
+    _warm(s, "0.0010", n=24)
+    spike = _c(100, "0.0012")
+    s.observe(spike)   # engine order: observe first
+    d = s.decide(spike)
+    assert d is not None and d.period_days == 30
+
+
+def test_integrated_mid_emits_p_mid_under_engine_order() -> None:
+    # ema_span=24 (alpha=2/25); warm flat at 0.0010 so ema=0.0010, then close=0.00106.
+    # After observe: ema=0.0010048, deviation≈0.05494 in (band1=0.05, band2=0.15] -> p_mid.
+    s = _ap(ema_span=24, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=30)
+    _warm(s, "0.0010", n=24)
+    mid = _c(100, "0.00106")
+    s.observe(mid)   # engine order: observe first
+    d = s.decide(mid)
+    assert d is not None and d.period_days == 7
+
+
+def test_integrated_flat_emits_floor_under_engine_order() -> None:
+    # ema_span=24; warm flat at 0.0010 so ema=0.0010, then another 0.0010 candle.
+    # After observe: ema=0.0010, deviation=0 <= band1 (0.05) -> floor (period_days=2).
+    s = _ap(ema_span=24, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=30)
+    _warm(s, "0.0010", n=24)
+    flat = _c(100, "0.0010")
+    s.observe(flat)   # engine order: observe first
+    d = s.decide(flat)
+    assert d is not None and d.period_days == 2
