@@ -113,12 +113,12 @@ async def test_missing_from_venue_releases(pg_session_factory):
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()
     await persister.persist(
-        ReservationIntent(cid=42, size_usdt=Decimal("80"), symbol="fUSD",
+        ReservationIntent(cid=42, size_usdt=Decimal("80"), symbol="fUST",
                           signal_correlation_id=scid,
                           account_id=acct, is_simulated=False, occurred_at_ms=1_000),
         ReservationClaimed(cid=42, venue_offer_id="999", size_usdt=Decimal("80"),
                           signal_correlation_id=scid, account_id=acct, is_simulated=False,
-                          occurred_at_ms=2_000, symbol="fUSD"),
+                          occurred_at_ms=2_000, symbol="fUST"),
     )
     assert await _reserved(pg_session_factory, acct) == Decimal("80")
 

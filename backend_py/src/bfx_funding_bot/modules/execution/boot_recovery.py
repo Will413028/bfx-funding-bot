@@ -118,7 +118,7 @@ def compute_recovery_actions(
     now_ms: int,
     grace_ms: int,
     action_grace_ms: int = 0,
-    symbol: str,
+    configured_symbols: frozenset[str],
 ) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append.
 
@@ -152,22 +152,30 @@ def compute_recovery_actions(
             continue
         if (now_ms - claim.occurred_at_ms) < action_grace_ms:
             continue  # too fresh — venue snapshot may lag the just-placed offer
+        if claim.symbol not in configured_symbols:
+            raise ValueError(
+                f"recovery release for cid={claim.cid} has symbol={claim.symbol!r} "
+                f"not in configured {sorted(configured_symbols)}")
         actions.append(ReservationReleased(
             cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
-            symbol=symbol,
+            symbol=claim.symbol,
         ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
     for c in local_claims:
         if c.state == RegistryState.PENDING and (now_ms - c.occurred_at_ms) >= grace_ms:
+            if c.symbol not in configured_symbols:
+                raise ValueError(
+                    f"recovery fail for cid={c.cid} has symbol={c.symbol!r} "
+                    f"not in configured {sorted(configured_symbols)}")
             actions.append(ReservationFailed(
                 cid=c.cid, size_usdt=c.size_usdt,
                 signal_correlation_id=c.signal_correlation_id,
                 account_id=account_id, is_simulated=is_simulated,
                 reason="unresolved_at_boot", occurred_at_ms=now_ms,
-                symbol=symbol,
+                symbol=c.symbol,
             ))
 
     return actions
@@ -307,15 +315,16 @@ class BootRecovery:
 
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
-            # GLOBAL FSM diff against the union of all symbols' venue offers.
-            # missing-claim releases stamp the primary symbol; LocalClaim has no
-            # per-claim symbol yet (Phase 2: offer_claims.symbol).
+            # GLOBAL FSM diff against the union of all symbols' venue offers
+            # (venue_offer_id is globally unique). Releases/fails now use each
+            # claim's own symbol (offer_claims.symbol); fail-loud if a claim's
+            # symbol is not configured.
             actions = compute_recovery_actions(
                 venue_offers=all_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
                 now_ms=now_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
-                symbol=self._symbols[0],
+                configured_symbols=frozenset(self._symbols),
             )
             for ev in actions:
                 await self._store.append(session, ev)
