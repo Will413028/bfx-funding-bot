@@ -49,10 +49,10 @@ def test_roundtrip(event: object) -> None:
 
 
 def test_intent_failed_event_type_of() -> None:
-    intent = ReservationIntent(cid=1, size_usdt=Decimal("5"),
+    intent = ReservationIntent(cid=1, size_usdt=Decimal("5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000)
-    failed = ReservationFailed(cid=1, size_usdt=Decimal("5"),
+    failed = ReservationFailed(cid=1, size_usdt=Decimal("5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         reason="submit_failed", occurred_at_ms=1000)
     assert event_type_of(intent) == "RESERVATION_INTENT"
@@ -60,10 +60,10 @@ def test_intent_failed_event_type_of() -> None:
 
 
 @pytest.mark.parametrize("event", [
-    ReservationIntent(cid=9, size_usdt=Decimal("7.5"),
+    ReservationIntent(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000),
-    ReservationFailed(cid=9, size_usdt=Decimal("7.5"),
+    ReservationFailed(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=False,
         reason="submit_failed", occurred_at_ms=2000),
 ])
@@ -71,6 +71,16 @@ def test_intent_failed_roundtrip(event: object) -> None:
     etype = event_type_of(event)
     restored = deserialize_event(etype, serialize_event(event))
     assert restored == event
+
+
+def test_intent_failed_legacy_payload_upcasts_symbol() -> None:
+    """Pre-symbol event_log rows have no `symbol`; deserialize injects fUST."""
+    legacy = {"cid": 9, "size_usdt": "7.5",
+              "signal_correlation_id": str(_SCID), "account_id": "acct",
+              "is_simulated": True, "occurred_at_ms": 1000}
+    ev = deserialize_event("RESERVATION_INTENT", legacy)
+    assert ev.symbol == "fUST"          # type: ignore[attr-defined]
+    assert ev.amount == Decimal("7.5")  # type: ignore[attr-defined]
 
 
 def test_decimal_preserved_as_string() -> None:

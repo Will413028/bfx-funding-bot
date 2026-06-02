@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.events import (
+    DEFAULT_RECONCILE_SYMBOL,
     OrderFilled,
     ReservationClaimed,
     ReservationFailed,
@@ -56,6 +57,11 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     cls = _CLASS_BY_TYPE.get(event_type)
     if cls is None:
         raise ValueError(f"unknown event_type: {event_type}")
+    # Upcast: Intent/Failed gained a mandatory `symbol` after these rows were
+    # written. Inject the historically-correct value for legacy payloads; new
+    # rows already carry symbol so this is a no-op for them.
+    if event_type in ("RESERVATION_INTENT", "RESERVATION_FAILED") and payload.get("symbol") is None:
+        payload = {**payload, "symbol": DEFAULT_RECONCILE_SYMBOL}
     kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
     return cls(**kwargs)
 

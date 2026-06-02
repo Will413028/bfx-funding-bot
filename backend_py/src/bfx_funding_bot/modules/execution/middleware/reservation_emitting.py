@@ -76,7 +76,7 @@ class ReservationEmittingMiddleware:
         await self._persister.persist(ReservationIntent(
             cid=cid, size_usdt=size, signal_correlation_id=scid,
             account_id=ctx.account_id, is_simulated=self._is_simulated,
-            occurred_at_ms=intent_ms,
+            occurred_at_ms=intent_ms, symbol=decision.symbol,
         ))
 
         result = await self._inner.submit(decision, ctx, cid=cid)
@@ -113,6 +113,7 @@ class ReservationEmittingMiddleware:
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 reason="submit_failed", occurred_at_ms=outcome_ms,
+                symbol=decision.symbol,
             ))
         return result
 
