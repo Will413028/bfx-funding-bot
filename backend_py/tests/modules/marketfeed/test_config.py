@@ -7,6 +7,7 @@ import yaml
 from pydantic import ValidationError
 
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols, load_config
+from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 
@@ -600,8 +601,6 @@ def test_configured_symbols_single_currency():
 # AdaptivePeriod strategy — enum + params validator
 # ---------------------------------------------------------------------------
 
-from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
-
 
 def _ap_params() -> dict:
     return {"ema_span": 24, "ratio_sigma": 0.42, "t1": 0.5, "t2": 1.5, "p_mid": 7, "p_long": 30}
@@ -632,3 +631,9 @@ def test_cellconfig_rejects_extra_param_key() -> None:
     bad = _ap_params() | {"bogus": 1}
     with pytest.raises(ValidationError):
         CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=bad)
+
+
+def test_cellconfig_accepts_p_long_equal_p_mid() -> None:
+    ok = _ap_params() | {"p_mid": 7, "p_long": 7}
+    c = CellConfig(strategy="adaptive_period", symbol="fUST", period_agg="a30", params=ok)
+    assert c.strategy.value == "adaptive_period"
