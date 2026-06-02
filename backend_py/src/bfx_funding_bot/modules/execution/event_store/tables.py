@@ -72,6 +72,7 @@ class OfferClaimRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     size_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     signal_correlation_id: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
