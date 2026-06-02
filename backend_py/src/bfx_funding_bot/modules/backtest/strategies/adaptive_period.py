@@ -99,3 +99,27 @@ class AdaptivePeriodStrategy(Strategy):
         period = self._period_for(candle.close)
         self._last_period = period
         return LendDecision(mts=candle.mts, rate=candle.close, period_days=period)
+
+    @classmethod
+    def param_grid_for_cell(
+        cls, symbol: str, period_agg: str, eda: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Grid: ema_span in {24, 168} x (t1, t2) in {(0.5,1.5),(1.0,2.0)}.
+        Period tiers fixed (p_mid=7, p_long=30) for v1; ratio_sigma injected
+        per ema_span from EDA close/EMA sigma stats (same as MeanReversion).
+        """
+        sigma_24 = eda.get("close_over_ema_sigma_24", Decimal("0.05"))
+        sigma_168 = eda.get("close_over_ema_sigma_168", Decimal("0.05"))
+        spans = [(24, sigma_24), (168, sigma_168)]
+        thresholds = [
+            (Decimal("0.5"), Decimal("1.5")),
+            (Decimal("1.0"), Decimal("2.0")),
+        ]
+        return [
+            {
+                "ema_span": span, "ratio_sigma": sigma,
+                "t1": t1, "t2": t2, "p_mid": 7, "p_long": 30,
+            }
+            for span, sigma in spans
+            for (t1, t2) in thresholds
+        ]

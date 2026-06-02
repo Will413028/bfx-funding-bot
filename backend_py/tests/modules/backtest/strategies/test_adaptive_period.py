@@ -196,3 +196,22 @@ def test_integrated_flat_emits_floor_under_engine_order() -> None:
     s.observe(flat)   # engine order: observe first
     d = s.decide(flat)
     assert d is not None and d.period_days == 2
+
+
+def test_param_grid_for_cell_from_eda() -> None:
+    grid = AdaptivePeriodStrategy.param_grid_for_cell(
+        symbol="fUST", period_agg="p2",
+        eda={
+            "close_over_ema_sigma_24": Decimal("0.05"),
+            "close_over_ema_sigma_168": Decimal("0.08"),
+        },
+    )
+    assert len(grid) == 4  # 2 ema_spans x 2 (t1,t2) pairs
+    assert {p["ema_span"] for p in grid} == {24, 168}
+    assert {(p["t1"], p["t2"]) for p in grid} == {
+        (Decimal("0.5"), Decimal("1.5")),
+        (Decimal("1.0"), Decimal("2.0")),
+    }
+    for p in grid:
+        assert p["p_mid"] == 7 and p["p_long"] == 30
+        assert p["ratio_sigma"] == (Decimal("0.05") if p["ema_span"] == 24 else Decimal("0.08"))
