@@ -125,6 +125,7 @@ class ReconcileObservationRow(Base):
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     realized_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     n_offers: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -136,6 +137,6 @@ class ReconcileObservationRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_reconcile_obs_acct_env_id",
-              "account_id", "deployment_environment", "id"),
+        Index("idx_reconcile_obs_acct_env_symbol_id",
+              "account_id", "deployment_environment", "symbol", "id"),
     )
