@@ -652,8 +652,8 @@ def test_compute_recovery_actions_requires_symbol() -> None:
 
 
 def test_missing_release_uses_per_claim_symbol_not_primary():
-    """fUSD is configured first (symbols[0]); a CLAIMED fUST offer missing from
-    venue must release as fUST, not the primary fUSD."""
+    """A CLAIMED fUST offer missing from venue must release as fUST — the claim's
+    own symbol — even when fUSD is also configured (no global primary-symbol stamp)."""
     scid = uuid4()
     claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80",
                    scid=scid, symbol="fUST")
@@ -665,7 +665,7 @@ def test_missing_release_uses_per_claim_symbol_not_primary():
     assert len(acts) == 1
     ev = acts[0]
     assert isinstance(ev, ReservationReleased)
-    assert ev.symbol == "fUST"          # per-claim, NOT symbols[0]=="fUSD"
+    assert ev.symbol == "fUST"          # the claim's own symbol, not a global stamp
 
 
 def test_recovery_fails_loud_on_unconfigured_symbol():
