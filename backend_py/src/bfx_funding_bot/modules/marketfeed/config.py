@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from pydantic import ValidationInfo
@@ -47,6 +47,24 @@ class RatePercentileParams(BaseModel):
     lookback_hours: int = Field(ge=2)
 
 
+class AdaptivePeriodParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ema_span: int = Field(ge=1)
+    ratio_sigma: float = Field(gt=0)
+    t1: float = Field(ge=0)
+    t2: float = Field(gt=0)
+    p_mid: int = Field(ge=2, le=120)
+    p_long: int = Field(ge=2, le=120)
+
+    @model_validator(mode="after")
+    def _check_ordering(self) -> "AdaptivePeriodParams":
+        if not self.t2 > self.t1:
+            raise ValueError("t2 must be > t1")
+        if not self.p_long >= self.p_mid:
+            raise ValueError("p_long must be >= p_mid")
+        return self
+
+
 class CellConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     strategy: StrategyName
@@ -73,6 +91,8 @@ class CellConfig(BaseModel):
             MeanReversionParams.model_validate(v)
         elif strat == StrategyName.RATE_PERCENTILE:
             RatePercentileParams.model_validate(v)
+        elif strat == StrategyName.ADAPTIVE_PERIOD:
+            AdaptivePeriodParams.model_validate(v)
         return v
 
     @field_validator("staleness_budget_hours")
