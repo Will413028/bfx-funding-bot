@@ -1,6 +1,7 @@
 # fUSD go-live cutover runbook
 
-> **Status:** READY — awaiting external USD funding. Do NOT execute any stage until USD is funded + settled in the Bitfinex funding wallet. Every stage is a real-money, write-gated operation — get operator go-ahead before each.
+> **Status:** Stage 1 **DECOUPLED from funding** (operator decision 2026-06-02) — deploy the per-symbol binary + 2 migrations NOW with fUSD dark, to de-risk the eventual cutover down to a single config flip. Adversarial pre-flight = **GO_WITH_CONDITIONS**: the forward deploy is safe (boot does not re-fold the legacy event_log; migrations additive; fUST byte-identical; fUSD dark via 3 independent layers), and the two must-fix conditions are folded into this doc below (corrected rollback procedure + corrected Stage-1 `effective_cap` expectation).
+> **Stages 2-3 (fUSD LIVE) REMAIN funding-gated:** do NOT add fUSD cells or set `caps.fUSD>0` until USD is funded + settled in the Bitfinex **funding** wallet. Every stage is a real-money, write-gated operation — get operator go-ahead before each.
 
 **Goal:** Take fUSD live on the VM canary as a SECOND funding currency alongside fUST, the first time two currencies coexist in production.
 
@@ -38,7 +39,8 @@ No config change to caps/cells yet — `caps:{fUSD:0}` stays. This deploys the p
 - [ ] Set the write gate: `KILL_SWITCH=true` (per established cutover).
 - [ ] Run `deploy-vm.sh canary`. The compose `migrate` one-shot runs `alembic upgrade head`, applying **in chain order** `b7c1d2e3f4a5 → c9d0e1f2a3b4 → dac1e2f3a4b5` (both `ADD COLUMN NOT NULL DEFAULT 'fUST'`, no table rewrite; advisory-lock serialized).
 - [ ] **Verify migrations + schema:** `alembic current` == `dac1e2f3a4b5`; `alembic check` clean; `reconcile_observation.symbol` + `offer_claims.symbol` columns present (psql `\d`), backfilled `'fUST'`.
-- [ ] **Verify fUST byte-identical:** position_state fUST `realized` == the pre-cutover value (byte-identical), `effective_cap_per_symbol {fUST:3000, fUSD:0}`, `assert_caps_invariant` passes (fUSD=0 allowed dark), `/healthz` 200 (`docker exec`), 0 errors, no submit/10001 spike.
+- [ ] **Verify fUST byte-identical:** position_state fUST `realized` == the pre-cutover value `273.06685288` (account_id=`primary`, env=`prod`, exact to all 8 decimals; n_credits=1, reserved=0). ANY other value → NO-GO, roll back.
+- [ ] **Verify caps:** the boot log shows `effective_cap_per_symbol {fUST:3000}` — **fUSD key is ABSENT, not `fUSD:0`** (the log iterates `configured_symbols(cells)` = {fUST}). Do NOT expect a `fUSD:0` entry, and **do NOT add an fUSD cell to make one appear** — that would un-dark fUSD and create real exposure. Confirm fUSD darkness instead by reading `safety.canary.yaml` (`caps {fUSD:0, fUST:3000}`) and grepping the boot logs for the absence of any `fUSD` string. `assert_caps_invariant` passes (only fUST configured; fUSD dark via cell absence). `/healthz` 200 (`docker exec`), 0 errors, no submit/10001 spike.
 - [ ] Flip `KILL_SWITCH=false`, restore `bot.env`, recreate. Confirm fUST steady state resumes (273 credit, 0 new offers if available~0).
 - [ ] **Hold here** for a short soak (hours) to confirm the per-symbol binary runs fUST-only with zero regression before introducing fUSD.
 
@@ -83,10 +85,24 @@ Config diffs (apply at execution, in BOTH safety files + the canary cells file):
 
 ## Rollback
 
-- **Stage 1 (schema):** redeploy the prior sha (`3db7a3b`). The new columns are additive + `server_default='fUST'`, so old code keeps running against the upgraded schema (forward-compatible). Only use Neon PITR if a migration genuinely corrupted data — never `alembic downgrade` on the live DB while a daemon runs.
+- **Stage 1 (schema) — CODE-ONLY rollback, leave the DB at `dac1e2f3a4b5`.** ⚠️ Do **NOT** roll back via `deploy-vm.sh` / a plain `docker compose up` of `3db7a3b`: the old tree's alembic head is `b7c1d2e3f4a5` and does **not** contain `c9d0e1f2a3b4`/`dac1e2f3a4b5`, so the compose `migrate` one-shot runs `alembic upgrade head`, hits the now-upgraded DB stamped at `dac1e2f3a4b5`, raises `Can't locate revision dac1e2f3a4b5`, exits non-zero, and `bot` (which `depends_on migrate service_completed_successfully`) **never starts** — a failed rollback leaves NO live writer. The columns are additive + `server_default='fUST'`, so old code runs fine against the upgraded schema (forward-compatible) — the fix is to revert the binary while keeping the migration files present so `upgrade head` is a no-op:
+  ```bash
+  # On the VM, in ~/bfx-funding-bot:
+  git checkout 3db7a3b
+  # restore the 2 migration files into the old tree so `alembic upgrade head` sees head==dac1e2f3a4b5 (== live DB) → clean no-op:
+  git checkout a948919 -- backend_py/alembic/versions/c9d0e1f2a3b4_add_symbol_to_reconcile_observation.py \
+                          backend_py/alembic/versions/dac1e2f3a4b5_add_symbol_to_offer_claims.py
+  export GIT_SHA=3db7a3b
+  docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA=$GIT_SHA
+  docker compose -f docker-compose.bot.yml up -d
+  # verify: migrate no-op exits 0, bot boots on 3db7a3b, position_state fUST realized still 273.06685288.
+  ```
+  Never `alembic downgrade` on the live DB. Neon PITR (only a **6h** retention window) is the last resort for genuine data corruption ONLY, not for a code revert.
 - **Stage 2/3 (fUSD live):** set `caps:{fUSD:0}` (dark) + remove the fUSD cells, redeploy — fUSD stops taking new offers; existing fUSD credits run to maturity. Reverts to fUST-only behaviour.
 
 ## Notes
 - Do NOT commit the Stage-2 config diffs (fUSD cap>0 / cells) until executing — a stray deploy would enable fUSD before funding/validation.
 - `ClaimRecord.symbol='fUSD'` dataclass default (registry_offers.py:70) is dead (from_snapshot always sets it) — cosmetic, out of scope.
+- ✅ **Foot-gun FIXED in this Stage-1 binary** (was: `deserialize_event` upcast `symbol='fUST'` only for INTENT/FAILED, so a manual `rebuild_snapshot_from_log` over the 419/422/3 legacy symbol-less `ORDER_FILL`/`CLAIMED`/`RELEASED` rows would silently drop them and miscompute realized). The hardening: the deserialize upcaster now injects `'fUST'` for ALL 5 legacy symbol-less event types; the `rebuild_snapshot_from_log` tail fold defaults a missing payload symbol to `'fUST'`; and the 5 reserve-event dataclasses fail-loud (`TypeError`) on `symbol=None`. `rebuild_snapshot_from_log` is now safe against the legacy fUST rows.
+- **New fail-loud posture (watch post-deploy):** an empty/None `symbol` on any reserve event — e.g. a malformed venue EXECUTED `foc` frame — now raises `TypeError` at construction instead of silently landing `symbol=''`. This is correct (an empty symbol is already money-corrupting at the offer_claims PK) but is a genuinely NEW live abort path. Watch Loki `bfx-submit-fail` + executor-error alerts on the first fills after deploy.
 - Source of truth for the runbook rationale: spec `2026-06-02-fusd-live-enablement-design.md` §6.5.
