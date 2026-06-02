@@ -85,6 +85,20 @@ def _strategy_attributes(
             "ema_current": strategy.ema_current,
             "last_deviation": strategy.last_deviation,
         }
+    if cell.strategy == StrategyName.ADAPTIVE_PERIOD:
+        # period_days is a deterministic step fn of (ema, close, config); comparing
+        # the derived period would only manufacture false divergences at the band
+        # tier boundaries. Compare its INPUTS instead: ema_current (rel-tol via
+        # _APPROX_ATTR_KEYS) catches genuine drift; window_filled (exact) catches
+        # warmup parity; t1/t2/ratio_sigma (exact) catch config drift. Sufficient.
+        return {
+            "rate": float(candle.close) if candle.close is not None else 0.0,
+            "t1": float(cell.params["t1"]),
+            "t2": float(cell.params["t2"]),
+            "ratio_sigma": float(cell.params["ratio_sigma"]),
+            "ema_current": strategy.ema_current,
+            "window_filled": strategy.window_filled,
+        }
     return {}
 
 
@@ -112,6 +126,11 @@ def _normalize_signal_score(
             return 0.0
         close = candle.close
         return 100.0 * sum(1 for w in window if w <= close) / len(window)
+    if cell.strategy == StrategyName.ADAPTIVE_PERIOD:
+        ema = strategy.ema_current
+        if ema is None or ema == 0 or candle.close is None:
+            return 0.0
+        return float((candle.close - ema) / ema)
     return 0.0
 
 
