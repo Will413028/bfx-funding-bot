@@ -161,6 +161,16 @@ Pre-conditions (all must hold):
 
 Action: un-gate cells.canary.yaml:8-12 by adding the fUSD cell(s) from cells.yaml; deploy via `deploy-vm.sh canary` under KILL_SWITCH gate; verify `effective_cap_per_symbol` shows fUST + fUSD, caps_invariant passes, per-symbol NAV guards active.
 
+### 6.5 Cutover runbook notes (from the whole-branch final review — IMPLEMENTED on main `008146a`)
+
+P1+P3+P2 are merged to main (`008146a`, `--no-ff`), **UNDEPLOYED**. The 3-lens adversarial review returned READY_TO_MERGE (fUST byte-identical, migrations forward-compatible, no blocker). Carry these to the fUSD cutover:
+
+1. **Apply migrations in chain order at cutover:** `cd backend_py && uv run alembic upgrade head` brings the DB `b7c1d2e3f4a5 → c9d0e1f2a3b4` (reconcile_observation.symbol + index) `→ dac1e2f3a4b5` (offer_claims.symbol). Both are `ADD COLUMN NOT NULL DEFAULT 'fUST'`, no table rewrite. Via `deploy-vm.sh canary`, never MCP/raw SQL. Run `alembic check` **after** apply (it shows drift until applied — that is expected pre-apply).
+2. **Coexistence is safe but directional:** old binary + upgraded schema works (old INSERTs get `server_default='fUST'`; the fUST-only canary attributes them correctly). The reverse (`alembic downgrade` while a new-code daemon runs) breaks new code — do **not** downgrade once cut over.
+3. **Deploy the per-symbol binary BEFORE enabling the fUSD cell.** If a fUSD cell is live while old code still runs, old code writes fUSD claims stamped `server_default='fUST'` → silent capital mis-attribution. Order: deploy binary (P1+P2+P3) → apply migrations → then add the fUSD config cell.
+4. **New boot-abort failure mode (intended):** `boot_recovery.compute_recovery_actions` now hard-aborts (`ValueError`) on every reconcile tick (boot + periodic) if any released/failed claim's `symbol ∉ configured_symbols` (boot_recovery.py ~155/169). Never fires on the fUST-only canary. After enabling fUSD, the config cell must list `{fUST, fUSD}` **before** any fUSD claim can be recovered, else boot/periodic reconcile fail-loud and halt (correct fail-fast — abort > corrupt; watch the Loki boot/`bfx-submit-fail` alerts on first fUSD boot).
+5. **Legacy event_log upcast is read-path only:** symbol-less historical INTENT/FAILED rows upcast to `'fUST'` at deserialize (serialization.py); the append-only event_log is never rewritten and needs no data migration.
+
 ## 7. Migration strategy (shared)
 
 - **Generate sequentially:** P1 first (`alembic revision --autogenerate` → `down_revision=b7c1d2e3f4a5`), then P2 (`down_revision=<P1 rev>`) so the chain is linear (no fork/multi-head).
