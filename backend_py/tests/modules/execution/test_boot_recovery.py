@@ -32,17 +32,19 @@ def _offer(voi="555", amount="100", rate=0.0003, period=2):
     )
 
 
-def _claim(cid, voi, state, size="100", scid=None, occurred=0):
+def _claim(cid, voi, state, size="100", scid=None, occurred=0, symbol="fUST"):
     return LocalClaim(
         cid=cid, venue_offer_id=voi, state=state, size_usdt=Decimal(size),
         signal_correlation_id=scid or uuid4(), occurred_at_ms=occurred,
+        symbol=symbol,
     )
 
 
 def _actions(venue, local, grace_ms=120_000, now=_NOW):
     return compute_recovery_actions(
         venue_offers=venue, local_claims=local, account_id=_ACC,
-        is_simulated=False, now_ms=now, grace_ms=grace_ms, symbol="fUSD",
+        is_simulated=False, now_ms=now, grace_ms=grace_ms,
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
 
 
@@ -148,7 +150,7 @@ def test_action_grace_skips_recent_orphan():
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        symbol="fUSD",
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert acts == []
 
@@ -158,7 +160,7 @@ def test_action_grace_skips_recent_missing_claim():
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        symbol="fUSD",
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert acts == []
 
@@ -168,7 +170,7 @@ def test_action_grace_releases_stale_missing_claim():
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        symbol="fUSD",
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert len(acts) == 1
     assert isinstance(acts[0], ReservationReleased)
@@ -183,7 +185,7 @@ def test_action_grace_claims_stale_orphan():
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
         is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        symbol="fUSD",
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
 
@@ -195,7 +197,8 @@ def test_action_grace_zero_preserves_boot_behaviour():
     )
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUSD",
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        configured_symbols=frozenset({"fUSD", "fUST"}),
     )
     assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
 
@@ -618,23 +621,25 @@ def test_orphan_claimed_carries_offer_symbol() -> None:
     )
     acts = compute_recovery_actions(
         venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST",
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        configured_symbols=frozenset({"fUST"}),
     )
     assert isinstance(acts[0], ReservationClaimed) and acts[0].symbol == "fUST"
 
 
-def test_missing_claim_released_carries_reconciler_symbol() -> None:
+def test_missing_claim_released_carries_own_claim_symbol() -> None:
     claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80")
     acts = compute_recovery_actions(
         venue_offers=[], local_claims=[claim], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, symbol="fUST",
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        configured_symbols=frozenset({"fUST"}),
     )
     assert isinstance(acts[0], ReservationReleased) and acts[0].symbol == "fUST"
 
 
 def test_compute_recovery_actions_requires_symbol() -> None:
-    """fail-loud: symbol is a required kwarg (no silent fUSD default) so a
-    forgotten symbol raises instead of mis-routing capital to fUSD."""
+    """fail-loud: configured_symbols is a required kwarg (no silent fUSD default)
+    so a forgotten symbol set raises instead of mis-routing capital."""
     offer = ActiveFundingOffer(
         venue_offer_id="111", symbol="fUSD", amount=Decimal("50"),
         rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
@@ -642,8 +647,36 @@ def test_compute_recovery_actions_requires_symbol() -> None:
     with pytest.raises(TypeError):
         compute_recovery_actions(
             venue_offers=[offer], local_claims=[], account_id=_ACC,
-            is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbol → TypeError
+            is_simulated=False, now_ms=_NOW, grace_ms=120_000,  # no symbols → TypeError
         )
+
+
+def test_missing_release_uses_per_claim_symbol_not_primary():
+    """A CLAIMED fUST offer missing from venue must release as fUST — the claim's
+    own symbol — even when fUSD is also configured (no global primary-symbol stamp)."""
+    scid = uuid4()
+    claim = _claim(cid=42, voi="999", state=RegistryState.CLAIMED, size="80",
+                   scid=scid, symbol="fUST")
+    acts = compute_recovery_actions(
+        venue_offers=[], local_claims=[claim],
+        account_id="acct", is_simulated=False, now_ms=1_000,
+        grace_ms=0, action_grace_ms=0,
+        configured_symbols=frozenset({"fUSD", "fUST"}))
+    assert len(acts) == 1
+    ev = acts[0]
+    assert isinstance(ev, ReservationReleased)
+    assert ev.symbol == "fUST"          # the claim's own symbol, not a global stamp
+
+
+def test_recovery_fails_loud_on_unconfigured_symbol():
+    claim = _claim(cid=7, voi="7", state=RegistryState.CLAIMED, size="10",
+                   scid=uuid4(), symbol="fXXX")
+    with pytest.raises(ValueError):
+        compute_recovery_actions(
+            venue_offers=[], local_claims=[claim],
+            account_id="acct", is_simulated=False, now_ms=1_000,
+            grace_ms=0, action_grace_ms=0,
+            configured_symbols=frozenset({"fUSD", "fUST"}))
 
 
 # ── Per-symbol plumbing (Cluster D Task 1) ───────────────────────────────────
@@ -859,3 +892,37 @@ async def test_multi_symbol_result_aggregates_dims():
     assert result.realized_usdt == Decimal("230")
     assert result.available_usdt == Decimal("12")
     assert result.n_credits == 2
+
+
+# --- from_snapshot loads each claim's own symbol (fUSD P2 Task 3) ------------
+
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from bfx_funding_bot.core.db import Base  # noqa: E402
+from bfx_funding_bot.modules.execution.event_store.tables import (  # noqa: E402
+    OfferClaimRow,
+)
+from bfx_funding_bot.modules.execution.registry_offers import (  # noqa: E402
+    OfferRegistry,
+)
+
+
+async def _create_all(session: AsyncSession) -> None:
+    bind = session.bind
+    assert bind is not None
+    async with bind.begin() as conn:  # type: ignore[union-attr]
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def test_from_snapshot_loads_symbol(sqlite_session: AsyncSession) -> None:
+    await _create_all(sqlite_session)
+    sqlite_session.add(OfferClaimRow(
+        cid=42, account_id="acct", deployment_environment="ci",
+        state="claimed", venue_offer_id="v42", symbol="fUST",
+        size_usdt=Decimal("100"),
+        signal_correlation_id="11111111-1111-1111-1111-111111111111",
+        occurred_at_ms=1000, last_updated_ms=2000, last_event_seq=0))
+    await sqlite_session.flush()
+    reg = await OfferRegistry.from_snapshot(
+        sqlite_session, account_id="acct", deployment_environment="ci")
+    assert reg._snapshot["v42"].symbol == "fUST"
