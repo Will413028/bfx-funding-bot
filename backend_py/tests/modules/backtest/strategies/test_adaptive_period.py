@@ -59,3 +59,102 @@ def test_window_filled_after_ema_span_samples() -> None:
     for i in range(3):
         s.observe(_c(i, "0.0003"))
     assert s.window_filled
+
+
+def _warm(s: AdaptivePeriodStrategy, level: str, n: int = 30) -> None:
+    """Warm EMA to `level` with n samples so window_filled and ema≈level."""
+    for i in range(n):
+        s.observe(_c(i, level))
+
+
+def test_decide_returns_none_when_close_is_none() -> None:
+    s = _ap()
+    none_candle = FundingCandle(
+        symbol="fUST", timeframe="1h", period_agg="p2", mts=5,
+        open=None, close=None, high=None, low=None, volume=None,
+    )
+    assert s.decide(none_candle) is None
+
+
+def test_decide_period_floor_during_warmup() -> None:
+    s = _ap(ema_span=24)
+    s.observe(_c(0, "0.0001"))          # 1 sample << ema_span -> not warmed
+    cand = _c(1, "0.0005")              # big positive deviation, but warmup
+    s.observe(cand)
+    d = s.decide(cand)
+    assert d is not None
+    assert d.period_days == 2
+    assert d.rate == Decimal("0.0005")  # always lends at market
+
+
+def test_decide_floor_when_at_or_below_trend() -> None:
+    # warmed flat at 0.0010, then a candle equal to EMA -> deviation 0 <= band1
+    s = _ap(ema_span=3, t1="0.5", t2="1.5", ratio_sigma="0.10")
+    _warm(s, "0.0010", n=5)
+    cand = _c(100, "0.0010")
+    s.observe(cand)
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 2
+
+
+def test_decide_p_mid_when_mildly_above_trend() -> None:
+    # ema_span=1 -> alpha=1.0 -> ema == previous close exactly (easy goldens).
+    # band1 = 0.5*0.10 = 0.05 ; band2 = 1.5*0.10 = 0.15
+    # want deviation in (0.05, 0.15]: close=0.0011 over ema=0.0010 -> dev=0.10
+    s = _ap(ema_span=1, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=30)
+    s.observe(_c(0, "0.0010"))          # ema=0.0010 (seed), samples=1>=ema_span=1
+    cand = _c(1, "0.0011")
+    # do NOT observe cand before decide, so ema stays 0.0010 for a clean golden
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 7
+
+
+def test_decide_p_long_on_spike() -> None:
+    # deviation = 0.20 > band2 (0.15) -> p_long
+    s = _ap(ema_span=1, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=30)
+    s.observe(_c(0, "0.0010"))
+    cand = _c(1, "0.0012")              # dev = 0.20
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 30
+
+
+def test_decide_boundary_band1_inclusive_to_floor() -> None:
+    # deviation exactly == band1 (0.05) -> floor (<=)
+    s = _ap(ema_span=1, t1="0.5", t2="1.5", ratio_sigma="0.10")
+    s.observe(_c(0, "0.0010"))
+    cand = _c(1, "0.00105")             # dev = 0.05 == band1
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 2
+
+
+def test_decide_boundary_band2_inclusive_to_mid() -> None:
+    # deviation exactly == band2 (0.15) -> p_mid (<=)
+    s = _ap(ema_span=1, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7)
+    s.observe(_c(0, "0.0010"))
+    cand = _c(1, "0.00115")             # dev = 0.15 == band2
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 7
+
+
+def test_decide_clamps_p_long_above_max() -> None:
+    s = _ap(ema_span=1, t1="0.5", t2="1.5", ratio_sigma="0.10", p_mid=7, p_long=999)
+    s.observe(_c(0, "0.0010"))
+    cand = _c(1, "0.0012")              # spike tier
+    d = s.decide(cand)
+    assert d is not None and d.period_days == 120  # clamped to Bitfinex max
+
+
+def test_decide_sets_last_period() -> None:
+    s = _ap(ema_span=1, ratio_sigma="0.10")
+    s.observe(_c(0, "0.0010"))
+    s.decide(_c(1, "0.0012"))
+    assert s.last_period == 30
+
+
+def test_decide_rate_always_equals_close() -> None:
+    s = _ap(ema_span=1, ratio_sigma="0.10")
+    s.observe(_c(0, "0.0010"))
+    for close in ("0.0009", "0.0011", "0.0012"):
+        cand = _c(2, close)
+        d = s.decide(cand)
+        assert d is not None and d.rate == Decimal(close)

@@ -78,5 +78,24 @@ class AdaptivePeriodStrategy(Strategy):
                 + (Decimal("1") - self._alpha) * self._ema
             )
 
+    def _period_for(self, close: Decimal) -> int:
+        # Warmup or undefined EMA -> safest shortest lock.
+        if self._ema is None or self._ema == 0 or self._samples < self._ema_span:
+            return _PERIOD_FLOOR
+        deviation = (close - self._ema) / self._ema
+        band1 = self._t1 * self._ratio_sigma
+        band2 = self._t2 * self._ratio_sigma
+        if deviation <= band1:
+            period = _PERIOD_FLOOR
+        elif deviation <= band2:
+            period = self._p_mid
+        else:
+            period = self._p_long
+        return max(_PERIOD_FLOOR, min(_PERIOD_MAX, period))
+
     def decide(self, candle: FundingCandle) -> LendDecision | None:
-        raise NotImplementedError  # implemented in Task 3
+        if candle.close is None:
+            return None
+        period = self._period_for(candle.close)
+        self._last_period = period
+        return LendDecision(mts=candle.mts, rate=candle.close, period_days=period)
