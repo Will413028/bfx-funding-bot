@@ -53,7 +53,7 @@ logger = logging.getLogger("run_oos_profitability")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
 DEFAULT_N_TRIALS = 9  # Phase 3b sweep tried 9 configs/cell (6 MR + 3 RP); the deflated-Sharpe factor
-CANARY_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
 
 
 @dataclass(frozen=True)
@@ -239,6 +239,10 @@ async def _amain() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, help="markdown output path (.json sibling auto)")
     parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
+    parser.add_argument(
+        "--cells", default=str(DEFAULT_CELLS_YAML),
+        help="cells yaml path (default: configs/cells.canary.yaml)",
+    )
     args = parser.parse_args()
 
     # Bootstrap mirrors scripts/run_phase3b_wfo_matrix.py exactly:
@@ -250,7 +254,7 @@ async def _amain() -> int:
 
     reports: list[CellReport] = []
     try:
-        for cell in load_cells_only(CANARY_YAML):
+        for cell in load_cells_only(Path(args.cells)):
             async with session_scope(session_factory) as session:
                 reports.append(await _run_cell(session, cell, args.n_trials))
     except Exception:
