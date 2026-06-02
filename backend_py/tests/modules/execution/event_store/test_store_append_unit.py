@@ -68,6 +68,19 @@ async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSess
     assert row2.state == "released"
 
 
+async def test_offer_claims_persists_symbol(sqlite_session: AsyncSession) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=820, venue_offer_id="v820", amount=Decimal("100"), symbol="fUSD",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000))
+    await sqlite_session.flush()
+    row = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 820))).scalar_one()
+    assert row.symbol == "fUSD"      # the offer's real currency, not a default
+
+
 async def test_append_fill_dedup_skips_duplicate(sqlite_session: AsyncSession) -> None:
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
@@ -88,7 +101,7 @@ async def test_intent_creates_pending_claim_with_null_voi(sqlite_session: AsyncS
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
     await store.append(sqlite_session, ReservationIntent(
-        cid=300, size_usdt=Decimal("8"), signal_correlation_id=_SCID,
+        cid=300, size_usdt=Decimal("8"), symbol="fUST", signal_correlation_id=_SCID,
         account_id="acct", is_simulated=True, occurred_at_ms=1000))
     await sqlite_session.flush()
     row = (await sqlite_session.execute(
@@ -102,7 +115,7 @@ async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSes
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
     await store.append(sqlite_session, ReservationIntent(
-        cid=301, size_usdt=Decimal("8"), signal_correlation_id=_SCID,
+        cid=301, size_usdt=Decimal("8"), symbol="fUSD", signal_correlation_id=_SCID,
         account_id="acct", is_simulated=True, occurred_at_ms=1000))
     await store.append(sqlite_session, ReservationClaimed(
         cid=301, venue_offer_id="v301", size_usdt=Decimal("8"),
@@ -188,10 +201,10 @@ async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
     await store.append(sqlite_session, ReservationIntent(
-        cid=302, size_usdt=Decimal("8"), signal_correlation_id=_SCID,
+        cid=302, size_usdt=Decimal("8"), symbol="fUST", signal_correlation_id=_SCID,
         account_id="acctF", is_simulated=True, occurred_at_ms=1000))
     await store.append(sqlite_session, ReservationFailed(
-        cid=302, size_usdt=Decimal("8"), signal_correlation_id=_SCID,
+        cid=302, size_usdt=Decimal("8"), symbol="fUST", signal_correlation_id=_SCID,
         account_id="acctF", is_simulated=True, reason="submit_failed",
         occurred_at_ms=1100))
     await sqlite_session.flush()
@@ -202,3 +215,20 @@ async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session
         select(PositionStateRow).where(PositionStateRow.account_id == "acctF"))).scalar_one()
     assert ps.reserved == Decimal("0")   # FAILED never reserved capital
     assert ps.last_event_seq > 0              # high-water mark still advances
+
+
+async def test_intent_projects_under_its_own_symbol(sqlite_session: AsyncSession) -> None:
+    """Regression: Intent must route its projection by its OWN symbol (no fUSD
+    leak from a dropped fallback). Intent carries no ledger effect, so reserved
+    stays 0 while the position_state row is created under fUST only."""
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationIntent(
+        cid=701, size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000))
+    await sqlite_session.flush()
+    ps = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acct"))).scalars().all()
+    assert [p.symbol for p in ps] == ["fUST"]      # no fUSD row created
+    assert ps[0].reserved == Decimal("0")          # intent has no ledger effect

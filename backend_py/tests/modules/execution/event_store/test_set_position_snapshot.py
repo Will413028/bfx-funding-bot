@@ -56,3 +56,19 @@ async def test_set_position_snapshot_writes_state_observation_and_returns_drift(
     assert drift.realized_drift == Decimal("150")     # |450 - 300|
     assert drift.reserved_drift == Decimal("0")
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_set_position_snapshot_stamps_symbol_on_checkpoint():
+    engine, sm = await _session()
+    store = PostgresEventStore(deployment_environment="ci")
+    async with sm() as session:
+        await store.set_position_snapshot(
+            session, account_id="a",
+            reserved_usdt=Decimal("0"), realized_usdt=Decimal("10"),
+            n_offers=0, n_credits=1, occurred_at_ms=1, symbol="fUST")
+        await session.commit()
+        obs = (await session.execute(select(ReconcileObservationRow).where(
+            ReconcileObservationRow.account_id == "a"))).scalar_one()
+    assert obs.symbol == "fUST"
+    await engine.dispose()
