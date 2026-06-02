@@ -1,0 +1,168 @@
+{
+  "reports": [
+    {
+      "cell": "fUST_a30",
+      "n_windows": 50,
+      "strategy": {
+        "n_windows": "50",
+        "median_monthly": "0.6705891625499226526958688760",
+        "p25_monthly": "0.5255532605430168018079941232",
+        "worst_monthly": "0.2091440967767527822522472500",
+        "best_monthly": "2.640273751083947969669520917",
+        "mean_monthly": "0.7940742975254459328533812316",
+        "annualized_pct": "9.944607469334095791589952900",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "baseline": {
+        "n_windows": "50",
+        "median_monthly": "0.4949311698493985746514873684",
+        "p25_monthly": "0.4078548982175135913439030115",
+        "worst_monthly": "0.1687275764759357396012716925",
+        "best_monthly": "0.8520028420911560583198149228",
+        "mean_monthly": "0.502328273793816468495981558",
+        "annualized_pct": "6.195917797725528389969868800",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "active": {
+        "n_windows": "50",
+        "median_active": "0.1655198098559120612706926064",
+        "mean_active": "0.2917460237316294643573996736",
+        "information_ratio": "0.7273154590365781568301511042",
+        "pct_months_outperform": "0.82"
+      },
+      "median_ci": [
+        "0.5980308150848076991166714691",
+        "0.8137705149340091850464892609"
+      ],
+      "deflated_sharpe": "0.9999999991880961",
+      "n_trials": 4
+    },
+    {
+      "cell": "fUST_p2",
+      "n_windows": 50,
+      "strategy": {
+        "n_windows": "50",
+        "median_monthly": "0.6441118510399458822116485472",
+        "p25_monthly": "0.4724774929446540049655007556",
+        "worst_monthly": "0.2091440967767527822522472500",
+        "best_monthly": "2.646299765855193970480201619",
+        "mean_monthly": "0.7511712295017666293001536154",
+        "annualized_pct": "9.383737113323370514772911000",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "baseline": {
+        "n_windows": "50",
+        "median_monthly": "0.4788566792978505048512994974",
+        "p25_monthly": "0.4026304444414314916856017515",
+        "worst_monthly": "0.2525645045505726045211699641",
+        "best_monthly": "0.8549668032043416163531812679",
+        "mean_monthly": "0.4923513271356785345059627164",
+        "annualized_pct": "6.069520891398100493130079800",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "active": {
+        "n_windows": "50",
+        "median_active": "0.1340399494525245904629255690",
+        "mean_active": "0.2588199023660880947941908996",
+        "information_ratio": "0.6465162087469971087572089917",
+        "pct_months_outperform": "0.82"
+      },
+      "median_ci": [
+        "0.5856879082098360211808671834",
+        "0.7820074460150278048624064803"
+      ],
+      "deflated_sharpe": "0.9999999995819774",
+      "n_trials": 4
+    },
+    {
+      "cell": "fUSD_a30",
+      "n_windows": 50,
+      "strategy": {
+        "n_windows": "50",
+        "median_monthly": "0.7590878640189078097531331497",
+        "p25_monthly": "0.5289097320031067341170168580",
+        "worst_monthly": "0.2885621692804467305656821572",
+        "best_monthly": "3.390715624320007102808324140",
+        "mean_monthly": "0.9463831129698037278344387274",
+        "annualized_pct": "11.94308013963894461326677680",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "baseline": {
+        "n_windows": "50",
+        "median_monthly": "0.4656766864705462288869979651",
+        "p25_monthly": "0.3831019988964492924639651148",
+        "worst_monthly": "0.2549122209751549194514054497",
+        "best_monthly": "0.8873919221075671536370361845",
+        "mean_monthly": "0.4817983767389091624997049582",
+        "annualized_pct": "5.936105899579266760675730000",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "active": {
+        "n_windows": "50",
+        "median_active": "0.3161040349063746735902320078",
+        "mean_active": "0.4645847362308945653347337688",
+        "information_ratio": "0.8707517065732632529775634746",
+        "pct_months_outperform": "0.9"
+      },
+      "median_ci": [
+        "0.6108275190547451664952266380",
+        "1.034796463142107489364234974"
+      ],
+      "deflated_sharpe": "0.9999999999998584",
+      "n_trials": 4
+    },
+    {
+      "cell": "fUSD_p2",
+      "n_windows": 50,
+      "strategy": {
+        "n_windows": "50",
+        "median_monthly": "0.6130762106206822352175365688",
+        "p25_monthly": "0.4429206244059176898105888174",
+        "worst_monthly": "0.2873597093134165750950381676",
+        "best_monthly": "3.568989178599018281764846057",
+        "mean_monthly": "0.8420262296575584676217051868",
+        "annualized_pct": "10.56261405128951507571736840",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "baseline": {
+        "n_windows": "50",
+        "median_monthly": "0.4421962467164864880781140232",
+        "p25_monthly": "0.3868281829430391428243650562",
+        "worst_monthly": "0.2488845342227230472337392728",
+        "best_monthly": "0.7482534753164467449862690801",
+        "mean_monthly": "0.4532670181952568163248975846",
+        "annualized_pct": "5.576154521109667056157341100",
+        "idle_rate": "0",
+        "mean_fill_rate": "1.0",
+        "sortino": "Infinity"
+      },
+      "active": {
+        "n_windows": "50",
+        "median_active": "0.1579870530786442770672527857",
+        "mean_active": "0.3887592114623016512968076018",
+        "information_ratio": "0.7095866274990964691743701873",
+        "pct_months_outperform": "0.82"
+      },
+      "median_ci": [
+        "0.5360026439766190397788700583",
+        "0.7847220319023466048898616549"
+      ],
+      "deflated_sharpe": "0.999999999254426",
+      "n_trials": 4
+    }
+  ]
+}

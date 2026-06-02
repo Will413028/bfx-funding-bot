@@ -30,6 +30,7 @@ class Phase(StrEnum):
 class StrategyName(StrEnum):
     RATE_PERCENTILE = "rate_percentile"
     MEAN_REVERSION = "mean_reversion"
+    ADAPTIVE_PERIOD = "adaptive_period"
 
 
 class EventType(StrEnum):

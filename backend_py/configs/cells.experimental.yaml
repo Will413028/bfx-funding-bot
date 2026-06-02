@@ -1,0 +1,35 @@
+# Phase 3c EXPERIMENTAL cells — AdaptivePeriodStrategy characterization ONLY.
+#
+# NOT deployed. NOT covered by derive_cells --check (that gate is MeanReversion-
+# specific; see cell_pipeline.check_against_fixture). Used by:
+#   uv run python scripts/run_oos_profitability.py \
+#     --cells configs/cells.experimental.yaml --n-trials 4 --output ...
+# to compare adaptive-period vs AlwaysMarketRate (period alpha) and vs the
+# MeanReversion canary reports (bot-vs-idle), over the same OOS windows.
+#
+# ratio_sigma copied verbatim from configs/cells.canary.yaml (it is the EDA
+# close_over_ema_sigma_24 — strategy-independent). Period tiers fixed for v1.
+cells:
+  - strategy: adaptive_period
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.42049266874194213, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 30}
+
+  - strategy: adaptive_period
+    symbol: fUST
+    period_agg: p2
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.4062263004196277, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 30}
+
+  - strategy: adaptive_period
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.3766563427150627, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 30}
+
+  - strategy: adaptive_period
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.3450137927640065, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 30}

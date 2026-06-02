@@ -13,6 +13,9 @@ from decimal import Decimal
 from typing import Protocol
 
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
+from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
+    AdaptivePeriodStrategy,
+)
 from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
     MeanReversionStrategy,
 )
@@ -52,6 +55,16 @@ def build_strategy(cell: CellConfig) -> _Strategy:
         return RatePercentileStrategy(
             percentile=int(p["percentile"]),
             lookback_hours=int(p["lookback_hours"]),
+        )
+    if cell.strategy == StrategyName.ADAPTIVE_PERIOD:
+        p = cell.params
+        return AdaptivePeriodStrategy(
+            ema_span=int(p["ema_span"]),
+            ratio_sigma=Decimal(str(p["ratio_sigma"])),
+            t1=Decimal(str(p["t1"])),
+            t2=Decimal(str(p["t2"])),
+            p_mid=int(p["p_mid"]),
+            p_long=int(p["p_long"]),
         )
     raise ValueError(f"unsupported strategy {cell.strategy!r}")
 
