@@ -202,3 +202,20 @@ async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session
         select(PositionStateRow).where(PositionStateRow.account_id == "acctF"))).scalar_one()
     assert ps.reserved == Decimal("0")   # FAILED never reserved capital
     assert ps.last_event_seq > 0              # high-water mark still advances
+
+
+async def test_intent_projects_under_its_own_symbol(sqlite_session: AsyncSession) -> None:
+    """Regression: Intent must route its projection by its OWN symbol (no fUSD
+    leak from a dropped fallback). Intent carries no ledger effect, so reserved
+    stays 0 while the position_state row is created under fUST only."""
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationIntent(
+        cid=701, size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000))
+    await sqlite_session.flush()
+    ps = (await sqlite_session.execute(select(PositionStateRow).where(
+        PositionStateRow.account_id == "acct"))).scalars().all()
+    assert [p.symbol for p in ps] == ["fUST"]      # no fUSD row created
+    assert ps[0].reserved == Decimal("0")          # intent has no ledger effect
