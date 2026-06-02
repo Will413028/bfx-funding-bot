@@ -72,6 +72,33 @@ async def test_rebuild_uses_checkpoint_then_replays_only_tail():
     await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_rebuild_seeds_from_same_symbol_checkpoint():
+    """Two checkpoints exist: fUST (fence=3, realized=450) then a LATER fUSD
+    (fence=4, realized=200). Rebuilding fUST must seed from the fUST checkpoint
+    (450), not the newer fUSD one (200). Proves the checkpoint base is per-symbol."""
+    engine, sm = await _engine()
+    store = PostgresEventStore(deployment_environment="ci")
+    async with sm() as session:
+        session.add(ReconcileObservationRow(
+            account_id="a", deployment_environment="ci", symbol="fUST",
+            reserved_usdt=Decimal("0"), realized_usdt=Decimal("450"),
+            n_offers=0, n_credits=3, observed_at_ms=100, event_seq_fence=3))
+        session.add(ReconcileObservationRow(
+            account_id="a", deployment_environment="ci", symbol="fUSD",
+            reserved_usdt=Decimal("0"), realized_usdt=Decimal("200"),
+            n_offers=0, n_credits=1, observed_at_ms=200, event_seq_fence=4))
+        await session.commit()
+        await store.rebuild_snapshot_from_log(
+            session, account_id="a", deployment_environment="ci", symbol="fUST")
+        await session.commit()
+        ps = (await session.execute(select(PositionStateRow).where(
+            PositionStateRow.account_id == "a",
+            PositionStateRow.symbol == "fUST"))).scalar_one()
+    assert ps.realized == Decimal("450")   # seeded from fUST checkpoint, not fUSD's 200
+    await engine.dispose()
+
+
 def _claimed_payload(*, symbol: str, amount: Decimal, seq: int) -> dict:
     """A RESERVATION_CLAIMED payload as serialization.py persists it: carries
     BOTH `amount` (canonical) and `symbol`. Deliberately omits `size_usdt` so
