@@ -241,7 +241,8 @@ def test_build_strategy_is_deterministic() -> None:
                 "p_mid": 7, "p_long": 30},
     )
     a, b = build_strategy(cell), build_strategy(cell)
-    a.observe(_c(0, "0.0010")); b.observe(_c(0, "0.0010"))
+    a.observe(_c(0, "0.0010"))
+    b.observe(_c(0, "0.0010"))
     cand = _c(1, "0.0012")
     da, db = a.decide(cand), b.decide(cand)
     assert da is not None and db is not None
@@ -251,6 +252,7 @@ def test_build_strategy_is_deterministic() -> None:
 
 def test_experimental_cells_yaml_loads_and_builds() -> None:
     from pathlib import Path
+
     from bfx_funding_bot.modules.marketfeed.config import load_cells_only
     from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 
