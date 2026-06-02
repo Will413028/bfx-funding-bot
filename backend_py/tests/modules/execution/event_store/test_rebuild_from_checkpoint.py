@@ -151,3 +151,44 @@ async def test_rebuild_folds_two_symbols_into_two_rows():
     assert by_symbol["fUST"].reserved == Decimal("100")   # NOT 140 — fold filtered by symbol
     assert by_symbol["fUSD"].reserved == Decimal("40")
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_genesis_folds_legacy_symbolless_fust_events():
+    """Genesis rebuild (no checkpoint) over LEGACY rows that predate the symbol
+    column (no `symbol` key in payload). They are fUST-era and MUST fold as fUST
+    (the tail-fold defaults a missing symbol to DEFAULT_RECONCILE_SYMBOL), not be
+    dropped by the `payload['symbol'] != symbol` filter — else a manual recovery
+    silently miscomputes realized (the live foot-gun the deploy pre-flight flagged)."""
+    engine, sm = await _engine()
+    store = PostgresEventStore(deployment_environment="ci")
+    async with sm() as session:
+        # legacy CLAIMED then ORDER_FILL of the same offer (cid=1), both WITHOUT
+        # a `symbol` key (written before Phase 2 added the column).
+        session.add(EventLogRow(
+            account_id="a", deployment_environment="ci",
+            event_type="RESERVATION_CLAIMED", cid=1, venue_offer_id="v1", venue_seq=1,
+            payload={"amount": "100", "size_usdt": "100", "cid": 1, "venue_offer_id": "v1",
+                     "signal_correlation_id": "00000000-0000-4000-8000-000000000000",
+                     "account_id": "a", "is_simulated": False},
+            occurred_at_ms=1))
+        session.add(EventLogRow(
+            account_id="a", deployment_environment="ci",
+            event_type="ORDER_FILL", cid=1, venue_offer_id="v1", venue_seq=2,
+            payload={"amount": "100", "size_usdt": "100", "cid": 1, "venue_offer_id": "v1",
+                     "credit_id": None, "fill_rate": 0.0,
+                     "signal_correlation_id": "00000000-0000-4000-8000-000000000000",
+                     "account_id": "a", "is_simulated": False},
+            occurred_at_ms=2))
+        await session.commit()
+
+        await store.rebuild_snapshot_from_log(
+            session, account_id="a", deployment_environment="ci", symbol="fUST")
+        await session.commit()
+
+        ps = (await session.execute(select(PositionStateRow).where(
+            PositionStateRow.account_id == "a",
+            PositionStateRow.symbol == "fUST"))).scalar_one()
+    assert ps.realized == Decimal("100")   # legacy fUST fill folded as fUST, not dropped
+    assert ps.reserved == Decimal("0")     # CLAIMED reserved 100, FILL moved it to realized
+    await engine.dispose()

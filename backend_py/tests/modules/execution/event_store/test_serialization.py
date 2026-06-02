@@ -86,3 +86,24 @@ def test_intent_failed_legacy_payload_upcasts_symbol() -> None:
 def test_decimal_preserved_as_string() -> None:
     payload = serialize_event(_claimed())
     assert payload["size_usdt"] == "10.5"  # Decimal serialized as str, not float
+
+
+@pytest.mark.parametrize("etype,extra", [
+    ("ORDER_FILL", {"venue_offer_id": "v1", "credit_id": None, "fill_rate": 0.0}),
+    ("RESERVATION_CLAIMED", {"venue_offer_id": "v1"}),
+    ("RESERVATION_RELEASED", {"venue_offer_id": "v1", "reason": "venue_cancel"}),
+])
+def test_legacy_position_event_without_symbol_upcasts_to_fust(
+    etype: str, extra: dict[str, object],
+) -> None:
+    """The 4 position events gained a mandatory `symbol` in Phase 2; event_log
+    rows written before that carry no `symbol`. deserialize must upcast them to
+    fUST exactly like INTENT/FAILED — otherwise a manual rebuild_snapshot_from_log
+    crashes at the offer_claims projection or silently drops the legacy fUST fills
+    in the position_state tail fold."""
+    legacy = {"cid": 9, "size_usdt": "12.5",
+              "signal_correlation_id": str(_SCID), "account_id": "acct",
+              "is_simulated": True, "occurred_at_ms": 1000, **extra}
+    ev = deserialize_event(etype, legacy)
+    assert ev.symbol == "fUST"           # type: ignore[attr-defined]
+    assert ev.amount == Decimal("12.5")  # type: ignore[attr-defined]

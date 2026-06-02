@@ -57,10 +57,15 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     cls = _CLASS_BY_TYPE.get(event_type)
     if cls is None:
         raise ValueError(f"unknown event_type: {event_type}")
-    # Upcast: Intent/Failed gained a mandatory `symbol` after these rows were
-    # written. Inject the historically-correct value for legacy payloads; new
-    # rows already carry symbol so this is a no-op for them.
-    if event_type in ("RESERVATION_INTENT", "RESERVATION_FAILED") and payload.get("symbol") is None:
+    # Upcast: each of the 5 reserve events gained a mandatory `symbol` (the 4
+    # position events in Phase 2; Intent/Failed in the fUSD-prereq work) AFTER
+    # early event_log rows were written. Inject the historically-correct value
+    # for ANY legacy payload missing it (not just Intent/Failed) — otherwise a
+    # rebuild_snapshot_from_log over legacy ORDER_FILL/CLAIMED/RELEASED rows hits
+    # the offer_claims symbol guard or the position_state tail fold drops them.
+    # New rows already carry symbol so this is a no-op. The canary was fUST-only
+    # when every symbol-less row existed.
+    if payload.get("symbol") is None:
         payload = {**payload, "symbol": DEFAULT_RECONCILE_SYMBOL}
     kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
     return cls(**kwargs)

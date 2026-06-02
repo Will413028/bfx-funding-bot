@@ -403,3 +403,24 @@ def test_position_reconciled_rejects_conflicting_canonical_and_usdt() -> None:
             reserved=Decimal("300"), reserved_usdt=Decimal("350"),
             realized=Decimal("0"), available=Decimal("0"),
         )
+
+
+@pytest.mark.parametrize("make", [
+    lambda s: ReservationIntent(cid=1, amount=Decimal("100"), symbol=s,
+        signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+    lambda s: ReservationFailed(cid=1, amount=Decimal("100"), symbol=s,
+        signal_correlation_id=uuid4(), account_id="a", is_simulated=False, reason="x"),
+    lambda s: ReservationClaimed(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,
+        signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+    lambda s: OrderFilled(cid=1, venue_offer_id="v1", credit_id=None, amount=Decimal("100"),
+        symbol=s, fill_rate=0.0, signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+    lambda s: ReservationReleased(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,
+        reason="x", signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+])
+def test_reserve_events_reject_none_symbol(make: object) -> None:
+    """symbol=None must fail loud, not silently construct. A frozen dataclass does
+    not enforce the `symbol: str` annotation at runtime, so a legacy-payload upcast
+    gap (deserialize building kwargs from payload.get('symbol')=None) could land
+    symbol=None and silently corrupt the per-symbol fold. Convert to a hard error."""
+    with pytest.raises(TypeError):
+        make(None)  # type: ignore[operator]

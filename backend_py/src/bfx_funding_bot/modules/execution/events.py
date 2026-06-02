@@ -22,10 +22,13 @@ from uuid import UUID
 
 __SCHEMA_VERSION__ = 2
 
-# Schema-evolution upcast value for the two events that gained a mandatory
-# `symbol` after early event_log rows were written. Used ONLY by
-# serialization.deserialize_event for those legacy rows; every live event now
-# carries an explicit symbol. The canary was fUST-only when those rows existed.
+# Schema-evolution upcast value: each of the 5 reserve events gained a mandatory
+# `symbol` after early event_log rows were written (the 4 position events in
+# Phase 2; Intent/Failed in the fUSD-prereq work). Two consumers use it for those
+# legacy rows — serialization.deserialize_event (injects it for any symbol-less
+# payload) and store.rebuild_snapshot_from_log's tail fold (defaults a missing
+# symbol). Every live event now carries an explicit symbol; the canary was
+# fUST-only when those rows existed.
 DEFAULT_RECONCILE_SYMBOL = "fUST"
 
 
@@ -51,6 +54,19 @@ def _resolve_amount(ev: object) -> None:
         object.__setattr__(ev, "amount", size_usdt)
     if size_usdt is None:
         object.__setattr__(ev, "size_usdt", amount)
+
+
+def _require_symbol(ev: object) -> None:
+    """Fail loud if `symbol` is missing/empty.
+
+    `symbol` is a mandatory non-default field on the reserve events, but a frozen
+    dataclass does NOT enforce the `str` annotation at runtime — e.g.
+    deserialize_event building kwargs from a legacy `payload.get("symbol")` could
+    land symbol=None and silently miscompute the per-symbol fold. Convert that
+    into a hard failure (defense-in-depth alongside the deserialize upcaster).
+    """
+    if not getattr(ev, "symbol", None):
+        raise TypeError(f"{type(ev).__name__} requires a non-empty `symbol`")
 
 
 def _resolve_position_fields(ev: object) -> None:
@@ -109,6 +125,7 @@ class ReservationIntent:
     recorded_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        _require_symbol(self)
         _resolve_amount(self)
 
 
@@ -133,6 +150,7 @@ class ReservationFailed:
     recorded_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        _require_symbol(self)
         _resolve_amount(self)
 
 
@@ -162,6 +180,7 @@ class ReservationClaimed:
     recorded_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        _require_symbol(self)
         _resolve_amount(self)
 
 
@@ -191,6 +210,7 @@ class OrderFilled:
     recorded_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        _require_symbol(self)
         _resolve_amount(self)
 
 
@@ -216,6 +236,7 @@ class ReservationReleased:
     recorded_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        _require_symbol(self)
         _resolve_amount(self)
 
 
