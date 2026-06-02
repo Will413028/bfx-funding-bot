@@ -215,3 +215,35 @@ def test_param_grid_for_cell_from_eda() -> None:
     for p in grid:
         assert p["p_mid"] == 7 and p["p_long"] == 30
         assert p["ratio_sigma"] == (Decimal("0.05") if p["ema_span"] == 24 else Decimal("0.08"))
+
+
+def test_build_strategy_from_cellconfig() -> None:
+    from bfx_funding_bot.modules.marketfeed.config import CellConfig
+    from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+
+    cell = CellConfig(
+        strategy="adaptive_period", symbol="fUST", period_agg="a30",
+        params={"ema_span": 24, "ratio_sigma": 0.42, "t1": 0.5, "t2": 1.5,
+                "p_mid": 7, "p_long": 30},
+    )
+    s = build_strategy(cell)
+    assert isinstance(s, AdaptivePeriodStrategy)
+    assert s.name == "adaptive_period_ema24_t0.5_1.5"
+
+
+def test_build_strategy_is_deterministic() -> None:
+    from bfx_funding_bot.modules.marketfeed.config import CellConfig
+    from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+
+    cell = CellConfig(
+        strategy="adaptive_period", symbol="fUST", period_agg="a30",
+        params={"ema_span": 1, "ratio_sigma": 0.10, "t1": 0.5, "t2": 1.5,
+                "p_mid": 7, "p_long": 30},
+    )
+    a, b = build_strategy(cell), build_strategy(cell)
+    a.observe(_c(0, "0.0010")); b.observe(_c(0, "0.0010"))
+    cand = _c(1, "0.0012")
+    da, db = a.decide(cand), b.decide(cand)
+    assert da is not None and db is not None
+    assert da.period_days == db.period_days == 30
+    assert da.rate == db.rate
