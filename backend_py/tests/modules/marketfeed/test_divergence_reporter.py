@@ -399,3 +399,175 @@ def test_mr_warmup_drift_no_false_divergence():
     assert divergence is None, (
         f"MR EMA convergence noise must not be flagged as divergence; got: {divergence}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AdaptivePeriod divergence reporter tests (B1)
+#
+# Design note: period_days is a deterministic step fn of (ema_current, close,
+# config). Comparing the derived period would manufacture false divergences at
+# tier boundaries. We compare its INPUTS: ema_current (tolerance via
+# _APPROX_ATTR_KEYS), window_filled (exact), t1/t2/ratio_sigma (exact config).
+# ---------------------------------------------------------------------------
+
+
+def _cell_ap() -> CellConfig:
+    return CellConfig.model_validate({
+        "strategy": "adaptive_period", "symbol": "fUST", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {
+            "ema_span": 24,
+            "ratio_sigma": 0.05,
+            "t1": 0.5,
+            "t2": 1.5,
+            "p_mid": 7,
+            "p_long": 14,
+        },
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 2,
+    })
+
+
+def test_adaptive_period_state_drift_detected():
+    """EMA accumulator drift on adaptive_period must surface as strategy_attributes
+    divergence even when signal_direction matches (mirrors MR G2 test)."""
+    cell = _cell_ap()
+    # Flat candle history — ema converges to ~0.0003 after warm-up.
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(30)]
+
+    # Live signal agrees on direction (POST — always lends) but carries a drifted ema.
+    fake_live = ExtractedSignal(
+        signal_score=0.0,
+        signal_direction=SignalDirection.POST,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.0003,
+            "t1": 0.5,
+            "t2": 1.5,
+            "ratio_sigma": 0.05,
+            "ema_current": Decimal("0.0009"),   # drifted: 3× the true ~0.0003
+            "window_filled": True,
+        }.items())),
+        lend_decision=None,
+    )
+
+    reporter = DivergenceReporter()
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=2, live_signal=fake_live,
+    )
+
+    assert result is not None, "EMA drift must be detected even with matching direction"
+    assert "strategy_attributes" in result["diff_fields"]
+    assert "signal_direction" not in result["diff_fields"]  # directions agreed
+    replay_attrs = dict(result["replay"]["strategy_attributes"])
+    assert "ema_current" in replay_attrs, "replay must expose ema_current"
+    assert Decimal(str(replay_attrs["ema_current"])) != Decimal("0.0009")
+
+
+def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
+    """No false divergence when ema_current matches within _REL_TOL even if a
+    period tier flip would occur if period were compared.
+
+    The key assertion: when all attrs match (within ema tolerance), check()
+    returns None. We do NOT need to actually trigger a real tier flip in the
+    strategy — period is not in the compared attributes by design.
+    """
+    cell = _cell_ap()
+    # Use enough candles for warm-up (ema_span=24, need ≥24 observes before boundary).
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(30)]
+
+    # Build the true replay signal to get exact attribute values.
+    true_strategy = build_strategy(cell)
+    for c in history[:-1]:
+        true_strategy.observe(c)
+    true_signal = ExtractedSignal.extract(cell, true_strategy, history[-1])
+    true_attrs = dict(true_signal.strategy_attributes)
+
+    # Build a fake_live whose ema_current is within _REL_TOL of the true value.
+    # Even if this tiny perturbation would flip a tier boundary (it won't for flat
+    # history, but conceptually: period is not compared, so it doesn't matter).
+    true_ema = true_attrs["ema_current"]
+    # Perturb by 1e-5 relative — well within _REL_TOL (1e-4).
+    perturbed_ema = true_ema * Decimal("1.00001")
+
+    fake_attrs = dict(true_attrs)
+    fake_attrs["ema_current"] = perturbed_ema
+
+    fake_live = ExtractedSignal(
+        signal_score=true_signal.signal_score,
+        signal_direction=true_signal.signal_direction,
+        strategy_attributes=tuple(sorted(fake_attrs.items())),
+        lend_decision=None,
+    )
+
+    reporter = DivergenceReporter()
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=2, live_signal=fake_live,
+    )
+
+    assert result is None, (
+        f"ema within _REL_TOL must NOT be flagged as divergence; got: {result}"
+    )
+
+
+def test_adaptive_period_warmup_no_false_divergence():
+    """Short history (< ema_span): live and replay both warmup, ema_current
+    matches within tolerance — no false divergence."""
+    cell = _cell_ap()
+    # Only 5 candles: well below ema_span=24, window_filled=False.
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(5)]
+
+    # Honest live signal: observe history[:-1] then extract at history[-1].
+    live = build_strategy(cell)
+    for c in history[:-1]:
+        live.observe(c)
+    live_signal = ExtractedSignal.extract(cell, live, history[-1])
+
+    reporter = DivergenceReporter()
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=2, live_signal=live_signal,
+    )
+
+    assert result is None, (
+        f"warmup (window not filled) must not produce false divergence; got: {result}"
+    )
+
+
+def test_adaptive_period_config_drift_detected():
+    """A live signal carrying a different t2 than what replay uses must be
+    flagged — catches config drift between live and replay paths."""
+    cell = _cell_ap()  # t2=1.5
+    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
+               for i in range(30)]
+
+    # Build the true replay signal first to get accurate ema_current / window_filled.
+    true_strategy = build_strategy(cell)
+    for c in history[:-1]:
+        true_strategy.observe(c)
+    true_signal = ExtractedSignal.extract(cell, true_strategy, history[-1])
+    true_attrs = dict(true_signal.strategy_attributes)
+
+    # Swap t2 to a different value (1.0 instead of 1.5).
+    drifted_attrs = dict(true_attrs)
+    drifted_attrs["t2"] = 1.0  # mismatches cell.params["t2"] = 1.5
+
+    fake_live = ExtractedSignal(
+        signal_score=true_signal.signal_score,
+        signal_direction=true_signal.signal_direction,
+        strategy_attributes=tuple(sorted(drifted_attrs.items())),
+        lend_decision=None,
+    )
+
+    reporter = DivergenceReporter()
+    result = reporter.check(
+        cell=cell, raw_history=history, boundary_candle=history[-1],
+        budget_hours=2, live_signal=fake_live,
+    )
+
+    assert result is not None, "config drift (t2 mismatch) must be detected"
+    assert "strategy_attributes" in result["diff_fields"]
