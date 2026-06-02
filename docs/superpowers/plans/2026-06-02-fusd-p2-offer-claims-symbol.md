@@ -17,6 +17,8 @@
 
 **Gate (run before every commit):** `cd backend_py && uv run pytest -m "not integration" && uv run mypy src/ && uv run ruff check`
 
+> ⚠️ **LIVE-DB SAFETY (read first).** `backend_py/.env` → `../.env` `DATABASE_URL` is the **shared live Neon DB the VM canary runs on**. NEVER run alembic `upgrade`/`downgrade`/`check`/`current`/`revision --autogenerate` (they connect to / reflect live). The migration is **hand-authored** (zero DB connection); correctness is proven by the testcontainers integration test (Task 5, CI/Docker). Offline-safe: `alembic heads`/`history`/`show`. Unit tests use sqlite.
+
 ---
 
 ### Task 1: `offer_claims.symbol` column + projection threading
@@ -142,19 +144,38 @@ git commit -m "✨ Feat: offer_claims.symbol column + projection threading (fUSD
 
 ---
 
-### Task 2: Alembic migration — add `offer_claims.symbol`
+### Task 2: Alembic migration — add `offer_claims.symbol` (hand-authored)
 
 **Files:**
-- Create: `backend_py/alembic/versions/<auto>_add_symbol_to_offer_claims.py`
+- Create: `backend_py/alembic/versions/dac1e2f3a4b5_add_symbol_to_offer_claims.py`
 
-- [ ] **Step 1: Autogenerate (after P1's migration is the head)**
+> Hand-write the file (no `--autogenerate`). Revision id `dac1e2f3a4b5`; `down_revision` is **P1's** migration `c9d0e1f2a3b4` (linear chain — P1 must be on this branch first). If P1's revision id differs in practice, set `down_revision` to the actual P1 revision so `alembic heads` shows a single head.
 
-Run: `cd backend_py && uv run alembic revision --autogenerate -m "add symbol to offer_claims"`
-Expected: a new file whose `down_revision` = the **P1** migration's revision (the current head once P1 is merged). If P1 is not yet merged in this working tree, set `down_revision` to P1's revision id by hand so the chain is linear.
+- [ ] **Step 1: Write the migration file verbatim**
 
-- [ ] **Step 2: Hand-adjust the generated upgrade/downgrade**
+Create `backend_py/alembic/versions/dac1e2f3a4b5_add_symbol_to_offer_claims.py`:
 
 ```python
+"""add symbol to offer_claims
+
+Revision ID: dac1e2f3a4b5
+Revises: c9d0e1f2a3b4
+Create Date: 2026-06-02
+
+"""
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+
+from alembic import op
+
+# revision identifiers, used by Alembic.
+revision: str = 'dac1e2f3a4b5'
+down_revision: str | Sequence[str] | None = 'c9d0e1f2a3b4'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
 def upgrade() -> None:
     op.add_column(
         'offer_claims',
@@ -166,25 +187,26 @@ def downgrade() -> None:
     op.drop_column('offer_claims', 'symbol')
 ```
 
-Keep `server_default='fUST'` permanently (D4 — backfills active CLAIMED rows; the canary is fUST-only so this is correct, and rows self-heal on the next reconcile regardless).
+(Keep `server_default='fUST'` permanently — D4; backfills active CLAIMED rows, correct on the fUST-only canary, self-heals on next reconcile.)
 
-- [ ] **Step 3: Apply locally + check drift + idempotency**
+- [ ] **Step 2: Verify linear single head (OFFLINE)**
 
-Run:
-```bash
-cd backend_py && uv run alembic upgrade head && uv run alembic check \
-  && uv run alembic downgrade -1 && uv run alembic upgrade head && uv run alembic check
-```
-Expected: clean both directions; no metadata drift.
+Run: `cd backend_py && uv run alembic heads && uv run alembic history -r c9d0e1f2a3b4:head`
+Expected: single head `dac1e2f3a4b5`; history `c9d0e1f2a3b4 -> dac1e2f3a4b5`. (Reads `versions/`; no DB connection. Do NOT run `upgrade`/`check`/`current`.)
+
+- [ ] **Step 3: Verify import + ruff-clean**
+
+Run: `cd backend_py && uv run python -c "import alembic.versions.dac1e2f3a4b5_add_symbol_to_offer_claims as m; print(m.revision, m.down_revision)" && uv run ruff check alembic/versions/dac1e2f3a4b5_add_symbol_to_offer_claims.py`
+Expected: prints `dac1e2f3a4b5 c9d0e1f2a3b4`; ruff clean.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add backend_py/alembic/versions/
+git add backend_py/alembic/versions/dac1e2f3a4b5_add_symbol_to_offer_claims.py
 git commit -m "✨ Feat: migration — offer_claims.symbol (fUSD P2)"
 ```
 
-> **Live-DB note:** author-now / apply-at-cutover only. Do not touch the shared Neon canary DB this session.
+> Applied to the live DB only at the coordinated cutover by the operator. Correctness is proven by the Task 5 testcontainers integration test, never by upgrading live.
 
 ---
 

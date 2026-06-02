@@ -16,6 +16,8 @@
 
 **Gate (run before every commit):** `cd backend_py && uv run pytest -m "not integration" && uv run mypy src/ && uv run ruff check`
 
+> ⚠️ **LIVE-DB SAFETY.** `.env` `DATABASE_URL` is the shared live Neon DB. This plan has no migration and touches no DB; keep the `-m "not integration"` marker on every pytest run (unit tests use sqlite; integration tests need a container and are CI-only). Do not run alembic.
+
 ---
 
 ### Task 1: Reshape the two events + wire producers + upcaster (atomic schema change)

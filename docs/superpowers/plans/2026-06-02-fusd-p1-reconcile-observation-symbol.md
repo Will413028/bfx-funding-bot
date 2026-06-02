@@ -14,6 +14,8 @@
 
 **Gate (run before every commit):** `cd backend_py && uv run pytest -m "not integration" && uv run mypy src/ && uv run ruff check`
 
+> ⚠️ **LIVE-DB SAFETY (read first).** `backend_py/.env` → `../.env` has `DATABASE_URL` pointing at the **shared live Neon DB the VM canary runs on**. NEVER run any alembic command that connects to it: `upgrade`, `downgrade`, `check`, `current`, or `revision --autogenerate` (autogenerate reflects the live schema). The migration is **hand-authored** (zero DB connection) and verified **only** via the testcontainers integration test (ephemeral PG, CI/Docker). Offline-safe alembic commands (read the `versions/` dir, no DB): `heads`, `history`, `show`. Unit tests (`-m "not integration"`) use sqlite and never touch Neon.
+
 ---
 
 ### Task 1: Per-symbol checkpoint base (ORM + behaviour)
@@ -151,26 +153,38 @@ git commit -m "✨ Feat: per-symbol reconcile_observation checkpoint base (fUSD 
 
 ---
 
-### Task 2: Alembic migration — add `reconcile_observation.symbol`
+### Task 2: Alembic migration — add `reconcile_observation.symbol` (hand-authored)
 
 **Files:**
-- Create: `backend_py/alembic/versions/<auto>_add_symbol_to_reconcile_observation.py`
+- Create: `backend_py/alembic/versions/c9d0e1f2a3b4_add_symbol_to_reconcile_observation.py`
 
-- [ ] **Step 1: Autogenerate the migration**
+> Do NOT use `alembic revision --autogenerate` — it reflects the live Neon schema. Hand-write the file with the Write tool (template: `93c9ff214a61_add_last_reconciled_at_and_n_credits_to_.py`). Revision id is pre-assigned below (`c9d0e1f2a3b4`); `down_revision` is the current head `b7c1d2e3f4a5`.
 
-Run (must be in `backend_py/` so it uses the uv-managed Python 3.13; needs `.env` symlink → `ln -sf ../.env backend_py/.env` if missing):
+- [ ] **Step 1: Write the migration file verbatim**
 
-```bash
-cd backend_py && uv run alembic revision --autogenerate -m "add symbol to reconcile_observation"
-```
-
-Expected: a new file under `alembic/versions/` whose `down_revision = 'b7c1d2e3f4a5'` (current head). It will contain an `op.add_column('reconcile_observation', sa.Column('symbol', sa.Text(), nullable=False))` and a `create_index`.
-
-- [ ] **Step 2: Hand-adjust the generated file**
-
-Autogenerate does NOT infer the backfill `server_default`. Edit `upgrade()`/`downgrade()` to read exactly (template: `93c9ff214a61_add_last_reconciled_at_and_n_credits_to_.py`):
+Create `backend_py/alembic/versions/c9d0e1f2a3b4_add_symbol_to_reconcile_observation.py`:
 
 ```python
+"""add symbol to reconcile_observation
+
+Revision ID: c9d0e1f2a3b4
+Revises: b7c1d2e3f4a5
+Create Date: 2026-06-02
+
+"""
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+
+from alembic import op
+
+# revision identifiers, used by Alembic.
+revision: str = 'c9d0e1f2a3b4'
+down_revision: str | Sequence[str] | None = 'b7c1d2e3f4a5'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
 def upgrade() -> None:
     op.add_column(
         'reconcile_observation',
@@ -194,36 +208,26 @@ def downgrade() -> None:
     op.drop_column('reconcile_observation', 'symbol')
 ```
 
-Confirm `revision`/`down_revision` were assigned by alembic; `down_revision` MUST be `'b7c1d2e3f4a5'`.
+(Keep `server_default='fUST'` permanently — D4 backfill; the ORM column declares the same, so they match.)
 
-- [ ] **Step 2b: Decide on the server_default lifetime**
+- [ ] **Step 2: Verify the chain is linear + single head (OFFLINE — reads versions/ only)**
 
-Keep `server_default=sa.text("'fUST'")` permanently — it backfills the single live canary row and is harmless (the ORM also declares it). Do NOT add a follow-up to drop it (YAGNI; matches the spec D4 ruling).
+Run: `cd backend_py && uv run alembic heads && uv run alembic history -r b7c1d2e3f4a5:head`
+Expected: a single head `c9d0e1f2a3b4`; history shows `b7c1d2e3f4a5 -> c9d0e1f2a3b4`. These commands read the `versions/` directory and do NOT connect to the DB. Do NOT run `alembic upgrade`/`check`/`current` (they connect to live Neon).
 
-- [ ] **Step 3: Apply locally + check for drift**
+- [ ] **Step 3: Verify the file imports + ruff-clean**
 
-Run:
-```bash
-cd backend_py && uv run alembic upgrade head && uv run alembic check
-```
-Expected: upgrade applies cleanly; `alembic check` reports no drift (ORM metadata matches the migrated schema). If `alembic check` flags the `server_default`, ensure the ORM column also declares `server_default=text("'fUST'")` (Task 1 Step 3) so they match.
+Run: `cd backend_py && uv run python -c "import alembic.versions.c9d0e1f2a3b4_add_symbol_to_reconcile_observation as m; print(m.revision, m.down_revision)" && uv run ruff check alembic/versions/c9d0e1f2a3b4_add_symbol_to_reconcile_observation.py`
+Expected: prints `c9d0e1f2a3b4 b7c1d2e3f4a5`; ruff clean. (Module import does not connect to the DB.)
 
-- [ ] **Step 4: Verify downgrade/upgrade idempotency on a scratch DB**
-
-Run:
-```bash
-cd backend_py && uv run alembic downgrade -1 && uv run alembic upgrade head && uv run alembic check
-```
-Expected: clean both ways.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add backend_py/alembic/versions/
+git add backend_py/alembic/versions/c9d0e1f2a3b4_add_symbol_to_reconcile_observation.py
 git commit -m "✨ Feat: migration — reconcile_observation.symbol (fUSD P1)"
 ```
 
-> **Live-DB note:** do NOT apply this to the shared Neon canary DB now. It is author-now / apply-at-cutover (with the eventual fUSD deploy), exactly like Phase-1's `b7c1d2e3f4a5`. Local sqlite/Postgres + CI only this session.
+> The actual `alembic upgrade head` happens only at the coordinated cutover deploy (with the eventual fUSD go-live), against the live DB by the operator — exactly like Phase-1's `b7c1d2e3f4a5`. Correctness is proven locally by the Task 3 testcontainers integration test, never by upgrading the live DB.
 
 ---
 
