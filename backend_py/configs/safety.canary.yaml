@@ -22,7 +22,7 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300
   allocation_cap:
     enabled: true
-    caps: {fUSD: 0, fUST: 3000}  # active per-symbol cap (live fUST: 3000) — guards AND reconciler sizing read caps[symbol]; BFX_ALLOCATION_CAP_USDT is only the absent-symbol fallback (dead while every configured symbol has an entry). fUSD=0 → dark.
+    caps: {fUSD: 400, fUST: 3000}  # active per-symbol cap (live fUST: 3000). fUSD=400 DRY-RUN 2026-06-02: USD UNFUNDED → per-symbol balance gate hard-blocks every fUSD offer (available=0); cap>0 only to satisfy the canary caps-invariant once fUSD cells are configured. guards AND reconciler sizing read caps[symbol].
     default_cap: 0
   buying_power:
     enabled: true
