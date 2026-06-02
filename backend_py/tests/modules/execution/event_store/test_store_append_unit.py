@@ -68,6 +68,19 @@ async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSess
     assert row2.state == "released"
 
 
+async def test_offer_claims_persists_symbol(sqlite_session: AsyncSession) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=820, venue_offer_id="v820", amount=Decimal("100"), symbol="fUSD",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        occurred_at_ms=1000))
+    await sqlite_session.flush()
+    row = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 820))).scalar_one()
+    assert row.symbol == "fUSD"      # the offer's real currency, not a default
+
+
 async def test_append_fill_dedup_skips_duplicate(sqlite_session: AsyncSession) -> None:
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")

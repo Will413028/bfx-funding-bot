@@ -137,12 +137,16 @@ class PostgresEventStore:
         now_ms: int = _ev.occurred_at_ms or 0
         # All claim-bearing events now carry canonical native `amount` (mirrored
         # from size_usdt by events._resolve_amount); use it directly.
+        symbol = getattr(_ev, "symbol", None)
+        if symbol is None:
+            raise ValueError(f"{etype} reached offer_claims projection without symbol")
         await self._upsert_claim(
             session,
             cid=cid,
             account_id=account_id,
             state=state,
             venue_offer_id=getattr(_ev, "venue_offer_id", None),
+            symbol=symbol,
             size_usdt=Decimal(str(_ev.amount)),
             signal_correlation_id=str(_ev.signal_correlation_id),
             occurred_at_ms=now_ms,
@@ -157,6 +161,7 @@ class PostgresEventStore:
         account_id: str,
         state: RegistryState,
         venue_offer_id: str | None,
+        symbol: str,
         size_usdt: Decimal,
         signal_correlation_id: str,
         occurred_at_ms: int,
@@ -168,6 +173,7 @@ class PostgresEventStore:
             "cid": cid,
             "account_id": account_id,
             "deployment_environment": self._env,
+            "symbol": symbol,
             "state": state.value,
             "venue_offer_id": venue_offer_id,
             "size_usdt": size_usdt,
@@ -181,7 +187,7 @@ class PostgresEventStore:
         }
         stmt = ins(OfferClaimRow).values(values).on_conflict_do_update(
             index_elements=["account_id", "deployment_environment", "cid"],
-            set_={k: values[k] for k in ("state", "venue_offer_id", "last_updated_ms")},
+            set_={k: values[k] for k in ("state", "venue_offer_id", "last_updated_ms", "symbol")},
         )
         await session.execute(stmt)
         # Core-level upsert bypasses the ORM, so any instance already loaded into
