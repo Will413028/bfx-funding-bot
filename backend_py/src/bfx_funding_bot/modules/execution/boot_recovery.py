@@ -283,12 +283,14 @@ class BootRecovery:
         # Per-symbol reconcile: each configured currency is an independent wallet
         # (native units), so offers/credits/available are queried per symbol and a
         # PositionReconciled is published per symbol. The FSM recovery diff
-        # (orphan-claim / missing-release of offer_claims) stays GLOBAL: offer_claims
-        # carries no symbol and venue_offer_id is globally unique on Bitfinex, so we
-        # union venue offers across symbols before diffing local claims — otherwise a
-        # claim for symbol B would look "missing_from_venue" while reconciling symbol A
-        # and be spuriously released. ReconcileResult aggregates across symbols (the
-        # PeriodicReconcile divergence/drift logic is per-tick, not per-symbol).
+        # (orphan-claim / missing-release of offer_claims) stays GLOBAL: venue_offer_id
+        # is globally unique on Bitfinex, so we union venue offers across symbols before
+        # diffing local claims — otherwise a claim for symbol B would look
+        # "missing_from_venue" while reconciling symbol A and be spuriously released.
+        # Each claim carries its own symbol (offer_claims.symbol), so releases/fails are
+        # stamped per-claim (fail-loud if a claim's symbol is not configured).
+        # ReconcileResult aggregates across symbols (the PeriodicReconcile
+        # divergence/drift logic is per-tick, not per-symbol).
         now_ms = self._clock()
         per_symbol: list[_SymbolSnapshot] = []
         all_offers: list[ActiveFundingOffer] = []
