@@ -1,0 +1,28 @@
+# Phase 3c p_long SWEEP variant — AdaptivePeriodStrategy, p_long=7 (cap at 1 week).
+# Characterization ONLY (not deployed, not in derive_cells --check). Same cells +
+# ratio_sigma as cells.experimental.yaml; only p_long differs (30 -> 7), so the
+# spike tier collapses into p_mid -> effectively a 2-tier {2,7} duration strategy.
+cells:
+  - strategy: adaptive_period
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.42049266874194213, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 7}
+
+  - strategy: adaptive_period
+    symbol: fUST
+    period_agg: p2
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.4062263004196277, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 7}
+
+  - strategy: adaptive_period
+    symbol: fUSD
+    period_agg: a30
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.3766563427150627, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 7}
+
+  - strategy: adaptive_period
+    symbol: fUSD
+    period_agg: p2
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.3450137927640065, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 7}
