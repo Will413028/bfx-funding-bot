@@ -57,7 +57,7 @@ class AdaptivePeriodParams(BaseModel):
     p_long: int = Field(ge=2, le=120)
 
     @model_validator(mode="after")
-    def _check_ordering(self) -> "AdaptivePeriodParams":
+    def _check_ordering(self) -> AdaptivePeriodParams:
         if not self.t2 > self.t1:
             raise ValueError("t2 must be > t1")
         if not self.p_long >= self.p_mid:

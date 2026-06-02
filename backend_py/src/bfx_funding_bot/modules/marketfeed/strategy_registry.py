@@ -13,11 +13,11 @@ from decimal import Decimal
 from typing import Protocol
 
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
-from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
-    MeanReversionStrategy,
-)
 from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
     AdaptivePeriodStrategy,
+)
+from bfx_funding_bot.modules.backtest.strategies.mean_reversion import (
+    MeanReversionStrategy,
 )
 from bfx_funding_bot.modules.backtest.strategies.rate_percentile import (
     RatePercentileStrategy,
