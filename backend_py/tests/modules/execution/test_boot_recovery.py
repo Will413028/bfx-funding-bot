@@ -32,10 +32,11 @@ def _offer(voi="555", amount="100", rate=0.0003, period=2):
     )
 
 
-def _claim(cid, voi, state, size="100", scid=None, occurred=0):
+def _claim(cid, voi, state, size="100", scid=None, occurred=0, symbol="fUST"):
     return LocalClaim(
         cid=cid, venue_offer_id=voi, state=state, size_usdt=Decimal(size),
         signal_correlation_id=scid or uuid4(), occurred_at_ms=occurred,
+        symbol=symbol,
     )
 
 
@@ -859,3 +860,37 @@ async def test_multi_symbol_result_aggregates_dims():
     assert result.realized_usdt == Decimal("230")
     assert result.available_usdt == Decimal("12")
     assert result.n_credits == 2
+
+
+# --- from_snapshot loads each claim's own symbol (fUSD P2 Task 3) ------------
+
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from bfx_funding_bot.core.db import Base  # noqa: E402
+from bfx_funding_bot.modules.execution.event_store.tables import (  # noqa: E402
+    OfferClaimRow,
+)
+from bfx_funding_bot.modules.execution.registry_offers import (  # noqa: E402
+    OfferRegistry,
+)
+
+
+async def _create_all(session: AsyncSession) -> None:
+    bind = session.bind
+    assert bind is not None
+    async with bind.begin() as conn:  # type: ignore[union-attr]
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def test_from_snapshot_loads_symbol(sqlite_session: AsyncSession) -> None:
+    await _create_all(sqlite_session)
+    sqlite_session.add(OfferClaimRow(
+        cid=42, account_id="acct", deployment_environment="ci",
+        state="claimed", venue_offer_id="v42", symbol="fUST",
+        size_usdt=Decimal("100"),
+        signal_correlation_id="11111111-1111-1111-1111-111111111111",
+        occurred_at_ms=1000, last_updated_ms=2000, last_event_seq=0))
+    await sqlite_session.flush()
+    reg = await OfferRegistry.from_snapshot(
+        sqlite_session, account_id="acct", deployment_environment="ci")
+    assert reg._snapshot["v42"].symbol == "fUST"
