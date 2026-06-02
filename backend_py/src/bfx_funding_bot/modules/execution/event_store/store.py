@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
     ReconcileObservationRow,
 )
+from bfx_funding_bot.modules.execution.events import DEFAULT_RECONCILE_SYMBOL
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 
@@ -401,7 +402,11 @@ class PostgresEventStore:
             # Phase 2: fUSD/fUST coexist in one event_log, so the tail fold MUST
             # filter on payload["symbol"] == symbol — otherwise the other
             # currency's deltas mix into this symbol's position_state row.
-            if (r.payload or {}).get("symbol") != symbol:
+            # Legacy rows predate the symbol column (no `symbol` key); they were
+            # fUST-era, so default a missing symbol to DEFAULT_RECONCILE_SYMBOL —
+            # otherwise this filter drops them and silently miscomputes realized
+            # on a genesis rebuild (the deploy pre-flight foot-gun).
+            if ((r.payload or {}).get("symbol") or DEFAULT_RECONCILE_SYMBOL) != symbol:
                 continue
             # Raw payload read (no deserialize_event) — intentional: the tail fold
             # only needs the native `amount` and stays decoupled from domain event
