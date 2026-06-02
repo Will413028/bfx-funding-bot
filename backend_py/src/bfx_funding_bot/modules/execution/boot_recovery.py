@@ -166,6 +166,7 @@ def compute_recovery_actions(
                 signal_correlation_id=c.signal_correlation_id,
                 account_id=account_id, is_simulated=is_simulated,
                 reason="unresolved_at_boot", occurred_at_ms=now_ms,
+                symbol=symbol,
             ))
 
     return actions

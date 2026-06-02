@@ -150,6 +150,7 @@ def test_reservation_intent_fields() -> None:
     ev = ReservationIntent(
         cid=42,
         size_usdt=Decimal("100"),
+        symbol="fUST",
         signal_correlation_id=_SCID_T1,
         account_id="acct",
         is_simulated=True,
@@ -169,6 +170,7 @@ def test_reservation_failed_fields() -> None:
     ev = ReservationFailed(
         cid=42,
         size_usdt=Decimal("100"),
+        symbol="fUST",
         signal_correlation_id=_SCID_T1,
         account_id="acct",
         is_simulated=False,
@@ -177,6 +179,24 @@ def test_reservation_failed_fields() -> None:
     )
     assert ev.reason == "submit_failed"
     assert ev.is_simulated is False
+
+
+def test_reservation_intent_has_symbol_and_amount() -> None:
+    e = ReservationIntent(
+        cid=1, size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False)
+    assert e.symbol == "fUST"
+    assert e.amount == Decimal("100")      # mirrored from size_usdt
+    assert e.size_usdt == Decimal("100")
+
+
+def test_reservation_failed_has_symbol_and_amount() -> None:
+    e = ReservationFailed(
+        cid=1, size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        reason="submit_failed")
+    assert e.symbol == "fUST"
+    assert e.amount == Decimal("100")
 
 
 def test_reservation_claimed_has_symbol_and_amount() -> None:

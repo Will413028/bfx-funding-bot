@@ -22,6 +22,12 @@ from uuid import UUID
 
 __SCHEMA_VERSION__ = 2
 
+# Schema-evolution upcast value for the two events that gained a mandatory
+# `symbol` after early event_log rows were written. Used ONLY by
+# serialization.deserialize_event for those legacy rows; every live event now
+# carries an explicit symbol. The canary was fUST-only when those rows existed.
+DEFAULT_RECONCILE_SYMBOL = "fUST"
+
 
 def _resolve_amount(ev: object) -> None:
     """Reconcile transitional `size_usdt` with canonical `amount` on frozen events.
@@ -83,37 +89,51 @@ class ReservationIntent:
 
     Persisted in txn1 so a crash between submit-call and outcome leaves a
     recoverable PENDING claim (resolved at boot in 3a-recovery). Carries no
-    venue_offer_id (unknown until CLAIMED). Not published to the bus
-    (in-memory ledger/registry track CLAIMED+, not PENDING).
+    venue_offer_id (unknown until CLAIMED). Not published to the bus.
+
+    `symbol` is the offer currency; MANDATORY (no default). `amount` is the
+    native reserve size; `size_usdt` is the transitional alias (see
+    _resolve_amount). Legacy rows predate `symbol` and are upcast to
+    DEFAULT_RECONCILE_SYMBOL in deserialize_event.
     """
+    symbol: str  # mandatory, FIRST (frozen+slots: non-default must precede defaulted)
     cid: int
-    size_usdt: Decimal
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
+    amount: Decimal | None = None
+    size_usdt: Decimal | None = None  # transitional alias; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _resolve_amount(self)
 
 
 @dataclass(frozen=True, slots=True)
 class ReservationFailed:
     """A2 terminal outcome — venue REST submit failed; intent resolves to FAILED.
 
-    Ledger effect: none (reserved untouched — capital was never committed).
-    Not published to the bus (no in-memory subscriber needs it).
+    Ledger effect: none (reserved untouched). Not published to the bus.
+    `symbol`/`amount`/`size_usdt`: see ReservationIntent (symbol mandatory).
     """
+    symbol: str  # mandatory, FIRST
     cid: int
-    size_usdt: Decimal
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
     reason: str  # e.g. "submit_failed"
+    amount: Decimal | None = None
+    size_usdt: Decimal | None = None  # transitional alias; mapped to amount
     venue_seq: int | None = None
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _resolve_amount(self)
 
 
 @dataclass(frozen=True, slots=True)

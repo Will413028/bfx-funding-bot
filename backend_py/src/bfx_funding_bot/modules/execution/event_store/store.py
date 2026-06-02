@@ -38,17 +38,6 @@ class SnapshotDrift:
 # skips vois already in CLAIMED state), not by this store-level dedup.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
-# Phase 2 / Task 11: the position-bearing events now carry a MANDATORY `symbol`
-# and the snapshot/projection methods require an explicit `symbol` param. This
-# constant survives ONLY as the projection fallback for the two symbol-less
-# claim-lifecycle events — ReservationIntent / ReservationFailed — which have no
-# `symbol` (or `amount`) field yet (adding them is a separate, later, gated
-# step; see the breadcrumb near `claim_size` in _project_offer_claims). It is
-# used solely at the append() projection call site (getattr(..., "symbol", None)
-# or DEFAULT_RECONCILE_SYMBOL); the four real position events return their own
-# symbol there, so this default never applies to them.
-DEFAULT_RECONCILE_SYMBOL = "fUST"
-
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
 # transition() (registry_offers.py) is reserved for the in-memory OfferRegistry's
 # fill-tracking; this snapshot is keyed by cid (stable across the whole lifecycle).
@@ -104,7 +93,7 @@ class PostgresEventStore:
         await self._project_position_state(
             session, etype, account_id, getattr(_ev, "amount", None),
             row.event_seq, occurred_at_ms,
-            symbol=getattr(_ev, "symbol", None) or DEFAULT_RECONCILE_SYMBOL,
+            symbol=_ev.symbol,
         )
         return True
 
@@ -146,25 +135,15 @@ class PostgresEventStore:
         if cid is None:
             return  # no cid -> nothing to key on
         now_ms: int = _ev.occurred_at_ms or 0
-        # size_usdt= targets the offer_claims DB column (not renamed); the VALUE
-        # source switches to the canonical event field `amount` where it exists.
-        # ReservationIntent/ReservationFailed predate the rename and carry only
-        # `size_usdt` (no `amount` field), so fall back to it. For the Claimed-
-        # family events amount == size_usdt (see execution.events._resolve_amount),
-        # so this is value-equivalent. `is not None` (not `or`) — a legitimate
-        # Decimal("0") amount must NOT fall through to size_usdt on the money path.
-        # NOTE(Task 11 symbol-mandatory): ReservationIntent/ReservationFailed also
-        # lack a `symbol` field; making symbol mandatory must add amount+symbol to
-        # those two events FIRST, after which this size_usdt fallback can be dropped.
-        _amount = getattr(_ev, "amount", None)
-        claim_size = _amount if _amount is not None else _ev.size_usdt
+        # All claim-bearing events now carry canonical native `amount` (mirrored
+        # from size_usdt by events._resolve_amount); use it directly.
         await self._upsert_claim(
             session,
             cid=cid,
             account_id=account_id,
             state=state,
             venue_offer_id=getattr(_ev, "venue_offer_id", None),
-            size_usdt=Decimal(str(claim_size)),
+            size_usdt=Decimal(str(_ev.amount)),
             signal_correlation_id=str(_ev.signal_correlation_id),
             occurred_at_ms=now_ms,
             last_updated_ms=now_ms,
