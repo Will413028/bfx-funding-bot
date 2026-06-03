@@ -23,12 +23,14 @@ from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanRever
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
+from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 
 pytestmark = pytest.mark.gate
 
 ROOT = Path(__file__).resolve().parents[3]  # backend_py/
 FIXTURES = ROOT / "fixtures" / "candles"
 CANARY = ROOT / "configs" / "cells.canary.yaml"
+P14 = ROOT / "configs" / "cells.experimental-p14.yaml"
 
 
 def _load_canary_cells() -> list[CellConfig]:
@@ -94,3 +96,28 @@ def test_old_inert_config_would_fail_gate() -> None:
     )
     assert result.passed is False
     assert result.distinguishable is False  # collapses to passive
+
+
+def _load_p14_cells() -> list[CellConfig]:
+    """Load p14 candidate cells, guarded at collection time (same idiom as _load_canary_cells)."""
+    return load_cells_only(P14) if P14.exists() else []
+
+
+def test_p14_config_present() -> None:
+    # Closes the no-op risk: if the p14 candidate config is missing/empty, the
+    # parametrized gate below would silently run zero cases. Fail loudly here.
+    assert P14.exists(), f"p14 candidate config missing: {P14}"
+    assert _load_p14_cells(), "p14 config has no cells to gate"
+
+
+@pytest.mark.parametrize("cell", _load_p14_cells())
+def test_adaptive_period_p14_candidate_beats_passive(cell: CellConfig) -> None:
+    """B2 deploy gate: p14 AdaptivePeriod candidate cells must be non-inert vs AlwaysMarketRate.
+
+    Uses the generic build_strategy factory (not hardcoded MeanReversionStrategy) so
+    this test works for any Strategy subclass wired in strategy_registry.py.
+    Mirrors the MR gate: distinguishable + not_worse (bootstrap 95% CI low >= 0).
+    """
+    candles = load_candles(FIXTURES / f"{cell.symbol}_{cell.period_agg}_{cell.timeframe}.jsonl.gz")
+    result = _gate_for(lambda: build_strategy(cell), candles)
+    assert result.passed, f"{cell.cell_id} failed deploy gate: {result.reasons}"
