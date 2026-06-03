@@ -8,6 +8,7 @@ docs/superpowers/specs/2026-06-04-adaptive-period-band-sweep-design.md.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -207,6 +208,9 @@ class BandResult:
 
 
 def _median_active(strat: list[WindowOutcome], base: list[WindowOutcome]) -> Decimal:
+    # strat/base halves stay aligned because the full lists are contract-aligned
+    # and split_disjoint applies an identical predicate; callers must pass
+    # contract-aligned lists, else paired_active_returns raises.
     if not strat or not base:
         return Decimal("0")
     paired = paired_active_returns(strat, base)
@@ -287,7 +291,7 @@ def render_cell_section(cell_label: str, results: list[BandResult]) -> str:
     return "\n".join(lines)
 
 
-def _rank_labels(results: list[BandResult], *, key) -> dict[str, int]:  # type: ignore[no-untyped-def]
+def _rank_labels(results: list[BandResult], *, key: Callable[[BandResult], Decimal]) -> dict[str, int]:
     ordered = sorted(results, key=key, reverse=True)  # higher active = rank 1
     return {f"({r.t1},{r.t2})": i + 1 for i, r in enumerate(ordered)}
 
