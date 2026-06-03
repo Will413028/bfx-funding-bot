@@ -136,6 +136,22 @@ def test_paired_diff_aligns_by_month_mts() -> None:
     assert ci[0] > Decimal("0")               # 0.5 diff on the 2 shared months
 
 
+def test_paired_diff_degenerate_returns_zero_zero() -> None:
+    # (a) fully disjoint months — zero shared months between A and B
+    a_disjoint = [_wo(0, "1.0"), _wo(1, "1.0")]
+    b_disjoint = [_wo(10, "0.5"), _wo(11, "0.5")]
+    ci_disjoint = paired_difference_ci(a_disjoint, b_disjoint)
+    assert ci_disjoint == (Decimal("0"), Decimal("0"))
+    assert is_tied(ci_disjoint)
+
+    # (b) single shared month — len(diffs) == 1, still degenerate
+    a_one = [_wo(0, "1.0"), _wo(1, "1.0")]
+    b_one = [_wo(0, "0.5"), _wo(99, "0.5")]  # only month 0 shared
+    ci_one = paired_difference_ci(a_one, b_one)
+    assert ci_one == (Decimal("0"), Decimal("0"))
+    assert is_tied(ci_one)
+
+
 def test_pairwise_tie_matrix_flags_winners_and_ties() -> None:
     strong = [_wo(i, "1.0") for i in range(12)]
     weak = [_wo(i, "0.5") for i in range(12)]
