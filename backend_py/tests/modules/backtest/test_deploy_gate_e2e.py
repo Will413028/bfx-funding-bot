@@ -103,6 +103,13 @@ def _load_p14_cells() -> list[CellConfig]:
     return load_cells_only(P14) if P14.exists() else []
 
 
+def test_p14_config_present() -> None:
+    # Closes the no-op risk: if the p14 candidate config is missing/empty, the
+    # parametrized gate below would silently run zero cases. Fail loudly here.
+    assert P14.exists(), f"p14 candidate config missing: {P14}"
+    assert _load_p14_cells(), "p14 config has no cells to gate"
+
+
 @pytest.mark.parametrize("cell", _load_p14_cells())
 def test_adaptive_period_p14_candidate_beats_passive(cell: CellConfig) -> None:
     """B2 deploy gate: p14 AdaptivePeriod candidate cells must be non-inert vs AlwaysMarketRate.
