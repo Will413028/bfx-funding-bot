@@ -466,50 +466,130 @@ def test_adaptive_period_state_drift_detected():
 
 
 def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
-    """No false divergence when ema_current matches within _REL_TOL even if a
-    period tier flip would occur if period were compared.
+    """Genuine tier-straddle: live and replay emas straddle a band boundary but
+    remain within _REL_TOL of each other — reporter must NOT flag divergence.
 
-    The key assertion: when all attrs match (within ema tolerance), check()
-    returns None. We do NOT need to actually trigger a real tier flip in the
-    strategy — period is not in the compared attributes by design.
+    Design property guarded: _strategy_attributes for adaptive_period does NOT
+    include period_days/last_period. Period is a deterministic step-function of
+    (close, ema, config); comparing the *derived* period would manufacture false
+    divergences at tier boundaries. We compare its INPUTS instead.
+
+    Mutation-discriminating construction:
+    - 24 flat warmup candles (0.0003) → ema_before = 0.0003 exactly.
+    - Boundary close chosen so dev_replay = (close - ema_replay) / ema_replay
+      sits just ABOVE band1 (0.025) → replay lands in p_mid tier (period=7).
+    - ema_live = close / (1 + band1) + ε: just above the tier threshold →
+      live lands in p_floor tier (period=2). Relative diff ≈ 9.2e-5 < _REL_TOL.
+    - Assertion (a): check() returns None (no false divergence).
+    - Assertion (b): _period_for gives DIFFERENT periods for ema_replay vs
+      ema_live (straddle is real, not vacuous).
+
+    Mutation proof: adding `last_period` to the adaptive_period branch in
+    _strategy_attributes causes a key-set mismatch (replay has 7 keys, live
+    has 6), which _attrs_diverge detects → check() returns a divergence dict →
+    the assert-None fails → mutation is caught.
     """
-    cell = _cell_ap()
-    # Use enough candles for warm-up (ema_span=24, need ≥24 observes before boundary).
-    history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
-               for i in range(30)]
+    from bfx_funding_bot.modules.backtest.strategies.adaptive_period import (
+        AdaptivePeriodStrategy,
+    )
 
-    # Build the true replay signal to get exact attribute values.
-    true_strategy = build_strategy(cell)
-    for c in history[:-1]:
-        true_strategy.observe(c)
-    true_signal = ExtractedSignal.extract(cell, true_strategy, history[-1])
-    true_attrs = dict(true_signal.strategy_attributes)
+    # ema_span=24, band1=t1*ratio_sigma=0.5*0.05=0.025, band2=0.075.
+    # alpha = 2/(24+1) = 2/25.
+    cell = CellConfig.model_validate({
+        "strategy": "adaptive_period", "symbol": "fUST", "period_agg": "a30",
+        "timeframe": "1h",
+        "params": {
+            "ema_span": 24, "ratio_sigma": 0.05,
+            "t1": 0.5, "t2": 1.5, "p_mid": 7, "p_long": 14,
+        },
+        "reference_amount_usdt": 150.0,
+        "staleness_budget_hours": 30,
+    })
 
-    # Build a fake_live whose ema_current is within _REL_TOL of the true value.
-    # Even if this tiny perturbation would flip a tier boundary (it won't for flat
-    # history, but conceptually: period is not compared, so it doesn't matter).
-    true_ema = true_attrs["ema_current"]
-    # Perturb by 1e-5 relative — well within _REL_TOL (1e-4).
-    perturbed_ema = true_ema * Decimal("1.00001")
+    base_mts = 1747584000000
+    hour_ms = 3_600_000
+    # 24 flat candles → ema converges to exactly 0.0003.
+    warmup_candles = [
+        _candle(base_mts + i * hour_ms, Decimal("0.0003")) for i in range(24)
+    ]
 
-    fake_attrs = dict(true_attrs)
-    fake_attrs["ema_current"] = perturbed_ema
+    # Compute boundary close that places dev_replay slightly above band1.
+    # Derivation: ema_after = α*close + (1-α)*ema_before.
+    #   dev = (close - ema_after) / ema_after = band1
+    #   ⟹ close_exact = (1+band1)*(1-α)*e0 / (1 - (1+band1)*α).
+    # Push 0.01% above so replay is strictly in p_mid.
+    alpha = Decimal("2") / Decimal("25")
+    e0 = Decimal("0.0003")
+    band1 = Decimal("0.5") * Decimal("0.05")   # 0.025
+    close_exact = (
+        (Decimal("1") + band1) * (Decimal("1") - alpha) * e0
+        / (Decimal("1") - (Decimal("1") + band1) * alpha)
+    )
+    boundary_close = close_exact * Decimal("1.0001")
+    boundary = _candle(base_mts + 24 * hour_ms, boundary_close)
+    raw_history = [*warmup_candles, boundary]
 
+    # Build replay reference to get the exact ema_replay value after extract.
+    result = build_strategy_at_boundary(
+        cell=cell, history=raw_history, ref_mts=boundary.mts, budget_hours=30,
+    )
+    replay_signal = ExtractedSignal.extract(cell, result.strategy, boundary)
+    replay_attrs = dict(replay_signal.strategy_attributes)
+    ema_replay = replay_attrs["ema_current"]
+
+    # Construct ema_live just above the tier threshold (→ p_floor), within _REL_TOL.
+    # Tier threshold: ema = close / (1 + band1) — above this, dev <= band1 → p_floor.
+    ema_threshold = boundary_close / (Decimal("1") + band1)
+    ema_live = ema_threshold + Decimal("1e-14")   # epsilon above threshold
+    rel_diff = abs(ema_live - ema_replay) / max(abs(ema_live), abs(ema_replay))
+    assert rel_diff <= Decimal("1e-4"), (
+        f"test setup error: rel_diff {rel_diff} exceeds _REL_TOL; straddle invalid"
+    )
+
+    # Verify genuine straddle: the two emas yield DIFFERENT tiers/periods.
+    def _period_for_ema(ema_val: Decimal) -> int:
+        s = AdaptivePeriodStrategy(
+            ema_span=24, ratio_sigma=Decimal("0.05"),
+            t1=Decimal("0.5"), t2=Decimal("1.5"), p_mid=7, p_long=14,
+        )
+        s._ema = ema_val
+        s._samples = 24     # mark window filled
+        return s._period_for(boundary_close)
+
+    period_replay = _period_for_ema(ema_replay)
+    period_live = _period_for_ema(ema_live)
+    assert period_replay != period_live, (
+        f"test setup error: both emas map to the same period ({period_replay}); "
+        "straddle is not a genuine tier flip"
+    )
+
+    # fake_live: constructed from the known 6-key schema, NOT by copying replay_attrs.
+    # This makes the test mutation-proof: if _strategy_attributes ever adds a 7th key
+    # (e.g. last_period), replay will have 7 keys while fake_live has 6 → _attrs_diverge
+    # fires on key-set mismatch → check() returns a divergence dict → assert-None fails.
     fake_live = ExtractedSignal(
-        signal_score=true_signal.signal_score,
-        signal_direction=true_signal.signal_direction,
-        strategy_attributes=tuple(sorted(fake_attrs.items())),
+        signal_score=replay_signal.signal_score,
+        signal_direction=replay_signal.signal_direction,
+        strategy_attributes=tuple(sorted({
+            "rate": replay_attrs["rate"],
+            "t1": replay_attrs["t1"],
+            "t2": replay_attrs["t2"],
+            "ratio_sigma": replay_attrs["ratio_sigma"],
+            "ema_current": ema_live,          # nudged within _REL_TOL
+            "window_filled": replay_attrs["window_filled"],
+        }.items())),
         lend_decision=None,
     )
 
+    # Core assertion (a): no false divergence — reporter must return None.
     reporter = DivergenceReporter()
-    result = reporter.check(
-        cell=cell, raw_history=history, boundary_candle=history[-1],
-        budget_hours=2, live_signal=fake_live,
+    result2 = reporter.check(
+        cell=cell, raw_history=raw_history, boundary_candle=boundary,
+        budget_hours=30, live_signal=fake_live,
     )
-
-    assert result is None, (
-        f"ema within _REL_TOL must NOT be flagged as divergence; got: {result}"
+    assert result2 is None, (
+        f"ema_current within _REL_TOL must NOT trigger divergence even at tier "
+        f"boundary (period {period_replay} vs {period_live}); got: {result2}"
     )
 
 
