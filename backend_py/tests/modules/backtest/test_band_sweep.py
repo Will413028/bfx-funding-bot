@@ -1,20 +1,26 @@
 # tests/modules/backtest/test_band_sweep.py
-import math
 from decimal import Decimal
 from pathlib import Path
 
-from bfx_funding_bot.modules.backtest.band_sweep import enumerate_bands
-from bfx_funding_bot.modules.backtest.band_sweep import simulate_period_path, period_profile
-from bfx_funding_bot.modules.backtest.band_sweep import active_deflated_sharpe
-from bfx_funding_bot.modules.backtest.band_sweep import paired_difference_ci, is_tied
-from bfx_funding_bot.modules.backtest.band_sweep import split_disjoint, SPLIT_MTS
-from bfx_funding_bot.modules.backtest.band_sweep import BandResult, build_band_result
-from bfx_funding_bot.modules.backtest.band_sweep import render_cell_section
-from bfx_funding_bot.modules.backtest.band_sweep import load_cell_ratio_sigmas
-from bfx_funding_bot.modules.backtest.engine import run_backtest
+from bfx_funding_bot.modules.backtest.band_sweep import (
+    SPLIT_MTS,
+    BandResult,
+    active_deflated_sharpe,
+    build_band_result,
+    enumerate_bands,
+    is_tied,
+    load_cell_ratio_sigmas,
+    paired_difference_ci,
+    pairwise_tie_matrix,
+    period_profile,
+    render_cell_section,
+    simulate_period_path,
+    split_disjoint,
+)
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
+from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
+from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 
@@ -47,10 +53,12 @@ def test_enumerate_bands_is_8_strict_pairs() -> None:
 
 def test_simulate_period_path_matches_engine_trade_count() -> None:
     # A long, mildly varying series so several trades + cooldowns fire.
-    closes = [str(Decimal("0.0003") + Decimal("0.0001") * Decimal((i % 7))) for i in range(400)]
+    closes = [str(Decimal("0.0003") + Decimal("0.0001") * Decimal(i % 7)) for i in range(400)]
     candles = _candles(closes)
-    params = dict(ema_span=24, ratio_sigma=Decimal("0.40"), t1=Decimal("0.5"),
-                  t2=Decimal("1.5"), p_mid=7, p_long=14)
+    params = {
+        "ema_span": 24, "ratio_sigma": Decimal("0.40"), "t1": Decimal("0.5"),
+        "t2": Decimal("1.5"), "p_mid": 7, "p_long": 14,
+    }
 
     periods = simulate_period_path(candles, **params)
 
@@ -129,7 +137,6 @@ def test_paired_diff_aligns_by_month_mts() -> None:
 
 
 def test_pairwise_tie_matrix_flags_winners_and_ties() -> None:
-    from bfx_funding_bot.modules.backtest.band_sweep import pairwise_tie_matrix
     strong = [_wo(i, "1.0") for i in range(12)]
     weak = [_wo(i, "0.5") for i in range(12)]
     tie = [_wo(i, "1.0") for i in range(12)]   # identical to strong
