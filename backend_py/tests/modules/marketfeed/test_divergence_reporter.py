@@ -515,22 +515,40 @@ def test_adaptive_period_no_false_divergence_on_boundary_period_flip():
 
 def test_adaptive_period_warmup_no_false_divergence():
     """Short history (< ema_span): live and replay both warmup, ema_current
-    matches within tolerance — no false divergence."""
+    matches within tolerance — no false divergence.
+
+    Strengthened (mutation-proof): fake_live carries HARDCODED strategy_attributes
+    matching the known deterministic replay output for 5 flat-rate candles.
+    The test fails if _strategy_attributes drops or renames any of the 6 keys.
+    """
     cell = _cell_ap()
     # Only 5 candles: well below ema_span=24, window_filled=False.
+    # Flat rate 0.0003 → EMA converges exactly to 0.0003 after 4 observes.
     history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
                for i in range(5)]
 
-    # Honest live signal: observe history[:-1] then extract at history[-1].
-    live = build_strategy(cell)
-    for c in history[:-1]:
-        live.observe(c)
-    live_signal = ExtractedSignal.extract(cell, live, history[-1])
+    # Hardcoded attrs mirroring what replay produces for this deterministic scenario:
+    #   rate=0.0003 (boundary candle close), t1/t2/ratio_sigma from config (exact),
+    #   ema_current=Decimal("0.000300000000") (EMA of 4 identical flat candles),
+    #   window_filled=False (only 4 observes < ema_span=24).
+    fake_live = ExtractedSignal(
+        signal_score=0.0,
+        signal_direction=SignalDirection.POST,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.0003,
+            "t1": 0.5,
+            "t2": 1.5,
+            "ratio_sigma": 0.05,
+            "ema_current": Decimal("0.000300000000"),
+            "window_filled": False,
+        }.items())),
+        lend_decision=None,
+    )
 
     reporter = DivergenceReporter()
     result = reporter.check(
         cell=cell, raw_history=history, boundary_candle=history[-1],
-        budget_hours=2, live_signal=live_signal,
+        budget_hours=2, live_signal=fake_live,
     )
 
     assert result is None, (
@@ -540,26 +558,37 @@ def test_adaptive_period_warmup_no_false_divergence():
 
 def test_adaptive_period_config_drift_detected():
     """A live signal carrying a different t2 than what replay uses must be
-    flagged — catches config drift between live and replay paths."""
+    flagged — catches config drift between live and replay paths.
+
+    Strengthened (mutation-proof): fake_live carries HARDCODED strategy_attributes
+    with all 6 keys explicit. The 5 matching keys exactly mirror replay's known
+    deterministic output for 30 flat candles; only t2 is flipped (1.0 vs replay's
+    1.5). Divergence is detected because the t2 VALUE differs (exact-field), NOT
+    because of a key-set mismatch. The test fails if _strategy_attributes drops or
+    renames any key (the set-check in _attrs_diverge fires instead, which also
+    detects but via the wrong path — this fixture makes the t2 value the trigger).
+    """
     cell = _cell_ap()  # t2=1.5
     history = [_candle(1747584000000 + i * 3600_000, Decimal("0.0003"))
                for i in range(30)]
 
-    # Build the true replay signal first to get accurate ema_current / window_filled.
-    true_strategy = build_strategy(cell)
-    for c in history[:-1]:
-        true_strategy.observe(c)
-    true_signal = ExtractedSignal.extract(cell, true_strategy, history[-1])
-    true_attrs = dict(true_signal.strategy_attributes)
-
-    # Swap t2 to a different value (1.0 instead of 1.5).
-    drifted_attrs = dict(true_attrs)
-    drifted_attrs["t2"] = 1.0  # mismatches cell.params["t2"] = 1.5
-
+    # Hardcoded attrs for 30 flat-rate candles:
+    #   rate=0.0003, t1=0.5, ratio_sigma=0.05 match replay exactly.
+    #   ema_current=Decimal("0.0003000000000000000000000000000") is the exact
+    #   EMA value after 29 identical flat observes (converges to the input).
+    #   window_filled=True (29 observes > ema_span=24).
+    #   t2 is DELIBERATELY wrong (1.0 vs replay's 1.5) to trigger detection.
     fake_live = ExtractedSignal(
-        signal_score=true_signal.signal_score,
-        signal_direction=true_signal.signal_direction,
-        strategy_attributes=tuple(sorted(drifted_attrs.items())),
+        signal_score=0.0,
+        signal_direction=SignalDirection.POST,
+        strategy_attributes=tuple(sorted({
+            "rate": 0.0003,
+            "t1": 0.5,
+            "t2": 1.0,          # drifted: replay produces 1.5 from cell config
+            "ratio_sigma": 0.05,
+            "ema_current": Decimal("0.0003000000000000000000000000000"),
+            "window_filled": True,
+        }.items())),
         lend_decision=None,
     )
 
@@ -571,3 +600,11 @@ def test_adaptive_period_config_drift_detected():
 
     assert result is not None, "config drift (t2 mismatch) must be detected"
     assert "strategy_attributes" in result["diff_fields"]
+    # Pin the FEATURE: replay must expose all 6 keys and t2 must be the correct
+    # config value (1.5). If _strategy_attributes returned {}, this fails because
+    # the divergence would be a key-set mismatch, not a t2 VALUE mismatch.
+    replay_attrs = dict(result["replay"]["strategy_attributes"])
+    assert set(replay_attrs) == {"rate", "t1", "t2", "ratio_sigma", "ema_current", "window_filled"}, (
+        f"replay must expose all 6 adaptive_period attrs; got keys: {set(replay_attrs)}"
+    )
+    assert replay_attrs["t2"] == 1.5, f"replay t2 must be 1.5 from config; got {replay_attrs['t2']}"
