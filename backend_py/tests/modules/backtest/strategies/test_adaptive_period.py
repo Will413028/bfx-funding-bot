@@ -199,6 +199,7 @@ def test_integrated_flat_emits_floor_under_engine_order() -> None:
 
 
 def test_param_grid_for_cell_from_eda() -> None:
+    # 2026-06-04 band sweep + 2026-06-03 p_long sweep: single deployed candidate.
     grid = AdaptivePeriodStrategy.param_grid_for_cell(
         symbol="fUST", period_agg="p2",
         eda={
@@ -206,15 +207,32 @@ def test_param_grid_for_cell_from_eda() -> None:
             "close_over_ema_sigma_168": Decimal("0.08"),
         },
     )
-    assert len(grid) == 4  # 2 ema_spans x 2 (t1,t2) pairs
-    assert {p["ema_span"] for p in grid} == {24, 168}
-    assert {(p["t1"], p["t2"]) for p in grid} == {
-        (Decimal("0.5"), Decimal("1.5")),
-        (Decimal("1.0"), Decimal("2.0")),
-    }
-    for p in grid:
-        assert p["p_mid"] == 7 and p["p_long"] == 30
-        assert p["ratio_sigma"] == (Decimal("0.05") if p["ema_span"] == 24 else Decimal("0.08"))
+    assert len(grid) == 1  # single deployed candidate (span-24, band (0.5,2.0), p_long=14)
+    p = grid[0]
+    assert p["ema_span"] == 24
+    assert (p["t1"], p["t2"]) == (Decimal("0.5"), Decimal("2.0"))
+    assert p["p_mid"] == 7
+    assert p["p_long"] == 14
+    assert p["ratio_sigma"] == Decimal("0.05")  # close_over_ema_sigma_24
+
+
+def test_param_grid_for_cell_guard_deployed_candidate() -> None:
+    # Guard: fails loudly if grid silently reverts to old exploration values.
+    # Mirrors test_p14_config_present idiom: protects the deploy decision from
+    # accidental reversion during refactoring.
+    grid = AdaptivePeriodStrategy.param_grid_for_cell(
+        symbol="fUST", period_agg="a30",
+        eda={"close_over_ema_sigma_24": Decimal("0.042")},
+    )
+    assert grid, "param_grid_for_cell must return at least one entry"
+    p_longs = {p["p_long"] for p in grid}
+    assert p_longs == {14}, f"all p_long must be 14 (deploy decision); got {p_longs}"
+    ema_spans = {p["ema_span"] for p in grid}
+    assert ema_spans == {24}, f"all ema_span must be 24 (sweep decision); got {ema_spans}"
+    bands = {(p["t1"], p["t2"]) for p in grid}
+    assert bands == {(Decimal("0.5"), Decimal("2.0"))}, (
+        f"band must be {{(0.5, 2.0)}} (sweep decision); got {bands}"
+    )
 
 
 def test_build_strategy_from_cellconfig() -> None:
