@@ -58,10 +58,11 @@ backtest-internal claim it is entitled to (§3).
 ### 2.1 Goals (measurable — each is a ship/no-ship criterion)
 
 - **G1.** For each of the 4 canary cells (fUST/fUSD × {a30, p2}), produce
-  `median active`, `mean active`, `mean÷median`, `best-month`, `win-rate`, and
-  `bot-vs-idle annualized` for **all 8** `(t1, t2)` band variants, over **both** the
-  recent (2022→) and full-history windows — one apples-to-apples table per cell, same
-  columns as the `p_long` sweep report.
+  `median active`, `mean active`, `mean÷median`, `best-month`, `win-rate`, `avg_period`,
+  and `p14_share` for **all 8** `(t1, t2)` band variants over the full-history window —
+  one apples-to-apples table per cell. (Cross-window robustness is G2's disjoint split,
+  not a separate recent/full pair of tables; the bot-vs-idle level is non-gating per §6
+  defense 3, so it is not a band-comparison column.)
 - **G2.** Produce a **disjoint-window rank-stability** read per cell: each band's rank by
   `median active` on **2016–2021** (full minus recent) vs **2022→** (recent) — two
   *non-overlapping* halves, so a band that only works in the post-2022 regime is exposed
