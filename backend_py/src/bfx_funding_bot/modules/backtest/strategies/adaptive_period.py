@@ -104,22 +104,24 @@ class AdaptivePeriodStrategy(Strategy):
     def param_grid_for_cell(
         cls, symbol: str, period_agg: str, eda: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """Grid: ema_span in {24, 168} x (t1, t2) in {(0.5,1.5),(1.0,2.0)}.
-        Period tiers fixed (p_mid=7, p_long=30) for v1; ratio_sigma injected
-        per ema_span from EDA close/EMA sigma stats (same as MeanReversion).
+        """Deployed candidate: ema_span=24, band (t1=0.5, t2=2.0), p_long=14.
+
+        Provenance:
+        - ema_span=24 chosen by 2026-06-04 band sweep (span-24 tested; span-168
+          not evaluated for AP, so grid is narrowed to the deployed candidate).
+        - Band (t1=0.5, t2=2.0) chosen by 2026-06-04 band sweep as optimal
+          trade-off: +median alpha vs AlwaysMarketRate with lowest fill risk.
+        - p_long=14 chosen by 2026-06-03 p_long sweep: p14->p30 yields only
+          ~+20% median alpha but ~+90% mean (fat-tail driven); p14 retains
+          80-84% of robust edge while halving fat-tail + 30-day credit risk.
+        - p_mid=7 fixed as midpoint between floor (2) and p_long (14).
+        - ratio_sigma injected from EDA close/EMA sigma for ema_span=24.
         """
         sigma_24 = eda.get("close_over_ema_sigma_24", Decimal("0.05"))
-        sigma_168 = eda.get("close_over_ema_sigma_168", Decimal("0.05"))
-        spans = [(24, sigma_24), (168, sigma_168)]
-        thresholds = [
-            (Decimal("0.5"), Decimal("1.5")),
-            (Decimal("1.0"), Decimal("2.0")),
-        ]
         return [
             {
-                "ema_span": span, "ratio_sigma": sigma,
-                "t1": t1, "t2": t2, "p_mid": 7, "p_long": 30,
+                "ema_span": 24, "ratio_sigma": sigma_24,
+                "t1": Decimal("0.5"), "t2": Decimal("2.0"),
+                "p_mid": 7, "p_long": 14,
             }
-            for span, sigma in spans
-            for (t1, t2) in thresholds
         ]
