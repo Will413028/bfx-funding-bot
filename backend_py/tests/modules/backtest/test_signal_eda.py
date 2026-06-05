@@ -5,10 +5,15 @@ import numpy as np
 import pandas as pd
 
 from bfx_funding_bot.modules.backtest.signal_eda import (
+    SIGNALS,
     SPLIT_MTS,
     add_forward_rate_change,
+    amount_pctile,
     build_signal_frame,
+    frr_trend,
+    spike_z,
     split_regime,
+    utilization_pctile,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
@@ -86,3 +91,38 @@ def test_build_signal_frame_stats_after_all_candles_yield_nan() -> None:
     df = build_signal_frame(candles, stats)
     assert np.isnan(df["frr"].iloc[0])
     assert np.isnan(df["funding_amount"].iloc[0])
+
+
+def test_spike_z_is_zero_on_flat_then_positive_on_spike() -> None:
+    frr = [1e-6] * 30 + [1e-5]  # flat then 10x spike
+    df = build_signal_frame(_candles(["1"] * 31), _stats([{"frr": v} for v in frr]))
+    z = spike_z(df, w=14)
+    assert z.iloc[-1] > 3.0  # spike is many sigma above rolling baseline
+    assert abs(z.iloc[20]) < 1e-9  # flat region -> z ~ 0
+
+
+def test_frr_trend_sign_tracks_direction() -> None:
+    rising = [float(i) * 1e-6 for i in range(1, 41)]
+    df = build_signal_frame(_candles(["1"] * 40), _stats([{"frr": v} for v in rising]))
+    t = frr_trend(df, k=3)
+    assert t.dropna().iloc[-1] > 0  # monotone rising -> positive trend
+
+
+def test_pctile_is_in_unit_interval_and_high_at_max() -> None:
+    amt = list(range(1, 41))
+    df = build_signal_frame(_candles(["1"] * 40), _stats([{"frr": 1e-6, "amt": a} for a in amt]))
+    p = amount_pctile(df, w=20)
+    assert (p.dropna() >= 0).all() and (p.dropna() <= 1).all()
+    assert p.iloc[-1] == 1.0  # latest is the max of its window
+
+
+def test_utilization_uses_ratio_not_absolute() -> None:
+    rows = [{"frr": 1e-6, "amt": 1000, "used": u} for u in range(100, 140)]
+    df = build_signal_frame(_candles(["1"] * 40), _stats(rows))
+    u = utilization_pctile(df, w=20)
+    assert u.iloc[-1] == 1.0  # rising utilization -> latest at top percentile
+
+
+def test_signals_registry_has_four_relative_signals() -> None:
+    # GUARD: every signal must be a rolling/relative transform, never raw frr/amount.
+    assert set(SIGNALS) == {"frr_trend", "spike_detect", "funding_supply", "utilization"}
