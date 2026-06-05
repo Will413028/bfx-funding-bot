@@ -134,3 +134,43 @@ SIGNALS: dict[str, Callable[[pd.DataFrame], pd.Series]] = {
     "funding_supply": lambda df: amount_pctile(df, w=_PCTILE_WINDOW),
     "utilization": lambda df: utilization_pctile(df, w=_PCTILE_WINDOW),
 }
+
+_MIN_IC_PAIRS = 10        # minimum non-null pairs for a meaningful rank correlation
+_MIN_QUINTILE_PAIRS = 25  # 5 quintiles x 5 observations minimum
+
+
+def spearman_ic(signal: pd.Series, target: pd.Series) -> float:
+    """Spearman rank IC between signal_t and forward target. NaN if < 10 paired
+    non-null observations. Uses numpy ranks to avoid scipy dependency.
+    Returns NaN for a constant (zero-variance) signal or target."""
+    pair = pd.concat(
+        [signal.reset_index(drop=True), target.reset_index(drop=True)], axis=1
+    ).dropna()
+    if len(pair) < _MIN_IC_PAIRS:
+        return float("nan")
+    rx = pair.iloc[:, 0].rank()
+    ry = pair.iloc[:, 1].rank()
+    if rx.std() == 0 or ry.std() == 0:  # constant signal/target -> IC undefined
+        return float("nan")
+    return float(rx.corr(ry))  # Pearson-on-ranks == Spearman; avoids scipy dependency
+
+
+def quintile_spread(signal: pd.Series, target: pd.Series) -> tuple[float, bool]:
+    """Mean target in the top signal-quintile minus the bottom, plus whether the
+    5 bucket means are monotone. NaN spread if < 25 pairs or quintiles collapse."""
+    pair = pd.concat(
+        [signal.reset_index(drop=True).rename("s"), target.reset_index(drop=True).rename("t")],
+        axis=1,
+    ).dropna()
+    if len(pair) < _MIN_QUINTILE_PAIRS:
+        return float("nan"), False
+    try:
+        pair["q"] = pd.qcut(pair["s"], 5, labels=False, duplicates="drop")
+    except ValueError:
+        return float("nan"), False
+    means = pair.groupby("q")["t"].mean()
+    if len(means) < 2:
+        return float("nan"), False
+    spread = float(means.iloc[-1] - means.iloc[0])
+    monotonic = bool(means.is_monotonic_increasing or means.is_monotonic_decreasing)
+    return spread, monotonic
