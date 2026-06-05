@@ -7,11 +7,13 @@ import pandas as pd
 from bfx_funding_bot.modules.backtest.signal_eda import (
     SIGNALS,
     SPLIT_MTS,
+    CellRegimeIC,
     add_forward_rate_change,
     amount_pctile,
     bh_fdr,
     block_bootstrap_ic,
     build_signal_frame,
+    decide_signal,
     frr_trend,
     quintile_spread,
     spearman_ic,
@@ -248,3 +250,70 @@ def test_bh_fdr_empty() -> None:
 def test_bh_fdr_treats_nan_as_not_rejected() -> None:
     rejected = bh_fdr([0.001, float("nan"), 0.002], alpha=0.05)
     assert rejected == [True, False, True]
+
+
+# ---------------------------------------------------------------------------
+# Task 6: GO/KILL decision
+# ---------------------------------------------------------------------------
+
+
+def _ic(cell: str, regime: str, ic: float, sig: bool = True) -> CellRegimeIC:
+    return CellRegimeIC(cell=cell, regime=regime, horizon=7, ic=ic, fdr_significant=sig)
+
+
+def test_go_when_robust_across_cells_and_regimes() -> None:
+    obs = [
+        _ic("fUST_a30", "early", 0.06), _ic("fUST_a30", "late", 0.05),
+        _ic("fUST_p2", "early", 0.05), _ic("fUST_p2", "late", 0.04),
+        _ic("fUSD_a30", "early", 0.05), _ic("fUSD_a30", "late", 0.04),
+        _ic("fUSD_p2", "early", -0.01, sig=False), _ic("fUSD_p2", "late", 0.00, sig=False),
+    ]
+    v = decide_signal("frr_trend", obs)
+    assert v.verdict == "GO"
+
+
+def test_kill_when_sign_flips_across_regimes() -> None:
+    obs = [
+        _ic("fUST_a30", "early", 0.06), _ic("fUST_a30", "late", -0.06),
+        _ic("fUST_p2", "early", 0.05), _ic("fUST_p2", "late", -0.05),
+        _ic("fUSD_a30", "early", 0.05), _ic("fUSD_a30", "late", -0.05),
+        _ic("fUSD_p2", "early", 0.05), _ic("fUSD_p2", "late", -0.05),
+    ]
+    v = decide_signal("spike_detect", obs)
+    assert v.verdict == "KILL"
+    assert "regime" in v.reason.lower()
+
+
+def test_kill_when_only_one_cell_significant() -> None:
+    obs = [
+        _ic("fUST_a30", "early", 0.06), _ic("fUST_a30", "late", 0.05),
+        _ic("fUST_p2", "early", 0.01, sig=False), _ic("fUST_p2", "late", 0.00, sig=False),
+        _ic("fUSD_a30", "early", 0.00, sig=False), _ic("fUSD_a30", "late", 0.01, sig=False),
+        _ic("fUSD_p2", "early", 0.00, sig=False), _ic("fUSD_p2", "late", 0.00, sig=False),
+    ]
+    v = decide_signal("utilization", obs)
+    assert v.verdict == "KILL"
+
+
+def test_kill_when_median_ic_below_floor() -> None:
+    obs = [
+        _ic("fUST_a30", "early", 0.02), _ic("fUST_a30", "late", 0.02),
+        _ic("fUST_p2", "early", 0.02), _ic("fUST_p2", "late", 0.02),
+        _ic("fUSD_a30", "early", 0.02), _ic("fUSD_a30", "late", 0.02),
+        _ic("fUSD_p2", "early", 0.02), _ic("fUSD_p2", "late", 0.02),
+    ]
+    v = decide_signal("funding_supply", obs)
+    assert v.verdict == "KILL"
+    assert "floor" in v.reason.lower()
+
+
+def test_kill_when_robust_cells_disagree_in_sign() -> None:
+    obs = [
+        _ic("fUST_a30", "early", 0.06), _ic("fUST_a30", "late", 0.05),
+        _ic("fUST_p2", "early", 0.05), _ic("fUST_p2", "late", 0.04),
+        _ic("fUSD_a30", "early", 0.05), _ic("fUSD_a30", "late", 0.04),
+        _ic("fUSD_p2", "early", -0.05), _ic("fUSD_p2", "late", -0.06),
+    ]
+    v = decide_signal("frr_trend", obs)
+    assert v.verdict == "KILL"
+    assert "disagree" in v.reason.lower()

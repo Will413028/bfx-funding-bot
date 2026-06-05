@@ -263,3 +263,77 @@ def bh_fdr(pvalues: list[float], *, alpha: float = 0.05) -> list[bool]:
         if rank <= max_rank:
             rejected[i] = True
     return rejected
+
+
+# ---------------------------------------------------------------------------
+# Task 6: GO/KILL decision over the cell × regime grid
+# ---------------------------------------------------------------------------
+
+IC_FLOOR = 0.03  # empirical minimum |IC| for a defensible tradeable edge on low-SNR funding data
+CELL_MAJORITY = 3  # of 4 cells
+
+_CELLS = ("fUST_a30", "fUST_p2", "fUSD_a30", "fUSD_p2")
+
+
+@dataclass(frozen=True)
+class CellRegimeIC:
+    cell: str
+    regime: str  # "early" | "late"
+    horizon: int
+    ic: float
+    fdr_significant: bool
+
+
+@dataclass(frozen=True)
+class SignalVerdict:
+    signal: str
+    verdict: str  # "GO" | "KILL"
+    reason: str
+    median_ic: float
+
+
+def _sign(x: float) -> int:
+    return (x > 0) - (x < 0)
+
+
+def decide_signal(signal: str, obs: list[CellRegimeIC]) -> SignalVerdict:
+    """Apply the four GO gates (spec §2): FDR-significant, same sign across both
+    regimes, same sign across >=3/4 cells, |median IC| >= floor. Otherwise KILL
+    with the binding reason. median_ic is over all non-NaN observations."""
+    sig = [o for o in obs if o.fdr_significant]
+    valid = [o.ic for o in obs if not np.isnan(o.ic)]
+    median_ic = float(np.median(valid)) if valid else float("nan")
+
+    if not sig:
+        return SignalVerdict(signal, "KILL", "no FDR-significant IC in any cell/regime", median_ic)
+
+    # cells where BOTH regimes are significant and agree in sign
+    robust_cell_signs: list[int] = []
+    for cell in _CELLS:
+        ce = [o for o in sig if o.cell == cell]
+        early = [o for o in ce if o.regime == "early"]
+        late = [o for o in ce if o.regime == "late"]
+        if not early or not late:
+            continue
+        se = _sign(float(np.median([o.ic for o in early])))
+        sl = _sign(float(np.median([o.ic for o in late])))
+        if se != 0 and se == sl:
+            robust_cell_signs.append(se)
+
+    if not robust_cell_signs:
+        return SignalVerdict(signal, "KILL", "sign flips across regimes (regime-fragile)", median_ic)
+    if len(robust_cell_signs) < CELL_MAJORITY:
+        return SignalVerdict(
+            signal, "KILL",
+            f"only {len(robust_cell_signs)}/4 cells robust (< {CELL_MAJORITY} majority)",
+            median_ic,
+        )
+    if abs(sum(robust_cell_signs)) < CELL_MAJORITY:
+        return SignalVerdict(signal, "KILL", "robust cells disagree in sign", median_ic)
+    if abs(median_ic) < IC_FLOOR:
+        return SignalVerdict(
+            signal, "KILL", f"median |IC| {abs(median_ic):.3f} below floor {IC_FLOOR}", median_ic
+        )
+    return SignalVerdict(
+        signal, "GO", f"{len(robust_cell_signs)}/4 cells robust, median IC {median_ic:.3f}", median_ic
+    )
