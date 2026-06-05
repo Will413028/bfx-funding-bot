@@ -1,0 +1,88 @@
+# tests/modules/backtest/test_signal_eda.py
+from decimal import Decimal
+
+import numpy as np
+import pandas as pd
+
+from bfx_funding_bot.modules.backtest.signal_eda import (
+    SPLIT_MTS,
+    add_forward_rate_change,
+    build_signal_frame,
+    split_regime,
+)
+from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+
+_DAY = 86_400_000
+
+
+def _candles(closes: list[str], *, start: int = 1_500_000_000_000, step: int = _DAY):
+    return [
+        FundingCandle(symbol="fUST", timeframe="1D", period_agg="p2",
+                      mts=start + i * step, open=Decimal(c), high=Decimal(c),
+                      low=Decimal(c), close=Decimal(c))
+        for i, c in enumerate(closes)
+    ]
+
+
+def _stats(rows: list[dict], *, start: int = 1_500_000_000_000, step: int = _DAY):
+    return [
+        FundingStat(symbol="fUST", mts=start + i * step,
+                    frr=Decimal(str(r["frr"])),
+                    funding_amount=Decimal(str(r.get("amt", 1000))),
+                    funding_amount_used=Decimal(str(r.get("used", 500))))
+        for i, r in enumerate(rows)
+    ]
+
+
+def test_build_signal_frame_aligns_stats_onto_candle_grid() -> None:
+    candles = _candles(["0.0001", "0.0002", "0.0003"])
+    stats = _stats([{"frr": 1e-6}, {"frr": 2e-6}, {"frr": 3e-6}])
+    df = build_signal_frame(candles, stats)
+    assert list(df["close"]) == [0.0001, 0.0002, 0.0003]
+    assert df["frr"].tolist() == [1e-6, 2e-6, 3e-6]
+    assert df["funding_amount"].tolist() == [1000.0, 1000.0, 1000.0]
+
+
+def test_build_signal_frame_asof_uses_latest_prior_stat() -> None:
+    # stat at t0 only; candles at t0, t1 -> t1 should carry t0's frr (backward asof)
+    candles = _candles(["0.0001", "0.0002"])
+    stats = _stats([{"frr": 5e-6}])  # single stat at t0
+    df = build_signal_frame(candles, stats)
+    assert df["frr"].tolist() == [5e-6, 5e-6]
+
+
+def test_add_forward_rate_change_is_time_based_mean_minus_spot() -> None:
+    # closes 1,2,3,4,5 on a daily grid; H=2 -> mean(next 2 closes) - spot
+    df = build_signal_frame(_candles(["1", "2", "3", "4", "5"]), _stats([{"frr": 1e-6}] * 5))
+    out = add_forward_rate_change(df, [2])
+    # row0: mean(2,3) - 1 = 1.5 ; row1: mean(3,4) - 2 = 1.5 ; ...
+    assert out["fwd_d2"].iloc[0] == 1.5
+    assert out["fwd_d2"].iloc[1] == 1.5
+    # last row has no forward candles -> NaN
+    assert np.isnan(out["fwd_d2"].iloc[-1])
+
+
+def test_split_regime_is_disjoint() -> None:
+    early_frame = build_signal_frame(
+        _candles(["1"], start=SPLIT_MTS - 2 * _DAY),
+        _stats([{"frr": 1e-6}], start=SPLIT_MTS - 2 * _DAY),
+    )
+    late_frame = build_signal_frame(
+        _candles(["1"], start=SPLIT_MTS + _DAY),
+        _stats([{"frr": 1e-6}], start=SPLIT_MTS + _DAY),
+    )
+    combined = pd.concat([early_frame, late_frame], ignore_index=True)
+    e, late_df = split_regime(combined)
+    assert (e["mts"] < SPLIT_MTS).all()
+    assert (late_df["mts"] >= SPLIT_MTS).all()
+    assert set(e["mts"]).isdisjoint(set(late_df["mts"]))
+
+
+def test_build_signal_frame_stats_after_all_candles_yield_nan() -> None:
+    # stats start one day AFTER the single candle -> backward asof finds nothing -> NaN
+    candles = _candles(["0.0001"])  # one candle at t0
+    stats = _stats([{"frr": 9e-6}], start=1_500_000_000_000 + _DAY)
+    df = build_signal_frame(candles, stats)
+    assert np.isnan(df["frr"].iloc[0])
+    assert np.isnan(df["funding_amount"].iloc[0])
