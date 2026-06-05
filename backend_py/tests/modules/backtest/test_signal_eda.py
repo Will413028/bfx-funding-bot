@@ -8,6 +8,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     SIGNALS,
     SPLIT_MTS,
     CellRegimeIC,
+    SignalVerdict,
     add_forward_rate_change,
     amount_pctile,
     bh_fdr,
@@ -16,6 +17,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     decide_signal,
     frr_trend,
     quintile_spread,
+    render_report,
     spearman_ic,
     spike_z,
     split_regime,
@@ -317,3 +319,31 @@ def test_kill_when_robust_cells_disagree_in_sign() -> None:
     v = decide_signal("frr_trend", obs)
     assert v.verdict == "KILL"
     assert "disagree" in v.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: render_report
+# ---------------------------------------------------------------------------
+
+
+def test_render_report_contains_verdict_and_table_headers() -> None:
+    verdicts = [
+        SignalVerdict("frr_trend", "GO", "3/4 cells robust, median IC 0.050", 0.05),
+        SignalVerdict("utilization", "KILL", "no FDR-significant IC in any cell/regime", 0.00),
+    ]
+    md = render_report(verdicts, data_window="2016-2026, fUST 86 / fUSD 115 windows")
+    assert "# Signal EDA Funnel" in md
+    assert "frr_trend" in md and "GO" in md
+    assert "utilization" in md and "KILL" in md
+    assert "0.050" in md
+    assert "2016-2026" in md
+
+
+def test_render_report_null_result_when_all_kill() -> None:
+    verdicts = [
+        SignalVerdict("frr_trend", "KILL", "regime-fragile", 0.01),
+        SignalVerdict("spike_detect", "KILL", "below floor", 0.02),
+    ]
+    md = render_report(verdicts, data_window="test window")
+    assert "Null result" in md
+    assert "falsified" in md.lower()
