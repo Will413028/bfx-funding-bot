@@ -9,6 +9,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     SPLIT_MTS,
     add_forward_rate_change,
     amount_pctile,
+    bh_fdr,
     block_bootstrap_ic,
     build_signal_frame,
     frr_trend,
@@ -219,3 +220,31 @@ def test_bootstrap_p_value_zero_is_valid_floor_for_monotone() -> None:
     res = block_bootstrap_ic(x, y)
     assert res.p_value == 0.0
     assert res.ci_lo > 0
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Benjamini-Hochberg FDR correction
+# ---------------------------------------------------------------------------
+
+
+def test_bh_fdr_rejects_clearly_small_p() -> None:
+    rejected = bh_fdr([0.001, 0.002, 0.9, 0.8], alpha=0.05)
+    assert rejected == [True, True, False, False]
+
+
+def test_bh_fdr_marginal_p_passes_raw_but_fails_adjusted() -> None:
+    # GUARD: a raw-p of 0.04 (passes un-adjusted 0.05) must be rejected by BH
+    # when buried among many large p-values.
+    pvals = [0.04] + [0.6] * 19  # 20 tests, only one smallish
+    rejected = bh_fdr(pvals, alpha=0.05)
+    assert rejected[0] is False  # BH threshold for rank 1 = (1/20)*0.05 = 0.0025
+    assert not any(rejected)
+
+
+def test_bh_fdr_empty() -> None:
+    assert bh_fdr([], alpha=0.05) == []
+
+
+def test_bh_fdr_treats_nan_as_not_rejected() -> None:
+    rejected = bh_fdr([0.001, float("nan"), 0.002], alpha=0.05)
+    assert rejected == [True, False, True]
