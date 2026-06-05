@@ -8,6 +8,7 @@ docs/superpowers/specs/2026-06-05-signal-eda-funnel-design.md.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import numpy as np
@@ -174,3 +175,72 @@ def quintile_spread(signal: pd.Series, target: pd.Series) -> tuple[float, bool]:
     spread = float(means.iloc[-1] - means.iloc[0])
     monotonic = bool(means.is_monotonic_increasing or means.is_monotonic_decreasing)
     return spread, monotonic
+
+
+_MIN_BOOTSTRAP = 30
+
+
+@dataclass(frozen=True)
+class BootstrapIC:
+    """Result of block_bootstrap_ic.
+
+    point:       Spearman IC on the full paired sample.
+    ci_lo/ci_hi: percentile CI from the bootstrap distribution (default 95%).
+    p_value:     two-sided crossing rate = 2 * min(frac_pos, frac_neg) over
+                 non-NaN bootstrap ICs. 0.0 is a VALID floor (no resample
+                 crossed zero), not a missing value.
+    n:           number of paired (non-NaN) observations used.
+    """
+    point: float
+    ci_lo: float
+    ci_hi: float
+    p_value: float
+    n: int
+
+
+def block_bootstrap_ic(
+    signal: pd.Series,
+    target: pd.Series,
+    *,
+    block_size: int = 20,
+    n_boot: int = 1000,
+    seed: int = SEED,
+    alpha: float = 0.05,
+) -> BootstrapIC:
+    """Circular block-bootstrap CI + two-sided p-value for the Spearman IC.
+
+    Block resampling preserves serial autocorrelation (a plain bootstrap would
+    understate the CI on a daily rate series). p_value is the two-sided bootstrap
+    crossing rate over non-NaN resamples. All-NaN result if < 30 paired
+    observations. Zero-variance resample blocks yield NaN ICs that are dropped.
+    n_boot=1000 gives stable 95% CI on typical EDA sizes (<=5k rows)."""
+    pair = (
+        pd.concat([signal.reset_index(drop=True), target.reset_index(drop=True)], axis=1)
+        .dropna()
+        .to_numpy()
+    )
+    n = len(pair)
+    if n < _MIN_BOOTSTRAP:
+        return BootstrapIC(float("nan"), float("nan"), float("nan"), float("nan"), n)
+    point = spearman_ic(pd.Series(pair[:, 0]), pd.Series(pair[:, 1]))
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(n / block_size))
+    ics = np.empty(n_boot)
+    # block_size=20: ~3-4x the typical ~5-day autocorrelation length of daily
+    # funding rates; errs conservative (wider CI) than a tighter block.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for b in range(n_boot):
+            starts = rng.integers(0, n, n_blocks)
+            idx = np.concatenate([(np.arange(s, s + block_size) % n) for s in starts])[:n]
+            samp = pair[idx]
+            rx = pd.Series(samp[:, 0]).rank()
+            ry = pd.Series(samp[:, 1]).rank()
+            ics[b] = rx.corr(ry) if (rx.std() != 0 and ry.std() != 0) else np.nan
+    valid = ics[~np.isnan(ics)]
+    if len(valid) == 0:
+        return BootstrapIC(point, float("nan"), float("nan"), float("nan"), n)
+    lo, hi = np.percentile(valid, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    frac_pos = float(np.mean(valid > 0))
+    frac_neg = float(np.mean(valid < 0))
+    p_value = 2.0 * min(frac_pos, frac_neg)
+    return BootstrapIC(point, float(lo), float(hi), p_value, n)

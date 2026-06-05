@@ -9,6 +9,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     SPLIT_MTS,
     add_forward_rate_change,
     amount_pctile,
+    block_bootstrap_ic,
     build_signal_frame,
     frr_trend,
     quintile_spread,
@@ -163,3 +164,58 @@ def test_quintile_spread_returns_nan_on_constant_signal() -> None:
     spread, monotonic = quintile_spread(x, y)
     assert np.isnan(spread)
     assert monotonic is False
+
+
+def test_bootstrap_ci_excludes_zero_for_strong_link() -> None:
+    rng = np.random.default_rng(2)
+    x = pd.Series(rng.normal(size=400))
+    y = x + pd.Series(rng.normal(size=400)) * 0.3
+    res = block_bootstrap_ic(x, y)
+    assert res.ci_lo > 0  # CI strictly above 0
+    assert res.p_value < 0.05
+
+
+def test_bootstrap_ci_includes_zero_for_noise() -> None:
+    rng = np.random.default_rng(3)
+    x = pd.Series(rng.normal(size=400))
+    y = pd.Series(rng.normal(size=400))
+    res = block_bootstrap_ic(x, y)
+    assert res.ci_lo < 0 < res.ci_hi  # CI straddles 0
+    assert res.p_value > 0.05
+
+
+def test_bootstrap_is_reproducible_with_fixed_seed() -> None:
+    rng = np.random.default_rng(4)
+    x = pd.Series(rng.normal(size=200))
+    y = x * 0.5 + pd.Series(rng.normal(size=200))
+    a = block_bootstrap_ic(x, y)
+    b = block_bootstrap_ic(x, y)
+    assert a.ci_lo == b.ci_lo and a.ci_hi == b.ci_hi and a.p_value == b.p_value
+
+
+def test_bootstrap_nan_when_too_few() -> None:
+    res = block_bootstrap_ic(pd.Series([1.0] * 5), pd.Series([1.0] * 5))
+    assert np.isnan(res.ci_lo)
+
+
+def test_bootstrap_handles_constant_resample_without_warning_error() -> None:
+    # A near-constant series can produce zero-variance resample blocks (rank corr = nan).
+    # Under strict warning filters this must NOT raise; nan ics are dropped, not fatal.
+    import warnings
+    rng = np.random.default_rng(7)
+    x = pd.Series([1.0] * 60 + list(rng.normal(size=40)))
+    y = pd.Series([1.0] * 60 + list(rng.normal(size=40)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        res = block_bootstrap_ic(x, y)
+    assert hasattr(res, "ci_lo")  # completed without raising
+
+
+def test_bootstrap_p_value_zero_is_valid_floor_for_monotone() -> None:
+    # A perfectly monotone link -> every non-NaN resample IC is positive ->
+    # frac_neg=0 -> p_value=0.0. This is a valid floor, not an error.
+    x = pd.Series(np.linspace(0, 1, 300))
+    y = x * 2.0
+    res = block_bootstrap_ic(x, y)
+    assert res.p_value == 0.0
+    assert res.ci_lo > 0
