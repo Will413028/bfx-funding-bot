@@ -32,6 +32,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     block_bootstrap_ic,
     build_signal_frame,
     decide_signal,
+    quintile_spread,
     render_report,
     resample_daily,
     split_regime,
@@ -58,6 +59,8 @@ class _Obs:
     horizon: int
     ic: float
     p_value: float
+    quintile: float
+    quintile_monotonic: bool
 
 
 def run_funnel_for_cell(
@@ -80,12 +83,19 @@ def run_funnel_for_cell(
             sig = fn(sub)
             for h in HORIZONS:
                 res = block_bootstrap_ic(sig, sub[f"fwd_d{h}"])
-                out.append(_Obs(sig_name, cell_label, regime_name, h, res.point, res.p_value))
+                qspread, qmono = quintile_spread(sig, sub[f"fwd_d{h}"])
+                out.append(_Obs(sig_name, cell_label, regime_name, h, res.point, res.p_value,
+                                qspread, qmono))
     return out
 
 
-def _apply_fdr_and_decide(all_obs: list[_Obs]) -> list[SignalVerdict]:
-    """BH-FDR across ALL observations, then reduce to per-signal verdicts."""
+def _apply_fdr_and_decide(
+    all_obs: list[_Obs],
+) -> tuple[list[SignalVerdict], list[bool]]:
+    """BH-FDR across ALL observations, then reduce to per-signal verdicts.
+
+    Returns (verdicts, rejected_mask) where rejected_mask is aligned to all_obs
+    order so the caller can annotate the audit grid with fdr_significant."""
     pvals = [o.p_value for o in all_obs]
     rejected = bh_fdr(pvals)
     by_signal: dict[str, list[CellRegimeIC]] = {}
@@ -94,7 +104,8 @@ def _apply_fdr_and_decide(all_obs: list[_Obs]) -> list[SignalVerdict]:
             CellRegimeIC(cell=o.cell, regime=o.regime, horizon=o.horizon,
                          ic=o.ic, fdr_significant=sig)
         )
-    return [decide_signal(name, obs) for name, obs in sorted(by_signal.items())]
+    verdicts = [decide_signal(name, obs) for name, obs in sorted(by_signal.items())]
+    return verdicts, rejected
 
 
 async def _fetch_cell(
@@ -135,24 +146,48 @@ async def _amain() -> int:
     # Heavy pure-CPU funnel runs AFTER all DB sessions are closed (Neon would
     # otherwise drop the idle connection during the multi-minute compute).
     all_obs: list[_Obs] = []
+    min_mts: int | None = None
     for cell_id, candles, stats in fetched:
+        if candles:
+            earliest = candles[0].mts  # candles are ASC by mts
+            min_mts = earliest if min_mts is None else min(min_mts, earliest)
         cell_obs = run_funnel_for_cell(cell_id, candles, stats)
         logger.info("%s: %d observations", cell_id, len(cell_obs))
         all_obs.extend(cell_obs)
 
-    verdicts = _apply_fdr_and_decide(all_obs)
+    verdicts, rejected_mask = _apply_fdr_and_decide(all_obs)
     n_cells = len({o.cell for o in all_obs})
-    md = render_report(
-        verdicts, data_window=f"{START_MTS}-now, {n_cells} cells, {len(all_obs)} observations"
-    )
+    if min_mts is not None:
+        start_date = datetime.fromtimestamp(min_mts / 1000, UTC).date()
+    else:
+        start_date = datetime.fromtimestamp(START_MTS / 1000, UTC).date()
+    data_window = f"{start_date}-now, {n_cells} cells, {len(all_obs)} observations"
+    md = render_report(verdicts, data_window=data_window)
     out_path = Path(args.output)
-    out_path.write_text(md)
+    out_path.write_text(md + "\nFull per-cell × regime × horizon IC / p-value / quintile grid in the .json sidecar.\n")
     out_path.with_suffix(".json").write_text(
         json.dumps(
-            [
-                {"signal": v.signal, "verdict": v.verdict, "median_ic": v.median_ic, "reason": v.reason}
-                for v in verdicts
-            ],
+            {
+                "verdicts": [
+                    {"signal": v.signal, "verdict": v.verdict,
+                     "median_ic": v.median_ic, "reason": v.reason}
+                    for v in verdicts
+                ],
+                "observations": [
+                    {
+                        "signal": o.signal_name,
+                        "cell": o.cell,
+                        "regime": o.regime,
+                        "horizon": o.horizon,
+                        "ic": o.ic,
+                        "p_value": o.p_value,
+                        "fdr_significant": bool(sig),
+                        "quintile_spread": o.quintile,
+                        "quintile_monotonic": o.quintile_monotonic,
+                    }
+                    for o, sig in zip(all_obs, rejected_mask, strict=True)
+                ],
+            },
             indent=2,
         )
     )
