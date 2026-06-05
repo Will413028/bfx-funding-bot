@@ -11,6 +11,8 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     amount_pctile,
     build_signal_frame,
     frr_trend,
+    quintile_spread,
+    spearman_ic,
     spike_z,
     split_regime,
     utilization_pctile,
@@ -126,3 +128,38 @@ def test_utilization_uses_ratio_not_absolute() -> None:
 def test_signals_registry_has_four_relative_signals() -> None:
     # GUARD: every signal must be a rolling/relative transform, never raw frr/amount.
     assert set(SIGNALS) == {"frr_trend", "spike_detect", "funding_supply", "utilization"}
+
+
+def test_spearman_ic_recovers_planted_positive_correlation() -> None:
+    rng = np.random.default_rng(0)
+    x = pd.Series(rng.normal(size=500))
+    y = x + pd.Series(rng.normal(size=500)) * 0.3  # strong positive monotone link
+    ic = spearman_ic(x, y)
+    assert ic > 0.7
+
+
+def test_spearman_ic_near_zero_on_independent_series() -> None:
+    rng = np.random.default_rng(1)
+    x = pd.Series(rng.normal(size=500))
+    y = pd.Series(rng.normal(size=500))
+    assert abs(spearman_ic(x, y)) < 0.15
+
+
+def test_spearman_ic_nan_when_too_few_pairs() -> None:
+    assert np.isnan(spearman_ic(pd.Series([1.0, 2.0]), pd.Series([1.0, np.nan])))
+
+
+def test_quintile_spread_monotone_for_linear_link() -> None:
+    x = pd.Series(np.linspace(0, 1, 200))
+    y = x * 2.0
+    spread, monotonic = quintile_spread(x, y)
+    assert spread > 0
+    assert monotonic is True
+
+
+def test_quintile_spread_returns_nan_on_constant_signal() -> None:
+    x = pd.Series([1.0] * 100)
+    y = pd.Series(np.random.default_rng(0).normal(size=100))
+    spread, monotonic = quintile_spread(x, y)
+    assert np.isnan(spread)
+    assert monotonic is False
