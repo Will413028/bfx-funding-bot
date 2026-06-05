@@ -244,3 +244,22 @@ def block_bootstrap_ic(
     frac_neg = float(np.mean(valid < 0))
     p_value = 2.0 * min(frac_pos, frac_neg)
     return BootstrapIC(point, float(lo), float(hi), p_value, n)
+
+
+def bh_fdr(pvalues: list[float], *, alpha: float = 0.05) -> list[bool]:
+    """Benjamini-Hochberg step-up. Returns a rejected-mask aligned to the input
+    order. NaN p-values are treated as 1.0 (never rejected). Empty -> empty."""
+    m = len(pvalues)
+    if m == 0:
+        return []
+    clean = [1.0 if (p is None or np.isnan(p)) else float(p) for p in pvalues]
+    order = sorted(range(m), key=lambda i: clean[i])
+    max_rank = 0
+    for rank, i in enumerate(order, start=1):
+        if clean[i] <= rank / m * alpha:
+            max_rank = rank
+    rejected = [False] * m
+    for rank, i in enumerate(order, start=1):
+        if rank <= max_rank:
+            rejected[i] = True
+    return rejected
