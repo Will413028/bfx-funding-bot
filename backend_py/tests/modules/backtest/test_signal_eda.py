@@ -347,3 +347,20 @@ def test_render_report_null_result_when_all_kill() -> None:
     md = render_report(verdicts, data_window="test window")
     assert "Null result" in md
     assert "falsified" in md.lower()
+
+
+def test_resample_daily_collapses_subdaily_to_last_of_day() -> None:
+    from bfx_funding_bot.modules.backtest.signal_eda import resample_daily
+
+    half = 43_200_000  # 12h -> 2 rows per day over 3 days
+    candles = _candles(["1", "2", "3", "4", "5", "6"], step=half)
+    stats = _stats([{"frr": 1e-6}] * 6, step=half)
+    daily = resample_daily(build_signal_frame(candles, stats))
+    assert len(daily) == 3
+    assert list(daily["close"]) == [2.0, 4.0, 6.0]  # last-of-day kept
+
+
+def test_resample_daily_empty() -> None:
+    from bfx_funding_bot.modules.backtest.signal_eda import resample_daily
+
+    assert resample_daily(pd.DataFrame()).empty
