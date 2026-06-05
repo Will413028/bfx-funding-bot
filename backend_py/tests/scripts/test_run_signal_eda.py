@@ -5,7 +5,7 @@ import numpy as np
 
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
-from scripts.run_signal_eda import run_funnel_for_cell
+from scripts.run_signal_eda import _apply_fdr_and_decide, _Obs, run_funnel_for_cell
 
 _DAY = 86_400_000
 
@@ -36,6 +36,36 @@ def test_run_funnel_for_cell_returns_obs_per_signal() -> None:
     regimes = {o.regime for o in obs}
     assert regimes and regimes.issubset({"early", "late"})  # synthetic 2017 data -> all 'early'
     assert all(hasattr(o, "ic") and hasattr(o, "p_value") for o in obs)
+
+
+def test_run_funnel_obs_have_quintile_fields() -> None:
+    """Each _Obs must carry quintile_spread (float) and quintile_monotonic (bool)."""
+    candles, stats = _series(300)
+    obs = run_funnel_for_cell("fUST_p2", candles, stats)
+    assert obs, "expected at least one observation"
+    for o in obs:
+        assert hasattr(o, "quintile"), "missing quintile field"
+        assert hasattr(o, "quintile_monotonic"), "missing quintile_monotonic field"
+        assert isinstance(o.quintile, float), f"quintile should be float, got {type(o.quintile)}"
+        assert isinstance(o.quintile_monotonic, bool), (
+            f"quintile_monotonic should be bool, got {type(o.quintile_monotonic)}"
+        )
+
+
+def test_apply_fdr_and_decide_returns_verdicts_and_mask() -> None:
+    """_apply_fdr_and_decide must return (verdicts, rejected_mask) with
+    len(mask) == len(all_obs) and mask aligned to input order."""
+    all_obs = [
+        _Obs("frr_trend", "fUST_p2", "early", 7, 0.05, 0.001, 0.01, True),
+        _Obs("frr_trend", "fUST_p2", "late",  7, 0.04, 0.002, 0.01, True),
+        _Obs("spike_detect", "fUST_p2", "early", 7, 0.01, 0.9,  0.0,  False),
+    ]
+    verdicts, mask = _apply_fdr_and_decide(all_obs)
+    assert isinstance(verdicts, list)
+    assert isinstance(mask, list)
+    assert len(mask) == len(all_obs), "mask must be aligned to all_obs"
+    assert all(isinstance(m, bool) for m in mask), "mask elements must be bool"
+    assert len(verdicts) == 2  # two distinct signal names
 
 
 def test_run_funnel_handles_empty_gracefully() -> None:

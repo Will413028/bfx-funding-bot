@@ -64,7 +64,10 @@ def add_forward_rate_change(df: pd.DataFrame, horizons_days: list[int]) -> pd.Da
     """For each horizon H, add column fwd_d{H} = mean(close in (t, t+H days]) - close_t.
 
     Time-based (ms) window, robust to candle spacing. Rows without any forward
-    candle inside the window get NaN."""
+    candle inside the window get NaN.
+
+    Intended for a DAILY frame (call resample_daily first); the per-row mask is
+    O(n^2) and will be slow on sub-daily frames."""
     out = df.copy()
     mts = out["mts"].to_numpy()
     close = out["close"].to_numpy()
