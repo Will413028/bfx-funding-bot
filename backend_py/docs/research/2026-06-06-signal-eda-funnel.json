@@ -1,0 +1,26 @@
+[
+  {
+    "signal": "frr_trend",
+    "verdict": "KILL",
+    "median_ic": -0.037119591251642395,
+    "reason": "sign flips across regimes (regime-fragile)"
+  },
+  {
+    "signal": "funding_supply",
+    "verdict": "KILL",
+    "median_ic": -0.023924468375641352,
+    "reason": "no FDR-significant IC in any cell/regime"
+  },
+  {
+    "signal": "spike_detect",
+    "verdict": "KILL",
+    "median_ic": -0.06024650011850112,
+    "reason": "sign flips across regimes (regime-fragile)"
+  },
+  {
+    "signal": "utilization",
+    "verdict": "KILL",
+    "median_ic": -0.011568103510540134,
+    "reason": "no FDR-significant IC in any cell/regime"
+  }
+]

@@ -370,3 +370,15 @@ def render_report(verdicts: list[SignalVerdict], *, data_window: str) -> str:
             "Candidate pool unchanged; these signals are recorded as falsified."
         )
     return "\n".join(lines) + "\n"
+
+
+def resample_daily(frame: pd.DataFrame) -> pd.DataFrame:
+    """Collapse a sub-daily frame to one row per UTC day (the day's last
+    observation). Raw funding candles are hourly; the signal rolling windows
+    count ROWS, so without daily resampling a w=14 window would span ~14 hours
+    instead of 14 days, and the O(n^2) forward window would be ~24x larger.
+    Empty -> empty."""
+    if frame.empty:
+        return frame
+    day = frame["mts"] // 86_400_000
+    return frame.groupby(day, sort=True).last().reset_index(drop=True)

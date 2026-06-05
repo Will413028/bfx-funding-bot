@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     build_signal_frame,
     decide_signal,
     render_report,
+    resample_daily,
     split_regime,
 )
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
@@ -66,7 +67,10 @@ def run_funnel_for_cell(
     signal x horizon x regime. Pure (no I/O) so it is unit-testable."""
     if not candles or not stats:
         return []
-    frame = add_forward_rate_change(build_signal_frame(candles, stats), HORIZONS)
+    # Resample hourly candles to daily so the signal rolling windows (w=14, w=30
+    # rows) are day-scaled as intended, not ~24x too short.
+    frame = resample_daily(build_signal_frame(candles, stats))
+    frame = add_forward_rate_change(frame, HORIZONS)
     early, late = split_regime(frame)
     out: list[_Obs] = []
     for regime_name, sub in (("early", early), ("late", late)):
@@ -93,13 +97,18 @@ def _apply_fdr_and_decide(all_obs: list[_Obs]) -> list[SignalVerdict]:
     return [decide_signal(name, obs) for name, obs in sorted(by_signal.items())]
 
 
-async def _run_cell(session: AsyncSession, cell: CellConfig, end_mts: int) -> list[_Obs]:
+async def _fetch_cell(
+    session: AsyncSession, cell: CellConfig, end_mts: int
+) -> tuple[str, list[FundingCandle], list[FundingStat]]:
+    """Fetch raw candles + stats for one cell. DB I/O ONLY — the heavy pure-CPU
+    funnel runs OUTSIDE the session scope. A long compute inside the session lets
+    Neon (serverless) close the idle connection mid-operation."""
     candles = await get_candles_in_range(
         session, symbol=cell.symbol, timeframe=cell.timeframe,
         period_agg=cell.period_agg, start_mts=START_MTS, end_mts=end_mts,
     )
     stats = await get_stats_in_range(session, symbol=cell.symbol, start_mts=START_MTS, end_mts=end_mts)
-    return run_funnel_for_cell(cell.cell_id, candles, stats)
+    return cell.cell_id, candles, stats
 
 
 async def _amain() -> int:
@@ -113,15 +122,23 @@ async def _amain() -> int:
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
     end_mts = int(datetime.now(UTC).timestamp() * 1000)
-    all_obs: list[_Obs] = []
+    fetched: list[tuple[str, list[FundingCandle], list[FundingStat]]] = []
     try:
         for cell in load_cells_only(Path(args.cells)):
             async with session_scope(session_factory) as session:
-                cell_obs = await _run_cell(session, cell, end_mts)
-                logger.info("%s: %d observations", cell.cell_id, len(cell_obs))
-                all_obs.extend(cell_obs)
+                cell_id, candles, stats = await _fetch_cell(session, cell, end_mts)
+                logger.info("%s: fetched %d candles / %d stats", cell_id, len(candles), len(stats))
+                fetched.append((cell_id, candles, stats))
     finally:
         await engine.dispose()
+
+    # Heavy pure-CPU funnel runs AFTER all DB sessions are closed (Neon would
+    # otherwise drop the idle connection during the multi-minute compute).
+    all_obs: list[_Obs] = []
+    for cell_id, candles, stats in fetched:
+        cell_obs = run_funnel_for_cell(cell_id, candles, stats)
+        logger.info("%s: %d observations", cell_id, len(cell_obs))
+        all_obs.extend(cell_obs)
 
     verdicts = _apply_fdr_and_decide(all_obs)
     n_cells = len({o.cell for o in all_obs})
