@@ -337,3 +337,36 @@ def decide_signal(signal: str, obs: list[CellRegimeIC]) -> SignalVerdict:
     return SignalVerdict(
         signal, "GO", f"{len(robust_cell_signs)}/4 cells robust, median IC {median_ic:.3f}", median_ic
     )
+
+
+def render_report(verdicts: list[SignalVerdict], *, data_window: str) -> str:
+    """Markdown summary: GO/KILL table + per-signal reason. Null-result safe
+    (renders even if every signal is KILL)."""
+    lines = [
+        "# Signal EDA Funnel",
+        "",
+        f"**Data window:** {data_window}",
+        "",
+        "Screens 4 candidate signals (FRR-trend, SpikeDetect, funding_supply, "
+        "utilization) for predictive power against forward rate change. GO requires "
+        "FDR-significant IC, same sign across both regimes, >=3/4 cells robust, and "
+        "|median IC| >= 0.03. Null result (all KILL) is a valid conclusion.",
+        "",
+        "## Verdicts",
+        "",
+        "| Signal | Verdict | Median IC | Reason |",
+        "| --- | --- | --- | --- |",
+    ]
+    go = [v for v in verdicts if v.verdict == "GO"]
+    for v in verdicts:
+        lines.append(f"| {v.signal} | **{v.verdict}** | {v.median_ic:.3f} | {v.reason} |")
+    lines += ["", "## Promotion", ""]
+    if go:
+        lines.append("Signals to promote to full strategy (engine plumbing + WFO/OOS):")
+        lines += [f"- **{v.signal}** (median IC {v.median_ic:.3f})" for v in go]
+    else:
+        lines.append(
+            "**Null result** — no signal cleared the bar. None promoted. "
+            "Candidate pool unchanged; these signals are recorded as falsified."
+        )
+    return "\n".join(lines) + "\n"
