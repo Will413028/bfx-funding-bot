@@ -7,6 +7,7 @@ docs/superpowers/specs/2026-06-05-signal-eda-funnel-design.md.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import numpy as np
@@ -84,3 +85,52 @@ def split_regime(
     early = df[df["mts"] < split_mts].reset_index(drop=True)
     late = df[df["mts"] >= split_mts].reset_index(drop=True)
     return early, late
+
+
+def frr_trend(df: pd.DataFrame, k: int) -> pd.Series:
+    """Normalized k-step FRR momentum: (frr_t - frr_{t-k}) / rolling_std. Relative,
+    so per-year FRR slope drift does not contaminate it. Normalized by the rolling std
+    of raw FRR (its scale), not of the delta."""
+    frr = df["frr"]
+    delta = frr - frr.shift(k)
+    return delta / frr.rolling(max(k * 4, 8), min_periods=k).std()
+
+
+def spike_z(df: pd.DataFrame, w: int) -> pd.Series:
+    """FRR z-score vs its own rolling baseline (spike detector). Relative form.
+    Zero-std windows (flat region) return 0 rather than NaN."""
+    frr = df["frr"]
+    roll = frr.rolling(w)
+    std = roll.std()
+    z = (frr - roll.mean()) / std
+    # flat window: numerator=0, std=0 -> 0/0=NaN; define z=0 there
+    return z.where(std != 0, other=0.0)
+
+
+def _rolling_pctile(series: pd.Series, w: int) -> pd.Series:
+    """Percentile rank of the latest value within its trailing window of size w."""
+    return series.rolling(w).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False)
+
+
+def amount_pctile(df: pd.DataFrame, w: int) -> pd.Series:
+    """Rolling percentile rank of funding_amount (supply level, regime-free)."""
+    return _rolling_pctile(df["funding_amount"], w)
+
+
+def utilization_pctile(df: pd.DataFrame, w: int) -> pd.Series:
+    """Rolling percentile of utilization = used/amount (demand pressure)."""
+    util = df["funding_amount_used"] / df["funding_amount"]
+    return _rolling_pctile(util, w)
+
+
+_TREND_LAG = 3        # 3-day FRR momentum
+_SPIKE_WINDOW = 14    # 2-week rolling baseline for the spike z-score
+_PCTILE_WINDOW = 30   # ~1-month context for supply / utilization percentile
+
+# Signal registry: name -> callable producing the signal series. All rolling/relative.
+SIGNALS: dict[str, Callable[[pd.DataFrame], pd.Series]] = {
+    "frr_trend": lambda df: frr_trend(df, k=_TREND_LAG),
+    "spike_detect": lambda df: spike_z(df, w=_SPIKE_WINDOW),
+    "funding_supply": lambda df: amount_pctile(df, w=_PCTILE_WINDOW),
+    "utilization": lambda df: utilization_pctile(df, w=_PCTILE_WINDOW),
+}
