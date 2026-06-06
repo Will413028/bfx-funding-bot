@@ -75,7 +75,7 @@ const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 - Better Auth（自托）處理 login/register/logout（Server Actions 包裝）
 - Session 存在 HttpOnly opaque cookie（Better Auth，secondaryStorage → Upstash，7 天）
 - Middleware 用 `getSessionCookie` 檢查 session，保護 dashboard 路由
-- Proxy 對後端請求 server-mint 短效 JWT（`bfx-funding-backend` audience，後端用 JWKS 驗證）
+- Proxy 對後端請求 server-mint 短效 EdDSA JWT（pinned `iss=bfx-funding-bot` / `aud=bfx-funding-backend`，解耦部署 URL；後端用 JWKS 驗證）
 - 已登入用戶自動跳過 login/register 頁面
 
 ### 狀態管理
@@ -131,7 +131,7 @@ NEXT_PUBLIC_AXIOM_DATASET    # Axiom（optional）
 
 # Server-only
 API_URL                    # Python web-API URL（proxy + server actions 用）
-BETTER_AUTH_URL            # Better Auth base URL（server，issuer / trustedOrigins）
+BETTER_AUTH_URL            # Better Auth base URL（server，baseURL / trustedOrigins / passkey origin）
 BETTER_AUTH_SECRET         # Better Auth 加密金鑰（≥ 32 chars）
 DATABASE_URL               # Neon（Better Auth `auth` schema，pg Pool）
 UPSTASH_REDIS_REST_URL     # Upstash（session / rate-limit secondaryStorage）

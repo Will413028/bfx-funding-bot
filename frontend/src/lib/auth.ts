@@ -91,9 +91,15 @@ export const auth = betterAuth({
     }),
     jwt({
       jwt: {
-        // Stable audience the Python backend checks, decoupled from the public URL.
+        // Stable issuer + audience the Python backend verifies, PINNED so both are
+        // decoupled from the public URL — a deploy/domain change can't break JWT
+        // verification (BE `better_auth_issuer` default must byte-match this issuer).
+        // NOTE: this is a plain (non-URL) string — fine for our closed FE↔BE JWKS
+        // contract (PyJWT does string-equality). If `oidc-provider`/`mcp` is ever
+        // added, this becomes the OIDC discovery issuer and MUST be an https:// URL.
+        issuer: "bfx-funding-bot",
         audience: "bfx-funding-backend",
-        // issuer defaults to BETTER_AUTH_URL; expiration defaults to 15m. EdDSA default.
+        // expiration defaults to 15m; EdDSA default.
         definePayload: ({ user }) => ({
           sub: user.id,
           email: user.email,

@@ -31,15 +31,18 @@ verifies the Better-Auth-minted JWT against the Next app's JWKS endpoint.
 ```bash
 cd backend_py && \
 BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks \
-BETTER_AUTH_ISSUER=http://localhost:3000 \
-JWT_AUDIENCE=bfx-funding-backend \
 uv run uvicorn bfx_funding_bot.main:app
 ```
 
-- `BETTER_AUTH_JWKS_URL` / `BETTER_AUTH_ISSUER` point at the **running Next app**
-  (the JWKS is served at `/api/auth/jwks`; the issuer is the Better Auth base URL).
-- `JWT_AUDIENCE` must match the `audience` minted in `src/lib/auth.ts`
-  (`bfx-funding-backend`).
+- `BETTER_AUTH_JWKS_URL` must point at the **running Next app**'s JWKS endpoint
+  (served at `/api/auth/jwks`). This is the only deploy-specific auth env the
+  web-API needs.
+- Issuer + audience are **pinned stable strings**, decoupled from the deploy URL:
+  the FE `jwt` plugin mints `iss="bfx-funding-bot"` / `aud="bfx-funding-backend"`
+  (`src/lib/auth.ts`), and the BE defaults already match (`better_auth_issuer` /
+  `jwt_audience` in `core/settings.py`). So you do **not** need to set
+  `BETTER_AUTH_ISSUER` / `JWT_AUDIENCE` — override them only if you change the
+  pinned strings in `auth.ts`.
 
 ### 2. Dev Postgres with the auth migration applied
 
