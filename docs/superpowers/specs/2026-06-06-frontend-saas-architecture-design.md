@@ -52,6 +52,8 @@ daemon 只服務 `GET /health`、`GET /healthz`、`POST /admin/smoke-test`。前
 | D10 | 策略設定面 | **唯讀 cells/standing-quote**（無客戶 knob 表單） | 引擎不能 hot-load，「儲存策略」表單會是謊言 |
 | D11 | 暗色主題 | **always-dark**（移除 inert `dark:` 機制） | 機構級終端不需 light mode（要時再加 next-themes） |
 | D12 | 組織模型 | **flat users now**，`org_id` 留 SP6 | users 在你 DB，永不被 provider tenant model 卡住 |
+| D13 | DB 拓樸 | **同一個 Neon DB + 專屬 `auth` schema + web app scoped DB role**；**Alembic 唯一 migration 工具**（port `better-auth generate` 出的 schema，永不跑 `better-auth migrate`）；SP4 同 DB 讀 trading 表 | 同 DB=業界默認、FK 完整、SP4 免跨 DB；schema+scoped role=真錢安全邊界（web app 動不了 trading 表）；單一 Alembic=與現有 live-Neon 手刻 migration 工作流一致。caveat：共用 2-CU/PITR，v1 可忽略、日後可升獨立 project（可逆）|
+| D14 | MFA | TOTP enroll（+passkey 選配）；**step-up 只在動錢操作**（改 key/升 cap/關 kill-switch） | Better Auth 無專屬 step-up API → 用 session-freshness 強制 re-verify；唯讀儀表板不擋 |
 
 ---
 
@@ -218,7 +220,7 @@ L2 經 `@theme inline` 暴露。**強制規則**：feature 元件只能用 `bg-c
 
 ## 9. 開放項（待逐子專案 brainstorm 細化）
 
-1. Better Auth 跑哪（Next app `/api/auth/*` on Vercel 確認）、session 表放哪個 Postgres schema、JWKS `iss`/`aud` 具體值、Upstash rate-limit 接線、MFA 政策（TOTP/passkey + 哪些操作 step-up）、Better Auth 版本鎖定。
+1. ~~DB 拓樸 / schema / MFA 政策~~ → 已決（D13/D14）：同 DB + `auth` schema、Alembic 唯一工具、TOTP+動錢 step-up。剩具體值：JWKS `iss`/`aud`（`aud="bfx-funding-backend"`）、`sub`=uuid、`requireEmailVerification:false`(v1)、Better Auth 版本（`better-auth@1.6.14`）、Upstash `secondaryStorage`+`rateLimit.storage="secondary-storage"`。
 2. `user_profile` JIT provision 的觸發點與 race 處理（首次 request 建 row、FK 到 Better Auth user id）。
 3. `(ops)` 6 視圖各自的 DTO 與投影 SQL（哪些可直接讀表、哪些要 aggregate）。
 4. G3 report 資料現在在 `docs/research/` 檔案——`ops/validation` 要讀 DB 投影還是另存查詢表。
