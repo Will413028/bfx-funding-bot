@@ -61,13 +61,12 @@ async function request<T>(
 
   if (isServer) {
     try {
-      const { cookies } = await import("next/headers");
-      const token = (await cookies()).get("auth_token")?.value;
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
+      const { auth } = await import("@/lib/auth");
+      const { headers: nextHeaders } = await import("next/headers");
+      const res = await auth.api.getToken({ headers: await nextHeaders() });
+      if (res?.token) headers.Authorization = `Bearer ${res.token}`;
     } catch {
-      // Outside Next.js request context (e.g., tests) — skip auth
+      // Outside a request context (e.g. tests) — skip auth
     }
   }
 
