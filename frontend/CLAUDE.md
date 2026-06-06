@@ -63,7 +63,7 @@ middleware.ts                       # Auth guard + i18n + security headers
 const user = await apiClient.get<User>("/users/me");
 const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 
-// Client 端 → /api/proxy → Go backend（注入 auth cookie）
+// Client 端 → /api/proxy → Python web-API（注入 server-minted JWT）
 // Server 端 → 直接呼叫 API_URL
 ```
 
@@ -72,9 +72,10 @@ const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 
 ### 認證
 
-- Server Actions 處理 login/register/logout
-- Token 存在 HttpOnly cookie（`auth_token`，7 天）
-- Middleware 檢查 JWT 過期，保護 dashboard 路由
+- Better Auth（自托）處理 login/register/logout（Server Actions 包裝）
+- Session 存在 HttpOnly opaque cookie（Better Auth，secondaryStorage → Upstash，7 天）
+- Middleware 用 `getSessionCookie` 檢查 session，保護 dashboard 路由
+- Proxy 對後端請求 server-mint 短效 JWT（`bfx-funding-backend` audience，後端用 JWKS 驗證）
 - 已登入用戶自動跳過 login/register 頁面
 
 ### 狀態管理
@@ -121,15 +122,21 @@ export function useApiKeys() {
 
 ```bash
 # Public（瀏覽器可見，需 NEXT_PUBLIC_ 前綴）
-NEXT_PUBLIC_APP_URL        # 前端 URL
-NEXT_PUBLIC_APP_NAME       # App 名稱
-NEXT_PUBLIC_WS_URL         # WebSocket（client 直連 backend）
-NEXT_PUBLIC_SENTRY_DSN     # Sentry（optional）
-NEXT_PUBLIC_AXIOM_DATASET  # Axiom（optional）
+NEXT_PUBLIC_APP_URL          # 前端 URL
+NEXT_PUBLIC_APP_NAME         # App 名稱
+NEXT_PUBLIC_WS_URL           # WebSocket（client 直連 backend）
+NEXT_PUBLIC_BETTER_AUTH_URL  # Better Auth base URL（client SDK 用）
+NEXT_PUBLIC_SENTRY_DSN       # Sentry（optional）
+NEXT_PUBLIC_AXIOM_DATASET    # Axiom（optional）
 
 # Server-only
-API_URL                    # Go backend URL（proxy + server actions 用）
-AUTH_SECRET                # Middleware JWT 驗證
+API_URL                    # Python web-API URL（proxy + server actions 用）
+BETTER_AUTH_URL            # Better Auth base URL（server，issuer / trustedOrigins）
+BETTER_AUTH_SECRET         # Better Auth 加密金鑰（≥ 32 chars）
+DATABASE_URL               # Neon（Better Auth `auth` schema，pg Pool）
+UPSTASH_REDIS_REST_URL     # Upstash（session / rate-limit secondaryStorage）
+UPSTASH_REDIS_REST_TOKEN   # Upstash token
+PASSKEY_RP_ID              # Passkey relying-party ID（domain）
 ```
 
 驗證邏輯在 `lib/env.ts`（Zod schema）。
