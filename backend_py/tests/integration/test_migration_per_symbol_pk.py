@@ -31,6 +31,10 @@ async def test_position_state_per_symbol_pk_after_upgrade(
     eng = create_engine(sync_url)
     try:
         with eng.begin() as setup_conn:
+            # The auth-schema migration creates `auth` too; drop it as well so a
+            # reused session-scoped container doesn't carry it over and fail the
+            # next upgrade with `relation "auth.user" already exists`.
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

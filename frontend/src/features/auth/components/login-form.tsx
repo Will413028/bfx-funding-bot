@@ -39,6 +39,11 @@ export function LoginForm() {
       return;
     }
 
+    if (result.twoFactorRequired) {
+      router.push("/two-factor");
+      return;
+    }
+
     if (!result.success) {
       setServerError(result.error ?? t("loginFailed"));
       return;

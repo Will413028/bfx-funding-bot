@@ -1,3 +1,4 @@
+import { getSessionCookie } from "better-auth/cookies";
 import createMiddleware from "next-intl/middleware";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
@@ -70,27 +71,12 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
 	return response;
 }
 
-function isTokenExpired(token: string): boolean {
-	try {
-		const base64Url = token.split(".")[1];
-		const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
-		const payload = JSON.parse(atob(base64));
-		return !payload.exp || payload.exp * 1000 < Date.now();
-	} catch {
-		return true;
-	}
-}
-
 export default function middleware(request: NextRequest) {
 	const { pathname } = request.nextUrl;
 	const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
-	const rawToken = request.cookies.get("auth_token")?.value;
-	const hasRefreshToken = request.cookies.has("refresh_token");
-	const token = rawToken && !isTokenExpired(rawToken) ? rawToken : undefined;
-	// User is "authenticated" if they have a valid access token OR a refresh token
-	// (the API proxy will handle transparent refresh for expired access tokens)
-	const isAuthenticated = !!token || hasRefreshToken;
+	const sessionCookie = getSessionCookie(request);
+	const isAuthenticated = !!sessionCookie;
 	const isProtected = protectedPaths.some((p) =>
 		pathnameWithoutLocale.startsWith(p),
 	);
