@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { Redis } from "@upstash/redis";
 import { admin, jwt, twoFactor } from "better-auth/plugins";
 import { passkey } from "@better-auth/passkey";
+import { nextCookies } from "better-auth/next-js";
 
 const redis = Redis.fromEnv(); // UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
 
@@ -76,5 +77,7 @@ export const auth = betterAuth({
         }),
       },
     }),
+    // MUST be last: propagates Better Auth Set-Cookie from server actions to the browser.
+    nextCookies(),
   ],
 });
