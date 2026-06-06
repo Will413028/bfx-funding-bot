@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection
 
 # Side-effect imports: register tables with Base.metadata
 import bfx_funding_bot.modules.accounts.tables
+import bfx_funding_bot.modules.accounts.user_profile
 import bfx_funding_bot.modules.candles.tables
 import bfx_funding_bot.modules.execution.diagnostics.tables
 import bfx_funding_bot.modules.execution.event_store.tables
