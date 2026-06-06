@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     bitfinex_api_base_url: str = "https://api-pub.bitfinex.com"
     log_level: str = "INFO"
 
+    # SP1 web-API auth (Better Auth JWKS verification)
+    better_auth_jwks_url: str = ""        # e.g. https://app.example.com/api/auth/jwks
+    better_auth_issuer: str = ""          # e.g. https://app.example.com
+    jwt_audience: str = "bfx-funding-backend"
+
     @property
     def database_url_sync(self) -> str:
         """Sync URL for alembic (psycopg driver).
