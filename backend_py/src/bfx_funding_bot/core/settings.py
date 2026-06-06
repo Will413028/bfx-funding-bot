@@ -44,8 +44,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # SP1 web-API auth (Better Auth JWKS verification)
-    better_auth_jwks_url: str = ""        # e.g. https://app.example.com/api/auth/jwks
-    better_auth_issuer: str = ""          # e.g. https://app.example.com
+    better_auth_jwks_url: str = ""        # deploy: https://<app>/api/auth/jwks (real endpoint)
+    # Pinned stable issuer — must byte-match the FE jwt plugin's `issuer` (frontend
+    # src/lib/auth.ts), NOT the deploy URL, so a domain change can't break verify.
+    # Override via env BETTER_AUTH_ISSUER only if the FE issuer string ever changes.
+    better_auth_issuer: str = "bfx-funding-bot"
     jwt_audience: str = "bfx-funding-backend"
 
     @property
