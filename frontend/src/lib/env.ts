@@ -5,11 +5,17 @@ const clientEnvSchema = z.object({
   NEXT_PUBLIC_APP_NAME: z.string().min(1),
   NEXT_PUBLIC_WS_URL: z.string().min(1),
   NEXT_PUBLIC_SENTRY_DSN: z.string().url().optional(),
+  NEXT_PUBLIC_BETTER_AUTH_URL: z.string().url(),
 });
 
 const serverEnvSchema = clientEnvSchema.extend({
   API_URL: z.string().url(),
-  AUTH_SECRET: z.string().min(1),
+  BETTER_AUTH_SECRET: z.string().min(32),
+  BETTER_AUTH_URL: z.string().url(),
+  DATABASE_URL: z.string().url(),
+  UPSTASH_REDIS_REST_URL: z.string().url(),
+  UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+  PASSKEY_RP_ID: z.string().min(1),
 });
 
 function parseEnv() {
@@ -19,6 +25,7 @@ function parseEnv() {
       NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
       NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
       NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
+      NEXT_PUBLIC_BETTER_AUTH_URL: process.env.NEXT_PUBLIC_BETTER_AUTH_URL,
     });
     if (!result.success) {
       console.error(
@@ -35,6 +42,7 @@ function parseEnv() {
         NEXT_PUBLIC_APP_NAME: "bfx-funding-bot",
         NEXT_PUBLIC_WS_URL: "",
         NEXT_PUBLIC_SENTRY_DSN: undefined,
+        NEXT_PUBLIC_BETTER_AUTH_URL: "",
       };
     }
     return result.data;
