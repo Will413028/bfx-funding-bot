@@ -1060,7 +1060,7 @@ git commit -m "✨ Feat: vault service create/list/delete (SP2)"
 - Modify: `backend_py/src/bfx_funding_bot/modules/accounts/vault.py`（加 `verify_api_key`）
 - Test: `backend_py/tests/test_vault_service.py`（append verify 測試）
 
-- [ ] **Step 1: 加失敗測試**
+- [x] **Step 1: 加失敗測試**
 
 在 `tests/test_vault_service.py` 末尾 append（用一個 fake permissions client，避免真網路）：
 
@@ -1163,12 +1163,12 @@ async def test_verify_unknown_key_returns_none(pg_session_factory):
         ) is None
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -k verify -v -m integration`
 Expected: FAIL — `ImportError: cannot import name 'verify_api_key'`。
 
-- [ ] **Step 3: 實作 `verify_api_key`**
+- [x] **Step 3: 實作 `verify_api_key`**
 
 在 `vault.py` 末尾加（定義一個輕量 protocol 給注入的 client，免 import 真 client 造成循環）：
 
@@ -1239,12 +1239,12 @@ async def verify_api_key(
 
 > 把這些新 import 併到檔案頂部既有 import 區（勿重複；`Decimal`/`Protocol` 視情況上移）。
 
-- [ ] **Step 4: 跑全 vault 測試確認通過**
+- [x] **Step 4: 跑全 vault 測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: PASS（10 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/vault.py backend_py/tests/test_vault_service.py
