@@ -797,7 +797,7 @@ git commit -m "✨ Feat: Bitfinex get_key_permissions for SP2 verify (SP2)"
 - Create: `backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py`
 - Test: `backend_py/tests/test_provisioning.py`
 
-- [ ] **Step 1: 寫失敗測試（PG，需 user_profiles 表）**
+- [x] **Step 1: 寫失敗測試（PG，需 user_profiles 表）**
 
 `tests/test_provisioning.py`：
 
@@ -839,12 +839,12 @@ async def test_idempotent(pg_session_factory):
 
 > **Note for executor:** 此 module-level `import ...user_profile` 會把 `UserProfile` 註冊進 `Base.metadata`，session-scoped `pg_engine` fixture 的 `create_all` 因此建出 `user_profiles`（model 無 FK，安全）。migration 測試自己 DROP SCHEMA + 跑 alembic，不受影響。
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_provisioning.py -v -m integration`
 Expected: FAIL — `ModuleNotFoundError: ...accounts.provisioning`。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `modules/accounts/provisioning.py`：
 
@@ -872,12 +872,12 @@ async def ensure_user_profile(session: AsyncSession, *, user_id: str, plan: str 
         await session.flush()
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_provisioning.py -v -m integration`
 Expected: PASS（2 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py backend_py/tests/test_provisioning.py
