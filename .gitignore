@@ -17,6 +17,7 @@ tmp/
 
 # VM deploy (assembled runtime env + operator secrets — never commit)
 .env.runtime
+.env.webapi.runtime
 bot.env
 
 # Keys
