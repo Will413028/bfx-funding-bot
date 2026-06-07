@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createApiKeyAction } from "@/app/[locale]/(dashboard)/api-keys/actions";
 import { apiClient } from "@/lib/api-client";
 import { apiKeyKeys } from "@/lib/query-keys";
 import type { ApiKey, VerifyResult } from "@/types";
@@ -14,7 +15,7 @@ export function useCreateApiKey() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: { label: string; apiKey: string; apiSecret: string }) =>
-      apiClient.post<ApiKey>("/api-keys", data),
+      createApiKeyAction(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: apiKeyKeys.all });
     },

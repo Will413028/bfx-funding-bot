@@ -31,7 +31,7 @@ WEBAPI_SECRETS="$HOME/bfx/webapi.env"
 [ -f "$WEBAPI_SECRETS" ] || { echo "ERROR: missing $WEBAPI_SECRETS (chmod 600)"; exit 1; }
 cp "$WEBAPI_SECRETS" .env.webapi.runtime
 chmod 600 .env.webapi.runtime
-for v in DATABASE_URL BETTER_AUTH_JWKS_URL; do
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
   grep -q "^$v=." .env.webapi.runtime || { echo "ERROR: web-API var $v missing/empty in $WEBAPI_SECRETS"; exit 1; }
 done
 

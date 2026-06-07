@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     better_auth_issuer: str = "bfx-funding-bot"
     jwt_audience: str = "bfx-funding-backend"
 
+    # SP2 vault: the api-key envelope KEK is the env var BFX_VAULT_KEK
+    # (base64-encoded 32 bytes), read DIRECTLY from os.environ by
+    # core.crypto.load_kek() — intentionally NOT a Settings field, so crypto
+    # unit tests don't require DATABASE_URL (which Settings() needs via the
+    # .env symlink). Deploy presence is enforced by deploy-vm.sh preflight.
+
     @property
     def database_url_sync(self) -> str:
         """Sync URL for alembic (psycopg driver).

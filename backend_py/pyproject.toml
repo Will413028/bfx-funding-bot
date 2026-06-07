@@ -10,6 +10,7 @@ dependencies = [
     "asyncpg>=0.30",
     "psycopg[binary]>=3.2",       # sync driver for alembic env.py (async runtime uses asyncpg)
     "alembic>=1.14",
+    "cryptography>=43",
     "httpx>=0.28",
     "aiolimiter>=1.2",
     "pydantic>=2.10",

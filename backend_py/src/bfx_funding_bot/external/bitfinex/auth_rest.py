@@ -134,10 +134,41 @@ def parse_wallets(raw: Any) -> list[FundingWallet]:
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class KeyPermissions:
+    """scope -> (read, write). Bitfinex /v2/auth/r/permissions rows are
+    [scope, read(0/1), write(0/1)]."""
+
+    scopes: dict[str, tuple[bool, bool]]
+
+    def can(self, scope: str, *, write: bool) -> bool:
+        read_flag, write_flag = self.scopes.get(scope, (False, False))
+        return write_flag if write else read_flag
+
+
+def parse_key_permissions(raw: Any) -> KeyPermissions:
+    if not isinstance(raw, list):
+        raise BitfinexShapeError(
+            f"expected list of permission rows, got {type(raw).__name__}: {raw!r}"
+        )
+    scopes: dict[str, tuple[bool, bool]] = {}
+    for row in raw:
+        if not isinstance(row, list) or len(row) < 3:
+            raise BitfinexShapeError(f"permission row malformed: {row!r}")
+        try:
+            scopes[str(row[0])] = (bool(int(row[1])), bool(int(row[2])))
+        except (ValueError, TypeError) as exc:
+            raise BitfinexShapeError(
+                f"permission flag not int-coercible in row {row!r}"
+            ) from exc
+    return KeyPermissions(scopes=scopes)
+
+
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
 _WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
+_PERMISSIONS_PATH = "v2/auth/r/permissions"  # no body args; sign_request prepends /api/
 
 
 class BitfinexAuthREST:
@@ -271,3 +302,35 @@ class BitfinexAuthREST:
              if w.wallet_type == "funding" and w.currency == currency),
             Decimal("0"),
         )
+
+    async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
+        """POST /v2/auth/r/permissions (signed). Returns the key's scope→(read,write)
+        map. Same error contract as the other auth reads: BitfinexAPIError on
+        transport/HTTP error (status_code=0 for transport), BitfinexShapeError on
+        invalid JSON / shape."""
+        path = _PERMISSIONS_PATH
+        body_bytes = json.dumps({}).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        try:
+            raw = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in permissions response: {e}") from e
+        return parse_key_permissions(raw)
