@@ -612,7 +612,7 @@ git commit -m "✨ Feat: api_key vault migration + FK to user_profiles (SP2)"
 - Modify: `backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py`（加 dataclass + parser + method）
 - Test: `backend_py/tests/external/bitfinex/test_auth_rest_permissions.py`
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/external/bitfinex/test_auth_rest_permissions.py`（鏡像 `test_auth_rest_wallets.py` 的 MockTransport pattern）：
 
@@ -698,12 +698,12 @@ async def test_get_key_permissions_raises_on_http_error():
             await client.get_key_permissions(ctx=_ctx())
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/external/bitfinex/test_auth_rest_permissions.py -v`
 Expected: FAIL — `ImportError`（`KeyPermissions` / `parse_key_permissions` 未定義）。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `auth_rest.py`：在 `_WALLETS_PATH` 常數附近加 path 常數，並加 dataclass + parser + method。
 
@@ -777,12 +777,12 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
         return parse_key_permissions(raw)
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/external/bitfinex/test_auth_rest_permissions.py -v`
 Expected: PASS（5 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/tests/external/bitfinex/test_auth_rest_permissions.py
