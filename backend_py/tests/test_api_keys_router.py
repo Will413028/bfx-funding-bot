@@ -160,3 +160,14 @@ def test_verify_another_users_key_404(app_client):
     app_client.app.dependency_overrides[require_user] = _other_user
     r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
     assert r.status_code == 404
+
+
+def test_create_kek_missing_503(app_client, monkeypatch):
+    # The app_client fixture sets BFX_VAULT_KEK during setup; remove it so the
+    # router's _require_kek() -> load_kek() raises VaultNotConfiguredError -> 503.
+    monkeypatch.delenv("BFX_VAULT_KEK", raising=False)
+    r = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    )
+    assert r.status_code == 503
+    assert r.json()["detail"] == "vault_not_configured"
