@@ -195,7 +195,7 @@ KEK 載入 / 版本對應集中在模組內（v1 單版；多版時 `key_version
 - **`docker-compose.bot.yml`**：webapi service `env_file: .env.webapi.runtime` 已涵蓋，無需改 compose。
 - **Runbook（手動，Will 有 prod 存取時）**：
   1. 產 KEK：`openssl rand -base64 32` → 存 `~/bfx/webapi.env` 的 `BFX_VAULT_KEK=`，並複製進 `~/second-brain/secrets/`。
-  2. psql（superuser）：`GRANT SELECT, INSERT, UPDATE, DELETE ON api_keys TO bfx_webapi;`
+  2. psql（superuser）：`GRANT SELECT, INSERT, UPDATE, DELETE ON public.api_keys TO bfx_webapi;`
   3. 本機改 source → VM 跑 `scripts/deploy-vm.sh canary`（git pull + build + migrate 套表 + recreate webapi）。**絕不手改 VM。**
   4. Vercel：無新 env（Server Action 用既有 `API_URL`）。
   5. smoke：FE 新增 key → verify → 綠勾；DB 確認 secret 為密文、`exchange_status=verified`。
