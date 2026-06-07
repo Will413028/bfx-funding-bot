@@ -430,7 +430,7 @@ git commit -m "♻️ Refactor: APIKey envelope vault columns + cross-dialect de
 - Create: `backend_py/alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py`
 - Test: `backend_py/tests/integration/test_api_key_vault_migration.py`
 
-- [ ] **Step 1: 寫 migration**
+- [x] **Step 1: 寫 migration**
 
 `alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py`：
 
@@ -523,7 +523,7 @@ def downgrade() -> None:
     )
 ```
 
-- [ ] **Step 2: 寫 integration 測試**
+- [x] **Step 2: 寫 integration 測試**
 
 `tests/integration/test_api_key_vault_migration.py`（沿用 SP1 migration test 的 schema-reset + alembic-to-head pattern）：
 
@@ -587,17 +587,17 @@ async def test_api_keys_table_and_fk_after_upgrade(pg_engine, monkeypatch) -> No
     ), f"user_profiles missing unique constraint on user_id; uniques={uniques}"
 ```
 
-- [ ] **Step 3: 跑 migration 測試**
+- [x] **Step 3: 跑 migration 測試**
 
 Run: `cd backend_py && uv run pytest tests/integration/test_api_key_vault_migration.py -v -m integration`
 Expected: PASS（需 Docker；testcontainers 起 PG，跑真 alembic upgrade head）。
 
-- [ ] **Step 4: 確認 SP1 migration test 仍綠（沒被 index→constraint 改動破壞）**
+- [x] **Step 4: 確認 SP1 migration test 仍綠（沒被 index→constraint 改動破壞）**
 
 Run: `cd backend_py && uv run pytest tests/integration/test_user_profile_migration.py -v -m integration`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py backend_py/tests/integration/test_api_key_vault_migration.py
