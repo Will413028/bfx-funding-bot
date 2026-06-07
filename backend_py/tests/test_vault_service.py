@@ -1,4 +1,6 @@
 import base64
+from dataclasses import dataclass
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -6,6 +8,8 @@ from sqlalchemy import select
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core.crypto import decrypt_secret
 from bfx_funding_bot.core.db import session_scope
+from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.accounts.vault import (
     Envelope,
@@ -13,6 +17,7 @@ from bfx_funding_bot.modules.accounts.vault import (
     create_api_key,
     delete_api_key,
     list_api_keys,
+    verify_api_key,
 )
 
 pytestmark = pytest.mark.integration
@@ -72,3 +77,121 @@ async def test_delete_returns_false_for_other_user(pg_session_factory):
         assert await delete_api_key(s, user_id="u_del", key_id=rid) is True
     async with session_scope(pg_session_factory) as s:
         assert await list_api_keys(s, user_id="u_del") == []
+
+
+# ---------------------------------------------------------------------------
+# verify_api_key tests
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeClient:
+    """Stands in for BitfinexAuthREST.get_key_permissions."""
+    perms: KeyPermissions | None = None
+    error: Exception | None = None
+
+    async def get_key_permissions(self, *, ctx) -> KeyPermissions:
+        if self.error is not None:
+            raise self.error
+        assert self.perms is not None
+        return self.perms
+
+
+def _perms(funding_w=True, withdraw_w=False) -> KeyPermissions:
+    return KeyPermissions(scopes={
+        "funding": (True, funding_w),
+        "withdraw": (False, withdraw_w),
+    })
+
+
+async def _make_key(factory, user_id="u_v") -> UUID:
+    async with session_scope(factory) as s:
+        row = await create_api_key(s, user_id=user_id, label="a", api_key="PUB", api_secret="sec", kek=_KEK)
+        return row.id
+
+
+@pytest.mark.asyncio
+async def test_verify_success_marks_verified(pg_session_factory):
+    rid = await _make_key(pg_session_factory, "u_ok")
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(perms=_perms()), user_id="u_ok", key_id=rid, kek=_KEK
+        )
+    assert row is not None
+    assert row.exchange_status == "verified"
+    assert row.verified_at is not None
+    assert row.last_verify_error is None
+
+
+@pytest.mark.asyncio
+async def test_verify_withdraw_enabled_fails_closed(pg_session_factory):
+    rid = await _make_key(pg_session_factory, "u_wd")
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(perms=_perms(withdraw_w=True)), user_id="u_wd", key_id=rid, kek=_KEK
+        )
+    assert row.exchange_status == "failed"
+    assert row.last_verify_error == "withdraw_must_be_disabled"
+
+
+@pytest.mark.asyncio
+async def test_verify_no_funding_write_fails(pg_session_factory):
+    rid = await _make_key(pg_session_factory, "u_nf")
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(perms=_perms(funding_w=False)), user_id="u_nf", key_id=rid, kek=_KEK
+        )
+    assert row.exchange_status == "failed"
+    assert row.last_verify_error == "funding_write_required"
+
+
+@pytest.mark.asyncio
+async def test_verify_bad_credentials_fails(pg_session_factory):
+    rid = await _make_key(pg_session_factory, "u_bad")
+    err = BitfinexAPIError(status_code=500, message="apikey: invalid", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(error=err), user_id="u_bad", key_id=rid, kek=_KEK
+        )
+    assert row.exchange_status == "failed"
+    assert row.last_verify_error == "invalid_credentials"
+
+
+@pytest.mark.asyncio
+async def test_verify_transport_error_reraises(pg_session_factory):
+    rid = await _make_key(pg_session_factory, "u_net")
+    err = BitfinexAPIError(status_code=0, message="transport error", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        with pytest.raises(BitfinexAPIError):
+            await verify_api_key(s, _FakeClient(error=err), user_id="u_net", key_id=rid, kek=_KEK)
+
+
+@pytest.mark.asyncio
+async def test_verify_unknown_key_returns_none(pg_session_factory):
+    from uuid import uuid4
+    async with session_scope(pg_session_factory) as s:
+        assert await verify_api_key(
+            s, _FakeClient(perms=_perms()), user_id="nobody", key_id=uuid4(), kek=_KEK
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_verify_transport_error_keeps_prior_verified(pg_session_factory):
+    """A network blip during re-verify must NOT demote an already-verified key."""
+    rid = await _make_key(pg_session_factory, "u_keep")
+    async with session_scope(pg_session_factory) as s:
+        await verify_api_key(
+            s, _FakeClient(perms=_perms()), user_id="u_keep", key_id=rid, kek=_KEK
+        )
+    err = BitfinexAPIError(status_code=0, message="transport error", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        with pytest.raises(BitfinexAPIError):
+            await verify_api_key(
+                s, _FakeClient(error=err), user_id="u_keep", key_id=rid, kek=_KEK
+            )
+    # re-fetch in a fresh session: the rollback reached the DB; still verified
+    async with session_scope(pg_session_factory) as s:
+        got = await s.scalar(select(APIKey).where(APIKey.id == rid))
+        assert got is not None
+        assert got.exchange_status == "verified"
+        assert got.verified_at is not None
