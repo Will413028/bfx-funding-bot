@@ -17,7 +17,7 @@
 ## File Structure
 
 **Backend（新增）**
-- `backend_py/src/bfx_funding_bot/core/crypto.py` — envelope encrypt/decrypt（純函式，kek 由參數傳入）+ `load_kek()` + `VaultNotConfigured`。
+- `backend_py/src/bfx_funding_bot/core/crypto.py` — envelope encrypt/decrypt（純函式，kek 由參數傳入）+ `load_kek()` + `VaultNotConfiguredError`。
 - `backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py` — `ensure_user_profile()`（JIT，SP3+ 共用）。
 - `backend_py/src/bfx_funding_bot/modules/accounts/vault.py` — vault service（create/list/delete/verify orchestration；無 HTTP）。
 - `backend_py/src/bfx_funding_bot/modules/api/deps.py` — `get_session` + `get_bitfinex_auth_rest` FastAPI deps。
@@ -51,7 +51,7 @@
 - Modify: `backend_py/pyproject.toml`（`dependencies` 陣列）
 - Modify: `backend_py/src/bfx_funding_bot/core/settings.py:42-52`
 
-- [ ] **Step 1: 加 dependency**
+- [x] **Step 1: 加 dependency**
 
 `backend_py/pyproject.toml` 的 `dependencies` 陣列加一行（緊接現有 `"cryptography"` 不存在 → 新增；pyjwt[crypto] 雖已間接帶入，仍宣告 direct dep）：
 
@@ -59,12 +59,12 @@
     "cryptography>=43",
 ```
 
-- [ ] **Step 2: 同步環境**
+- [x] **Step 2: 同步環境**
 
 Run: `cd backend_py && uv sync`
 Expected: 成功，`cryptography` 已在 lock。
 
-- [ ] **Step 3: 在 settings.py 記錄 KEK env var（不加欄位）**
+- [x] **Step 3: 在 settings.py 記錄 KEK env var（不加欄位）**
 
 > **[Plan amendment 2026-06-07 — review]** 原計畫加 `bfx_vault_kek: str = ""` 欄位，但 `core.crypto.load_kek()` 是直接讀 `os.environ`（為了讓 crypto unit test 不需 DATABASE_URL），該欄位永遠不會被讀 → 是「看起來 load-bearing 實則 dead」的誤導欄位。改為只加文件化註解，不加欄位（grep 驗證全 src 無 `settings.bfx_vault_kek` reader）。
 
@@ -78,12 +78,12 @@ Expected: 成功，`cryptography` 已在 lock。
     # .env symlink). Deploy presence is enforced by deploy-vm.sh preflight (Task 12).
 ```
 
-- [ ] **Step 4: 確認 import 與型別乾淨**
+- [x] **Step 4: 確認 import 與型別乾淨**
 
 Run: `cd backend_py && uv run python -c "import cryptography; from bfx_funding_bot.core.settings import Settings; print('ok')"`
 Expected: 印 `ok`（注意：此步在 `backend_py/` 下，`.env` symlink 提供 `DATABASE_URL`）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/pyproject.toml backend_py/uv.lock backend_py/src/bfx_funding_bot/core/settings.py
@@ -98,7 +98,7 @@ git commit -m "🔧 Chore: add cryptography dep + document BFX_VAULT_KEK env (SP
 - Create: `backend_py/src/bfx_funding_bot/core/crypto.py`
 - Test: `backend_py/tests/test_crypto.py`
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/test_crypto.py`：
 
@@ -109,7 +109,7 @@ import pytest
 
 from bfx_funding_bot.core.crypto import (
     Envelope,
-    VaultNotConfigured,
+    VaultNotConfiguredError,
     decrypt_secret,
     encrypt_secret,
     load_kek,
@@ -166,13 +166,13 @@ def test_wrong_kek_fails():
 
 def test_load_kek_missing_raises(monkeypatch):
     monkeypatch.delenv("BFX_VAULT_KEK", raising=False)
-    with pytest.raises(VaultNotConfigured):
+    with pytest.raises(VaultNotConfiguredError):
         load_kek()
 
 
 def test_load_kek_wrong_length_raises(monkeypatch):
     monkeypatch.setenv("BFX_VAULT_KEK", base64.b64encode(b"too-short").decode())
-    with pytest.raises(VaultNotConfigured):
+    with pytest.raises(VaultNotConfiguredError):
         load_kek()
 
 
@@ -181,12 +181,12 @@ def test_load_kek_ok(monkeypatch):
     assert len(load_kek()) == 32
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_crypto.py -v`
 Expected: FAIL — `ModuleNotFoundError: bfx_funding_bot.core.crypto`。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `core/crypto.py`：
 
@@ -211,7 +211,7 @@ _DEK_LEN = 32
 _CURRENT_KEY_VERSION = 1
 
 
-class VaultNotConfigured(Exception):
+class VaultNotConfiguredError(Exception):
     """BFX_VAULT_KEK missing or malformed."""
 
 
@@ -227,13 +227,13 @@ class Envelope:
 def load_kek() -> bytes:
     raw = os.environ.get("BFX_VAULT_KEK", "")
     if not raw:
-        raise VaultNotConfigured("BFX_VAULT_KEK not set")
+        raise VaultNotConfiguredError("BFX_VAULT_KEK not set")
     try:
         kek = base64.b64decode(raw, validate=True)
     except Exception as e:  # noqa: BLE001
-        raise VaultNotConfigured("BFX_VAULT_KEK is not valid base64") from e
+        raise VaultNotConfiguredError("BFX_VAULT_KEK is not valid base64") from e
     if len(kek) != 32:
-        raise VaultNotConfigured(f"BFX_VAULT_KEK must decode to 32 bytes, got {len(kek)}")
+        raise VaultNotConfiguredError(f"BFX_VAULT_KEK must decode to 32 bytes, got {len(kek)}")
     return kek
 
 
@@ -260,12 +260,12 @@ def decrypt_secret(env: Envelope, *, user_id: str, kek: bytes) -> str:
     return plaintext.decode("utf-8")
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_crypto.py -v`
 Expected: PASS（8 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/core/crypto.py backend_py/tests/test_crypto.py
@@ -1549,7 +1549,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_user
-from bfx_funding_bot.core.crypto import VaultNotConfigured, load_kek
+from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts import vault
@@ -1576,7 +1576,7 @@ def _to_response(row: APIKey) -> dict[str, object]:
 def _require_kek() -> bytes:
     try:
         return load_kek()
-    except VaultNotConfigured as e:
+    except VaultNotConfiguredError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="vault_not_configured"
         ) from e
