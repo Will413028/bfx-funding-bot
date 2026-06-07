@@ -1260,7 +1260,7 @@ git commit -m "✨ Feat: vault verify_api_key fail-closed permission check (SP2)
 - Create: `backend_py/src/bfx_funding_bot/modules/api/schemas.py`
 - Test: `backend_py/tests/test_api_schemas.py`
 
-- [ ] **Step 1: 寫失敗測試（schema alias roundtrip）**
+- [x] **Step 1: 寫失敗測試（schema alias roundtrip）**
 
 `tests/test_api_schemas.py`：
 
@@ -1300,12 +1300,12 @@ def test_verify_result():
     }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_schemas.py -v`
 Expected: FAIL — `ModuleNotFoundError: ...api.schemas`。
 
-- [ ] **Step 3: 實作 schemas**
+- [x] **Step 3: 實作 schemas**
 
 `modules/api/schemas.py`：
 
@@ -1342,7 +1342,7 @@ class VerifyResultResponse(BaseModel):
     error: str | None = None
 ```
 
-- [ ] **Step 4: 實作 deps**
+- [x] **Step 4: 實作 deps**
 
 `modules/api/deps.py`：
 
@@ -1381,12 +1381,12 @@ async def get_bitfinex_auth_rest() -> AsyncIterator[BitfinexAuthREST]:
         yield BitfinexAuthREST(http=http)
 ```
 
-- [ ] **Step 5: 跑測試確認通過**
+- [x] **Step 5: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_schemas.py -v`
 Expected: PASS（3 passed）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/api/deps.py backend_py/src/bfx_funding_bot/modules/api/schemas.py backend_py/tests/test_api_schemas.py
