@@ -17,7 +17,7 @@
 ## File Structure
 
 **Backend（新增）**
-- `backend_py/src/bfx_funding_bot/core/crypto.py` — envelope encrypt/decrypt（純函式，kek 由參數傳入）+ `load_kek()` + `VaultNotConfigured`。
+- `backend_py/src/bfx_funding_bot/core/crypto.py` — envelope encrypt/decrypt（純函式，kek 由參數傳入）+ `load_kek()` + `VaultNotConfiguredError`。
 - `backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py` — `ensure_user_profile()`（JIT，SP3+ 共用）。
 - `backend_py/src/bfx_funding_bot/modules/accounts/vault.py` — vault service（create/list/delete/verify orchestration；無 HTTP）。
 - `backend_py/src/bfx_funding_bot/modules/api/deps.py` — `get_session` + `get_bitfinex_auth_rest` FastAPI deps。
@@ -51,7 +51,7 @@
 - Modify: `backend_py/pyproject.toml`（`dependencies` 陣列）
 - Modify: `backend_py/src/bfx_funding_bot/core/settings.py:42-52`
 
-- [ ] **Step 1: 加 dependency**
+- [x] **Step 1: 加 dependency**
 
 `backend_py/pyproject.toml` 的 `dependencies` 陣列加一行（緊接現有 `"cryptography"` 不存在 → 新增；pyjwt[crypto] 雖已間接帶入，仍宣告 direct dep）：
 
@@ -59,33 +59,35 @@
     "cryptography>=43",
 ```
 
-- [ ] **Step 2: 同步環境**
+- [x] **Step 2: 同步環境**
 
 Run: `cd backend_py && uv sync`
 Expected: 成功，`cryptography` 已在 lock。
 
-- [ ] **Step 3: 加 setting 欄**
+- [x] **Step 3: 在 settings.py 記錄 KEK env var（不加欄位）**
 
-`core/settings.py` 的 `Settings` class，在 `jwt_audience` 之後加：
+> **[Plan amendment 2026-06-07 — review]** 原計畫加 `bfx_vault_kek: str = ""` 欄位，但 `core.crypto.load_kek()` 是直接讀 `os.environ`（為了讓 crypto unit test 不需 DATABASE_URL），該欄位永遠不會被讀 → 是「看起來 load-bearing 實則 dead」的誤導欄位。改為只加文件化註解，不加欄位（grep 驗證全 src 無 `settings.bfx_vault_kek` reader）。
+
+`core/settings.py` 的 `Settings` class，在 `jwt_audience` 之後加一段註解（**不**新增欄位）：
 
 ```python
-    # SP2 vault: base64-encoded 32-byte KEK (key-encryption-key) for the
-    # api-key envelope. Held only in the web-API env. Empty in unit tests
-    # that don't touch the vault. core.crypto.load_kek reads os.environ
-    # directly (not this field) so crypto unit tests don't require DATABASE_URL.
-    bfx_vault_kek: str = ""
+    # SP2 vault: the api-key envelope KEK is the env var BFX_VAULT_KEK
+    # (base64-encoded 32 bytes), read DIRECTLY from os.environ by
+    # core.crypto.load_kek() — intentionally NOT a Settings field, so crypto
+    # unit tests don't require DATABASE_URL (which Settings() needs via the
+    # .env symlink). Deploy presence is enforced by deploy-vm.sh preflight (Task 12).
 ```
 
-- [ ] **Step 4: 確認 import 與型別乾淨**
+- [x] **Step 4: 確認 import 與型別乾淨**
 
 Run: `cd backend_py && uv run python -c "import cryptography; from bfx_funding_bot.core.settings import Settings; print('ok')"`
 Expected: 印 `ok`（注意：此步在 `backend_py/` 下，`.env` symlink 提供 `DATABASE_URL`）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/pyproject.toml backend_py/uv.lock backend_py/src/bfx_funding_bot/core/settings.py
-git commit -m "🔧 Chore: add cryptography dep + BFX_VAULT_KEK setting (SP2)"
+git commit -m "🔧 Chore: add cryptography dep + document BFX_VAULT_KEK env (SP2)"
 ```
 
 ---
@@ -96,7 +98,7 @@ git commit -m "🔧 Chore: add cryptography dep + BFX_VAULT_KEK setting (SP2)"
 - Create: `backend_py/src/bfx_funding_bot/core/crypto.py`
 - Test: `backend_py/tests/test_crypto.py`
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/test_crypto.py`：
 
@@ -107,7 +109,7 @@ import pytest
 
 from bfx_funding_bot.core.crypto import (
     Envelope,
-    VaultNotConfigured,
+    VaultNotConfiguredError,
     decrypt_secret,
     encrypt_secret,
     load_kek,
@@ -164,13 +166,13 @@ def test_wrong_kek_fails():
 
 def test_load_kek_missing_raises(monkeypatch):
     monkeypatch.delenv("BFX_VAULT_KEK", raising=False)
-    with pytest.raises(VaultNotConfigured):
+    with pytest.raises(VaultNotConfiguredError):
         load_kek()
 
 
 def test_load_kek_wrong_length_raises(monkeypatch):
     monkeypatch.setenv("BFX_VAULT_KEK", base64.b64encode(b"too-short").decode())
-    with pytest.raises(VaultNotConfigured):
+    with pytest.raises(VaultNotConfiguredError):
         load_kek()
 
 
@@ -179,12 +181,12 @@ def test_load_kek_ok(monkeypatch):
     assert len(load_kek()) == 32
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_crypto.py -v`
 Expected: FAIL — `ModuleNotFoundError: bfx_funding_bot.core.crypto`。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `core/crypto.py`：
 
@@ -209,7 +211,7 @@ _DEK_LEN = 32
 _CURRENT_KEY_VERSION = 1
 
 
-class VaultNotConfigured(Exception):
+class VaultNotConfiguredError(Exception):
     """BFX_VAULT_KEK missing or malformed."""
 
 
@@ -225,13 +227,13 @@ class Envelope:
 def load_kek() -> bytes:
     raw = os.environ.get("BFX_VAULT_KEK", "")
     if not raw:
-        raise VaultNotConfigured("BFX_VAULT_KEK not set")
+        raise VaultNotConfiguredError("BFX_VAULT_KEK not set")
     try:
         kek = base64.b64decode(raw, validate=True)
     except Exception as e:  # noqa: BLE001
-        raise VaultNotConfigured("BFX_VAULT_KEK is not valid base64") from e
+        raise VaultNotConfiguredError("BFX_VAULT_KEK is not valid base64") from e
     if len(kek) != 32:
-        raise VaultNotConfigured(f"BFX_VAULT_KEK must decode to 32 bytes, got {len(kek)}")
+        raise VaultNotConfiguredError(f"BFX_VAULT_KEK must decode to 32 bytes, got {len(kek)}")
     return kek
 
 
@@ -258,12 +260,12 @@ def decrypt_secret(env: Envelope, *, user_id: str, kek: bytes) -> str:
     return plaintext.decode("utf-8")
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_crypto.py -v`
 Expected: PASS（8 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/core/crypto.py backend_py/tests/test_crypto.py
@@ -272,13 +274,14 @@ git commit -m "✨ Feat: envelope encryption module for vault secrets (SP2)"
 
 ---
 
-## Task 3: 改造 `APIKey` model（envelope 欄位）
+## Task 3: 改造 `APIKey` model（envelope 欄位）+ UserProfile 跨方言 default
 
 **Files:**
 - Modify: `backend_py/src/bfx_funding_bot/modules/accounts/tables.py:46-72`
+- Modify: `backend_py/src/bfx_funding_bot/modules/accounts/user_profile.py`（跨方言 default，見 Step 3b）
 - Test: `backend_py/tests/test_api_key_model.py`
 
-- [ ] **Step 1: 寫失敗測試（sqlite roundtrip + unique）**
+- [x] **Step 1: 寫失敗測試（sqlite roundtrip + unique）**
 
 `tests/test_api_key_model.py`：
 
@@ -332,12 +335,12 @@ async def test_unique_per_user(session: AsyncSession):
         await session.commit()
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_key_model.py -v`
 Expected: FAIL — `TypeError`（`APIKey` 無 `secret_ciphertext` 等欄位）。
 
-- [ ] **Step 3: 改 model**
+- [x] **Step 3: 改 model**
 
 `modules/accounts/tables.py` 把 `class APIKey`（行 46-72）整段替換為（移除舊 `users.id` FK 與單一 `api_secret`，改 envelope 欄位；`user_id` 改 `Text`，FK 只在 migration 層）：
 
@@ -355,7 +358,8 @@ class APIKey(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        default=uuid4,  # client-side: ORM supplies the uuid (works on sqlite tests)
+        server_default=text("gen_random_uuid()"),  # PG DB-level default (raw SQL inserts)
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
@@ -373,32 +377,49 @@ class APIKey(Base):
     )
     last_verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
 
     __table_args__ = (Index("idx_api_keys_user_id", "user_id", unique=True),)
 ```
 
-注意：檔案頂部 import 已含 `Integer`、`LargeBinary`、`Text`、`DateTime`、`Index`、`text`。`ForeignKey` 仍被其他 model 使用，勿移除 import。`datetime | None` 需要檔案有 `from __future__ import annotations`（已有，行 1 是 `from datetime import datetime`；若無 future import，`datetime | None` 在 mapped_column annotation 用 `Mapped[datetime | None]` 於 3.13 OK，但保險起見確認檔首已 `from __future__ import annotations` — 若無則加）。
+> **[Plan amendment 2026-06-07 — review, sqlite cross-dialect]** 原計畫用 `server_default=text("now()")` + `id` 只有 `server_default=text("gen_random_uuid()")`。但 Task 3/Task 10 的測試跑在 **sqlite**，sqlite 無 `now()` / `gen_random_uuid()` 函式 → INSERT 省略這些欄位時會炸 `unknown function`（已實測證實）。修法（沿用本 repo 既定跨方言慣例，見 `execution/event_store/tables.py` 的 `_NOW = func.current_timestamp()`）：
+> - `id` 加 client-side `default=uuid4`（ORM INSERT 時供值，sqlite 不評估 `gen_random_uuid()`；PG 行為等價，無 DDL drift），保留 `server_default` 給 raw-SQL/migration。
+> - `created_at`/`updated_at` 用 `func.current_timestamp()`（PG→`now()`、sqlite→`CURRENT_TIMESTAMP`，ANSI，兩方言皆可）。
+> - **migration（Task 4）維持 `sa.text("now()")` 即可**（只跑 PG/testcontainers，不經 sqlite；migration test 不比對 server_default 文字，且本 plan 不跑 `alembic check`）。
 
-- [ ] **Step 4: 跑測試確認通過**
+注意 import：檔案頂部 import 已含 `Integer`、`LargeBinary`、`Text`、`DateTime`、`Index`、`text`，但 **需新增 `func`**（`from sqlalchemy import func`，或併入既有 `from sqlalchemy import ...`）與 **`uuid4`**（`from uuid import uuid4`；檔案可能已 import `UUID` type，確認 `uuid4` 也在）。`ForeignKey` 仍被其他 model 使用，勿移除 import。`from __future__ import annotations`：本檔頂部目前**沒有**（行 1 是 `from datetime import datetime`），但 `Mapped[datetime | None]` 在 Python 3.13 的 mapped_column annotation 下 OK（既有 dormant model 已用同寫法），故**不需**加 future import；勿順手改動以免污染其他 model。
+
+- [x] **Step 3b: 同步修 `UserProfile` 跨方言 default（Task 10 router 測試在 sqlite 插 UserProfile 需要）**
+
+> **[Plan amendment 2026-06-07 — review]** Task 10 的 router 測試走真實 create 流程 → `ensure_user_profile` 在 **sqlite** 插入 `UserProfile`。`UserProfile`（SP1 表）的 `id` 用 `server_default=text("gen_random_uuid()")`、`created_at`/`updated_at` 用 `text("now()")` → sqlite 一樣炸。此為同一 latent bug，必須一併修（不修 Task 10 sqlite 測試過不了）。
+
+`modules/accounts/user_profile.py`：把 `id` 加 client-side `default=uuid4`（保留 `server_default`），`created_at`/`updated_at` 的 `server_default=text("now()")` 改為 `func.current_timestamp()`。新增 import `from sqlalchemy import func` 與 `from uuid import uuid4`（若尚無）。
+
+**安全性（對 live prod 無影響）**：`default=uuid4` 是 client-side（不改 DDL，不影響既有 prod 表的 DB default `gen_random_uuid()`）；timestamp model server_default 只影響 `create_all`（測試），ORM INSERT 省略欄位時用的是 **DB 既有 default**（`now()`，migration 建的，未變）→ prod insert 行為零變化。不需 migration、不需 `alembic`。
+
+UserProfile 的 `__table_args__` 仍宣告 unique `Index`（SP2 migration 會把它換成 unique constraint）——此 model/DB 細微 drift 無害（本 plan 不 autogenerate/check），**不動**。
+
+驗證：UserProfile 的 sqlite 插入路徑由 Task 10 的 router 測試覆蓋（Task 6 `test_provisioning` 走 PG，不覆蓋 sqlite）。
+
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_key_model.py -v`
 Expected: PASS（2 passed）。
 
-- [ ] **Step 5: 全測試 + lint 不回歸**
+- [x] **Step 5: 全測試 + lint 不回歸**
 
 Run: `cd backend_py && uv run pytest -m "not integration" -q && uv run ruff check && uv run mypy src/`
 Expected: 全綠（既有測試不因 model 改動而壞 — 確認無其他程式讀舊 `api_secret` 欄位；若有編譯/型別錯誤在此修）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add backend_py/src/bfx_funding_bot/modules/accounts/tables.py backend_py/tests/test_api_key_model.py
-git commit -m "♻️ Refactor: APIKey model -> envelope vault columns, FK to user_profiles (SP2)"
+git add backend_py/src/bfx_funding_bot/modules/accounts/tables.py backend_py/src/bfx_funding_bot/modules/accounts/user_profile.py backend_py/tests/test_api_key_model.py
+git commit -m "♻️ Refactor: APIKey envelope vault columns + cross-dialect defaults (SP2)"
 ```
 
 ---
@@ -409,7 +430,7 @@ git commit -m "♻️ Refactor: APIKey model -> envelope vault columns, FK to us
 - Create: `backend_py/alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py`
 - Test: `backend_py/tests/integration/test_api_key_vault_migration.py`
 
-- [ ] **Step 1: 寫 migration**
+- [x] **Step 1: 寫 migration**
 
 `alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py`：
 
@@ -502,7 +523,7 @@ def downgrade() -> None:
     )
 ```
 
-- [ ] **Step 2: 寫 integration 測試**
+- [x] **Step 2: 寫 integration 測試**
 
 `tests/integration/test_api_key_vault_migration.py`（沿用 SP1 migration test 的 schema-reset + alembic-to-head pattern）：
 
@@ -566,17 +587,17 @@ async def test_api_keys_table_and_fk_after_upgrade(pg_engine, monkeypatch) -> No
     ), f"user_profiles missing unique constraint on user_id; uniques={uniques}"
 ```
 
-- [ ] **Step 3: 跑 migration 測試**
+- [x] **Step 3: 跑 migration 測試**
 
 Run: `cd backend_py && uv run pytest tests/integration/test_api_key_vault_migration.py -v -m integration`
 Expected: PASS（需 Docker；testcontainers 起 PG，跑真 alembic upgrade head）。
 
-- [ ] **Step 4: 確認 SP1 migration test 仍綠（沒被 index→constraint 改動破壞）**
+- [x] **Step 4: 確認 SP1 migration test 仍綠（沒被 index→constraint 改動破壞）**
 
 Run: `cd backend_py && uv run pytest tests/integration/test_user_profile_migration.py -v -m integration`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/alembic/versions/f1a2b3c4d5e6_add_api_key_vault.py backend_py/tests/integration/test_api_key_vault_migration.py
@@ -591,7 +612,7 @@ git commit -m "✨ Feat: api_key vault migration + FK to user_profiles (SP2)"
 - Modify: `backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py`（加 dataclass + parser + method）
 - Test: `backend_py/tests/external/bitfinex/test_auth_rest_permissions.py`
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/external/bitfinex/test_auth_rest_permissions.py`（鏡像 `test_auth_rest_wallets.py` 的 MockTransport pattern）：
 
@@ -677,12 +698,12 @@ async def test_get_key_permissions_raises_on_http_error():
             await client.get_key_permissions(ctx=_ctx())
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/external/bitfinex/test_auth_rest_permissions.py -v`
 Expected: FAIL — `ImportError`（`KeyPermissions` / `parse_key_permissions` 未定義）。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `auth_rest.py`：在 `_WALLETS_PATH` 常數附近加 path 常數，並加 dataclass + parser + method。
 
@@ -756,12 +777,12 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
         return parse_key_permissions(raw)
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/external/bitfinex/test_auth_rest_permissions.py -v`
 Expected: PASS（5 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/tests/external/bitfinex/test_auth_rest_permissions.py
@@ -776,7 +797,7 @@ git commit -m "✨ Feat: Bitfinex get_key_permissions for SP2 verify (SP2)"
 - Create: `backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py`
 - Test: `backend_py/tests/test_provisioning.py`
 
-- [ ] **Step 1: 寫失敗測試（PG，需 user_profiles 表）**
+- [x] **Step 1: 寫失敗測試（PG，需 user_profiles 表）**
 
 `tests/test_provisioning.py`：
 
@@ -818,12 +839,12 @@ async def test_idempotent(pg_session_factory):
 
 > **Note for executor:** 此 module-level `import ...user_profile` 會把 `UserProfile` 註冊進 `Base.metadata`，session-scoped `pg_engine` fixture 的 `create_all` 因此建出 `user_profiles`（model 無 FK，安全）。migration 測試自己 DROP SCHEMA + 跑 alembic，不受影響。
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_provisioning.py -v -m integration`
 Expected: FAIL — `ModuleNotFoundError: ...accounts.provisioning`。
 
-- [ ] **Step 3: 實作**
+- [x] **Step 3: 實作**
 
 `modules/accounts/provisioning.py`：
 
@@ -851,12 +872,12 @@ async def ensure_user_profile(session: AsyncSession, *, user_id: str, plan: str 
         await session.flush()
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_provisioning.py -v -m integration`
 Expected: PASS（2 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/provisioning.py backend_py/tests/test_provisioning.py
@@ -871,7 +892,7 @@ git commit -m "✨ Feat: JIT ensure_user_profile helper (SP2)"
 - Create: `backend_py/src/bfx_funding_bot/modules/accounts/vault.py`
 - Test: `backend_py/tests/test_vault_service.py`（本 task 寫 create/list/delete 部分）
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/test_vault_service.py`：
 
@@ -887,7 +908,7 @@ from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.accounts.vault import (
     Envelope,
-    KeyAlreadyExists,
+    KeyAlreadyExistsError,
     create_api_key,
     delete_api_key,
     list_api_keys,
@@ -924,7 +945,7 @@ async def test_create_duplicate_raises(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
         await create_api_key(s, user_id="u_dup", label="a", api_key="P", api_secret="s", kek=_KEK)
     async with session_scope(pg_session_factory) as s:
-        with pytest.raises(KeyAlreadyExists):
+        with pytest.raises(KeyAlreadyExistsError):
             await create_api_key(s, user_id="u_dup", label="b", api_key="P2", api_secret="s2", kek=_KEK)
 
 
@@ -952,12 +973,12 @@ async def test_delete_returns_false_for_other_user(pg_session_factory):
         assert await list_api_keys(s, user_id="u_del") == []
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: FAIL — `ModuleNotFoundError: ...accounts.vault`。
 
-- [ ] **Step 3: 實作（create/list/delete；verify 在 Task 8 加）**
+- [x] **Step 3: 實作（create/list/delete；verify 在 Task 8 加）**
 
 `modules/accounts/vault.py`：
 
@@ -979,7 +1000,7 @@ from bfx_funding_bot.modules.accounts.provisioning import ensure_user_profile
 from bfx_funding_bot.modules.accounts.tables import APIKey
 
 
-class KeyAlreadyExists(Exception):
+class KeyAlreadyExistsError(Exception):
     """User already has a key (single-key-per-user invariant)."""
 
 
@@ -994,7 +1015,7 @@ async def create_api_key(
 ) -> APIKey:
     existing = await session.scalar(select(APIKey).where(APIKey.user_id == user_id))
     if existing is not None:
-        raise KeyAlreadyExists()
+        raise KeyAlreadyExistsError()
     await ensure_user_profile(session, user_id=user_id)
     env = encrypt_secret(api_secret, user_id=user_id, kek=kek)
     row = APIKey(
@@ -1019,12 +1040,12 @@ async def delete_api_key(session: AsyncSession, *, user_id: str, key_id: UUID) -
     return True
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: PASS（4 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/vault.py backend_py/tests/test_vault_service.py
@@ -1039,7 +1060,7 @@ git commit -m "✨ Feat: vault service create/list/delete (SP2)"
 - Modify: `backend_py/src/bfx_funding_bot/modules/accounts/vault.py`（加 `verify_api_key`）
 - Test: `backend_py/tests/test_vault_service.py`（append verify 測試）
 
-- [ ] **Step 1: 加失敗測試**
+- [x] **Step 1: 加失敗測試**
 
 在 `tests/test_vault_service.py` 末尾 append（用一個 fake permissions client，避免真網路）：
 
@@ -1142,12 +1163,12 @@ async def test_verify_unknown_key_returns_none(pg_session_factory):
         ) is None
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -k verify -v -m integration`
 Expected: FAIL — `ImportError: cannot import name 'verify_api_key'`。
 
-- [ ] **Step 3: 實作 `verify_api_key`**
+- [x] **Step 3: 實作 `verify_api_key`**
 
 在 `vault.py` 末尾加（定義一個輕量 protocol 給注入的 client，免 import 真 client 造成循環）：
 
@@ -1218,12 +1239,12 @@ async def verify_api_key(
 
 > 把這些新 import 併到檔案頂部既有 import 區（勿重複；`Decimal`/`Protocol` 視情況上移）。
 
-- [ ] **Step 4: 跑全 vault 測試確認通過**
+- [x] **Step 4: 跑全 vault 測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: PASS（10 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/vault.py backend_py/tests/test_vault_service.py
@@ -1239,7 +1260,7 @@ git commit -m "✨ Feat: vault verify_api_key fail-closed permission check (SP2)
 - Create: `backend_py/src/bfx_funding_bot/modules/api/schemas.py`
 - Test: `backend_py/tests/test_api_schemas.py`
 
-- [ ] **Step 1: 寫失敗測試（schema alias roundtrip）**
+- [x] **Step 1: 寫失敗測試（schema alias roundtrip）**
 
 `tests/test_api_schemas.py`：
 
@@ -1279,12 +1300,12 @@ def test_verify_result():
     }
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_schemas.py -v`
 Expected: FAIL — `ModuleNotFoundError: ...api.schemas`。
 
-- [ ] **Step 3: 實作 schemas**
+- [x] **Step 3: 實作 schemas**
 
 `modules/api/schemas.py`：
 
@@ -1321,7 +1342,7 @@ class VerifyResultResponse(BaseModel):
     error: str | None = None
 ```
 
-- [ ] **Step 4: 實作 deps**
+- [x] **Step 4: 實作 deps**
 
 `modules/api/deps.py`：
 
@@ -1360,12 +1381,12 @@ async def get_bitfinex_auth_rest() -> AsyncIterator[BitfinexAuthREST]:
         yield BitfinexAuthREST(http=http)
 ```
 
-- [ ] **Step 5: 跑測試確認通過**
+- [x] **Step 5: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_schemas.py -v`
 Expected: PASS（3 passed）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/api/deps.py backend_py/src/bfx_funding_bot/modules/api/schemas.py backend_py/tests/test_api_schemas.py
@@ -1381,7 +1402,7 @@ git commit -m "✨ Feat: api-keys deps (session/bitfinex) + camelCase schemas (S
 - Modify: `backend_py/src/bfx_funding_bot/main.py:33`
 - Test: `backend_py/tests/test_api_keys_router.py`
 
-- [ ] **Step 1: 寫失敗測試（TestClient + dependency overrides + sqlite session factory）**
+- [x] **Step 1: 寫失敗測試（TestClient + dependency overrides + sqlite session factory）**
 
 `tests/test_api_keys_router.py`：
 
@@ -1508,12 +1529,12 @@ def test_requires_auth():
     assert c.get("/api/v1/api-keys").status_code in (401, 403)
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_keys_router.py -v`
 Expected: FAIL — `ModuleNotFoundError: ...api.api_keys`。
 
-- [ ] **Step 3: 實作 router**
+- [x] **Step 3: 實作 router**
 
 `modules/api/api_keys.py`：
 
@@ -1528,9 +1549,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_user
-from bfx_funding_bot.core.crypto import VaultNotConfigured, load_kek
+from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.api.deps import get_bitfinex_auth_rest, get_session
@@ -1555,7 +1576,7 @@ def _to_response(row: APIKey) -> dict[str, object]:
 def _require_kek() -> bytes:
     try:
         return load_kek()
-    except VaultNotConfigured as e:
+    except VaultNotConfiguredError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="vault_not_configured"
         ) from e
@@ -1584,7 +1605,7 @@ def build_api_keys_router() -> APIRouter:
                 session, user_id=user.user_id, label=body.label,
                 api_key=body.api_key, api_secret=body.api_secret, kek=kek,
             )
-        except vault.KeyAlreadyExists as e:
+        except vault.KeyAlreadyExistsError as e:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="key_already_exists"
             ) from e
@@ -1602,7 +1623,9 @@ def build_api_keys_router() -> APIRouter:
             row = await vault.verify_api_key(
                 session, client, user_id=user.user_id, key_id=key_id, kek=kek,
             )
-        except BitfinexAPIError as e:
+        except (BitfinexAPIError, BitfinexShapeError) as e:
+            # transport error (status 0, re-raised by verify) OR malformed upstream
+            # permissions response -> the exchange is unreachable/unusable, 502.
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail="exchange_unreachable"
             ) from e
@@ -1626,7 +1649,7 @@ def build_api_keys_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 4: Wire into main.py**
+- [x] **Step 4: Wire into main.py**
 
 `main.py` 行 9 import 之後加，並在行 33 之後 include：
 
@@ -1640,17 +1663,17 @@ from bfx_funding_bot.modules.api.api_keys import build_api_keys_router as build_
 app.include_router(build_api_keys())
 ```
 
-- [ ] **Step 5: 跑 router 測試 + 全 unit 測試確認通過**
+- [x] **Step 5: 跑 router 測試 + 全 unit 測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_keys_router.py -v && uv run pytest -m "not integration" -q`
 Expected: router PASS（7 passed）；全 unit suite 綠。
 
-- [ ] **Step 6: lint + type**
+- [x] **Step 6: lint + type**
 
 Run: `cd backend_py && uv run ruff check && uv run mypy src/`
 Expected: 全綠。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/api/api_keys.py backend_py/src/bfx_funding_bot/main.py backend_py/tests/test_api_keys_router.py
@@ -1666,7 +1689,7 @@ git commit -m "✨ Feat: api-keys CRUD + verify router (SP2)"
 - Modify: `frontend/src/features/api-keys/hooks/use-api-keys.ts:13-22`
 - Test: `frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts`
 
-- [ ] **Step 1: 寫失敗測試（Vitest，mock auth + fetch）**
+- [x] **Step 1: 寫失敗測試（Vitest，mock auth + fetch）**
 
 `frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts`：
 
@@ -1710,12 +1733,12 @@ describe("createApiKeyAction", () => {
 });
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd frontend && pnpm test src/features/api-keys/hooks/__tests__/create-action.test.ts`
 Expected: FAIL — 找不到 `createApiKeyAction`。
 
-- [ ] **Step 3: 實作 Server Action**
+- [x] **Step 3: 實作 Server Action**
 
 `frontend/src/app/[locale]/(dashboard)/api-keys/actions.ts`：
 
@@ -1771,7 +1794,7 @@ export async function createApiKeyAction(input: {
 }
 ```
 
-- [ ] **Step 4: 改 hook 用 action**
+- [x] **Step 4: 改 hook 用 action**
 
 `frontend/src/features/api-keys/hooks/use-api-keys.ts`：頂部加 import，`useCreateApiKey` 的 `mutationFn` 改呼 action：
 
@@ -1788,12 +1811,12 @@ import { createApiKeyAction } from "@/app/[locale]/(dashboard)/api-keys/actions"
 
 （其餘 `useApiKeys` / `useDeleteApiKey` / `useVerifyApiKey` 不變 — 無明文，仍走 client proxy。）
 
-- [ ] **Step 5: 跑測試 + lint 確認通過**
+- [x] **Step 5: 跑測試 + lint 確認通過**
 
 Run: `cd frontend && pnpm test src/features/api-keys/hooks/__tests__/create-action.test.ts && pnpm lint`
 Expected: PASS（2 passed）+ lint 綠。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/app/[locale]/\(dashboard\)/api-keys/actions.ts frontend/src/features/api-keys/hooks/use-api-keys.ts frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts
@@ -1807,35 +1830,39 @@ git commit -m "✨ Feat: api-key create via Server Action (no client proxy hop) 
 **Files:**
 - Modify: `scripts/deploy-vm.sh`（webapi.env 組裝段；參考 SP1 `DATABASE_URL` / `BETTER_AUTH_JWKS_URL` 註記）
 
-- [ ] **Step 1: 看現況**
+- [x] **Step 1: 看現況**
 
 Run: `grep -n "webapi\|WEBAPI\|JWKS\|DATABASE_URL\|\.env.webapi.runtime" scripts/deploy-vm.sh`
 Expected: 找到 SP1 組裝 `.env.webapi.runtime` 的區段（約行 29-36）。
 
-- [ ] **Step 2: 加 BFX_VAULT_KEK 到 webapi.env 組裝**
+- [x] **Step 2: 加 BFX_VAULT_KEK 到 webapi preflight（form a 已確認）**
 
-在組 `.env.webapi.runtime` 的區段，比照 SP1 把 `BFX_VAULT_KEK` 從 `$HOME/bfx/webapi.env` 帶入（webapi.env 已是整檔 `cp` 的話無需改腳本邏輯，只需確認註解列出必要變數）。若腳本是逐項 echo 變數，加一行：
+> **[Plan amendment 2026-06-07 — review]** 已驗證 SP1 的組裝是 **form (a) 整檔 `cp`**：`scripts/deploy-vm.sh:30-33` 設 `WEBAPI_SECRETS="$HOME/bfx/webapi.env"` → `cp "$WEBAPI_SECRETS" .env.webapi.runtime` → `chmod 600`。webapi.env **從不被 `source`** 進 shell scope（只 `cp` + grep 驗證）。所以原計畫的 `echo "BFX_VAULT_KEK=${BFX_VAULT_KEK:?...}" >> .env.webapi.runtime` 會把 `$BFX_VAULT_KEK` 展開成**空字串**（變數不在 scope）——**不可使用**。
+
+正確做法（**不改 cp 邏輯**，只加 fail-fast preflight）：把 `BFX_VAULT_KEK` 加進既有 webapi preflight for-loop（`scripts/deploy-vm.sh:34`，比照 `DATABASE_URL` / `BETTER_AUTH_JWKS_URL`，缺/空即 `exit 1`）：
 
 ```bash
-# SP2 vault KEK (base64 32 bytes); web-API envelope-encrypts Bitfinex secrets.
-echo "BFX_VAULT_KEK=${BFX_VAULT_KEK:?BFX_VAULT_KEK missing from webapi.env}" >> .env.webapi.runtime
+# 由：
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL; do
+# 改為：
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
 ```
 
-若 SP1 是 `cp "$HOME/bfx/webapi.env" .env.webapi.runtime`（整檔複製），則**不需改腳本**——只要 runbook 確保 `~/bfx/webapi.env` 含 `BFX_VAULT_KEK=`。請依實際腳本形式擇一，並更新區段註解列出 `BFX_VAULT_KEK` 為必要變數。
+（line 35 的錯誤訊息模板已內插 `$v` 與 `$WEBAPI_SECRETS`，會自動對 `BFX_VAULT_KEK` 產生正確訊息，無需其他改動。`BFX_VAULT_KEK` 只屬 webapi loop，**勿**加進 daemon-side 的 `need_common`/`need_canary` 區塊。）整檔 `cp` 會把 `~/bfx/webapi.env` 內的 `BFX_VAULT_KEK=` 自動帶進 `.env.webapi.runtime`，runbook（Step 5）負責確保它在該檔內。
 
-- [ ] **Step 3: 驗證腳本語法**
+- [x] **Step 3: 驗證腳本語法**
 
 Run: `bash -n scripts/deploy-vm.sh`
 Expected: 無語法錯誤輸出。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/deploy-vm.sh
 git commit -m "🚀 Deploy: pass BFX_VAULT_KEK into webapi.env assembly (SP2)"
 ```
 
-- [ ] **Step 5: 寫部署 runbook（手動步驟，Will 有 prod 存取時執行；不需測試）**
+- [x] **Step 5: 寫部署 runbook（手動步驟，Will 有 prod 存取時執行；不需測試）**
 
 把以下追加到 spec 或一個 `docs/superpowers/` runbook 註記（executor 只需確認檔案存在、內容正確，不執行）：
 
