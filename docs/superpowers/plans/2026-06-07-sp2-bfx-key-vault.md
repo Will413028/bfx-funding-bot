@@ -1830,12 +1830,12 @@ git commit -m "✨ Feat: api-key create via Server Action (no client proxy hop) 
 **Files:**
 - Modify: `scripts/deploy-vm.sh`（webapi.env 組裝段；參考 SP1 `DATABASE_URL` / `BETTER_AUTH_JWKS_URL` 註記）
 
-- [ ] **Step 1: 看現況**
+- [x] **Step 1: 看現況**
 
 Run: `grep -n "webapi\|WEBAPI\|JWKS\|DATABASE_URL\|\.env.webapi.runtime" scripts/deploy-vm.sh`
 Expected: 找到 SP1 組裝 `.env.webapi.runtime` 的區段（約行 29-36）。
 
-- [ ] **Step 2: 加 BFX_VAULT_KEK 到 webapi preflight（form a 已確認）**
+- [x] **Step 2: 加 BFX_VAULT_KEK 到 webapi preflight（form a 已確認）**
 
 > **[Plan amendment 2026-06-07 — review]** 已驗證 SP1 的組裝是 **form (a) 整檔 `cp`**：`scripts/deploy-vm.sh:30-33` 設 `WEBAPI_SECRETS="$HOME/bfx/webapi.env"` → `cp "$WEBAPI_SECRETS" .env.webapi.runtime` → `chmod 600`。webapi.env **從不被 `source`** 進 shell scope（只 `cp` + grep 驗證）。所以原計畫的 `echo "BFX_VAULT_KEK=${BFX_VAULT_KEK:?...}" >> .env.webapi.runtime` 會把 `$BFX_VAULT_KEK` 展開成**空字串**（變數不在 scope）——**不可使用**。
 
@@ -1850,19 +1850,19 @@ for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
 
 （line 35 的錯誤訊息模板已內插 `$v` 與 `$WEBAPI_SECRETS`，會自動對 `BFX_VAULT_KEK` 產生正確訊息，無需其他改動。`BFX_VAULT_KEK` 只屬 webapi loop，**勿**加進 daemon-side 的 `need_common`/`need_canary` 區塊。）整檔 `cp` 會把 `~/bfx/webapi.env` 內的 `BFX_VAULT_KEK=` 自動帶進 `.env.webapi.runtime`，runbook（Step 5）負責確保它在該檔內。
 
-- [ ] **Step 3: 驗證腳本語法**
+- [x] **Step 3: 驗證腳本語法**
 
 Run: `bash -n scripts/deploy-vm.sh`
 Expected: 無語法錯誤輸出。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/deploy-vm.sh
 git commit -m "🚀 Deploy: pass BFX_VAULT_KEK into webapi.env assembly (SP2)"
 ```
 
-- [ ] **Step 5: 寫部署 runbook（手動步驟，Will 有 prod 存取時執行；不需測試）**
+- [x] **Step 5: 寫部署 runbook（手動步驟，Will 有 prod 存取時執行；不需測試）**
 
 把以下追加到 spec 或一個 `docs/superpowers/` runbook 註記（executor 只需確認檔案存在、內容正確，不執行）：
 
