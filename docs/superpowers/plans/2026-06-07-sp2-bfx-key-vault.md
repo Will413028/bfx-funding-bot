@@ -1402,7 +1402,7 @@ git commit -m "✨ Feat: api-keys deps (session/bitfinex) + camelCase schemas (S
 - Modify: `backend_py/src/bfx_funding_bot/main.py:33`
 - Test: `backend_py/tests/test_api_keys_router.py`
 
-- [ ] **Step 1: 寫失敗測試（TestClient + dependency overrides + sqlite session factory）**
+- [x] **Step 1: 寫失敗測試（TestClient + dependency overrides + sqlite session factory）**
 
 `tests/test_api_keys_router.py`：
 
@@ -1529,12 +1529,12 @@ def test_requires_auth():
     assert c.get("/api/v1/api-keys").status_code in (401, 403)
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_keys_router.py -v`
 Expected: FAIL — `ModuleNotFoundError: ...api.api_keys`。
 
-- [ ] **Step 3: 實作 router**
+- [x] **Step 3: 實作 router**
 
 `modules/api/api_keys.py`：
 
@@ -1551,7 +1551,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.auth import Principal, require_user
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.api.deps import get_bitfinex_auth_rest, get_session
@@ -1623,7 +1623,9 @@ def build_api_keys_router() -> APIRouter:
             row = await vault.verify_api_key(
                 session, client, user_id=user.user_id, key_id=key_id, kek=kek,
             )
-        except BitfinexAPIError as e:
+        except (BitfinexAPIError, BitfinexShapeError) as e:
+            # transport error (status 0, re-raised by verify) OR malformed upstream
+            # permissions response -> the exchange is unreachable/unusable, 502.
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY, detail="exchange_unreachable"
             ) from e
@@ -1647,7 +1649,7 @@ def build_api_keys_router() -> APIRouter:
     return router
 ```
 
-- [ ] **Step 4: Wire into main.py**
+- [x] **Step 4: Wire into main.py**
 
 `main.py` 行 9 import 之後加，並在行 33 之後 include：
 
@@ -1661,17 +1663,17 @@ from bfx_funding_bot.modules.api.api_keys import build_api_keys_router as build_
 app.include_router(build_api_keys())
 ```
 
-- [ ] **Step 5: 跑 router 測試 + 全 unit 測試確認通過**
+- [x] **Step 5: 跑 router 測試 + 全 unit 測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_keys_router.py -v && uv run pytest -m "not integration" -q`
 Expected: router PASS（7 passed）；全 unit suite 綠。
 
-- [ ] **Step 6: lint + type**
+- [x] **Step 6: lint + type**
 
 Run: `cd backend_py && uv run ruff check && uv run mypy src/`
 Expected: 全綠。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/api/api_keys.py backend_py/src/bfx_funding_bot/main.py backend_py/tests/test_api_keys_router.py
