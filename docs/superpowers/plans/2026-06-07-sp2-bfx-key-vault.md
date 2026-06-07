@@ -1689,7 +1689,7 @@ git commit -m "✨ Feat: api-keys CRUD + verify router (SP2)"
 - Modify: `frontend/src/features/api-keys/hooks/use-api-keys.ts:13-22`
 - Test: `frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts`
 
-- [ ] **Step 1: 寫失敗測試（Vitest，mock auth + fetch）**
+- [x] **Step 1: 寫失敗測試（Vitest，mock auth + fetch）**
 
 `frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts`：
 
@@ -1733,12 +1733,12 @@ describe("createApiKeyAction", () => {
 });
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd frontend && pnpm test src/features/api-keys/hooks/__tests__/create-action.test.ts`
 Expected: FAIL — 找不到 `createApiKeyAction`。
 
-- [ ] **Step 3: 實作 Server Action**
+- [x] **Step 3: 實作 Server Action**
 
 `frontend/src/app/[locale]/(dashboard)/api-keys/actions.ts`：
 
@@ -1794,7 +1794,7 @@ export async function createApiKeyAction(input: {
 }
 ```
 
-- [ ] **Step 4: 改 hook 用 action**
+- [x] **Step 4: 改 hook 用 action**
 
 `frontend/src/features/api-keys/hooks/use-api-keys.ts`：頂部加 import，`useCreateApiKey` 的 `mutationFn` 改呼 action：
 
@@ -1811,12 +1811,12 @@ import { createApiKeyAction } from "@/app/[locale]/(dashboard)/api-keys/actions"
 
 （其餘 `useApiKeys` / `useDeleteApiKey` / `useVerifyApiKey` 不變 — 無明文，仍走 client proxy。）
 
-- [ ] **Step 5: 跑測試 + lint 確認通過**
+- [x] **Step 5: 跑測試 + lint 確認通過**
 
 Run: `cd frontend && pnpm test src/features/api-keys/hooks/__tests__/create-action.test.ts && pnpm lint`
 Expected: PASS（2 passed）+ lint 綠。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/app/[locale]/\(dashboard\)/api-keys/actions.ts frontend/src/features/api-keys/hooks/use-api-keys.ts frontend/src/features/api-keys/hooks/__tests__/create-action.test.ts
