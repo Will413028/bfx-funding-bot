@@ -26,6 +26,15 @@ for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
 done
 
+# --- web-API env (separate from the daemon: scoped DB role, NO daemon secrets) ---
+WEBAPI_SECRETS="$HOME/bfx/webapi.env"
+[ -f "$WEBAPI_SECRETS" ] || { echo "ERROR: missing $WEBAPI_SECRETS (chmod 600)"; exit 1; }
+cp "$WEBAPI_SECRETS" .env.webapi.runtime
+chmod 600 .env.webapi.runtime
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL; do
+  grep -q "^$v=." .env.webapi.runtime || { echo "ERROR: web-API var $v missing/empty in $WEBAPI_SECRETS"; exit 1; }
+done
+
 # Real-money gate.
 if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
   read -r -p "CANARY = REAL MONEY (per-symbol caps from the safety config; live fUST funded, fUSD dark). Type 'yes' to proceed: " ans
