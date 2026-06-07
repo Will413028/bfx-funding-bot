@@ -281,7 +281,7 @@ git commit -m "✨ Feat: envelope encryption module for vault secrets (SP2)"
 - Modify: `backend_py/src/bfx_funding_bot/modules/accounts/user_profile.py`（跨方言 default，見 Step 3b）
 - Test: `backend_py/tests/test_api_key_model.py`
 
-- [ ] **Step 1: 寫失敗測試（sqlite roundtrip + unique）**
+- [x] **Step 1: 寫失敗測試（sqlite roundtrip + unique）**
 
 `tests/test_api_key_model.py`：
 
@@ -335,12 +335,12 @@ async def test_unique_per_user(session: AsyncSession):
         await session.commit()
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_api_key_model.py -v`
 Expected: FAIL — `TypeError`（`APIKey` 無 `secret_ciphertext` 等欄位）。
 
-- [ ] **Step 3: 改 model**
+- [x] **Step 3: 改 model**
 
 `modules/accounts/tables.py` 把 `class APIKey`（行 46-72）整段替換為（移除舊 `users.id` FK 與單一 `api_secret`，改 envelope 欄位；`user_id` 改 `Text`，FK 只在 migration 層）：
 
@@ -393,7 +393,7 @@ class APIKey(Base):
 
 注意 import：檔案頂部 import 已含 `Integer`、`LargeBinary`、`Text`、`DateTime`、`Index`、`text`，但 **需新增 `func`**（`from sqlalchemy import func`，或併入既有 `from sqlalchemy import ...`）與 **`uuid4`**（`from uuid import uuid4`；檔案可能已 import `UUID` type，確認 `uuid4` 也在）。`ForeignKey` 仍被其他 model 使用，勿移除 import。`from __future__ import annotations`：本檔頂部目前**沒有**（行 1 是 `from datetime import datetime`），但 `Mapped[datetime | None]` 在 Python 3.13 的 mapped_column annotation 下 OK（既有 dormant model 已用同寫法），故**不需**加 future import；勿順手改動以免污染其他 model。
 
-- [ ] **Step 3b: 同步修 `UserProfile` 跨方言 default（Task 10 router 測試在 sqlite 插 UserProfile 需要）**
+- [x] **Step 3b: 同步修 `UserProfile` 跨方言 default（Task 10 router 測試在 sqlite 插 UserProfile 需要）**
 
 > **[Plan amendment 2026-06-07 — review]** Task 10 的 router 測試走真實 create 流程 → `ensure_user_profile` 在 **sqlite** 插入 `UserProfile`。`UserProfile`（SP1 表）的 `id` 用 `server_default=text("gen_random_uuid()")`、`created_at`/`updated_at` 用 `text("now()")` → sqlite 一樣炸。此為同一 latent bug，必須一併修（不修 Task 10 sqlite 測試過不了）。
 
@@ -405,17 +405,17 @@ UserProfile 的 `__table_args__` 仍宣告 unique `Index`（SP2 migration 會把
 
 驗證：UserProfile 的 sqlite 插入路徑由 Task 10 的 router 測試覆蓋（Task 6 `test_provisioning` 走 PG，不覆蓋 sqlite）。
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_api_key_model.py -v`
 Expected: PASS（2 passed）。
 
-- [ ] **Step 5: 全測試 + lint 不回歸**
+- [x] **Step 5: 全測試 + lint 不回歸**
 
 Run: `cd backend_py && uv run pytest -m "not integration" -q && uv run ruff check && uv run mypy src/`
 Expected: 全綠（既有測試不因 model 改動而壞 — 確認無其他程式讀舊 `api_secret` 欄位；若有編譯/型別錯誤在此修）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/tables.py backend_py/src/bfx_funding_bot/modules/accounts/user_profile.py backend_py/tests/test_api_key_model.py
