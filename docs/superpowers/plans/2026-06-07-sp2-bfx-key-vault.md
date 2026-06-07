@@ -892,7 +892,7 @@ git commit -m "✨ Feat: JIT ensure_user_profile helper (SP2)"
 - Create: `backend_py/src/bfx_funding_bot/modules/accounts/vault.py`
 - Test: `backend_py/tests/test_vault_service.py`（本 task 寫 create/list/delete 部分）
 
-- [ ] **Step 1: 寫失敗測試**
+- [x] **Step 1: 寫失敗測試**
 
 `tests/test_vault_service.py`：
 
@@ -908,7 +908,7 @@ from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.accounts.vault import (
     Envelope,
-    KeyAlreadyExists,
+    KeyAlreadyExistsError,
     create_api_key,
     delete_api_key,
     list_api_keys,
@@ -945,7 +945,7 @@ async def test_create_duplicate_raises(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
         await create_api_key(s, user_id="u_dup", label="a", api_key="P", api_secret="s", kek=_KEK)
     async with session_scope(pg_session_factory) as s:
-        with pytest.raises(KeyAlreadyExists):
+        with pytest.raises(KeyAlreadyExistsError):
             await create_api_key(s, user_id="u_dup", label="b", api_key="P2", api_secret="s2", kek=_KEK)
 
 
@@ -973,12 +973,12 @@ async def test_delete_returns_false_for_other_user(pg_session_factory):
         assert await list_api_keys(s, user_id="u_del") == []
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [x] **Step 2: 跑測試確認失敗**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: FAIL — `ModuleNotFoundError: ...accounts.vault`。
 
-- [ ] **Step 3: 實作（create/list/delete；verify 在 Task 8 加）**
+- [x] **Step 3: 實作（create/list/delete；verify 在 Task 8 加）**
 
 `modules/accounts/vault.py`：
 
@@ -1000,7 +1000,7 @@ from bfx_funding_bot.modules.accounts.provisioning import ensure_user_profile
 from bfx_funding_bot.modules.accounts.tables import APIKey
 
 
-class KeyAlreadyExists(Exception):
+class KeyAlreadyExistsError(Exception):
     """User already has a key (single-key-per-user invariant)."""
 
 
@@ -1015,7 +1015,7 @@ async def create_api_key(
 ) -> APIKey:
     existing = await session.scalar(select(APIKey).where(APIKey.user_id == user_id))
     if existing is not None:
-        raise KeyAlreadyExists()
+        raise KeyAlreadyExistsError()
     await ensure_user_profile(session, user_id=user_id)
     env = encrypt_secret(api_secret, user_id=user_id, kek=kek)
     row = APIKey(
@@ -1040,12 +1040,12 @@ async def delete_api_key(session: AsyncSession, *, user_id: str, key_id: UUID) -
     return True
 ```
 
-- [ ] **Step 4: 跑測試確認通過**
+- [x] **Step 4: 跑測試確認通過**
 
 Run: `cd backend_py && uv run pytest tests/test_vault_service.py -v -m integration`
 Expected: PASS（4 passed）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/vault.py backend_py/tests/test_vault_service.py
@@ -1605,7 +1605,7 @@ def build_api_keys_router() -> APIRouter:
                 session, user_id=user.user_id, label=body.label,
                 api_key=body.api_key, api_secret=body.api_secret, kek=kek,
             )
-        except vault.KeyAlreadyExists as e:
+        except vault.KeyAlreadyExistsError as e:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="key_already_exists"
             ) from e
