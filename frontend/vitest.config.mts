@@ -13,5 +13,8 @@ export default defineConfig({
 	test: {
 		include: ["src/**/*.test.{ts,tsx}"],
 		environment: "jsdom",
+		env: {
+			API_URL: "http://localhost:8000",
+		},
 	},
 });
