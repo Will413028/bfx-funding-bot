@@ -29,7 +29,7 @@ describe("QueryError", () => {
     const { container } = render(<QueryError onRetry={onRetry} />);
     const button = container.querySelector("button");
     expect(button).not.toBeNull();
-    fireEvent.click(button!);
+    if (button) fireEvent.click(button);
     expect(onRetry).toHaveBeenCalledOnce();
   });
 });
