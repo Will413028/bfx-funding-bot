@@ -2,8 +2,8 @@
 
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
 import { routing } from "@/i18n/routing";
+import { auth } from "@/lib/auth";
 
 interface AuthResult {
   success: boolean;

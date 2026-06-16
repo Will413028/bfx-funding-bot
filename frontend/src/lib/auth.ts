@@ -1,9 +1,9 @@
-import { betterAuth } from "better-auth";
-import { Pool } from "pg";
-import { Redis } from "@upstash/redis";
-import { admin, jwt, twoFactor } from "better-auth/plugins";
 import { passkey } from "@better-auth/passkey";
+import { Redis } from "@upstash/redis";
+import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
+import { admin, jwt, twoFactor } from "better-auth/plugins";
+import { Pool } from "pg";
 
 // Lazy, globalThis-cached singletons.
 //
@@ -38,6 +38,7 @@ function getRedis(): Redis {
 export const auth = betterAuth({
   appName: "BFX Funding Bot",
   baseURL: process.env.BETTER_AUTH_URL,
+  // biome-ignore lint/style/noNonNullAssertion: required server env, validated in lib/env.ts; not imported here to keep this module build-safe (env.ts process.exit(1)s on missing vars).
   trustedOrigins: [process.env.BETTER_AUTH_URL!],
 
   database: getPool(),
@@ -85,8 +86,10 @@ export const auth = betterAuth({
     admin({ defaultRole: "user", adminRoles: ["admin"] }),
     twoFactor({ issuer: "BFX Funding Bot" }),
     passkey({
+      // biome-ignore lint/style/noNonNullAssertion: required server env, validated in lib/env.ts.
       rpID: process.env.PASSKEY_RP_ID!,
       rpName: "BFX Funding Bot",
+      // biome-ignore lint/style/noNonNullAssertion: required server env, validated in lib/env.ts.
       origin: process.env.BETTER_AUTH_URL!,
     }),
     jwt({

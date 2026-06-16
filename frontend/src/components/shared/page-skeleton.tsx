@@ -1,12 +1,16 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
+// Stable, non-index keys for static placeholder lists (biome noArrayIndexKey).
+const placeholderKeys = (count: number, prefix: string) =>
+  Array.from({ length: count }, (_, i) => `${prefix}-${i}`);
+
 export function OverviewSkeleton() {
   return (
     <div className="space-y-4">
       {/* Stats grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-24 rounded-xl" />
+        {placeholderKeys(4, "stat").map((key) => (
+          <Skeleton key={key} className="h-24 rounded-xl" />
         ))}
       </div>
       {/* Charts */}
@@ -40,8 +44,8 @@ export function StrategySkeleton() {
     <div className="mx-auto max-w-2xl space-y-6">
       <Skeleton className="h-7 w-40" />
       <div className="space-y-4">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-14 rounded-lg" />
+        {placeholderKeys(5, "strategy").map((key) => (
+          <Skeleton key={key} className="h-14 rounded-lg" />
         ))}
       </div>
       <Skeleton className="h-10 w-full rounded-md" />
@@ -55,8 +59,8 @@ export function HistorySkeleton() {
       <Skeleton className="h-7 w-20" />
       <Skeleton className="h-10 w-56 rounded-md" />
       <div className="space-y-2">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <Skeleton key={i} className="h-12 rounded-lg" />
+        {placeholderKeys(5, "history").map((key) => (
+          <Skeleton key={key} className="h-12 rounded-lg" />
         ))}
       </div>
     </div>
