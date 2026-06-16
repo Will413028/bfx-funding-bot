@@ -21,6 +21,7 @@ class ApiKeyResponse(BaseModel):
     exchange_status: str = Field(serialization_alias="exchangeStatus")
     created_at: str = Field(serialization_alias="createdAt")
     verified_at: str | None = Field(default=None, serialization_alias="verifiedAt")
+    last_verify_error: str | None = Field(default=None, serialization_alias="lastVerifyError")
 
 
 class VerifyResultResponse(BaseModel):

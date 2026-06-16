@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Index, Text, func, text
+from sqlalchemy import DateTime, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,4 +47,6 @@ class UserProfile(Base):
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
 
-    __table_args__ = (Index("idx_user_profiles_user_id", "user_id", unique=True),)
+    # Migration f1a2b3c4d5e6 replaced the bare unique index with a UNIQUE
+    # CONSTRAINT (PG requires a constraint, not an index, as an FK target).
+    __table_args__ = (UniqueConstraint("user_id", name="uq_user_profiles_user_id"),)
