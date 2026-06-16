@@ -35,6 +35,7 @@ export interface ApiKey {
   apiKey: string;
   apiSecret: string; // always "****" (masked by backend)
   exchangeStatus: string; // "verified" | "unverified" | "failed"
+  lastVerifyError?: string | null; // reason the last verify failed (when exchangeStatus is "failed")
   createdAt: string;
   fundingBalance?: {
     currency: string;

@@ -146,15 +146,98 @@ async def test_verify_no_funding_write_fails(pg_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_verify_bad_credentials_fails(pg_session_factory):
-    rid = await _make_key(pg_session_factory, "u_bad")
-    err = BitfinexAPIError(status_code=500, message="apikey: invalid", raw=None)
+async def test_verify_500_is_transient_does_not_demote(pg_session_factory):
+    # #1: a 5xx (server/maintenance) is TRANSIENT -> re-raise (router 502),
+    # status unchanged. A previously-verified key must NOT be demoted.
+    rid = await _make_key(pg_session_factory, "u_5xx")
     async with session_scope(pg_session_factory) as s:
-        row = await verify_api_key(
-            s, _FakeClient(error=err), user_id="u_bad", key_id=rid, kek=_KEK
+        await verify_api_key(s, _FakeClient(perms=_perms()), user_id="u_5xx", key_id=rid, kek=_KEK)
+    err = BitfinexAPIError(status_code=500, message="server error", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        with pytest.raises(BitfinexAPIError):
+            await verify_api_key(s, _FakeClient(error=err), user_id="u_5xx", key_id=rid, kek=_KEK)
+    async with session_scope(pg_session_factory) as s:
+        got = await s.scalar(select(APIKey).where(APIKey.id == rid))
+        assert got is not None
+        assert got.exchange_status == "verified"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 503])
+async def test_verify_transient_status_does_not_demote(pg_session_factory, status_code):
+    # #1: 429 (rate limit) and 503 (maintenance) are transient -> no demote.
+    rid = await _make_key(pg_session_factory, f"u_t{status_code}")
+    async with session_scope(pg_session_factory) as s:
+        await verify_api_key(
+            s, _FakeClient(perms=_perms()), user_id=f"u_t{status_code}", key_id=rid, kek=_KEK
         )
+    err = BitfinexAPIError(status_code=status_code, message="transient", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        with pytest.raises(BitfinexAPIError):
+            await verify_api_key(
+                s, _FakeClient(error=err), user_id=f"u_t{status_code}", key_id=rid, kek=_KEK
+            )
+    async with session_scope(pg_session_factory) as s:
+        got = await s.scalar(select(APIKey).where(APIKey.id == rid))
+        assert got is not None
+        assert got.exchange_status == "verified"
+
+
+@pytest.mark.asyncio
+async def test_verify_401_demotes(pg_session_factory):
+    # #1: a genuine 4xx credential error (401) DOES demote.
+    rid = await _make_key(pg_session_factory, "u_401")
+    async with session_scope(pg_session_factory) as s:
+        await verify_api_key(s, _FakeClient(perms=_perms()), user_id="u_401", key_id=rid, kek=_KEK)
+    err = BitfinexAPIError(status_code=401, message="unauthorized", raw=None)
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(s, _FakeClient(error=err), user_id="u_401", key_id=rid, kek=_KEK)
     assert row.exchange_status == "failed"
     assert row.last_verify_error == "invalid_credentials"
+
+
+@pytest.mark.asyncio
+async def test_verify_funding_only_verified(pg_session_factory):
+    # #3 fail-closed: only funding read+write -> verified.
+    rid = await _make_key(pg_session_factory, "u_fonly")
+    perms = KeyPermissions(scopes={"funding": (True, True)})
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(perms=perms), user_id="u_fonly", key_id=rid, kek=_KEK
+        )
+    assert row.exchange_status == "verified"
+    assert row.last_verify_error is None
+
+
+@pytest.mark.asyncio
+async def test_verify_other_write_scope_fails_closed(pg_session_factory):
+    # #3 fail-closed: funding-write ON + an OTHER (renamed) write scope -> failed.
+    rid = await _make_key(pg_session_factory, "u_other")
+    perms = KeyPermissions(scopes={
+        "funding": (True, True),
+        "orders": (True, True),
+        "withdrawals": (False, True),
+    })
+    async with session_scope(pg_session_factory) as s:
+        row = await verify_api_key(
+            s, _FakeClient(perms=perms), user_id="u_other", key_id=rid, kek=_KEK
+        )
+    assert row.exchange_status == "failed"
+    assert row.last_verify_error is not None
+    assert row.last_verify_error.startswith("unexpected_write_scope")
+
+
+@pytest.mark.asyncio
+async def test_verify_wrong_kek_raises_key_mismatch(pg_session_factory):
+    # #2: decrypt under a different KEK -> VaultKeyMismatchError, not a raw 500.
+    from bfx_funding_bot.modules.accounts.vault import VaultKeyMismatchError
+    rid = await _make_key(pg_session_factory, "u_kek")
+    wrong_kek = bytes(range(31, -1, -1))
+    async with session_scope(pg_session_factory) as s:
+        with pytest.raises(VaultKeyMismatchError):
+            await verify_api_key(
+                s, _FakeClient(perms=_perms()), user_id="u_kek", key_id=rid, kek=wrong_kek
+            )
 
 
 @pytest.mark.asyncio

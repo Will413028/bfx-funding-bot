@@ -92,6 +92,7 @@
     "verified": "已驗證",
     "unverified": "未驗證",
     "verifyFailed": "驗證失敗",
+    "verifyFailedReason": "原因",
     "fundingBalance": "放貸餘額",
     "available": "可用",
     "verify": "驗證",
@@ -101,7 +102,8 @@
     "empty": "尚未新增 API 金鑰。新增您的 Bitfinex API 金鑰以開始使用。",
     "deleteTitle": "刪除 API 金鑰",
     "deleteDescription": "確定要刪除「{label}」嗎？此操作無法復原。",
-    "loadFailed": "載入 API 金鑰失敗"
+    "loadFailed": "載入 API 金鑰失敗",
+    "authTokenUnavailable": "認證權杖暫時無法取得，請重試。"
   },
   "strategy": {
     "title": "策略設定",

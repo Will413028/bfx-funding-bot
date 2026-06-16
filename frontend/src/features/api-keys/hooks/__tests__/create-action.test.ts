@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 vi.mock("@/lib/auth", () => ({
@@ -6,8 +6,18 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import { createApiKeyAction } from "@/app/[locale]/(dashboard)/api-keys/actions";
+import { auth } from "@/lib/auth";
 
-afterEach(() => vi.restoreAllMocks());
+const getTokenMock = vi.mocked(auth.api.getToken);
+
+beforeEach(() => {
+  getTokenMock.mockResolvedValue({ token: "jwt-123" });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  getTokenMock.mockReset();
+});
 
 describe("createApiKeyAction", () => {
   it("posts plaintext server-side with bearer and returns data", async () => {
@@ -42,6 +52,28 @@ describe("createApiKeyAction", () => {
     expect((init as RequestInit).body).toContain("SEC"); // plaintext only in server fetch body
     // biome-ignore lint/suspicious/noExplicitAny: test-only header access
     expect((init as any).headers.Authorization).toBe("Bearer jwt-123");
+  });
+
+  it("throws without sending the secret when getToken rejects", async () => {
+    getTokenMock.mockRejectedValue(new Error("session store down"));
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+    ).rejects.toThrow("authTokenUnavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws without sending the secret when getToken returns no token", async () => {
+    getTokenMock.mockResolvedValue(null as unknown as { token: string });
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+    ).rejects.toThrow("authTokenUnavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("throws on non-ok response", async () => {

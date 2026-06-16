@@ -16,19 +16,26 @@ export async function createApiKeyAction(input: {
   apiKey: string;
   apiSecret: string;
 }): Promise<ApiKey> {
+  // Mint the bearer token BEFORE issuing the secret-bearing request. If the
+  // token is unavailable (getToken throws or returns none) we MUST fail fast
+  // and never transmit the plaintext apiSecret on an unauthenticated request.
   let token: string | undefined;
   try {
-    const res = await auth.api.getToken({ headers: await headers() });
-    token = res?.token;
+    const authRes = await auth.api.getToken({ headers: await headers() });
+    token = authRes?.token;
   } catch {
     token = undefined;
+  }
+  if (!token) {
+    // i18n key meaning "auth token unavailable, please retry" (retryable).
+    throw new Error("authTokenUnavailable");
   }
 
   const res = await fetch(new URL("/api/v1/api-keys", API_URL).toString(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(input),
   });

@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_user
@@ -29,6 +30,7 @@ def _to_response(row: APIKey) -> dict[str, object]:
         exchange_status=row.exchange_status,
         created_at=row.created_at.isoformat() if row.created_at else "",
         verified_at=row.verified_at.isoformat() if row.verified_at else None,
+        last_verify_error=row.last_verify_error,
     ).model_dump(by_alias=True)
 
 
@@ -64,7 +66,10 @@ def build_api_keys_router() -> APIRouter:
                 session, user_id=user.user_id, label=body.label,
                 api_key=body.api_key, api_secret=body.api_secret, kek=kek,
             )
-        except vault.KeyAlreadyExistsError as e:
+        except (vault.KeyAlreadyExistsError, IntegrityError) as e:
+            # KeyAlreadyExistsError: app-level pre-check. IntegrityError: the DB
+            # unique index idx_api_keys_user_id fires on a concurrent duplicate
+            # INSERT that slipped past the pre-check (race) -> still a 409.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="key_already_exists"
             ) from e
@@ -82,6 +87,14 @@ def build_api_keys_router() -> APIRouter:
             row = await vault.verify_api_key(
                 session, client, user_id=user.user_id, key_id=key_id, kek=kek,
             )
+        except vault.VaultKeyMismatchError as e:
+            # Stored ciphertext can't be decrypted with the active KEK (wrong/
+            # rotated KEK or corruption). 503, not a raw 500.
+            # NOTE: key_version-aware multi-KEK rotation is NOT implemented yet
+            # (follow-up); for now this is a hard "vault misconfigured" signal.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="vault_key_mismatch"
+            ) from e
         except (BitfinexAPIError, BitfinexShapeError) as e:
             # transport error (status 0, re-raised by verify) OR malformed upstream
             # permissions response -> the exchange is unreachable/unusable, 502.

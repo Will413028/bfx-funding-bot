@@ -1,6 +1,7 @@
 import base64
 import uuid
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -101,6 +102,34 @@ def test_verify_withdraw_enabled_fails(app_client):
     assert r.json()["data"]["error"] == "withdraw_must_be_disabled"
 
 
+def test_verify_funding_only_read_write_verified(app_client):
+    # #3 fail-closed: a key with ONLY funding read+write must verify.
+    created = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    app_client._fake._perms = KeyPermissions(scopes={"funding": (True, True)})
+    r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "verified"
+
+
+def test_verify_other_write_scope_fails_closed(app_client):
+    # #3 fail-closed: funding-write ON plus some OTHER (renamed/unknown) write
+    # scope must NOT slip through as verified.
+    created = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    app_client._fake._perms = KeyPermissions(scopes={
+        "funding": (True, True),
+        "orders": (True, True),
+        "withdrawals": (False, True),  # renamed dangerous scope
+    })
+    r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "failed"
+    assert r.json()["data"]["error"].startswith("unexpected_write_scope")
+
+
 def test_verify_unknown_id_404(app_client):
     r = app_client.post(f"/api/v1/api-keys/{uuid.uuid4()}/verify")
     assert r.status_code == 404
@@ -118,6 +147,94 @@ def test_verify_shape_error_502(app_client):
     app_client._fake._error = BitfinexShapeError("malformed permissions response")
     r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
     assert r.status_code == 502
+
+
+def _verify_ok_first(app_client):
+    """Create a key and verify it once (-> verified). Returns the key id."""
+    created = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
+    assert r.json()["data"]["status"] == "verified"
+    return created["id"]
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_verify_transient_does_not_demote(app_client, status_code):
+    # #1: rate-limit (429) and server/maintenance (5xx) are TRANSIENT -> 502 and
+    # the previously-verified row is left unchanged (not demoted to failed).
+    key_id = _verify_ok_first(app_client)
+    app_client._fake._error = BitfinexAPIError(
+        status_code=status_code, message="transient", raw=None
+    )
+    r = app_client.post(f"/api/v1/api-keys/{key_id}/verify")
+    assert r.status_code == 502
+    # status unchanged: list still shows verified
+    item = next(i for i in app_client.get("/api/v1/api-keys").json()["data"] if i["id"] == key_id)
+    assert item["exchangeStatus"] == "verified"
+
+
+def test_verify_client_error_demotes(app_client):
+    # #1: a genuine 4xx credential error (401) DOES demote a verified row.
+    key_id = _verify_ok_first(app_client)
+    app_client._fake._error = BitfinexAPIError(status_code=401, message="unauthorized", raw=None)
+    r = app_client.post(f"/api/v1/api-keys/{key_id}/verify")
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "failed"
+    assert r.json()["data"]["error"] == "invalid_credentials"
+
+
+def test_verify_kek_mismatch_503_not_500(app_client, monkeypatch):
+    # #2: a wrong/rotated KEK fails AES-GCM auth on decrypt -> the verify
+    # endpoint yields 503 vault_key_mismatch, NOT an unhandled 500.
+    created = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    # Swap the active KEK to a different 32-byte key after the secret was
+    # encrypted under the original -> decrypt InvalidTag.
+    monkeypatch.setenv("BFX_VAULT_KEK", base64.b64encode(bytes(range(31, -1, -1))).decode())
+    r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "vault_key_mismatch"
+
+
+def test_create_encrypt_unaffected_by_kek_mismatch_test(app_client):
+    # #2 guard: create/encrypt path stays a normal 201 (sanity that the mismatch
+    # only bites on decrypt).
+    r = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    )
+    assert r.status_code == 201
+
+
+def test_list_exposes_last_verify_error(app_client):
+    # #5: GET /api/v1/api-keys returns lastVerifyError for a failed key.
+    created = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    app_client._fake._perms = KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, True)})
+    app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
+    items = app_client.get("/api/v1/api-keys").json()["data"]
+    assert items[0]["exchangeStatus"] == "failed"
+    assert items[0]["lastVerifyError"] == "withdraw_must_be_disabled"
+
+
+def test_create_integrity_error_returns_409(app_client, monkeypatch):
+    # #7: a concurrent duplicate INSERT trips the DB unique index ->
+    # sqlalchemy IntegrityError -> 409 (not 500).
+    from sqlalchemy.exc import IntegrityError
+
+    from bfx_funding_bot.modules.api import api_keys as api_keys_mod
+
+    async def _boom(*args, **kwargs):
+        raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(api_keys_mod.vault, "create_api_key", _boom)
+    r = app_client.post(
+        "/api/v1/api-keys", json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"] == "key_already_exists"
 
 
 def test_delete(app_client):

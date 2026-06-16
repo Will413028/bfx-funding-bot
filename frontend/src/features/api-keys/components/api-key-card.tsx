@@ -62,6 +62,15 @@ export function ApiKeyCard({
           </Badge>
         </div>
 
+        {apiKey.exchangeStatus === "failed" && apiKey.lastVerifyError && (
+          <p
+            data-testid="verify-error-reason"
+            className="mt-3 rounded-lg bg-rose-500/5 px-3 py-2 text-xs text-rose-400"
+          >
+            {t("verifyFailedReason")}: {apiKey.lastVerifyError}
+          </p>
+        )}
+
         {apiKey.exchangeStatus === "verified" && apiKey.fundingBalance && (
           <div className="mt-3 rounded-lg bg-white/[0.02] px-3 py-2">
             <p className="text-xs text-zinc-400">{t("fundingBalance")}</p>

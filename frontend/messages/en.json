@@ -92,6 +92,7 @@
     "verified": "Verified",
     "unverified": "Unverified",
     "verifyFailed": "Failed",
+    "verifyFailedReason": "Reason",
     "fundingBalance": "Funding Balance",
     "available": "Available",
     "verify": "Verify",
@@ -101,7 +102,8 @@
     "empty": "No API keys yet. Add your Bitfinex API key to get started.",
     "deleteTitle": "Delete API Key",
     "deleteDescription": "Are you sure you want to delete \"{label}\"? This action cannot be undone.",
-    "loadFailed": "Failed to load API keys"
+    "loadFailed": "Failed to load API keys",
+    "authTokenUnavailable": "Authentication token unavailable. Please try again."
   },
   "strategy": {
     "title": "Strategy Configuration",
