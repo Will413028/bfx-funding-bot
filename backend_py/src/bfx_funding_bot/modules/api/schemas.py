@@ -2,7 +2,7 @@
 the FE types (frontend/src/types/index.ts) and the SP1 profile endpoint."""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -27,3 +27,42 @@ class ApiKeyResponse(BaseModel):
 class VerifyResultResponse(BaseModel):
     status: str
     error: str | None = None
+
+
+class Range(BaseModel):
+    """A {min, max} bound. min/max must be positive and min <= max. Used for
+    amount, rate (daily ratio) and period. Modelled as float to keep zero
+    divergence from the FE's single rangeSchema (which types all three as
+    number); period values are integers by convention (FE step=1)."""
+
+    min: float = Field(gt=0)
+    max: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _min_le_max(self) -> Range:
+        if self.min > self.max:
+            raise ValueError("min must be <= max")
+        return self
+
+
+class StrategyConfigBody(BaseModel):
+    """Validated PUT /configs body. Mirrors the FE Zod strategyConfigSchema
+    (positive ranges, min<=max, non-empty currency). Stored verbatim as the
+    user_configs.config JSONB blob. The backend is unit-agnostic on rate; it
+    stores the daily ratio the FE sends and never converts."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    currency: str = Field(min_length=1)
+    amount: Range
+    rate: Range
+    period: Range
+    auto_renew: bool = Field(alias="autoRenew")
+
+
+class UserConfigResponse(BaseModel):
+    id: str
+    user_id: str = Field(serialization_alias="userId")
+    config: dict[str, object]
+    created_at: str = Field(serialization_alias="createdAt")
+    updated_at: str = Field(serialization_alias="updatedAt")

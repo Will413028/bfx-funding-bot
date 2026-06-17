@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
+from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
 
 
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="bfx-funding-bot", lifespan=lifespan)
 app.include_router(build_api_router())
 app.include_router(build_api_keys_router())
+app.include_router(build_config_router())
 
 
 @app.get("/health")
