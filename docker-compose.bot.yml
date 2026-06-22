@@ -1,12 +1,33 @@
 name: bfx
 
 services:
+  # Self-hosted Postgres — replaces Neon. Internal-only (no published port);
+  # the real-money DB must never be reachable from outside the docker network.
+  # POSTGRES_USER/PASSWORD/DB come from .env.runtime (assembled from ~/bfx/bot.env
+  # by deploy-vm.sh); Settings(extra="ignore") makes bot/migrate ignore them.
+  postgres:
+    image: postgres:18-alpine
+    container_name: bfx-postgres
+    restart: unless-stopped
+    env_file: .env.runtime
+    volumes:
+      - bfx_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   migrate:
     image: bfx-bot:local
     command: ["sh", "-c", "alembic upgrade head"]
     working_dir: /app
     env_file: .env.runtime
     restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   bot:
     build:
@@ -31,6 +52,8 @@ services:
       retries: 3
       start_period: 180s
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
 
@@ -66,5 +89,10 @@ services:
       retries: 3
       start_period: 30s
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+volumes:
+  bfx_pgdata:
