@@ -11,7 +11,10 @@ services:
     restart: unless-stopped
     env_file: .env.runtime
     volumes:
-      - bfx_pgdata:/var/lib/postgresql/data
+      # PG18+ stores data in a version-specific subdir; the volume must mount at
+      # /var/lib/postgresql (NOT /data) or the image refuses to start.
+      # See docker-library/postgres#1259.
+      - bfx_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
