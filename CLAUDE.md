@@ -14,10 +14,12 @@ Bitfinex 自動放貸 SaaS 平台。
 
 | 服務 | 平台 |
 |------|------|
-| Frontend | Vercel |
-| Backend | Koyeb (Docker) |
-| Database | Neon (Serverless PostgreSQL) |
+| Frontend | Vercel（Step 2 將搬上 VM，棄 Vercel） |
+| Backend (bot + webapi) | Oracle Cloud VM `oci-a1`（Docker，`docker-compose.bot.yml`） |
+| Database | 自托 Postgres 18（VM docker `bfx-postgres`，named volume `bfx_pgdata`） |
 | Cache | Upstash (Serverless Redis) |
+
+> **2026-06-23 棄 Neon Step 1**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。bot/webapi/DB 全搬 VM 自托 Postgres，Neon 退役（FE auth 仍在 Vercel→Neon，待 Step 2 搬 FE 上 VM 後 Neon 完全歸零）。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）備份至 `~/bfx/backups/`。Koyeb 為更早的 backend 平台，已於 2026-05-31 cutover 至 VM。
 
 ## 指令執行目錄
 
