@@ -12,14 +12,16 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 部署架構
 
+全部自托於 Oracle Cloud VM `oci-a1`（單機 docker stack，`docker-compose.bot.yml`）。除 Bitfinex venue 外零外部 serverless 依賴。
+
 | 服務 | 平台 |
 |------|------|
-| Frontend | Vercel（Step 2 將搬上 VM，棄 Vercel） |
-| Backend (bot + webapi) | Oracle Cloud VM `oci-a1`（Docker，`docker-compose.bot.yml`） |
-| Database | 自托 Postgres 18（VM docker `bfx-postgres`，named volume `bfx_pgdata`） |
-| Cache | Upstash (Serverless Redis) |
+| Frontend | VM `bfx-frontend`（Next.js standalone，Tailscale Funnel 443→`127.0.0.1:3001`；公開 `https://<public-host>`） |
+| Backend (bot + webapi) | VM（`bfx-bot` / `bfx-webapi`；webapi 內網限定，FE 經 docker 網路呼叫） |
+| Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
+| Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
-> **2026-06-23 棄 Neon Step 1**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。bot/webapi/DB 全搬 VM 自托 Postgres，Neon 退役（FE auth 仍在 Vercel→Neon，待 Step 2 搬 FE 上 VM 後 Neon 完全歸零）。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）備份至 `~/bfx/backups/`。Koyeb 為更早的 backend 平台，已於 2026-05-31 cutover 至 VM。
+> **2026-06-23 棄 Neon + Vercel（Step 1+2 完成）**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。**Step 1**：bot/webapi/DB 搬 VM 自托 Postgres。**Step 2**：FE 容器化上 VM（Funnel 443→3001，因 grafana 占 3000）、Better Auth 連本地 Postgres（`bfx_webauth`、direct 無 pooler）+ VM 自托 Redis（Upstash→ioredis）、**Vercel 專案已刪、Neon 完全歸零**。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）→ `~/bfx/backups/`（Redis session 為 ephemeral，免備份）。Koyeb 為更早 backend 平台，2026-05-31 已 cutover 至 VM。WS 在 v1 為 dead（FE WS client vestigial → webapi `/auth/ws-token` 404 噪音，待獨立 cleanup）。
 
 ## 指令執行目錄
 
