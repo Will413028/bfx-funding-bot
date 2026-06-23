@@ -35,6 +35,17 @@ for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
   grep -q "^$v=." .env.webapi.runtime || { echo "ERROR: web-API var $v missing/empty in $WEBAPI_SECRETS"; exit 1; }
 done
 
+# --- frontend env (Better Auth FE: scoped bfx_webauth role, VM redis, server-only) ---
+FRONTEND_SECRETS="$HOME/bfx/frontend.env"
+[ -f "$FRONTEND_SECRETS" ] || { echo "ERROR: missing $FRONTEND_SECRETS (chmod 600)"; exit 1; }
+cp "$FRONTEND_SECRETS" .env.frontend.runtime
+chmod 600 .env.frontend.runtime
+for v in NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL API_URL BETTER_AUTH_SECRET BETTER_AUTH_URL DATABASE_URL REDIS_URL PASSKEY_RP_ID; do
+  grep -q "^$v=." .env.frontend.runtime || { echo "ERROR: frontend var $v missing/empty in $FRONTEND_SECRETS"; exit 1; }
+done
+# Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
+set -a; . ./.env.frontend.runtime; set +a
+
 # Real-money gate.
 if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
   read -r -p "CANARY = REAL MONEY (per-symbol caps from the safety config; live fUST funded, fUSD dark). Type 'yes' to proceed: " ans

@@ -133,9 +133,8 @@ NEXT_PUBLIC_AXIOM_DATASET    # Axiom（optional）
 API_URL                    # Python web-API URL（proxy + server actions 用）
 BETTER_AUTH_URL            # Better Auth base URL（server，baseURL / trustedOrigins / passkey origin）
 BETTER_AUTH_SECRET         # Better Auth 加密金鑰（≥ 32 chars）
-DATABASE_URL               # Neon（Better Auth `auth` schema，pg Pool）
-UPSTASH_REDIS_REST_URL     # Upstash（session / rate-limit secondaryStorage）
-UPSTASH_REDIS_REST_TOKEN   # Upstash token
+DATABASE_URL               # VM-local Postgres（Better Auth `auth` schema，bfx_webauth，direct 無 -pooler）
+REDIS_URL                  # VM-local Redis（session / rate-limit secondaryStorage，ioredis）
 PASSKEY_RP_ID              # Passkey relying-party ID（domain）
 ```
 
