@@ -8,16 +8,9 @@ import type { MarketSummary } from "@/types";
 
 interface MarketPanelProps {
   market: MarketSummary | null;
-  wsStatus?: "disconnected" | "connecting" | "connected";
 }
 
-const wsStatusColor = {
-  connected: "bg-emerald-500",
-  connecting: "bg-amber-500",
-  disconnected: "bg-zinc-600",
-} as const;
-
-export function MarketPanel({ market, wsStatus }: MarketPanelProps) {
+export function MarketPanel({ market }: MarketPanelProps) {
   const t = useTranslations("overview");
   return (
     <div className="rounded-xl border border-white/5 bg-white/[0.02] p-5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.1)]">
@@ -25,21 +18,6 @@ export function MarketPanel({ market, wsStatus }: MarketPanelProps) {
         <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400">
           {t("marketSnapshot")}
         </h3>
-        {wsStatus && (
-          <span className="flex items-center gap-1.5 text-xs text-zinc-500">
-            <span
-              className={cn(
-                "inline-block size-1.5 rounded-full",
-                wsStatusColor[wsStatus],
-              )}
-            />
-            {wsStatus === "connected"
-              ? t("wsLive")
-              : wsStatus === "connecting"
-                ? t("wsConnecting")
-                : t("wsOffline")}
-          </span>
-        )}
       </div>
 
       {!market ? (

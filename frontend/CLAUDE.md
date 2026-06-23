@@ -40,13 +40,11 @@ src/
     settings/{components,hooks}/    # ChangePasswordForm, useUser
   lib/
     api-client.ts                   # HTTP client（自動解包 { data: T }）
-    ws-client.ts                    # WebSocket（指數退避重連）
     query-keys.ts                   # TanStack Query key factory
     env.ts                          # Zod 環境變數驗證
     validations.ts                  # 表單 schema（Zod）
     format.ts                       # 格式化工具（APR, USD, period）
   providers/query-provider.tsx      # TanStack Query + Devtools
-  stores/ws-store.ts                # Zustand（WebSocket 狀態）
   types/index.ts                    # 所有 TypeScript 型別
   i18n/                             # next-intl 設定
 messages/                           # i18n JSON（en.json, zh-TW.json）
@@ -83,7 +81,6 @@ const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 | 類型 | 工具 | 用途 |
 |------|------|------|
 | Server state | TanStack Query v5 | API 資料快取（staleTime 60s） |
-| Client state | Zustand | WebSocket 連線狀態 |
 | URL state | nuqs | Query string 參數 |
 | Form state | react-hook-form + Zod | 表單驗證 |
 
@@ -124,7 +121,6 @@ export function useApiKeys() {
 # Public（瀏覽器可見，需 NEXT_PUBLIC_ 前綴）
 NEXT_PUBLIC_APP_URL          # 前端 URL
 NEXT_PUBLIC_APP_NAME         # App 名稱
-NEXT_PUBLIC_WS_URL           # WebSocket（client 直連 backend）
 NEXT_PUBLIC_BETTER_AUTH_URL  # Better Auth base URL（client SDK 用）
 NEXT_PUBLIC_SENTRY_DSN       # Sentry（optional）
 NEXT_PUBLIC_AXIOM_DATASET    # Axiom（optional）
