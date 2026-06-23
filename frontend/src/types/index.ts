@@ -191,13 +191,3 @@ export interface DailyEarning {
   date: string;
   amount: number;
 }
-
-// ── WebSocket ──
-
-export interface MarketSnapshot {
-  frr: number;
-  regime: string;
-  mdcScore: number;
-  flashFreeze: boolean;
-  timestamp: string;
-}
