@@ -58,9 +58,8 @@ cd backend_py && uv run alembic upgrade head   # against a dev DB, never prod
 Point the FE at the dev DB and the web-API:
 
 ```bash
-# Upstash (sessions + rate-limit counters)
-UPSTASH_REDIS_REST_URL=...
-UPSTASH_REDIS_REST_TOKEN=...
+# Redis (sessions + rate-limit counters)
+REDIS_URL=redis://localhost:6379
 
 # Better Auth
 BETTER_AUTH_SECRET=...                       # ≥ 32 chars
