@@ -3,7 +3,6 @@ import { z } from "zod";
 const clientEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
   NEXT_PUBLIC_APP_NAME: z.string().min(1),
-  NEXT_PUBLIC_WS_URL: z.string().min(1),
   NEXT_PUBLIC_SENTRY_DSN: z.string().url().optional(),
   NEXT_PUBLIC_BETTER_AUTH_URL: z.string().url(),
 });
@@ -22,7 +21,6 @@ function parseEnv() {
     const result = clientEnvSchema.safeParse({
       NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
       NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
-      NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
       NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
       NEXT_PUBLIC_BETTER_AUTH_URL: process.env.NEXT_PUBLIC_BETTER_AUTH_URL,
     });
@@ -39,7 +37,6 @@ function parseEnv() {
       return {
         NEXT_PUBLIC_APP_URL: "",
         NEXT_PUBLIC_APP_NAME: "bfx-funding-bot",
-        NEXT_PUBLIC_WS_URL: "",
         NEXT_PUBLIC_SENTRY_DSN: undefined,
         NEXT_PUBLIC_BETTER_AUTH_URL: "",
       };

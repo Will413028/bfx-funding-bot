@@ -11,7 +11,6 @@ import { RateChart } from "@/features/dashboard/components/rate-chart";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
-import { useDashboardWS } from "@/features/dashboard/hooks/use-dashboard-ws";
 import { useEarnings } from "@/features/dashboard/hooks/use-earnings";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
@@ -29,7 +28,6 @@ export default function OverviewPage() {
     isError: earnError,
     refetch: earnRefetch,
   } = useEarnings();
-  const { status: wsStatus } = useDashboardWS();
   const { data: apiKeys } = useApiKeys();
   const { data: config } = useConfig();
 
@@ -72,7 +70,7 @@ export default function OverviewPage() {
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <OffersList offers={dashboard.offers} />
-        <MarketPanel market={dashboard.market} wsStatus={wsStatus} />
+        <MarketPanel market={dashboard.market} />
       </div>
     </div>
   );
