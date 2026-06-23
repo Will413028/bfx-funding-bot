@@ -1,26 +1,24 @@
 import { passkey } from "@better-auth/passkey";
-import { Redis } from "@upstash/redis";
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { admin, jwt, twoFactor } from "better-auth/plugins";
+import Redis from "ioredis";
 import { Pool } from "pg";
 
-// Lazy, globalThis-cached singletons.
+// Lazy, globalThis-cached singletons (pg Pool + Redis).
 //
-// Why:
-//  1. `Redis.fromEnv()` THROWS at import time if Upstash env vars are absent,
-//     which breaks `next build` (the build never connects anywhere). Constructing
-//     it lazily inside the secondaryStorage closures keeps import side-effect-free.
-//  2. On serverless/HMR, the auth module is re-evaluated repeatedly. Caching the
-//     pg Pool + Redis client on `globalThis` avoids leaking a new connection pool
-//     on every re-eval (the documented Next-on-serverless singleton pattern).
+// On serverless/HMR the auth module is re-evaluated repeatedly; caching the
+// clients on `globalThis` avoids leaking a new pool/connection per re-eval.
+// Both are constructed lazily (inside the getters) so importing this module is
+// side-effect-free and `next build` never connects anywhere.
 const globalForAuth = globalThis as unknown as {
   _bfxAuthPool?: Pool;
   _bfxAuthRedis?: Redis;
 };
 
 function getPool(): Pool {
-  // Same Neon DB, dedicated `auth` schema (D13). Pooled (-pooler) URL for serverless.
+  // VM-local Postgres, dedicated `auth` schema. Direct (no -pooler) so the
+  // `-c search_path=auth` startup option is honored.
   globalForAuth._bfxAuthPool ??= new Pool({
     connectionString: process.env.DATABASE_URL,
     options: "-c search_path=auth",
@@ -29,9 +27,9 @@ function getPool(): Pool {
 }
 
 function getRedis(): Redis {
-  // UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN.
-  // Constructed lazily so importing this module does not require Upstash env.
-  globalForAuth._bfxAuthRedis ??= Redis.fromEnv();
+  // VM-local Redis (docker service `redis`), standard protocol via ioredis.
+  // biome-ignore lint/style/noNonNullAssertion: required server env, validated in lib/env.ts.
+  globalForAuth._bfxAuthRedis ??= new Redis(process.env.REDIS_URL!);
   return globalForAuth._bfxAuthRedis;
 }
 
@@ -43,14 +41,13 @@ export const auth = betterAuth({
 
   database: getPool(),
 
-  // Sessions + rate-limit counters live in Upstash (REST), not Neon.
+  // Sessions + rate-limit counters live in VM-local Redis (ioredis), not Postgres.
   secondaryStorage: {
     get: async (key) => {
-      const v = await getRedis().get<string>(key);
-      return v ?? null;
+      return await getRedis().get(key); // ioredis returns string | null
     },
     set: async (key, value, ttl) => {
-      if (ttl) await getRedis().set(key, value, { ex: ttl });
+      if (ttl) await getRedis().set(key, value, "EX", ttl);
       else await getRedis().set(key, value);
     },
     delete: async (key) => {
@@ -70,7 +67,7 @@ export const auth = betterAuth({
     cookieCache: { enabled: true, maxAge: 5 * 60 },
   },
 
-  // Route rate-limit counters to Upstash (secondaryStorage alone does NOT do this).
+  // Route rate-limit counters to Redis (secondaryStorage alone does NOT do this).
   rateLimit: {
     enabled: true,
     storage: "secondary-storage",
