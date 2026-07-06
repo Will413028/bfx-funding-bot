@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.deployment.book_clamp import clamp_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
@@ -1063,6 +1064,12 @@ async def build_daemon(
             # 本區塊本來就 live-only）。
             canceller=executor if isinstance(executor, CancelPort) else None,
             reprice=policy_from_env(os.environ),
+            # E2 book-aware clamp：ticker 用既有 public BitfinexREST（共用
+            # FundingRateLimiter；~2 call/90s ≪ 30/min budget）。預設
+            # observe-only（BFX_CLAMP_ENABLED=false）：抓 ticker、log
+            # clamp_would_adjust，submit 與 sweep 行為 = 現狀。
+            ticker_source=bitfinex,
+            clamp=clamp_policy_from_env(os.environ),
         )
         periodic_reconcile = PeriodicReconcile(
             recovery=runtime_recovery,
