@@ -1,24 +1,34 @@
 """G3 — live bot-vs-idle validation of the deployed canary MR config.
 
 Loads live fills (event_log), market-rate series (funding_candles.close), and
-reconcile state from Neon; attributes the bot's absolute return on budget vs idle
-(primary) plus MR timing alpha vs AlwaysMarketRate (secondary, non-gating
-diagnostic) via modules/live_validation, reuses the oos_profitability metrics, and
-writes a markdown + JSON report with a four-state verdict.
+reconcile state from Postgres (VM 自托 bfx-postgres；2026-06-23 前為 Neon); attributes
+the bot's absolute return on budget vs idle (primary) plus MR timing alpha vs
+AlwaysMarketRate (secondary, non-gating diagnostic) via modules/live_validation,
+reuses the oos_profitability metrics, and writes a markdown + JSON report with a
+four-state verdict.
 
 Run from backend_py/:
-  uv run python scripts/run_g3_live_validation.py --out docs/research/<date>-g3-live-validation.md
+  uv run python -m scripts.run_g3_live_validation --out docs/research/<date>-g3-live-validation.md
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
 import sys
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
 from bfx_funding_bot.modules.live_validation.live_attribution import ClampDiagnostic, G3Verdict
+
+
+def _default_capital(environ: Mapping[str, str]) -> str:
+    """--capital 預設：跟著部署 cap 走（.env.runtime 的 BFX_ALLOCATION_CAP_USDT），
+    避免 cap 調整後報告還用舊 570 分母（2026-07-06 review 發現 3000→10000 期間
+    的 stale default）。"""
+    return environ.get("BFX_ALLOCATION_CAP_USDT", "570")
 
 
 def render_markdown(
@@ -116,7 +126,11 @@ def _verdict_to_json(v: G3Verdict, clamp_diag: ClampDiagnostic) -> dict[str, obj
 async def _amain() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, help="output .md path")
-    parser.add_argument("--capital", default="570", help="capital budget C (canary cap)")
+    parser.add_argument(
+        "--capital",
+        default=_default_capital(os.environ),
+        help="capital budget C (default: BFX_ALLOCATION_CAP_USDT env, else 570)",
+    )
     args = parser.parse_args()
 
     from scripts._g3_loaders import build_verdict_from_neon

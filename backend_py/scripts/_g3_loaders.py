@@ -1,8 +1,9 @@
-"""Neon data loader for G3 live validation.
+"""Postgres data loader for G3 live validation.
 
 Queries event_log (fills + releases) and funding_candles (per-day market-rate
-series, close) from Neon, builds FillRecord / MarketRatePoint lists, and delegates
-all computation to the pure modules/live_validation/live_attribution module.
+series, close) from Postgres, builds FillRecord / MarketRatePoint lists, and
+delegates all computation to the pure modules/live_validation/live_attribution
+module.
 
 account_id  = BFX_ACCOUNT_ID env-var (defaults "default", same as daemon.py)
 environment = BFX_DEPLOYMENT_ENV env-var (required; "prod" for the live canary)
@@ -79,12 +80,15 @@ async def build_verdict_from_neon(
     capital: Decimal,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[G3Verdict, str, int, ClampDiagnostic]:
-    """Query Neon and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag).
+    """Query Postgres and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag).
 
     I/O shell only: fetches fills/releases/candles/position_state, builds the
     FillRecord + MarketRatePoint domain lists, then delegates to the pure
     _compute_verdict. Pass `session_factory` to run against an injected DB
-    (used by the seeded unit test); otherwise a Neon engine is built from env.
+    (used by the seeded unit test); otherwise an engine is built from env.
+    Function name `build_verdict_from_neon` is a historical holdover from the
+    pre-2026-06-23 Neon era; kept as-is (many call sites, rename is behavior-free
+    churn).
     """
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
     deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
