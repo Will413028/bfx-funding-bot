@@ -65,6 +65,11 @@ executing-plans → code review）。本節提供 phase 目標、關鍵證據、
 
 ### E2 — Book-aware rate clamp + taker branch
 
+> **實作 plan 已寫好**（2026-07-06）：`docs/superpowers/plans/2026-07-06-e2-book-aware-clamp.md`
+> — 5 tasks 含完整 code / TDD 步驟 / rollout runbook（5-verifier 對 codebase 驗證過），直接用
+> superpowers:subagent-driven-development 執行。Plan 對本節的三處刻意強化（E1×E2 sweep ref
+> 對齊防自砍、down-clamp max_down floor、taker bid_size/bid_period guard）rationale 見 plan Self-Review。
+
 **目標**：submit 時知道自己在 book 的哪個位置；不再高掛排隊或低掛送 spread；spike 時能立即成交。
 
 **現況與證據**：
