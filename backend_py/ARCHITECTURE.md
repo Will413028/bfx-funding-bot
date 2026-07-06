@@ -236,6 +236,8 @@ sequenceDiagram
    - 低於 `effective_min_usdt = ceil(150 * 1.02) = 153` USDT 的零頭（dust）丟棄；總分配 ≤ gap，全域 cap 永不超過。
 7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ `SafetyGuardChain.evaluate` → executor submit。executor 對 venue reject（如 10001）回 `status="failed"` 而非 raise，故 reconciler 檢查 `status`，僅 submitted 才 `tracker.record_deploy`（否則記 `deployment_submit_rejected`、不記 phantom intent）。
 
+7b. **Reprice sweep（E1）**：allocation 前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。
+
 **成交與重部署**
 
 8. WS `foc EXECUTED` → `OrderFilled` → reserved 降、realized 升（見 3c）。credit 到期由 Bitfinex 自動觸發，**不需顯式 redeploy**：下一個 90s tick 重算 gap 時，被釋放的額度自然回到分配池。
@@ -250,7 +252,7 @@ sequenceDiagram
 
 | 參數 | 值 | env |
 |---|---|---|
-| Allocation cap（canary on Koyeb） | 570 USDT | `BFX_ALLOCATION_CAP_USDT`（程式預設 500） |
+| Allocation cap（canary on Koyeb） | 10000 USDT | `BFX_ALLOCATION_CAP_USDT`（程式預設 500；canary 3000→10000 見 commit `aa4842c`，原文件曾誤留 570） |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
 | Per-cell concentration | 70% of cap | `BFX_CONCENTRATION_PCT`=0.70 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
@@ -367,10 +369,10 @@ funding_candles        (訊號層輸入)
 
 | 服務 | 平台 |
 |---|---|
-| Backend daemon | Koyeb（Docker，Python 3.13 + uv） |
-| Database | Neon（serverless PG） |
+| Backend daemon | VM 自托（`oci-a1`，Docker，Python 3.13 + uv；`bfx-bot`/`bfx-webapi`。Koyeb 已於 2026-05-31 cutover 至 VM） |
+| Database | VM 自托 Postgres 18（`bfx-postgres`。Neon 已於 2026-06-23 棄用歸零） |
 | Cache | Upstash（serverless Redis，optional） |
-| Frontend | Vercel |
+| Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
 **Deploy script（`scripts/deploy-koyeb.sh`）**：idempotent、phase-aware。canary 顯式設 `BFX_DEPLOYMENT_ENV=prod`、`BFX_EXECUTOR=bitfinex_live`、`BFX_ALLOCATION_CAP_USDT=570`；翻回 paper/shadow 時以 `--env '!VAR'` 清掉 canary-only 變數（防 paper + bitfinex_live 殘留錯配）。canary 需 `BFX_CANARY_CONFIRM=yes` 或互動確認。**Koyeb 從 `origin/main` 最新 commit 建置**（`--git-sha ''`）——部署前需先 `git push origin main`（用 `Will413028` 帳號）。auto-deploy-on-push 已停用（git push 不再觸發真錢 redeploy，部署改手動跑 script）。Docker type=web（worker 不支援 health probe），`/healthz` grace 90s。
 
@@ -392,6 +394,7 @@ funding_candles        (訊號層輸入)
 - **submit 成功才記 intent**：executor 對 venue reject 回 `status="failed"`（非 raise）；reconciler 僅 `status != "failed"` 才 `record_deploy`。
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。
 - **TaskGroup 監督**：任何 sub-task 例外 → ExceptionGroup 傳播 → daemon 非零退出，無 silent task death。
+- **I-RP reprice-down only**：sweep 只砍「高於現行 active quote 超過 tolerance 且夠老」的 offer；不砍低於 quote 的、不砍 spike 當小時的（min-age）、無 active quote 不砍。cancel 失敗 fail-safe（offer 留在 book）；`ExecutorAuthError` propagate。sweep 不直接改 ledger/tracker。
 
 ---
 
