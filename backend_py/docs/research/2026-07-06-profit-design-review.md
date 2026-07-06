@@ -32,6 +32,9 @@ executing-plans → code review）。本節提供 phase 目標、關鍵證據、
 
 ### E1 — Stale-offer cancel/reprice sweep（最高優先）
 
+> **實作 plan 已寫好**（2026-07-06）：`docs/superpowers/plans/2026-07-06-e1-stale-offer-reprice.md`
+> — 5 tasks 含完整 code / TDD 步驟 / rollout runbook，直接用 superpowers:subagent-driven-development 執行。
+
 **目標**：offer 掛著不成交時不再永久卡死資金；quote 變了或過期後，reserved 在 ~90s–N min 內
 回到分配池以新 quote 重掛。
 
