@@ -238,6 +238,8 @@ sequenceDiagram
 
 7b. **Reprice sweep（E1）**：allocation 前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。
 
+7c. **Book-aware clamp（E2）**：步驟 7 建 DecisionPayload 前，每 symbol 每 tick 抓一次 public funding ticker（`GET /v2/ticker/f{sym}`，免認證，共用 FundingRateLimiter），把 quote rate 對齊 live book：`BID ≥ quote.rate` 且 `bid_size ≥ amount` 且 `bid_period ≤ BFX_CLAMP_TAKER_MAX_PERIOD_D` → 掛 quote.rate 直接吃單（taker，唯一保證成交路徑；fill 繼承 bid 的 rate/period）；否則掛 `ASK − 1 tick`（搶隊首），但競爭價低於 `quote.rate × (1 − BFX_CLAMP_MAX_DOWN_PCT)` 時維持 quote.rate（深度下移屬 signal 層職權）。ticker 抓失敗 → 全 fallback quote.rate（= 現狀）。`BFX_CLAMP_ENABLED=false`（預設）僅 log `clamp_would_adjust`。clamp enabled 時 7b 的 sweep ref 同步對齊 `max(quote ref, ASK − 1 tick)` — sustained spike 中不自砍 E2 剛掛的高價單。
+
 **成交與重部署**
 
 8. WS `foc EXECUTED` → `OrderFilled` → reserved 降、realized 升（見 3c）。credit 到期由 Bitfinex 自動觸發，**不需顯式 redeploy**：下一個 90s tick 重算 gap 時，被釋放的額度自然回到分配池。
@@ -258,6 +260,7 @@ sequenceDiagram
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
+| Book clamp（E2） | observe（enabled=false）；down floor 15%；taker ≤7d | `BFX_CLAMP_ENABLED`、`BFX_CLAMP_MAX_DOWN_PCT`、`BFX_CLAMP_TAKER_MAX_PERIOD_D` |
 
 ---
 
@@ -395,6 +398,7 @@ funding_candles        (訊號層輸入)
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。
 - **TaskGroup 監督**：任何 sub-task 例外 → ExceptionGroup 傳播 → daemon 非零退出，無 silent task death。
 - **I-RP reprice-down only**：sweep 只砍「高於現行 active quote 超過 tolerance 且夠老」的 offer；不砍低於 quote 的、不砍 spike 當小時的（min-age）、無 active quote 不砍。cancel 失敗 fail-safe（offer 留在 book）；`ExecutorAuthError` propagate。sweep 不直接改 ledger/tracker。
+- **I-BC book-clamp bounded**：execution clamp 只調 submit rate — POST/SKIP、period、amount 權威不變（signal gate + sizing 不動）、不回寫 quote、不碰 ledger/tracker。taker 需 `bid ≥ quote.rate`（fill ≥ signal floor）+ `bid_size ≥ amount` + `bid_period ≤ 上限`；down-clamp 以 `BFX_CLAMP_MAX_DOWN_PCT` 為界（超界回 quote.rate）；up-clamp 無上界（風險由 I-RP sweep 收斂，閒置有界 ~min-age）。ticker 失敗 fail-closed（行為 = 無 clamp）、fetch 錯誤不得擋 deploy。clamp enabled 時 sweep ref = `max(quote ref, ASK − 1 tick)`（防自砍）。
 
 ---
 

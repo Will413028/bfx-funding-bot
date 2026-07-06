@@ -4,6 +4,11 @@ Decoupling (spec 2026-05-29): the signal layer (1h candle boundary) decides
 the *terms* (POST{rate,period} / SKIP) and writes a StandingQuote here. The
 deployment reconciler (90s) reads active (POST + non-expired) quotes and
 deploys idle capital toward them without recomputing the signal.
+
+E2 (book-aware clamp, 2026-07-06): submit 前 deployment 層可在 policy 界內把
+rate 對齊 live book（taker / undercut / raise；ARCHITECTURE §4 步驟 7c）。
+StandingQuote.rate 仍是 POST/SKIP 閘門與 down-clamp floor 的權威 — clamp
+只調執行價，不回寫 quote。
 """
 from __future__ import annotations
 
