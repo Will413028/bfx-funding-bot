@@ -13,9 +13,14 @@ from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
 
-def _row(cell: str = "fUST_p2", week: int = 1_782_691_200_000) -> AttributionWeeklyRow:
+def _row(
+    cell: str = "fUST_p2",
+    week: int = 1_782_691_200_000,
+    env: str = "prod",
+    account: str = "default",
+) -> AttributionWeeklyRow:
     return AttributionWeeklyRow(
-        deployment_environment="prod", account_id="default", cell=cell,
+        deployment_environment=env, account_id=account, cell=cell,
         week_start_ms=week, week_end_ms=week + 604_800_000, n_fills=2,
         gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal("0.17"),
         capital_days=Decimal("1000"), realized_apr_net_pct=Decimal("6.205"),
@@ -32,6 +37,8 @@ async def app_client(sqlite_engine):
     async with factory() as s:
         s.add(_row())
         s.add(_row(cell="fUST_a30"))
+        # different realm — must never leak into the default-realm response
+        s.add(_row(cell="fUST_p2", env="canary"))
         await s.commit()
 
     app = FastAPI()
@@ -59,15 +66,37 @@ def test_weekly_returns_rows_camel_case(app_client):
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert len(data) == 2
+    # ordered by cell: 'fUST_a30' < 'fUST_p2'
+    assert [d["cell"] for d in data] == ["fUST_a30", "fUST_p2"]
     row = next(d for d in data if d["cell"] == "fUST_p2")
     assert row["weekStartMs"] == 1_782_691_200_000
     assert row["realizedAprNetPct"] == "6.205"
     assert row["baselineFrrAprNetPct"] is None
+    assert row["grossInterestUsdt"] == "0.2"
+    assert row["netInterestUsdt"] == "0.17"
+    # regression guard: _dec_str must not emit scientific notation ("1E+3")
+    # for whole-number Decimals.
+    assert row["capitalDays"] == "1000"
 
 
 def test_weekly_cell_filter(app_client):
     resp = app_client.get("/api/v1/attribution/weekly", params={"cell": "fUST_a30"})
     assert [d["cell"] for d in resp.json()["data"]] == ["fUST_a30"]
+
+
+def test_weekly_excludes_other_realm(app_client):
+    """Rows from a different deployment_environment/account_id must never
+    leak into the default-realm response — otherwise the FE weekly chart
+    (Task 7) would plot duplicate points per cell/week."""
+    resp = app_client.get("/api/v1/attribution/weekly")
+    data = resp.json()["data"]
+    assert len(data) == 2
+    assert all(d["cell"] in ("fUST_a30", "fUST_p2") for d in data)
+    # both default-realm rows for fUST_p2/fUST_a30 present exactly once each —
+    # the canary-realm fUST_p2 row seeded in app_client is excluded.
+    cells = [d["cell"] for d in data]
+    assert cells.count("fUST_p2") == 1
+    assert cells.count("fUST_a30") == 1
 
 
 def test_weekly_requires_auth(sqlite_engine):
