@@ -65,7 +65,7 @@ services:
       - sh
       - -c
       - |
-        python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed (frr arm may be stale)"
+        timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"
         python -m scripts.run_weekly_attribution
         python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
     depends_on:

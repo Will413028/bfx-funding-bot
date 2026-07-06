@@ -5,6 +5,8 @@ After=docker.service
 
 [Service]
 Type=oneshot
+# 整條 chain 上限 30min（ingest 步驟另有 timeout 600；防 systemd 端無限掛住）
+TimeoutStartSec=1800
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bfx-funding-bot
 ExecStart=/usr/bin/docker compose -f docker-compose.bot.yml --profile ops run --rm weekly-report
