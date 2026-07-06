@@ -191,3 +191,18 @@ export interface DailyEarning {
   date: string;
   amount: number;
 }
+
+// ── Attribution ──
+
+export interface WeeklyAttributionPoint {
+  cell: string;
+  weekStartMs: number;
+  weekEndMs: number;
+  nFills: number;
+  grossInterestUsdt: string;
+  netInterestUsdt: string;
+  capitalDays: string;
+  realizedAprNetPct: string | null;
+  baselineCloseAprNetPct: string | null;
+  baselineFrrAprNetPct: string | null;
+}

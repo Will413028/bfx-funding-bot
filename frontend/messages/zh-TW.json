@@ -10,7 +10,8 @@
     "history": "歷史記錄",
     "settings": "帳戶設定",
     "logout": "登出",
-    "pricing": "方案價格"
+    "pricing": "方案價格",
+    "attribution": "歸因分析"
   },
   "common": {
     "loading": "載入中...",
@@ -209,5 +210,15 @@
     "stopped": "已停止",
     "connected": "已連線",
     "disconnected": "已斷線"
+  },
+  "attribution": {
+    "title": "每週歸因",
+    "subtitle": "扣費後 APR — Bot vs Always-close vs AlwaysFRR",
+    "botLine": "Bot 實得（扣費）",
+    "closeLine": "Always-close",
+    "frrLine": "AlwaysFRR",
+    "loading": "載入中…",
+    "loadFailed": "歸因資料載入失敗",
+    "empty": "尚無歸因資料 — 每週排程尚未執行。"
   }
 }
