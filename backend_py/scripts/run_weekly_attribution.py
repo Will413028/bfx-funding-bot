@@ -17,7 +17,7 @@ import os
 import sys
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
@@ -184,10 +184,24 @@ async def persist_rows(
     account_id: str,
     deployment_environment: str,
 ) -> int:
-    """Upsert by PK（merge — sqlite/PG 通用；全量重算所以 merge 語意即覆蓋）。"""
+    """Full-recompute replace：單一 transaction 內先刪本 realm 既有 rows 再插新的。
+
+    event_log 是 append-only SoT、本表是純 read model，故 replace 語意讓表永遠
+    等於「以現在的 SoT 重算」。merge-only 只能新增/覆蓋、不能縮減：一旦
+    diagnostics（best-effort、30-90d prunable）把某 fill 重歸 unattributed，舊
+    (cell,week) row 會殘留舊 interest（read model 漏）。delete+insert 同 transaction
+    是 atomic（失敗 rollback，表不變）；空 rows 正確清空該 realm（SoT 無 fill →
+    表就該無該 realm）。delete 以 (env,account) 為界，不動其他 realm。
+    """
     async with session_factory() as session:
-        for r in rows:
-            await session.merge(AttributionWeeklyRow(
+        await session.execute(
+            delete(AttributionWeeklyRow).where(
+                AttributionWeeklyRow.account_id == account_id,
+                AttributionWeeklyRow.deployment_environment == deployment_environment,
+            )
+        )
+        session.add_all([
+            AttributionWeeklyRow(
                 deployment_environment=deployment_environment,
                 account_id=account_id,
                 cell=r.cell,
@@ -200,7 +214,9 @@ async def persist_rows(
                 realized_apr_net_pct=r.realized_apr_net_pct,
                 baseline_close_apr_net_pct=r.baseline_close_apr_net_pct,
                 baseline_frr_apr_net_pct=r.baseline_frr_apr_net_pct,
-            ))
+            )
+            for r in rows
+        ])
         await session.commit()
     return len(rows)
 
