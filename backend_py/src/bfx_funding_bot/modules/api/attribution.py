@@ -1,6 +1,7 @@
 """E3 (b) — per-cell weekly attribution 讀端點（operator 儀表；read-only）。"""
 from __future__ import annotations
 
+import logging
 import os
 from decimal import Decimal
 
@@ -12,6 +13,8 @@ from bfx_funding_bot.core.auth import Principal, require_user
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.schemas import WeeklyAttributionResponse
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
+
+log = logging.getLogger(__name__)
 
 
 def _dec_str(value: Decimal) -> str:
@@ -59,6 +62,10 @@ def build_attribution_router() -> APIRouter:
     # （否則 FE 每週有重複點）。與 loader 寫入時的 env 對齊（同 default）。
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
     deployment_environment = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
+    log.info(
+        "attribution_router filtering realm account_id=%s deployment_environment=%s",
+        account_id, deployment_environment,
+    )
 
     @router.get("/attribution/weekly")
     async def weekly(
