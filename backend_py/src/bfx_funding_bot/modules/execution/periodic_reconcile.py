@@ -22,6 +22,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Protocol
 
+from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
@@ -40,7 +41,9 @@ class _Probe(Protocol):
 
 
 class _Deployment(Protocol):
-    async def deploy(self) -> None: ...
+    async def deploy(
+        self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+    ) -> None: ...
 
 
 class PeriodicReconcile:
@@ -169,6 +172,6 @@ class PeriodicReconcile:
             )
         if self._deployment is not None:
             try:
-                await self._deployment.deploy()
+                await self._deployment.deploy(venue_offers=result.venue_offers)
             except Exception:  # deployment must never crash the reconcile backbone
                 log.exception("deployment_phase_failed")

@@ -59,6 +59,7 @@ class ReconcileResult:
     n_credits: int = 0
     reserved_drift_usdt: Decimal = Decimal("0")
     realized_drift_usdt: Decimal = Decimal("0")
+    venue_offers: tuple[ActiveFundingOffer, ...] = ()
 
 
 class _SymbolSnapshot(NamedTuple):
@@ -387,6 +388,7 @@ class BootRecovery:
             n_credits=agg_n_credits,
             reserved_drift_usdt=agg_reserved_drift,
             realized_drift_usdt=agg_realized_drift,
+            venue_offers=tuple(all_offers),
         )
 
     async def _fetch_offers(self, symbol: str) -> list[ActiveFundingOffer]:
