@@ -49,6 +49,29 @@ services:
       postgres:
         condition: service_healthy
 
+  # E3 weekly measurement chain（systemd timer bfx-weekly-report.timer 觸發，
+  # profiles: ["ops"] 讓 up -d 不啟動）：① funding_stats forward-fill（AlwaysFRR
+  # arm 資料）② attribution 落表 ③ G3 報告。步驟 ① 失敗不擋 ②③（|| echo；
+  # attribution/G3 對缺資料 fail-soft）。
+  weekly-report:
+    image: bfx-bot:local
+    profiles: ["ops"]
+    working_dir: /app
+    env_file: .env.runtime
+    restart: "no"
+    volumes:
+      - ${HOME}/bfx/reports:/reports
+    command:
+      - sh
+      - -c
+      - |
+        python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed (frr arm may be stale)"
+        python -m scripts.run_weekly_attribution
+        python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   bot:
     build:
       context: backend_py
