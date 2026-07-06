@@ -21,7 +21,14 @@ from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
-from bfx_funding_bot.modules.live_validation.live_attribution import ClampDiagnostic, G3Verdict
+from bfx_funding_bot.modules.live_validation.live_attribution import (
+    ClampDiagnostic,
+    FrrBenchmark,
+    G3Verdict,
+)
+
+# Bitfinex takes 15% of earned interest. Keep in sync with modules/backtest/config.py fee_rate.
+_FEE_RATE = Decimal("0.15")
 
 
 def _default_capital(environ: Mapping[str, str]) -> str:
@@ -32,7 +39,13 @@ def _default_capital(environ: Mapping[str, str]) -> str:
 
 
 def render_markdown(
-    *, verdict: G3Verdict, data_window: str, n_fills: int, clamp_diag: ClampDiagnostic
+    *,
+    verdict: G3Verdict,
+    data_window: str,
+    n_fills: int,
+    clamp_diag: ClampDiagnostic,
+    frr: FrrBenchmark,
+    fee_rate: Decimal,
 ) -> str:
     """Pure renderer — unit-testable without a DB."""
     honesty = [
@@ -73,6 +86,21 @@ def render_markdown(
             idle_arm_note,
         ]
 
+    frr_section = ["", "## AlwaysFRR benchmark (cap-increase gating bar)"]
+    if frr.available:
+        frr_section += [
+            f"- bot − AlwaysFRR spread: {frr.spread}%  (95% CI [{frr.ci_lo}, {frr.ci_hi}])",
+            "- POLICY: cap 再加碼前，本 spread 需非負（贏不了免費的 FRR auto-renew"
+            " = 零附加值）且 verdict 為最新 PASS。",
+            "- Rate source: funding_stats.frr × 365 (≈ ticker per-day FRR;"
+            " band-guarded, see live_attribution.FRR_ANNUALIZATION).",
+        ]
+    else:
+        frr_section += [
+            f"- **unavailable** — {frr.reason}",
+            "- POLICY: benchmark unavailable 時 cap 一律不加碼。",
+        ]
+
     lines = [
         "# G3 Live Validation — fUST MeanReversion (a30, p2), deployed ema_span=24/thr=0.5",
         "",
@@ -82,11 +110,15 @@ def render_markdown(
         f"- **Verdict: {verdict.state.value}**",
         f"- Headline bot-vs-idle (absolute return on budget since inception): {verdict.headline_bot_vs_idle}%",
         f"- bot-vs-idle 95% CI: [{verdict.ci_lo}, {verdict.ci_hi}]",
+        f"- Headline bot-vs-idle **fee-adjusted** (×{Decimal('1') - fee_rate}): "
+        f"{verdict.headline_bot_vs_idle * (Decimal('1') - fee_rate)}%"
+        " — Bitfinex takes 15% of interest; gross headline kept for continuity",
         "",
         "### Reasons",
         *[f"- {r}" for r in verdict.reasons],
         "",
         *mr_alpha,
+        *frr_section,
         "",
         *honesty,
         "",
@@ -99,7 +131,13 @@ def render_markdown(
     return "\n".join(lines)
 
 
-def _verdict_to_json(v: G3Verdict, clamp_diag: ClampDiagnostic) -> dict[str, object]:
+def _verdict_to_json(
+    v: G3Verdict,
+    clamp_diag: ClampDiagnostic,
+    *,
+    frr: FrrBenchmark,
+    fee_rate: Decimal,
+) -> dict[str, object]:
     return {
         "state": v.state.value,
         "headline_bot_vs_idle": str(v.headline_bot_vs_idle),
@@ -112,6 +150,19 @@ def _verdict_to_json(v: G3Verdict, clamp_diag: ClampDiagnostic) -> dict[str, obj
             "ci_lo": str(v.mr_alpha_ci_lo),
             "ci_hi": str(v.mr_alpha_ci_hi),
             "available": v.mr_alpha_available,
+        },
+        "fee_adjusted": {
+            "fee_rate": str(fee_rate),
+            "headline_bot_vs_idle_net": str(
+                v.headline_bot_vs_idle * (Decimal("1") - fee_rate)
+            ),
+        },
+        "frr_benchmark": {
+            "available": frr.available,
+            "spread": str(frr.spread),
+            "ci_lo": str(frr.ci_lo),
+            "ci_hi": str(frr.ci_hi),
+            "reason": frr.reason,
         },
         "over_deploy": {
             "cap": str(clamp_diag.cap),
@@ -135,17 +186,20 @@ async def _amain() -> int:
 
     from scripts._g3_loaders import build_verdict_from_neon
 
-    verdict, data_window, n_fills, clamp_diag = await build_verdict_from_neon(
+    verdict, data_window, n_fills, clamp_diag, frr = await build_verdict_from_neon(
         capital=Decimal(args.capital)
     )
 
     out = Path(args.out)
     out.write_text(
         render_markdown(
-            verdict=verdict, data_window=data_window, n_fills=n_fills, clamp_diag=clamp_diag
+            verdict=verdict, data_window=data_window, n_fills=n_fills, clamp_diag=clamp_diag,
+            frr=frr, fee_rate=_FEE_RATE,
         )
     )
-    out.with_suffix(".json").write_text(json.dumps(_verdict_to_json(verdict, clamp_diag), indent=2))
+    out.with_suffix(".json").write_text(
+        json.dumps(_verdict_to_json(verdict, clamp_diag, frr=frr, fee_rate=_FEE_RATE), indent=2)
+    )
     print(f"wrote {out} and {out.with_suffix('.json')}")
     return 0
 

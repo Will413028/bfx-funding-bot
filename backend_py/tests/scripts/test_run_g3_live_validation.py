@@ -2,11 +2,21 @@ from decimal import Decimal
 
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     ClampDiagnostic,
+    FrrBenchmark,
     VerdictState,
     check_deployment_anchor,
     check_nav_anchor,
     decide_verdict,
 )
+
+_FEE = Decimal("0.15")
+
+
+def _frr() -> FrrBenchmark:
+    return FrrBenchmark(
+        available=True, spread=Decimal("0.01"),
+        ci_lo=Decimal("-0.005"), ci_hi=Decimal("0.02"), reason=None,
+    )
 
 
 def _diag(peak: str) -> ClampDiagnostic:
@@ -49,7 +59,8 @@ def test_render_markdown_contains_verdict_and_headline():
 
     v = _verdict({})
     md = render_markdown(
-        verdict=v, data_window="2026-05-30..2026-06-30", n_fills=12, clamp_diag=_diag("400")
+        verdict=v, data_window="2026-05-30..2026-06-30", n_fills=12, clamp_diag=_diag("400"),
+        frr=_frr(), fee_rate=_FEE,
     )
     assert "PASS" in md
     assert "0.06" in md
@@ -61,7 +72,9 @@ def test_render_markdown_mr_alpha_section_available():
     from scripts.run_g3_live_validation import render_markdown
 
     v = _verdict({})  # mr_alpha_available True by default
-    md = render_markdown(verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"))
+    md = render_markdown(
+        verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"), frr=_frr(), fee_rate=_FEE
+    )
     assert "MR timing alpha" in md
     assert "secondary diagnostic" in md
     assert "0% by construction" in md
@@ -74,7 +87,9 @@ def test_render_markdown_mr_alpha_section_unavailable():
     from scripts.run_g3_live_validation import render_markdown
 
     v = _verdict({"mr_alpha_available": False})
-    md = render_markdown(verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"))
+    md = render_markdown(
+        verdict=v, data_window="x", n_fills=12, clamp_diag=_diag("400"), frr=_frr(), fee_rate=_FEE
+    )
     assert "MR timing alpha" in md
     assert "unavailable" in md
     assert "MR alpha spread" not in md  # numeric lines must NOT render when unavailable
@@ -85,7 +100,9 @@ def test_render_markdown_insufficient_data_states_caveat():
 
     v = _verdict({"n_windows": 3})
     assert v.state is VerdictState.INSUFFICIENT_DATA
-    md = render_markdown(verdict=v, data_window="n/a", n_fills=0, clamp_diag=_diag("400"))
+    md = render_markdown(
+        verdict=v, data_window="n/a", n_fills=0, clamp_diag=_diag("400"), frr=_frr(), fee_rate=_FEE
+    )
     assert "INSUFFICIENT_DATA" in md
 
 
@@ -94,7 +111,8 @@ def test_render_markdown_prints_over_deploy_line_when_clamped():
 
     v = _verdict({"n_windows": 1})
     md = render_markdown(
-        verdict=v, data_window="2026-05-24..2026-05-31", n_fills=4, clamp_diag=_diag("863")
+        verdict=v, data_window="2026-05-24..2026-05-31", n_fills=4, clamp_diag=_diag("863"),
+        frr=_frr(), fee_rate=_FEE,
     )
     assert "clamped to budget" in md
     assert "863" in md
@@ -104,7 +122,9 @@ def test_render_markdown_no_over_deploy_line_when_within_budget():
     from scripts.run_g3_live_validation import render_markdown
 
     v = _verdict({"n_windows": 1})
-    md = render_markdown(verdict=v, data_window="x", n_fills=1, clamp_diag=_diag("400"))
+    md = render_markdown(
+        verdict=v, data_window="x", n_fills=1, clamp_diag=_diag("400"), frr=_frr(), fee_rate=_FEE
+    )
     assert "clamped to budget" not in md
 
 
@@ -112,13 +132,13 @@ def test_verdict_to_json_includes_over_deploy_block():
     from scripts.run_g3_live_validation import _verdict_to_json
 
     v = _verdict({"n_windows": 1})
-    j = _verdict_to_json(v, _diag("863"))
+    j = _verdict_to_json(v, _diag("863"), frr=_frr(), fee_rate=_FEE)
     assert "over_deploy" in j
     od = j["over_deploy"]
     assert od["cap"] == "570"
     assert od["peak_concurrent"] == "863"
     assert od["detected"] is True
-    j2 = _verdict_to_json(v, _diag("400"))
+    j2 = _verdict_to_json(v, _diag("400"), frr=_frr(), fee_rate=_FEE)
     assert j2["over_deploy"]["detected"] is False
     # reframed keys
     assert j["headline_bot_vs_idle"] == "0.06"
