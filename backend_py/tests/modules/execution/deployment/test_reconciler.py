@@ -4,7 +4,10 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.core.errors import ExecutorAuthError
+from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
     StandingQuoteStore,
@@ -140,7 +143,7 @@ class _SeqSafety:
 
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
-           available=None, event_sink=None):
+           available=None, event_sink=None, canceller=None, reprice=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -156,6 +159,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.CANARY,
+        canceller=canceller,
+        reprice=reprice,
     )
     return rec, ex, tracker, safety
 
@@ -516,3 +521,122 @@ async def test_independent_per_symbol_gap_pools():
     # Lock that caps["fUST"]=3000 (the map) drives sizing, NOT the 570 _ctx() env
     # fallback — the precise global-cap divergence this task closes.
     assert sum(s.offer_amount_usdt for s in submitted) > 570
+
+
+# ---------------------------------------------------------------------------
+# E1: stale-offer reprice sweep (execution layer). Cancel wiring runs BEFORE
+# allocate_gap so freed exposure is visible to the reconciler's own reserved
+# read next tick (release is reconciled elsewhere — WS foc / next reconcile —
+# single-writer ledger; this sweep never touches ledger/tracker/position).
+# ---------------------------------------------------------------------------
+
+
+class _FakeCanceller:
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx) -> None:
+        self.cancelled.append(venue_offer_id)
+
+
+def _venue_offer(
+    voi: str, rate: float, age_ms: int = 3_600_000, symbol: str = "fUST",
+) -> ActiveFundingOffer:
+    # _build 的 clock 固定回 1_000（ms）；mts_created 允許負值（純 int 運算）
+    return ActiveFundingOffer(
+        venue_offer_id=voi, symbol=symbol, amount=D("200"), rate=rate,
+        period_days=2, mts_created=1_000 - age_ms, status="ACTIVE",
+    )
+
+
+_REPRICE = RepricePolicy(
+    enabled=True, tolerance_pct=0.10, min_age_ms=1_800_000, max_cancels_per_tick=3,
+)
+
+
+async def test_sweep_cancels_stale_offer_when_enabled():
+    canc = _FakeCanceller()
+    rec, _ex, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
+        canceller=canc, reprice=_REPRICE,
+    )
+    # quote rate 0.00012；offer 0.001 遠超 +10% 且齡 60min
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == ["42"]
+
+
+async def test_sweep_observe_mode_logs_but_does_not_cancel():
+    canc = _FakeCanceller()
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        canceller=canc,
+        reprice=RepricePolicy(
+            enabled=False, tolerance_pct=0.10, min_age_ms=1_800_000,
+            max_cancels_per_tick=3,
+        ),
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == []
+    assert len(ex.submitted) == 1  # observe mode 不影響正常部署
+
+
+async def test_sweep_no_active_quote_no_cancel():
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[], canceller=canc, reprice=_REPRICE,
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == []  # SKIP/過期 → resting 高價單留作 spike option
+
+
+async def test_sweep_respects_per_tick_budget():
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
+        canceller=canc,
+        reprice=RepricePolicy(
+            enabled=True, tolerance_pct=0.10, min_age_ms=1_800_000,
+            max_cancels_per_tick=2,
+        ),
+    )
+    offers = tuple(_venue_offer(str(i), 0.001 + i * 0.0001) for i in range(5))
+    await rec.deploy(venue_offers=offers)
+    assert len(canc.cancelled) == 2
+    assert canc.cancelled == ["4", "3"]  # 最超價的先砍
+
+
+async def test_sweep_cancel_error_does_not_block_deploy():
+    class _BoomCanceller(_FakeCanceller):
+        async def cancel(self, **kwargs) -> None:
+            raise RuntimeError("venue 500")
+
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        canceller=_BoomCanceller(), reprice=_REPRICE,
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert len(ex.submitted) == 1  # sweep 失敗不影響 gap 部署
+
+
+async def test_sweep_auth_error_propagates():
+    class _AuthBoom(_FakeCanceller):
+        async def cancel(self, **kwargs) -> None:
+            raise ExecutorAuthError("digest invalid")
+
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
+        canceller=_AuthBoom(), reprice=_REPRICE,
+    )
+    with pytest.raises(ExecutorAuthError):
+        await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+
+
+async def test_no_reprice_config_is_noop():
+    # reprice=None（預設）→ 與現狀 byte-identical
+    canc = _FakeCanceller()
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == []
+    assert len(ex.submitted) == 1
