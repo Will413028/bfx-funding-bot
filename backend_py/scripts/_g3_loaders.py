@@ -26,9 +26,12 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     PositionStateRow,
 )
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
+from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     ClampDiagnostic,
     FillRecord,
+    FrrBenchmark,
     G3Verdict,
     MarketRatePoint,
     _fill_duration_days,
@@ -41,6 +44,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     check_nav_anchor,
     clamp_active_window,
     decide_verdict,
+    frr_points_from_stats,
     open_principal_at,
     weekly_window_bounds,
 )
@@ -79,8 +83,8 @@ async def build_verdict_from_neon(
     *,
     capital: Decimal,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
-) -> tuple[G3Verdict, str, int, ClampDiagnostic]:
-    """Query Postgres and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag).
+) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
+    """Query Postgres and run G3 attribution.  Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
 
     I/O shell only: fetches fills/releases/candles/position_state, builds the
     FillRecord + MarketRatePoint domain lists, then delegates to the pure
@@ -151,6 +155,29 @@ async def build_verdict_from_neon(
                 end_mts=rate_end_ms,
             )
 
+            # ── 3b. Fetch funding_stats range (AlwaysFRR arm; same window) ────
+            # funding_stats is shared market data (realm-agnostic), queried over
+            # the SAME [rate_start_ms, rate_end_ms] window as the candle series.
+            frr_rows = (
+                await session.execute(
+                    select(FundingStatRow)
+                    .where(
+                        FundingStatRow.symbol == _MARKET_SYMBOL,
+                        FundingStatRow.mts >= rate_start_ms,
+                        FundingStatRow.mts <= rate_end_ms,
+                    )
+                    .order_by(FundingStatRow.mts)
+                )
+            ).scalars().all()
+            frr_stats = [
+                FundingStat(
+                    symbol=r.symbol, mts=r.mts,
+                    frr=Decimal(str(r.frr)) if r.frr is not None else None,
+                    avg_period=Decimal(str(r.avg_period)) if r.avg_period is not None else None,
+                )
+                for r in frr_rows
+            ]
+
             # ── 4. Fetch observed_realized from position_state snapshot ───────
             pos_stmt = (
                 select(PositionStateRow)
@@ -200,6 +227,7 @@ async def build_verdict_from_neon(
         market_rate_points=market_rate_points,
         observed_realized=observed_realized,
         capital=capital,
+        frr_points=frr_points_from_stats(frr_stats),
     )
 
 
@@ -209,11 +237,13 @@ def _compute_verdict(
     market_rate_points: list[MarketRatePoint],
     observed_realized: Decimal,
     capital: Decimal,
-) -> tuple[G3Verdict, str, int, ClampDiagnostic]:
+    frr_points: list[MarketRatePoint] | None = None,
+) -> tuple[G3Verdict, str, int, ClampDiagnostic, FrrBenchmark]:
     """Pure G3 verdict over already-built domain lists. No I/O.
 
-    Returns (verdict, data_window_str, n_fills, clamp_diag).
+    Returns (verdict, data_window_str, n_fills, clamp_diag, frr_bench).
     """
+    frr_points = frr_points or []
     n_fills = len(fills)
 
     # ── Compute windows + attribution ────────────────────────────────────────
@@ -236,6 +266,15 @@ def _compute_verdict(
         [p for p in market_rate_points if min_ts <= p.mts < max_ts]
         if (fills or market_rate_points)
         else []
+    )
+
+    # AlwaysFRR benchmark default — MUST be defined before the fills/else split so
+    # the empty-fills else path returns a full 5-tuple (no UnboundLocalError). The
+    # fills branch overwrites it below when frr_points are present.
+    frr_bench = FrrBenchmark(
+        available=False, spread=Decimal("0"), ci_lo=Decimal("0"),
+        ci_hi=Decimal("0"),
+        reason="funding_stats empty — run backfill (E3 Task 8)",
     )
 
     if fills and bounds:
@@ -267,6 +306,37 @@ def _compute_verdict(
         # MR-alpha is trustworthy only with real market-rate coverage and an
         # in-band series. The band check is deferred to band_reason below.
         mr_alpha_available = len(window_rate_points) > 0
+
+        # AlwaysFRR benchmark (policy bar; NOT fed into decide_verdict). Statistical
+        # handling is isomorphic to the mr_alpha block above: paired_active_returns
+        # already returns a per-window diff list (not a tuple list), bootstrap_ci
+        # takes mean_fn as its second positional stat_fn, and the headline spread is
+        # the full-span single-window diff. The band guard is the "double insurance"
+        # deferred from Task 2: an out-of-band FRR series marks the arm unavailable
+        # (reason = the ValueError) rather than crashing.
+        if frr_points:
+            try:
+                assert_market_rate_band([p.rate for p in frr_points])
+            except ValueError as exc:
+                frr_bench = FrrBenchmark(
+                    available=False, spread=Decimal("0"), ci_lo=Decimal("0"),
+                    ci_hi=Decimal("0"), reason=str(exc),
+                )
+            else:
+                frr_arm = attribute_passive(frr_points, window_bounds=bounds)
+                frr_diffs = paired_active_returns(strat_outcomes, frr_arm)  # already a diff list
+                if frr_diffs:
+                    lo, hi = bootstrap_ci(frr_diffs, mean_fn)
+                    single_frr = attribute_passive(frr_points, window_bounds=[(min_ts, max_ts)])
+                    spread = single_strat[0].net_monthly - single_frr[0].net_monthly
+                    frr_bench = FrrBenchmark(
+                        available=True, spread=spread, ci_lo=lo, ci_hi=hi, reason=None,
+                    )
+                else:
+                    frr_bench = FrrBenchmark(
+                        available=False, spread=Decimal("0"), ci_lo=Decimal("0"),
+                        ci_hi=Decimal("0"), reason="no overlapping windows",
+                    )
 
         full_clamp = clamp_active_window(fills, cap=capital)
         total_capital_days = full_clamp.capital_days
@@ -375,4 +445,4 @@ def _compute_verdict(
     else:
         data_window = "n/a"
 
-    return verdict, data_window, n_fills, clamp_diag
+    return verdict, data_window, n_fills, clamp_diag, frr_bench

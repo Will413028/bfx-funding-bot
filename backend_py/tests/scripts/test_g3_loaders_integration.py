@@ -18,7 +18,7 @@ async def test_build_verdict_from_neon_returns_g3_verdict():
     from bfx_funding_bot.modules.live_validation.live_attribution import G3Verdict
     from scripts._g3_loaders import build_verdict_from_neon
 
-    verdict, data_window, n_fills = await build_verdict_from_neon(capital=Decimal("570"))
+    verdict, data_window, n_fills, *_ = await build_verdict_from_neon(capital=Decimal("570"))
 
     assert isinstance(verdict, G3Verdict)
     assert isinstance(data_window, str)

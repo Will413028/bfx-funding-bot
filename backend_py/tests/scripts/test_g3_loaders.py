@@ -77,7 +77,7 @@ def test_compute_verdict_frr_scale_points_mark_mr_alpha_unavailable_not_unreliab
     # verdict stays data-driven (1 window → INSUFFICIENT_DATA), never UNRELIABLE.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("1.1e-06")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    verdict, _window, n_fills, _clamp = _compute_verdict(
+    verdict, _window, n_fills, _clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
@@ -91,7 +91,7 @@ def test_compute_verdict_legit_points_mr_alpha_available():
     # window stays data-driven (INSUFFICIENT_DATA), never UNRELIABLE-by-band.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    verdict, _window, n_fills, _clamp = _compute_verdict(
+    verdict, _window, n_fills, _clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert not any("plausible per-day band" in r for r in verdict.reasons)
@@ -105,7 +105,7 @@ def test_compute_verdict_headline_is_absolute_active_return():
     # active net_monthly = 570*3e-4*2 / 570 * 100 = 0.06 (idle subtracts 0).
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    verdict, _window, _n, _clamp = _compute_verdict(
+    verdict, _window, _n, _clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert verdict.headline_bot_vs_idle == Decimal("570") * Decimal("0.0003") * Decimal("2") / C * Decimal("100")
@@ -123,7 +123,7 @@ def test_compute_verdict_no_coverage_marks_mr_alpha_unavailable_primary_unblocke
     # second fill is still open at max_ts) keeps the deployment anchor clean.
     week_ms = 7 * 24 * 3600 * 1000
     fills = [_fill(0, "285", "0.0003"), _fill(week_ms + 1000, "285", "0.0003")]
-    verdict, _window, _n, _clamp = _compute_verdict(
+    verdict, _window, _n, _clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=[], observed_realized=Decimal("285"), capital=C
     )
     assert verdict.mr_alpha_available is False
@@ -134,12 +134,14 @@ def test_compute_verdict_no_coverage_marks_mr_alpha_unavailable_primary_unblocke
 
 
 def test_compute_verdict_empty_is_insufficient_no_crash():
-    verdict, window, n_fills, _clamp = _compute_verdict(
+    verdict, window, n_fills, _clamp, _frr = _compute_verdict(
         fills=[], market_rate_points=[], observed_realized=Decimal("0"), capital=C
     )
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
     assert n_fills == 0
     assert window == "n/a"
+    # empty-fills else path must still return a defined FrrBenchmark (no UnboundLocalError).
+    assert _frr.available is False
 
 
 def test_compute_verdict_capital_days_is_usdt_days_not_divided():
@@ -150,7 +152,7 @@ def test_compute_verdict_capital_days_is_usdt_days_not_divided():
     # diagnostic: one full-budget fill peaks at the cap with no over-deploy.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "570", "0.0003")]
-    _verdict, _window, _n, clamp = _compute_verdict(
+    _verdict, _window, _n, clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("570"), capital=C
     )
     assert clamp.peak_concurrent == Decimal("570")
@@ -161,7 +163,7 @@ def test_compute_verdict_over_deploy_populates_diagnostic():
     # 3 fills 300 each = 900 concurrent > 570 → over-deploy diagnostic set.
     pts = [MarketRatePoint(mts=1000 + i, rate=Decimal("0.0002")) for i in range(5)]
     fills = [_fill(1000, "300", "0.0003") for _ in range(3)]
-    _verdict, _window, _n, clamp = _compute_verdict(
+    _verdict, _window, _n, clamp, _frr = _compute_verdict(
         fills=fills, market_rate_points=pts, observed_realized=Decimal("900"), capital=C
     )
     assert clamp.peak_concurrent == Decimal("900")
@@ -212,7 +214,7 @@ async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
         await upsert_candles(s, target + decoys)
         await s.commit()
 
-    verdict, _window, n_fills, _clamp = await build_verdict_from_neon(
+    verdict, _window, n_fills, _clamp, _frr = await build_verdict_from_neon(
         capital=C, session_factory=g3_factory
     )
     # A correct fUST/p2/1h query reads the frr-scale target → band caveat fires
@@ -222,6 +224,8 @@ async def test_build_verdict_queries_only_fust_p2_1h_cell(g3_factory):
     assert verdict.mr_alpha_available is False
     assert any("plausible per-day band" in r for r in verdict.reasons)
     assert n_fills == 0
+    # No funding_stats seeded → AlwaysFRR arm unavailable (not a crash).
+    assert _frr.available is False
 
 
 @pytest.mark.asyncio
@@ -236,10 +240,12 @@ async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factor
         await upsert_candles(s, candles)
         await s.commit()
 
-    verdict, _window, n_fills, _clamp = await build_verdict_from_neon(
+    verdict, _window, n_fills, _clamp, _frr = await build_verdict_from_neon(
         capital=C, session_factory=g3_factory
     )
     assert verdict.state is VerdictState.INSUFFICIENT_DATA
     assert not any("plausible per-day band" in r for r in verdict.reasons)
     assert n_fills == 0
     assert verdict.mr_alpha_available is False
+    # No funding_stats seeded → AlwaysFRR arm unavailable (not a crash).
+    assert _frr.available is False
