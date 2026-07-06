@@ -225,7 +225,7 @@ class _FakeDeployment:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def deploy(self) -> None:
+    async def deploy(self, *, venue_offers=()) -> None:
         self.calls += 1
 
 
@@ -273,7 +273,7 @@ async def test_deployment_exception_does_not_crash_loop():
         def __init__(self) -> None:
             self.calls = 0
 
-        async def deploy(self) -> None:
+        async def deploy(self, *, venue_offers=()) -> None:
             self.calls += 1
             raise RuntimeError("deploy boom")
 
@@ -357,3 +357,36 @@ async def test_loop_drives_aggregate_recovery_and_flags_drift():
         t == HealthTarget.RECONCILE and s == HealthStatus.DEGRADED
         for (t, s, _f) in probe.updates
     )
+
+
+@pytest.mark.asyncio
+async def test_deploy_receives_venue_offers_from_reconcile():
+    from decimal import Decimal
+
+    from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+
+    offer = ActiveFundingOffer(
+        venue_offer_id="42", symbol="fUST", amount=Decimal("200"), rate=0.001,
+        period_days=2, mts_created=0, status="ACTIVE",
+    )
+
+    class _OfferRecovery:
+        async def run(self) -> ReconcileResult:
+            return ReconcileResult(
+                n_claimed=0, n_released=0, n_failed=0, venue_offers=(offer,),
+            )
+
+    class _CapturingDeployment:
+        def __init__(self) -> None:
+            self.received: list[tuple] = []
+
+        async def deploy(self, *, venue_offers=()) -> None:
+            self.received.append(venue_offers)
+
+    dep = _CapturingDeployment()
+    pr = PeriodicReconcile(
+        recovery=_OfferRecovery(), probe=_FakeProbe(), interval_s=90,
+        deployment=dep,
+    )
+    await pr._tick()
+    assert dep.received == [(offer,)]

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Protocol
 
+from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.deployment.sizing import (
     allocate_gap,
     effective_min_usdt,
@@ -108,7 +109,14 @@ class DeploymentReconciler:
         # used for the per-symbol balance clamp.
         self._cell_symbol: dict[str, str] = {c.cell_id: c.symbol for c in cells}
 
-    async def deploy(self) -> None:
+    async def deploy(
+        self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+    ) -> None:
+        # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
+        # (E1 stale-offer reprice). Not yet consumed here — reprice/cancel
+        # wiring lands in a later task; accepting the param now keeps this
+        # the single production `_Deployment` conformer in sync with the
+        # protocol so periodic_reconcile's call doesn't TypeError in prod.
         now = self._clock()
         # Phase 2: each configured currency is an INDEPENDENT gap pool. The
         # reconciler is the real-money sizing authority, so the sizing math runs

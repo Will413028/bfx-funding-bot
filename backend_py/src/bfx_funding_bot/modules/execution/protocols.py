@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from uuid import UUID
 
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
@@ -74,6 +75,23 @@ class ExecutorPort(Protocol):
     async def submit(
         self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder: ...
+
+
+@runtime_checkable
+class CancelPort(Protocol):
+    """Venue funding-offer cancel（只有 live executor 實作；paper 無 venue offer）。
+
+    對應 BitfinexLiveExecutor.cancel：CancelRequested/CancelAcknowledged audit
+    與 release 路徑（WS foc → ReservationReleased）都在那一側，呼叫方不碰 ledger。
+    """
+    async def cancel(
+        self,
+        *,
+        venue_offer_id: str,
+        signal_correlation_id: UUID,
+        account_id: str,
+        ctx: AccountContext,
+    ) -> None: ...
 
 
 class FillTracker(Protocol):
