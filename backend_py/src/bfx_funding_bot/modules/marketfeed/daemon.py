@@ -59,6 +59,7 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
@@ -80,6 +81,7 @@ from bfx_funding_bot.modules.execution.middleware import (
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
+    CancelPort,
     Credentials,
     ExecutorPort,
     GuardRule,
@@ -1054,6 +1056,13 @@ async def build_daemon(
             clock=lambda: int(time.time() * 1000),
             event_sink=stdout_sink,
             phase=config.phase,
+            # E1 reprice sweep：canceller 用 RAW executor（middleware onion 只包
+            # submit；cancel 的 audit/retry 已在 BitfinexLiveExecutor 內建）。
+            # isinstance(CancelPort) 是 runtime_checkable 結構檢查 — paper
+            # executor 無 cancel → None → sweep 恆 noop（defense-in-depth，
+            # 本區塊本來就 live-only）。
+            canceller=executor if isinstance(executor, CancelPort) else None,
+            reprice=policy_from_env(os.environ),
         )
         periodic_reconcile = PeriodicReconcile(
             recovery=runtime_recovery,
