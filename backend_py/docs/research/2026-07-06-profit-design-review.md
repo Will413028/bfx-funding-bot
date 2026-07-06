@@ -100,6 +100,11 @@ executing-plans → code review）。本節提供 phase 目標、關鍵證據、
 
 ### E3 — 量測自動化（其他一切決策 gated 在這）
 
+> **實作 plan 已寫好**（2026-07-06）：`docs/superpowers/plans/2026-07-06-e3-measurement-automation.md`
+> — 8 tasks 含完整 code / TDD 步驟 / VM rollout runbook（7-reader 研究 + 5-verifier Opus 驗證過），直接用
+> superpowers:subagent-driven-development 執行（Task 8 VM 步驟為人工 gate）。刻意差異：WFO matrix 的
+> AlwaysFRR arm 延後（撞 P1 G13 step③ 同函式）、frr×365 換算雙保險、per-cell 走 diagnostics DECISION join。
+
 **目標**：把 G3 從手動一次性腳本變成每週自動儀表；operator 隨時看得到 per-cell 扣費後
 realized APR vs 兩條 benchmark。
 
