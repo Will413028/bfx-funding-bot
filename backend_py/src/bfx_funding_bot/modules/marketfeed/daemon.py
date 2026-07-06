@@ -760,7 +760,8 @@ async def build_daemon(
     event_store = PostgresEventStore(deployment_environment=env_str)
     persister = EventStorePersister(store=event_store, session_factory=session_factory)
     diagnostics = DiagnosticsSink(
-        session_factory=session_factory, deployment_environment=env_str,
+        session_factory=session_factory, account_id=account_id,
+        deployment_environment=env_str,
     )
     async with session_factory() as snap_session:
         ledger = await PaperPositionLedger.from_snapshot(

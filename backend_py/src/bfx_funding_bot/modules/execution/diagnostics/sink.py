@@ -58,9 +58,11 @@ class DiagnosticsSink:
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
+        account_id: str,
         deployment_environment: str,
     ) -> None:
         self._sf = session_factory
+        self._account_id = account_id
         self._env = deployment_environment
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -70,9 +72,14 @@ class DiagnosticsSink:
         kind = _KIND_BY_EVENT_TYPE.get(str(event.get("event_type")))
         if kind is None:
             return  # operational / unknown — not forensic, dropped
+        # account_id is sink-authoritative (mirror deployment_environment=self._env):
+        # the real signal-engine decision event dict carries no account_id, so relying
+        # on event.get(..., "default") mis-tagged every decision row "default" while
+        # event_log fills carry the configured BFX_ACCOUNT_ID → per-cell attribution
+        # join (scid→cell via diagnostics) silently failed. The sink knows its account.
         await self._insert(
             kind=kind,
-            account_id=str(event.get("account_id", "default")),
+            account_id=self._account_id,
             payload=event,
             occurred_at=_occurred_at(event),
         )
@@ -80,7 +87,7 @@ class DiagnosticsSink:
     async def handle_cancel_requested(self, event: CancelRequested) -> None:
         await self._insert(
             kind=DiagnosticKind.CANCEL_AUDIT,
-            account_id=event.account_id,
+            account_id=self._account_id,
             payload={
                 "event_type": EventType.CANCEL_REQUESTED.value,
                 "venue_offer_id": event.venue_offer_id,
@@ -93,7 +100,7 @@ class DiagnosticsSink:
     async def handle_cancel_acknowledged(self, event: CancelAcknowledged) -> None:
         await self._insert(
             kind=DiagnosticKind.CANCEL_AUDIT,
-            account_id=event.account_id,
+            account_id=self._account_id,
             payload={
                 "event_type": EventType.CANCEL_ACKNOWLEDGED.value,
                 "venue_offer_id": event.venue_offer_id,
