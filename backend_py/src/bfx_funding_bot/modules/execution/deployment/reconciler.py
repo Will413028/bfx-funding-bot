@@ -14,6 +14,13 @@ from typing import Any, Protocol
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.rest import FundingTicker
+from bfx_funding_bot.modules.execution.deployment.book_clamp import (
+    TICK,
+    ClampBranch,
+    ClampPolicy,
+    clamp_rate,
+)
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
     stale_offers,
@@ -60,6 +67,10 @@ class _EventSinkProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
+class _TickerSourceProtocol(Protocol):
+    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker: ...
+
+
 class DeploymentReconciler:
     def __init__(
         self,
@@ -84,6 +95,8 @@ class DeploymentReconciler:
         phase: Phase,
         canceller: CancelPort | None = None,
         reprice: RepricePolicy | None = None,
+        ticker_source: _TickerSourceProtocol | None = None,
+        clamp: ClampPolicy | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -110,6 +123,8 @@ class DeploymentReconciler:
         self._phase = phase
         self._canceller = canceller
         self._reprice = reprice
+        self._ticker_source = ticker_source
+        self._clamp = clamp
         # cell_id → strategy, for the structured ORDER_SUBMIT event envelope.
         self._cell_strategy: dict[str, StrategyName] = {
             c.cell_id: c.strategy for c in cells
@@ -153,6 +168,26 @@ class DeploymentReconciler:
             )
             symbol_cells = [c for c in self._cells
                             if self._cell_symbol[c.cell_id] == symbol]
+            # E2 book-aware clamp：每 symbol 每 tick 一次 public ticker（免認證，
+            # 走共用 FundingRateLimiter，~2 call/90s ≪ 30/min budget）。抓不到
+            # → ticker=None → 本 tick 全 fallback（= 現狀行為）；絕不擋 deploy。
+            ticker: FundingTicker | None = None
+            if self._clamp is not None and self._ticker_source is not None:
+                try:
+                    ticker = await self._ticker_source.get_funding_ticker(symbol=symbol)
+                except Exception:
+                    log.warning("clamp_ticker_fetch_failed symbol=%s", symbol, exc_info=True)
+            # clamp enabled 時 sweep ref 對齊 book 競爭價（新掛單就掛在這個價位）：
+            # 否則 sustained spike 中 sweep 會把 E2 剛掛的高價單當 stale 自砍
+            # （cancel/repost churn）。只會抬高 ref（更少 cancel、更保守）；
+            # observe mode 不對齊（零行為差）。
+            book_competitive = (
+                round(ticker.ask - TICK, 10)
+                if ticker is not None
+                and self._clamp is not None and self._clamp.enabled
+                and ticker.ask > TICK
+                else None
+            )
             e_total = self._ledger.current_exposure(symbol)
             # Clamp the deployable gap to funds physically present in the funding
             # wallet (available − buffer) so the reconciler never sizes an offer the
@@ -185,6 +220,7 @@ class DeploymentReconciler:
                     venue_offers=venue_offers,
                     now=now,
                     budget=cancel_budget,
+                    book_competitive=book_competitive,
                 )
 
             # Fills are pre-computed from this single pre-loop snapshot; the per-cell
@@ -243,10 +279,28 @@ class DeploymentReconciler:
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue
+                # E2 clamp：guard chain、ORDER_SUBMIT event、venue 全部看到
+                # clamp 後的 rate（單一 rate 真相）。observe mode 只 log。
+                offer_rate = quote.rate
+                if self._clamp is not None and ticker is not None and quote.rate is not None:
+                    cd = clamp_rate(
+                        quote_rate=quote.rate, amount=float(amount),
+                        ticker=ticker, policy=self._clamp,
+                    )
+                    if cd.rate != quote.rate or cd.branch is ClampBranch.TAKER:
+                        log.info(
+                            "clamp_%s cell=%s branch=%s quote_rate=%s clamped=%s "
+                            "bid=%s ask=%s bid_period=%s amount=%s",
+                            "applied" if self._clamp.enabled else "would_adjust",
+                            cell_id, cd.branch, quote.rate, cd.rate,
+                            ticker.bid, ticker.ask, ticker.bid_period, amount,
+                        )
+                    if self._clamp.enabled:
+                        offer_rate = cd.rate
                 decision = DecisionPayload(
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
-                    offer_rate=quote.rate,
+                    offer_rate=offer_rate,
                     offer_amount_usdt=float(amount),
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
@@ -314,6 +368,7 @@ class DeploymentReconciler:
         venue_offers: tuple[ActiveFundingOffer, ...],
         now: int,
         budget: int,
+        book_competitive: float | None = None,
     ) -> int:
         """砍掉 rate 已 stale-high 的 resting offers（policy 見 reprice.py）。
 
@@ -333,9 +388,15 @@ class DeploymentReconciler:
             return 0
         ref = max(quotes, key=lambda q: q.rate or 0.0)
         assert ref.rate is not None  # POST quote 的 rate 必非 None
+        ref_rate = ref.rate
+        if book_competitive is not None:
+            # E2：ref 對齊「現在會掛出的價」（clamp 後）。max() 只會抬高 ref
+            # （更少 cancel）；book 下移不加速砍單 — reprice-down 的節奏仍由
+            # quote 每小時更新決定（E1 語意不變）。
+            ref_rate = max(ref_rate, book_competitive)
         candidates = stale_offers(
             offers=[o for o in venue_offers if o.symbol == symbol],
-            ref_rate=ref.rate,
+            ref_rate=ref_rate,
             now_ms=now,
             policy=self._reprice,
         )
@@ -346,7 +407,7 @@ class DeploymentReconciler:
                 log.info(
                     "reprice_would_cancel voi=%s symbol=%s offer_rate=%s "
                     "ref_rate=%s age_min=%.0f",
-                    offer.venue_offer_id, symbol, offer.rate, ref.rate, age_min,
+                    offer.venue_offer_id, symbol, offer.rate, ref_rate, age_min,
                 )
                 continue
             if issued >= budget:
@@ -371,6 +432,6 @@ class DeploymentReconciler:
             log.info(
                 "reprice_cancelled voi=%s symbol=%s offer_rate=%s ref_rate=%s "
                 "age_min=%.0f",
-                offer.venue_offer_id, symbol, offer.rate, ref.rate, age_min,
+                offer.venue_offer_id, symbol, offer.rate, ref_rate, age_min,
             )
         return issued

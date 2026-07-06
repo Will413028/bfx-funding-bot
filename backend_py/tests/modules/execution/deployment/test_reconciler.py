@@ -6,6 +6,8 @@ import pytest
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.rest import FundingTicker
+from bfx_funding_bot.modules.execution.deployment.book_clamp import ClampPolicy
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
@@ -143,7 +145,8 @@ class _SeqSafety:
 
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
-           available=None, event_sink=None, canceller=None, reprice=None):
+           available=None, event_sink=None, canceller=None, reprice=None,
+           ticker_source=None, clamp=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -161,6 +164,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         phase=Phase.CANARY,
         canceller=canceller,
         reprice=reprice,
+        ticker_source=ticker_source,
+        clamp=clamp,
     )
     return rec, ex, tracker, safety
 
@@ -640,3 +645,135 @@ async def test_no_reprice_config_is_noop():
     await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
     assert canc.cancelled == []
     assert len(ex.submitted) == 1
+
+
+# ---------------------------------------------------------------------------
+# E2: book-aware rate clamp (ticker fetch + clamp apply + sweep ref alignment).
+# observe mode = zero behavioural change; ticker_source=None OR clamp=None =
+# byte-identical to pre-E2 (zero fetch). Fetch failure never blocks deploy.
+# ---------------------------------------------------------------------------
+
+
+_CLAMP_ON = ClampPolicy(enabled=True, max_down_pct=0.15, taker_max_period_days=7)
+_CLAMP_OBSERVE = ClampPolicy(enabled=False, max_down_pct=0.15, taker_max_period_days=7)
+
+
+def _fticker(
+    *, bid: float = 0.00005, bid_period: int = 2, bid_size: float = 100_000.0,
+    ask: float = 0.001,
+) -> FundingTicker:
+    return FundingTicker(
+        symbol="fUST", frr=0.0002, bid=bid, bid_period=bid_period,
+        bid_size=bid_size, ask=ask, ask_period=2, ask_size=100_000.0,
+    )
+
+
+class _FakeTickerSource:
+    def __init__(self, ticker: FundingTicker) -> None:
+        self.ticker = ticker
+        self.fetched: list[str] = []
+
+    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
+        self.fetched.append(symbol)
+        return self.ticker
+
+
+class _BoomTickerSource:
+    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
+        raise RuntimeError("venue 500")
+
+
+async def test_clamp_raises_stale_quote_to_book_front():
+    # quote 0.00012（_post_quote），book ask 0.001（spike）→ 掛 ask−tick
+    ts = _FakeTickerSource(_fticker())
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts, clamp=_CLAMP_ON,
+    )
+    await rec.deploy()
+    assert ts.fetched == ["fUST"]
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_rate == 0.00099999  # round(0.001 - 1e-8, 10)
+
+
+async def test_clamp_observe_mode_submits_quote_rate():
+    ts = _FakeTickerSource(_fticker())
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts, clamp=_CLAMP_OBSERVE,
+    )
+    await rec.deploy()
+    assert ts.fetched == ["fUST"]  # observe mode 照抓 ticker（rollout 需要 log）
+    assert ex.submitted[0].offer_rate == 0.00012  # 但 submit 行為 = 現狀
+
+
+async def test_clamp_taker_keeps_quote_rate():
+    # bid 0.0002 ≥ quote 0.00012，size/period 都在界內 → taker（rate 不變）
+    ts = _FakeTickerSource(_fticker(bid=0.0002, ask=0.00021))
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts, clamp=_CLAMP_ON,
+    )
+    await rec.deploy()
+    assert ex.submitted[0].offer_rate == 0.00012
+
+
+async def test_clamp_floor_keeps_quote_rate():
+    # book 崩到 ask 0.00005 → 競爭價 < 0.00012×0.85 → 不追砍，掛原價
+    ts = _FakeTickerSource(_fticker(bid=0.00001, ask=0.00005))
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts, clamp=_CLAMP_ON,
+    )
+    await rec.deploy()
+    assert ex.submitted[0].offer_rate == 0.00012
+
+
+async def test_clamp_ticker_fetch_error_falls_back_and_deploys():
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=_BoomTickerSource(), clamp=_CLAMP_ON,
+    )
+    await rec.deploy()  # fetch 失敗絕不擋部署
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_rate == 0.00012
+
+
+async def test_no_clamp_config_never_fetches():
+    ts = _FakeTickerSource(_fticker())
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts,  # clamp=None（預設）
+    )
+    await rec.deploy()
+    assert ts.fetched == []
+    assert ex.submitted[0].offer_rate == 0.00012
+
+
+async def test_sweep_ref_aligns_to_book_when_clamp_enabled():
+    # E1×E2 交互：sustained spike 中（ask 0.001 維持高檔），E2 上一 tick 以
+    # ~ask−tick 掛出的單（0.00099，齡 60min）不可被 sweep 當 stale 自砍 —
+    # ref 對齊 max(quote 0.00012, ask−tick 0.00099999) → 0.00099 在容忍內。
+    canc = _FakeCanceller()
+    ts = _FakeTickerSource(_fticker())
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
+        canceller=canc, reprice=_REPRICE,
+        ticker_source=ts, clamp=_CLAMP_ON,
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.00099),))
+    assert canc.cancelled == []
+
+
+async def test_sweep_ref_unchanged_in_observe_mode():
+    # observe mode = 零行為差：sweep ref 仍用 quote ref（0.00012×1.1），
+    # 0.00099 是 stale → 照砍（與 E1 現狀 byte-identical）
+    canc = _FakeCanceller()
+    ts = _FakeTickerSource(_fticker())
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
+        canceller=canc, reprice=_REPRICE,
+        ticker_source=ts, clamp=_CLAMP_OBSERVE,
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.00099),))
+    assert canc.cancelled == ["42"]
