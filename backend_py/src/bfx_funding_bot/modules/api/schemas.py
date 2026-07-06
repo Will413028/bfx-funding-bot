@@ -66,3 +66,20 @@ class UserConfigResponse(BaseModel):
     config: dict[str, object]
     created_at: str = Field(serialization_alias="createdAt")
     updated_at: str = Field(serialization_alias="updatedAt")
+
+
+class WeeklyAttributionResponse(BaseModel):
+    cell: str
+    week_start_ms: int = Field(serialization_alias="weekStartMs")
+    week_end_ms: int = Field(serialization_alias="weekEndMs")
+    n_fills: int = Field(serialization_alias="nFills")
+    gross_interest_usdt: str = Field(serialization_alias="grossInterestUsdt")
+    net_interest_usdt: str = Field(serialization_alias="netInterestUsdt")
+    capital_days: str = Field(serialization_alias="capitalDays")
+    realized_apr_net_pct: str | None = Field(serialization_alias="realizedAprNetPct")
+    baseline_close_apr_net_pct: str | None = Field(
+        serialization_alias="baselineCloseAprNetPct"
+    )
+    baseline_frr_apr_net_pct: str | None = Field(
+        serialization_alias="baselineFrrAprNetPct"
+    )
