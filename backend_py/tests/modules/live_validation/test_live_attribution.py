@@ -3,11 +3,14 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    FRR_ANNUALIZATION,
     MS_PER_DAY,
     ClampDiagnostic,
     DeploymentAnchorResult,
     FillRecord,
+    FrrBenchmark,
     G3Verdict,
     MarketRatePoint,
     NavAnchorResult,
@@ -21,6 +24,8 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     check_nav_anchor,
     clamp_active_window,
     decide_verdict,
+    fill_duration_days,
+    frr_points_from_stats,
     open_principal_at,
     weekly_window_bounds,
 )
@@ -689,3 +694,46 @@ def test_clamp_diagnostic_zero_cap_guards_are_zero():
     )
     assert d.over_deploy_factor == Decimal("0")
     assert d.excess_return_pct == Decimal("0")
+
+
+# ---- E3: AlwaysFRR arm 素材（import 已在檔頭，見上）----
+def _stat(mts: int, frr: str | None) -> FundingStat:
+    return FundingStat(
+        symbol="fUST", mts=mts,
+        frr=Decimal(frr) if frr is not None else None,
+        avg_period=Decimal("95"),
+    )
+
+
+def test_frr_points_annualize_by_365():
+    pts = frr_points_from_stats([_stat(0, "0.00000102")])
+    assert pts[0].rate == Decimal("0.00000102") * FRR_ANNUALIZATION
+    # ×365 後落在 assert_market_rate_band 的 [1e-5, 0.05] 內
+    assert Decimal("0.00001") <= pts[0].rate <= Decimal("0.05")
+
+
+def test_frr_points_skip_null_frr():
+    assert frr_points_from_stats([_stat(0, None)]) == []
+
+
+def test_frr_points_preserve_mts_order():
+    pts = frr_points_from_stats([_stat(100, "1e-6"), _stat(200, "2e-6")])
+    assert [p.mts for p in pts] == [100, 200]
+
+
+def test_frr_benchmark_dataclass_shape():
+    b = FrrBenchmark(
+        available=False, spread=Decimal("0"), ci_lo=Decimal("0"),
+        ci_hi=Decimal("0"), reason="funding_stats empty",
+    )
+    assert b.available is False and b.reason == "funding_stats empty"
+
+
+def test_fill_duration_days_public_alias():
+    # 公開版與既有語意一致：無 release = held-to-term
+    assert fill_duration_days(_fill(0, "100", "0.0002", "2")) == Decimal("2")
+    # release 提早 → 取實際存續
+    one_day_ms = 24 * 60 * 60 * 1000
+    assert fill_duration_days(
+        _fill(0, "100", "0.0002", "2", release=one_day_ms)
+    ) == Decimal("1")

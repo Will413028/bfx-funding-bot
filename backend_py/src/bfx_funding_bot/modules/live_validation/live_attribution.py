@@ -30,6 +30,7 @@ from enum import Enum
 from itertools import pairwise
 
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
+from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 MS_PER_DAY = Decimal(24 * 60 * 60 * 1000)
 
@@ -82,6 +83,40 @@ def assert_market_rate_band(rates: list[Decimal]) -> None:
         )
 
 
+# ---- E3: AlwaysFRR benchmark arm（docs/research/2026-07-06-profit-design-review.md §1 E3 (c)）----
+# funding_stats.frr 不是市場利率、也非 candle close 的單位轉換（ADR
+# 2026-05-28-frr-not-a-market-rate-proxy；5 個假設全 FAIL）。但它是 ticker FRR
+# 的 /365 表示：2026-07-06 兩 symbol 實測 frr×365 ≈ ticker FRR（per-day）誤差
+# <0.5%（plan 2026-07-06-e3-measurement-automation.md 背景段）。AlwaysFRR arm
+# 用 frr×365 當「FRR auto-renew 掛單者實得的日利率」序列；換算後仍須過
+# assert_market_rate_band（雙保險：任何未來單位漂移會炸 loader 而非產出錯報告）。
+FRR_ANNUALIZATION = Decimal("365")
+
+
+def frr_points_from_stats(stats: list[FundingStat]) -> list[MarketRatePoint]:
+    """funding_stats rows → AlwaysFRR arm 的 per-day rate 序列（×365，skip null）。"""
+    return [
+        MarketRatePoint(mts=s.mts, rate=s.frr * FRR_ANNUALIZATION)
+        for s in stats
+        if s.frr is not None
+    ]
+
+
+@dataclass(frozen=True)
+class FrrBenchmark:
+    """bot(active) vs AlwaysFRR 的比較結果 — 報告/JSON 用，NEVER 改變 verdict 狀態。
+
+    這是 cap 加碼的政策 gating bar（「贏不了免費的 FRR auto-renew 就是零附加值」），
+    由 operator 讀報告執行，不進 decide_verdict 狀態機。
+    """
+
+    available: bool
+    spread: Decimal   # active − AlwaysFRR 的 paired headline spread（%，gross）
+    ci_lo: Decimal
+    ci_hi: Decimal
+    reason: str | None  # unavailable 時的人話原因；available 時 None
+
+
 def cell_period_days(period_agg: str, frr_avg_period: Decimal) -> Decimal:
     """Held-to-term duration for a cell. p2 -> 2 days; a30 -> FRR auto-period."""
     if period_agg == "p2":
@@ -131,14 +166,19 @@ def open_principal_at(fills: list[FillRecord], as_of_ms: int) -> Decimal:
     return total
 
 
-def _fill_duration_days(f: FillRecord) -> Decimal:
-    """Held-to-term, capped by actual lifetime when a release exists."""
+def fill_duration_days(f: FillRecord) -> Decimal:
+    """Held-to-term, capped by actual lifetime when a release exists.
+
+    （E3 公開化：weekly_attribution 需要同一套 duration 語意。）"""
     if f.release_ts_ms is None:
         return f.period_days
     actual = Decimal(f.release_ts_ms - f.fill_ts_ms) / MS_PER_DAY
     if actual < 0:
         actual = Decimal("0")
     return min(f.period_days, actual)
+
+
+_fill_duration_days = fill_duration_days  # 舊名 alias（防漏改；勿新增使用）
 
 
 @dataclass(frozen=True)
@@ -191,7 +231,7 @@ class ClampDiagnostic:
 def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWindow:
     """Sweep-line attribution with concurrent-principal clamped to `cap`.
 
-    Each fill occupies [fill_ts, fill_ts + _fill_duration_days·MS_PER_DAY).
+    Each fill occupies [fill_ts, fill_ts + fill_duration_days·MS_PER_DAY).
     Per sub-interval: S = Σ open sizes; scale = min(1, cap/S). Durations are
     accumulated per fill in integer milliseconds (scale==1) so a non-clamped
     bucket divides by MS_PER_DAY exactly once → identical to the old formula.
@@ -201,7 +241,7 @@ def clamp_active_window(fills: list[FillRecord], *, cap: Decimal) -> ClampedWind
     intervals: list[tuple[int, int, FillRecord]] = []
     for f in fills:
         start = f.fill_ts_ms
-        end = start + int(_fill_duration_days(f) * MS_PER_DAY)
+        end = start + int(fill_duration_days(f) * MS_PER_DAY)
         if end > start:
             intervals.append((start, end, f))
     if not intervals:
