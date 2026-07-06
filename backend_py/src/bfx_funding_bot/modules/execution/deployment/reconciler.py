@@ -12,7 +12,12 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, Protocol
 
+from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.execution.deployment.reprice import (
+    RepricePolicy,
+    stale_offers,
+)
 from bfx_funding_bot.modules.execution.deployment.sizing import (
     allocate_gap,
     effective_min_usdt,
@@ -22,6 +27,7 @@ from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentT
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
+    CancelPort,
     ExecutorPort,
     GuardResult,
     SubmittedOrder,
@@ -76,6 +82,8 @@ class DeploymentReconciler:
         clock: Callable[[], int],
         event_sink: _EventSinkProtocol,
         phase: Phase,
+        canceller: CancelPort | None = None,
+        reprice: RepricePolicy | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -100,6 +108,8 @@ class DeploymentReconciler:
         self._clock = clock
         self._event_sink = event_sink
         self._phase = phase
+        self._canceller = canceller
+        self._reprice = reprice
         # cell_id → strategy, for the structured ORDER_SUBMIT event envelope.
         self._cell_strategy: dict[str, StrategyName] = {
             c.cell_id: c.strategy for c in cells
@@ -113,11 +123,13 @@ class DeploymentReconciler:
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
     ) -> None:
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
-        # (E1 stale-offer reprice). Not yet consumed here — reprice/cancel
-        # wiring lands in a later task; accepting the param now keeps this
-        # the single production `_Deployment` conformer in sync with the
-        # protocol so periodic_reconcile's call doesn't TypeError in prod.
+        # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
+        # RepricePolicy is configured (self._reprice is not None); otherwise
+        # ignored — byte-identical to pre-E1 behavior.
         now = self._clock()
+        cancel_budget = (
+            self._reprice.max_cancels_per_tick if self._reprice is not None else 0
+        )
         # Phase 2: each configured currency is an INDEPENDENT gap pool. The
         # reconciler is the real-money sizing authority, so the sizing math runs
         # once per symbol against THAT symbol's cap[symbol] / buffer[symbol] /
@@ -162,6 +174,18 @@ class DeploymentReconciler:
 
             active = [c.cell_id for c in symbol_cells
                       if self._store.get_active(c.cell_id, now_ms=now) is not None]
+
+            # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
+            # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
+            # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
+            if self._reprice is not None and venue_offers:
+                cancel_budget -= await self._reprice_sweep(
+                    symbol=symbol,
+                    symbol_cells=symbol_cells,
+                    venue_offers=venue_offers,
+                    now=now,
+                    budget=cancel_budget,
+                )
 
             # Fills are pre-computed from this single pre-loop snapshot; the per-cell
             # concentration cap is enforced inside allocate_gap, not incrementally as
@@ -281,3 +305,72 @@ class DeploymentReconciler:
             status=result.status,
             failure_reason=failure_reason,
         )
+
+    async def _reprice_sweep(
+        self,
+        *,
+        symbol: str,
+        symbol_cells: list[CellConfig],
+        venue_offers: tuple[ActiveFundingOffer, ...],
+        now: int,
+        budget: int,
+    ) -> int:
+        """砍掉 rate 已 stale-high 的 resting offers（policy 見 reprice.py）。
+
+        回傳實際發出的 cancel 數（observe mode 恆 0）。任何非 auth 錯誤只
+        log 不擋部署（sweep 是 best-effort 最佳化，deploy 才是主線）。
+        """
+        assert self._reprice is not None
+        quotes = [
+            q for q in (
+                self._store.get_active(c.cell_id, now_ms=now) for c in symbol_cells
+            )
+            if q is not None and q.rate is not None
+        ]
+        if not quotes:
+            # 無 active POST quote：resting 高價單 = 免費 spike option，留著。
+            # 下一個 POST quote 出現時本 sweep 自然會 reprice-down。
+            return 0
+        ref = max(quotes, key=lambda q: q.rate or 0.0)
+        assert ref.rate is not None  # POST quote 的 rate 必非 None
+        candidates = stale_offers(
+            offers=[o for o in venue_offers if o.symbol == symbol],
+            ref_rate=ref.rate,
+            now_ms=now,
+            policy=self._reprice,
+        )
+        issued = 0
+        for offer in candidates:
+            age_min = (now - offer.mts_created) / 60_000
+            if not self._reprice.enabled or self._canceller is None:
+                log.info(
+                    "reprice_would_cancel voi=%s symbol=%s offer_rate=%s "
+                    "ref_rate=%s age_min=%.0f",
+                    offer.venue_offer_id, symbol, offer.rate, ref.rate, age_min,
+                )
+                continue
+            if issued >= budget:
+                log.info(
+                    "reprice_budget_exhausted symbol=%s deferred=%d",
+                    symbol, len(candidates) - issued,
+                )
+                break
+            try:
+                await self._canceller.cancel(
+                    venue_offer_id=offer.venue_offer_id,
+                    signal_correlation_id=ref.signal_correlation_id,
+                    account_id=self._ctx.account_id,
+                    ctx=self._ctx,
+                )
+            except ExecutorAuthError:
+                raise  # auth 壞掉必須讓 daemon fail-safe 退出，不可吞
+            except Exception:
+                log.exception("reprice_cancel_error voi=%s", offer.venue_offer_id)
+                continue
+            issued += 1
+            log.info(
+                "reprice_cancelled voi=%s symbol=%s offer_rate=%s ref_rate=%s "
+                "age_min=%.0f",
+                offer.venue_offer_id, symbol, offer.rate, ref.rate, age_min,
+            )
+        return issued
