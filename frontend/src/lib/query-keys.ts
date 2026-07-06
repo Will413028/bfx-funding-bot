@@ -36,3 +36,8 @@ export const executionKeys = {
   list: (params?: Record<string, unknown>) =>
     [...executionKeys.all, "list", params] as const,
 };
+
+export const attributionKeys = {
+  all: ["attribution"] as const,
+  weekly: () => [...attributionKeys.all, "weekly"] as const,
+};

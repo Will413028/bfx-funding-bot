@@ -10,7 +10,8 @@
     "history": "History",
     "settings": "Settings",
     "logout": "Logout",
-    "pricing": "Pricing"
+    "pricing": "Pricing",
+    "attribution": "Attribution"
   },
   "common": {
     "loading": "Loading...",
@@ -209,5 +210,15 @@
     "stopped": "Stopped",
     "connected": "Connected",
     "disconnected": "Disconnected"
+  },
+  "attribution": {
+    "title": "Weekly Attribution",
+    "subtitle": "Fee-adjusted APR — bot vs always-close vs AlwaysFRR",
+    "botLine": "Bot (realized, net)",
+    "closeLine": "Always-close",
+    "frrLine": "AlwaysFRR",
+    "loading": "Loading…",
+    "loadFailed": "Failed to load attribution data",
+    "empty": "No attribution rows yet — weekly job has not run."
   }
 }

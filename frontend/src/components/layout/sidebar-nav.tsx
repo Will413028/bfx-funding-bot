@@ -4,6 +4,7 @@ import {
   BarChart3,
   Key,
   LayoutDashboard,
+  LineChart,
   LogOut,
   ScrollText,
   Settings,
@@ -22,6 +23,7 @@ const navItems = [
   { href: "/api-keys", icon: Key, labelKey: "apiKeys" },
   { href: "/strategy", icon: BarChart3, labelKey: "strategy" },
   { href: "/history", icon: ScrollText, labelKey: "history" },
+  { href: "/attribution", icon: LineChart, labelKey: "attribution" },
   { href: "/settings", icon: Settings, labelKey: "settings" },
 ] as const;
 
