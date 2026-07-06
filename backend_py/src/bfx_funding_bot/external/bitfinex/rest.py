@@ -1,5 +1,7 @@
 import json
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -13,6 +15,44 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class FundingTicker:
+    """GET /v2/ticker/{fSymbol} — funding book 快照（E2 book-aware clamp）。
+
+    Rate 欄位是日利率 decimal（0.0002 = 0.02%/day），與 funding_candles.close
+    同尺度，可直接與 StandingQuote.rate 比較。funding_stats 的 frr（~1e-6）
+    是不同量，勿混用（see live_attribution.assert_market_rate_band）。
+    """
+    symbol: str
+    frr: float          # Flash Return Rate（過去 1h 平均固定利率）
+    bid: float          # best bid rate（借方最高出價；我方吃單即成交）
+    bid_period: int     # bid 天期 — taker fill 會繼承這個 period
+    bid_size: float
+    ask: float          # best ask rate（貸方最低要價 = 隊首）
+    ask_period: int
+    ask_size: float
+
+    @classmethod
+    def from_bitfinex(cls, entry: list[Any], *, symbol: str) -> "FundingTicker":
+        # REST 回 17 欄（WS 16 欄 + FIRST_TRADE）；clamp 只需前 7 欄。
+        if len(entry) < 7:
+            raise ValueError(f"funding ticker too short: {len(entry)} fields")
+        head = entry[:7]
+        if any(v is None for v in head):
+            # 空 book 邊 → fail-closed：讓呼叫方走 fallback（= 無 clamp）
+            raise ValueError(f"null field in funding ticker head: {head!r}")
+        return cls(
+            symbol=symbol,
+            frr=float(entry[0]),
+            bid=float(entry[1]),
+            bid_period=int(entry[2]),
+            bid_size=float(entry[3]),
+            ask=float(entry[4]),
+            ask_period=int(entry[5]),
+            ask_size=float(entry[6]),
+        )
 
 
 def _bitfinex_period_agg_path(period_agg: str) -> str:
@@ -208,3 +248,58 @@ class BitfinexREST:
                 ) from e
 
         return stats
+
+    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
+        """Pull the live funding ticker (best bid/ask) for one symbol.
+
+        Endpoint: GET /v2/ticker/f{symbol}（免認證；funding schema 17 欄）
+
+        E2 book-aware clamp 的唯一 book 資料源（docs/research/
+        2026-07-06-profit-design-review.md §1 E2）。每 ~90s reconcile tick
+        每 symbol 一 call，走共用 FundingRateLimiter（30/min budget）。
+
+        Args:
+            symbol: e.g. "fUST", "fUSD". Tolerates leading "f".
+        """
+        sym = symbol[1:] if symbol.startswith("f") else symbol
+        path = f"/v2/ticker/f{sym}"
+
+        async with self._limiter.acquire():
+            try:
+                resp = await self._http.get(f"{self._base_url}{path}", timeout=30.0)
+            except httpx.HTTPError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {e}", raw=None
+                ) from e
+
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after_seconds = None
+            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error",
+                raw=resp.text,
+            )
+
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON: {e}") from e
+
+        if not isinstance(payload, list):
+            raise BitfinexShapeError(
+                f"expected funding ticker list, got {type(payload).__name__}: {payload!r}"
+            )
+
+        try:
+            return FundingTicker.from_bitfinex(payload, symbol=f"f{sym}")
+        except (ValueError, TypeError) as e:
+            raise BitfinexShapeError(
+                f"funding ticker parse failed: {e}; raw={payload!r}"
+            ) from e
