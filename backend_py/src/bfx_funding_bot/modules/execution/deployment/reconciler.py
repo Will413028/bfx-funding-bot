@@ -17,7 +17,6 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.rest import FundingTicker
 from bfx_funding_bot.modules.execution.deployment.book_clamp import (
     TICK,
-    ClampBranch,
     ClampPolicy,
     clamp_rate,
 )
@@ -287,14 +286,17 @@ class DeploymentReconciler:
                         quote_rate=quote.rate, amount=float(amount),
                         ticker=ticker, policy=self._clamp,
                     )
-                    if cd.rate != quote.rate or cd.branch is ClampBranch.TAKER:
-                        log.info(
-                            "clamp_%s cell=%s branch=%s quote_rate=%s clamped=%s "
-                            "bid=%s ask=%s bid_period=%s amount=%s",
-                            "applied" if self._clamp.enabled else "would_adjust",
-                            cell_id, cd.branch, quote.rate, cd.rate,
-                            ticker.bid, ticker.ask, ticker.bid_period, amount,
-                        )
+                    # E2 fix wave: log every branch (TAKER/UNDERCUT/RAISE/FLOOR/
+                    # FALLBACK) evaluated here — FLOOR/FALLBACK are the down-side
+                    # protection events the observe rollout exists to measure, and
+                    # were previously silent (only rate-changed/TAKER logged).
+                    log.info(
+                        "clamp_%s cell=%s branch=%s quote_rate=%s clamped=%s "
+                        "bid=%s ask=%s bid_period=%s amount=%s",
+                        "applied" if self._clamp.enabled else "would_adjust",
+                        cell_id, cd.branch, quote.rate, cd.rate,
+                        ticker.bid, ticker.ask, ticker.bid_period, amount,
+                    )
                     if self._clamp.enabled:
                         offer_rate = cd.rate
                 decision = DecisionPayload(

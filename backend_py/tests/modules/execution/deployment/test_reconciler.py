@@ -729,6 +729,24 @@ async def test_clamp_floor_keeps_quote_rate():
     assert ex.submitted[0].offer_rate == 0.00012
 
 
+async def test_clamp_floor_logs_would_adjust_in_observe_mode(caplog):
+    # E2 fix wave: FLOOR branch was previously silent (guard only fired on
+    # rate-changed/TAKER) — Task 5's enforce go/no-go needs FLOOR frequency
+    # evidence from observe mode, so it must now log every branch.
+    ts = _FakeTickerSource(_fticker(bid=0.00001, ask=0.00005))
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        ticker_source=ts, clamp=_CLAMP_OBSERVE,
+    )
+    with caplog.at_level(logging.INFO):
+        await rec.deploy()
+    assert ex.submitted[0].offer_rate == 0.00012  # submit 行為仍 = 現狀（observe-only）
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "clamp_would_adjust" in m and "branch=floor" in m for m in msgs
+    )
+
+
 async def test_clamp_ticker_fetch_error_falls_back_and_deploys():
     rec, ex, _, _ = _build(
         exposure=D("370"), quotes=[_post_quote("fUST_a30")],
