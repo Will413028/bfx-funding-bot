@@ -260,7 +260,8 @@ sequenceDiagram
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
-| Book clamp（E2） | observe（enabled=false）；down floor 15%；taker ≤7d | `BFX_CLAMP_ENABLED`、`BFX_CLAMP_MAX_DOWN_PCT`、`BFX_CLAMP_TAKER_MAX_PERIOD_D` |
+| Reprice sweep（E1） | enabled（canary 2026-07-07 起）；tolerance 10%；min age 30min；≤3 cancels/tick | `BFX_REPRICE_ENABLED`、`BFX_REPRICE_TOLERANCE_PCT`、`BFX_REPRICE_MIN_AGE_S`、`BFX_REPRICE_MAX_CANCELS_PER_TICK` |
+| Book clamp（E2） | enabled（canary 2026-07-10 起）；down floor 15%；taker ≤7d；flags source of truth = `deploy/vm/canary.env` | `BFX_CLAMP_ENABLED`、`BFX_CLAMP_MAX_DOWN_PCT`、`BFX_CLAMP_TAKER_MAX_PERIOD_D` |
 
 ---
 
