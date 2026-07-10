@@ -44,7 +44,12 @@ class RegimeSummary:
 def pair_claims_to_fills(
     claims: list[ClaimEvent], fills: list[FillEvent],
 ) -> list[ClaimOutcome]:
-    """First fill per cid wins (partial-fill streams share the cid)."""
+    """First fill per cid wins (partial-fill streams share the cid).
+
+    Live claim timestamps are local-clock post-REST submit; WS fill timestamps
+    are venue mts_update. An immediately-filled offer can appear "before" its
+    claim, yielding negative latency. Clamp to 0 = "filled instantly".
+    """
     first_fill: dict[int, int] = {}
     for f in fills:
         cur = first_fill.get(f.cid)
@@ -55,7 +60,7 @@ def pair_claims_to_fills(
             cid=c.cid,
             claimed_at_ms=c.claimed_at_ms,
             latency_ms=(
-                first_fill[c.cid] - c.claimed_at_ms
+                max(0, first_fill[c.cid] - c.claimed_at_ms)
                 if c.cid in first_fill else None
             ),
         )

@@ -28,6 +28,18 @@ def test_pairs_first_fill_per_cid_and_leaves_unfilled_none():
     assert by_cid[2].latency_ms is None
 
 
+def test_pairs_clamps_negative_latency_to_zero():
+    """Immediate fill (venue mts_update before local-clock claim) yields 0, not negative."""
+    claims = [
+        ClaimEvent(cid=1, claimed_at_ms=10_000),
+    ]
+    fills = [
+        FillEvent(cid=1, filled_at_ms=9_000),  # "before" claim due to clock skew
+    ]
+    outcomes = pair_claims_to_fills(claims, fills)
+    assert outcomes[0].latency_ms == 0
+
+
 def test_bucket_by_regime_assigns_claims_to_latest_boot_before_them():
     outcomes = [
         ClaimOutcome(cid=1, claimed_at_ms=5_000, latency_ms=100),
