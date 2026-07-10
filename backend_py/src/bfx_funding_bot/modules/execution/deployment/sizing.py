@@ -44,7 +44,11 @@ def allocate_gap(
     if gap < min_fill or not active_cells:
         return {}
 
-    cap_per_cell = concentration_pct * target
+    # Degenerate-case relaxation: with a single active cell the concentration
+    # cap buys no diversification (all cells run the same strategy per symbol)
+    # and strands (1 − concentration_pct) × target at 0%. max() is
+    # behavior-identical for ≥2 active cells.
+    cap_per_cell = max(concentration_pct * target, target / len(active_cells))
     ordered = sorted(active_cells, key=lambda c: (deployed.get(c, Decimal("0")), c))
 
     fills: dict[str, Decimal] = {}

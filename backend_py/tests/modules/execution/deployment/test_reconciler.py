@@ -370,11 +370,36 @@ async def test_stranded_log_names_balance_limit_when_headroom_binds(caplog):
 
 
 async def test_stranded_log_names_concentration_when_balance_ample(caplog):
-    # gap = 570; available is effectively unbounded so balance never binds. A single
-    # active cell caps at concentration 0.70*570 = 399, leaving 171 stranded — the
-    # genuine concentration/no-further-active-cell case must keep its label.
-    rec, _ex, _, _ = _build(
-        exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("1000000"),
+    # Single-active-cell relaxation raises cap_per_cell to the full policy
+    # target (max(0.70*cap, cap/1) = cap) — a lone cell starting from empty
+    # can no longer be concentration-capped-stranded (see Task 2). Genuine
+    # concentration/no-further-active-cell stranding still happens when the
+    # lone active cell already carries deployed intent close to that (now
+    # relaxed) cap: cap=10000, cell already at 9500 (== reserved, so the
+    # tracker's reconcile_to_total rescale is a no-op) -> cap_per_cell=10000,
+    # e_total=8000 -> gap=2000, cell headroom=10000-9500=500 -> allocated=500,
+    # stranded=1500 (>= min_fill, no other active cell to absorb it), while
+    # balance is ample.
+    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    store.update(_post_quote("fUST_a30"))  # only "a30" active; "p2" idle
+    tracker = CellDeploymentTracker()
+    tracker.record_deploy("fUST_a30", D("9500"))
+    ledger = _FakeLedger(
+        exposure=D("8000"), reserved=D("9500"), available=D("1000000"),
+    )
+    ctx = AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=D("10000"),
+    )
+    rec = DeploymentReconciler(
+        store=store, tracker=tracker, ledger=ledger,
+        safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
+        account_ctx=ctx, cells=cells, venue_floor_usd=D("150"),
+        min_offer_buffer_pct=D("0.02"), concentration_pct=D("0.70"),
+        balance_buffer_usdt=D("3"), clock=lambda: 1_000,
+        event_sink=_CapturingSink(), phase=Phase.CANARY,
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
@@ -795,3 +820,48 @@ async def test_sweep_ref_unchanged_in_observe_mode():
     )
     await rec.deploy(venue_offers=(_venue_offer("42", 0.00099),))
     assert canc.cancelled == ["42"]
+
+
+# ---------------------------------------------------------------------------
+# Single-active-cell stranding fix: the tracker's reconcile_to_total clamp
+# must stay aligned with allocate_gap's relaxed per-cell cap.
+# ---------------------------------------------------------------------------
+
+
+async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
+    """With 1 active POST quote of 2 configured cells, the tracker rescale clamp
+    must use the SAME relaxed cap as allocate_gap — otherwise reconcile_to_total
+    clamp-warns every tick once the lone cell's intent legitimately exceeds
+    concentration_pct * cap.
+
+    current_exposure == cap (gap=0) isolates the tracker-clamp path from
+    allocate_gap: reserved=9000 (the venue-true open-offer total attributable to
+    fUST_p2, already recorded in the tracker) is strictly less than exposure
+    (9000 reserved + 1000 unattributable realized credit = 10000 = cap), so no
+    new fill is computed and reconcile_to_total's clamp is the only thing that
+    can move tracker.deployed("fUST_p2").
+    """
+    cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
+    store = StandingQuoteStore(ttl_ms=3_900_000)
+    store.update(_post_quote("fUST_p2"))  # only one of the two cells POSTs
+    tracker = CellDeploymentTracker()
+    tracker.record_deploy("fUST_p2", D("9000"))  # lone cell's venue-true intent
+    ledger = _FakeLedger(
+        exposure=D("10000"), reserved=D("9000"), available=D("100000"),
+    )
+    ctx = AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=D("10000"),
+    )
+    ex = _FakeExecutor()
+    rec = DeploymentReconciler(
+        store=store, tracker=tracker, ledger=ledger,
+        safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
+        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+    )
+    await rec.deploy()
+    # NOT clamped down to 7000: relaxed cap = max(7000, 10000/1) = 10000.
+    assert tracker.deployed("fUST_p2") == D("9000")

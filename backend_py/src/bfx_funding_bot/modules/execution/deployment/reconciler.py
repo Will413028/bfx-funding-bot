@@ -199,15 +199,22 @@ class DeploymentReconciler:
             # silently starve cells via negative allocate_gap headroom. cells= scopes
             # the rescale to THIS symbol's cells only (Phase 2 per-currency
             # independence): rescaling fUST's cells must not touch fUSD's.
-            cap_per_cell = self._concentration_pct * cap
+            active = [c.cell_id for c in symbol_cells
+                      if self._store.get_active(c.cell_id, now_ms=now) is not None]
+            # Keep the tracker's defense-in-depth clamp aligned with
+            # allocate_gap's relaxed per-cell cap (single-active-cell case),
+            # or reconcile_to_total spuriously clamp-warns every tick while a
+            # lone cell legitimately holds more than concentration_pct * cap.
+            # No active cells → allocation below is a no-op; keep the strict cap.
+            cap_per_cell = (
+                max(self._concentration_pct * cap, cap / len(active))
+                if active else self._concentration_pct * cap
+            )
             self._tracker.reconcile_to_total(
                 self._ledger.reserved_exposure(symbol),
                 cells=[c.cell_id for c in symbol_cells],
                 cap_per_cell=cap_per_cell,
             )
-
-            active = [c.cell_id for c in symbol_cells
-                      if self._store.get_active(c.cell_id, now_ms=now) is not None]
 
             # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
             # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
