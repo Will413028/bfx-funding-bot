@@ -43,6 +43,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
+from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -754,6 +755,11 @@ async def build_daemon(
         credentials=credentials,
         allocation_cap_usdt=allocation_cap,
     )
+    # ONE monotonic µs nonce shared by every auth client on this single API key.
+    # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
+    # independent time-based providers get "nonce: small" rejections — that is
+    # what left the auth WS flapping. See external/bitfinex/nonce.py.
+    bfx_nonce = make_monotonic_us_nonce()
 
     # Phase 4.4c / 3a: PG event-store replaces Axiom replay at boot.
     # from_snapshot reads position_state + offer_claims from Postgres (written
@@ -835,6 +841,7 @@ async def build_daemon(
         cell=first_cell.cell_id,
         http=bitfinex_http,
         bus=bus,
+        nonce_provider=bfx_nonce,
     )
 
     # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
@@ -951,7 +958,7 @@ async def build_daemon(
     boot_recovery: BootRecovery | None = None
     periodic_reconcile: PeriodicReconcile | None = None
     if not spec.is_simulated:
-        auth_rest = BitfinexAuthREST(http=bitfinex_http)
+        auth_rest = BitfinexAuthREST(http=bitfinex_http, nonce_provider=bfx_nonce)
         boot_recovery = BootRecovery(
             store=event_store,
             session_factory=session_factory,
@@ -1293,6 +1300,7 @@ async def build_daemon(
         )
         auth_ws = BitfinexAuthWSClient(
             creds=creds,
+            nonce_provider=bfx_nonce,
             on_resync_needed=(
                 periodic_reconcile.request_resync
                 if periodic_reconcile is not None

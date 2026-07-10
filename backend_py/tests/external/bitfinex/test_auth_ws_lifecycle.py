@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -92,6 +93,88 @@ async def test_close_terminates_iterator(fake_bfx_ws_server: Any) -> None:
     await asyncio.wait_for(task, timeout=2.0)
 
 
+class _AuthStatusServer:
+    """Fake WS that replies to `auth` with a configurable status, then stays open."""
+
+    def __init__(self, status: str) -> None:
+        self._status = status
+        self.connections: list = []
+        self.auth_count = 0
+
+    async def handler(self, websocket: Any) -> None:
+        self.connections.append(websocket)
+        try:
+            async for msg in websocket:
+                if json.loads(msg).get("event") == "auth":
+                    self.auth_count += 1
+                    await websocket.send(json.dumps({
+                        "event": "auth", "status": self._status,
+                        "chanId": 0, "userId": 1234,
+                    }))
+        except websockets.ConnectionClosed:
+            pass
+
+
+@contextlib.asynccontextmanager
+async def _serve(status: str):
+    state = _AuthStatusServer(status)
+    server = await ws_serve(state.handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield state, f"ws://127.0.0.1:{port}"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_auth_ok_resets_reconnect_attempts() -> None:
+    async with _serve("OK") as (_state, url):
+        client = BitfinexAuthWSClient(
+            creds=Credentials(api_key="k", api_secret="s"),
+            url=url, nonce_provider=lambda: 1000,
+        )
+        client.reconnect_attempts = 7  # simulate cumulative-since-boot climb
+
+        async def collect() -> None:
+            async for _ev in client.events():
+                break  # first frame is the AuthAck
+
+        task = asyncio.create_task(collect())
+        await asyncio.wait_for(task, timeout=3.0)
+        await client.close()
+
+    # Genuine auth success clears the backoff counter → next drop starts at 0.
+    assert client.reconnect_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_auth_failed_logs_loud_and_drops_into_backoff(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with _serve("FAILED") as (_state, url):
+        client = BitfinexAuthWSClient(
+            creds=Credentials(api_key="k", api_secret="s"),
+            url=url, nonce_provider=lambda: 1000,
+        )
+
+        async def run() -> None:
+            async for _ev in client.events():
+                pass
+
+        task = asyncio.create_task(run())
+        with caplog.at_level(logging.ERROR):
+            await asyncio.sleep(0.8)  # connect → auth FAILED → return → backoff
+        await client.close()
+        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+    # Loud, not silent; and counted as a failure (dropped into backoff) rather
+    # than treated as an authed connection.
+    assert "bfx_auth_ws_auth_FAILED" in caplog.text
+    assert client.reconnect_attempts >= 1
+
+
 @pytest.mark.asyncio
 async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any) -> None:
     server_state, url = fake_bfx_ws_server
@@ -116,7 +199,9 @@ async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any)
         await ws.close()
 
     await asyncio.sleep(1.5)  # let backoff + reconnect attempt happen
-    assert client.reconnect_attempts >= 1
+    # reconnect_attempts now resets on a successful re-auth (consecutive-failure
+    # semantics), so assert the durable disconnect history instead.
+    assert client.reconnect_count_last_hour() >= 1
 
     await client.close()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):

@@ -416,6 +416,26 @@ class BitfinexAuthWSClient:
             async for raw in ws:
                 event = parse_frame(raw)
                 if event is not None:
+                    if isinstance(event, AuthAck):
+                        if event.status.upper() == "OK":
+                            # Genuine auth success → clear backoff so
+                            # reconnect_attempts means "consecutive failures",
+                            # not cumulative-since-boot (the public ws.py resets
+                            # on stability; this client had no reset at all).
+                            self.reconnect_attempts = 0
+                            log.info(
+                                "bfx_auth_ws_authed user_id=%s chan=%d",
+                                event.user_id, event.chan_id,
+                            )
+                        else:
+                            # Auth rejected (e.g. "nonce: small") → the socket is
+                            # useless; log LOUD and drop into backoff instead of
+                            # silently reconnecting forever.
+                            log.error(
+                                "bfx_auth_ws_auth_FAILED status=%s raw=%r",
+                                event.status, event.raw,
+                            )
+                            return
                     if self._seq.observe(_public_seq_of(event)) == "gap":
                         self._fire_resync("seq_gap")
                     yield event
