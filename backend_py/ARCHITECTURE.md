@@ -232,7 +232,7 @@ sequenceDiagram
 6. `allocate_gap(target=cap, current=current_exposure)`：
    - gap = cap − current_exposure（current_exposure = reserved + realized）；
    - **greedy emptiest-first**：依目前各 cell 已部署量由小到大排序，先填最空的；
-   - 每 cell 上限 `cap_per_cell = concentration_pct * target`（預設 70%）；
+   - 每 cell 上限 `cap_per_cell = max(concentration_pct * target, target / n_active_cells)`（`concentration_pct` 預設 70%，`n_active_cells` 為當下 active cell 數）：≥2 active cells 時與舊公式 byte-identical；僅 1 active cell 時可吃下全部 target（同幣別多 cell 皆跑同一策略，cap 對單一 active cell 本就不提供分散效果，見 commit `0d29fc8`）；
    - 低於 `effective_min_usdt = ceil(150 * 1.02) = 153` USDT 的零頭（dust）丟棄；總分配 ≤ gap，全域 cap 永不超過。
 7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ `SafetyGuardChain.evaluate` → executor submit。executor 對 venue reject（如 10001）回 `status="failed"` 而非 raise，故 reconciler 檢查 `status`，僅 submitted 才 `tracker.record_deploy`（否則記 `deployment_submit_rejected`、不記 phantom intent）。
 
@@ -247,7 +247,7 @@ sequenceDiagram
 **為什麼這樣設計（WHY）**
 
 - **rate 慢、idle cost 連續**：策略 rate（EMA / percentile window）算起來「慢」且對 1h 尺度才有意義，但閒置資金每秒都在損失機會成本。把 rate 凍結成 ~65min TTL 的 standing quote，讓資金分配能以 90s 高頻運作而不必每次重算訊號。TTL 確保 rate regime 變動後過期的 quote 不會繼續部署。
-- **greedy emptiest-first**：在 concentration cap（70%）下儘量分散，避免單一 cell 過度集中。
+- **greedy emptiest-first**：在 relaxed concentration cap（`max(70% * target, target / n_active_cells)`）下儘量分散，避免單一 cell 過度集中；僅 1 active cell 時例外允許吃下全部 target（該情況下 cap 對唯一 cell 無分散意義可言）。
 - **per-cell intent 只用 reserved**：venue 的 realized credits 無法回溯歸屬到 cell（venue→cell attribution problem，funding credit 不帶 client cid）。若把 realized 算進 rescale factor，per-cell 意圖會被灌爆超過 `cap_per_cell` 並餓死其他 cell。因此 `CellDeploymentTracker` 只 rescale 到 reserved 總量，並對任何超過 `cap_per_cell` 的 rescale 做 hard clamp（defense-in-depth）。
 
 **參數總覽**
@@ -256,7 +256,7 @@ sequenceDiagram
 |---|---|---|
 | Allocation cap（canary on Koyeb） | 10000 USDT | `BFX_ALLOCATION_CAP_USDT`（程式預設 500；canary 3000→10000 見 commit `aa4842c`，原文件曾誤留 570） |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
-| Per-cell concentration | 70% of cap | `BFX_CONCENTRATION_PCT`=0.70 |
+| Per-cell concentration | `max(70% × target, target / n_active_cells)`；≥2 active cells 等同 70%，僅 1 active cell 時可達 100%（見 commit `0d29fc8`） | `BFX_CONCENTRATION_PCT`=0.70 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
@@ -349,6 +349,14 @@ diagnostics            (非 SoT forensic, prunable)
 
 funding_candles        (訊號層輸入)
   PK (symbol, timeframe, period_agg, mts)
+
+config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
+  PK (deployment_environment, account_id, recorded_at_ms)
+  clamp_enabled, reprice_enabled (BFX_CLAMP_ENABLED/BFX_REPRICE_ENABLED),
+  git_sha
+  用途：flag flip 需重啟（config boot-immutable），boot 即為 regime
+  boundary；供 execution-quality（fill latency、realized APR）歸因對應
+  的 flag regime，不必等 weekly window 累積。
 ```
 
 **Alembic**：遷移在 `backend_py/alembic/versions/`。套用一律 `cd backend_py && uv run alembic upgrade head`；驗證無 drift `uv run alembic check`。
@@ -398,7 +406,7 @@ funding_candles        (訊號層輸入)
 - **I-R/R reserved/realized 分離**：`tracker.reconcile_to_total` 只用 `reserved_exposure`，不含 realized（避免 venue→cell attribution 灌爆 per-cell 意圖）。gap 仍以 `current_exposure = reserved + realized` 對 cap 計算。
 - **I-AC allocation cap**：`(reserved + realized) + amount ≤ cap`；恰好 at-cap 放行，over-cap 擋；`reconcile_to_total` 對超過 `cap_per_cell` 做 hard clamp。
 - **gap ≤ target**：`allocate_gap` 總分配 ≤ gap，全域 cap 永不超過；低於 153 的 dust 丟棄。
-- **I-CC concentration**：每 cell ≤ `concentration_pct * cap`（70%）；跨 tick 漂移於下個 90s reconcile 自我修正。（注意：reserved-only rescale 後，集中度上限僅對 pending 資本生效，不含已成交 realized；2-cell 同幣別下無害，multi-cell scale-up 需 cid 完整歸屬。）
+- **I-CC concentration**：每 cell ≤ `max(concentration_pct * cap, cap / n_active_cells)`（≥2 active cells 等同 70%；僅 1 active cell 時可達 100% cap——該情況下 cap 本就不提供分散效果，屬刻意 relax，見 commit `0d29fc8`）；跨 tick 漂移於下個 90s reconcile 自我修正。（注意：reserved-only rescale 後，集中度上限僅對 pending 資本生效，不含已成交 realized；2-cell 同幣別下無害，multi-cell scale-up 需 cid 完整歸屬。）
 - **I-WAI write-ahead intent**：txn1 寫 `ReservationIntent`(PENDING) → REST（唯一非事務邊界）→ txn2 寫 outcome；crash 於中間留 PENDING，boot 時老者判 FAILED。txn 永不跨 REST call。
 - **I-IDEM idempotency**：`ORDER_FILL` / `RESERVATION_RELEASED` 以 dedup key 去重；`OfferRegistry.transition()` 純函式、原子套用、重送安全。
 - **I-ES event sourcing SoT**：`event_log` append-only；snapshots 皆可由 log 重算；bus publish 為 best-effort，recovery 一律走 event_log。
