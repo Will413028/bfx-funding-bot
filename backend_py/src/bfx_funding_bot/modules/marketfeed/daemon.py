@@ -59,6 +59,7 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.deployment.book_clamp import clamp_policy_from_env
+from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
@@ -1038,6 +1039,7 @@ async def build_daemon(
     if not spec.is_simulated:
         reprice_policy = policy_from_env(os.environ)
         clamp_policy = clamp_policy_from_env(os.environ)
+        ladder_policy = ladder_policy_from_env(os.environ)
         deployment_reconciler = DeploymentReconciler(
             store=quote_store,
             tracker=CellDeploymentTracker(),
@@ -1074,6 +1076,7 @@ async def build_daemon(
             # clamp_would_adjust，submit 與 sweep 行為 = 現狀。
             ticker_source=bitfinex,
             clamp=clamp_policy,
+            ladder=ladder_policy,
         )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —

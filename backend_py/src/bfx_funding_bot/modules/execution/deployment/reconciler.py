@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.deployment.book_clamp import (
     ClampPolicy,
     clamp_rate,
 )
+from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy, spike_rungs
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
     stale_offers,
@@ -96,6 +97,7 @@ class DeploymentReconciler:
         reprice: RepricePolicy | None = None,
         ticker_source: _TickerSourceProtocol | None = None,
         clamp: ClampPolicy | None = None,
+        ladder: LadderPolicy | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -124,6 +126,7 @@ class DeploymentReconciler:
         self._reprice = reprice
         self._ticker_source = ticker_source
         self._clamp = clamp
+        self._ladder = ladder
         # cell_id → strategy, for the structured ORDER_SUBMIT event envelope.
         self._cell_strategy: dict[str, StrategyName] = {
             c.cell_id: c.strategy for c in cells
@@ -306,6 +309,18 @@ class DeploymentReconciler:
                     )
                     if self._clamp.enabled:
                         offer_rate = cd.rate
+                # Observe-only spike-rung ladder（2026-07-10 review）：只 log
+                # 會掛什麼 rungs，submit 行為零改變。enforce 見 ladder.py 頂註。
+                if self._ladder is not None and ticker is not None and ticker.ask > TICK:
+                    rungs = spike_rungs(
+                        amount=float(amount), ask=ticker.ask, policy=self._ladder,
+                    )
+                    if rungs:
+                        log.info(
+                            "ladder_would_post cell=%s base_rate=%s rungs=%s ask=%s",
+                            cell_id, offer_rate,
+                            [(round(a, 2), r) for a, r in rungs], ticker.ask,
+                        )
                 decision = DecisionPayload(
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
