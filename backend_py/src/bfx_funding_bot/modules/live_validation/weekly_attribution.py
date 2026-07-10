@@ -16,7 +16,8 @@ Pure, I/O-free。與 G3 的差異：
 - baseline_frr_util_apr_net_pct = baseline_frr_apr_net_pct × mean(市場 utilization)
   — funding_amount_used / funding_amount（市場級、每 stats snapshot），把
   「FRR 掛單只在 market ≥ FRR 時成交」的 idle 折進 benchmark。idealized 欄
-  保留當 upper bound；cap-gate spread 應讀本欄。
+  保留當 upper bound；cap-gate spread 應讀本欄。utilization per-snapshot
+  clamp 到 ≤1（分母近零 glitch 會 >1），保證本欄 ≤ idealized upper bound。
 - 缺資料 = None，不是 0（零收益與缺資料必須可區分）。
 """
 from __future__ import annotations
@@ -59,10 +60,17 @@ class WeeklyCellRow:
     baseline_frr_util_apr_net_pct: Decimal | None
 
 
-def _mean_rate_by_week(points: list[MarketRatePoint]) -> dict[int, Decimal]:
+def _mean_rate_by_week(
+    points: list[MarketRatePoint], *, clamp_one: bool = False
+) -> dict[int, Decimal]:
+    # clamp_one：utilization = used/total ∈ [0,1]。分母近零的 snapshot 會產生
+    # >1 的 ratio outlier，per-point clamp 才擋得住（只 clamp 週均值會讓單點
+    # glitch 把整週 util 調整抹平）。close/frr rate 不 clamp。
     by_week: dict[int, list[Decimal]] = {}
     for p in points:
-        by_week.setdefault(calendar_week_start(p.mts), []).append(p.rate)
+        by_week.setdefault(calendar_week_start(p.mts), []).append(
+            min(Decimal("1"), p.rate) if clamp_one else p.rate
+        )
     return {
         wk: sum(rates, Decimal("0")) / Decimal(len(rates))
         for wk, rates in by_week.items()
@@ -90,7 +98,7 @@ def compute_weekly_rows(
     """
     close_by_week = _mean_rate_by_week(close_points)
     frr_by_week = _mean_rate_by_week(frr_points)
-    util_by_week = _mean_rate_by_week(utilization_points)
+    util_by_week = _mean_rate_by_week(utilization_points, clamp_one=True)
     baseline_weeks = set(close_by_week) | set(frr_by_week)
 
     rows: list[WeeklyCellRow] = []

@@ -128,6 +128,26 @@ class TestUtilizationAdjustedFrrBaseline:
         assert row.baseline_frr_apr_net_pct == Decimal("6.20500")
         assert row.baseline_frr_util_apr_net_pct == Decimal("6.20500") * Decimal("0.7")
 
+    def test_util_ratio_above_one_clamped_per_point(self):
+        # denominator 近零的 snapshot → utilization ratio >1 outlier。per-point
+        # clamp 到 ≤1，否則單點 glitch 拉高週均、使 util-baseline 超過 idealized
+        # （cap-gate spread 讀這欄 → 污染真錢加碼決策）。
+        wk = calendar_week_start(1_700_000_000_000)
+        frr = [MarketRatePoint(mts=wk + 1000, rate=Decimal("0.0002"))]
+        util = [
+            MarketRatePoint(mts=wk + 1000, rate=Decimal("5")),    # used/≈0 glitch
+            MarketRatePoint(mts=wk + 2000, rate=Decimal("0.6")),
+        ]
+        rows = compute_weekly_rows(
+            fills_by_cell={"fUST_p2": []},
+            close_points=[], frr_points=frr, utilization_points=util,
+        )
+        row = next(r for r in rows if r.week_start_ms == wk)
+        # 5 clamp→1；mean util = (1 + 0.6)/2 = 0.8
+        assert row.baseline_frr_util_apr_net_pct == Decimal("6.20500") * Decimal("0.8")
+        # 恆定不變式：util-adjusted baseline 絕不超過 idealized upper bound
+        assert row.baseline_frr_util_apr_net_pct <= row.baseline_frr_apr_net_pct
+
     def test_util_baseline_none_when_no_utilization_data(self):
         wk = calendar_week_start(1_700_000_000_000)
         rows = compute_weekly_rows(
