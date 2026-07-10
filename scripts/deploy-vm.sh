@@ -8,6 +8,11 @@ case "$PHASE" in paper|shadow|canary) ;; *) echo "usage: $0 <paper|shadow|canary
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# Pull FIRST: the env assembly below reads deploy/vm/<phase>.env from the repo —
+# pulling after it deploys the PREVIOUS commit's env config (bit us 2026-07-10:
+# freshly committed BFX_REPRICE/CLAMP flags were silently absent from .env.runtime,
+# reverting E1 to observe-only for ~15 min on a live bot).
+git pull --ff-only origin main
 SECRETS="$HOME/bfx/bot.env"
 PHASE_ENV="deploy/vm/${PHASE}.env"
 
@@ -52,7 +57,6 @@ if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
   [ "$ans" = yes ] || { echo "aborted"; exit 1; }
 fi
 
-git pull --ff-only origin main
 export GIT_SHA="$(git rev-parse --short HEAD)"
 docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA="$GIT_SHA"
 docker compose -f docker-compose.bot.yml up -d --remove-orphans
