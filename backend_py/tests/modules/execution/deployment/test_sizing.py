@@ -42,10 +42,13 @@ def test_single_active_cell_fills_gap_up_to_concentration_cap():
 
 
 def test_concentration_cap_limits_a_single_cell():
-    # target 570, cap_per_cell 399. gap = 570 (exposure 0), only cell "a" active.
-    # "a" can take at most 399; remaining 171 has no other active cell -> dropped.
+    # target 570, gap 570 (exposure 0), only cell "a" active. Single-active-cell
+    # relaxation: cap_per_cell = max(0.70*570, 570/1) = 570 -> "a" absorbs the
+    # whole gap (pre-relaxation this pinned the 399 stranding cap; see
+    # sizing.allocate_gap's cap_per_cell relaxation for >=2 active cells the
+    # 0.70*target cap still binds, see test_fills_emptiest_cell_first_then_next).
     out = _alloc(D("570"), D("0"), {}, ["a"])
-    assert out == {"a": D("399")}
+    assert out == {"a": D("570")}
 
 
 def test_fills_emptiest_cell_first_then_next():
@@ -132,3 +135,43 @@ def test_allocate_gap_default_headroom_is_unbounded():
         min_fill=Decimal("153"),
     )
     assert fills == {"fUST_a30": Decimal("200")}
+
+
+class TestSingleActiveCellRelaxation:
+    def test_single_active_cell_absorbs_full_gap(self):
+        # 1 active cell of 2 configured: 70% cap would strand 3000 — relaxed
+        # cap (target / n_active = 10000) lets the lone cell take everything.
+        fills = allocate_gap(
+            target=Decimal("10000"),
+            current_exposure=Decimal("0"),
+            deployed={},
+            active_cells=["fUST_p2"],
+            concentration_pct=Decimal("0.70"),
+            min_fill=Decimal("153"),
+        )
+        assert fills == {"fUST_p2": Decimal("10000")}
+
+    def test_two_active_cells_unchanged(self):
+        # max(0.70*10000, 10000/2) = 7000 — byte-identical to pre-change split.
+        fills = allocate_gap(
+            target=Decimal("10000"),
+            current_exposure=Decimal("0"),
+            deployed={},
+            active_cells=["fUST_a30", "fUST_p2"],
+            concentration_pct=Decimal("0.70"),
+            min_fill=Decimal("153"),
+        )
+        assert fills == {"fUST_a30": Decimal("7000"), "fUST_p2": Decimal("3000")}
+
+    def test_single_active_cell_respects_headroom(self):
+        # Relaxation raises the CAP, never the gap: balance headroom still binds.
+        fills = allocate_gap(
+            target=Decimal("10000"),
+            current_exposure=Decimal("0"),
+            deployed={},
+            active_cells=["fUST_p2"],
+            concentration_pct=Decimal("0.70"),
+            min_fill=Decimal("153"),
+            available_headroom=Decimal("4000"),
+        )
+        assert fills == {"fUST_p2": Decimal("4000")}
