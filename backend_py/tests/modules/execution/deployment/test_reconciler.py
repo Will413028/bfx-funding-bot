@@ -8,6 +8,7 @@ from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.rest import FundingTicker
 from bfx_funding_bot.modules.execution.deployment.book_clamp import ClampPolicy
+from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
@@ -146,7 +147,7 @@ class _SeqSafety:
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            available=None, event_sink=None, canceller=None, reprice=None,
-           ticker_source=None, clamp=None):
+           ticker_source=None, clamp=None, ladder=None, cap=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -154,9 +155,17 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     tracker = CellDeploymentTracker()
     ex = executor or _FakeExecutor()
     safety = safety if safety is not None else _FakeSafety(allowed=safety_allowed)
+    # cap override: only the ladder observe-log test needs a gap large enough
+    # (>= min_rung_usdt / spike_fraction) to actually produce spike rungs; every
+    # other caller keeps the default _ctx() (allocation_cap_usdt=570).
+    ctx = _ctx() if cap is None else AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=cap,
+    )
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=_FakeLedger(exposure, available=available),
-        safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
+        safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000,
@@ -166,6 +175,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         reprice=reprice,
         ticker_source=ticker_source,
         clamp=clamp,
+        ladder=ladder,
     )
     return rec, ex, tracker, safety
 
@@ -865,3 +875,47 @@ async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
     await rec.deploy()
     # NOT clamped down to 7000: relaxed cap = max(7000, 10000/1) = 10000.
     assert tracker.deployed("fUST_p2") == D("9000")
+
+
+# ---------------------------------------------------------------------------
+# Task 6: observe-only spike-rung ladder — log ladder_would_post, zero submit
+# behaviour change. clamp=_CLAMP_OBSERVE (not _CLAMP_ON) so this test isolates
+# the ladder's effect: the offer_rate/submit count must match the no-ladder
+# case exactly (see test_clamp_observe_mode_submits_quote_rate above).
+# ---------------------------------------------------------------------------
+
+
+_LADDER = LadderPolicy(spike_fraction=0.15, rung_multipliers=(1.5, 3.0), min_rung_usdt=153.0)
+
+
+async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
+    # cap=10000, single active cell (fUST_p2) -> relaxed cap_per_cell = cap ->
+    # full 10000 gap deploys to that one cell. budget = 10000*0.15 = 1500 ->
+    # 750/rung >= 153 -> two rungs get logged (ask=0.00025 from _fticker()).
+    ts = _FakeTickerSource(_fticker(ask=0.00025))
+    rec, ex, _, _ = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_p2")],
+        cap=D("10000"), ticker_source=ts, clamp=_CLAMP_OBSERVE, ladder=_LADDER,
+    )
+    with caplog.at_level(logging.INFO):
+        await rec.deploy()
+    assert any("ladder_would_post" in r.getMessage() for r in caplog.records)
+    # observe-only invariant: exactly the same submit as without a ladder —
+    # one offer, at the (unclamped, observe-mode) quote rate.
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_rate == 0.00012
+
+
+async def test_no_ladder_config_never_computes_rungs(caplog):
+    # ladder=None (default) -> byte-identical to pre-Task-6: same submit, no
+    # ladder_would_post log line, even with an identical ticker/clamp/cap setup.
+    ts = _FakeTickerSource(_fticker(ask=0.00025))
+    rec, ex, _, _ = _build(
+        exposure=D("0"), quotes=[_post_quote("fUST_p2")],
+        cap=D("10000"), ticker_source=ts, clamp=_CLAMP_OBSERVE,
+    )
+    with caplog.at_level(logging.INFO):
+        await rec.deploy()
+    assert not any("ladder_would_post" in r.getMessage() for r in caplog.records)
+    assert len(ex.submitted) == 1
+    assert ex.submitted[0].offer_rate == 0.00012
