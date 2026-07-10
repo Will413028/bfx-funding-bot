@@ -1087,7 +1087,7 @@ async def build_daemon(
             deployment_environment=env_str,
             clamp_enabled=clamp_policy.enabled,
             reprice_enabled=reprice_policy.enabled,
-            git_sha=os.environ.get("GIT_SHA"),
+            git_sha=os.environ.get("GIT_SHA") or os.environ.get("BFX_SERVICE_VERSION"),
             now_ms=now_ms_utc(),
         )
         periodic_reconcile = PeriodicReconcile(
