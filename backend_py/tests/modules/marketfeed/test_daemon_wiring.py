@@ -209,6 +209,11 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     # bound method equality: same __self__ + __func__
     assert daemon.auth_ws._on_resync_needed == daemon.periodic_reconcile.request_resync
     assert daemon.periodic_reconcile._min_resync_interval_s == 7.0
+    # Shared-nonce wiring invariant (2026-07 auth-WS flap fix): every auth client
+    # on the one BFX_API_KEY MUST draw from ONE monotonic nonce source. A separate
+    # provider at a smaller scale (the old ms WS default vs µs REST) gets rejected
+    # "nonce: small" and that client can never authenticate — regression guard.
+    assert daemon.auth_ws._nonce_provider is daemon.executor._nonce_provider  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

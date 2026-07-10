@@ -85,6 +85,39 @@ assert not (LIVENESS_THRESHOLDS.keys() & ACTIVITY_THRESHOLDS.keys()), (
 )
 
 
+# auth WS reconnects/hour at/above which we call it "flapping" (still authing
+# sometimes, but unstable). ~6 consecutive failures already hits the 60s backoff cap.
+_AUTH_WS_FLAP_THRESHOLD = 6
+
+
+def assess_auth_ws_health(
+    *, connection_count: int, auth_ok_count: int, reconnect_count_last_hour: int,
+) -> tuple[HealthStatus, str | None]:
+    """Observe-only health for the authenticated Bitfinex WS.
+
+    Catches the failure a disconnect callback can't: an ABSENCE of success —
+    the socket opens but never authenticates (the 2026-07 µs/ms nonce bug, dead
+    for months because nothing looked). Returns a status for the HEALTH_CHECK
+    emit path only; the caller MUST NOT record a liveness heartbeat off this, so
+    a DOWN never drives /healthz 503 or autoheal restart — a systemic auth/nonce
+    fault won't heal on restart, it would just flap-restart.
+    """
+    if connection_count == 0:
+        return HealthStatus.HEALTHY, None  # boot grace: not connected yet
+    if auth_ok_count == 0:
+        return (
+            HealthStatus.DOWN,
+            f"auth WS connected ({connection_count}x) but never authenticated "
+            "— check API key nonce scope (shared REST/WS per-key nonce)",
+        )
+    if reconnect_count_last_hour >= _AUTH_WS_FLAP_THRESHOLD:
+        return (
+            HealthStatus.DEGRADED,
+            f"auth WS flapping (reconnects_last_hour={reconnect_count_last_hour})",
+        )
+    return HealthStatus.HEALTHY, None
+
+
 class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 

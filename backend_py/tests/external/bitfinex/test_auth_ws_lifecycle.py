@@ -146,6 +146,10 @@ async def test_auth_ok_resets_reconnect_attempts() -> None:
 
     # Genuine auth success clears the backoff counter → next drop starts at 0.
     assert client.reconnect_attempts == 0
+    # ...and is counted (health poll reads auth_ok_count + connection_count to
+    # tell "connected but never authed" apart from "authed fine").
+    assert client.auth_ok_count == 1
+    assert client.connection_count >= 1
 
 
 @pytest.mark.asyncio
