@@ -13,6 +13,10 @@ Pure, I/O-free。與 G3 的差異：
   — 實際部署資本的年化報酬（utilization 無關；capital_days = Σ size×duration）。
 - baseline_*_apr_net_pct = mean(rate in week) × 365 × 100 × (1−fee)
   — 滿倉掛市場價/FRR 的理想化年化（full utilization 假設，與 G3 passive arm 同構）。
+- baseline_frr_util_apr_net_pct = baseline_frr_apr_net_pct × mean(市場 utilization)
+  — funding_amount_used / funding_amount（市場級、每 stats snapshot），把
+  「FRR 掛單只在 market ≥ FRR 時成交」的 idle 折進 benchmark。idealized 欄
+  保留當 upper bound；cap-gate spread 應讀本欄。
 - 缺資料 = None，不是 0（零收益與缺資料必須可區分）。
 """
 from __future__ import annotations
@@ -52,6 +56,7 @@ class WeeklyCellRow:
     realized_apr_net_pct: Decimal | None
     baseline_close_apr_net_pct: Decimal | None
     baseline_frr_apr_net_pct: Decimal | None
+    baseline_frr_util_apr_net_pct: Decimal | None
 
 
 def _mean_rate_by_week(points: list[MarketRatePoint]) -> dict[int, Decimal]:
@@ -75,8 +80,9 @@ def compute_weekly_rows(
     fills_by_cell: dict[str, list[FillRecord]],
     close_points: list[MarketRatePoint],
     frr_points: list[MarketRatePoint],
+    utilization_points: list[MarketRatePoint],
 ) -> list[WeeklyCellRow]:
-    """cell × calendar-week 的 fee-adjusted 實得 + 兩條 baseline。
+    """cell × calendar-week 的 fee-adjusted 實得 + 三條 baseline。
 
     row 集合 = (每個 cell) × (該 cell 有 fill 的週 ∪ 有 baseline 資料的週) —
     baseline 週沒 fill 也出 row（前端 baseline 線不斷），fill 週沒 baseline
@@ -84,6 +90,7 @@ def compute_weekly_rows(
     """
     close_by_week = _mean_rate_by_week(close_points)
     frr_by_week = _mean_rate_by_week(frr_points)
+    util_by_week = _mean_rate_by_week(utilization_points)
     baseline_weeks = set(close_by_week) | set(frr_by_week)
 
     rows: list[WeeklyCellRow] = []
@@ -106,6 +113,7 @@ def compute_weekly_rows(
                 net / capital_days * _DAYS_PER_YEAR * Decimal("100")
                 if capital_days > 0 else None
             )
+            frr_baseline = _baseline_apr_net(frr_by_week.get(wk))
             rows.append(WeeklyCellRow(
                 cell=cell,
                 week_start_ms=wk,
@@ -116,6 +124,11 @@ def compute_weekly_rows(
                 capital_days=capital_days,
                 realized_apr_net_pct=apr,
                 baseline_close_apr_net_pct=_baseline_apr_net(close_by_week.get(wk)),
-                baseline_frr_apr_net_pct=_baseline_apr_net(frr_by_week.get(wk)),
+                baseline_frr_apr_net_pct=frr_baseline,
+                baseline_frr_util_apr_net_pct=(
+                    frr_baseline * util_by_week[wk]
+                    if frr_baseline is not None and wk in util_by_week
+                    else None
+                ),
             ))
     return rows

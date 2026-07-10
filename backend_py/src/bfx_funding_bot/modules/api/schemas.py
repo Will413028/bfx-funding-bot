@@ -83,3 +83,6 @@ class WeeklyAttributionResponse(BaseModel):
     baseline_frr_apr_net_pct: str | None = Field(
         serialization_alias="baselineFrrAprNetPct"
     )
+    baseline_frr_util_apr_net_pct: str | None = Field(
+        default=None, serialization_alias="baselineFrrUtilAprNetPct",
+    )

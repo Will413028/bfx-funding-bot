@@ -170,10 +170,23 @@ async def load_and_compute(
         MarketRatePoint(mts=c.mts, rate=c.close)
         for c in candles if c.close is not None
     ]
+    utilization_points = [
+        MarketRatePoint(
+            mts=r.mts,
+            rate=(
+                Decimal(str(r.funding_amount_used)) / Decimal(str(r.funding_amount))
+            ),
+        )
+        for r in frr_rows
+        if r.funding_amount is not None
+        and r.funding_amount_used is not None
+        and r.funding_amount > 0
+    ]
     return compute_weekly_rows(
         fills_by_cell=fills_by_cell,
         close_points=close_points,
         frr_points=frr_points_from_stats(frr_stats),
+        utilization_points=utilization_points,
     )
 
 
@@ -214,6 +227,7 @@ async def persist_rows(
                 realized_apr_net_pct=r.realized_apr_net_pct,
                 baseline_close_apr_net_pct=r.baseline_close_apr_net_pct,
                 baseline_frr_apr_net_pct=r.baseline_frr_apr_net_pct,
+                baseline_frr_util_apr_net_pct=r.baseline_frr_util_apr_net_pct,
             )
             for r in rows
         ])

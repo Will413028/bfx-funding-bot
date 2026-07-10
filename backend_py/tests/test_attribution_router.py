@@ -26,6 +26,7 @@ def _row(
         capital_days=Decimal("1000"), realized_apr_net_pct=Decimal("6.205"),
         baseline_close_apr_net_pct=Decimal("6.205"),
         baseline_frr_apr_net_pct=None,
+        baseline_frr_util_apr_net_pct=Decimal("4.34"),
     )
 
 
@@ -72,6 +73,7 @@ def test_weekly_returns_rows_camel_case(app_client):
     assert row["weekStartMs"] == 1_782_691_200_000
     assert row["realizedAprNetPct"] == "6.205"
     assert row["baselineFrrAprNetPct"] is None
+    assert row["baselineFrrUtilAprNetPct"] == "4.34"
     assert row["grossInterestUsdt"] == "0.2"
     assert row["netInterestUsdt"] == "0.17"
     # regression guard: _dec_str must not emit scientific notation ("1E+3")

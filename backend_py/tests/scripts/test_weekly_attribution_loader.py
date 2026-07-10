@@ -13,6 +13,7 @@ import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 from bfx_funding_bot.modules.live_validation.weekly_attribution import WeeklyCellRow
 from scripts.run_weekly_attribution import load_and_compute, persist_rows
@@ -122,6 +123,7 @@ def _wcr(cell: str, wk: int = _MON) -> WeeklyCellRow:
         gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal("0.17"),
         capital_days=Decimal("1000"), realized_apr_net_pct=Decimal("6.205"),
         baseline_close_apr_net_pct=None, baseline_frr_apr_net_pct=None,
+        baseline_frr_util_apr_net_pct=None,
     )
 
 
@@ -163,3 +165,34 @@ async def test_persist_rows_replace_is_realm_scoped(sf):
             )
         )).scalars().all()
     assert len(others) == 1  # 別的 realm 不受影響
+
+
+async def test_loader_builds_utilization_points_from_funding_stats(sf):
+    """funding_amount(_used) present → utilization point used/total; missing or
+    zero total → no point for that snapshot (None column ≠ 0 utilization)."""
+    scid = str(uuid4())
+    five_days = 5 * 24 * 60 * 60 * 1000
+    async with sf() as s:
+        # 兩筆 fill 拉寬 loader 的 [min_ts, max_ts] 查詢窗，讓三筆 funding_stats
+        # snapshot（同一週內）都落在窗內。
+        s.add(_fill_event(scid, "50", _MON + 1000))
+        s.add(_fill_event(scid, "51", _MON + five_days))
+        s.add(_decision_row(scid, "fUST_p2"))
+        # 三筆 snapshot：(amount=1000, used=800) → 0.8；(amount=None, used=500)
+        # → skip；(amount=0, used=0) → skip（防 div-by-zero）。週均 = 0.8。
+        s.add(FundingStatRow(
+            symbol="fUST", mts=_MON + 2000, frr=0.0002, avg_period=2.0,
+            funding_amount=1000.0, funding_amount_used=800.0,
+        ))
+        s.add(FundingStatRow(
+            symbol="fUST", mts=_MON + 3000, frr=0.0002, avg_period=2.0,
+            funding_amount=None, funding_amount_used=500.0,
+        ))
+        s.add(FundingStatRow(
+            symbol="fUST", mts=_MON + 4000, frr=0.0002, avg_period=2.0,
+            funding_amount=0.0, funding_amount_used=0.0,
+        ))
+        await s.commit()
+    rows = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV)
+    row = next(r for r in rows if r.baseline_frr_apr_net_pct is not None)
+    assert row.baseline_frr_util_apr_net_pct == row.baseline_frr_apr_net_pct * Decimal("0.8")
