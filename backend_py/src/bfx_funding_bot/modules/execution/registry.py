@@ -16,6 +16,7 @@ CC4 invariants:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -58,6 +59,7 @@ def build_executor(
     cell: str,
     http: httpx.AsyncClient | None = None,
     bus: Any | None = None,  # DomainEventBus typed via Any to avoid circular ref
+    nonce_provider: Callable[[], int] | None = None,
 ) -> ExecutorSpec:
     executor_raw = os.environ.get("BFX_EXECUTOR", "paper")
     executor_kind = executor_raw.lower()
@@ -110,6 +112,7 @@ def build_executor(
                 phase=phase, strategy=strategy,
                 configured_symbols=configured_symbols or frozenset(),
                 cell=cell,
+                nonce_provider=nonce_provider,
             ),
             fill_tracker_enabled=fill_tracker_enabled,
             ws_client_enabled=ws_client_enabled,
