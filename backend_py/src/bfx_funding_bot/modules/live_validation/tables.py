@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -39,3 +39,24 @@ class AttributionWeeklyRow(Base):
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_NOW,
     )
+
+
+class ConfigRegimeRow(Base):
+    """One row per daemon boot — execution-policy regime boundaries.
+
+    Flag flips require a restart (config is boot-immutable), so boots ARE the
+    regime boundaries. Task: attribute execution-quality metrics (fill latency,
+    realized APR) to the flag state that produced them, without waiting for
+    weekly windows to accumulate. Telemetry, not SoT — prunable.
+    """
+
+    __tablename__ = "config_regime"
+
+    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    recorded_at_ms: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
+    )
+    clamp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reprice_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    git_sha: Mapped[str | None] = mapped_column(Text, nullable=True)

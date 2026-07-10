@@ -109,6 +109,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     WriterLockGuard,
 )
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
+from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
@@ -1035,6 +1036,8 @@ async def build_daemon(
     # DeploymentReconciler needs wrapped_executor — constructed here (after
     # wrapped_executor) and injected into PeriodicReconcile.
     if not spec.is_simulated:
+        reprice_policy = policy_from_env(os.environ)
+        clamp_policy = clamp_policy_from_env(os.environ)
         deployment_reconciler = DeploymentReconciler(
             store=quote_store,
             tracker=CellDeploymentTracker(),
@@ -1064,13 +1067,25 @@ async def build_daemon(
             # executor 無 cancel → None → sweep 恆 noop（defense-in-depth，
             # 本區塊本來就 live-only）。
             canceller=executor if isinstance(executor, CancelPort) else None,
-            reprice=policy_from_env(os.environ),
+            reprice=reprice_policy,
             # E2 book-aware clamp：ticker 用既有 public BitfinexREST（共用
             # FundingRateLimiter；~2 call/90s ≪ 30/min budget）。預設
             # observe-only（BFX_CLAMP_ENABLED=false）：抓 ticker、log
             # clamp_would_adjust，submit 與 sweep 行為 = 現狀。
             ticker_source=bitfinex,
-            clamp=clamp_policy_from_env(os.environ),
+            clamp=clamp_policy,
+        )
+        # Execution-policy regime telemetry: one row per boot (flags are
+        # boot-immutable, so boots are the regime boundaries). Best-effort —
+        # record_config_regime never raises.
+        await record_config_regime(
+            session_factory,
+            account_id=account_id,
+            deployment_environment=env_str,
+            clamp_enabled=clamp_policy.enabled,
+            reprice_enabled=reprice_policy.enabled,
+            git_sha=os.environ.get("GIT_SHA"),
+            now_ms=now_ms_utc(),
         )
         periodic_reconcile = PeriodicReconcile(
             recovery=runtime_recovery,
