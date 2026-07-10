@@ -122,6 +122,7 @@ from bfx_funding_bot.modules.marketfeed.config import (
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
     HealthMonitor,
     HealthProbe,
+    assess_auth_ws_health,
 )
 from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
 from bfx_funding_bot.modules.marketfeed.scheduler import (
@@ -245,6 +246,13 @@ class Daemon:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
                     name="ws_dispatcher",
+                )
+            # Observe-only auth-WS health poll (2026-07 nonce-flap fix): surfaces
+            # "enabled but never authenticates" in the HEALTH_CHECK stream. NOT a
+            # liveness task → never drives /healthz 503 / autoheal restart.
+            if self.auth_ws is not None:
+                tg.create_task(
+                    self._auth_ws_health_poll_loop(), name="auth_ws_health",
                 )
             # Spec 2026-05-27: periodic venue reconcile is the correctness
             # backbone — runs live-only, converges the ledger every interval.
@@ -380,6 +388,36 @@ class Daemon:
             admin_token=self.admin_token,
         )
         log.info("sub_task_exit name=healthz")
+
+    async def _auth_ws_health_poll_loop(self) -> None:
+        """Observe-only: surface a dead/flapping authenticated WS in the
+        HEALTH_CHECK stream. Polls every 60s and calls assess_auth_ws_health.
+
+        Deliberately does NOT record a liveness heartbeat: a DOWN here (auth WS
+        connected but never authenticated) must stay observable-only — a nonce/
+        auth fault won't heal on restart, so wiring it to /healthz 503 / autoheal
+        would just flap-restart the real-money bot. Transition-only update()
+        (like BITFINEX_WS) avoids emitting every 60s.
+        """
+        assert self.auth_ws is not None
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=60.0)
+                log.info("sub_task_exit name=auth_ws_health")
+                return
+            except TimeoutError:
+                pass
+            status, msg = assess_auth_ws_health(
+                connection_count=self.auth_ws.connection_count,
+                auth_ok_count=self.auth_ws.auth_ok_count,
+                reconnect_count_last_hour=self.auth_ws.reconnect_count_last_hour(),
+            )
+            if self.probe.current_status(HealthTarget.AUTH_WS) != status:
+                self.probe.update(
+                    HealthTarget.AUTH_WS, status,
+                    reconnect_count_last_hour=self.auth_ws.reconnect_count_last_hour(),
+                    error_message=msg,
+                )
 
     async def _ws_heartbeat_poll_loop(self) -> None:
         """Poll ws_client.last_msg_age_ms() and record heartbeat when fresh.

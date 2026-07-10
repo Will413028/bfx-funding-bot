@@ -70,6 +70,7 @@ class SkipReason(StrEnum):
 
 class HealthTarget(StrEnum):
     BITFINEX_WS = "bitfinex_ws"
+    AUTH_WS = "auth_ws"
     BITFINEX_REST = "bitfinex_rest"
     DB = "db"
     REDIS = "redis"

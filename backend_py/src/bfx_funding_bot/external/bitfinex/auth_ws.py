@@ -343,10 +343,17 @@ class BitfinexAuthWSClient:
         self._ws: ClientConnection | None = None
         self._stop = False
         self.reconnect_attempts = 0
+        self.auth_ok_count = 0  # successful AuthAck OK count (health: 0 = never authed)
         self._reconnect_history: deque[float] = deque(maxlen=1000)
         self._last_msg_ts: float = time.monotonic()
         self._seq = SequenceTracker()
         self._connection_count = 0
+
+    @property
+    def connection_count(self) -> int:
+        """WS connections opened so far. `connection_count>0 and auth_ok_count==0`
+        = the 'connected but never authenticates' failure (health-poll reads it)."""
+        return self._connection_count
 
     def reconnect_count_last_hour(self) -> int:
         cutoff = time.monotonic() - 3600
@@ -423,6 +430,7 @@ class BitfinexAuthWSClient:
                             # not cumulative-since-boot (the public ws.py resets
                             # on stability; this client had no reset at all).
                             self.reconnect_attempts = 0
+                            self.auth_ok_count += 1
                             log.info(
                                 "bfx_auth_ws_authed user_id=%s chan=%d",
                                 event.user_id, event.chan_id,
