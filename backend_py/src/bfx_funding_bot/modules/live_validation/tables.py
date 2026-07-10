@@ -35,6 +35,7 @@ class AttributionWeeklyRow(Base):
     realized_apr_net_pct: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     baseline_close_apr_net_pct: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     baseline_frr_apr_net_pct: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    baseline_frr_util_apr_net_pct: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=_NOW,
     )

@@ -34,7 +34,7 @@ def test_compute_weekly_rows_fee_and_apr():
     # 單 cell 單 fill：500 USDT × 0.0002/day × 2 天 = gross 0.2
     fills = {"fUST_p2": [_fill(_MON + _DAY, "500", "0.0002")]}
     rows = compute_weekly_rows(
-        fills_by_cell=fills, close_points=[], frr_points=[],
+        fills_by_cell=fills, close_points=[], frr_points=[], utilization_points=[],
     )
     assert len(rows) == 1
     r = rows[0]
@@ -60,7 +60,9 @@ def test_compute_weekly_rows_bins_by_fill_week():
         _fill(_MON + _DAY, "500", "0.0002"),
         _fill(_MON + WEEK_MS + _DAY, "300", "0.0003"),
     ]}
-    rows = compute_weekly_rows(fills_by_cell=fills, close_points=[], frr_points=[])
+    rows = compute_weekly_rows(
+        fills_by_cell=fills, close_points=[], frr_points=[], utilization_points=[],
+    )
     assert [(r.week_start_ms, r.n_fills) for r in rows] == [
         (_MON, 1), (_MON + WEEK_MS, 1),
     ]
@@ -74,7 +76,9 @@ def test_compute_weekly_rows_baselines_use_week_mean_rate():
         for i in range(3)
     ]
     frr = [MarketRatePoint(mts=_MON + _DAY, rate=Decimal("0.0003"))]
-    rows = compute_weekly_rows(fills_by_cell=fills, close_points=close, frr_points=frr)
+    rows = compute_weekly_rows(
+        fills_by_cell=fills, close_points=close, frr_points=frr, utilization_points=[],
+    )
     r = rows[0]
     expected_close = Decimal("0.0002") * Decimal("365") * Decimal("100") * Decimal("0.85")
     expected_frr = Decimal("0.0003") * Decimal("365") * Decimal("100") * Decimal("0.85")
@@ -87,6 +91,7 @@ def test_compute_weekly_rows_baseline_weeks_without_fills_still_emitted():
     close = [MarketRatePoint(mts=_MON + _DAY, rate=Decimal("0.0002"))]
     rows = compute_weekly_rows(
         fills_by_cell={"fUST_p2": []}, close_points=close, frr_points=[],
+        utilization_points=[],
     )
     assert len(rows) == 1
     r = rows[0]
@@ -99,6 +104,38 @@ def test_compute_weekly_rows_baseline_weeks_without_fills_still_emitted():
 def test_unattributed_bucket_is_a_normal_cell_key():
     rows = compute_weekly_rows(
         fills_by_cell={"unattributed": [_fill(_MON, "200", "0.0002")]},
-        close_points=[], frr_points=[],
+        close_points=[], frr_points=[], utilization_points=[],
     )
     assert rows[0].cell == "unattributed"
+
+
+class TestUtilizationAdjustedFrrBaseline:
+    def test_util_baseline_scales_idealized_by_mean_utilization(self):
+        wk = calendar_week_start(1_700_000_000_000)
+        frr = [MarketRatePoint(mts=wk + 1000, rate=Decimal("0.0002"))]
+        util = [
+            MarketRatePoint(mts=wk + 1000, rate=Decimal("0.8")),
+            MarketRatePoint(mts=wk + 2000, rate=Decimal("0.6")),
+        ]
+        rows = compute_weekly_rows(
+            fills_by_cell={"fUST_p2": []},
+            close_points=[],
+            frr_points=frr,
+            utilization_points=util,
+        )
+        row = next(r for r in rows if r.week_start_ms == wk)
+        # idealized = 0.0002*365*100*0.85 = 6.205; mean util = 0.7
+        assert row.baseline_frr_apr_net_pct == Decimal("6.20500")
+        assert row.baseline_frr_util_apr_net_pct == Decimal("6.20500") * Decimal("0.7")
+
+    def test_util_baseline_none_when_no_utilization_data(self):
+        wk = calendar_week_start(1_700_000_000_000)
+        rows = compute_weekly_rows(
+            fills_by_cell={"fUST_p2": []},
+            close_points=[],
+            frr_points=[MarketRatePoint(mts=wk + 1000, rate=Decimal("0.0002"))],
+            utilization_points=[],
+        )
+        row = next(r for r in rows if r.week_start_ms == wk)
+        assert row.baseline_frr_apr_net_pct is not None
+        assert row.baseline_frr_util_apr_net_pct is None

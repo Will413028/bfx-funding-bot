@@ -53,6 +53,10 @@ def _to_response(row: AttributionWeeklyRow) -> dict[str, object]:
             _dec_str(row.baseline_frr_apr_net_pct)
             if row.baseline_frr_apr_net_pct is not None else None
         ),
+        baseline_frr_util_apr_net_pct=(
+            _dec_str(row.baseline_frr_util_apr_net_pct)
+            if row.baseline_frr_util_apr_net_pct is not None else None
+        ),
     ).model_dump(by_alias=True)
 
 
