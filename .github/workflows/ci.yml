@@ -22,7 +22,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
         with:
@@ -59,7 +59,7 @@ jobs:
       # NOTE: Actions @v4/@v3 acceptable per OpenSSF transitional guidance.
       # Dependabot (.github/dependabot.yml) auto-bumps these to commit SHA via
       # weekly PRs.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -79,7 +79,7 @@ jobs:
       run:
         working-directory: backend_py
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
@@ -108,7 +108,7 @@ jobs:
       GITHUB_RUN_ID: ${{ github.run_id }}
       GITHUB_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
