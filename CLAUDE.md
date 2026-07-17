@@ -64,17 +64,8 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 
 ### Commit 訊息格式
 
-使用 emoji prefix：
-- `✨ Feat:` 新功能
-- `🐛 Fix:` 修 bug
-- `🔧 Chore:` 工具/設定調整
-- `📝 Docs:` 文件
-- `🎉 Init:` 初始化
-- `♻️ Refactor:` 重構
-- `✅ Test:` 測試
-- `🔥 Remove:` 移除程式碼或檔案
-- `🚀 Deploy:` 部署
-- `💄 Style:` UI / 樣式
-- `👷 CI:` CI/CD
-- `⚡️ Perf:` 效能優化
-- `🩹 Patch:` 非關鍵小修正
+使用 [Conventional Commits](https://www.conventionalcommits.org/)：`<type>(<scope>)?: <subject>`
+
+- type：`feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
+- subject：小寫開頭、祈使句、結尾不加句號
+- 由 `lefthook.yml` 的 `commit-msg` hook 強制檢查
