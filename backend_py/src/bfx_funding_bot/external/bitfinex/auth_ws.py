@@ -95,6 +95,25 @@ class FcuEvent(BfxWSEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class FccEvent(BfxWSEvent):
+    """FUNDING CREDIT CLOSE — credit ended (matured or borrower returned early).
+
+    mts_update is the close time; the venue does NOT carry the originating
+    offer id, so downstream attribution joins on (symbol, amount, mts_create).
+    """
+    credit_id: int
+    symbol: str
+    mts_create: int
+    mts_update: int          # close time
+    amount: Decimal
+    status: str
+    rate: float
+    period_days: int
+    raw_seq: int | None
+    raw: list[Any] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class FocEvent(BfxWSEvent):
     """FUNDING OFFER CLOSE — offer was cancelled or executed."""
     venue_offer_id: str
@@ -212,6 +231,8 @@ def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
             return _parse_fcn(data, raw_seq)
         if msg_type == "fcu":
             return _parse_fcu(data, raw_seq)
+        if msg_type == "fcc":
+            return _parse_fcc(data, raw_seq)
         if msg_type == "foc":
             return _parse_foc(data, raw_seq)
     except (IndexError, TypeError, ValueError, BitfinexShapeError) as e:
@@ -233,6 +254,22 @@ def _parse_fcn(d: list[Any], raw_seq: int | None) -> FcnEvent:
         mts_create=int(d[3]),
         mts_update=int(d[4]),
         amount=Decimal(str(d[5])),
+        rate=float(d[12]),
+        period_days=int(d[13]),
+        raw_seq=raw_seq,
+        raw=d,
+    )
+
+
+def _parse_fcc(d: list[Any], raw_seq: int | None) -> FccEvent:
+    # Same array layout as FCN; status at index 7, mts_update (index 4) = close time
+    return FccEvent(
+        credit_id=int(d[0]),
+        symbol=str(d[1]),
+        mts_create=int(d[3]),
+        mts_update=int(d[4]),
+        amount=Decimal(str(d[5])),
+        status=str(d[7]),
         rate=float(d[12]),
         period_days=int(d[13]),
         raw_seq=raw_seq,

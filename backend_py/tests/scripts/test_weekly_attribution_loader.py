@@ -117,6 +117,29 @@ async def test_release_shortens_duration(sf):
     assert p2.gross_interest_usdt == Decimal("500") * Decimal("0.0002") * Decimal("1")
 
 
+async def test_credit_close_shortens_duration(sf):
+    """CREDIT_CLOSED (WS fcc, no offer linkage) must cap duration like a
+    release — joined by (symbol, amount, mts_create ≈ fill ts). Regression for
+    the 2026-07-19 early-return double-count."""
+    scid = str(uuid4())
+    one_day = 24 * 60 * 60 * 1000
+    async with sf() as s:
+        s.add(_fill_event(scid, "46", _MON + 1000))
+        s.add(_decision_row(scid, "fUST_p2"))
+        s.add(EventLogRow(
+            account_id=_ACCT, deployment_environment=_ENV,
+            event_type="CREDIT_CLOSED",
+            payload={"symbol": "fUST", "credit_id": 9, "amount": "500",
+                     "mts_create": _MON + 3000},
+            occurred_at_ms=_MON + 1000 + one_day,
+        ))
+        await s.commit()
+    rows = await load_and_compute(sf, account_id=_ACCT, deployment_environment=_ENV)
+    p2 = next(r for r in rows if r.cell == "fUST_p2")
+    # duration 被 venue close 截到 1 天(而非 held-to-term 2 天)
+    assert p2.gross_interest_usdt == Decimal("500") * Decimal("0.0002") * Decimal("1")
+
+
 def _wcr(cell: str, wk: int = _MON) -> WeeklyCellRow:
     return WeeklyCellRow(
         cell=cell, week_start_ms=wk, week_end_ms=wk + 604_800_000, n_fills=1,

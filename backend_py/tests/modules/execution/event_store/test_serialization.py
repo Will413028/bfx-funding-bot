@@ -9,6 +9,7 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
     serialize_event,
 )
 from bfx_funding_bot.modules.execution.events import (
+    CreditClosed,
     OrderFilled,
     ReservationClaimed,
     ReservationFailed,
@@ -46,6 +47,15 @@ def test_roundtrip(event: object) -> None:
     assert isinstance(payload, dict)
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
+
+
+def test_credit_closed_roundtrip() -> None:
+    ev = CreditClosed(symbol="fUST", credit_id=123456, amount=Decimal("1338.02976177"),
+        rate=0.000174, period_days=2, mts_create=1716383500000, account_id="acct",
+        is_simulated=False, venue_seq=42, occurred_at_ms=1716385500000)
+    assert event_type_of(ev) == "CREDIT_CLOSED"
+    restored = deserialize_event("CREDIT_CLOSED", serialize_event(ev))
+    assert restored == ev
 
 
 def test_intent_failed_event_type_of() -> None:

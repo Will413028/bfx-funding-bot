@@ -241,6 +241,33 @@ class ReservationReleased:
 
 
 @dataclass(frozen=True, slots=True)
+class CreditClosed:
+    """Venue credit ended (matured or borrower returned early) — WS `fcc`.
+
+    Ledger effect: NONE — audit/attribution-only. realized stays reconcile-owned
+    (single-writer, ADR 2026-05-29); this event exists so attribution can stop
+    assuming held-to-term when the borrower returned early. Carries no
+    cid/venue_offer_id (the venue credit object has no offer linkage) — consumers
+    join on (symbol, amount, mts_create ≈ fill time).
+    """
+    symbol: str
+    credit_id: int
+    amount: Decimal
+    rate: float
+    period_days: int
+    mts_create: int
+    account_id: str
+    is_simulated: bool
+    venue_seq: int | None = None
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None  # close time (venue mts_update)
+    recorded_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _require_symbol(self)
+
+
+@dataclass(frozen=True, slots=True)
 class CancelRequested:
     """User-initiated cancel request on pending offer.
 

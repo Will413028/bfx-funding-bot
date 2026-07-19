@@ -9,6 +9,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import (
     AuthAck,
     BfxWSEvent,
     ChannelInfo,
+    FccEvent,
     FcnEvent,
     FocEvent,
     Heartbeat,
@@ -32,6 +33,20 @@ def test_parse_fcn_credit_new() -> None:
     assert result.mts_create == 1716383500000
     assert result.amount == Decimal("100.0")
     assert result.rate == 0.0005
+
+
+def test_parse_fcc_credit_close() -> None:
+    raw = _load("fcc_credit_close.json")
+    result = parse_frame(raw)
+    assert isinstance(result, FccEvent)
+    assert result.credit_id == 123456
+    assert result.symbol == "fUST"
+    assert result.mts_create == 1716383500000
+    assert result.mts_update == 1716385500000  # close time
+    assert result.amount == Decimal("1338.02976177")
+    assert result.status == "CLOSED (used)"
+    assert result.rate == 0.000174
+    assert result.period_days == 2
 
 
 def test_parse_foc_canceled() -> None:

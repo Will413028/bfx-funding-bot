@@ -1351,6 +1351,7 @@ async def build_daemon(
             bus=bus,
             event_sink=stdout_sink,
             persister=persister,
+            account_id=account_id,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
 

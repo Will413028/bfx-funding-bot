@@ -28,8 +28,10 @@ from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.live_validation.live_attribution import (
+    CreditCloseRecord,
     FillRecord,
     MarketRatePoint,
+    apply_credit_closes,
     cell_period_days,
     frr_points_from_stats,
 )
@@ -43,6 +45,7 @@ log = logging.getLogger(__name__)
 
 _FILL_TYPE = "ORDER_FILL"
 _RELEASE_TYPE = "RESERVATION_RELEASED"
+_CREDIT_CLOSE_TYPE = "CREDIT_CLOSED"
 _DECISION_KIND = "decision"
 _MARKET_SYMBOL = "fUST"
 _MARKET_TIMEFRAME = "1h"
@@ -92,6 +95,15 @@ async def load_and_compute(
             await session.execute(
                 select(EventLogRow).where(
                     EventLogRow.event_type == _RELEASE_TYPE,
+                    EventLogRow.account_id == account_id,
+                    EventLogRow.deployment_environment == deployment_environment,
+                )
+            )
+        ).scalars().all()
+        credit_close_rows = (
+            await session.execute(
+                select(EventLogRow).where(
+                    EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
                     EventLogRow.account_id == account_id,
                     EventLogRow.deployment_environment == deployment_environment,
                 )
@@ -151,11 +163,13 @@ async def load_and_compute(
     )
 
     fills_by_cell: dict[str, list[FillRecord]] = {}
+    cell_symbol: dict[str, str] = {}  # cells are per-symbol by construction
     for row in fill_rows:
         payload = row.payload
         scid = str(payload.get("signal_correlation_id") or "")
         cell = scid_to_cell.get(scid, _UNATTRIBUTED)
         voi = str(payload.get("venue_offer_id") or row.venue_offer_id or "")
+        cell_symbol.setdefault(cell, str(payload.get("symbol") or _MARKET_SYMBOL))
         # Decimal(str(float)) 防科學記號（live executor 踩坑 ae2c59d 同慣例）
         fills_by_cell.setdefault(cell, []).append(FillRecord(
             venue_offer_id=voi,
@@ -165,6 +179,25 @@ async def load_and_compute(
             period_days=_period_for_cell(cell, latest_avg_period),
             release_ts_ms=release_map.get(voi),
         ))
+
+    # Venue credit-close truth (CREDIT_CLOSED, WS fcc): cap durations the same
+    # way a release does — otherwise early borrower returns double-count re-lent
+    # principal (2026-07-19 anchor divergence root cause). Joined per cell on the
+    # cell's own symbol; the join itself is (amount, mts_create ≈ fill ts).
+    closes_by_symbol: dict[str, list[CreditCloseRecord]] = {}
+    for r in credit_close_rows:
+        closes_by_symbol.setdefault(str(r.payload.get("symbol") or ""), []).append(
+            CreditCloseRecord(
+                credit_id=int(r.payload["credit_id"]),
+                amount=Decimal(str(r.payload["amount"])),
+                mts_create=int(r.payload["mts_create"]),
+                close_ts_ms=r.occurred_at_ms,
+            )
+        )
+    for cell, cell_fills in fills_by_cell.items():
+        closes = closes_by_symbol.get(cell_symbol[cell], [])
+        if closes:
+            fills_by_cell[cell] = apply_credit_closes(cell_fills, closes)
 
     close_points = [
         MarketRatePoint(mts=c.mts, rate=c.close)

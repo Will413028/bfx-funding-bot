@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
-from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    PositionStateRow,
+)
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     FillRecord,
     MarketRatePoint,
@@ -319,3 +322,51 @@ async def test_build_verdict_survives_position_state_row(g3_factory):
     assert verdict.state is VerdictState.UNRELIABLE
     assert any("12.34" in r for r in verdict.reasons)
     assert n_fills == 0
+
+
+@pytest.mark.asyncio
+async def test_build_verdict_credit_close_resolves_anchor_divergence(g3_factory):
+    """End-to-end regression for the 2026-07-19 divergence: borrower returned
+    1338.03 early, bot re-lent it 40 min later. Without CREDIT_CLOSED the
+    anchor sees 2×1338.03 attributed vs 1338.03 observed → diverged; with the
+    close event joined, attributed == observed and the reason disappears."""
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    hour = 3600 * 1000
+    candles = [
+        _recent_candle("fUST", "1h", "p2", now_ms - 12 * hour + i * hour, "0.0002")
+        for i in range(12)
+    ]
+    t_fill1 = now_ms - 2 * hour
+    t_fill2 = now_ms - 1 * hour
+    amount = "1338.03"
+
+    def _fill_row(ts: int, voi: str) -> EventLogRow:
+        return EventLogRow(
+            account_id="default", deployment_environment="prod",
+            event_type="ORDER_FILL", venue_offer_id=voi,
+            payload={"symbol": "fUST", "size_usdt": amount, "fill_rate": 0.0002,
+                     "venue_offer_id": voi,
+                     "signal_correlation_id": "11111111-1111-1111-1111-111111111111"},
+            occurred_at_ms=ts,
+        )
+
+    close_row = EventLogRow(
+        account_id="default", deployment_environment="prod",
+        event_type="CREDIT_CLOSED",
+        payload={"symbol": "fUST", "credit_id": 555, "amount": amount,
+                 "mts_create": t_fill1 + 2_000},
+        occurred_at_ms=t_fill2 - 300_000,  # returned 5 min before the re-lend
+    )
+    async with g3_factory() as s:
+        await upsert_candles(s, candles)
+        s.add(_fill_row(t_fill1, "voi-1"))
+        s.add(_fill_row(t_fill2, "voi-2"))
+        s.add(close_row)
+        s.add(_position_row("fUST", amount))  # venue truth: ONE credit open
+        await s.commit()
+
+    verdict, _window, n_fills, _clamp, _frr = await build_verdict_from_neon(
+        capital=C, session_factory=g3_factory
+    )
+    assert n_fills == 2
+    assert not any("deployment anchor diverged" in r for r in verdict.reasons)

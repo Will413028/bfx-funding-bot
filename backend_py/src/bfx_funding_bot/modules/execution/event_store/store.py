@@ -39,6 +39,11 @@ class SnapshotDrift:
 # skips vois already in CLAIMED state), not by this store-level dedup.
 _DEDUP_TYPES = frozenset({"ORDER_FILL", "RESERVATION_RELEASED"})
 
+# Audit/attribution-only events: appended to event_log but NEVER projected onto
+# position_state (live or rebuild tail) — realized/reserved stay reconcile-owned
+# (single-writer invariant, ADR 2026-05-29).
+_AUDIT_ONLY_TYPES = frozenset({"CREDIT_CLOSED"})
+
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
 # transition() (registry_offers.py) is reserved for the in-memory OfferRegistry's
 # fill-tracking; this snapshot is keyed by cid (stable across the whole lifecycle).
@@ -89,6 +94,8 @@ class PostgresEventStore:
         )
         session.add(row)
         await session.flush()  # assigns row.event_seq
+        if etype in _AUDIT_ONLY_TYPES:
+            return True  # log-only: no claims/position projection
         # Snapshot maintenance (same txn).
         await self._project_offer_claims(session, event, account_id)
         await self._project_position_state(
@@ -399,6 +406,8 @@ class PostgresEventStore:
         for r in rows:
             if r.event_seq <= fence:
                 continue
+            if r.event_type in _AUDIT_ONLY_TYPES:
+                continue  # mirror the live-append skip: no ledger fold, no seq bump
             # Phase 2: fUSD/fUST coexist in one event_log, so the tail fold MUST
             # filter on payload["symbol"] == symbol — otherwise the other
             # currency's deltas mix into this symbol's position_state row.

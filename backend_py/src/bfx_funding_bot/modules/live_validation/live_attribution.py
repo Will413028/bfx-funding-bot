@@ -24,7 +24,7 @@ unavailable — it does not affect the bot-vs-idle verdict (idle needs no market
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from itertools import pairwise
@@ -164,6 +164,71 @@ def open_principal_at(fills: list[FillRecord], as_of_ms: int) -> Decimal:
         if effective_end > as_of_ms:
             total += f.size_usdt
     return total
+
+
+@dataclass(frozen=True)
+class CreditCloseRecord:
+    """One CREDIT_CLOSED event (WS `fcc`) — venue truth for a credit's end.
+
+    The venue credit object has no offer linkage, so joining onto fills is by
+    (amount exact, mts_create ≈ fill time). Callers pre-filter both sides to a
+    single symbol (FillRecord itself is symbol-less)."""
+
+    credit_id: int
+    amount: Decimal
+    mts_create: int   # credit creation ≈ the originating fill's timestamp
+    close_ts_ms: int  # venue mts_update on the fcc frame
+
+
+_CREDIT_MATCH_SLACK_MS = 300_000  # fill may trail credit creation by venue clock skew
+
+
+def apply_credit_closes(
+    fills: list[FillRecord],
+    closes: list[CreditCloseRecord],
+    *,
+    match_slack_ms: int = _CREDIT_MATCH_SLACK_MS,
+) -> list[FillRecord]:
+    """Join venue credit-close truth onto fills → corrected release_ts_ms.
+
+    Root need (2026-07-19 anchor divergence): a borrower-returned credit whose
+    principal is re-lent within the period window double-counts in
+    open_principal_at and overstates fill_duration_days. Each close (deduped by
+    credit_id, earliest close kept) claims the nearest fill at/before
+    mts_create+slack with the exact same amount; the fill's effective end
+    becomes min(existing release, close time). Unmatched closes are ignored
+    (fill may predate event-log history); unmatched fills keep held-to-term.
+    """
+    best_close: dict[int, CreditCloseRecord] = {}
+    for c in closes:
+        prev = best_close.get(c.credit_id)
+        if prev is None or c.close_ts_ms < prev.close_ts_ms:
+            best_close[c.credit_id] = c
+
+    out = list(fills)
+    claimed: set[int] = set()  # indexes into out already matched to a credit
+    for close in sorted(best_close.values(), key=lambda c: c.mts_create):
+        best_idx: int | None = None
+        best_dist: int | None = None
+        for i, f in enumerate(out):
+            if i in claimed or f.size_usdt != close.amount:
+                continue
+            if f.fill_ts_ms > close.mts_create + match_slack_ms:
+                continue
+            dist = abs(close.mts_create - f.fill_ts_ms)
+            if best_dist is None or dist < best_dist:
+                best_idx, best_dist = i, dist
+        if best_idx is None:
+            continue
+        claimed.add(best_idx)
+        f = out[best_idx]
+        new_release = (
+            close.close_ts_ms
+            if f.release_ts_ms is None
+            else min(f.release_ts_ms, close.close_ts_ms)
+        )
+        out[best_idx] = replace(f, release_ts_ms=new_release)
+    return out
 
 
 def fill_duration_days(f: FillRecord) -> Decimal:
