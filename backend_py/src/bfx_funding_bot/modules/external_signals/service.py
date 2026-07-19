@@ -105,7 +105,11 @@ async def backfill_perp_funding_to_earliest(
 
         oldest = min(r.mts for r in page)
         if oldest > end_ms:
-            raise BackfillCursorStuck(symbol, end_ms, oldest)
+            # Bottom of history: Bitfinex `end` has second resolution and
+            # re-serves the boundary row (oldest == end_ms+1) instead of an
+            # empty page. No rows older than end_ms exist — walk complete.
+            done = True
+            break
         # NOTE: a partial page does NOT terminate the walk — the server can
         # serve short pages mid-history; only an EMPTY page proves the end.
         end_ms = oldest - 1
@@ -152,7 +156,11 @@ async def topup_perp_funding_to_latest(
 
         oldest = min(r.mts for r in page)
         if oldest > end_ms:
-            raise BackfillCursorStuck(symbol, end_ms, oldest)
+            # Bottom of history: Bitfinex `end` has second resolution and
+            # re-serves the boundary row (oldest == end_ms+1) instead of an
+            # empty page. No rows older than end_ms exist — walk complete.
+            done = True
+            break
         if floor is not None and oldest <= floor:
             done = True
             break
@@ -197,7 +205,11 @@ async def backfill_liquidations_to_earliest(
 
         oldest = min(r.mts for r in page)
         if oldest > end_ms:
-            raise BackfillCursorStuck("liquidations", end_ms, oldest)
+            # Bottom of history: Bitfinex `end` has second resolution and
+            # re-serves the boundary row (oldest == end_ms+1) instead of an
+            # empty page. No rows older than end_ms exist — walk complete.
+            done = True
+            break
         # Partial pages do not terminate the walk (only empty does). Inclusive
         # overlap cursor; escape by 1ms when a page made no progress.
         end_ms = oldest if oldest < end_ms else end_ms - 1
@@ -241,7 +253,11 @@ async def topup_liquidations_to_latest(
 
         oldest = min(r.mts for r in page)
         if oldest > end_ms:
-            raise BackfillCursorStuck("liquidations", end_ms, oldest)
+            # Bottom of history: Bitfinex `end` has second resolution and
+            # re-serves the boundary row (oldest == end_ms+1) instead of an
+            # empty page. No rows older than end_ms exist — walk complete.
+            done = True
+            break
         if floor is not None and oldest <= floor:
             done = True
             break

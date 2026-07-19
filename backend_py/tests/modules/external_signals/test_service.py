@@ -10,7 +10,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.backfill.errors import BackfillCursorStuck
 from bfx_funding_bot.modules.external_signals.repository import (
     upsert_liquidations,
     upsert_perp_funding,
@@ -121,16 +120,27 @@ class TestPerpWalkBack:
         assert stats.pages == 2
         assert stats.done is False  # budget exhausted, not naturally finished
 
-    async def test_cursor_stuck_raises(self, sqlite_session: AsyncSession) -> None:
+    async def test_boundary_reserve_treated_as_bottom(
+        self, sqlite_session: AsyncSession
+    ) -> None:
+        """Bitfinex `end` has second resolution: at the bottom of history the
+        API re-serves the boundary row (oldest == end+1) instead of returning
+        an empty page (observed live: end_ms=...855999 → oldest=...856000).
+        That means no rows older than `end` exist — the walk is complete, not
+        stuck."""
         client: Any = AsyncMock()
         client.get_deriv_status_hist.side_effect = [
-            [_perp(_NOW + 10), _perp(_NOW + 5), _perp(_NOW + 1)],
+            [_perp(5000), _perp(4000), _perp(3000)],
+            [_perp(3000)],  # requested end=2999, boundary row re-served
         ]
-        with pytest.raises(BackfillCursorStuck):
-            await backfill_perp_funding_to_earliest(
-                client=client, session=sqlite_session, symbol=_SYM,
-                page_limit=3, now_ms=_NOW,
-            )
+        stats = await backfill_perp_funding_to_earliest(
+            client=client, session=sqlite_session, symbol=_SYM,
+            page_limit=3, now_ms=_NOW,
+        )
+        assert stats.done is True
+        assert stats.pages == 2
+        assert client.get_deriv_status_hist.await_count == 2
+        assert stats.earliest_mts == 3000
 
 
 @pytest.mark.asyncio
