@@ -21,6 +21,7 @@ import bfx_funding_bot.modules.candles.tables
 import bfx_funding_bot.modules.execution.diagnostics.tables
 import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
+import bfx_funding_bot.modules.external_signals.tables
 import bfx_funding_bot.modules.funding_stats.tables
 import bfx_funding_bot.modules.lending.tracking.tables
 import bfx_funding_bot.modules.marketfeed.tables
