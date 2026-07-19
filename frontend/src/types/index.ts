@@ -87,61 +87,58 @@ export interface UserConfig {
   updatedAt: string;
 }
 
-// ── Dashboard ──
+// ── SP4 Projections (operator console read models) ──
 
-export interface WalletSummary {
-  currency: string;
-  balance: number;
-  balanceAvailable: number;
+/** offer_claims FSM states (backend RegistryState). */
+export type OfferClaimState = "pending" | "claimed" | "released" | "failed";
+
+/** event_log event types (backend serialization registry). */
+export type ExecutionEventType =
+  | "RESERVATION_INTENT"
+  | "RESERVATION_CLAIMED"
+  | "RESERVATION_FAILED"
+  | "ORDER_FILL"
+  | "RESERVATION_RELEASED"
+  | "CREDIT_CLOSED";
+
+/** GET /positions — per-symbol position_state ledger projection. */
+export interface Position {
+  symbol: string;
+  /** Decimal string (USDT). */
+  reserved: string;
+  /** Decimal string (USDT). */
+  realized: string;
+  nCredits: number | null;
+  lastUpdatedMs: number;
+  /** Epoch ms of the last reconcile checkpoint; null if never reconciled. */
+  lastReconciledAt: number | null;
+  lastEventSeq: number;
 }
 
-export interface OfferSummary {
-  id: number;
-  currency: string;
-  amount: number;
-  rate: number;
-  period: number;
-  status: string;
-  createdAt: string;
+/** GET /offers — cid-keyed offer claim (default: pending/claimed only). */
+export interface OfferClaim {
+  cid: number;
+  venueOfferId: string | null;
+  state: OfferClaimState;
+  symbol: string;
+  /** Decimal string (USDT). */
+  sizeUsdt: string;
+  occurredAtMs: number;
+  lastUpdatedMs: number;
 }
 
-export interface CreditSummary {
-  id: number;
-  currency: string;
-  amount: number;
-  rate: number;
-  period: number;
-  status: string;
-  autoRenew: boolean;
-  openedAt: string;
-}
-
-export interface MarketSummary {
-  frr: number;
-  regime: string;
-  mdcScore: number;
-  flashFreeze: boolean;
-  timestamp: string;
-}
-
-export interface DashboardSummary {
-  wallet: WalletSummary | null;
-  offers: OfferSummary[];
-  credits: CreditSummary[];
-  market: MarketSummary | null;
-  engineReady: boolean;
-}
-
-// ── Earnings ──
-
-export interface EarningsSummary {
-  estimatedDailyEarning: number;
-  weightedAPY: number;
-  earnings7d: number;
-  earnings30d: number;
-  totalLent: number;
-  activeCredits: number;
-  currency: string;
+/** GET /executions — one event_log row, event_seq descending. */
+export interface ExecutionEvent {
+  eventSeq: number;
+  eventType: ExecutionEventType;
+  occurredAtMs: number;
+  symbol: string | null;
+  venueOfferId: string | null;
+  cid: number | null;
+  /** Decimal string (USDT); null when the payload carries no amount. */
+  amount: string | null;
+  /** Daily rate (e.g. 0.00017); null when the payload carries no rate. */
+  rate: number | null;
 }
 
 // ── Billing ──
@@ -183,13 +180,6 @@ export interface ExecutionRecord {
 export interface ExecutionListResponse {
   data: ExecutionRecord[];
   pagination: CursorPagination;
-}
-
-// ── Charts ──
-
-export interface DailyEarning {
-  date: string;
-  amount: number;
 }
 
 // ── Attribution ──

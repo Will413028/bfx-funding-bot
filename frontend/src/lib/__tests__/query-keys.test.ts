@@ -3,9 +3,9 @@ import {
   apiKeyKeys,
   billingKeys,
   configKeys,
-  dashboardKeys,
-  earningsKeys,
   executionKeys,
+  offerKeys,
+  positionKeys,
 } from "../query-keys";
 
 describe("apiKeyKeys", () => {
@@ -24,23 +24,19 @@ describe("configKeys", () => {
   });
 });
 
-describe("dashboardKeys", () => {
-  it("summary extends all", () => {
-    expect(dashboardKeys.summary()).toEqual(["dashboard", "summary"]);
+describe("positionKeys", () => {
+  it("list extends all", () => {
+    expect(positionKeys.list()).toEqual(["positions", "list"]);
   });
 });
 
-describe("earningsKeys", () => {
-  it("summary extends all", () => {
-    expect(earningsKeys.summary()).toEqual(["earnings", "summary"]);
+describe("offerKeys", () => {
+  it("list includes state param", () => {
+    expect(offerKeys.list("released")).toEqual(["offers", "list", "released"]);
   });
 
-  it("history includes days param", () => {
-    expect(earningsKeys.history(30)).toEqual(["earnings", "history", 30]);
-  });
-
-  it("history without days includes undefined", () => {
-    expect(earningsKeys.history()).toEqual(["earnings", "history", undefined]);
+  it("list without state includes undefined", () => {
+    expect(offerKeys.list()).toEqual(["offers", "list", undefined]);
   });
 });
 
@@ -59,5 +55,9 @@ describe("executionKeys", () => {
   it("list includes params", () => {
     const params = { after: "abc" };
     expect(executionKeys.list(params)).toEqual(["executions", "list", params]);
+  });
+
+  it("events extends all", () => {
+    expect(executionKeys.events()).toEqual(["executions", "events"]);
   });
 });

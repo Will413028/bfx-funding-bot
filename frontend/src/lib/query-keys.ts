@@ -13,15 +13,14 @@ export const configKeys = {
   current: () => [...configKeys.all, "current"] as const,
 };
 
-export const dashboardKeys = {
-  all: ["dashboard"] as const,
-  summary: () => [...dashboardKeys.all, "summary"] as const,
+export const positionKeys = {
+  all: ["positions"] as const,
+  list: () => [...positionKeys.all, "list"] as const,
 };
 
-export const earningsKeys = {
-  all: ["earnings"] as const,
-  summary: () => [...earningsKeys.all, "summary"] as const,
-  history: (days?: number) => [...earningsKeys.all, "history", days] as const,
+export const offerKeys = {
+  all: ["offers"] as const,
+  list: (state?: string) => [...offerKeys.all, "list", state] as const,
 };
 
 export const billingKeys = {
@@ -35,6 +34,8 @@ export const executionKeys = {
   all: ["executions"] as const,
   list: (params?: Record<string, unknown>) =>
     [...executionKeys.all, "list", params] as const,
+  /** SP4 event_log projection (before-cursor infinite list). */
+  events: () => [...executionKeys.all, "events"] as const,
 };
 
 export const attributionKeys = {

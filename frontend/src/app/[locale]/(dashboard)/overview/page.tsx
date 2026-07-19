@@ -4,44 +4,42 @@ import { useTranslations } from "next-intl";
 import { OverviewSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
-import { EarningsChart } from "@/features/dashboard/components/earnings-chart";
-import { MarketPanel } from "@/features/dashboard/components/market-panel";
-import { OffersList } from "@/features/dashboard/components/offers-list";
-import { RateChart } from "@/features/dashboard/components/rate-chart";
+import { ExecutionsTable } from "@/features/dashboard/components/executions-table";
+import { OffersTable } from "@/features/dashboard/components/offers-table";
+import { PositionsCard } from "@/features/dashboard/components/positions-card";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
-import { StatsGrid } from "@/features/dashboard/components/stats-grid";
-import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
-import { useEarnings } from "@/features/dashboard/hooks/use-earnings";
+import { useExecutionEvents } from "@/features/dashboard/hooks/use-execution-events";
+import { useOffers } from "@/features/dashboard/hooks/use-offers";
+import { usePositions } from "@/features/dashboard/hooks/use-positions";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
 export default function OverviewPage() {
   const t = useTranslations("overview");
-  const {
-    data: dashboard,
-    isLoading: dashLoading,
-    isError: dashError,
-    refetch: dashRefetch,
-  } = useDashboard();
-  const {
-    data: earnings,
-    isLoading: earnLoading,
-    isError: earnError,
-    refetch: earnRefetch,
-  } = useEarnings();
+  const positions = usePositions();
+  const offers = useOffers();
+  const executions = useExecutionEvents();
   const { data: apiKeys } = useApiKeys();
   const { data: config } = useConfig();
 
-  if (dashLoading || earnLoading) {
+  if (positions.isLoading || offers.isLoading || executions.isLoading) {
     return <OverviewSkeleton />;
   }
 
-  if (dashError || earnError || !dashboard || !earnings) {
+  if (
+    positions.isError ||
+    offers.isError ||
+    executions.isError ||
+    !positions.data ||
+    !offers.data ||
+    !executions.data
+  ) {
     return (
       <QueryError
         message={t("loadFailed")}
         onRetry={() => {
-          dashRefetch();
-          earnRefetch();
+          positions.refetch();
+          offers.refetch();
+          executions.refetch();
         }}
       />
     );
@@ -51,8 +49,9 @@ export default function OverviewPage() {
     Array.isArray(apiKeys) &&
     apiKeys.some((k) => k.exchangeStatus === "verified");
   const hasStrategy = config != null;
-  const engineReady = dashboard.engineReady;
-  const setupComplete = hasVerifiedKey && hasStrategy && engineReady;
+  const setupComplete = hasVerifiedKey && hasStrategy;
+
+  const events = executions.data.pages.flat();
 
   return (
     <div className="space-y-4">
@@ -60,18 +59,20 @@ export default function OverviewPage() {
         <SetupChecklist
           hasVerifiedKey={hasVerifiedKey}
           hasStrategy={hasStrategy}
-          engineReady={engineReady}
         />
       )}
-      <StatsGrid dashboard={dashboard} earnings={earnings} />
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <RateChart />
-        <EarningsChart />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <PositionsCard positions={positions.data} />
+        <div className="lg:col-span-2">
+          <OffersTable offers={offers.data} />
+        </div>
       </div>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <OffersList offers={dashboard.offers} />
-        <MarketPanel market={dashboard.market} />
-      </div>
+      <ExecutionsTable
+        events={events}
+        hasMore={executions.hasNextPage}
+        isFetchingNextPage={executions.isFetchingNextPage}
+        onLoadMore={() => executions.fetchNextPage()}
+      />
     </div>
   );
 }

@@ -20,3 +20,28 @@ export function formatUSD(amount: number): string {
 export function formatPeriod(days: number): string {
   return `${days}d`;
 }
+
+const RELATIVE_UNITS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
+  ["day", 86_400_000],
+  ["hour", 3_600_000],
+  ["minute", 60_000],
+];
+
+/** Localized relative time from epoch ms (e.g. "5 min. ago" / "5 分鐘前") */
+export function formatRelativeTime(
+  epochMs: number,
+  locale = "en",
+  nowMs = Date.now(),
+): string {
+  const delta = epochMs - nowMs;
+  const rtf = new Intl.RelativeTimeFormat(locale, {
+    numeric: "always",
+    style: "narrow",
+  });
+  for (const [unit, msPerUnit] of RELATIVE_UNITS) {
+    if (Math.abs(delta) >= msPerUnit) {
+      return rtf.format(Math.trunc(delta / msPerUnit), unit);
+    }
+  }
+  return rtf.format(Math.trunc(delta / 1000), "second");
+}
