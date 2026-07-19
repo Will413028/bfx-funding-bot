@@ -167,3 +167,18 @@ export interface WeeklyAttributionPoint {
   baselineFrrAprNetPct: string | null;
   baselineFrrUtilAprNetPct: string | null;
 }
+
+// ── Public proof page (percent-only, no absolute $ — no auth required) ──
+
+/** GET /public/proof-summary — one week of the blended public series. */
+export interface PublicProofWeek {
+  weekStartMs: number;
+  realizedAprNetPct: string | null;
+  baselineFrrUtilAprNetPct: string | null;
+}
+
+/** GET /public/proof-summary — full response envelope. */
+export interface PublicProofSummary {
+  weeks: PublicProofWeek[];
+  asOf: string;
+}

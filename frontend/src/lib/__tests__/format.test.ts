@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatAPR, formatDailyRate, formatPeriod, formatUSD } from "../format";
+import {
+  formatAPR,
+  formatDailyRate,
+  formatPercent,
+  formatPeriod,
+  formatUSD,
+} from "../format";
 
 describe("formatAPR", () => {
   it("converts daily rate to annual percentage", () => {
@@ -40,6 +46,24 @@ describe("formatUSD", () => {
 
   it("handles negative amounts", () => {
     expect(formatUSD(-100)).toBe("-$100.00");
+  });
+});
+
+describe("formatPercent", () => {
+  it("formats an already-annualized value without re-multiplying by 365", () => {
+    expect(formatPercent(6.205)).toBe("6.21%");
+  });
+
+  it("handles zero", () => {
+    expect(formatPercent(0)).toBe("0.00%");
+  });
+
+  it("handles negative spreads", () => {
+    expect(formatPercent(-1.5)).toBe("-1.50%");
+  });
+
+  it("supports a custom precision", () => {
+    expect(formatPercent(6.205, 0)).toBe("6%");
   });
 });
 

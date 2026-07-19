@@ -14,6 +14,12 @@ export function MarketingHeader() {
         </Link>
         <nav className="hidden items-center gap-4 sm:flex">
           <Link
+            href="/proof"
+            className="text-sm text-zinc-400 transition-colors hover:text-foreground"
+          >
+            {tn("proof")}
+          </Link>
+          <Link
             href="/pricing"
             className="text-sm text-zinc-400 transition-colors hover:text-foreground"
           >
