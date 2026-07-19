@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 from bfx_funding_bot.external.bitfinex.auth_ws import (
     BfxWSEvent,
+    FccEvent,
     FcnEvent,
     FcuEvent,
     FocEvent,
@@ -32,6 +33,7 @@ from bfx_funding_bot.modules.execution.event_store.persister import (
     NoopEventPersister,
 )
 from bfx_funding_bot.modules.execution.events import (
+    CreditClosed,
     OrderFilled,
     ReservationReleased,
 )
@@ -56,12 +58,30 @@ def translate_bfx_event(
     snapshot: dict[str, ClaimRecord],
     recent_cancels: dict[str, int],
     now_ms: int,
+    *,
+    account_id: str = "default",
 ) -> tuple[list[Any], list[RegistryMutation], list[DiagnosticLog]]:
     """Pure mapping. Returns (domain_events, mutations, diagnostics)."""
     if isinstance(bfx_event, FcnEvent):
         return [], [], []  # informational only — no offer id; foc EXECUTED is the fill signal
     if isinstance(bfx_event, FocEvent):
         return _translate_foc(bfx_event, snapshot, recent_cancels, now_ms)
+    if isinstance(bfx_event, FccEvent):
+        # Audit-only release truth for attribution (no offer linkage on the
+        # venue credit object, no registry mutation, zero ledger effect).
+        closed = CreditClosed(
+            symbol=bfx_event.symbol,
+            credit_id=bfx_event.credit_id,
+            amount=bfx_event.amount,
+            rate=bfx_event.rate,
+            period_days=bfx_event.period_days,
+            mts_create=bfx_event.mts_create,
+            account_id=account_id,
+            is_simulated=False,
+            venue_seq=bfx_event.raw_seq,
+            occurred_at_ms=bfx_event.mts_update,
+        )
+        return [closed], [], []
     if isinstance(bfx_event, FcuEvent):
         return [], [], []  # 4.4a: rate updates not modeled
     return [], [], []  # Heartbeat / AuthAck / ChannelInfo / Unknown
@@ -170,6 +190,7 @@ class BitfinexLiveWSDispatcher:
         clock: Callable[[], int] | None = None,
         queue_max: int = 10_000,
         persister: EventPersister | None = None,
+        account_id: str = "default",
     ) -> None:
         self._ws_client = ws_client
         self._registry = registry
@@ -181,6 +202,7 @@ class BitfinexLiveWSDispatcher:
         self._recent_cancels: dict[str, int] = {}
         self._last_depth_emit_ms: int = 0
         self._persister: EventPersister = persister or NoopEventPersister()
+        self._account_id = account_id
 
     async def handle_cancel_requested(self, event: Any) -> None:
         """Bus subscriber for CancelRequested — tracks recent cancels for 60s."""
@@ -217,6 +239,7 @@ class BitfinexLiveWSDispatcher:
         snapshot = self._registry.snapshot()
         events, _mutations, diags = translate_bfx_event(
             bfx_event, snapshot, dict(self._recent_cancels), now_ms,
+            account_id=self._account_id,
         )
         for d in diags:
             (log.warning if d.level == "warn" else log.info)(

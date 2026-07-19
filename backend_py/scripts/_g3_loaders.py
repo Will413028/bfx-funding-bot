@@ -30,11 +30,13 @@ from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 from bfx_funding_bot.modules.funding_stats.tables import FundingStatRow
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     ClampDiagnostic,
+    CreditCloseRecord,
     FillRecord,
     FrrBenchmark,
     G3Verdict,
     MarketRatePoint,
     _fill_duration_days,
+    apply_credit_closes,
     assert_market_rate_band,
     attribute_active,
     attribute_idle,
@@ -52,6 +54,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
 # Event type constants — must match serialization._TYPE_BY_CLASS (UPPERCASE).
 _FILL_TYPE = "ORDER_FILL"
 _RELEASE_TYPE = "RESERVATION_RELEASED"
+_CREDIT_CLOSE_TYPE = "CREDIT_CLOSED"
 
 # Thresholds for decide_verdict (spec: min_windows=8, min_capital_days=capital*7)
 _MIN_WINDOWS = 8
@@ -236,6 +239,27 @@ async def build_verdict_from_neon(
                         release_ts_ms=release_map.get(venue_offer_id),
                     )
                 )
+
+            # ── 5b. Join venue credit-close truth (CREDIT_CLOSED, WS fcc) ─────
+            # Early borrower returns otherwise double-count re-lent principal in
+            # open_principal_at (2026-07-19 anchor divergence root cause).
+            close_stmt = select(EventLogRow).where(
+                EventLogRow.account_id == account_id,
+                EventLogRow.deployment_environment == deployment_env,
+                EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
+            )
+            close_rows = (await session.execute(close_stmt)).scalars().all()
+            closes = [
+                CreditCloseRecord(
+                    credit_id=int(r.payload["credit_id"]),
+                    amount=Decimal(str(r.payload["amount"])),
+                    mts_create=int(r.payload["mts_create"]),
+                    close_ts_ms=r.occurred_at_ms,
+                )
+                for r in close_rows
+                if r.payload.get("symbol") == _MARKET_SYMBOL
+            ]
+            fills = apply_credit_closes(fills, closes)
     finally:
         if engine is not None:
             await engine.dispose()

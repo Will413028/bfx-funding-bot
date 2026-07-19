@@ -1,9 +1,10 @@
 from decimal import Decimal
 from uuid import uuid4
 
-from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent, FcuEvent, FocEvent
+from bfx_funding_bot.external.bitfinex.auth_ws import FccEvent, FcnEvent, FcuEvent, FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import translate_bfx_event
 from bfx_funding_bot.modules.execution.events import (
+    CreditClosed,
     OrderFilled,
     ReservationReleased,
 )
@@ -152,3 +153,28 @@ def test_foc_canceled_reservation_released_carries_foc_symbol() -> None:
     )
     events, _, _ = translate_bfx_event(foc, {"v1": claim}, {}, now_ms=2500)
     assert isinstance(events[0], ReservationReleased) and events[0].symbol == "fUST"
+
+
+def test_fcc_emits_audit_only_credit_closed() -> None:
+    """fcc → CreditClosed (attribution release truth). No registry mutation —
+    credits are not offers; the ledger stays reconcile-owned."""
+    fcc = FccEvent(
+        credit_id=555, symbol="fUST", mts_create=1000, mts_update=9000,
+        amount=Decimal("1338.03"), status="CLOSED (used)", rate=0.000174,
+        period_days=2, raw_seq=11, raw=[],
+    )
+    events, mutations, diags = translate_bfx_event(
+        fcc, snapshot={}, recent_cancels={}, now_ms=9500, account_id="primary",
+    )
+    assert mutations == [] and diags == []
+    assert len(events) == 1
+    ev = events[0]
+    assert isinstance(ev, CreditClosed)
+    assert ev.credit_id == 555
+    assert ev.symbol == "fUST"
+    assert ev.amount == Decimal("1338.03")
+    assert ev.mts_create == 1000
+    assert ev.occurred_at_ms == 9000  # close time
+    assert ev.account_id == "primary"
+    assert ev.is_simulated is False
+    assert ev.venue_seq == 11

@@ -232,3 +232,24 @@ async def test_intent_projects_under_its_own_symbol(sqlite_session: AsyncSession
         PositionStateRow.account_id == "acct"))).scalars().all()
     assert [p.symbol for p in ps] == ["fUST"]      # no fUSD row created
     assert ps[0].reserved == Decimal("0")          # intent has no ledger effect
+
+
+async def test_credit_closed_is_audit_only(sqlite_session: AsyncSession) -> None:
+    """CREDIT_CLOSED is attribution-only: event row written, but NO offer_claims
+    row and NO position_state row/delta (reconcile stays the single writer of
+    realized — ADR 2026-05-29)."""
+    from bfx_funding_bot.modules.execution.events import CreditClosed
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    await store.append(sqlite_session, CreditClosed(
+        symbol="fUST", credit_id=555, amount=Decimal("1338.03"), rate=0.000174,
+        period_days=2, mts_create=1000, account_id="acctC", is_simulated=False,
+        occurred_at_ms=2000))
+    await sqlite_session.flush()
+    rows = (await sqlite_session.execute(select(EventLogRow))).scalars().all()
+    assert [r.event_type for r in rows] == ["CREDIT_CLOSED"]
+    assert rows[0].payload["credit_id"] == 555
+    claims = (await sqlite_session.execute(select(OfferClaimRow))).scalars().all()
+    assert claims == []
+    ps = (await sqlite_session.execute(select(PositionStateRow))).scalars().all()
+    assert ps == []  # audit-only: never touches the ledger projection

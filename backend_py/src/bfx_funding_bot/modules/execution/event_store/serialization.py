@@ -7,6 +7,7 @@ from uuid import UUID
 
 from bfx_funding_bot.modules.execution.events import (
     DEFAULT_RECONCILE_SYMBOL,
+    CreditClosed,
     OrderFilled,
     ReservationClaimed,
     ReservationFailed,
@@ -21,6 +22,7 @@ _TYPE_BY_CLASS: dict[type, str] = {
     ReservationFailed: "RESERVATION_FAILED",
     OrderFilled: "ORDER_FILL",
     ReservationReleased: "RESERVATION_RELEASED",
+    CreditClosed: "CREDIT_CLOSED",
 }
 _CLASS_BY_TYPE: dict[str, type] = {v: k for k, v in _TYPE_BY_CLASS.items()}
 

@@ -8,6 +8,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,
     MS_PER_DAY,
     ClampDiagnostic,
+    CreditCloseRecord,
     DeploymentAnchorResult,
     FillRecord,
     FrrBenchmark,
@@ -15,6 +16,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
     MarketRatePoint,
     NavAnchorResult,
     VerdictState,
+    apply_credit_closes,
     assert_market_rate_band,
     attribute_active,
     attribute_idle,
@@ -737,3 +739,65 @@ def test_fill_duration_days_public_alias():
     assert fill_duration_days(
         _fill(0, "100", "0.0002", "2", release=one_day_ms)
     ) == Decimal("1")
+
+
+# ---------------------------------------------------------------------------
+# apply_credit_closes — venue close truth joined onto fills (fcc → CreditClosed).
+# Regression root: 2026-07-19 anchor divergence — borrower returned 1338.03
+# after 40 min, bot re-lent it; held-to-term double-counted the principal.
+# ---------------------------------------------------------------------------
+
+
+def _close(credit_id, amount, mts_create, close_ts):
+    return CreditCloseRecord(
+        credit_id=credit_id, amount=Decimal(amount),
+        mts_create=mts_create, close_ts_ms=close_ts,
+    )
+
+
+def test_apply_credit_closes_regression_1338_early_return():
+    h = 3600 * 1000
+    f1 = _fill(0, "1338.03", "0.0003", "2")            # 08:30 fill → returned early
+    f2 = _fill(1 * h, "1338.03", "0.0003", "2")        # 09:10 re-lend, still open
+    close = _close(555, "1338.03", mts_create=10, close_ts=h - 300_000)
+    out = apply_credit_closes([f1, f2], [close])
+    assert out[0].release_ts_ms == h - 300_000         # f1 closed by venue truth
+    assert out[1].release_ts_ms is None                # f2 untouched
+    # open principal at "now" no longer double-counts the returned principal
+    assert open_principal_at(out, 2 * h) == Decimal("1338.03")
+
+
+def test_apply_credit_closes_matches_nearest_preceding_fill():
+    f_old = _fill(0, "100", "0.0003", "2")
+    f_near = _fill(5_000, "100", "0.0003", "2")
+    close = _close(1, "100", mts_create=6_000, close_ts=50_000)
+    out = apply_credit_closes([f_old, f_near], [close])
+    assert out[0].release_ts_ms is None
+    assert out[1].release_ts_ms == 50_000
+
+
+def test_apply_credit_closes_ignores_amount_mismatch_and_future_fills():
+    f_future = _fill(400_000, "100", "0.0003", "2")    # beyond mts_create+slack(5m)
+    f_other = _fill(0, "99", "0.0003", "2")            # different amount
+    close = _close(1, "100", mts_create=6_000, close_ts=500_000)
+    out = apply_credit_closes([f_future, f_other], [close])
+    assert [f.release_ts_ms for f in out] == [None, None]
+
+
+def test_apply_credit_closes_keeps_earlier_existing_release():
+    f = _fill(0, "100", "0.0003", "2", release=10_000)  # RESERVATION_RELEASED earlier
+    close = _close(1, "100", mts_create=100, close_ts=50_000)
+    out = apply_credit_closes([f], [close])
+    assert out[0].release_ts_ms == 10_000
+
+
+def test_apply_credit_closes_dedupes_by_credit_id():
+    f1 = _fill(0, "100", "0.0003", "2")
+    f2 = _fill(1_000, "100", "0.0003", "2")
+    dupes = [
+        _close(7, "100", mts_create=1_500, close_ts=60_000),
+        _close(7, "100", mts_create=1_500, close_ts=70_000),  # redelivery
+    ]
+    out = apply_credit_closes([f1, f2], dupes)
+    # one credit → exactly one fill released (the nearest), not two
+    assert sorted(f.release_ts_ms is not None for f in out) == [False, True]
