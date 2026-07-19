@@ -21,7 +21,7 @@ Bitfinex 自動放貸 SaaS 平台。
 | Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
 | Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
-> **2026-06-23 棄 Neon + Vercel（Step 1+2 完成）**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。**Step 1**：bot/webapi/DB 搬 VM 自托 Postgres。**Step 2**：FE 容器化上 VM（Funnel 443→3001，因 grafana 占 3000）、Better Auth 連本地 Postgres（`bfx_webauth`、direct 無 pooler）+ VM 自托 Redis（Upstash→ioredis）、**Vercel 專案已刪、Neon 完全歸零**。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）→ `~/bfx/backups/`（Redis session 為 ephemeral，免備份）。每週量測 chain 由 `bfx-weekly-report.timer`（Mon 04:17 UTC）跑 compose `weekly-report` one-shot（`--profile ops`）→ attribution 落表 + G3 報告至 `~/bfx/reports/`（unit 檔在 repo `deploy/vm/systemd/`）。Koyeb 為更早 backend 平台，2026-05-31 已 cutover 至 VM。WS 在 v1 為 dead（FE WS client vestigial → webapi `/auth/ws-token` 404 噪音，待獨立 cleanup）。
+> **2026-06-23 棄 Neon + Vercel（Step 1+2 完成）**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。**Step 1**：bot/webapi/DB 搬 VM 自托 Postgres。**Step 2**：FE 容器化上 VM（Funnel 443→3001，因 grafana 占 3000）、Better Auth 連本地 Postgres（`bfx_webauth`、direct 無 pooler）+ VM 自托 Redis（Upstash→ioredis）、**Vercel 專案已刪、Neon 完全歸零**。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）→ `~/bfx/backups/`（Redis session 為 ephemeral，免備份）。每週量測 chain 由 `bfx-weekly-report.timer`（Mon 04:17 UTC）跑 compose `weekly-report` one-shot（`--profile ops`）→ attribution 落表 + G3 報告至 `~/bfx/reports/`（unit 檔在 repo `deploy/vm/systemd/`）。Koyeb 為更早 backend 平台，2026-05-31 已 cutover 至 VM。WS 在 v1 為 dead——FE WS client 已於 2026-06-23 移除（`2252267`，`env.ts` 無 WS 欄位；2026-07-19 驗證 webapi 96h 零 `/auth/ws-token`/404 噪音）。
 
 ## 指令執行目錄
 
