@@ -114,6 +114,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
+from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
 from bfx_funding_bot.modules.marketfeed.config import (
     CellConfig,
@@ -208,6 +209,7 @@ class Daemon:
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     boot_recovery: BootRecovery | None = None
     periodic_reconcile: PeriodicReconcile | None = None
+    book_snapshot_writer: BookSnapshotWriter | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
@@ -266,6 +268,12 @@ class Daemon:
                 tg.create_task(
                     self.ws_dispatcher.run(self._stop_event),
                     name="ws_dispatcher",
+                )
+            # Book depth self-recording (observe-only; fail-open inside).
+            if self.book_snapshot_writer is not None:
+                tg.create_task(
+                    self.book_snapshot_writer.run(self._stop_event),
+                    name="book_snapshot",
                 )
             # Observe-only auth-WS health poll (2026-07 nonce-flap fix): surfaces
             # "enabled but never authenticates" in the HEALTH_CHECK stream. NOT a
@@ -1046,6 +1054,7 @@ async def build_daemon(
     # and Daemon.run() skips it.
     boot_recovery: BootRecovery | None = None
     periodic_reconcile: PeriodicReconcile | None = None
+    book_snapshot_writer: BookSnapshotWriter | None = None
     if not spec.is_simulated:
         auth_rest = BitfinexAuthREST(http=bitfinex_http, nonce_provider=bfx_nonce)
         boot_recovery = BootRecovery(
@@ -1448,6 +1457,17 @@ async def build_daemon(
         if tracing.enabled:
             instrument_ws_dispatcher(ws_dispatcher, tracing=tracing)
 
+    # Funding-book depth self-recording (2026-07-19): Bitfinex serves no
+    # historical book — book-aware backtests can only use data we record.
+    # Additive/fail-open; default off, flag lives in deploy/vm/canary.env.
+    if os.environ.get("BFX_BOOK_SNAPSHOT_ENABLED", "").lower() == "true":
+        book_snapshot_writer = BookSnapshotWriter(
+            rest=bitfinex,
+            session_factory=session_factory,
+            symbols=sorted(configured_symbols(config.cells)),
+            interval_s=int(os.environ.get("BFX_BOOK_SNAPSHOT_INTERVAL_S", "3600")),
+        )
+
     return Daemon(
         config=config,
         registry=registry,
@@ -1474,6 +1494,7 @@ async def build_daemon(
         auth_ws=auth_ws,
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
+        book_snapshot_writer=book_snapshot_writer,
         periodic_reconcile=periodic_reconcile,
         healthz_host=healthz_host,
         healthz_port=healthz_port,

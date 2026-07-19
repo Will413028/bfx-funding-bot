@@ -55,6 +55,27 @@ class FundingTicker:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FundingBookLevel:
+    """One row of GET /v2/book/f{sym}/P0 — [RATE, PERIOD, COUNT, AMOUNT].
+
+    AMOUNT > 0 = ask（貸方掛單）、< 0 = bid（借方需求）。rate 與 ticker/candle
+    close 同尺度（日利率 decimal）。"""
+    rate: float
+    period: int
+    count: int
+    amount: float
+
+    @classmethod
+    def from_bitfinex(cls, entry: list[Any]) -> "FundingBookLevel":
+        if not isinstance(entry, list) or len(entry) < 4:
+            raise BitfinexShapeError(f"funding book row too short: {entry!r}")
+        return cls(
+            rate=float(entry[0]), period=int(entry[1]),
+            count=int(entry[2]), amount=float(entry[3]),
+        )
+
+
 def _bitfinex_period_agg_path(period_agg: str) -> str:
     """Translate user-facing period_agg → Bitfinex URL period_agg.
 
@@ -248,6 +269,45 @@ class BitfinexREST:
                 ) from e
 
         return stats
+
+    async def get_funding_book(
+        self, *, symbol: str, length: int = 25
+    ) -> list[FundingBookLevel]:
+        """Pull the live funding book depth (P0) for one symbol.
+
+        Endpoint: GET /v2/book/f{sym}/P0?len={length}（免認證）。
+        用途：定期 snapshot 落 `funding_book_snapshots`（自錄歷史 book——
+        Bitfinex 不提供歷史 book，book-aware 策略的可回測資料只能從現在
+        開始累積）。E2 clamp 照舊用 ticker，不共用此路徑。
+        """
+        sym = symbol[1:] if symbol.startswith("f") else symbol
+        path = f"/v2/book/f{sym}/P0"
+
+        async with self._limiter.acquire():
+            try:
+                resp = await self._http.get(
+                    f"{self._base_url}{path}", params={"len": length}, timeout=30.0
+                )
+            except httpx.HTTPError as e:
+                raise BitfinexAPIError(
+                    status_code=0, message=f"transport error: {e}", raw=None
+                ) from e
+
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after_seconds = None
+            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+        if resp.status_code != 200:
+            raise BitfinexAPIError(
+                status_code=resp.status_code, message=resp.text, raw=None
+            )
+        body = resp.json()
+        if not isinstance(body, list):
+            raise BitfinexShapeError(f"funding book: expected list, got {type(body).__name__}")
+        return [FundingBookLevel.from_bitfinex(row) for row in body]
 
     async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
         """Pull the live funding ticker (best bid/ask) for one symbol.
