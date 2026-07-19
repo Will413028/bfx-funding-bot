@@ -110,6 +110,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     ManualKillGuard,
     WriterLockGuard,
 )
+from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
@@ -830,7 +831,15 @@ async def build_daemon(
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
     # RealizedLossGuard / DrawdownGuard can actually trip. Subscribed to
     # PositionReconciled below (alongside the ledger).
-    pnl_source = ReconcileNavTracker(account_id=account_id)
+    pnl_source = ReconcileNavTracker(
+        account_id=account_id,
+        peak_store=NavPeakStore(
+            session_factory, account_id=account_id, deployment_environment=env_str,
+        ),
+    )
+    # Seed the all-time peak from nav_peak so drawdown_pct survives restarts
+    # (fail-permissive: load errors leave the in-memory-only behavior).
+    await pnl_source.load_persisted_peaks()
     div_source = _StubDivergenceSource()
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
