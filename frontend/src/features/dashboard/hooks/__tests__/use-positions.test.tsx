@@ -17,7 +17,7 @@ const POSITIONS: Position[] = [
     realized: "1.5",
     nCredits: 2,
     lastUpdatedMs: 1_790_000_000_000,
-    lastReconciledAt: 1_790_000_000_000,
+    lastReconciledAtMs: 1_790_000_000_000,
     lastEventSeq: 42,
   },
 ];

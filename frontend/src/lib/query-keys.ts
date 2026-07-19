@@ -23,19 +23,11 @@ export const offerKeys = {
   list: (state?: string) => [...offerKeys.all, "list", state] as const,
 };
 
-export const billingKeys = {
-  all: ["billing"] as const,
-  list: (params?: Record<string, unknown>) =>
-    [...billingKeys.all, "list", params] as const,
-  plan: () => [...billingKeys.all, "plan"] as const,
-};
-
 export const executionKeys = {
   all: ["executions"] as const,
-  list: (params?: Record<string, unknown>) =>
-    [...executionKeys.all, "list", params] as const,
-  /** SP4 event_log projection (before-cursor infinite list). */
-  events: () => [...executionKeys.all, "events"] as const,
+  /** SP4 event_log projection (before-cursor infinite list, per filter). */
+  events: (eventType?: string) =>
+    [...executionKeys.all, "events", eventType ?? "all"] as const,
 };
 
 export const attributionKeys = {

@@ -11,7 +11,7 @@ const POSITION: Position = {
   realized: "37.1234",
   nCredits: 4,
   lastUpdatedMs: NOW - 60_000,
-  lastReconciledAt: NOW - 120_000,
+  lastReconciledAtMs: NOW - 120_000,
   lastEventSeq: 981,
 };
 
@@ -28,9 +28,9 @@ describe("PositionsCard", () => {
     expect(text).toContain("Realized");
   });
 
-  it("shows never-reconciled label when lastReconciledAt is null", () => {
+  it("shows never-reconciled label when lastReconciledAtMs is null", () => {
     const { container } = render(
-      <PositionsCard positions={[{ ...POSITION, lastReconciledAt: null }]} />,
+      <PositionsCard positions={[{ ...POSITION, lastReconciledAtMs: null }]} />,
     );
     expect(container.textContent).toContain("Never reconciled");
   });

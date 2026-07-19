@@ -11,11 +11,6 @@ export interface ApiErrorResponse {
   };
 }
 
-export interface CursorPagination {
-  nextCursor?: string;
-  hasMore: boolean;
-}
-
 // ── User ──
 
 export interface User {
@@ -111,7 +106,7 @@ export interface Position {
   nCredits: number | null;
   lastUpdatedMs: number;
   /** Epoch ms of the last reconcile checkpoint; null if never reconciled. */
-  lastReconciledAt: number | null;
+  lastReconciledAtMs: number | null;
   lastEventSeq: number;
 }
 
@@ -141,45 +136,20 @@ export interface ExecutionEvent {
   rate: number | null;
 }
 
-// ── Billing ──
-
-export interface BillingRecord {
-  id: string;
-  userId: string;
-  periodStart: string;
-  periodEnd: string;
-  plan: string;
-  amount: number;
-  currency: string;
-  status: "pending" | "paid" | "overdue" | "waived";
-  paidAt?: string;
-  createdAt: string;
+/**
+ * GET /executions pagination (contract v2) — server envelope replaces the
+ * old "full page => more" client heuristic.
+ */
+export interface ExecutionEventsPagination {
+  hasMore: boolean;
+  /** event_seq cursor for the next page; null when the log is exhausted. */
+  nextBefore: number | null;
 }
 
-export interface BillingListResponse {
-  data: BillingRecord[];
-  pagination: CursorPagination;
-}
-
-// ── Execution ──
-
-export interface ExecutionRecord {
-  id: string;
-  userId: string;
-  action: "place" | "cancel" | "filled" | "renew";
-  currency: string;
-  amount: number;
-  rate: number;
-  period: number;
-  offerId?: number;
-  status: string;
-  errorMessage?: string;
-  createdAt: string;
-}
-
-export interface ExecutionListResponse {
-  data: ExecutionRecord[];
-  pagination: CursorPagination;
+/** GET /executions — full response envelope. */
+export interface ExecutionEventsResponse {
+  data: ExecutionEvent[];
+  pagination: ExecutionEventsPagination;
 }
 
 // ── Attribution ──

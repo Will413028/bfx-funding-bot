@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   apiKeyKeys,
-  billingKeys,
   configKeys,
   executionKeys,
   offerKeys,
@@ -40,24 +39,16 @@ describe("offerKeys", () => {
   });
 });
 
-describe("billingKeys", () => {
-  it("list includes params", () => {
-    const params = { status: "paid" };
-    expect(billingKeys.list(params)).toEqual(["billing", "list", params]);
-  });
-
-  it("plan extends all", () => {
-    expect(billingKeys.plan()).toEqual(["billing", "plan"]);
-  });
-});
-
 describe("executionKeys", () => {
-  it("list includes params", () => {
-    const params = { after: "abc" };
-    expect(executionKeys.list(params)).toEqual(["executions", "list", params]);
+  it("events without filter uses the all bucket", () => {
+    expect(executionKeys.events()).toEqual(["executions", "events", "all"]);
   });
 
-  it("events extends all", () => {
-    expect(executionKeys.events()).toEqual(["executions", "events"]);
+  it("events includes the event-type filter", () => {
+    expect(executionKeys.events("ORDER_FILL")).toEqual([
+      "executions",
+      "events",
+      "ORDER_FILL",
+    ]);
   });
 });
