@@ -8,6 +8,13 @@ export function formatDailyRate(rate: number): string {
   return `${(rate * 100).toFixed(4)}%`;
 }
 
+/** An already-annualized percentage value (e.g. 6.205 → "6.21%"). Unlike
+ * formatAPR, this does NOT multiply by 365 — use for APR/return figures the
+ * backend already annualized (attribution + public proof-page series). */
+export function formatPercent(value: number, fractionDigits = 2): string {
+  return `${value.toFixed(fractionDigits)}%`;
+}
+
 /** USD currency format (e.g. 50000 → "$50,000.00") */
 export function formatUSD(amount: number): string {
   return new Intl.NumberFormat("en-US", {

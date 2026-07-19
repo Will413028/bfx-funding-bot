@@ -11,7 +11,8 @@
     "settings": "Settings",
     "logout": "Logout",
     "pricing": "Pricing",
-    "attribution": "Attribution"
+    "attribution": "Attribution",
+    "proof": "Track Record"
   },
   "common": {
     "loading": "Loading...",
@@ -206,5 +207,24 @@
     "loading": "Loading…",
     "loadFailed": "Failed to load attribution data",
     "empty": "No attribution rows yet — weekly job has not run."
+  },
+  "proof": {
+    "liveBadge": "Live bot — updated weekly",
+    "headline": "Real Bitfinex funding-bot performance, published weekly",
+    "subtitle": "Historical results from a live-running lending bot, benchmarked against a passive always-on-FRR baseline. Every figure below is a percentage — no dollar amounts, no projections.",
+    "asOf": "Data as of {date}",
+    "chartTitle": "Weekly realized APR — bot vs passive baseline",
+    "chartSubtitle": "Fee-adjusted, capital-days-weighted APR across all tracked lending cells",
+    "botLine": "Bot (realized, net)",
+    "baselineLine": "AlwaysFRR (util-adjusted)",
+    "empty": "No performance data yet — the weekly attribution job hasn't produced a report for this deployment.",
+    "statAvgRealized": "Avg realized APR (last {weeks} weeks)",
+    "statSpread": "Spread vs baseline",
+    "statWeeksTracked": "Weeks tracked",
+    "csvTitle": "Free funding-rate history",
+    "csvBody": "10 years of hourly fUST/fUSD Bitfinex funding rates. Free download, no signup.",
+    "csvCta": "Download CSV",
+    "disclaimerTitle": "Past performance is not indicative of future results",
+    "disclaimerBody": "The figures on this page are historical data only. They are not a projection, prediction, promise, or guarantee of future returns, and nothing here is investment advice. Bitfinex funding rates are volatile and can fall to zero; past results do not guarantee future performance."
   }
 }

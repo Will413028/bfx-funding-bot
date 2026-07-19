@@ -11,7 +11,8 @@
     "settings": "帳戶設定",
     "logout": "登出",
     "pricing": "方案價格",
-    "attribution": "歸因分析"
+    "attribution": "歸因分析",
+    "proof": "真實績效"
   },
   "common": {
     "loading": "載入中...",
@@ -206,5 +207,24 @@
     "loading": "載入中…",
     "loadFailed": "歸因資料載入失敗",
     "empty": "尚無歸因資料 — 每週排程尚未執行。"
+  },
+  "proof": {
+    "liveBadge": "機器人運行中 — 每週更新",
+    "headline": "Bitfinex 放貸機器人真實績效，每週公開",
+    "subtitle": "真實運行中放貸機器人的歷史數據，對比被動 always-on-FRR 基準。以下所有數字皆為百分比 — 不揭露任何美金金額，亦非預估數字。",
+    "asOf": "資料截至 {date}",
+    "chartTitle": "週度已實現 APR — Bot vs 被動基準",
+    "chartSubtitle": "跨所有追蹤放貸單元、經手續費調整、以資金天數加權的年化報酬",
+    "botLine": "Bot（實得，扣費）",
+    "baselineLine": "AlwaysFRR（利用率調整）",
+    "empty": "尚無績效資料 — 本部署的每週歸因排程尚未產出報告。",
+    "statAvgRealized": "近 {weeks} 週平均已實現 APR",
+    "statSpread": "對比基準價差",
+    "statWeeksTracked": "追蹤週數",
+    "csvTitle": "免費利率歷史資料",
+    "csvBody": "10 年 fUST/fUSD Bitfinex 每小時利率資料，免費下載，無需註冊。",
+    "csvCta": "下載 CSV",
+    "disclaimerTitle": "過去績效不代表未來表現",
+    "disclaimerBody": "本頁面所有數字皆為歷史資料，並非對未來報酬的預測、承諾或保證，本頁內容亦不構成投資建議。Bitfinex 放貸利率波動劇烈，可能歸零；過去表現不保證未來績效。"
   }
 }
