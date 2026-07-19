@@ -88,6 +88,22 @@ class WeeklyAttributionResponse(BaseModel):
     )
 
 
+class PublicWeeklyPoint(BaseModel):
+    """One week of the public proof-page series — percent-only, no absolute
+    $ fields (see modules/api/public.py for the compliance rationale)."""
+
+    week_start_ms: int = Field(serialization_alias="weekStartMs")
+    realized_apr_net_pct: str | None = Field(serialization_alias="realizedAprNetPct")
+    baseline_frr_util_apr_net_pct: str | None = Field(
+        serialization_alias="baselineFrrUtilAprNetPct"
+    )
+
+
+class PublicProofSummaryResponse(BaseModel):
+    weeks: list[PublicWeeklyPoint]
+    as_of: str = Field(serialization_alias="asOf")
+
+
 class PositionResponse(BaseModel):
     """SP4: one position_state row (per-symbol ledger projection)."""
 
