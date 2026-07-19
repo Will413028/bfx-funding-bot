@@ -150,6 +150,13 @@ from bfx_funding_bot.modules.observability.metrics import (
 )
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
+from bfx_funding_bot.modules.observability.tracing import (
+    DaemonTracing,
+    TracedReconcileRecovery,
+    TracingSubmitMiddleware,
+    instrument_ws_dispatcher,
+    tracing_from_env,
+)
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
@@ -208,6 +215,8 @@ class Daemon:
     writer_lock: WriterLock | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
     metrics: DaemonMetrics | None = None
+    # OTel traces (wiki pending #4) — default-off (BFX_OTEL_ENABLED), fail-open.
+    tracing: DaemonTracing | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self) -> None:
@@ -751,6 +760,13 @@ async def build_daemon(
         deployment_environment=config.deployment_environment.value,
         phase=config.phase.value,
     )
+    # OTel traces (wiki pending #4) — DEFAULT OFF via BFX_OTEL_ENABLED. When
+    # disabled this is a no-op object (zero SDK init) and NOTHING below gets
+    # wrapped, so the money-path call chain is byte-identical to the
+    # metrics-era stack. All span recording is fail-open.
+    tracing = tracing_from_env(os.environ, event_resource=event_resource)
+    if tracing.enabled:
+        log.info("otel_tracing_enabled endpoint=%s", tracing.endpoint)
     stdout_sink = StdoutEventSink(resource=event_resource, metrics=metrics)
     bitfinex_http = httpx.AsyncClient()
     # Venue REST traffic/latency/error metrics — additive event hooks on the
@@ -1130,6 +1146,10 @@ async def build_daemon(
         ),
         metrics=metrics,
     )
+    # OTel span "executor.submit" — enabled-only, stacked OUTSIDE metrics so
+    # one span covers the full chain. Transparent: result/exception unchanged.
+    if tracing.enabled:
+        wrapped_executor = TracingSubmitMiddleware(wrapped_executor, tracing=tracing)
 
     # DeploymentReconciler needs wrapped_executor — constructed here (after
     # wrapped_executor) and injected into PeriodicReconcile.
@@ -1187,11 +1207,18 @@ async def build_daemon(
             git_sha=os.environ.get("GIT_SHA") or os.environ.get("BFX_SERVICE_VERSION"),
             now_ms=now_ms_utc(),
         )
+        # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
+        # bfx_reconcile_ticks_total) — PeriodicReconcile's failure handling
+        # sees exactly what the raw recovery would produce. When tracing is
+        # enabled, the "reconcile.tick" span wrapper stacks OUTSIDE the timer
+        # (same window as the histogram); both are observe-only pass-throughs.
+        recovery_runner: TimedReconcileRecovery | TracedReconcileRecovery = (
+            TimedReconcileRecovery(runtime_recovery, metrics=metrics)
+        )
+        if tracing.enabled:
+            recovery_runner = TracedReconcileRecovery(recovery_runner, tracing=tracing)
         periodic_reconcile = PeriodicReconcile(
-            # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
-            # bfx_reconcile_ticks_total) — PeriodicReconcile's failure handling
-            # sees exactly what the raw recovery would produce.
-            recovery=TimedReconcileRecovery(runtime_recovery, metrics=metrics),
+            recovery=recovery_runner,
             probe=probe,
             interval_s=reconcile_interval_s,
             min_resync_interval_s=resync_min_interval_s,
@@ -1416,6 +1443,10 @@ async def build_daemon(
             depth_fn=lambda: _dispatcher_for_gauge.queue_depth,
             capacity=ws_dispatcher.queue_capacity,
         )
+        # OTel span "ws_dispatcher.process" — enabled-only in-place wrap of the
+        # per-event translate+persist+publish step (fail-open, transparent).
+        if tracing.enabled:
+            instrument_ws_dispatcher(ws_dispatcher, tracing=tracing)
 
     return Daemon(
         config=config,
@@ -1449,6 +1480,7 @@ async def build_daemon(
         admin_token=admin_token,
         writer_lock=writer_lock,
         metrics=metrics,
+        tracing=tracing,
     )
 
 
@@ -1535,6 +1567,10 @@ async def _run() -> None:
         if daemon.smoke_runner is not None:
             with contextlib.suppress(Exception):
                 await daemon.smoke_runner.aclose()
+        # Flush any batched spans before exit (no-op when tracing disabled).
+        if daemon.tracing is not None:
+            with contextlib.suppress(Exception):
+                daemon.tracing.shutdown()
 
 
 
