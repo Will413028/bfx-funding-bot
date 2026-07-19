@@ -217,6 +217,7 @@
     "botLine": "Bot (realized, net)",
     "closeLine": "Always-close",
     "frrLine": "AlwaysFRR",
+    "frrUtilLine": "AlwaysFRR (util-adjusted)",
     "loading": "Loading…",
     "loadFailed": "Failed to load attribution data",
     "empty": "No attribution rows yet — weekly job has not run."

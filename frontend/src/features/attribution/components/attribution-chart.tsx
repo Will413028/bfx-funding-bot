@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import type { WeeklyAttributionPoint } from "@/types";
 
-function toSeries(points: WeeklyAttributionPoint[]) {
+export function toSeries(points: WeeklyAttributionPoint[]) {
   return points.map((p) => ({
     week: new Date(p.weekStartMs).toISOString().slice(0, 10),
     bot: p.realizedAprNetPct === null ? null : Number(p.realizedAprNetPct),
@@ -23,6 +23,10 @@ function toSeries(points: WeeklyAttributionPoint[]) {
         : Number(p.baselineCloseAprNetPct),
     frr:
       p.baselineFrrAprNetPct === null ? null : Number(p.baselineFrrAprNetPct),
+    frrUtil:
+      p.baselineFrrUtilAprNetPct === null
+        ? null
+        : Number(p.baselineFrrUtilAprNetPct),
   }));
 }
 
@@ -89,6 +93,16 @@ export function AttributionChart({
               name={t("frrLine")}
               stroke="#f59e0b"
               strokeWidth={1.5}
+              dot={false}
+              connectNulls
+            />
+            <Line
+              type="monotone"
+              dataKey="frrUtil"
+              name={t("frrUtilLine")}
+              stroke="#f59e0b"
+              strokeWidth={1.5}
+              strokeDasharray="6 3"
               dot={false}
               connectNulls
             />

@@ -205,4 +205,5 @@ export interface WeeklyAttributionPoint {
   realizedAprNetPct: string | null;
   baselineCloseAprNetPct: string | null;
   baselineFrrAprNetPct: string | null;
+  baselineFrrUtilAprNetPct: string | null;
 }

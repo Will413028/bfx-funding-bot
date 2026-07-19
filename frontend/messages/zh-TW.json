@@ -217,6 +217,7 @@
     "botLine": "Bot 實得（扣費）",
     "closeLine": "Always-close",
     "frrLine": "AlwaysFRR",
+    "frrUtilLine": "AlwaysFRR（利用率調整）",
     "loading": "載入中…",
     "loadFailed": "歸因資料載入失敗",
     "empty": "尚無歸因資料 — 每週排程尚未執行。"
