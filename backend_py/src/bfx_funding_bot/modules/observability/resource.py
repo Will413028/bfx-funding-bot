@@ -66,10 +66,10 @@ class EventResource:
     def to_otel_resource(self) -> Any:
         """Migration helper for future OTEL adoption.
 
-        Lazy imports `opentelemetry.sdk.resources.Resource` — no SDK
-        dependency until OTEL adoption phase. See spec D20.
+        Lazy import keeps SDK cost off the disabled path. Since OTEL adoption
+        (wiki pending #4) the SDK is a real dependency — see tracing.py.
         """
-        from opentelemetry.sdk.resources import Resource  # type: ignore[import-not-found]
+        from opentelemetry.sdk.resources import Resource
 
         attrs: dict[str, Any] = {
             "deployment.environment.name": self.deployment_environment.value,

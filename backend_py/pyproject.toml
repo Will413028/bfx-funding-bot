@@ -27,6 +27,8 @@ dependencies = [
     "pandas>=3.0.2",
     "ruamel.yaml>=0.18",
     "prometheus-client>=0.25.0",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.44.0",
 ]
 
 [dependency-groups]
