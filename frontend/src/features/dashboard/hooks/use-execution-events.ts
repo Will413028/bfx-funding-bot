@@ -1,28 +1,39 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { executionKeys } from "@/lib/query-keys";
-import type { ExecutionEvent } from "@/types";
+import type { ExecutionEventsResponse, ExecutionEventType } from "@/types";
 
 export const EXECUTION_EVENTS_PAGE_SIZE = 25;
 
 /**
- * Cursor for the next page: the smallest event_seq seen so far (rows come
- * back event_seq descending). A short page means the log is exhausted.
+ * Contract v2: the server pagination envelope drives the before-cursor —
+ * `nextBefore` is the smallest event_seq of the page, `hasMore` replaces
+ * the old "full page => more" heuristic.
  */
 export function getNextEventsPageParam(
-  lastPage: ExecutionEvent[],
+  lastPage: ExecutionEventsResponse,
 ): number | undefined {
-  if (lastPage.length < EXECUTION_EVENTS_PAGE_SIZE) return undefined;
-  return lastPage[lastPage.length - 1]?.eventSeq;
+  const { hasMore, nextBefore } = lastPage.pagination;
+  return hasMore && nextBefore != null ? nextBefore : undefined;
 }
 
-export function useExecutionEvents() {
+interface UseExecutionEventsOptions {
+  /** Restrict to a single event_log type; omit for all events. */
+  eventType?: ExecutionEventType;
+  pageSize?: number;
+}
+
+export function useExecutionEvents({
+  eventType,
+  pageSize = EXECUTION_EVENTS_PAGE_SIZE,
+}: UseExecutionEventsOptions = {}) {
   return useInfiniteQuery({
-    queryKey: executionKeys.events(),
+    queryKey: executionKeys.events(eventType),
     queryFn: ({ pageParam }) =>
-      apiClient.get<ExecutionEvent[]>("/executions", {
+      apiClient.getList<ExecutionEventsResponse>("/executions", {
         params: {
-          limit: String(EXECUTION_EVENTS_PAGE_SIZE),
+          limit: String(pageSize),
+          ...(eventType !== undefined ? { event_type: eventType } : {}),
           ...(pageParam !== undefined ? { before: String(pageParam) } : {}),
         },
       }),

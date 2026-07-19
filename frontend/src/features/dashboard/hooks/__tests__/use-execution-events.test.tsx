@@ -3,7 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { apiClient } from "@/lib/api-client";
-import type { ExecutionEvent } from "@/types";
+import type { ExecutionEvent, ExecutionEventsResponse } from "@/types";
 import {
   EXECUTION_EVENTS_PAGE_SIZE,
   getNextEventsPageParam,
@@ -11,7 +11,7 @@ import {
 } from "../use-execution-events";
 
 vi.mock("@/lib/api-client", () => ({
-  apiClient: { get: vi.fn() },
+  apiClient: { getList: vi.fn() },
 }));
 
 function makeEvent(eventSeq: number): ExecutionEvent {
@@ -27,6 +27,13 @@ function makeEvent(eventSeq: number): ExecutionEvent {
   };
 }
 
+function makePage(
+  eventSeqs: number[],
+  pagination: ExecutionEventsResponse["pagination"],
+): ExecutionEventsResponse {
+  return { data: eventSeqs.map(makeEvent), pagination };
+}
+
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -35,49 +42,68 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("getNextEventsPageParam", () => {
-  it("returns the smallest event_seq of a full page as the before cursor", () => {
-    const fullPage = Array.from(
-      { length: EXECUTION_EVENTS_PAGE_SIZE },
-      (_, i) => makeEvent(200 - i),
-    );
-    expect(getNextEventsPageParam(fullPage)).toBe(
-      200 - (EXECUTION_EVENTS_PAGE_SIZE - 1),
-    );
+  it("returns nextBefore when the server says there is more", () => {
+    const page = makePage([200, 199], { hasMore: true, nextBefore: 199 });
+    expect(getNextEventsPageParam(page)).toBe(199);
   });
 
-  it("returns undefined for a short page (log exhausted)", () => {
-    expect(getNextEventsPageParam([makeEvent(3)])).toBeUndefined();
-    expect(getNextEventsPageParam([])).toBeUndefined();
+  it("returns undefined when the log is exhausted", () => {
+    expect(
+      getNextEventsPageParam(
+        makePage([3], { hasMore: false, nextBefore: null }),
+      ),
+    ).toBeUndefined();
+    expect(
+      getNextEventsPageParam(
+        makePage([], { hasMore: false, nextBefore: null }),
+      ),
+    ).toBeUndefined();
   });
 });
 
 describe("useExecutionEvents", () => {
-  it("fetches the first page without a before cursor, then pages with it", async () => {
-    const firstPage = Array.from(
-      { length: EXECUTION_EVENTS_PAGE_SIZE },
-      (_, i) => makeEvent(200 - i),
-    );
-    vi.mocked(apiClient.get)
-      .mockResolvedValueOnce(firstPage)
-      .mockResolvedValueOnce([makeEvent(100)]);
+  it("fetches the first page without a cursor, then pages with nextBefore", async () => {
+    vi.mocked(apiClient.getList)
+      .mockResolvedValueOnce(
+        makePage([200, 199], { hasMore: true, nextBefore: 199 }),
+      )
+      .mockResolvedValueOnce(
+        makePage([100], { hasMore: false, nextBefore: null }),
+      );
 
     const { result } = renderHook(() => useExecutionEvents(), { wrapper });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(apiClient.get).toHaveBeenCalledWith("/executions", {
+    expect(apiClient.getList).toHaveBeenCalledWith("/executions", {
       params: { limit: String(EXECUTION_EVENTS_PAGE_SIZE) },
     });
     expect(result.current.hasNextPage).toBe(true);
 
     result.current.fetchNextPage();
     await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
-    expect(apiClient.get).toHaveBeenLastCalledWith("/executions", {
+    expect(apiClient.getList).toHaveBeenLastCalledWith("/executions", {
       params: {
         limit: String(EXECUTION_EVENTS_PAGE_SIZE),
-        before: String(200 - (EXECUTION_EVENTS_PAGE_SIZE - 1)),
+        before: "199",
       },
     });
-    // Short second page → no further cursor.
+    // Envelope says exhausted → no further cursor.
     expect(result.current.hasNextPage).toBe(false);
+  });
+
+  it("passes the event_type filter and custom page size through", async () => {
+    vi.mocked(apiClient.getList).mockResolvedValueOnce(
+      makePage([50], { hasMore: false, nextBefore: null }),
+    );
+
+    const { result } = renderHook(
+      () => useExecutionEvents({ eventType: "ORDER_FILL", pageSize: 50 }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiClient.getList).toHaveBeenCalledWith("/executions", {
+      params: { limit: "50", event_type: "ORDER_FILL" },
+    });
   });
 });

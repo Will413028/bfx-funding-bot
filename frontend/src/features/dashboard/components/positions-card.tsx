@@ -13,11 +13,11 @@ const LAGGING_MS = 30 * 60_000;
 
 /** Bucket reconcile age: ≤5m fresh, ≤30m lagging, older stale. */
 export function reconcileFreshness(
-  lastReconciledAt: number | null,
+  lastReconciledAtMs: number | null,
   nowMs = Date.now(),
 ): ReconcileFreshness {
-  if (lastReconciledAt == null) return "never";
-  const age = nowMs - lastReconciledAt;
+  if (lastReconciledAtMs == null) return "never";
+  const age = nowMs - lastReconciledAtMs;
   if (age <= FRESH_MS) return "fresh";
   if (age <= LAGGING_MS) return "lagging";
   return "stale";
@@ -49,7 +49,7 @@ export function PositionsCard({ positions }: PositionsCardProps) {
       ) : (
         <ul className="mt-4 space-y-5">
           {positions.map((p) => {
-            const freshness = reconcileFreshness(p.lastReconciledAt);
+            const freshness = reconcileFreshness(p.lastReconciledAtMs);
             return (
               <li key={p.symbol} className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -59,9 +59,9 @@ export function PositionsCard({ positions }: PositionsCardProps) {
                   <span
                     className="flex items-center gap-1.5 text-xs text-zinc-500"
                     title={
-                      p.lastReconciledAt == null
+                      p.lastReconciledAtMs == null
                         ? undefined
-                        : new Date(p.lastReconciledAt).toISOString()
+                        : new Date(p.lastReconciledAtMs).toISOString()
                     }
                   >
                     <span
@@ -70,9 +70,9 @@ export function PositionsCard({ positions }: PositionsCardProps) {
                         freshnessDot[freshness],
                       )}
                     />
-                    {p.lastReconciledAt == null
+                    {p.lastReconciledAtMs == null
                       ? t("reconcileNever")
-                      : `${t("reconciled")} ${formatRelativeTime(p.lastReconciledAt, locale)}`}
+                      : `${t("reconciled")} ${formatRelativeTime(p.lastReconciledAtMs, locale)}`}
                   </span>
                 </div>
                 <dl className="grid grid-cols-3 gap-2">

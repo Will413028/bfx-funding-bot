@@ -44,16 +44,16 @@ export function StrategySkeleton() {
   );
 }
 
+/**
+ * Executions-browser table region only — the history page keeps its header
+ * and filter chips mounted while a filter change refetches.
+ */
 export function HistorySkeleton() {
   return (
-    <div className="space-y-6">
-      <Skeleton className="h-7 w-20" />
-      <Skeleton className="h-10 w-56 rounded-md" />
-      <div className="space-y-2">
-        {placeholderKeys(5, "history").map((key) => (
-          <Skeleton key={key} className="h-12 rounded-lg" />
-        ))}
-      </div>
+    <div className="space-y-2">
+      {placeholderKeys(8, "history").map((key) => (
+        <Skeleton key={key} className="h-12 rounded-lg" />
+      ))}
     </div>
   );
 }

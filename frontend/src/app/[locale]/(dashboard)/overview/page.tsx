@@ -51,7 +51,7 @@ export default function OverviewPage() {
   const hasStrategy = config != null;
   const setupComplete = hasVerifiedKey && hasStrategy;
 
-  const events = executions.data.pages.flat();
+  const events = executions.data.pages.flatMap((p) => p.data);
 
   return (
     <div className="space-y-4">
