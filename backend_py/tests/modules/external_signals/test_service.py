@@ -250,7 +250,9 @@ class TestBinanceForwardFill:
         await sqlite_session.commit()
 
         calls = client.get_binance_funding.await_args_list
-        assert calls[0].kwargs["start_time"] == 0
+        # startTime=0 is treated as absent by Binance (returns latest page
+        # instead of history) — empty DB must start from 1, not 0.
+        assert calls[0].kwargs["start_time"] == 1
         assert calls[1].kwargs["start_time"] == 2001
         assert stats.done is True
         assert stats.rows == 3
@@ -267,4 +269,23 @@ class TestBinanceForwardFill:
             client=client, session=sqlite_session, symbol="BTCUSDT", page_limit=2,
         )
         assert client.get_binance_funding.await_args_list[0].kwargs["start_time"] == 5001
+        assert stats.done is True
+
+    async def test_explicit_start_time_overrides_resume(
+        self, sqlite_session: AsyncSession
+    ) -> None:
+        """Full-history sweep despite existing recent rows (gap repair)."""
+        await upsert_perp_funding(
+            sqlite_session, [_perp(5000, venue="binance-usdm", symbol="BTCUSDT")]
+        )
+        await sqlite_session.flush()
+        client: Any = AsyncMock()
+        client.get_binance_funding.side_effect = [
+            [_perp(100, venue="binance-usdm", symbol="BTCUSDT")]
+        ]
+        stats = await topup_binance_funding_to_latest(
+            client=client, session=sqlite_session, symbol="BTCUSDT",
+            page_limit=2, start_time=1,
+        )
+        assert client.get_binance_funding.await_args_list[0].kwargs["start_time"] == 1
         assert stats.done is True
