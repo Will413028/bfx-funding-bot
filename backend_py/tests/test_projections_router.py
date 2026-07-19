@@ -118,7 +118,8 @@ def test_positions_realm_scoped_camel_case(app_client):
     fust = data[1]
     assert fust["realized"] == "2314.03"
     assert fust["nCredits"] == 3
-    assert fust["lastReconciledAt"] == 2000
+    assert fust["lastReconciledAtMs"] == 2000  # *Ms suffix (contract v2 rename)
+    assert "lastReconciledAt" not in fust
     assert fust["lastEventSeq"] == 7
 
 
@@ -141,17 +142,32 @@ def test_offers_state_filter(app_client):
 def test_executions_desc_with_limit_and_cursor(app_client):
     resp = app_client.get("/api/v1/executions", params={"limit": 2})
     assert resp.status_code == 200
-    data = resp.json()["data"]
+    body = resp.json()
+    data = body["data"]
     assert len(data) == 2
     assert data[0]["eventType"] == "CREDIT_CLOSED"  # newest first, canary excluded
     assert data[0]["amount"] == "123.5"
     assert data[0]["rate"] == 0.0002
-    before = data[-1]["eventSeq"]
+    # contract v2: pagination envelope
+    assert body["pagination"]["hasMore"] is True
+    before = body["pagination"]["nextBefore"]
+    assert before == data[-1]["eventSeq"]
 
     resp2 = app_client.get("/api/v1/executions", params={"limit": 2, "before": before})
-    data2 = resp2.json()["data"]
-    assert len(data2) == 2
-    assert data2[0]["eventSeq"] < before
+    body2 = resp2.json()
+    assert len(body2["data"]) == 2
+    assert body2["data"][0]["eventSeq"] < before
+    # 4 realm rows total -> second page exhausts them
+    assert body2["pagination"]["hasMore"] is False
+    assert body2["pagination"]["nextBefore"] is None
+
+
+def test_executions_event_type_filter(app_client):
+    resp = app_client.get("/api/v1/executions", params={"event_type": "ORDER_FILL"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [e["eventType"] for e in body["data"]] == ["ORDER_FILL"]  # canary row excluded
+    assert body["pagination"]["hasMore"] is False
 
 
 def test_executions_limit_capped(app_client):

@@ -109,6 +109,7 @@ def build_projections_router() -> APIRouter:
     async def executions(
         limit: int = Query(default=50, ge=1, le=_EXECUTIONS_LIMIT_CAP),
         before: int | None = Query(default=None, description="event_seq cursor"),
+        event_type: str | None = Query(default=None),
         user: Principal = Depends(require_user),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
@@ -118,8 +119,14 @@ def build_projections_router() -> APIRouter:
         )
         if before is not None:
             stmt = stmt.where(EventLogRow.event_seq < before)
-        stmt = stmt.order_by(EventLogRow.event_seq.desc()).limit(limit)
+        if event_type is not None:
+            stmt = stmt.where(EventLogRow.event_type == event_type)
+        # Fetch one extra row purely as the has-more probe (contract v2:
+        # pagination envelope replaces the FE "full page => more" heuristic).
+        stmt = stmt.order_by(EventLogRow.event_seq.desc()).limit(limit + 1)
         rows = (await session.execute(stmt)).scalars().all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
         out = []
         for r in rows:
             payload = r.payload or {}
@@ -137,6 +144,12 @@ def build_projections_router() -> APIRouter:
                     rate=float(rate) if rate is not None else None,
                 ).model_dump(by_alias=True)
             )
-        return {"data": out}
+        return {
+            "data": out,
+            "pagination": {
+                "hasMore": has_more,
+                "nextBefore": rows[-1].event_seq if has_more and rows else None,
+            },
+        }
 
     return router
