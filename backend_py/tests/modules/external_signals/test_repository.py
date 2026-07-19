@@ -51,6 +51,22 @@ async def _schema(sqlite_engine: AsyncEngine) -> None:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_schema")
 class TestPerpFundingRepository:
+    async def test_intra_batch_duplicate_mts_deduped(self, sqlite_session: AsyncSession) -> None:
+        await upsert_perp_funding(
+            sqlite_session, [_perp(1000, rate=0.0001), _perp(1000, rate=0.0004)]
+        )
+        await sqlite_session.flush()
+        n = (
+            await sqlite_session.execute(
+                select(func.count()).select_from(PerpFundingRateRow)
+            )
+        ).scalar_one()
+        assert n == 1
+        rate = (
+            await sqlite_session.execute(select(PerpFundingRateRow.funding_rate))
+        ).scalar_one()
+        assert rate == 0.0004
+
     async def test_upsert_is_idempotent_and_updates(self, sqlite_session: AsyncSession) -> None:
         await upsert_perp_funding(sqlite_session, [_perp(1000), _perp(2000)])
         await upsert_perp_funding(sqlite_session, [_perp(2000, rate=0.0009)])
@@ -108,6 +124,28 @@ class TestLiquidationRepository:
             )
         ).scalar_one()
         assert updated == -0.5
+
+    async def test_intra_batch_duplicate_keys_deduped_last_wins(
+        self, sqlite_session: AsyncSession
+    ) -> None:
+        """The live feed serves duplicate entries within one page; Postgres
+        raises CardinalityViolation if one INSERT..ON CONFLICT touches the
+        same key twice (observed on VM 2026-07-19), so the batch must be
+        deduped before insert."""
+        await upsert_liquidations(
+            sqlite_session, [_liq(9, 100, amount=-0.1), _liq(9, 100, amount=-0.7)]
+        )
+        await sqlite_session.flush()
+        n = (
+            await sqlite_session.execute(select(func.count()).select_from(LiquidationRow))
+        ).scalar_one()
+        assert n == 1
+        amount = (
+            await sqlite_session.execute(
+                select(LiquidationRow.amount).where(LiquidationRow.pos_id == 9)
+            )
+        ).scalar_one()
+        assert amount == -0.7  # last wins
 
     async def test_same_pos_id_distinct_events_kept(self, sqlite_session: AsyncSession) -> None:
         initial = LiquidationRecord(
