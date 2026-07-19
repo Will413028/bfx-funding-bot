@@ -86,3 +86,42 @@ class WeeklyAttributionResponse(BaseModel):
     baseline_frr_util_apr_net_pct: str | None = Field(
         default=None, serialization_alias="baselineFrrUtilAprNetPct",
     )
+
+
+class PositionResponse(BaseModel):
+    """SP4: one position_state row (per-symbol ledger projection)."""
+
+    symbol: str
+    reserved: str
+    realized: str
+    n_credits: int | None = Field(default=None, serialization_alias="nCredits")
+    last_updated_ms: int = Field(serialization_alias="lastUpdatedMs")
+    last_reconciled_at: int | None = Field(
+        default=None, serialization_alias="lastReconciledAt"
+    )
+    last_event_seq: int = Field(serialization_alias="lastEventSeq")
+
+
+class OfferClaimResponse(BaseModel):
+    """SP4: one offer_claims row (cid-keyed offer FSM projection)."""
+
+    cid: int
+    venue_offer_id: str | None = Field(default=None, serialization_alias="venueOfferId")
+    state: str
+    symbol: str
+    size_usdt: str = Field(serialization_alias="sizeUsdt")
+    occurred_at_ms: int = Field(serialization_alias="occurredAtMs")
+    last_updated_ms: int = Field(serialization_alias="lastUpdatedMs")
+
+
+class ExecutionEventResponse(BaseModel):
+    """SP4: one event_log row (amount/rate lifted from payload when present)."""
+
+    event_seq: int = Field(serialization_alias="eventSeq")
+    event_type: str = Field(serialization_alias="eventType")
+    occurred_at_ms: int = Field(serialization_alias="occurredAtMs")
+    symbol: str | None = None
+    venue_offer_id: str | None = Field(default=None, serialization_alias="venueOfferId")
+    cid: int | None = None
+    amount: str | None = None
+    rate: float | None = None

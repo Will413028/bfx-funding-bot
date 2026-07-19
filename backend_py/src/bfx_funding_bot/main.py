@@ -9,6 +9,7 @@ from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.config import build_config_router
+from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
 
 
@@ -37,6 +38,7 @@ app.include_router(build_api_router())
 app.include_router(build_api_keys_router())
 app.include_router(build_attribution_router())
 app.include_router(build_config_router())
+app.include_router(build_projections_router())
 
 
 @app.get("/health")
