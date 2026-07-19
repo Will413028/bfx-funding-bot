@@ -273,10 +273,20 @@ async def topup_binance_funding_to_latest(
     symbol: str,
     page_limit: int = 1000,
     max_pages: int | None = None,
+    start_time: int | None = None,
 ) -> IngestStats:
-    """Forward-fill Binance realized funding from db_max+1 (ascending pages)."""
-    db_max = await get_perp_max_mts(session, venue=_BINANCE, symbol=symbol)
-    cursor = (db_max + 1) if db_max is not None else 0
+    """Forward-fill Binance realized funding from db_max+1 (ascending pages).
+
+    start_time overrides the resume cursor (full-history sweep / gap repair —
+    idempotent upserts make re-covering stored ranges safe). Note: Binance
+    treats startTime=0 as absent and returns the LATEST page instead of
+    history, so the empty-DB cursor starts at 1.
+    """
+    if start_time is not None:
+        cursor = start_time
+    else:
+        db_max = await get_perp_max_mts(session, venue=_BINANCE, symbol=symbol)
+        cursor = (db_max + 1) if db_max is not None else 1
 
     pages = 0
     rows = 0

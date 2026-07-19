@@ -56,6 +56,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Comma-separated Binance USD-M symbols")
     p.add_argument("--skip-binance", action="store_true")
     p.add_argument("--skip-bitfinex", action="store_true")
+    p.add_argument("--binance-start-time", type=int, default=None,
+                   help="Override Binance resume cursor (e.g. 1 = full-history "
+                        "sweep; idempotent upserts make this safe)")
     p.add_argument("--page-limit", type=int, default=5000)
     p.add_argument("--pages-per-commit", type=int, default=20,
                    help="Commit every N pages so interrupts lose little work")
@@ -167,11 +170,20 @@ async def _amain() -> int:
                 return run
 
             def _mk_binance(sym: str) -> Callable[[AsyncSession], Awaitable[IngestStats]]:
+                start_override: int | None = args.binance_start_time
+
                 async def run(s: AsyncSession) -> IngestStats:
-                    return await topup_binance_funding_to_latest(
+                    nonlocal start_override
+                    stats = await topup_binance_funding_to_latest(
                         client=client, session=s, symbol=sym,
                         max_pages=args.pages_per_commit,
+                        start_time=start_override,
                     )
+                    # Only the first chunk uses the override; afterwards resume
+                    # from DB max as usual (otherwise every chunk restarts).
+                    if stats.pages > 0:
+                        start_override = None
+                    return stats
                 return run
 
             for symbol in bfx_symbols:
