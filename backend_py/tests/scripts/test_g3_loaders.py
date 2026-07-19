@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     FillRecord,
     MarketRatePoint,
@@ -21,6 +22,7 @@ from bfx_funding_bot.modules.live_validation.live_attribution import (
 from scripts._g3_loaders import (
     _candles_to_market_rate_points,
     _compute_verdict,
+    _load_observed_realized,
     build_verdict_from_neon,
 )
 
@@ -249,3 +251,71 @@ async def test_build_verdict_legit_idle_cell_is_insufficient_not_crash(g3_factor
     assert verdict.mr_alpha_available is False
     # No funding_stats seeded → AlwaysFRR arm unavailable (not a crash).
     assert _frr.available is False
+
+
+# ---------------------------------------------------------------------------
+# position_state → observed_realized (regression: per-symbol rename e7b20dc)
+# ---------------------------------------------------------------------------
+
+
+def _position_row(symbol: str, realized: str) -> PositionStateRow:
+    return PositionStateRow(
+        account_id="default",
+        deployment_environment="prod",
+        symbol=symbol,
+        reserved=Decimal("0"),
+        realized=Decimal(realized),
+        last_updated_ms=1,
+        last_event_seq=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_observed_realized_filters_symbol(g3_factory):
+    """position_state is per-symbol (composite PK since e7b20dc): the loader
+    must read the measured cell's `realized`, not whichever row .first()
+    happens to return. fUSD is seeded FIRST so an unfiltered query would
+    pick it and this test would fail."""
+    async with g3_factory() as s:
+        s.add(_position_row("fUSD", "999"))
+        s.add(_position_row("fUST", "42.5"))
+        await s.commit()
+
+    async with g3_factory() as s:
+        got = await _load_observed_realized(
+            s, account_id="default", deployment_env="prod", symbol="fUST"
+        )
+    assert got == Decimal("42.5")
+
+
+@pytest.mark.asyncio
+async def test_load_observed_realized_missing_row_is_zero(g3_factory):
+    async with g3_factory() as s:
+        got = await _load_observed_realized(
+            s, account_id="default", deployment_env="prod", symbol="fUST"
+        )
+    assert got == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_build_verdict_survives_position_state_row(g3_factory):
+    """2026-07-13 prod crash regression: with a position_state row present the
+    loader read the stale pre-rename attribute (realized_usdt) and the whole
+    weekly chain died on AttributeError. A seeded row must flow through."""
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    base = now_ms - 5 * 24 * 3600 * 1000
+    hour = 3600 * 1000
+    candles = [_recent_candle("fUST", "1h", "p2", base + i * hour, "0.0002") for i in range(12)]
+    async with g3_factory() as s:
+        await upsert_candles(s, candles)
+        s.add(_position_row("fUST", "12.34"))
+        await s.commit()
+
+    verdict, _window, n_fills, _clamp, _frr = await build_verdict_from_neon(
+        capital=C, session_factory=g3_factory
+    )
+    # 0 fills + nonzero observed realized = legit anchor divergence → UNRELIABLE;
+    # the seeded value surfacing in the reason proves it flowed through the query.
+    assert verdict.state is VerdictState.UNRELIABLE
+    assert any("12.34" in r for r in verdict.reasons)
+    assert n_fills == 0

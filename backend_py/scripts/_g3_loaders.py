@@ -79,6 +79,30 @@ def _candles_to_market_rate_points(candles: list[FundingCandle]) -> list[MarketR
     ]
 
 
+async def _load_observed_realized(
+    session: AsyncSession,
+    *,
+    account_id: str,
+    deployment_env: str,
+    symbol: str,
+) -> Decimal:
+    """observed_realized for ONE symbol cell. position_state is per-symbol
+    (composite PK account/env/symbol since the per-symbol refactor) — an
+    unfiltered .first() would return an arbitrary symbol's row once fUSD
+    coexists with fUST. Missing row → 0 (idle canary)."""
+    stmt = (
+        select(PositionStateRow)
+        .where(
+            PositionStateRow.account_id == account_id,
+            PositionStateRow.deployment_environment == deployment_env,
+            PositionStateRow.symbol == symbol,
+        )
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalars().first()
+    return Decimal(str(row.realized)) if row is not None else Decimal("0")
+
+
 async def build_verdict_from_neon(
     *,
     capital: Decimal,
@@ -179,17 +203,11 @@ async def build_verdict_from_neon(
             ]
 
             # ── 4. Fetch observed_realized from position_state snapshot ───────
-            pos_stmt = (
-                select(PositionStateRow)
-                .where(
-                    PositionStateRow.account_id == account_id,
-                    PositionStateRow.deployment_environment == deployment_env,
-                )
-                .limit(1)
-            )
-            pos_row = (await session.execute(pos_stmt)).scalars().first()
-            observed_realized = (
-                Decimal(str(pos_row.realized_usdt)) if pos_row is not None else Decimal("0")
+            observed_realized = await _load_observed_realized(
+                session,
+                account_id=account_id,
+                deployment_env=deployment_env,
+                symbol=_MARKET_SYMBOL,
             )
 
             # ── 5. Build domain lists (frozen dataclasses, session-detached) ──
