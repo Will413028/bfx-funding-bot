@@ -227,3 +227,63 @@ async def test_unseen_symbol_is_permissive_while_another_has_history() -> None:
     # fUSD never seen → permissive, NOT gated on fUST's 40% drop.
     assert t.realized_loss_pct_24h("fUSD") == 0.0
     assert t.drawdown_pct("fUSD") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Peak persistence (restart survival) — peak_store is optional; None keeps the
+# pure in-memory behavior (all tests above).
+# ---------------------------------------------------------------------------
+
+
+class _FakePeakStore:
+    def __init__(self, initial: dict[str, Decimal] | None = None, fail_save: bool = False):
+        self.saved: list[tuple[str, Decimal, int]] = []
+        self._initial = initial or {}
+        self._fail_save = fail_save
+
+    async def load(self) -> dict[str, Decimal]:
+        return dict(self._initial)
+
+    async def save(self, symbol: str, peak: Decimal, updated_at_ms: int) -> None:
+        if self._fail_save:
+            raise RuntimeError("db down")
+        self.saved.append((symbol, peak, updated_at_ms))
+
+
+@pytest.mark.asyncio
+async def test_persisted_peak_survives_restart() -> None:
+    """3e21657 known limitation: all-time peak reset on restart. A persisted
+    1000-peak must anchor drawdown after reboot even though the first live
+    sample is only 800."""
+    tracker = ReconcileNavTracker(_ACC, peak_store=_FakePeakStore({"fUST": Decimal("1000")}))
+    await tracker.load_persisted_peaks()
+    await tracker.on_position_reconciled(_reconciled(available="800"))
+    assert tracker.drawdown_pct("fUST") == pytest.approx(20.0)
+
+
+@pytest.mark.asyncio
+async def test_new_peak_is_persisted() -> None:
+    store = _FakePeakStore()
+    tracker = ReconcileNavTracker(_ACC, peak_store=store)
+    await tracker.load_persisted_peaks()
+    await tracker.on_position_reconciled(_reconciled(available="500", ts=_T0))
+    await tracker.on_position_reconciled(_reconciled(available="600", ts=_T0 + 1))
+    await tracker.on_position_reconciled(_reconciled(available="590", ts=_T0 + 2))
+    assert [(s, p) for s, p, _ in store.saved] == [
+        ("fUST", Decimal("500")), ("fUST", Decimal("600")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_save_failure_never_breaks_the_reconcile_path() -> None:
+    tracker = ReconcileNavTracker(_ACC, peak_store=_FakePeakStore(fail_save=True))
+    await tracker.on_position_reconciled(_reconciled(available="500"))  # must not raise
+    assert tracker.drawdown_pct("fUST") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_stale_lower_persisted_peak_is_max_merged() -> None:
+    tracker = ReconcileNavTracker(_ACC, peak_store=_FakePeakStore({"fUST": Decimal("100")}))
+    await tracker.on_position_reconciled(_reconciled(available="500"))
+    await tracker.load_persisted_peaks()  # boot-ordering tolerance
+    assert tracker.drawdown_pct("fUST") == 0.0  # live 500 wins over stale 100
