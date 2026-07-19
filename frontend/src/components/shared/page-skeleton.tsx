@@ -7,22 +7,13 @@ const placeholderKeys = (count: number, prefix: string) =>
 export function OverviewSkeleton() {
   return (
     <div className="space-y-4">
-      {/* Stats grid */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {placeholderKeys(4, "stat").map((key) => (
-          <Skeleton key={key} className="h-24 rounded-xl" />
-        ))}
-      </div>
-      {/* Charts */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Skeleton className="h-64 rounded-xl" />
-        <Skeleton className="h-64 rounded-xl" />
-      </div>
-      {/* Lists */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {/* Positions + active offers */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Skeleton className="h-48 rounded-xl" />
-        <Skeleton className="h-48 rounded-xl" />
+        <Skeleton className="h-48 rounded-xl lg:col-span-2" />
       </div>
+      {/* Recent executions */}
+      <Skeleton className="h-72 rounded-xl" />
     </div>
   );
 }

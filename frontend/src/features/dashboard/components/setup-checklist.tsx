@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronRight, KeyRound, Settings, Zap } from "lucide-react";
+import { Check, ChevronRight, KeyRound, Settings } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -17,13 +17,11 @@ interface SetupStep {
 interface SetupChecklistProps {
   hasVerifiedKey: boolean;
   hasStrategy: boolean;
-  engineReady: boolean;
 }
 
 export function SetupChecklist({
   hasVerifiedKey,
   hasStrategy,
-  engineReady,
 }: SetupChecklistProps) {
   const t = useTranslations("overview");
   const params = useParams();
@@ -45,14 +43,6 @@ export function SetupChecklist({
       href: `/${locale}/strategy`,
       icon: Settings,
       done: hasStrategy,
-    },
-    {
-      id: "engine",
-      title: t("setupEngineTitle"),
-      description: t("setupEngineDesc"),
-      href: `/${locale}/overview`,
-      icon: Zap,
-      done: engineReady,
     },
   ];
 

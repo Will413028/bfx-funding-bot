@@ -8,53 +8,24 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("SetupChecklist", () => {
-  it("renders all 3 steps when nothing is complete", () => {
-    render(
-      <SetupChecklist
-        hasVerifiedKey={false}
-        hasStrategy={false}
-        engineReady={false}
-      />,
-    );
+  it("renders both steps when nothing is complete", () => {
+    render(<SetupChecklist hasVerifiedKey={false} hasStrategy={false} />);
 
     expect(screen.getByText("Get started")).toBeDefined();
-    expect(screen.getByText("0/3")).toBeDefined();
+    expect(screen.getByText("0/2")).toBeDefined();
     expect(screen.getByText("Connect your Bitfinex API key")).toBeDefined();
     expect(screen.getByText("Configure your lending strategy")).toBeDefined();
-    expect(screen.getByText("Start earning")).toBeDefined();
   });
 
-  it("shows progress 1/3 when API key is verified", () => {
-    render(
-      <SetupChecklist
-        hasVerifiedKey={true}
-        hasStrategy={false}
-        engineReady={false}
-      />,
-    );
+  it("shows progress 1/2 when API key is verified", () => {
+    render(<SetupChecklist hasVerifiedKey={true} hasStrategy={false} />);
 
-    expect(screen.getByText("1/3")).toBeDefined();
-  });
-
-  it("shows progress 2/3 when key + strategy done", () => {
-    render(
-      <SetupChecklist
-        hasVerifiedKey={true}
-        hasStrategy={true}
-        engineReady={false}
-      />,
-    );
-
-    expect(screen.getByText("2/3")).toBeDefined();
+    expect(screen.getByText("1/2")).toBeDefined();
   });
 
   it("returns null when all steps are complete", () => {
     const { container } = render(
-      <SetupChecklist
-        hasVerifiedKey={true}
-        hasStrategy={true}
-        engineReady={true}
-      />,
+      <SetupChecklist hasVerifiedKey={true} hasStrategy={true} />,
     );
 
     expect(container.innerHTML).toBe("");
@@ -62,11 +33,7 @@ describe("SetupChecklist", () => {
 
   it("links to api-keys page for first step", () => {
     const { container } = render(
-      <SetupChecklist
-        hasVerifiedKey={false}
-        hasStrategy={false}
-        engineReady={false}
-      />,
+      <SetupChecklist hasVerifiedKey={false} hasStrategy={false} />,
     );
 
     const links = container.querySelectorAll("a");
