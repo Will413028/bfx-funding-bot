@@ -97,7 +97,7 @@ class PositionResponse(BaseModel):
     n_credits: int | None = Field(default=None, serialization_alias="nCredits")
     last_updated_ms: int = Field(serialization_alias="lastUpdatedMs")
     last_reconciled_at: int | None = Field(
-        default=None, serialization_alias="lastReconciledAt"
+        default=None, serialization_alias="lastReconciledAtMs"
     )
     last_event_seq: int = Field(serialization_alias="lastEventSeq")
 
