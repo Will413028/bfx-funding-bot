@@ -60,6 +60,9 @@ services:
     env_file: .env.runtime
     restart: "no"
     volumes:
+      # Host dir must be writable by uid 1000 (image appuser); OCI ubuntu is uid
+      # 1001 → one-time `sudo chown 1000:1001 ~/bfx/reports && chmod 775` on the
+      # VM, else the G3 report write dies on EACCES (bit us 2026-07-19).
       - ${HOME}/bfx/reports:/reports
     command:
       - sh
