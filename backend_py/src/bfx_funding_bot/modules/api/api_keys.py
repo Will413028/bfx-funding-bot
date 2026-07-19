@@ -15,6 +15,7 @@ from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexS
 from bfx_funding_bot.modules.accounts import vault
 from bfx_funding_bot.modules.accounts.tables import APIKey
 from bfx_funding_bot.modules.api.deps import get_bitfinex_auth_rest, get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import (
     ApiKeyResponse,
     CreateApiKeyRequest,
@@ -44,7 +45,10 @@ def _require_kek() -> bytes:
 
 
 def build_api_keys_router() -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["api-keys"])
+    router = APIRouter(
+        prefix="/api/v1", tags=["api-keys"],
+        dependencies=[Depends(shared_rate_limit_dependency())],
+    )
 
     @router.get("/api-keys")
     async def list_keys(

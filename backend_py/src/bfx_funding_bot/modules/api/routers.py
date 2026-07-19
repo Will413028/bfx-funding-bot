@@ -7,10 +7,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 
 
 def build_router() -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["api"])
+    router = APIRouter(
+        prefix="/api/v1", tags=["api"],
+        dependencies=[Depends(shared_rate_limit_dependency())],
+    )
 
     @router.get("/profile")
     async def get_profile(user: Principal = Depends(require_user)) -> dict[str, object]:  # noqa: B008

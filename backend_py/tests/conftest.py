@@ -74,3 +74,13 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
 @pytest_asyncio.fixture
 async def pg_session_factory(pg_engine: AsyncEngine):
     return async_sessionmaker(pg_engine, expire_on_commit=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """SP5: routers share one process-wide token bucket; suites reuse the same
+    fake user, so drain state must not bleed across tests."""
+    from bfx_funding_bot.modules.api.ratelimit import reset_shared_rate_limits
+
+    reset_shared_rate_limits()
+    yield
