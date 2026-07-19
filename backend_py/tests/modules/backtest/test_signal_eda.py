@@ -15,10 +15,12 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     block_bootstrap_ic,
     build_signal_frame,
     decide_signal,
+    frr_curvature,
     frr_trend,
     quintile_spread,
     render_report,
     spearman_ic,
+    spike_pctile,
     spike_z,
     split_regime,
     utilization_pctile,
@@ -114,6 +116,30 @@ def test_frr_trend_sign_tracks_direction() -> None:
     df = build_signal_frame(_candles(["1"] * 40), _stats([{"frr": v} for v in rising]))
     t = frr_trend(df, k=3)
     assert t.dropna().iloc[-1] > 0  # monotone rising -> positive trend
+
+
+def test_frr_curvature_zero_on_linear_trend() -> None:
+    # constant slope -> first difference is constant -> second difference is 0
+    linear = [float(i) * 1e-6 for i in range(1, 61)]
+    df = build_signal_frame(_candles(["1"] * 60), _stats([{"frr": v} for v in linear]))
+    c = frr_curvature(df, k=3)
+    assert abs(c.dropna().iloc[-1]) < 1e-9
+
+
+def test_frr_curvature_positive_on_accelerating_rise() -> None:
+    # quadratic growth -> first difference itself rising -> positive curvature
+    accel = [float(i**2) * 1e-6 for i in range(1, 61)]
+    df = build_signal_frame(_candles(["1"] * 60), _stats([{"frr": v} for v in accel]))
+    c = frr_curvature(df, k=3)
+    assert c.dropna().iloc[-1] > 0
+
+
+def test_spike_pctile_is_in_unit_interval_and_high_at_spike() -> None:
+    frr = [1e-6] * 30 + [1e-5]  # flat then 10x spike
+    df = build_signal_frame(_candles(["1"] * 31), _stats([{"frr": v} for v in frr]))
+    p = spike_pctile(df, w=14)
+    assert (p.dropna() >= 0).all() and (p.dropna() <= 1).all()
+    assert p.iloc[-1] == 1.0  # spike is the max within its trailing window
 
 
 def test_pctile_is_in_unit_interval_and_high_at_max() -> None:

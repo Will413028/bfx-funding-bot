@@ -100,6 +100,23 @@ def frr_trend(df: pd.DataFrame, k: int) -> pd.Series:
     return delta / frr.rolling(max(k * 4, 8), min_periods=k).std()
 
 
+def frr_curvature(df: pd.DataFrame, k: int) -> pd.Series:
+    """Discrete second difference of FRR: (frr_t - frr_{t-k}) - (frr_{t-k} - frr_{t-2k}),
+    normalized by rolling std. Captures trend curvature/inflection (rate-of-change of
+    the rate-of-change, i.e. acceleration) rather than frr_trend's first-order
+    momentum. Relative form (D4): normalized by the rolling std of raw FRR (its
+    scale), not of the second difference itself.
+
+    2026-07-19 phase3c re-operationalization candidate (post frr_trend/spike_detect
+    KILL, 2026-06-06 ADR): a sign-stable first-order trend can still miss the
+    inflection point where a rate move is decelerating/about to reverse -- curvature
+    targets exactly that turning-point signal."""
+    frr = df["frr"]
+    d1 = frr - frr.shift(k)
+    d2 = d1 - d1.shift(k)
+    return d2 / frr.rolling(max(k * 6, 12), min_periods=k * 2).std()
+
+
 def spike_z(df: pd.DataFrame, w: int) -> pd.Series:
     """FRR z-score vs its own rolling baseline (spike detector). Relative form.
     Zero-std windows (flat region) return 0 rather than NaN."""
@@ -114,6 +131,19 @@ def spike_z(df: pd.DataFrame, w: int) -> pd.Series:
 def _rolling_pctile(series: pd.Series, w: int) -> pd.Series:
     """Percentile rank of the latest value within its trailing window of size w."""
     return series.rolling(w).apply(lambda x: (x.iloc[-1] >= x).mean(), raw=False)
+
+
+def spike_pctile(df: pd.DataFrame, w: int) -> pd.Series:
+    """Rolling percentile rank of FRR within its own trailing window: a quantile-based
+    spike detector. Unlike spike_z (z-score), a large spike cannot inflate its own
+    baseline here -- percentile rank is order-based, not moment-based -- so it is
+    robust to the heavy-tailed FRR distribution (documented per-year FRR drift/spikes)
+    that can dilute a z-score's read of the very spike it targets.
+
+    2026-07-19 phase3c re-operationalization candidate (post spike_detect KILL,
+    2026-06-06 ADR): reuses _rolling_pctile (already vetted for funding_supply /
+    utilization) applied to FRR itself."""
+    return _rolling_pctile(df["frr"], w)
 
 
 def amount_pctile(df: pd.DataFrame, w: int) -> pd.Series:
