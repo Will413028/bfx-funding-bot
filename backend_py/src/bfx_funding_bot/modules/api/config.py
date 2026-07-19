@@ -10,6 +10,7 @@ from bfx_funding_bot.core.auth import Principal, require_user
 from bfx_funding_bot.modules.accounts import config_service
 from bfx_funding_bot.modules.accounts.tables import UserConfig
 from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import StrategyConfigBody, UserConfigResponse
 
 
@@ -24,7 +25,10 @@ def _to_response(row: UserConfig) -> dict[str, object]:
 
 
 def build_config_router() -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["configs"])
+    router = APIRouter(
+        prefix="/api/v1", tags=["configs"],
+        dependencies=[Depends(shared_rate_limit_dependency())],
+    )
 
     @router.get("/configs")
     async def get_config(

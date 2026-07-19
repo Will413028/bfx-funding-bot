@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.auth import Principal, require_user
 from bfx_funding_bot.modules.api.attribution import _dec_str
 from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import (
     ExecutionEventResponse,
     OfferClaimResponse,
@@ -36,7 +37,10 @@ _EXECUTIONS_LIMIT_CAP = 200
 
 
 def build_projections_router() -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["projections"])
+    router = APIRouter(
+        prefix="/api/v1", tags=["projections"],
+        dependencies=[Depends(shared_rate_limit_dependency())],
+    )
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
     deployment_environment = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
     log.info(

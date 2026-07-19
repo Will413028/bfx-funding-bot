@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_user
 from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import WeeklyAttributionResponse
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
@@ -61,7 +62,10 @@ def _to_response(row: AttributionWeeklyRow) -> dict[str, object]:
 
 
 def build_attribution_router() -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["attribution"])
+    router = APIRouter(
+        prefix="/api/v1", tags=["attribution"],
+        dependencies=[Depends(shared_rate_limit_dependency())],
+    )
     # 儀表只看單一部署 realm — 多 env/account 的 row 不可混進同一 cell 序列
     # （否則 FE 每週有重複點）。與 loader 寫入時的 env 對齊（同 default）。
     account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
