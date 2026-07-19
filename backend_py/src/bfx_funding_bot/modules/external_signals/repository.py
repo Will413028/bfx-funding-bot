@@ -1,6 +1,8 @@
 """Dialect-aware idempotent upserts + mts bounds for external-signal tables."""
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
+
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql.dml import Insert as PGInsert
@@ -29,6 +31,18 @@ _LIQ_SET_COLS = ["symbol", "amount", "base_price", "price_acquired"]
 # perp: 10 cols × 3000 = 30000; liq: 9 cols × 3000 = 27000 — both under cap.
 _CHUNK = 3000
 
+def _dedupe_last_wins[T](records: list[T], key: Callable[[T], Hashable]) -> list[T]:
+    """Collapse intra-batch duplicate keys, keeping the LAST occurrence.
+
+    The liquidations feed serves duplicate entries within a single page;
+    Postgres raises CardinalityViolation when one INSERT..ON CONFLICT
+    statement touches the same key twice (observed on VM 2026-07-19).
+    """
+    by_key: dict[Hashable, _T] = {}
+    for r in records:
+        by_key[key(r)] = r
+    return list(by_key.values())
+
 
 async def upsert_perp_funding(
     session: AsyncSession,
@@ -37,6 +51,7 @@ async def upsert_perp_funding(
     """Upsert by composite PK (venue, symbol, mts); latest write wins."""
     if not records:
         return
+    records = _dedupe_last_wins(records, key=lambda r: (r.venue, r.symbol, r.mts))
     dialect_name = session.bind.dialect.name if session.bind else "postgresql"
     for i in range(0, len(records), _CHUNK):
         chunk = records[i : i + _CHUNK]
@@ -60,6 +75,10 @@ async def upsert_liquidations(
     """Upsert by composite PK (venue, pos_id, mts, is_match, is_market_sold)."""
     if not records:
         return
+    records = _dedupe_last_wins(
+        records,
+        key=lambda r: (r.venue, r.pos_id, r.mts, r.is_match, r.is_market_sold),
+    )
     dialect_name = session.bind.dialect.name if session.bind else "postgresql"
     for i in range(0, len(records), _CHUNK):
         chunk = records[i : i + _CHUNK]
