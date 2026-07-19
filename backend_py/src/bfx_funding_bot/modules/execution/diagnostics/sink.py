@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -53,6 +53,13 @@ def _occurred_at(event: dict[str, Any]) -> datetime:
     return datetime.now(UTC)
 
 
+class _MetricsHook(Protocol):
+    """Structural port for DaemonMetrics (observability/metrics.py) — keeps the
+    forensic sink import-free of the metrics module and test doubles trivial."""
+
+    def observe_diagnostic_event(self, event: dict[str, Any]) -> None: ...
+
+
 class DiagnosticsSink:
     def __init__(
         self,
@@ -60,10 +67,12 @@ class DiagnosticsSink:
         session_factory: async_sessionmaker[AsyncSession],
         account_id: str,
         deployment_environment: str,
+        metrics: _MetricsHook | None = None,
     ) -> None:
         self._sf = session_factory
         self._account_id = account_id
         self._env = deployment_environment
+        self._metrics = metrics
 
     async def emit(self, event: dict[str, Any]) -> None:
         """Persists only forensic kinds; lenient field extraction (NO full
@@ -72,6 +81,14 @@ class DiagnosticsSink:
         kind = _KIND_BY_EVENT_TYPE.get(str(event.get("event_type")))
         if kind is None:
             return  # operational / unknown — not forensic, dropped
+        # Four Golden Signals hook (bfx_diagnostic_events_total — safety guard
+        # trips / decision rate). Observe-only + fail-open: a broken hook must
+        # never block the forensic write, let alone the calling trade path.
+        if self._metrics is not None:
+            try:
+                self._metrics.observe_diagnostic_event(event)
+            except Exception:
+                log.debug("diagnostics_metrics_hook_failed", exc_info=True)
         # account_id is sink-authoritative (mirror deployment_environment=self._env):
         # the real signal-engine decision event dict carries no account_id, so relying
         # on event.get(..., "default") mis-tagged every decision row "default" while

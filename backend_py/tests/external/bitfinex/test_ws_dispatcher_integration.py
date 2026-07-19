@@ -270,3 +270,17 @@ async def test_persisted_event_is_published_to_bus() -> None:
     assert len(fake_persister.calls) == 1
     assert len(published) == 1
     assert isinstance(published[0], OrderFilled)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_queue_observability_accessors() -> None:
+    """queue_depth / queue_capacity are read-only observability accessors for
+    the Prometheus saturation gauges (bfx_ws_dispatcher_queue_*). No behavior."""
+    dispatcher = BitfinexLiveWSDispatcher(
+        ws_client=_FakeWSClient([]), registry=OfferRegistry(clock=lambda: 0),
+        bus=DomainEventBus(), event_sink=_EventCapture(), queue_max=77,
+    )
+    assert dispatcher.queue_depth == 0
+    assert dispatcher.queue_capacity == 77
+    dispatcher._queue.put_nowait(object())  # type: ignore[arg-type]
+    assert dispatcher.queue_depth == 1

@@ -204,6 +204,17 @@ class BitfinexLiveWSDispatcher:
         self._persister: EventPersister = persister or NoopEventPersister()
         self._account_id = account_id
 
+    @property
+    def queue_depth(self) -> int:
+        """Read-only observability accessor (Prometheus saturation gauge
+        bfx_ws_dispatcher_queue_depth reads this at scrape time). No behavior."""
+        return self._queue.qsize()
+
+    @property
+    def queue_capacity(self) -> int:
+        """Read-only observability accessor — the bounded queue's maxsize."""
+        return self._queue_max
+
     async def handle_cancel_requested(self, event: Any) -> None:
         """Bus subscriber for CancelRequested — tracks recent cancels for 60s."""
         self._recent_cancels[event.venue_offer_id] = event.requested_at_ms
