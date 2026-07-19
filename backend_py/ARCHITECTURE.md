@@ -20,7 +20,7 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 3. **單一寫入者曝險（single-writer exposure）**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層不送單。
 4. **Reconcile 即正確性骨幹（reconcile-as-correctness-backbone）**：venue（透過 REST）是曝險真相的權威來源；90s 週期 reconcile 保證 ledger 收斂。WebSocket 只是延遲最佳化（latency optimization），不是正確性來源。
 
-部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；DB 為 Neon（serverless PG），cache 為 Upstash（optional Redis），佈署在 Koyeb（Docker）。
+部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於 Oracle Cloud VM `oci-a1`（docker compose：`bfx-bot`/`bfx-webapi`/`bfx-postgres`(PG 18)/`bfx-redis`/`bfx-frontend`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
 ---
 
@@ -371,7 +371,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
 | `shadow` | 模擬校準 | `shadow` | paper | 無 duration cap |
-| `canary` | **真錢** | `prod` | `bitfinex_live` | 570 USDT cap，2 cells（fUST a30 + p2，mean_reversion） |
+| `canary` | **真錢** | `prod` | `bitfinex_live` | cap 10000 USDT（`canary.env`），fUST 2 cells（a30 + p2，mean_reversion）+ fUSD 2 cells armed（cap 400、未入金 0 submit） |
 
 **Phase ⟷ Realm guard**（`load_config()`）：canary 只能配 prod realm（真錢不可污染校準資料），paper/shadow 只能配 shadow|ci（模擬不可污染真錢分析）。違規 `ValueError` fail-fast。
 
@@ -383,10 +383,10 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 |---|---|
 | Backend daemon | VM 自托（`oci-a1`，Docker，Python 3.13 + uv；`bfx-bot`/`bfx-webapi`。Koyeb 已於 2026-05-31 cutover 至 VM） |
 | Database | VM 自托 Postgres 18（`bfx-postgres`。Neon 已於 2026-06-23 棄用歸零） |
-| Cache | Upstash（serverless Redis，optional） |
+| Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
-**Deploy script（`scripts/deploy-koyeb.sh`）**：idempotent、phase-aware。canary 顯式設 `BFX_DEPLOYMENT_ENV=prod`、`BFX_EXECUTOR=bitfinex_live`、`BFX_ALLOCATION_CAP_USDT=570`；翻回 paper/shadow 時以 `--env '!VAR'` 清掉 canary-only 變數（防 paper + bitfinex_live 殘留錯配）。canary 需 `BFX_CANARY_CONFIRM=yes` 或互動確認。**Koyeb 從 `origin/main` 最新 commit 建置**（`--git-sha ''`）——部署前需先 `git push origin main`（用 `Will413028` 帳號）。auto-deploy-on-push 已停用（git push 不再觸發真錢 redeploy，部署改手動跑 script）。Docker type=web（worker 不支援 health probe），`/healthz` grace 90s。
+**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env` 組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數 → canary 需 `BFX_CANARY_CONFIRM=yes` → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、`BFX_ALLOCATION_CAP_USDT`、`BFX_API_KEY`/`BFX_API_SECRET`、`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_ACCOUNT_ID`。
 
