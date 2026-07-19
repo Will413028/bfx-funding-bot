@@ -89,8 +89,10 @@ class TestPerpWalkBack:
         calls = client.get_deriv_status_hist.await_args_list
         assert calls[0].kwargs["end"] == _NOW
         assert calls[1].kwargs["end"] == 2999  # oldest(page1)-1
-        # page2 is partial (2 < 3) → loop breaks; third call never happens
-        assert len(calls) == 2
+        # A partial page (2 < 3) must NOT terminate the walk — the server can
+        # serve short pages mid-history; only an EMPTY page proves the end.
+        assert calls[2].kwargs["end"] == 999
+        assert len(calls) == 3
 
     async def test_resumes_from_db_min(self, sqlite_session: AsyncSession) -> None:
         await upsert_perp_funding(sqlite_session, [_perp(9000), _perp(8000)])
@@ -156,13 +158,15 @@ class TestPerpTopUp:
         self, sqlite_session: AsyncSession
     ) -> None:
         client: Any = AsyncMock()
-        client.get_deriv_status_hist.side_effect = [[_perp(9000)]]
+        # Partial page must not stop the walk; only the empty page does.
+        client.get_deriv_status_hist.side_effect = [[_perp(9000)], []]
         stats = await topup_perp_funding_to_latest(
             client=client, session=sqlite_session, symbol=_SYM,
             page_limit=3, now_ms=_NOW,
         )
         assert stats.done is True
         assert stats.rows == 1
+        assert client.get_deriv_status_hist.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -172,7 +176,8 @@ class TestLiquidationsWalkBack:
         client: Any = AsyncMock()
         page1 = [_liq(3, 5000), _liq(2, 4000), _liq(1, 3000)]
         page2 = [_liq(1, 3000), _liq(0, 1000)]  # boundary event re-served
-        client.get_liquidations_hist.side_effect = [page1, page2]
+        page3 = [_liq(0, 1000)]  # inclusive cursor re-serves the oldest event
+        client.get_liquidations_hist.side_effect = [page1, page2, page3, []]
 
         stats = await backfill_liquidations_to_earliest(
             client=client, session=sqlite_session, page_limit=3, now_ms=_NOW,
@@ -182,6 +187,8 @@ class TestLiquidationsWalkBack:
         calls = client.get_liquidations_hist.await_args_list
         assert calls[0].kwargs["end"] == _NOW
         assert calls[1].kwargs["end"] == 3000  # inclusive overlap, not -1
+        assert calls[2].kwargs["end"] == 1000  # partial page does not stop the walk
+        assert calls[3].kwargs["end"] == 999  # no-progress escape, then empty ends it
         assert stats.done is True
         assert await _liq_count(sqlite_session) == 4  # dedup via upsert
 
@@ -229,6 +236,7 @@ class TestLiquidationsTopUp:
         )
         assert stats.done is True
         assert stats.pages == 1
+        assert client.get_liquidations_hist.await_count == 1  # floor ends it
         assert await _liq_count(sqlite_session) == 4
 
 
