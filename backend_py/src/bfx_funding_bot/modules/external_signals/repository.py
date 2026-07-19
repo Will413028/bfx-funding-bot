@@ -31,6 +31,7 @@ _LIQ_SET_COLS = ["symbol", "amount", "base_price", "price_acquired"]
 # perp: 10 cols × 3000 = 30000; liq: 9 cols × 3000 = 27000 — both under cap.
 _CHUNK = 3000
 
+
 def _dedupe_last_wins[T](records: list[T], key: Callable[[T], Hashable]) -> list[T]:
     """Collapse intra-batch duplicate keys, keeping the LAST occurrence.
 
@@ -38,7 +39,7 @@ def _dedupe_last_wins[T](records: list[T], key: Callable[[T], Hashable]) -> list
     Postgres raises CardinalityViolation when one INSERT..ON CONFLICT
     statement touches the same key twice (observed on VM 2026-07-19).
     """
-    by_key: dict[Hashable, _T] = {}
+    by_key: dict[Hashable, T] = {}
     for r in records:
         by_key[key(r)] = r
     return list(by_key.values())
