@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
@@ -99,12 +100,26 @@ def _apply_fdr_and_decide(
     pvals = [o.p_value for o in all_obs]
     rejected = bh_fdr(pvals)
     by_signal: dict[str, list[CellRegimeIC]] = {}
+    spreads_by_signal: dict[str, list[float]] = {}
     for o, sig in zip(all_obs, rejected, strict=True):
         by_signal.setdefault(o.signal_name, []).append(
             CellRegimeIC(cell=o.cell, regime=o.regime, horizon=o.horizon,
                          ic=o.ic, fdr_significant=sig)
         )
-    verdicts = [decide_signal(name, obs) for name, obs in sorted(by_signal.items())]
+        # Gate 5 input: only FDR-significant observations' quintile spreads —
+        # aligned with the population the statistical gates ran on.
+        if sig and not np.isnan(o.quintile):
+            spreads_by_signal.setdefault(o.signal_name, []).append(o.quintile)
+    verdicts = [
+        decide_signal(
+            name, obs,
+            median_quintile_spread=(
+                float(np.median(spreads_by_signal[name]))
+                if spreads_by_signal.get(name) else None
+            ),
+        )
+        for name, obs in sorted(by_signal.items())
+    ]
     return verdicts, rejected
 
 
