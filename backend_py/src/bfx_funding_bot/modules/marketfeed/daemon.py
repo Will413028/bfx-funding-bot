@@ -71,6 +71,7 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
+    CreditClosed,
     OrderFilled,
     PositionReconciled,
     ReservationClaimed,
@@ -140,6 +141,13 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.observability.metrics import (
+    DaemonMetrics,
+    MetricsSubmitMiddleware,
+    TimedReconcileRecovery,
+    attach_httpx_metrics,
+    install_log_metrics_handler,
+)
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
 
@@ -198,6 +206,8 @@ class Daemon:
     admin_token: str | None = None
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
+    # Four Golden Signals registry — served at /metrics on the healthz server.
+    metrics: DaemonMetrics | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self) -> None:
@@ -387,6 +397,7 @@ class Daemon:
             stop_event=self._stop_event,
             smoke_runner=self.smoke_runner,
             admin_token=self.admin_token,
+            metrics=self.metrics,
         )
         log.info("sub_task_exit name=healthz")
 
@@ -725,12 +736,26 @@ async def build_daemon(
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
 
     probe = HealthProbe()
+    # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
+    # Wired FIRST so every sink / client / wrapper below can carry the hook.
+    # All recording is fail-open — a metrics fault never touches trading paths.
+    metrics = DaemonMetrics()
+    metrics.register_probe(probe)  # heartbeat age/threshold + health_status
+    install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
     # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
     event_resource = EventResource(
         deployment_environment=config.deployment_environment,
     )
-    stdout_sink = StdoutEventSink(resource=event_resource)
+    metrics.set_daemon_info(
+        service_version=event_resource.service_version,
+        deployment_environment=config.deployment_environment.value,
+        phase=config.phase.value,
+    )
+    stdout_sink = StdoutEventSink(resource=event_resource, metrics=metrics)
     bitfinex_http = httpx.AsyncClient()
+    # Venue REST traffic/latency/error metrics — additive event hooks on the
+    # ONE shared client (public REST + auth REST + live executor + tracker).
+    attach_httpx_metrics(bitfinex_http, metrics)
     bitfinex = BitfinexREST(
         http=bitfinex_http,
         base_url=_BITFINEX_REST_BASE_URL,
@@ -809,6 +834,7 @@ async def build_daemon(
     diagnostics = DiagnosticsSink(
         session_factory=session_factory, account_id=account_id,
         deployment_environment=env_str,
+        metrics=metrics,  # bfx_diagnostic_events_total (safety trips / decisions)
     )
     async with session_factory() as snap_session:
         ledger = await PaperPositionLedger.from_snapshot(
@@ -1072,20 +1098,37 @@ async def build_daemon(
     # Same snapshot feeds the L2 loss-limiter source: NAV peak + 24h window drive
     # RealizedLossGuard / DrawdownGuard (no-op stub before this — see #4).
     bus.subscribe(PositionReconciled, pnl_source.on_position_reconciled)
+    # Traffic signal: bfx_domain_events_total{event_type} — one fail-open
+    # counting handler across all execution domain events (observe-only; a
+    # handler failure is already isolated by the bus's per-handler gather).
+    domain_event_counter = metrics.domain_event_handler()
+    for _domain_event_type in (
+        ReservationClaimed, OrderFilled, ReservationReleased,
+        CancelRequested, CancelAcknowledged, PositionReconciled, CreditClosed,
+    ):
+        bus.subscribe(_domain_event_type, domain_event_counter)
 
     # NO retry wrapper around submit: a funding-offer submit is a financial write
     # that must be attempted exactly once. Bitfinex funding offers have no client
     # cid dedup (only trading orders do), so retrying a submit would risk a real
     # duplicate live offer. Transient failures are recovered by the periodic
     # reconcile, not by re-submitting. (cancel retries internally — it's idempotent.)
-    wrapped_executor = HeartbeatMiddleware(
-        ReservationEmittingMiddleware(
-            executor,
-            bus=bus,
-            persister=persister,
-            is_simulated=spec.is_simulated,
+    # MetricsSubmitMiddleware is OUTERMOST and observe-only: times the full
+    # submit chain (intent persist + venue POST + ack) into
+    # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
+    # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
+    # no-retry submit contract below are untouched.
+    wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
+        HeartbeatMiddleware(
+            ReservationEmittingMiddleware(
+                executor,
+                bus=bus,
+                persister=persister,
+                is_simulated=spec.is_simulated,
+            ),
+            probe=probe,
         ),
-        probe=probe,
+        metrics=metrics,
     )
 
     # DeploymentReconciler needs wrapped_executor — constructed here (after
@@ -1145,7 +1188,10 @@ async def build_daemon(
             now_ms=now_ms_utc(),
         )
         periodic_reconcile = PeriodicReconcile(
-            recovery=runtime_recovery,
+            # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
+            # bfx_reconcile_ticks_total) — PeriodicReconcile's failure handling
+            # sees exactly what the raw recovery would produce.
+            recovery=TimedReconcileRecovery(runtime_recovery, metrics=metrics),
             probe=probe,
             interval_s=reconcile_interval_s,
             min_resync_interval_s=resync_min_interval_s,
@@ -1363,6 +1409,13 @@ async def build_daemon(
             account_id=account_id,
         )
         bus.subscribe(CancelRequested, ws_dispatcher.handle_cancel_requested)
+        # Saturation signal: queue depth read live at scrape time (replaces the
+        # 30s ws_dispatcher_queue_depth log line as the primary surface).
+        _dispatcher_for_gauge = ws_dispatcher
+        metrics.bind_ws_dispatcher_queue(
+            depth_fn=lambda: _dispatcher_for_gauge.queue_depth,
+            capacity=ws_dispatcher.queue_capacity,
+        )
 
     return Daemon(
         config=config,
@@ -1395,6 +1448,7 @@ async def build_daemon(
         healthz_port=healthz_port,
         admin_token=admin_token,
         writer_lock=writer_lock,
+        metrics=metrics,
     )
 
 

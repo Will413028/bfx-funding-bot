@@ -50,3 +50,35 @@ async def test_emit_is_lossless_and_json_safe(caplog) -> None:
         await sink.emit({"amt": Decimal("1.5"), "ts": datetime(2026, 5, 24, tzinfo=UTC)})
     line = json.loads(caplog.records[0].getMessage())
     assert line["amt"] == "1.5"
+
+
+# ── Four Golden Signals metrics hook (observe-only, fail-open) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_emit_counts_operational_event_when_metrics_bound(caplog) -> None:
+    from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
+
+    metrics = DaemonMetrics()
+    sink = StdoutEventSink(resource=_resource(), metrics=metrics)
+    with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
+        await sink.emit({"event_type": "signal", "level": "info"})
+
+    assert metrics.registry.get_sample_value(
+        "bfx_operational_events_total", {"event_type": "signal", "level": "info"},
+    ) == 1.0
+    assert len(caplog.records) == 1  # stdout line still written
+
+
+@pytest.mark.asyncio
+async def test_emit_still_logs_when_metrics_hook_raises(caplog) -> None:
+    """Fail-open: a broken metrics hook must never eat the telemetry line."""
+
+    class _BrokenMetrics:
+        def observe_operational_event(self, event) -> None:
+            raise RuntimeError("metrics down")
+
+    sink = StdoutEventSink(resource=_resource(), metrics=_BrokenMetrics())
+    with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
+        await sink.emit({"event_type": "signal", "level": "info"})
+    assert len(caplog.records) == 1

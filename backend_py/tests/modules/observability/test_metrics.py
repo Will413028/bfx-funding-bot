@@ -1,0 +1,496 @@
+"""DaemonMetrics — Four Golden Signals Prometheus metrics (observe-only).
+
+Contract under test:
+1. Every observe_* method is FAIL-OPEN: a broken metric backend or malformed
+   event never raises into the observed path.
+2. Wrappers (MetricsSubmitMiddleware / TimedReconcileRecovery) are transparent:
+   results and exceptions pass through byte-identical; only counters/histograms
+   move on the side.
+3. Per-instance CollectorRegistry — no cross-test / cross-daemon collisions.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+import httpx
+import pytest
+
+from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
+from bfx_funding_bot.modules.execution.protocols import (
+    AccountContext,
+    Credentials,
+    SubmittedOrder,
+)
+from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    DecisionPayload,
+    HealthStatus,
+    HealthTarget,
+)
+from bfx_funding_bot.modules.observability.metrics import (
+    DaemonMetrics,
+    LogMetricsHandler,
+    MetricsSubmitMiddleware,
+    TimedReconcileRecovery,
+    attach_httpx_metrics,
+    install_log_metrics_handler,
+)
+
+
+def _ctx() -> AccountContext:
+    return AccountContext(
+        account_id="default",
+        credentials=Credentials(api_key="k", api_secret="s"),
+        allocation_cap_usdt=Decimal("500"),
+    )
+
+
+def _decision() -> DecisionPayload:
+    return DecisionPayload(
+        decision_outcome=DecisionOutcome.POST,
+        signal_correlation_id=uuid4(),
+        offer_rate=0.0005,
+        offer_amount_usdt=150.0,
+        offer_duration_days=2,
+        symbol="fUST",
+    )
+
+
+# ── operational / diagnostic event counters ──────────────────────────────────
+
+
+def test_operational_event_counter_increments() -> None:
+    m = DaemonMetrics()
+    m.observe_operational_event({"event_type": "signal", "level": "info"})
+    m.observe_operational_event({"event_type": "signal", "level": "info"})
+    m.observe_operational_event({"event_type": "health_check", "level": "warn"})
+    assert m.registry.get_sample_value(
+        "bfx_operational_events_total", {"event_type": "signal", "level": "info"},
+    ) == 2.0
+    assert m.registry.get_sample_value(
+        "bfx_operational_events_total", {"event_type": "health_check", "level": "warn"},
+    ) == 1.0
+
+
+def test_diagnostic_event_counter_increments() -> None:
+    m = DaemonMetrics()
+    m.observe_diagnostic_event({"event_type": "safety_trigger", "level": "critical"})
+    assert m.registry.get_sample_value(
+        "bfx_diagnostic_events_total",
+        {"event_type": "safety_trigger", "level": "critical"},
+    ) == 1.0
+
+
+def test_operational_event_fail_open_on_malformed_event() -> None:
+    m = DaemonMetrics()
+    m.observe_operational_event({})          # no keys → "unknown" labels, no raise
+    m.observe_operational_event({"event_type": None, "level": 7})  # junk types
+    assert m.registry.get_sample_value(
+        "bfx_operational_events_total", {"event_type": "unknown", "level": "unknown"},
+    ) == 2.0
+
+
+def test_observe_methods_fail_open_when_backend_broken() -> None:
+    """Broken internals must never propagate into the observed path."""
+    m = DaemonMetrics()
+
+    class _Boom:
+        def labels(self, **kwargs: Any) -> Any:
+            raise RuntimeError("broken metric")
+
+        def observe(self, *a: Any) -> None:
+            raise RuntimeError("broken metric")
+
+    m.operational_events = _Boom()  # type: ignore[assignment]
+    m.diagnostic_events = _Boom()  # type: ignore[assignment]
+    m.domain_events = _Boom()  # type: ignore[assignment]
+    m.executor_submits = _Boom()  # type: ignore[assignment]
+    m.executor_submit_duration = _Boom()  # type: ignore[assignment]
+    m.reconcile_ticks = _Boom()  # type: ignore[assignment]
+    m.reconcile_tick_duration = _Boom()  # type: ignore[assignment]
+    m.log_messages = _Boom()  # type: ignore[assignment]
+    # None of these may raise:
+    m.observe_operational_event({"event_type": "signal", "level": "info"})
+    m.observe_diagnostic_event({"event_type": "safety_trigger", "level": "warn"})
+    m.observe_submit(status="filled", duration_s=0.1)
+    m.observe_reconcile_tick(result="ok", duration_s=0.1)
+    m.observe_log_record(level="warning", logger="x")
+
+
+# ── domain event bus handler ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_domain_event_handler_counts_by_class() -> None:
+    m = DaemonMetrics()
+    handler = m.domain_event_handler()
+    await handler(ReservationClaimed(
+        symbol="fUST", cid=1, venue_offer_id="1",
+        signal_correlation_id=uuid4(), account_id="default",
+        is_simulated=True, amount=Decimal("100"),
+    ))
+    await handler(OrderFilled(
+        symbol="fUST", cid=1, venue_offer_id="1", credit_id=None,
+        fill_rate=0.0005, signal_correlation_id=uuid4(), account_id="default",
+        is_simulated=True, amount=Decimal("100"),
+    ))
+    await handler(OrderFilled(
+        symbol="fUST", cid=2, venue_offer_id="2", credit_id=None,
+        fill_rate=0.0005, signal_correlation_id=uuid4(), account_id="default",
+        is_simulated=True, amount=Decimal("100"),
+    ))
+    assert m.registry.get_sample_value(
+        "bfx_domain_events_total", {"event_type": "ReservationClaimed"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_domain_events_total", {"event_type": "OrderFilled"},
+    ) == 2.0
+
+
+# ── executor submit middleware ───────────────────────────────────────────────
+
+
+class _StubExecutor:
+    def __init__(self, order: SubmittedOrder | None = None,
+                 exc: Exception | None = None) -> None:
+        self._order = order
+        self._exc = exc
+        self.calls: list[int | None] = []
+
+    async def submit(
+        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+    ) -> SubmittedOrder:
+        self.calls.append(cid)
+        if self._exc is not None:
+            raise self._exc
+        assert self._order is not None
+        return self._order
+
+
+@pytest.mark.asyncio
+async def test_submit_middleware_passes_result_and_records() -> None:
+    m = DaemonMetrics()
+    order = SubmittedOrder(cid=7, venue_offer_id="paper_x", status="filled", raw_response=None)
+    inner = _StubExecutor(order=order)
+    mw = MetricsSubmitMiddleware(inner, metrics=m)
+    got = await mw.submit(_decision(), _ctx(), cid=7)
+    assert got is order                       # byte-identical passthrough
+    assert inner.calls == [7]                 # cid threaded down unchanged
+    assert m.registry.get_sample_value(
+        "bfx_executor_submits_total", {"status": "filled"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_executor_submit_duration_seconds_count") == 1.0
+
+
+@pytest.mark.asyncio
+async def test_submit_middleware_reraises_and_counts_exception() -> None:
+    m = DaemonMetrics()
+    boom = ValueError("venue said no")
+    mw = MetricsSubmitMiddleware(_StubExecutor(exc=boom), metrics=m)
+    with pytest.raises(ValueError) as ei:
+        await mw.submit(_decision(), _ctx())
+    assert ei.value is boom                   # exception object unchanged
+    assert m.registry.get_sample_value(
+        "bfx_executor_submits_total", {"status": "exception"},
+    ) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
+    m = DaemonMetrics()
+    order = SubmittedOrder(cid=1, venue_offer_id=None, status="weird_venue_string", raw_response=None)
+    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
+    await mw.submit(_decision(), _ctx())
+    assert m.registry.get_sample_value(
+        "bfx_executor_submits_total", {"status": "other"},
+    ) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
+    m = DaemonMetrics()
+
+    def _boom(**kwargs: Any) -> None:
+        raise RuntimeError("metrics down")
+
+    m.observe_submit = _boom  # type: ignore[method-assign]
+    order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
+    got = await mw.submit(_decision(), _ctx())   # must NOT raise
+    assert got is order
+
+
+# ── reconcile tick timing wrapper ────────────────────────────────────────────
+
+
+def _reconcile_result() -> ReconcileResult:
+    return ReconcileResult(
+        n_released=0, n_claimed=0, n_failed=0,
+        realized_drift_usdt=Decimal("0"), reserved_drift_usdt=Decimal("0"),
+        venue_offers=(),
+    )
+
+
+class _StubRecovery:
+    def __init__(self, result: ReconcileResult | None = None,
+                 exc: Exception | None = None) -> None:
+        self._result = result
+        self._exc = exc
+
+    async def run(self) -> ReconcileResult:
+        if self._exc is not None:
+            raise self._exc
+        assert self._result is not None
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_timed_recovery_passes_result_through() -> None:
+    m = DaemonMetrics()
+    result = _reconcile_result()
+    wrapped = TimedReconcileRecovery(_StubRecovery(result=result), metrics=m)
+    got = await wrapped.run()
+    assert got is result
+    assert m.registry.get_sample_value(
+        "bfx_reconcile_ticks_total", {"result": "ok"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_reconcile_tick_duration_seconds_count") == 1.0
+
+
+@pytest.mark.asyncio
+async def test_timed_recovery_reraises_and_counts_error() -> None:
+    m = DaemonMetrics()
+    boom = ConnectionError("venue unreachable")
+    wrapped = TimedReconcileRecovery(_StubRecovery(exc=boom), metrics=m)
+    with pytest.raises(ConnectionError) as ei:
+        await wrapped.run()
+    assert ei.value is boom
+    assert m.registry.get_sample_value(
+        "bfx_reconcile_ticks_total", {"result": "error"},
+    ) == 1.0
+
+
+# ── probe collector: heartbeat age / thresholds / health status ──────────────
+
+
+def test_probe_collector_exports_heartbeat_age_and_thresholds() -> None:
+    m = DaemonMetrics()
+    probe = HealthProbe()
+    now = datetime.now(UTC)
+    probe.last_active_ts["ws"] = now - timedelta(seconds=30)
+    probe.last_active_ts["executor"] = now - timedelta(seconds=600)
+    m.register_probe(probe)
+
+    age_ws = m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_age_seconds", {"sub_task": "ws"},
+    )
+    assert age_ws is not None and 29.0 <= age_ws <= 35.0
+    age_exec = m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_age_seconds", {"sub_task": "executor"},
+    )
+    assert age_exec is not None and age_exec >= 599.0
+    # thresholds exported for both classes → alert expr `age > threshold`
+    assert m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_threshold_seconds",
+        {"sub_task": "ws", "task_class": "liveness"},
+    ) == 90.0
+    assert m.registry.get_sample_value(
+        "bfx_subtask_heartbeat_threshold_seconds",
+        {"sub_task": "executor", "task_class": "activity"},
+    ) == 360.0
+
+
+def test_probe_collector_exports_health_status() -> None:
+    m = DaemonMetrics()
+    probe = HealthProbe()
+    probe.update(HealthTarget.BITFINEX_REST, HealthStatus.HEALTHY)
+    probe.update(HealthTarget.RECONCILE, HealthStatus.DEGRADED)
+    probe.update(HealthTarget.EXECUTOR, HealthStatus.DOWN)
+    m.register_probe(probe)
+    assert m.registry.get_sample_value(
+        "bfx_health_status", {"target": "bitfinex_rest"},
+    ) == 0.0
+    assert m.registry.get_sample_value(
+        "bfx_health_status", {"target": "reconcile"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_health_status", {"target": "executor"},
+    ) == 2.0
+
+
+def test_probe_collector_fail_open_on_broken_probe() -> None:
+    m = DaemonMetrics()
+
+    class _BrokenProbe:
+        @property
+        def last_active_ts(self) -> dict[str, datetime]:
+            raise RuntimeError("probe exploded")
+
+        def snapshot(self) -> dict[Any, Any]:
+            raise RuntimeError("probe exploded")
+
+    m.register_probe(_BrokenProbe())  # type: ignore[arg-type]
+    # scrape must not raise, just omit the families
+    out = m.render().decode()
+    assert "bfx_subtask_heartbeat_age_seconds{" not in out
+
+
+# ── log-derived error counter ────────────────────────────────────────────────
+
+
+def test_log_handler_counts_warning_and_above() -> None:
+    m = DaemonMetrics()
+    handler = install_log_metrics_handler(m, logger_name="bfx_metrics_test")
+    log = logging.getLogger("bfx_metrics_test.sub.module")
+    try:
+        log.info("not counted")
+        log.warning("counted w")
+        log.error("counted e")
+        log.critical("counted c")
+    finally:
+        logging.getLogger("bfx_metrics_test").removeHandler(handler)
+    assert m.registry.get_sample_value(
+        "bfx_log_messages_total",
+        {"level": "warning", "logger": "bfx_metrics_test.sub.module"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_log_messages_total",
+        {"level": "error", "logger": "bfx_metrics_test.sub.module"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_log_messages_total",
+        {"level": "critical", "logger": "bfx_metrics_test.sub.module"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_log_messages_total",
+        {"level": "info", "logger": "bfx_metrics_test.sub.module"},
+    ) is None
+
+
+def test_install_log_metrics_handler_is_idempotent() -> None:
+    m = DaemonMetrics()
+    target = logging.getLogger("bfx_metrics_test_idem")
+    h1 = install_log_metrics_handler(m, logger_name="bfx_metrics_test_idem")
+    h2 = install_log_metrics_handler(m, logger_name="bfx_metrics_test_idem")
+    try:
+        ours = [h for h in target.handlers if isinstance(h, LogMetricsHandler)]
+        assert ours == [h2]
+        assert h1 not in target.handlers
+    finally:
+        target.removeHandler(h2)
+
+
+# ── venue REST via httpx event hooks ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_httpx_hooks_count_requests_latency_and_errors() -> None:
+    m = DaemonMetrics()
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/boom":
+            return httpx.Response(500)
+        if request.url.path == "/nope":
+            return httpx.Response(404)
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_respond), base_url="https://api.test",
+    ) as client:
+        attach_httpx_metrics(client, m)
+        await client.get("/ok")
+        await client.get("/ok")
+        await client.get("/boom")
+        await client.post("/nope")
+
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_requests_total", {"method": "GET", "status_class": "2xx"},
+    ) == 2.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_requests_total", {"method": "GET", "status_class": "5xx"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_requests_total", {"method": "POST", "status_class": "4xx"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_errors_total", {"kind": "http_5xx"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_errors_total", {"kind": "http_4xx"},
+    ) == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_venue_rest_request_duration_seconds_count",
+    ) == 4.0
+
+
+@pytest.mark.asyncio
+async def test_httpx_hooks_do_not_break_request_when_metrics_broken() -> None:
+    m = DaemonMetrics()
+
+    def _boom(**kwargs: Any) -> None:
+        raise RuntimeError("metrics down")
+
+    m.observe_venue_rest_response = _boom  # type: ignore[method-assign]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        base_url="https://api.test",
+    ) as client:
+        attach_httpx_metrics(client, m)
+        resp = await client.get("/ok")     # must NOT raise
+    assert resp.status_code == 200
+
+
+# ── ws dispatcher queue saturation gauges ────────────────────────────────────
+
+
+def test_ws_queue_gauges_scrape_time_callback() -> None:
+    m = DaemonMetrics()
+    depth = 3
+    m.bind_ws_dispatcher_queue(depth_fn=lambda: depth, capacity=1000)
+    assert m.registry.get_sample_value("bfx_ws_dispatcher_queue_depth") == 3.0
+    assert m.registry.get_sample_value("bfx_ws_dispatcher_queue_capacity") == 1000.0
+    depth = 42   # live read at scrape time — no stale 30s snapshot
+    assert m.registry.get_sample_value("bfx_ws_dispatcher_queue_depth") == 42.0
+
+
+def test_ws_queue_gauge_fail_open_when_depth_fn_raises() -> None:
+    m = DaemonMetrics()
+
+    def _boom() -> int:
+        raise RuntimeError("dispatcher gone")
+
+    m.bind_ws_dispatcher_queue(depth_fn=_boom, capacity=1000)
+    assert m.registry.get_sample_value("bfx_ws_dispatcher_queue_depth") == 0.0
+    m.render()   # full scrape must not raise either
+
+
+# ── info + registry isolation ────────────────────────────────────────────────
+
+
+def test_daemon_info_and_render() -> None:
+    m = DaemonMetrics()
+    m.set_daemon_info(
+        service_version="abc1234", deployment_environment="prod", phase="canary",
+    )
+    assert m.registry.get_sample_value(
+        "bfx_daemon_info",
+        {"service_version": "abc1234", "deployment_environment": "prod", "phase": "canary"},
+    ) == 1.0
+    out = m.render().decode()
+    assert "bfx_daemon_info" in out
+    assert m.content_type.startswith("text/plain")
+
+
+def test_two_instances_are_isolated() -> None:
+    a = DaemonMetrics()
+    b = DaemonMetrics()   # second instance must not raise duplicate-timeseries
+    a.observe_operational_event({"event_type": "signal", "level": "info"})
+    assert b.registry.get_sample_value(
+        "bfx_operational_events_total", {"event_type": "signal", "level": "info"},
+    ) is None

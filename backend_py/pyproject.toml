@@ -8,7 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
-    "psycopg[binary]>=3.2",       # sync driver for alembic env.py (async runtime uses asyncpg)
+    "psycopg[binary]>=3.2", # sync driver for alembic env.py (async runtime uses asyncpg)
     "alembic>=1.14",
     "cryptography>=43",
     "httpx>=0.28",
@@ -26,6 +26,7 @@ dependencies = [
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "ruamel.yaml>=0.18",
+    "prometheus-client>=0.25.0",
 ]
 
 [dependency-groups]

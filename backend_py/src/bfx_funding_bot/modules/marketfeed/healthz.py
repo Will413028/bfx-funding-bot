@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import (
 
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
+    from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def make_app(
     *,
     smoke_runner: SmokeRunner | None = None,
     admin_token: str | None = None,
+    metrics: DaemonMetrics | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to a given HealthProbe instance.
 
@@ -57,6 +59,12 @@ def make_app(
     router (POST /admin/smoke-test) is mounted alongside /healthz. If either
     is missing, the admin endpoint is not exposed (defaults preserve the
     pre-Phase-4.4 behaviour of healthz-only).
+
+    If `metrics` is provided, `GET /metrics` serves the Prometheus text
+    exposition (Four Golden Signals — see observability/metrics.py). The
+    handler is async on purpose: collectors read live daemon state (probe
+    dicts, ws queue depth) and running on the event loop keeps those reads
+    race-free with the single-threaded daemon mutations.
     """
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -89,6 +97,12 @@ def make_app(
             content={"status": "ok", "tasks": len(liveness)},
         )
 
+    if metrics is not None:
+        @app.get("/metrics")
+        async def metrics_exposition() -> Response:
+            return Response(content=metrics.render(), media_type=metrics.content_type)
+        log.info("metrics_endpoint_mounted endpoint=/metrics")
+
     if smoke_runner is not None and admin_token:
         from bfx_funding_bot.modules.admin.router import build_router
         app.include_router(build_router(
@@ -112,6 +126,7 @@ async def run_healthz_server(
     stop_event: asyncio.Event,
     smoke_runner: SmokeRunner | None = None,
     admin_token: str | None = None,
+    metrics: DaemonMetrics | None = None,
 ) -> None:
     """Run uvicorn until stop_event fires; cancellation safe.
 
@@ -121,7 +136,9 @@ async def run_healthz_server(
     cancels all sibling tasks (same supervision contract as other
     sub-tasks per D4 spec).
     """
-    app = make_app(probe, smoke_runner=smoke_runner, admin_token=admin_token)
+    app = make_app(
+        probe, smoke_runner=smoke_runner, admin_token=admin_token, metrics=metrics,
+    )
     config = uvicorn.Config(
         app=app, host=host, port=port,
         log_level="warning", access_log=False,

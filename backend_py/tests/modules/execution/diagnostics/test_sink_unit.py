@@ -163,3 +163,57 @@ async def test_noop_sink_does_nothing(diag_factory) -> None:
     await sink.handle_cancel_requested(CancelRequested(
         venue_offer_id="v1", requested_at_ms=1, signal_correlation_id=_SCID, account_id="a"))
     assert await _rows(diag_factory) == []
+
+
+# ── Four Golden Signals metrics hook (observe-only, fail-open) ────────────────
+
+
+async def test_emit_forensic_counts_diagnostic_metric(diag_factory) -> None:
+    from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
+
+    metrics = DaemonMetrics()
+    sink = DiagnosticsSink(
+        session_factory=diag_factory, account_id="acct",
+        deployment_environment="ci", metrics=metrics,
+    )
+    ev = _decision_event()
+    ev["event_type"] = "safety_trigger"
+    ev["level"] = "critical"
+    await sink.emit(ev)
+    assert metrics.registry.get_sample_value(
+        "bfx_diagnostic_events_total",
+        {"event_type": "safety_trigger", "level": "critical"},
+    ) == 1.0
+    rows = await _rows(diag_factory)
+    assert len(rows) == 1  # persistence unchanged
+
+
+async def test_emit_non_forensic_not_counted(diag_factory) -> None:
+    from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
+
+    metrics = DaemonMetrics()
+    sink = DiagnosticsSink(
+        session_factory=diag_factory, account_id="acct",
+        deployment_environment="ci", metrics=metrics,
+    )
+    ev = _decision_event()
+    ev["event_type"] = "signal"  # operational — dropped by the sink, not counted
+    await sink.emit(ev)
+    assert metrics.registry.get_sample_value(
+        "bfx_diagnostic_events_total", {"event_type": "signal", "level": "info"},
+    ) is None
+
+
+async def test_emit_persists_even_when_metrics_hook_raises(diag_factory) -> None:
+    class _BrokenMetrics:
+        def observe_diagnostic_event(self, event) -> None:
+            raise RuntimeError("metrics down")
+
+    sink = DiagnosticsSink(
+        session_factory=diag_factory, account_id="acct",
+        deployment_environment="ci", metrics=_BrokenMetrics(),
+    )
+    ev = _decision_event()
+    await sink.emit(ev)  # must NOT raise
+    rows = await _rows(diag_factory)
+    assert len(rows) == 1
