@@ -304,6 +304,11 @@ def bh_fdr(pvalues: list[float], *, alpha: float = 0.05) -> list[bool]:
 
 IC_FLOOR = 0.03  # empirical minimum |IC| for a defensible tradeable edge on low-SNR funding data
 CELL_MAJORITY = 3  # of 4 cells
+# Gate 5 (2026-07-19 methodology audit): a statistical GO must also clear a
+# fee+friction-scale economic effect. 0.5 pp APR gross ≈ the floor below which
+# 15% fee + fill friction eat everything (execution levers E1/E2 move 1-2 pp;
+# a signal worth less is noise relative to them).
+ECONOMIC_HURDLE_APR_PP = 0.5
 
 _CELLS = ("fUST_a30", "fUST_p2", "fUSD_a30", "fUSD_p2")
 
@@ -329,10 +334,22 @@ def _sign(x: float) -> int:
     return (x > 0) - (x < 0)
 
 
-def decide_signal(signal: str, obs: list[CellRegimeIC]) -> SignalVerdict:
+def annualize_daily_spread_pp(spread_daily: float) -> float:
+    """Quintile spread of the daily-rate target → annualized percentage points."""
+    return spread_daily * 365.0 * 100.0
+
+
+def decide_signal(
+    signal: str,
+    obs: list[CellRegimeIC],
+    *,
+    median_quintile_spread: float | None = None,
+) -> SignalVerdict:
     """Apply the four GO gates (spec §2): FDR-significant, same sign across both
-    regimes, same sign across >=3/4 cells, |median IC| >= floor. Otherwise KILL
-    with the binding reason. median_ic is over all non-NaN observations."""
+    regimes, same sign across >=3/4 cells, |median IC| >= floor — plus gate 5
+    (economic hurdle) when the caller supplies the median quintile spread in
+    daily-rate units. None skips gate 5 (legacy callers keep 4-gate behavior).
+    median_ic is over all non-NaN observations."""
     sig = [o for o in obs if o.fdr_significant]
     valid = [o.ic for o in obs if not np.isnan(o.ic)]
     median_ic = float(np.median(valid)) if valid else float("nan")
@@ -367,6 +384,15 @@ def decide_signal(signal: str, obs: list[CellRegimeIC]) -> SignalVerdict:
         return SignalVerdict(
             signal, "KILL", f"median |IC| {abs(median_ic):.3f} below floor {IC_FLOOR}", median_ic
         )
+    if median_quintile_spread is not None and not np.isnan(median_quintile_spread):
+        apr_pp = annualize_daily_spread_pp(abs(median_quintile_spread))
+        if apr_pp < ECONOMIC_HURDLE_APR_PP:
+            return SignalVerdict(
+                signal, "KILL",
+                f"economically insignificant: quintile spread {apr_pp:.2f} pp APR "
+                f"< hurdle {ECONOMIC_HURDLE_APR_PP} pp (fee+friction floor)",
+                median_ic,
+            )
     return SignalVerdict(
         signal, "GO", f"{len(robust_cell_signs)}/4 cells robust, median IC {median_ic:.3f}", median_ic
     )

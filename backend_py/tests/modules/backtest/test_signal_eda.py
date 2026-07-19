@@ -11,6 +11,7 @@ from bfx_funding_bot.modules.backtest.signal_eda import (
     SignalVerdict,
     add_forward_rate_change,
     amount_pctile,
+    annualize_daily_spread_pp,
     bh_fdr,
     block_bootstrap_ic,
     build_signal_frame,
@@ -390,3 +391,48 @@ def test_resample_daily_empty() -> None:
     from bfx_funding_bot.modules.backtest.signal_eda import resample_daily
 
     assert resample_daily(pd.DataFrame()).empty
+
+
+# ---------------------------------------------------------------------------
+# Gate 5: economic hurdle (2026-07-19 methodology audit) — statistical GO must
+# also clear a fee+friction-scale economic effect, else it's noise vs the
+# execution-layer levers (E1/E2 moved ~1-2 pp APR; a signal worth < 0.5 pp
+# gross can never survive 15% fee + fill friction).
+# ---------------------------------------------------------------------------
+
+
+def _all_pass_obs() -> list[CellRegimeIC]:
+    return [
+        _ic("fUST_a30", "early", 0.06), _ic("fUST_a30", "late", 0.05),
+        _ic("fUST_p2", "early", 0.05), _ic("fUST_p2", "late", 0.04),
+        _ic("fUSD_a30", "early", 0.05), _ic("fUSD_a30", "late", 0.04),
+        _ic("fUSD_p2", "early", 0.05), _ic("fUSD_p2", "late", 0.04),
+    ]
+
+
+def test_annualize_daily_spread_pp() -> None:
+    assert abs(annualize_daily_spread_pp(0.0001) - 3.65) < 1e-9
+
+
+def test_gate5_kills_statistically_significant_but_economically_trivial() -> None:
+    # 0.000005/day → 0.18 pp APR: passes all 4 statistical gates, fails hurdle.
+    v = decide_signal("s", _all_pass_obs(), median_quintile_spread=0.000005)
+    assert v.verdict == "KILL"
+    assert "economically insignificant" in v.reason
+
+
+def test_gate5_passes_above_hurdle() -> None:
+    # 0.00002/day → 0.73 pp APR ≥ 0.5 hurdle.
+    v = decide_signal("s", _all_pass_obs(), median_quintile_spread=0.00002)
+    assert v.verdict == "GO"
+
+
+def test_gate5_negative_spread_uses_magnitude() -> None:
+    v = decide_signal("s", _all_pass_obs(), median_quintile_spread=-0.00002)
+    assert v.verdict == "GO"
+
+
+def test_gate5_absent_spread_keeps_legacy_behavior() -> None:
+    # Backward compat: callers not passing spread get the original 4-gate verdict.
+    v = decide_signal("s", _all_pass_obs())
+    assert v.verdict == "GO"
