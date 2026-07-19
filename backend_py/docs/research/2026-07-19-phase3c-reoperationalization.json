@@ -1,0 +1,3295 @@
+{
+  "run_date": "2026-07-19T12:51:36.829792+00:00",
+  "data_window": "2016-07-31..2026-07-19, 4 canary cells (fUST_a30, fUST_p2, fUSD_a30, fUSD_p2), daily-resampled",
+  "methodology": "Reuses bfx_funding_bot.modules.backtest.signal_eda unmodified core (spearman_ic, block_bootstrap_ic, quintile_spread, bh_fdr, decide_signal, split_regime, add_forward_rate_change, resample_daily, build_signal_frame) against 2 new pure signal functions (frr_curvature, spike_pctile, added with unit tests) and 2 horizon-extension retests of the existing frr_trend/spike_z formulas. Data pulled read-only from the VM's self-hosted Postgres via a one-off docker container (--label autoheal=false, no deploy, no canary/live container touched), resampled to daily frames on the VM, then scp'd to a local scratch dir for the funnel run (kept the multi-minute compute off any DB session, same rationale as the original driver).",
+  "primary_block_size": 20,
+  "primary": {
+    "verdicts": [
+      {
+        "signal": "frr_curvature_k3",
+        "verdict": "KILL",
+        "median_ic": 0.0005688399567537344,
+        "reason": "sign flips across regimes (regime-fragile)"
+      },
+      {
+        "signal": "frr_trend_extH",
+        "verdict": "KILL",
+        "median_ic": -0.10204357478524362,
+        "reason": "only 2/4 cells robust (< 3 majority)"
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "verdict": "KILL",
+        "median_ic": -0.08689255627954617,
+        "reason": "only 2/4 cells robust (< 3 majority)"
+      },
+      {
+        "signal": "spike_z_extH",
+        "verdict": "GO",
+        "median_ic": -0.17805017437643972,
+        "reason": "4/4 cells robust, median IC -0.178"
+      }
+    ],
+    "observations": [
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.06719707302901778,
+        "p_value": 0.03,
+        "fdr_significant": false,
+        "quintile_spread": -3.7599939119703833e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0663771208515678,
+        "p_value": 0.046,
+        "fdr_significant": false,
+        "quintile_spread": -3.371952310434664e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.04346551278111669,
+        "p_value": 0.176,
+        "fdr_significant": false,
+        "quintile_spread": -5.282263706429318e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.04487529983945923,
+        "p_value": 0.156,
+        "fdr_significant": false,
+        "quintile_spread": -6.427036808654497e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.04882033791522416,
+        "p_value": 0.114,
+        "fdr_significant": false,
+        "quintile_spread": -7.01569996415201e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.07857563457604161,
+        "p_value": 0.018,
+        "fdr_significant": false,
+        "quintile_spread": -8.804120006757117e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.0636095539480696,
+        "p_value": 0.032,
+        "fdr_significant": false,
+        "quintile_spread": -7.616765249182043e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.06187409549988109,
+        "p_value": 0.048,
+        "fdr_significant": false,
+        "quintile_spread": -6.110497795542636e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0428270269468046,
+        "p_value": 0.38,
+        "fdr_significant": false,
+        "quintile_spread": -0.00010369758162606127,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.07135787755830482,
+        "p_value": 0.236,
+        "fdr_significant": false,
+        "quintile_spread": -0.00011391480806233496,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.07592268524372735,
+        "p_value": 0.264,
+        "fdr_significant": false,
+        "quintile_spread": -0.00012805443590171967,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.06545835851600525,
+        "p_value": 0.352,
+        "fdr_significant": false,
+        "quintile_spread": -0.00012100644048552384,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09202025487097305,
+        "p_value": 0.186,
+        "fdr_significant": false,
+        "quintile_spread": -0.00013943382462444707,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.09890432028678638,
+        "p_value": 0.168,
+        "fdr_significant": false,
+        "quintile_spread": -0.00013019360526020043,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.08065284647635873,
+        "p_value": 0.084,
+        "fdr_significant": false,
+        "quintile_spread": -0.00014588096103569631,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.11907735014593043,
+        "p_value": 0.016,
+        "fdr_significant": true,
+        "quintile_spread": -0.0001856163231459468,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10204826340136301,
+        "p_value": 0.04,
+        "fdr_significant": false,
+        "quintile_spread": -0.00016484062694821519,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.13752580535206424,
+        "p_value": 0.056,
+        "fdr_significant": false,
+        "quintile_spread": -0.00013151921138323877,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.18541884051907256,
+        "p_value": 0.01,
+        "fdr_significant": true,
+        "quintile_spread": -0.00017632413368418338,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.17536528516339367,
+        "p_value": 0.018,
+        "fdr_significant": false,
+        "quintile_spread": -0.00016035094239506554,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.027987861850862925,
+        "p_value": 0.212,
+        "fdr_significant": false,
+        "quintile_spread": -0.00027030138972809666,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.007731447843410031,
+        "p_value": 0.716,
+        "fdr_significant": false,
+        "quintile_spread": -0.00022984659178535463,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.011661001771124503,
+        "p_value": 0.676,
+        "fdr_significant": false,
+        "quintile_spread": -0.00022074550848798734,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.021918175227020945,
+        "p_value": 0.384,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021293455441473265,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.022355903681399423,
+        "p_value": 0.366,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021348549092807504,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.023915026583306402,
+        "p_value": 0.328,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021950596435854242,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.030110488580907528,
+        "p_value": 0.2,
+        "fdr_significant": false,
+        "quintile_spread": -0.00022011933454295807,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.049182588695943844,
+        "p_value": 0.006,
+        "fdr_significant": true,
+        "quintile_spread": -4.7144896594643034e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": -0.11482122879460759,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -3.553320720900129e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.1624662960561977,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -5.473980510805976e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.21652639170659463,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -9.431247685425094e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.23391101720458166,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0001001888528252375,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.22740243303946753,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -9.739395142038487e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.25174078570076286,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00010424293978179027,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.16181819462145208,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.000249440373931456,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.16449718482278303,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00025690898197431076,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.1752497020192169,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002519206977324393,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.24191742252098009,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002725276571320428,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23471940735616684,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002698039106837795,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.25548476147141075,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00027307346376882026,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.05544090494434727,
+        "p_value": 0.054,
+        "fdr_significant": false,
+        "quintile_spread": -2.8104630296174415e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.07027062797006295,
+        "p_value": 0.032,
+        "fdr_significant": false,
+        "quintile_spread": -3.896465394899218e-05,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.03942935401070681,
+        "p_value": 0.258,
+        "fdr_significant": false,
+        "quintile_spread": -4.182946107964434e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.05360800495911802,
+        "p_value": 0.084,
+        "fdr_significant": false,
+        "quintile_spread": -5.6291282245138225e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.0544200400388424,
+        "p_value": 0.078,
+        "fdr_significant": false,
+        "quintile_spread": -6.303287451790634e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.07889712891253121,
+        "p_value": 0.014,
+        "fdr_significant": true,
+        "quintile_spread": -8.133836157587842e-05,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.06300156953888436,
+        "p_value": 0.034,
+        "fdr_significant": false,
+        "quintile_spread": -6.78998793893996e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.061390279393994926,
+        "p_value": 0.038,
+        "fdr_significant": false,
+        "quintile_spread": -4.162084471899225e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.025165703595798127,
+        "p_value": 0.632,
+        "fdr_significant": false,
+        "quintile_spread": -7.018048101236619e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.04380770148637269,
+        "p_value": 0.468,
+        "fdr_significant": false,
+        "quintile_spread": -7.972275282445267e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.058947294009382645,
+        "p_value": 0.39,
+        "fdr_significant": false,
+        "quintile_spread": -0.00010460345519079122,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.06597818193187309,
+        "p_value": 0.344,
+        "fdr_significant": false,
+        "quintile_spread": -0.00011119407206806436,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09129508295423258,
+        "p_value": 0.208,
+        "fdr_significant": false,
+        "quintile_spread": -0.00012868178056212498,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10869423660644412,
+        "p_value": 0.138,
+        "fdr_significant": false,
+        "quintile_spread": -0.00012340566116573033,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.08856092730552495,
+        "p_value": 0.064,
+        "fdr_significant": false,
+        "quintile_spread": -0.00010257577051053522,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.12229531526898102,
+        "p_value": 0.01,
+        "fdr_significant": true,
+        "quintile_spread": -0.00014074433617097427,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10632258718773252,
+        "p_value": 0.028,
+        "fdr_significant": false,
+        "quintile_spread": -0.00011885323940662408,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.14580252867821722,
+        "p_value": 0.042,
+        "fdr_significant": false,
+        "quintile_spread": -0.00012638680547483975,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.192524774066737,
+        "p_value": 0.01,
+        "fdr_significant": true,
+        "quintile_spread": -0.00016862383758996984,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.1868214955119116,
+        "p_value": 0.014,
+        "fdr_significant": true,
+        "quintile_spread": -0.00015330170499774822,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.02015384375888681,
+        "p_value": 0.396,
+        "fdr_significant": false,
+        "quintile_spread": -0.0002728527945619335,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.011232535587193995,
+        "p_value": 0.64,
+        "fdr_significant": false,
+        "quintile_spread": -0.00022282734793554885,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.014315655889603122,
+        "p_value": 0.586,
+        "fdr_significant": false,
+        "quintile_spread": -0.0002208282434901453,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.015388349400600914,
+        "p_value": 0.55,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021182429432475077,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.014007971267049347,
+        "p_value": 0.574,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021235639477167655,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.016216352789980584,
+        "p_value": 0.492,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021777352838846492,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.021194621611533605,
+        "p_value": 0.34,
+        "fdr_significant": false,
+        "quintile_spread": -0.00021831404715563405,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.04845914427450589,
+        "p_value": 0.012,
+        "fdr_significant": true,
+        "quintile_spread": -5.321391725580007e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": -0.10867297736054063,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -3.8134577274860954e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.15689464928726227,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -6.334859259403126e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.20865776462059887,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -9.915532889852424e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.22450418533443445,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00010462980171358197,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23044090383319069,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0001047421232240703,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.2585608158459897,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0001125775548931574,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.1445638575581759,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002517486588300486,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.15532300872225288,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00026008205151034083,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.16835968254720848,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002565188080210825,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.2289147301509155,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00027401584939367243,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23485490513300591,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.000274042407431391,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.2581302286509264,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002779530957447839,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.0344148230935842,
+        "p_value": 0.196,
+        "fdr_significant": false,
+        "quintile_spread": -3.5745232222356988e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": 0.042359377480511703,
+        "p_value": 0.124,
+        "fdr_significant": false,
+        "quintile_spread": 2.1802561631663433e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": 0.03263912171589744,
+        "p_value": 0.198,
+        "fdr_significant": false,
+        "quintile_spread": -4.150216987329274e-09,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": 0.02971022942057743,
+        "p_value": 0.216,
+        "fdr_significant": false,
+        "quintile_spread": -2.1734516026572688e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": 0.012097631162309275,
+        "p_value": 0.588,
+        "fdr_significant": false,
+        "quintile_spread": -1.3750948532370577e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": 0.002836955263057105,
+        "p_value": 0.9,
+        "fdr_significant": false,
+        "quintile_spread": -2.2488487210850188e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.008956117056573657,
+        "p_value": 0.692,
+        "fdr_significant": false,
+        "quintile_spread": -3.095256803816243e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.008754827212231846,
+        "p_value": 0.652,
+        "fdr_significant": false,
+        "quintile_spread": -3.966820534090638e-06,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0038333238947485643,
+        "p_value": 0.886,
+        "fdr_significant": false,
+        "quintile_spread": -3.15847300731692e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.01802669950676566,
+        "p_value": 0.654,
+        "fdr_significant": false,
+        "quintile_spread": -7.189611958202259e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.06739883963547091,
+        "p_value": 0.24,
+        "fdr_significant": false,
+        "quintile_spread": -0.00010089237906624574,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1054628563518108,
+        "p_value": 0.104,
+        "fdr_significant": false,
+        "quintile_spread": -0.0001454551721013764,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.13784048982620642,
+        "p_value": 0.028,
+        "fdr_significant": false,
+        "quintile_spread": -0.00018217756460909337,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.17285258964111083,
+        "p_value": 0.004,
+        "fdr_significant": true,
+        "quintile_spread": -0.00020785354195874823,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.07353474083654599,
+        "p_value": 0.052,
+        "fdr_significant": false,
+        "quintile_spread": -0.00011500771548066543,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09653504215098059,
+        "p_value": 0.02,
+        "fdr_significant": false,
+        "quintile_spread": -0.00014884575043803307,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.11732384229456097,
+        "p_value": 0.004,
+        "fdr_significant": true,
+        "quintile_spread": -0.00016969370926121,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1425827467856837,
+        "p_value": 0.024,
+        "fdr_significant": false,
+        "quintile_spread": -0.00017152081819168848,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.17500330802010627,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -0.00021284944027928773,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.21132039622539836,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00024267395052887135,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.005071199233300713,
+        "p_value": 0.82,
+        "fdr_significant": false,
+        "quintile_spread": -4.771102719033233e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.03357671380197186,
+        "p_value": 0.194,
+        "fdr_significant": false,
+        "quintile_spread": -3.7014968349877706e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": 0.03152051078715255,
+        "p_value": 0.23,
+        "fdr_significant": false,
+        "quintile_spread": -3.192604423270585e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": 0.026746871803900053,
+        "p_value": 0.324,
+        "fdr_significant": false,
+        "quintile_spread": -4.49022529143947e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": 0.019374951113462706,
+        "p_value": 0.506,
+        "fdr_significant": false,
+        "quintile_spread": -6.804407145925574e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": 0.019173072597271287,
+        "p_value": 0.496,
+        "fdr_significant": false,
+        "quintile_spread": -6.40811133134621e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": 0.012516758663037185,
+        "p_value": 0.666,
+        "fdr_significant": false,
+        "quintile_spread": -7.663200404201093e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.002288682766174527,
+        "p_value": 0.888,
+        "fdr_significant": false,
+        "quintile_spread": -7.969213810316133e-07,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.03259069316586147,
+        "p_value": 0.276,
+        "fdr_significant": false,
+        "quintile_spread": -4.1622836705043e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.011882157431569446,
+        "p_value": 0.744,
+        "fdr_significant": false,
+        "quintile_spread": -1.4258672433443032e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.08249002960485977,
+        "p_value": 0.024,
+        "fdr_significant": false,
+        "quintile_spread": -3.3216417616661096e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.10562309362361884,
+        "p_value": 0.014,
+        "fdr_significant": true,
+        "quintile_spread": -3.9925123374276935e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.14547053432463766,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -4.72319979531485e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.15090114407936153,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -4.848022443771427e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.03943602766432579,
+        "p_value": 0.228,
+        "fdr_significant": false,
+        "quintile_spread": -1.5162902192823014e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.058957148094340196,
+        "p_value": 0.066,
+        "fdr_significant": false,
+        "quintile_spread": -2.055923947086673e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.061401114159185775,
+        "p_value": 0.086,
+        "fdr_significant": false,
+        "quintile_spread": -2.0740149807270695e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.08399185236887001,
+        "p_value": 0.034,
+        "fdr_significant": false,
+        "quintile_spread": -3.294391578403106e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.12334431857128776,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -3.970911891653411e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.1219307921763048,
+        "p_value": 0.006,
+        "fdr_significant": true,
+        "quintile_spread": -3.9784267996494534e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.05917947342967767,
+        "p_value": 0.036,
+        "fdr_significant": false,
+        "quintile_spread": 1.1564854682656262e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": 0.05431470385949831,
+        "p_value": 0.048,
+        "fdr_significant": false,
+        "quintile_spread": -1.8073959340738178e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": 0.04119593994195898,
+        "p_value": 0.098,
+        "fdr_significant": false,
+        "quintile_spread": -3.4201350134097754e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": 0.02863963691886994,
+        "p_value": 0.218,
+        "fdr_significant": false,
+        "quintile_spread": -7.168290218749687e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": 0.007299867298206649,
+        "p_value": 0.748,
+        "fdr_significant": false,
+        "quintile_spread": -2.0632369133571957e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.003077095355345852,
+        "p_value": 0.928,
+        "fdr_significant": false,
+        "quintile_spread": -3.113621219432877e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.014581751515312857,
+        "p_value": 0.504,
+        "fdr_significant": false,
+        "quintile_spread": -3.9480119397497275e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.00357601408375982,
+        "p_value": 0.934,
+        "fdr_significant": false,
+        "quintile_spread": -4.480333757492442e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.007732094621207871,
+        "p_value": 0.796,
+        "fdr_significant": false,
+        "quintile_spread": -3.94706981704013e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.025169050054299116,
+        "p_value": 0.548,
+        "fdr_significant": false,
+        "quintile_spread": -8.270997768118133e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.07536746773997383,
+        "p_value": 0.182,
+        "fdr_significant": false,
+        "quintile_spread": -0.00011512583683757662,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1126456250328878,
+        "p_value": 0.07,
+        "fdr_significant": false,
+        "quintile_spread": -0.00016479552352493306,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.14219626114910883,
+        "p_value": 0.022,
+        "fdr_significant": false,
+        "quintile_spread": -0.00020217812099687933,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.1801515915595361,
+        "p_value": 0.004,
+        "fdr_significant": true,
+        "quintile_spread": -0.00022860946210105906,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.07945969808949092,
+        "p_value": 0.038,
+        "fdr_significant": false,
+        "quintile_spread": -0.00013051494286861807,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.10203888616912424,
+        "p_value": 0.01,
+        "fdr_significant": true,
+        "quintile_spread": -0.00016606845515283842,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.12397810993082349,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -0.00018721508659719316,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.15218256498120936,
+        "p_value": 0.01,
+        "fdr_significant": true,
+        "quintile_spread": -0.00019426365995244083,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.18073506358948577,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.0002358643314181826,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.21948558905775906,
+        "p_value": 0.0,
+        "fdr_significant": true,
+        "quintile_spread": -0.00026623635733419277,
+        "quintile_monotonic": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.0016992753495496363,
+        "p_value": 0.9,
+        "fdr_significant": false,
+        "quintile_spread": -5.189984894259819e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.030640943422325154,
+        "p_value": 0.236,
+        "fdr_significant": false,
+        "quintile_spread": -3.8160285570421514e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": 0.028544532945312596,
+        "p_value": 0.29,
+        "fdr_significant": false,
+        "quintile_spread": -4.3991516826577245e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": 0.025947255462824597,
+        "p_value": 0.362,
+        "fdr_significant": false,
+        "quintile_spread": -4.789206042143434e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": 0.01287936755742674,
+        "p_value": 0.624,
+        "fdr_significant": false,
+        "quintile_spread": -7.847685852750808e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": 0.013788337022331268,
+        "p_value": 0.596,
+        "fdr_significant": false,
+        "quintile_spread": -7.132938080187921e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": 0.007529250245053166,
+        "p_value": 0.776,
+        "fdr_significant": false,
+        "quintile_spread": -7.99934108061196e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.003942887807667575,
+        "p_value": 0.864,
+        "fdr_significant": false,
+        "quintile_spread": -4.263699902336685e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.04211290118933066,
+        "p_value": 0.18,
+        "fdr_significant": false,
+        "quintile_spread": -8.210349110092563e-06,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.0021711247687377466,
+        "p_value": 0.972,
+        "fdr_significant": false,
+        "quintile_spread": -1.666331611478159e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.08101943408027057,
+        "p_value": 0.024,
+        "fdr_significant": false,
+        "quintile_spread": -3.48909370137273e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.1052327738196302,
+        "p_value": 0.012,
+        "fdr_significant": true,
+        "quintile_spread": -4.05685177763768e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.13911836056388788,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -4.5339512442193545e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.13975483279856082,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -4.552499318328263e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.042202952038115575,
+        "p_value": 0.194,
+        "fdr_significant": false,
+        "quintile_spread": -2.092807093995852e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.05835442674082231,
+        "p_value": 0.072,
+        "fdr_significant": false,
+        "quintile_spread": -2.5312249662435874e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.05807376627428247,
+        "p_value": 0.108,
+        "fdr_significant": false,
+        "quintile_spread": -2.484777160456291e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.08328672822444728,
+        "p_value": 0.038,
+        "fdr_significant": false,
+        "quintile_spread": -4.046194107626362e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.11809140656075136,
+        "p_value": 0.002,
+        "fdr_significant": true,
+        "quintile_spread": -4.542691203478904e-05,
+        "quintile_monotonic": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.11464856621080546,
+        "p_value": 0.008,
+        "fdr_significant": true,
+        "quintile_spread": -4.43500016802473e-05,
+        "quintile_monotonic": false
+      }
+    ]
+  },
+  "robustness_check": {
+    "purpose": "block_bootstrap_ic's block_size=20 default (from the 2026-06-06 ADR) was sized for H<=30d. At H=45/60/90 the forward-return target (mean of the next H days minus spot) overlaps (H-1)/H between consecutive rows -- a much longer induced serial-correlation length than block_size=20 can capture, which risks an artificially tight bootstrap CI/p-value on exactly the long-horizon observations this re-operationalization round depends on. This reruns the identical funnel with block_size=max(20, h) (block length scaled to the horizon) as a sensitivity check on the two extended-horizon signals.",
+    "block_size_rule": "max(20, h)",
+    "verdicts": [
+      {
+        "signal": "frr_curvature_k3",
+        "verdict": "KILL",
+        "median_ic": 0.0005688399567537344,
+        "reason": "sign flips across regimes (regime-fragile)"
+      },
+      {
+        "signal": "frr_trend_extH",
+        "verdict": "KILL",
+        "median_ic": -0.10204357478524362,
+        "reason": "sign flips across regimes (regime-fragile)"
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "verdict": "KILL",
+        "median_ic": -0.08689255627954617,
+        "reason": "only 2/4 cells robust (< 3 majority)"
+      },
+      {
+        "signal": "spike_z_extH",
+        "verdict": "GO",
+        "median_ic": -0.17805017437643972,
+        "reason": "4/4 cells robust, median IC -0.178"
+      }
+    ],
+    "observations": [
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.06719707302901778,
+        "p_value": 0.03,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0663771208515678,
+        "p_value": 0.046,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.04346551278111669,
+        "p_value": 0.176,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.04487529983945923,
+        "p_value": 0.17,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.04882033791522416,
+        "p_value": 0.096,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.07857563457604161,
+        "p_value": 0.016,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.0636095539480696,
+        "p_value": 0.008,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.06187409549988109,
+        "p_value": 0.048,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0428270269468046,
+        "p_value": 0.38,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.07135787755830482,
+        "p_value": 0.236,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.07592268524372735,
+        "p_value": 0.274,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.06545835851600525,
+        "p_value": 0.4,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09202025487097305,
+        "p_value": 0.284,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.09890432028678638,
+        "p_value": 0.334,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.08065284647635873,
+        "p_value": 0.122,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.11907735014593043,
+        "p_value": 0.04,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10204826340136301,
+        "p_value": 0.092,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.13752580535206424,
+        "p_value": 0.066,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.18541884051907256,
+        "p_value": 0.016,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.17536528516339367,
+        "p_value": 0.042,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.027987861850862925,
+        "p_value": 0.212,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.007731447843410031,
+        "p_value": 0.716,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.011661001771124503,
+        "p_value": 0.676,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.021918175227020945,
+        "p_value": 0.366,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.022355903681399423,
+        "p_value": 0.362,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.023915026583306402,
+        "p_value": 0.332,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.030110488580907528,
+        "p_value": 0.2,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.049182588695943844,
+        "p_value": 0.006,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": -0.11482122879460759,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.1624662960561977,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.21652639170659463,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.23391101720458166,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.22740243303946753,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.25174078570076286,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.16181819462145208,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.16449718482278303,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.1752497020192169,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.24191742252098009,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23471940735616684,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.25548476147141075,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.05544090494434727,
+        "p_value": 0.054,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.07027062797006295,
+        "p_value": 0.032,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.03942935401070681,
+        "p_value": 0.258,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.05360800495911802,
+        "p_value": 0.114,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.0544200400388424,
+        "p_value": 0.06,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.07889712891253121,
+        "p_value": 0.016,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.06300156953888436,
+        "p_value": 0.008,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.061390279393994926,
+        "p_value": 0.038,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.025165703595798127,
+        "p_value": 0.632,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.04380770148637269,
+        "p_value": 0.468,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.058947294009382645,
+        "p_value": 0.396,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.06597818193187309,
+        "p_value": 0.406,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09129508295423258,
+        "p_value": 0.286,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10869423660644412,
+        "p_value": 0.266,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.08856092730552495,
+        "p_value": 0.092,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.12229531526898102,
+        "p_value": 0.038,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.10632258718773252,
+        "p_value": 0.074,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.14580252867821722,
+        "p_value": 0.052,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.192524774066737,
+        "p_value": 0.014,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.1868214955119116,
+        "p_value": 0.026,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.02015384375888681,
+        "p_value": 0.396,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.011232535587193995,
+        "p_value": 0.64,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.014315655889603122,
+        "p_value": 0.586,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.015388349400600914,
+        "p_value": 0.53,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.014007971267049347,
+        "p_value": 0.518,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.016216352789980584,
+        "p_value": 0.504,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.021194621611533605,
+        "p_value": 0.336,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.04845914427450589,
+        "p_value": 0.012,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": -0.10867297736054063,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.15689464928726227,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.20865776462059887,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.22450418533443445,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23044090383319069,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.2585608158459897,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.1445638575581759,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.15532300872225288,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.16835968254720848,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.2289147301509155,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.23485490513300591,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUST_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.2581302286509264,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.0344148230935842,
+        "p_value": 0.196,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": 0.042359377480511703,
+        "p_value": 0.124,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": 0.03263912171589744,
+        "p_value": 0.198,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": 0.02971022942057743,
+        "p_value": 0.236,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": 0.012097631162309275,
+        "p_value": 0.602,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": 0.002836955263057105,
+        "p_value": 0.932,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.008956117056573657,
+        "p_value": 0.654,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 2,
+        "ic": -0.008754827212231846,
+        "p_value": 0.652,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.0038333238947485643,
+        "p_value": 0.886,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.01802669950676566,
+        "p_value": 0.654,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.06739883963547091,
+        "p_value": 0.228,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1054628563518108,
+        "p_value": 0.1,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.13784048982620642,
+        "p_value": 0.04,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.17285258964111083,
+        "p_value": 0.004,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.07353474083654599,
+        "p_value": 0.044,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.09653504215098059,
+        "p_value": 0.01,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.11732384229456097,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1425827467856837,
+        "p_value": 0.016,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.17500330802010627,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.21132039622539836,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.005071199233300713,
+        "p_value": 0.82,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.03357671380197186,
+        "p_value": 0.194,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": 0.03152051078715255,
+        "p_value": 0.23,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": 0.026746871803900053,
+        "p_value": 0.366,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": 0.019374951113462706,
+        "p_value": 0.536,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": 0.019173072597271287,
+        "p_value": 0.486,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": 0.012516758663037185,
+        "p_value": 0.642,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.002288682766174527,
+        "p_value": 0.888,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.03259069316586147,
+        "p_value": 0.276,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.011882157431569446,
+        "p_value": 0.744,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.08249002960485977,
+        "p_value": 0.024,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.10562309362361884,
+        "p_value": 0.018,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.14547053432463766,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.15090114407936153,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.03943602766432579,
+        "p_value": 0.242,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.058957148094340196,
+        "p_value": 0.102,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.061401114159185775,
+        "p_value": 0.092,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.08399185236887001,
+        "p_value": 0.028,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.12334431857128776,
+        "p_value": 0.01,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_a30",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.1219307921763048,
+        "p_value": 0.006,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.05917947342967767,
+        "p_value": 0.036,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": 0.05431470385949831,
+        "p_value": 0.048,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": 0.04119593994195898,
+        "p_value": 0.098,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": 0.02863963691886994,
+        "p_value": 0.236,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": 0.007299867298206649,
+        "p_value": 0.726,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.003077095355345852,
+        "p_value": 0.862,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.014581751515312857,
+        "p_value": 0.424,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 2,
+        "ic": 0.00357601408375982,
+        "p_value": 0.934,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 7,
+        "ic": -0.007732094621207871,
+        "p_value": 0.796,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 14,
+        "ic": -0.025169050054299116,
+        "p_value": 0.548,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 30,
+        "ic": -0.07536746773997383,
+        "p_value": 0.186,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.1126456250328878,
+        "p_value": 0.08,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.14219626114910883,
+        "p_value": 0.03,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.1801515915595361,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.07945969808949092,
+        "p_value": 0.02,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.10203888616912424,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.12397810993082349,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 45,
+        "ic": -0.15218256498120936,
+        "p_value": 0.008,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 60,
+        "ic": -0.18073506358948577,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "early",
+        "horizon": 90,
+        "ic": -0.21948558905775906,
+        "p_value": 0.0,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": -0.0016992753495496363,
+        "p_value": 0.9,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.030640943422325154,
+        "p_value": 0.236,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": 0.028544532945312596,
+        "p_value": 0.29,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": 0.025947255462824597,
+        "p_value": 0.382,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": 0.01287936755742674,
+        "p_value": 0.672,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": 0.013788337022331268,
+        "p_value": 0.6,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_curvature_k3",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": 0.007529250245053166,
+        "p_value": 0.778,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 2,
+        "ic": 0.003942887807667575,
+        "p_value": 0.864,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 7,
+        "ic": 0.04211290118933066,
+        "p_value": 0.18,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 14,
+        "ic": -0.0021711247687377466,
+        "p_value": 0.972,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 30,
+        "ic": -0.08101943408027057,
+        "p_value": 0.026,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.1052327738196302,
+        "p_value": 0.022,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.13911836056388788,
+        "p_value": 0.004,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_pctile_w14",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.13975483279856082,
+        "p_value": 0.002,
+        "fdr_significant": true
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.042202952038115575,
+        "p_value": 0.202,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.05835442674082231,
+        "p_value": 0.1,
+        "fdr_significant": false
+      },
+      {
+        "signal": "frr_trend_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.05807376627428247,
+        "p_value": 0.118,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 45,
+        "ic": -0.08328672822444728,
+        "p_value": 0.024,
+        "fdr_significant": false
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 60,
+        "ic": -0.11809140656075136,
+        "p_value": 0.012,
+        "fdr_significant": true
+      },
+      {
+        "signal": "spike_z_extH",
+        "cell": "fUSD_p2",
+        "regime": "late",
+        "horizon": 90,
+        "ic": -0.11464856621080546,
+        "p_value": 0.008,
+        "fdr_significant": true
+      }
+    ]
+  },
+  "final_verdicts": [
+    {
+      "signal": "frr_curvature_k3",
+      "verdict": "KILL",
+      "median_ic": 0.0005688399567537344,
+      "reason": "sign flips across regimes (regime-fragile)"
+    },
+    {
+      "signal": "frr_trend_extH",
+      "verdict": "KILL",
+      "median_ic": -0.10204357478524362,
+      "reason": "only 2/4 cells robust (< 3 majority)"
+    },
+    {
+      "signal": "spike_pctile_w14",
+      "verdict": "KILL",
+      "median_ic": -0.08689255627954617,
+      "reason": "only 2/4 cells robust (< 3 majority)"
+    },
+    {
+      "signal": "spike_z_extH",
+      "verdict": "GO",
+      "median_ic": -0.17805017437643972,
+      "reason": "4/4 cells robust, median IC -0.178"
+    }
+  ],
+  "conclusion": "spike_z_extH (existing spike_z z-score formula, w=14, retested at H=45/60/90d instead of the original 2/7/14/30d) clears all 4 gates under BOTH the primary (block_size=20) and the block-size-robustness-check (block_size=max(20,h)) runs: 4/4 cells robust, same sign both disjoint regimes, FDR-significant, median IC -0.178 (floor 0.03). frr_trend_extH looked marginally promising under the primary block_size=20 run (2/4 cells robust) but that marginal significance evaporated under the robustness check (0 robust cells) -- demonstrating the robustness check is doing real work, not rubber-stamping. frr_curvature_k3 and spike_pctile_w14 are KILL under both runs (regime-fragile / underpowered early regime respectively, same failure mode as the original 2026-06-06 frr_trend/spike_detect KILLs)."
+}
