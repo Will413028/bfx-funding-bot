@@ -42,6 +42,13 @@ from bfx_funding_bot.modules.external_signals.schemas import (
 _BITFINEX = "bitfinex"
 _BINANCE = "binance-usdm"
 
+# Bitfinex's all-symbol liquidations feed has been observed (2026-07-21 live
+# probe) to return a spurious empty page well before the true bottom of
+# history — end=2024-03-30 came back empty while end=2024-03-21 (further
+# back) had real data. An empty page alone must not end the walk; probe this
+# far back first before trusting it as bottom-of-history.
+_LIQ_EMPTY_PROBE_SKIP_MS = 30 * 24 * 60 * 60 * 1000  # 30 days
+
 
 class SignalsClient(Protocol):
     """Client surface the ingest loops need (see client.ExternalSignalsClient)."""
@@ -183,6 +190,7 @@ async def backfill_liquidations_to_earliest(
     page_limit: int = 500,
     max_pages: int | None = None,
     now_ms: int | None = None,
+    empty_probe_skip_ms: int = _LIQ_EMPTY_PROBE_SKIP_MS,
 ) -> IngestStats:
     """Walk the (all-symbol) liquidations feed backwards to earliest history."""
     db_min = await get_liq_min_mts(session, venue=_BITFINEX)
@@ -196,8 +204,16 @@ async def backfill_liquidations_to_earliest(
             break
         page = await client.get_liquidations_hist(end=end_ms, limit=page_limit)
         if not page:
-            done = True
-            break
+            # Empty page ≠ bottom of history (see _LIQ_EMPTY_PROBE_SKIP_MS) —
+            # probe further back before trusting it.
+            probe_end_ms = end_ms - empty_probe_skip_ms
+            page = await client.get_liquidations_hist(
+                end=probe_end_ms, limit=page_limit
+            )
+            if not page:
+                done = True
+                break
+            end_ms = probe_end_ms
         await upsert_liquidations(session, page)
         await session.flush()
         pages += 1
@@ -231,8 +247,13 @@ async def topup_liquidations_to_latest(
     page_limit: int = 500,
     max_pages: int | None = None,
     now_ms: int | None = None,
+    empty_probe_skip_ms: int = _LIQ_EMPTY_PROBE_SKIP_MS,
 ) -> IngestStats:
-    """Fill the liquidations gap between db_max and now."""
+    """Fill the liquidations gap between db_max and now.
+
+    See `backfill_liquidations_to_earliest` for why an empty page is probed
+    once before being trusted as bottom-of-history.
+    """
     floor = await get_liq_max_mts(session, venue=_BITFINEX)
     end_ms = _now_ms(now_ms)
 
@@ -244,8 +265,14 @@ async def topup_liquidations_to_latest(
             break
         page = await client.get_liquidations_hist(end=end_ms, limit=page_limit)
         if not page:
-            done = True
-            break
+            probe_end_ms = end_ms - empty_probe_skip_ms
+            page = await client.get_liquidations_hist(
+                end=probe_end_ms, limit=page_limit
+            )
+            if not page:
+                done = True
+                break
+            end_ms = probe_end_ms
         await upsert_liquidations(session, page)
         await session.flush()
         pages += 1

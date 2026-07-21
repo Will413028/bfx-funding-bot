@@ -187,10 +187,11 @@ class TestLiquidationsWalkBack:
         page1 = [_liq(3, 5000), _liq(2, 4000), _liq(1, 3000)]
         page2 = [_liq(1, 3000), _liq(0, 1000)]  # boundary event re-served
         page3 = [_liq(0, 1000)]  # inclusive cursor re-serves the oldest event
-        client.get_liquidations_hist.side_effect = [page1, page2, page3, []]
+        client.get_liquidations_hist.side_effect = [page1, page2, page3, [], []]
 
         stats = await backfill_liquidations_to_earliest(
             client=client, session=sqlite_session, page_limit=3, now_ms=_NOW,
+            empty_probe_skip_ms=500,
         )
         await sqlite_session.commit()
 
@@ -198,7 +199,9 @@ class TestLiquidationsWalkBack:
         assert calls[0].kwargs["end"] == _NOW
         assert calls[1].kwargs["end"] == 3000  # inclusive overlap, not -1
         assert calls[2].kwargs["end"] == 1000  # partial page does not stop the walk
-        assert calls[3].kwargs["end"] == 999  # no-progress escape, then empty ends it
+        assert calls[3].kwargs["end"] == 999  # no-progress escape, then empty page
+        assert calls[4].kwargs["end"] == 499  # probe (999-500) also empty: genuine bottom
+        assert len(calls) == 5
         assert stats.done is True
         assert await _liq_count(sqlite_session) == 4  # dedup via upsert
 
@@ -207,28 +210,64 @@ class TestLiquidationsWalkBack:
     ) -> None:
         client: Any = AsyncMock()
         same = [_liq(3, 3000), _liq(2, 3000), _liq(1, 3000)]
-        client.get_liquidations_hist.side_effect = [same, same, []]
+        client.get_liquidations_hist.side_effect = [same, same, [], []]
         stats = await backfill_liquidations_to_earliest(
             client=client, session=sqlite_session, page_limit=3, now_ms=_NOW,
+            empty_probe_skip_ms=500,
         )
         calls = client.get_liquidations_hist.await_args_list
         assert calls[1].kwargs["end"] == 3000
         assert calls[2].kwargs["end"] == 2999  # escape decrement after no progress
+        assert calls[3].kwargs["end"] == 2999 - 500  # probe also empty: genuine bottom
         assert stats.done is True
 
     async def test_resume_and_empty_first_page(self, sqlite_session: AsyncSession) -> None:
         await upsert_liquidations(sqlite_session, [_liq(5, 7000)])
         await sqlite_session.flush()
         client: Any = AsyncMock()
-        client.get_liquidations_hist.side_effect = [[]]
+        client.get_liquidations_hist.side_effect = [[], []]
         stats = await backfill_liquidations_to_earliest(
             client=client, session=sqlite_session, page_limit=3, now_ms=_NOW,
+            empty_probe_skip_ms=500,
         )
         # Inclusive resume cursor: events sharing db_min's millisecond may have
         # been cut off at the page boundary; re-fetch db_min itself (upsert dedups).
-        assert client.get_liquidations_hist.await_args_list[0].kwargs["end"] == 7000
+        calls = client.get_liquidations_hist.await_args_list
+        assert calls[0].kwargs["end"] == 7000
+        assert calls[1].kwargs["end"] == 7000 - 500  # probe also empty: genuine bottom
         assert stats.pages == 0
         assert stats.done is True
+
+    async def test_false_empty_page_probes_further_before_declaring_done(
+        self, sqlite_session: AsyncSession
+    ) -> None:
+        """Live-observed bug (2026-07-21): Bitfinex's all-symbol liquidations
+        feed returned an empty page at end=2024-03-30 while end=2024-03-21
+        (further back) had real data — the walk-back declared bottom-of-history
+        4+ years too early. An empty page alone must not end the walk; probe
+        further back first."""
+        client: Any = AsyncMock()
+        page1 = [_liq(3, 5000), _liq(2, 4000), _liq(1, 3000)]
+        probe_page = [_liq(9, 1500), _liq(8, 1000)]  # data found on probe
+        client.get_liquidations_hist.side_effect = [page1, [], probe_page, [], []]
+
+        stats = await backfill_liquidations_to_earliest(
+            client=client, session=sqlite_session, page_limit=3, now_ms=_NOW,
+            empty_probe_skip_ms=500,
+        )
+        await sqlite_session.commit()
+
+        calls = client.get_liquidations_hist.await_args_list
+        assert calls[0].kwargs["end"] == _NOW
+        assert calls[1].kwargs["end"] == 3000  # after page1
+        assert calls[2].kwargs["end"] == 2500  # probe of the false empty (3000-500)
+        assert calls[3].kwargs["end"] == 1000  # probe found data, walk resumes from it
+        assert calls[4].kwargs["end"] == 500  # probe of the next (genuine) empty
+        assert len(calls) == 5
+        assert stats.done is True
+        assert stats.pages == 2  # page1 + probe_page; empties aren't pages
+        assert stats.earliest_mts == 1000
+        assert await _liq_count(sqlite_session) == 5  # 3 + 2
 
 
 @pytest.mark.asyncio
