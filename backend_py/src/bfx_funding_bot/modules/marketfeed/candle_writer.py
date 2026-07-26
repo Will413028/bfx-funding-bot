@@ -20,7 +20,10 @@ from tenacity import (
 
 from bfx_funding_bot.core.errors import FatalError
 from bfx_funding_bot.external.bitfinex.ws import CandleMessage
-from bfx_funding_bot.modules.candles.repository import upsert_candles
+from bfx_funding_bot.modules.candles.repository import (
+    mark_candles_final,
+    upsert_candles,
+)
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
@@ -100,6 +103,17 @@ class CandleWriter:
             session = maybe  # type: ignore[assignment]
         try:
             await upsert_candles(session, [candle])
+            # The venue moving on to a later period is the ONLY reliable proof the
+            # previous one closed — waiting a fixed settle delay is a guess (5s then
+            # 30s were both wrong, and the strategy observed in-flight values as a
+            # result). Sealing here is what makes `is_final` mean "safe to observe".
+            await mark_candles_final(
+                session,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                period_agg=candle.period_agg,
+                through_mts=candle.mts - 1,
+            )
             await session.commit()
         finally:
             await session.close()
