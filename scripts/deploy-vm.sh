@@ -53,6 +53,17 @@ set -a; . ./.env.frontend.runtime; set +a
 
 # Real-money gate.
 if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
+  # Without this check a non-interactive run (ssh 'cmd', CI, cron) reaches `read`,
+  # gets EOF, and dies via `set -e` printing NOTHING — while .env.runtime has
+  # already been rewritten above. The deploy looks like it worked and the
+  # containers keep running the previous config. Bit us 2026-07-27 pausing the
+  # canary: cap was 0 on disk and still 10000 in the live process.
+  if [ ! -t 0 ]; then
+    echo "ERROR: canary deploy needs interactive confirmation but stdin is not a TTY." >&2
+    echo "       Nothing was deployed; .env.runtime may already be regenerated." >&2
+    echo "       Re-run with BFX_CANARY_CONFIRM=yes to confirm non-interactively." >&2
+    exit 1
+  fi
   read -r -p "CANARY = REAL MONEY (per-symbol caps from the safety config; live fUST funded, fUSD dark). Type 'yes' to proceed: " ans
   [ "$ans" = yes ] || { echo "aborted"; exit 1; }
 fi
