@@ -16,6 +16,10 @@ from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,
 )
 
+# Period length per timeframe. Mirrors marketfeed.scheduler._TIMEFRAME_MS; kept
+# here so the candles layer does not import upward into marketfeed.
+_TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
+
 _UPSERT_INDEX = ["symbol", "timeframe", "period_agg", "mts"]
 _UPSERT_SET_COLS = ["open", "close", "high", "low", "volume"]
 
@@ -25,6 +29,19 @@ _UPSERT_SET_COLS = ["open", "close", "high", "low", "volume"]
 # page, so chunking is required. NOTE: adding a column shrinks the safe chunk —
 # 3000 was fine at 9 columns (27000) but overflows at 12 (36000).
 _CANDLE_CHUNK = 2500
+
+
+def _is_period_closed(timeframe: str, mts: int, now_ms: int) -> bool:
+    """True when `mts` belongs to a period strictly before the one holding `now_ms`.
+
+    Unknown timeframes fall back to "not closed" — refusing to seal something we
+    cannot reason about is the safe direction: an unsealed row can still be sealed
+    later, while a wrongly sealed one is immutable.
+    """
+    step = _TIMEFRAME_MS.get(timeframe)
+    if step is None:
+        return False
+    return mts < (now_ms // step) * step
 
 
 def _to_float_or_none(d: Decimal | None) -> float | None:
@@ -59,10 +76,17 @@ async def upsert_candles(
     Chunked at _CANDLE_CHUNK rows per execute() to stay under asyncpg's
     32767 bind-parameter limit.
 
-    Rows land NOT final: while its period is still forming, Bitfinex keeps
-    re-pushing the same mts with a moving close. `first_seen_at_ms` records when
-    we first observed it (knowledge time) and is never overwritten by later
-    pushes — only the OHLCV columns are.
+    A row lands sealed iff its period has already closed (`mts` before the period
+    containing `now`). The still-forming period stays open because Bitfinex keeps
+    re-pushing that same mts with a moving close; everything older is settled
+    history and must be readable by final-only consumers immediately — REST
+    backfill writes only settled history, and `fetch_and_store` reads back what it
+    just wrote, so landing it unsealed would make backfill silently produce
+    nothing visible.
+
+    `first_seen_at_ms` records when we first observed the row (knowledge time) and
+    is never overwritten by later pushes — only the OHLCV columns are, and only
+    while the row is still open.
     """
     if not candles:
         return
@@ -84,7 +108,7 @@ async def upsert_candles(
                 "high": _to_float_or_none(c.high),
                 "low": _to_float_or_none(c.low),
                 "volume": _to_float_or_none(c.volume),
-                "is_final": False,
+                "is_final": _is_period_closed(c.timeframe, c.mts, now),
                 "first_seen_at_ms": now,
                 "finalized_at_ms": None,
             }
@@ -206,17 +230,28 @@ async def get_candles_in_range(
     period_agg: str,
     start_mts: int,
     end_mts: int,
+    final_only: bool = True,
 ) -> list[FundingCandle]:
-    """Fetch candles in [start_mts, end_mts] (inclusive) ordered by mts ASC."""
+    """Fetch candles in [start_mts, end_mts] (inclusive) ordered by mts ASC.
+
+    `final_only` defaults to True, matching get_up_to. warmup reads through here,
+    and when only get_up_to filtered, live state (warmup) absorbed the in-flight
+    candle while replay (get_up_to) did not — the two arms then differed by
+    exactly one observe() of a still-forming close, which is a ~0.7% EMA shift at
+    ema_span=24. Both readers must apply the same rule or I-CI is only half true.
+    """
+    conditions = [
+        FundingCandleRow.symbol == symbol,
+        FundingCandleRow.timeframe == timeframe,
+        FundingCandleRow.period_agg == period_agg,
+        FundingCandleRow.mts >= start_mts,
+        FundingCandleRow.mts <= end_mts,
+    ]
+    if final_only:
+        conditions.append(FundingCandleRow.is_final.is_(True))
     stmt = (
         select(FundingCandleRow)
-        .where(
-            FundingCandleRow.symbol == symbol,
-            FundingCandleRow.timeframe == timeframe,
-            FundingCandleRow.period_agg == period_agg,
-            FundingCandleRow.mts >= start_mts,
-            FundingCandleRow.mts <= end_mts,
-        )
+        .where(*conditions)
         .order_by(FundingCandleRow.mts.asc())
     )
     result = await session.execute(stmt)

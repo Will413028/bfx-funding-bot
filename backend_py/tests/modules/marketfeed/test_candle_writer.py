@@ -62,14 +62,17 @@ async def test_candle_writer_logs_and_continues_on_error(sqlite_engine: AsyncEng
     await queue.put(None)
 
     call_count = 0
-    async def flaky_upsert(session, candles):
+    # Signature must track the real upsert_candles (now keyword-only now_ms) —
+    # a stale fake raises TypeError on every call, which this test would report
+    # as "the writer kept failing" rather than "the fake is out of date".
+    async def flaky_upsert(session, candles, *, now_ms=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise RuntimeError("simulated db failure")
         # delegate to the real function for subsequent calls
         from bfx_funding_bot.modules.candles.repository import upsert_candles as _real
-        await _real(session, candles)
+        await _real(session, candles, now_ms=now_ms)
 
     with patch(
         "bfx_funding_bot.modules.marketfeed.candle_writer.upsert_candles",
@@ -120,9 +123,16 @@ async def test_writer_seals_previous_candle_when_the_period_advances(
 
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
     queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
-    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
 
     first, second = 1747584000000, 1747587600000
+    # Advance the clock between messages so `first` is written while its period is
+    # still open, then sealed only once the venue moves on to `second`.
+    clock_values = iter([first + 1_800_000, second + 1_800_000])
+    writer = CandleWriter(
+        queue=queue, session_factory=factory, probe=HealthProbe(),
+        clock=lambda: next(clock_values),
+    )
+
     for mts in (first, second):
         await queue.put(CandleMessage(
             symbol="fUSD", timeframe="1h", period_agg="a30",
