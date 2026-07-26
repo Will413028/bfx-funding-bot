@@ -105,3 +105,42 @@ class TestCandleWriterErrorClassification:
             src = f.read()
         assert "from bfx_funding_bot.core.errors import" in src
         assert "FatalError" in src
+
+
+async def test_writer_seals_previous_candle_when_the_period_advances(
+    sqlite_engine: AsyncEngine,
+):
+    """A later mts arriving is the only reliable proof the previous period closed.
+
+    Replaces guessing a settle delay (5s, then 30s — both wrong): the strategy
+    may only observe a candle the venue has demonstrably moved past.
+    """
+    async with sqlite_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
+    queue: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
+    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
+
+    first, second = 1747584000000, 1747587600000
+    for mts in (first, second):
+        await queue.put(CandleMessage(
+            symbol="fUSD", timeframe="1h", period_agg="a30",
+            mts=mts, open=0.0001, close=0.0001,
+            high=0.0001, low=0.0001, volume=100.0,
+        ))
+    await queue.put(None)
+
+    await writer.run()
+
+    async with factory() as verify_session:
+        rows = {
+            r.mts: r
+            for r in (
+                await verify_session.execute(select(FundingCandleRow))
+            ).scalars().all()
+        }
+        assert rows[first].is_final is True
+        assert rows[first].finalized_at_ms is not None
+        # the period now forming must stay open — it is still being re-pushed
+        assert rows[second].is_final is False

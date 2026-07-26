@@ -1,15 +1,22 @@
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.repository import (
     get_candles_in_range,
     get_min_mts,
+    get_up_to,
+    mark_candles_final,
     upsert_candles,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.candles.tables import (
+    FundingCandleRevisionRow,
+    FundingCandleRow,
+)
 
 
 @pytest.fixture
@@ -185,3 +192,176 @@ async def test_upsert_candles_chunks_large_input(
         start_mts=1700000000000, end_mts=1700000000000 + 5000 * 3600000,
     )
     assert len(fetched) == 5000
+
+
+def _candle(mts: int, close: str) -> FundingCandle:
+    return FundingCandle(
+        symbol="fUST", timeframe="1h", period_agg="p2", mts=mts,
+        open=Decimal("0.0001"), close=Decimal(close),
+        high=Decimal("0.0003"), low=Decimal("0.00005"), volume=Decimal("100"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_newly_upserted_candle_is_not_final(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """A candle that just arrived over WS is still forming — never final on write."""
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=111)
+    await sqlite_session.commit()
+
+    row = (
+        await sqlite_session.execute(
+            select(FundingCandleRow).where(FundingCandleRow.mts == 1704067200000)
+        )
+    ).scalar_one()
+    assert row.is_final is False
+    assert row.first_seen_at_ms == 111
+    assert row.finalized_at_ms is None
+
+
+@pytest.mark.asyncio
+async def test_mark_candles_final_seals_rows_through_mts(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Sealing at boundary T marks every earlier open candle final, not just one."""
+    await upsert_candles(
+        sqlite_session,
+        [_candle(1704067200000, "0.0002"), _candle(1704070800000, "0.0003")],
+        now_ms=111,
+    )
+    await sqlite_session.commit()
+
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    rows = {
+        r.mts: r
+        for r in (await sqlite_session.execute(select(FundingCandleRow))).scalars()
+    }
+    assert rows[1704067200000].is_final is True
+    assert rows[1704067200000].finalized_at_ms == 222
+    # the still-forming candle at the boundary itself stays open
+    assert rows[1704070800000].is_final is False
+    assert rows[1704070800000].finalized_at_ms is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_does_not_overwrite_a_finalized_candle(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """The whole point: once sealed, a candle's value can never move again.
+
+    This is the bug that let live EMA drift — the venue re-pushed mts=T with a
+    different close long after the strategy had already observed it.
+    """
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=111)
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    # venue re-pushes the same slot with a revised close
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.00014999")], now_ms=333)
+    await sqlite_session.commit()
+
+    row = (
+        await sqlite_session.execute(
+            select(FundingCandleRow).where(FundingCandleRow.mts == 1704067200000)
+        )
+    ).scalar_one()
+    assert row.close == pytest.approx(0.0002)
+    assert row.finalized_at_ms == 222
+
+
+@pytest.mark.asyncio
+async def test_rejected_revision_of_a_final_candle_is_recorded(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Refusing the write is not enough — we must be able to prove it happened.
+
+    Feeds the ADR revocation trigger: if the venue never actually revises sealed
+    candles, this table stays empty and the bitemporal layer can be dropped.
+    """
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=111)
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.00014999")], now_ms=333)
+    await sqlite_session.commit()
+
+    revs = (
+        await sqlite_session.execute(select(FundingCandleRevisionRow))
+    ).scalars().all()
+    assert len(revs) == 1
+    assert revs[0].mts == 1704067200000
+    assert revs[0].observed_at_ms == 333
+    assert revs[0].rejected_close == pytest.approx(0.00014999)
+    assert revs[0].final_close == pytest.approx(0.0002)
+
+
+@pytest.mark.asyncio
+async def test_identical_repush_of_a_final_candle_is_not_recorded(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Only a CHANGED value is evidence; re-sending the same close is noise."""
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=111)
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    await upsert_candles(sqlite_session, [_candle(1704067200000, "0.0002")], now_ms=333)
+    await sqlite_session.commit()
+
+    revs = (
+        await sqlite_session.execute(select(FundingCandleRevisionRow))
+    ).scalars().all()
+    assert revs == []
+
+
+@pytest.mark.asyncio
+async def test_get_up_to_hides_the_still_forming_candle(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Strategies must never see the in-flight period — that IS the bug.
+
+    Default is final-only so a new call site is safe by construction; opting out
+    has to be explicit.
+    """
+    await upsert_candles(
+        sqlite_session,
+        [_candle(1704067200000, "0.0002"), _candle(1704070800000, "0.0003")],
+        now_ms=111,
+    )
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    visible = await get_up_to(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        mts_inclusive=1704070800000, lookback=10,
+    )
+    assert [c.mts for c in visible] == [1704067200000]
+
+    including_open = await get_up_to(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        mts_inclusive=1704070800000, lookback=10, final_only=False,
+    )
+    assert [c.mts for c in including_open] == [1704067200000, 1704070800000]
