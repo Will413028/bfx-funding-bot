@@ -16,6 +16,7 @@ candles at all (the ADR's revocation trigger).
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "c5a7e2d94f18"
@@ -45,10 +46,20 @@ def upgrade() -> None:
     #
     # `finalized_at_ms` stays NULL for them: we genuinely do not know when they
     # closed, and inventing a timestamp would poison the very evidence this
-    # migration exists to collect. The single newest row per series may still
-    # have been forming at migration time — it gets sealed one period early,
-    # which is bounded, one-off, and strictly safer than leaving it writable.
-    op.execute("UPDATE funding_candles SET is_final = true")
+    # migration exists to collect.
+    #
+    # The `mts <` bound excludes the period still forming right now. Sealing it
+    # would (a) freeze its close at whatever half-formed value we happen to hold
+    # and (b) make every legitimate WS update to it land in
+    # funding_candle_revisions — polluting the exact table the ADR's revocation
+    # trigger reads. Observed on the 2026-07-27 production run before this bound
+    # existed: 8 false-positive revisions in 4 minutes, up to +67%. The in-flight
+    # period needs no backfill anyway — CandleWriter seals it normally as soon as
+    # the next mts arrives.
+    op.execute(
+        "UPDATE funding_candles SET is_final = true "
+        "WHERE mts < (EXTRACT(EPOCH FROM date_trunc('hour', now())) * 1000)::bigint"
+    )
 
     op.create_table(
         "funding_candle_revisions",
