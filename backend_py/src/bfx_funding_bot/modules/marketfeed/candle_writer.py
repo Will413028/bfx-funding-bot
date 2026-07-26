@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
@@ -46,10 +47,14 @@ class CandleWriter:
         queue: asyncio.Queue[CandleMessage | None],
         session_factory: Callable[[], AsyncSession] | Callable[[], Awaitable[AsyncSession]],
         probe: HealthProbe,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         self._queue = queue
         self._session_factory = session_factory
         self._probe = probe
+        # One clock for both the write and the seal, so a candle can never be
+        # judged "still forming" by one and "closed" by the other in the same tick.
+        self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> None:
         while True:
@@ -102,7 +107,8 @@ class CandleWriter:
         else:
             session = maybe  # type: ignore[assignment]
         try:
-            await upsert_candles(session, [candle])
+            now_ms = self._clock()
+            await upsert_candles(session, [candle], now_ms=now_ms)
             # The venue moving on to a later period is the ONLY reliable proof the
             # previous one closed — waiting a fixed settle delay is a guess (5s then
             # 30s were both wrong, and the strategy observed in-flight values as a
@@ -113,6 +119,7 @@ class CandleWriter:
                 timeframe=candle.timeframe,
                 period_agg=candle.period_agg,
                 through_mts=candle.mts - 1,
+                now_ms=now_ms,
             )
             await session.commit()
         finally:

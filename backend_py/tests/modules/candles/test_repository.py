@@ -65,6 +65,7 @@ async def test_upsert_then_get_round_trips_decimal(
         period_agg="p2",
         start_mts=1704067200000,
         end_mts=1704070800000,
+        final_only=False,  # asserting what was written
     )
 
     assert len(fetched) == 2
@@ -75,10 +76,15 @@ async def test_upsert_then_get_round_trips_decimal(
 
 
 @pytest.mark.asyncio
-async def test_upsert_replaces_existing_pk(
+async def test_upsert_replaces_existing_pk_while_the_period_is_still_forming(
     sqlite_session: AsyncSession,
     setup_schema: None,
 ) -> None:
+    """A forming candle must keep absorbing the venue's updates.
+
+    This is the half of the rule that stays permissive: sealing only kicks in
+    once the period closes (see test_upsert_does_not_overwrite_a_finalized_candle).
+    """
     original = FundingCandle(
         symbol="fUST",
         timeframe="1h",
@@ -91,9 +97,11 @@ async def test_upsert_replaces_existing_pk(
         volume=Decimal("100.0"),
     )
     updated = original.model_copy(update={"close": Decimal("0.0009")})
+    # now inside the same hour as mts -> the period has not closed yet
+    now = 1704067200000 + 1_800_000
 
-    await upsert_candles(sqlite_session, [original])
-    await upsert_candles(sqlite_session, [updated])
+    await upsert_candles(sqlite_session, [original], now_ms=now)
+    await upsert_candles(sqlite_session, [updated], now_ms=now)
     await sqlite_session.commit()
 
     fetched = await get_candles_in_range(
@@ -103,6 +111,7 @@ async def test_upsert_replaces_existing_pk(
         period_agg="p2",
         start_mts=1704067200000,
         end_mts=1704067200000,
+        final_only=False,  # asserting what was written
     )
     assert len(fetched) == 1
     assert fetched[0].close is not None
@@ -123,6 +132,7 @@ async def test_upsert_empty_list_is_noop(
         period_agg="p2",
         start_mts=0,
         end_mts=10**13,
+        final_only=False,  # asserting what was written
     )
     assert fetched == []
 
@@ -190,6 +200,7 @@ async def test_upsert_candles_chunks_large_input(
     fetched = await get_candles_in_range(
         sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
         start_mts=1700000000000, end_mts=1700000000000 + 5000 * 3600000,
+        final_only=False,  # asserting what was written, not what a strategy may read
     )
     assert len(fetched) == 5000
 
@@ -365,3 +376,66 @@ async def test_get_up_to_hides_the_still_forming_candle(
         mts_inclusive=1704070800000, lookback=10, final_only=False,
     )
     assert [c.mts for c in including_open] == [1704067200000, 1704070800000]
+
+
+@pytest.mark.asyncio
+async def test_get_candles_in_range_hides_the_still_forming_candle(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """warmup reads through this function, so it must hide unsealed candles too.
+
+    Missing this was the third root cause: get_up_to (divergence replay) filtered
+    to final while get_candles_in_range (warmup) did not, so live state absorbed
+    the in-flight candle and replay never did. The two arms diverged by exactly
+    one observe() of a low, still-forming close.
+    """
+    await upsert_candles(
+        sqlite_session,
+        [_candle(1704067200000, "0.0002"), _candle(1704070800000, "0.0003")],
+        now_ms=111,
+    )
+    await mark_candles_final(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        through_mts=1704067200000, now_ms=222,
+    )
+    await sqlite_session.commit()
+
+    sealed_only = await get_candles_in_range(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        start_mts=0, end_mts=1704070800000,
+    )
+    assert [c.mts for c in sealed_only] == [1704067200000]
+
+    everything = await get_candles_in_range(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        start_mts=0, end_mts=1704070800000, final_only=False,
+    )
+    assert [c.mts for c in everything] == [1704067200000, 1704070800000]
+
+
+@pytest.mark.asyncio
+async def test_upsert_seals_candles_from_periods_already_past(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """REST backfill writes settled history — it must land sealed, not open.
+
+    Otherwise final-only readers (warmup, replay, backtest) cannot see anything
+    backfill produced, and fetch_and_store's read-back returns empty.
+    """
+    now = 1704074400000  # 2024-01-01 02:00 UTC — the 02:00 period is forming
+    past = 1704067200000  # 00:00, closed
+    forming = 1704074400000  # 02:00, current
+
+    await upsert_candles(
+        sqlite_session, [_candle(past, "0.0002"), _candle(forming, "0.0003")], now_ms=now
+    )
+    await sqlite_session.commit()
+
+    rows = {
+        r.mts: r
+        for r in (await sqlite_session.execute(select(FundingCandleRow))).scalars()
+    }
+    assert rows[past].is_final is True, "a closed period must land sealed"
+    assert rows[forming].is_final is False, "the forming period must stay open"
