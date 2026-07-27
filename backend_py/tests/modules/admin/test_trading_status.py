@@ -29,6 +29,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     BuyingPowerGuard,
@@ -92,6 +93,36 @@ def _ctx() -> AccountContext:
     return AccountContext("default", Credentials("k", "s"), D("0"))
 
 
+class _FakeHaltStore:
+    """In-memory stand-in for HaltStateStore (its own DB tests live elsewhere)."""
+
+    def __init__(self, state: HaltState | None = None) -> None:
+        self.state = state
+        self.writes: list[tuple[bool, str, str]] = []
+
+    async def current(self) -> HaltState | None:
+        return self.state
+
+    async def set_halted(
+        self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
+    ) -> HaltState:
+        self.writes.append((halted, reason, actor))
+        self.state = HaltState(
+            halted=halted, reason=reason, actor=actor,
+            created_at_ms=now_ms or 1000, id=len(self.writes),
+        )
+        return self.state
+
+    async def history(self, *, limit: int = 20) -> list[HaltState]:
+        return [self.state] if self.state is not None else []
+
+
+def _halt_state(halted: bool, reason: str = "candle distortion") -> HaltState:
+    return HaltState(
+        halted=halted, reason=reason, actor="admin", created_at_ms=1000, id=7,
+    )
+
+
 def _service(
     *,
     guards: list[Any] | None = None,
@@ -102,10 +133,11 @@ def _service(
     env_fallback_buffer: Decimal | None = _ENV_BUFFER_3,
     cells: list[CellConfig] | None = None,
     recorder: SubmitAttemptRecorder | None = None,
+    halt_store: Any = None,
 ) -> TradingStatusService:
     led = ledger if ledger is not None else _FakeLedger()
     chain = SafetyGuardChain(
-        guards=guards if guards is not None else [ManualKillGuard()],
+        guards=guards if guards is not None else [ManualKillGuard(halt_store=halt_store)],
         probe=HealthProbe(), diagnostics=_Sink(),
         phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
@@ -123,6 +155,7 @@ def _service(
         env_fallback_buffer=env_fallback_buffer,
         phase=Phase.CANARY,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
+        halt_store=halt_store,
     )
 
 
@@ -428,3 +461,112 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
     await svc.dry_run()
     await svc.snapshot()
     assert sink.events == []
+
+
+# --------------------------------------------------------------------------
+# persisted halt (P2) — the halt must survive a canary.env revert
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_reports_both_stop_sources_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which mechanism is holding the bot decides how you resume it. Collapsing
+    them into one boolean is how "I removed the env var, why is it still
+    halted?" becomes a mystery."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    snap = await _service(halt_store=_FakeHaltStore(_halt_state(True))).snapshot()
+    assert snap["halt"]["halted"] is True
+    assert snap["halt"]["sources"]["env_kill_switch"] is False
+    persisted = snap["halt"]["sources"]["persisted"]
+    assert persisted["halted"] is True
+    assert persisted["reason"] == "candle distortion"
+    assert persisted["actor"] == "admin"
+    assert persisted["id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_env_flag_alone_is_reported_as_env_sourced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
+    snap = await _service(halt_store=_FakeHaltStore(_halt_state(False))).snapshot()
+    assert snap["halt"]["halted"] is True
+    assert snap["halt"]["sources"]["env_kill_switch"] is True
+    assert snap["halt"]["sources"]["persisted"]["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_never_configured_persisted_state_is_null_not_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`null` (no decision ever recorded) and `{"halted": false}` (explicitly
+    resumed by someone, with a reason) are different facts."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    snap = await _service(halt_store=_FakeHaltStore(None)).snapshot()
+    assert snap["halt"]["sources"]["persisted"] is None
+    assert snap["halt"]["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_halt_writes_a_persisted_transition() -> None:
+    store = _FakeHaltStore(None)
+    svc = _service(halt_store=store)
+    out = await svc.halt(reason="candle distortion", actor="admin")
+    assert store.writes == [(True, "candle distortion", "admin")]
+    assert out["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_writes_a_persisted_transition() -> None:
+    store = _FakeHaltStore(_halt_state(True))
+    svc = _service(halt_store=store)
+    out = await svc.resume(reason="L4 v2 passed", actor="admin")
+    assert store.writes == [(False, "L4 v2 passed", "admin")]
+    assert out["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_resume_warns_while_the_env_flag_still_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the persisted halt does not clear BFX_KILL_SWITCH. Reporting
+    "resumed" while the bot is still fully stopped would be a lie of exactly
+    the kind this whole endpoint exists to prevent."""
+    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
+    svc = _service(halt_store=_FakeHaltStore(_halt_state(True)))
+    out = await svc.resume(reason="L4 v2 passed", actor="admin")
+    assert out["halted"] is False
+    assert out["still_halted_by_env"] is True
+    assert "BFX_KILL_SWITCH" in out["note"]
+
+
+@pytest.mark.asyncio
+async def test_resume_reports_no_env_warning_when_the_flag_is_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    svc = _service(halt_store=_FakeHaltStore(_halt_state(True)))
+    out = await svc.resume(reason="done", actor="admin")
+    assert out["still_halted_by_env"] is False
+    assert out["note"] is None
+
+
+@pytest.mark.asyncio
+async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None:
+    """paper/shadow have no store. Silently accepting a halt request there
+    would report success while changing nothing."""
+    svc = _service(halt_store=None)
+    with pytest.raises(ValueError, match="not configured"):
+        await svc.halt(reason="x", actor="admin")
+    with pytest.raises(ValueError, match="not configured"):
+        await svc.resume(reason="x", actor="admin")
+
+
+@pytest.mark.asyncio
+async def test_status_includes_recent_halt_history() -> None:
+    """"Who resumed trading and why" must be answerable from the same place
+    that answers "are we halted"."""
+    snap = await _service(halt_store=_FakeHaltStore(_halt_state(True))).snapshot()
+    assert snap["halt"]["history"][0]["reason"] == "candle distortion"
