@@ -53,7 +53,7 @@ from bfx_funding_bot.external.bitfinex.ws import (
     compute_backoff_secs,
 )
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
-from bfx_funding_bot.modules.candles.repository import get_up_to
+from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
@@ -1308,6 +1308,18 @@ async def build_daemon(
         # was fed during daemon startup — NOT re-fed from this small window.
         lookback = budget_hours + 1  # +1 to ensure boundary candle is included
         async with session_factory() as s:
+            # Seal on elapsed time before reading. CandleWriter only seals when a
+            # LATER mts lands, so a slow venue push leaves mts=candle_mts unsealed
+            # at exactly the moment we need it — a final-only read then skips it,
+            # LOCF fills the slot from the previous candle, and the live observe
+            # sequence gains a hole that replay does not have.
+            await seal_closed_periods(
+                s,
+                symbol=cell.symbol,
+                timeframe=cell.timeframe,
+                period_agg=cell.period_agg,
+            )
+            await s.commit()
             raw_candles = await get_up_to(
                 s,
                 symbol=cell.symbol,

@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
-from bfx_funding_bot.modules.candles.repository import get_candles_in_range
+from bfx_funding_bot.modules.candles.repository import (
+    get_candles_in_range,
+    seal_closed_periods,
+)
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
@@ -64,7 +67,14 @@ async def warmup_cell(
         now_mts=now_mts,
     )
 
-    # 3. Read last `lookback` candles from DB
+    # 3. Read last `lookback` candles from DB. Seal elapsed periods first, for
+    # the same reason the scheduler does: a period that has closed cannot gain
+    # more trades, and leaving it unsealed hides it from this final-only read.
+    await seal_closed_periods(
+        session,
+        symbol=cell.symbol, timeframe=cell.timeframe, period_agg=cell.period_agg,
+        now_ms=now_mts,
+    )
     start_mts = now_mts - lookback * step
     history = await get_candles_in_range(
         session,
