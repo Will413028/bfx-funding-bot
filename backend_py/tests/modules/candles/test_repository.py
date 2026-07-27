@@ -10,6 +10,7 @@ from bfx_funding_bot.modules.candles.repository import (
     get_min_mts,
     get_up_to,
     mark_candles_final,
+    seal_closed_periods,
     upsert_candles,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -439,3 +440,42 @@ async def test_upsert_seals_candles_from_periods_already_past(
     }
     assert rows[past].is_final is True, "a closed period must land sealed"
     assert rows[forming].is_final is False, "the forming period must stay open"
+
+
+@pytest.mark.asyncio
+async def test_seal_closed_periods_does_not_wait_for_the_next_candle(
+    sqlite_session: AsyncSession,
+    setup_schema: None,
+) -> None:
+    """Time alone must be enough to seal — the next candle may not have arrived.
+
+    CandleWriter seals on "a later mts landed", but the scheduler reads mts=T-1h
+    at T+30s. If the venue is slow to push T, that row is still unsealed at read
+    time and a final-only reader skips it, leaving a hole in the live observe
+    sequence that replay (reading moments later, after the seal) does not have.
+    """
+    closed = 1704067200000  # 00:00
+    forming = 1704070800000  # 01:00
+    await upsert_candles(
+        sqlite_session, [_candle(closed, "0.0002")], now_ms=closed + 60_000
+    )
+    await sqlite_session.commit()
+    assert (
+        await sqlite_session.execute(
+            select(FundingCandleRow.is_final).where(FundingCandleRow.mts == closed)
+        )
+    ).scalar_one() is False, "written while its own period was live"
+
+    # now sits inside the NEXT period, but no candle for it has arrived yet
+    n = await seal_closed_periods(
+        sqlite_session, symbol="fUST", timeframe="1h", period_agg="p2",
+        now_ms=forming + 30_000,
+    )
+    await sqlite_session.commit()
+
+    assert n == 1
+    assert (
+        await sqlite_session.execute(
+            select(FundingCandleRow.is_final).where(FundingCandleRow.mts == closed)
+        )
+    ).scalar_one() is True

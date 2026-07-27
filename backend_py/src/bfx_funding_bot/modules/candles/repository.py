@@ -222,6 +222,41 @@ async def mark_candles_final(
     return result.rowcount or 0
 
 
+async def seal_closed_periods(
+    session: AsyncSession,
+    *,
+    symbol: str,
+    timeframe: str,
+    period_agg: str,
+    now_ms: int | None = None,
+) -> int:
+    """Seal every candle whose period has closed by `now_ms`; return the count.
+
+    `CandleWriter` seals on "a later mts arrived", which is the strongest possible
+    evidence but not always timely: the scheduler reads mts=T-1h at T+30s, and if
+    the venue is slow to push mts=T that row is still unsealed at read time. A
+    final-only reader then skips it, leaving a hole in the live observe sequence
+    that replay — reading moments later, after the seal — does not have. Two arms
+    with different sequences is exactly the divergence this whole ADR is about.
+
+    Time is sufficient evidence on its own: a period that has elapsed cannot
+    receive more trades. Call this before any strategy-facing read.
+    """
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    step = _TIMEFRAME_MS.get(timeframe)
+    if step is None:
+        return 0
+    current_period_start = (now // step) * step
+    return await mark_candles_final(
+        session,
+        symbol=symbol,
+        timeframe=timeframe,
+        period_agg=period_agg,
+        through_mts=current_period_start - 1,
+        now_ms=now,
+    )
+
+
 async def get_candles_in_range(
     session: AsyncSession,
     *,
