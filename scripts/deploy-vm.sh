@@ -57,8 +57,11 @@ set -a; . ./.env.frontend.runtime; set +a
 # binds nothing here. Setting it to 0 on 2026-07-27 read as "paused" and halted
 # nothing; the bot kept lending for hours against caps.fUST=10000.
 if [ "$PHASE" = canary ]; then
-  SAFETY_HOST="backend_py/${BFX_SAFETY_CONFIG#/app/}"
-  [ -f "$SAFETY_HOST" ] || SAFETY_HOST=$(grep -oE 'configs/safety[^ ]*\.yaml' .env.runtime | head -1 | sed 's#^#backend_py/#')
+  # Read from .env.runtime, never from the shell env: this script runs under
+  # `set -u` and never sources that file, so ${BFX_SAFETY_CONFIG} is unbound and
+  # would abort the deploy. It did, on the first version of this block — and the
+  # failure was invisible because the caller happened to be grepping the output.
+  SAFETY_HOST=$(grep -oE 'configs/safety[^ ]*\.yaml' .env.runtime | head -1 | sed 's#^#backend_py/#')
   echo "--- effective real-money limits ---"
   echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
   echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
