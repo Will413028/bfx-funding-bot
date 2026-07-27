@@ -56,6 +56,7 @@ def run_backtest(
     record_start_mts: int | None = None,
     record_end_mts: int | None = None,
     fill_model: FillRateModel | None = None,
+    market_candles: list[FundingCandle] | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -65,6 +66,15 @@ def run_backtest(
         - candle index > cooldown_until_idx, AND
         - candle.mts in [record_start_mts, record_end_mts] (defaults: full span)
       Trades recorded only in this window contribute to n_trades / equity / sortino.
+
+    `market_candles` (optional) separates what the strategy SEES from where the
+    market actually IS. `candles` drives observe/decide; `market_candles` prices
+    fills, matched by mts. Defaults to `candles`, i.e. unchanged behaviour.
+
+    This exists to measure candle distortion honestly. Live observed a value the
+    venue later revised, and quoted from it, while fills settled against the true
+    rate. Passing one series to both sides makes `spread_pct` collapse to 0 and
+    the distortion appear harmless — the artifact that invalidated the first L4 run.
     """
     config = config or BacktestConfig()
 
@@ -80,6 +90,12 @@ def run_backtest(
         )
 
     sorted_candles = sorted(candles, key=lambda c: c.mts)
+    # Fills price off the market series; absent one, the observed series is the
+    # market (unchanged behaviour). Matched by mts so a gap in either series
+    # degrades to "use the observed candle" rather than silently misaligning.
+    market_by_mts = (
+        {c.mts: c for c in market_candles} if market_candles is not None else None
+    )
     symbol = sorted_candles[0].symbol
     full_start_mts = sorted_candles[0].mts
     full_end_mts = sorted_candles[-1].mts
@@ -116,7 +132,12 @@ def run_backtest(
         if decision is None:
             continue
 
-        gross_rate, fill_prob = _apply_friction(decision, candle, config, fill_model)
+        pricing_candle = (
+            market_by_mts.get(candle.mts, candle) if market_by_mts is not None else candle
+        )
+        gross_rate, fill_prob = _apply_friction(
+            decision, pricing_candle, config, fill_model
+        )
         period = Decimal(decision.period_days)
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee

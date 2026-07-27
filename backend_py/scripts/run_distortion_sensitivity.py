@@ -14,21 +14,16 @@ WHAT THIS CAN AND CANNOT ANSWER
   can:    "do the conclusions survive plausible distortion" (robustness)
   cannot: "what would live actually have earned" (needs the lost series)
 
-!! KNOWN DEFECT — the 2026-07-26 N=500 run is NOT valid evidence !!
-close plays two roles in a backtest: the strategy's observation (POST/SKIP and
-offer rate) AND the market rate that decides fills and P&L. Perturbing the single
-series moves both together, so the error cancels between the decision side and
-the payoff side. That models "the market rate really changed", whereas live means
-"the bot saw a distorted price while the market was at the settled value".
+HOW THE DISTORTION IS APPLIED (v2, 2026-07-27)
+The strategy observes the PERTURBED series; fills and P&L price off the TRUE
+series. That is what live suffered: it quoted from a value the venue later
+revised, while the market settled at the true rate, so the quote sat at the wrong
+distance from the market and fills changed.
 
-The experiment therefore almost cannot fail, and its passing proves nothing —
-exactly the tautology-verification failure mode in
-wiki/tech/verification-discriminating-power.
-
-Fixing this needs evaluate_oos_windows to accept TWO series (observe the
-distorted one, price fills off the true one); it currently takes only `candles`.
-Until then WFO/OOS conclusions stay "unconfirmed" and must not be released on
-the strength of this script's output.
+The first run (2026-07-26, N=500) fed one perturbed series to both sides. That
+collapses spread_pct to 0, cancels the error between the decision side and the
+payoff side, and makes the experiment nearly incapable of failing — its clean
+result was an artifact, not resilience. Superseded by this version.
 
 Sample + biases: docs/research/2026-07-27-candle-distortion-sample.md
 ADR D2: wiki/projects/bfx-funding-bot/decisions/2026-07-27-candle-immutability-bitemporal.md
@@ -102,15 +97,23 @@ def _summarize(outcomes: list[WindowOutcome]) -> ArmResult:
     )
 
 
-def _evaluate(cell: CellConfig, candles: list[FundingCandle]) -> ArmResult:
-    windows = compute_wfo_windows(candles)
+def _evaluate(
+    cell: CellConfig,
+    observed: list[FundingCandle],
+    market: list[FundingCandle] | None = None,
+) -> ArmResult:
+    """`observed` drives the strategy; `market` prices fills (None = same series)."""
+    # Windows come from the true series so both arms share identical boundaries.
+    windows = compute_wfo_windows(market if market is not None else observed)
     if not windows:
         raise SystemExit(f"No WFO windows for {cell.cell_id}; series too short?")
 
     def _make_strategy() -> Strategy:
         return build_strategy(cell)  # type: ignore[return-value]
 
-    strat_outcomes, _ = evaluate_oos_windows(candles, windows, make_strategy=_make_strategy)
+    strat_outcomes, _ = evaluate_oos_windows(
+        observed, windows, make_strategy=_make_strategy, market_candles=market
+    )
     return _summarize(strat_outcomes)
 
 
@@ -143,7 +146,7 @@ async def _run_cell(
             pct_samples=OBSERVED_PCT_SAMPLES,
             seed=i,
         )
-        r = _evaluate(cell, perturbed)
+        r = _evaluate(cell, perturbed, market=candles)
         medians.append(r.median_monthly)
         positives.append(r.positive_month_ratio)
         if (i + 1) % 10 == 0 or i == 0:
