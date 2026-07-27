@@ -1,0 +1,9 @@
+[Unit]
+Description=Verify every 15 min that a set halt is really blocking submits
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
