@@ -53,6 +53,7 @@ from bfx_funding_bot.external.bitfinex.ws import (
     compute_backoff_secs,
 )
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
@@ -64,6 +65,9 @@ from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_fr
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
+    SubmitAttemptRecorder,
+)
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
@@ -213,6 +217,8 @@ class Daemon:
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
+    # Behaviour-reporting service behind /admin/trading-status + /admin/dry-evaluate.
+    trading_status: TradingStatusService | None = None
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
@@ -415,6 +421,7 @@ class Daemon:
             smoke_runner=self.smoke_runner,
             admin_token=self.admin_token,
             metrics=self.metrics,
+            trading_status=self.trading_status,
         )
         log.info("sub_task_exit name=healthz")
 
@@ -1160,6 +1167,12 @@ async def build_daemon(
     if tracing.enabled:
         wrapped_executor = TracingSubmitMiddleware(wrapped_executor, tracing=tracing)
 
+    # Last-submit-attempt slot read by GET /admin/trading-status. Built
+    # unconditionally so the endpoint always has a `started_at` to report;
+    # only the live reconciler ever writes to it, so on paper/shadow it stays
+    # empty — which correctly reads as "this process has submitted nothing".
+    attempt_recorder = SubmitAttemptRecorder()
+
     # DeploymentReconciler needs wrapped_executor — constructed here (after
     # wrapped_executor) and injected into PeriodicReconcile.
     if not spec.is_simulated:
@@ -1203,6 +1216,7 @@ async def build_daemon(
             ticker_source=bitfinex,
             clamp=clamp_policy,
             ladder=ladder_policy,
+            attempt_recorder=attempt_recorder,
         )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —
@@ -1424,6 +1438,27 @@ async def build_daemon(
             ),
         )
 
+    # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
+    # Reports what the guards actually do, not what the config says. The env
+    # fallbacks passed here are the SAME scalars the guards and the reconciler
+    # resolve against (allocation_cap / balance_buffer_usdt), so the report's
+    # "which tier bound this" answer describes the live resolution rather than
+    # a second reading of the same files.
+    trading_status = TradingStatusService(
+        chain=safety_chain,
+        ledger=ledger,
+        account_ctx=account_ctx,
+        cells=config.cells,
+        caps=hg.allocation_cap.caps,
+        default_cap=hg.allocation_cap.default_cap,
+        env_fallback_cap=allocation_cap,
+        buffers=hg.buying_power.buffers,
+        default_buffer=hg.buying_power.default_buffer,
+        env_fallback_buffer=balance_buffer_usdt,
+        phase=config.phase,
+        attempts=attempt_recorder,
+    )
+
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
     healthz_port = int(healthz_port_env) if healthz_port_env else 8080
     healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
@@ -1511,6 +1546,7 @@ async def build_daemon(
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
+        trading_status=trading_status,
         writer_lock=writer_lock,
         metrics=metrics,
         tracing=tracing,

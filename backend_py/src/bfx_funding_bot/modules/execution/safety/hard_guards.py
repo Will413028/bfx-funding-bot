@@ -6,9 +6,10 @@ allocation cap). Chain short-circuits on first block.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -105,6 +106,47 @@ class HeartbeatGuard:
         return GuardResult(allowed=True, guard_name=self.name)
 
 
+ResolutionSource = Literal["symbol_map", "env_fallback", "default"]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedValue:
+    """A resolved per-symbol scalar plus WHICH TIER produced it."""
+    value: Decimal
+    source: ResolutionSource
+
+
+def resolve_for_symbol_with_source(
+    mapping: dict[str, Decimal],
+    symbol: str,
+    *,
+    env_fallback: Decimal | None,
+    default: Decimal,
+) -> ResolvedValue:
+    """Three-tier resolution, reporting the tier that bound.
+
+    Same chain as :func:`resolve_for_symbol` — this is the implementation, and
+    the scalar helper delegates here, so the reported source can never describe
+    a tier the guards did not actually take.
+
+    Reporting the tier is not cosmetic. On 2026-07-27 the canary was "paused"
+    by setting the env scalar to 0; every configured symbol had an explicit
+    ``mapping`` entry, so the scalar bound nothing and lending continued for
+    hours. The value alone (0) looked like a halt; only the source
+    (``symbol_map``, not ``env_fallback``) shows the knob was inert.
+
+    Note the ``is not None`` test on env_fallback: ``Decimal("0")`` is falsy,
+    and a truthiness check would silently report ``default`` for exactly the
+    value that caused the incident.
+    """
+    v = mapping.get(symbol)
+    if v is not None:
+        return ResolvedValue(value=v, source="symbol_map")
+    if env_fallback is not None:
+        return ResolvedValue(value=env_fallback, source="env_fallback")
+    return ResolvedValue(value=default, source="default")
+
+
 def resolve_for_symbol(
     mapping: dict[str, Decimal],
     symbol: str,
@@ -122,11 +164,13 @@ def resolve_for_symbol(
     Task 8) because the DeploymentReconciler also resolves caps/buffers with this
     exact chain — the reconciler must size to the SAME cap the guard enforces, or
     sizing and the per-offer guard diverge (silent under/over-deployment).
+
+    Thin wrapper over :func:`resolve_for_symbol_with_source` — one resolution,
+    two views. Do NOT reimplement the chain here.
     """
-    v = mapping.get(symbol)
-    if v is not None:
-        return v
-    return env_fallback if env_fallback is not None else default
+    return resolve_for_symbol_with_source(
+        mapping, symbol, env_fallback=env_fallback, default=default,
+    ).value
 
 
 class _LedgerProtocol(Protocol):

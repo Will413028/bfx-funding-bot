@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from bfx_funding_bot.modules.execution.emit import emit_safety_trigger
@@ -35,6 +36,32 @@ class _DiagnosticsProtocol(Protocol):
     """Forensic diagnostics port (→ PG DiagnosticsSink)."""
 
     async def emit(self, event: dict[str, Any]) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GuardOutcome:
+    """One guard's verdict inside a dry run."""
+    name: str
+    allowed: bool
+    reason: str | None = None
+    # True when the guard timed out or raised — the real path would fail closed
+    # here AND emit safety_trigger level=critical.
+    internal_error: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunReport:
+    """What the chain WOULD do with this decision, right now.
+
+    ``would_submit`` is the real short-circuiting verdict (no guard blocked);
+    ``blocked_by`` is where the real path would stop. ``guards`` additionally
+    carries the verdicts of guards the real path would never have reached —
+    that is the diagnostic value: it distinguishes "one knob away from
+    resuming" from "three separate things would still block".
+    """
+    would_submit: bool
+    blocked_by: str | None = None
+    guards: list[GuardOutcome] = field(default_factory=list)
 
 
 class SafetyGuardChain:
@@ -74,6 +101,51 @@ class SafetyGuardChain:
             return GuardResult(allowed=True, guard_name="<chain>")
         finally:
             self.probe.record_heartbeat("safety_chain")
+
+    async def dry_evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> DryRunReport:
+        """Answer "would this decision be submitted right now?" WITHOUT side effects.
+
+        Exists because the daemon otherwise exposes only its INPUTS. On
+        2026-07-27 the kill switch was set while the funding wallet held 3.00 —
+        the reconciler never sized an offer, the chain was never reached, and
+        "no orders appeared" was therefore compatible with both a working halt
+        and a broken one. Reading BFX_KILL_SWITCH back proved nothing either:
+        that is the input we already knew we wrote. This runs the real guards.
+
+        Differences from :meth:`evaluate`, all deliberate:
+        - no short-circuit — every guard is evaluated so one report shows
+          everything that would block, not just the first thing;
+        - no ``safety_trigger`` emit — a probe must never write to the table
+          incident response reads as a record of live blocks;
+        - no heartbeat — a probe must never forge evidence of trading activity.
+
+        Guard evaluation itself goes through the same :meth:`_evaluate_one` the
+        real path uses (same timeout, same fail-closed semantics), so the probe
+        cannot drift from the behaviour it claims to describe. Every guard is
+        read-only, which is what makes running past the first block safe.
+
+        The executor is not reachable from here: this method only evaluates
+        guards and returns a report.
+        """
+        outcomes: list[GuardOutcome] = []
+        blocked_by: str | None = None
+        for guard in self.guards:
+            result, is_internal_error = await self._evaluate_one(guard, decision, ctx)
+            outcomes.append(GuardOutcome(
+                name=guard.name,
+                allowed=result.allowed,
+                reason=result.reason,
+                internal_error=is_internal_error,
+            ))
+            if not result.allowed and blocked_by is None:
+                blocked_by = guard.name
+        return DryRunReport(
+            would_submit=blocked_by is None,
+            blocked_by=blocked_by,
+            guards=outcomes,
+        )
 
     async def _evaluate_one(
         self, guard: GuardRule, decision: DecisionPayload, ctx: AccountContext,

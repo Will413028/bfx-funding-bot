@@ -147,7 +147,8 @@ class _SeqSafety:
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            available=None, event_sink=None, canceller=None, reprice=None,
-           ticker_source=None, clamp=None, ladder=None, cap=None):
+           ticker_source=None, clamp=None, ladder=None, cap=None,
+           attempt_recorder=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -176,6 +177,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         ticker_source=ticker_source,
         clamp=clamp,
         ladder=ladder,
+        attempt_recorder=attempt_recorder,
     )
     return rec, ex, tracker, safety
 
@@ -919,3 +921,85 @@ async def test_no_ladder_config_never_computes_rungs(caplog):
     assert not any("ladder_would_post" in r.getMessage() for r in caplog.records)
     assert len(ex.submitted) == 1
     assert ex.submitted[0].offer_rate == 0.00012
+
+
+# ---------------------------------------------------------------------------
+# SubmitAttemptRecorder wiring (P0 trading-status)
+#
+# The reconciler already logs every one of these outcomes. These tests pin that
+# the same facts also land somewhere the status endpoint can read, because on
+# 2026-07-27 "is it placing orders?" was answerable only by grepping logs.
+# ---------------------------------------------------------------------------
+
+
+def _recorder():
+    from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
+        SubmitAttemptRecorder,
+    )
+    return SubmitAttemptRecorder()
+
+
+async def test_guard_block_is_recorded_as_the_last_attempt():
+    rec_att = _recorder()
+    rec, ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], safety_allowed=False,
+        attempt_recorder=rec_att,
+    )
+    await rec.deploy()
+    assert ex.submitted == []
+    assert rec_att.last is not None
+    assert rec_att.last.outcome == "blocked"
+    assert rec_att.last.guard_name == "fake"
+    assert rec_att.last.reason == "blocked"
+    assert rec_att.last.cell == "fUST_a30"
+    assert rec_att.last.symbol == "fUST"
+    assert rec_att.last.amount == D("200")
+
+
+async def test_successful_submit_is_recorded():
+    rec_att = _recorder()
+    rec, _ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], attempt_recorder=rec_att,
+    )
+    await rec.deploy()
+    assert rec_att.last is not None
+    assert rec_att.last.outcome == "submitted"
+    assert rec_att.last.amount == D("200")
+
+
+async def test_venue_rejection_is_recorded_as_rejected_not_blocked():
+    rec_att = _recorder()
+    rec, _ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        executor=_RejectingExecutor(), attempt_recorder=rec_att,
+    )
+    await rec.deploy()
+    assert rec_att.last is not None
+    assert rec_att.last.outcome == "rejected"
+
+
+async def test_submit_exception_is_recorded_as_error():
+    class _Boom(_FakeExecutor):
+        async def submit(self, decision, ctx, *, cid=None):
+            raise RuntimeError("venue 500")
+
+    rec_att = _recorder()
+    rec, _ex, _, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")], executor=_Boom(),
+        attempt_recorder=rec_att,
+    )
+    await rec.deploy()
+    assert rec_att.last is not None
+    assert rec_att.last.outcome == "error"
+    assert "venue 500" in (rec_att.last.reason or "")
+
+
+async def test_recorder_is_optional_and_absent_changes_nothing():
+    # Default construction (attempt_recorder=None) must stay byte-identical:
+    # every pre-existing test above builds without one.
+    rec, ex, tracker, _ = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+    )
+    await rec.deploy()
+    assert len(ex.submitted) == 1
+    assert tracker.deployed("fUST_a30") == D("200")
