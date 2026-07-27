@@ -227,43 +227,59 @@ class TradingStatusService:
         rate: float | None = None,
         period_days: int | None = None,
     ) -> dict[str, Any]:
-        """Run a synthetic POST through the real guard chain and report.
+        """Run a synthetic POST per symbol through the real guard chain.
 
         This is the answer to "the halt is set, but can we prove it blocks?"
         when the funding wallet is too empty for the reconciler to ever reach
         the chain on its own. Nothing is submitted: the executor is not a
         dependency of this class.
 
-        The report includes the decision that was evaluated, because a verdict
-        without its input is another thing that cannot be checked.
+        EVERY configured symbol is probed unless one is named. An earlier
+        version defaulted to a single symbol and, on the first live run
+        (2026-07-27), that default picked fUSD — sorted first and dark, zero
+        balance — reporting "blocked by buying_power" while the funded symbol
+        was held solely by the kill switch. Reading that default would have
+        pointed an operator at funds instead of the halt. A probe that answers
+        about a symbol nobody trades is worse than no probe.
+
+        ``would_submit_any`` is the headline: could this daemon place any order
+        right now. Each symbol additionally carries the decision it evaluated,
+        because a verdict without its input is another thing that cannot be
+        checked.
         """
-        sym = symbol if symbol is not None else self._symbols[0]
-        if sym not in self._symbols:
+        if symbol is not None and symbol not in self._symbols:
             raise ValueError(
-                f"symbol {sym!r} is not configured (configured: {self._symbols}); "
+                f"symbol {symbol!r} is not configured (configured: {self._symbols}); "
                 "a probe on an untraded symbol describes nothing real",
             )
-        decision = self._probe_decision(
-            sym, amount=amount, rate=rate, period_days=period_days,
-        )
-        report = await self._chain.dry_evaluate(decision, self._ctx)
+        targets = [symbol] if symbol is not None else self._symbols
+        per_symbol: dict[str, Any] = {}
+        for sym in targets:
+            decision = self._probe_decision(
+                sym, amount=amount, rate=rate, period_days=period_days,
+            )
+            report = await self._chain.dry_evaluate(decision, self._ctx)
+            per_symbol[sym] = {
+                "would_submit": report.would_submit,
+                "blocked_by": report.blocked_by,
+                "guards": [
+                    {
+                        "name": g.name, "allowed": g.allowed,
+                        "reason": g.reason, "internal_error": g.internal_error,
+                    }
+                    for g in report.guards
+                ],
+                "decision": {
+                    "decision_outcome": decision.decision_outcome.value,
+                    "symbol": decision.symbol,
+                    "offer_amount_usdt": decision.offer_amount_usdt,
+                    "offer_rate": decision.offer_rate,
+                    "offer_duration_days": decision.offer_duration_days,
+                },
+            }
         return {
-            "would_submit": report.would_submit,
-            "blocked_by": report.blocked_by,
-            "guards": [
-                {
-                    "name": g.name, "allowed": g.allowed,
-                    "reason": g.reason, "internal_error": g.internal_error,
-                }
-                for g in report.guards
-            ],
-            "decision": {
-                "decision_outcome": decision.decision_outcome.value,
-                "symbol": decision.symbol,
-                "offer_amount_usdt": decision.offer_amount_usdt,
-                "offer_rate": decision.offer_rate,
-                "offer_duration_days": decision.offer_duration_days,
-            },
+            "would_submit_any": any(s["would_submit"] for s in per_symbol.values()),
+            "symbols": per_symbol,
         }
 
     def _probe_decision(

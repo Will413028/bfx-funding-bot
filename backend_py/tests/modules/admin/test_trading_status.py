@@ -305,31 +305,84 @@ async def test_dry_run_reports_the_halt_even_with_no_funds(
         ledger=_FakeLedger(available={"fUST": D("3.00")}),
     )
     out = await svc.dry_run()
-    assert out["would_submit"] is False
-    assert out["blocked_by"] == "manual_kill"
+    assert out["would_submit_any"] is False
+    fust = out["symbols"]["fUST"]
+    assert fust["would_submit"] is False
+    assert fust["blocked_by"] == "manual_kill"
     # And the full picture: funds would ALSO block, so clearing the kill switch
     # alone would not resume trading.
-    assert [g["name"] for g in out["guards"] if not g["allowed"]] == [
+    assert [g["name"] for g in fust["guards"] if not g["allowed"]] == [
         "manual_kill", "buying_power",
     ]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_probes_every_configured_symbol_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live finding, 2026-07-27: defaulting to one symbol picked fUSD (sorted
+    first, and dark — zero balance), whose verdict was "blocked by buying_power".
+    An operator running the default probe would have concluded funds were the
+    blocker while the funded symbol was held solely by the kill switch. A probe
+    that reports on a symbol nobody is trading is worse than none."""
+    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
+    svc = _service(
+        cells=[_cell("fUST"), _cell("fUSD")],
+        caps={"fUST": D("10000"), "fUSD": D("400")},
+        buffers={"fUST": D("3"), "fUSD": D("3")},
+    )
+    out = await svc.dry_run()
+    assert sorted(out["symbols"]) == ["fUSD", "fUST"]
+    assert all(s["blocked_by"] == "manual_kill" for s in out["symbols"].values())
+
+
+@pytest.mark.asyncio
+async def test_would_submit_any_is_true_when_any_single_symbol_would_trade() -> None:
+    """The headline field must answer "could this daemon place ANY order right
+    now" — one tradeable symbol is enough for the answer to be yes."""
+    svc = _service(
+        cells=[_cell("fUST"), _cell("fUSD")],
+        caps={"fUST": D("10000"), "fUSD": D("400")},
+        buffers={"fUST": D("3"), "fUSD": D("3")},
+        guards=[BuyingPowerGuard(
+            ledger=_FakeLedger(available={"fUST": D("500"), "fUSD": D("0")}),
+            buffers={"fUST": D("3"), "fUSD": D("3")}, default_buffer=D("0"),
+        )],
+    )
+    out = await svc.dry_run()
+    assert out["symbols"]["fUSD"]["would_submit"] is False
+    assert out["symbols"]["fUST"]["would_submit"] is True
+    assert out["would_submit_any"] is True
+
+
+@pytest.mark.asyncio
+async def test_dry_run_accepts_an_explicit_symbol_and_reports_only_that_one() -> None:
+    svc = _service(
+        cells=[_cell("fUST"), _cell("fUSD")],
+        caps={"fUST": D("10000"), "fUSD": D("400")},
+        buffers={"fUST": D("3"), "fUSD": D("3")},
+    )
+    out = await svc.dry_run(symbol="fUST")
+    assert list(out["symbols"]) == ["fUST"]
 
 
 @pytest.mark.asyncio
 async def test_dry_run_echoes_the_synthetic_decision_it_evaluated() -> None:
     svc = _service()
     out = await svc.dry_run(symbol="fUST", amount=250.0, rate=0.0002, period_days=7)
-    assert out["decision"]["symbol"] == "fUST"
-    assert out["decision"]["offer_amount_usdt"] == 250.0
-    assert out["decision"]["offer_rate"] == 0.0002
-    assert out["decision"]["offer_duration_days"] == 7
+    d = out["symbols"]["fUST"]["decision"]
+    assert d["symbol"] == "fUST"
+    assert d["offer_amount_usdt"] == 250.0
+    assert d["offer_rate"] == 0.0002
+    assert d["offer_duration_days"] == 7
 
 
 @pytest.mark.asyncio
 async def test_dry_run_defaults_come_from_the_configured_cells_not_magic_numbers() -> None:
     svc = _service(cells=[_cell("fUST")])
     out = await svc.dry_run()
-    assert out["decision"]["symbol"] == "fUST"
-    assert out["decision"]["offer_amount_usdt"] == 150.0  # cell reference_amount_usdt
+    d = out["symbols"]["fUST"]["decision"]
+    assert d["offer_amount_usdt"] == 150.0  # cell reference_amount_usdt
 
 
 @pytest.mark.asyncio
@@ -352,9 +405,10 @@ async def test_dry_run_is_a_post_decision_so_the_sizing_guards_actually_run() ->
         )],
     )
     out = await svc.dry_run()
-    assert out["decision"]["decision_outcome"] == "post"
-    assert out["would_submit"] is False
-    assert out["blocked_by"] == "allocation_cap"
+    fust = out["symbols"]["fUST"]
+    assert fust["decision"]["decision_outcome"] == "post"
+    assert fust["would_submit"] is False
+    assert fust["blocked_by"] == "allocation_cap"
 
 
 @pytest.mark.asyncio

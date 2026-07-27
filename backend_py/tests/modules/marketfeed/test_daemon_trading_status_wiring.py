@@ -121,8 +121,8 @@ async def test_halt_reported_from_the_guard_tracks_the_env_flag(
     assert snap["halt"]["guard_installed"] is True
 
     dry = await daemon.trading_status.dry_run()
-    assert dry["would_submit"] is False
-    assert dry["blocked_by"] == "manual_kill"
+    assert dry["would_submit_any"] is False
+    assert dry["symbols"]["fUSD"]["blocked_by"] == "manual_kill"
 
 
 async def test_dry_run_passes_when_nothing_blocks(
@@ -135,8 +135,8 @@ async def test_dry_run_passes_when_nothing_blocks(
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
     dry = await daemon.trading_status.dry_run()
-    assert dry["would_submit"] is True
-    assert dry["blocked_by"] is None
+    assert dry["would_submit_any"] is True
+    assert dry["symbols"]["fUSD"]["blocked_by"] is None
 
 
 async def test_last_submit_attempt_starts_empty_with_a_process_start_time(
