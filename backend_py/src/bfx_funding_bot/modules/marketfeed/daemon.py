@@ -107,6 +107,7 @@ from bfx_funding_bot.modules.execution.safety.config import (
     _AllocationCapCfg,
     load_safety_config,
 )
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
@@ -899,6 +900,14 @@ async def build_daemon(
     await pnl_source.load_persisted_peaks()
     div_source = _StubDivergenceSource()
 
+    # Persisted kill switch. Built unconditionally (like NavPeakStore) so every
+    # phase can be halted durably. Note the OPPOSITE failure posture to the peak
+    # store above: an unreadable halt state blocks submits rather than degrading
+    # gracefully — see ManualKillGuard.
+    halt_store = HaltStateStore(
+        session_factory, account_id=account_id, deployment_environment=env_str,
+    )
+
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
     # 4.2 is single-cell paper / shadow; multi-cell uniform-policy refinement
     # tracked in Phase 4.4. AllocationCap is account-scoped (not per-cell),
@@ -966,7 +975,7 @@ async def build_daemon(
 
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
-        guards.append(ManualKillGuard())
+        guards.append(ManualKillGuard(halt_store=halt_store))
     if hg.auth_health.enabled:
         guards.append(AuthHealthGuard(probe=probe))
     if hg.heartbeat.enabled:
@@ -1457,6 +1466,7 @@ async def build_daemon(
         env_fallback_buffer=balance_buffer_usdt,
         phase=config.phase,
         attempts=attempt_recorder,
+        halt_store=halt_store,
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()

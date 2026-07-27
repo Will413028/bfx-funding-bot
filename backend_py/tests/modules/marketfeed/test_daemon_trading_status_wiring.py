@@ -147,3 +147,45 @@ async def test_last_submit_attempt_starts_empty_with_a_process_start_time(
     snap = await daemon.trading_status.snapshot()
     assert snap["last_submit_attempt"] is None
     assert snap["process_started_at"] is not None
+
+
+async def test_persisted_halt_blocks_with_the_env_flag_absent(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """The property P2 exists for: this is what a reverted canary.env looks
+    like. Before the persisted halt, that revert silently resumed lending."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    daemon = await _build(monkeypatch, tmp_path, httpx_mock)
+    assert daemon.trading_status is not None
+
+    # Baseline: with no halt recorded anywhere, trading is live.
+    assert (await daemon.trading_status.dry_run())["would_submit_any"] is True
+
+    await daemon.trading_status.halt(reason="candle distortion", actor="test")
+
+    dry = await daemon.trading_status.dry_run()
+    assert dry["would_submit_any"] is False
+    assert dry["symbols"]["fUSD"]["blocked_by"] == "manual_kill"
+
+    snap = await daemon.trading_status.snapshot()
+    assert snap["halt"]["halted"] is True
+    assert snap["halt"]["sources"]["env_kill_switch"] is False
+    assert snap["halt"]["sources"]["persisted"]["reason"] == "candle distortion"
+
+
+async def test_resume_restores_trading_and_leaves_an_audit_trail(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    daemon = await _build(monkeypatch, tmp_path, httpx_mock)
+    assert daemon.trading_status is not None
+
+    await daemon.trading_status.halt(reason="candle distortion", actor="test")
+    await daemon.trading_status.resume(reason="L4 v2 passed", actor="test")
+
+    assert (await daemon.trading_status.dry_run())["would_submit_any"] is True
+    snap = await daemon.trading_status.snapshot()
+    # Both transitions retained, newest first — the audit trail that was missing.
+    assert [(h["halted"], h["reason"]) for h in snap["halt"]["history"]] == [
+        (False, "L4 v2 passed"), (True, "candle distortion"),
+    ]

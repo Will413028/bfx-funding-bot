@@ -16,6 +16,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     WriterLockHandle,
 )
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
@@ -25,11 +26,36 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
+class _HaltStateReader(Protocol):
+    async def current(self) -> HaltState | None: ...
+
+
 class ManualKillGuard:
-    """Block all when env BFX_KILL_SWITCH=true. Always-on watchdog."""
+    """Always-on kill switch. Blocks on EITHER stop mechanism.
+
+    1. ``BFX_KILL_SWITCH=true`` — break-glass. Checked first and short-circuits,
+       so stopping the bot works when the database is the thing that is broken.
+    2. The persisted ``trading_halt`` state, when a store is wired. This is the
+       durable decision: before it existed the canary halt lived only in
+       canary.env, and a plain revert of that file would have resumed
+       real-money trading with nothing having to malfunction.
+
+    Both point the same way (OR), so unlike the allocation-cap env/yaml pair
+    there is no "which one actually binds" ambiguity — and the status endpoint
+    reports each source separately anyway.
+
+    **Fails closed.** An unreadable halt state blocks. A kill switch that opens
+    when the database hiccups is not a kill switch. Note this differs from
+    NavPeakStore's fail-permissive posture; the two must not be unified.
+
+    ``halt_store=None`` (paper/shadow) keeps the original env-only behaviour.
+    """
 
     name = "manual_kill"
     is_calibrated = False
+
+    def __init__(self, *, halt_store: _HaltStateReader | None = None) -> None:
+        self._halt_store = halt_store
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -39,6 +65,25 @@ class ManualKillGuard:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason="BFX_KILL_SWITCH env flag set",
+            )
+        if self._halt_store is None:
+            return GuardResult(allowed=True, guard_name=self.name)
+        try:
+            state = await self._halt_store.current()
+        except Exception as exc:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason=f"halt state unreadable — failing closed: {exc!r}",
+            )
+        # None = no halt decision was ever recorded for this realm. That is not
+        # "halted" — otherwise every fresh environment would deadlock on boot.
+        if state is not None and state.halted:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason=(
+                    f"persisted halt: {state.reason} "
+                    f"(actor={state.actor}, id={state.id})"
+                ),
             )
         return GuardResult(allowed=True, guard_name=self.name)
 

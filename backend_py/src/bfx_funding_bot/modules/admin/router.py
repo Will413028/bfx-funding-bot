@@ -33,6 +33,8 @@ class _TradingStatusProtocol(Protocol):
         self, *, symbol: str | None = None, amount: float | None = None,
         rate: float | None = None, period_days: int | None = None,
     ) -> dict[str, Any]: ...
+    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]: ...
+    async def resume(self, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
 def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | None:
@@ -124,6 +126,60 @@ def build_router(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": str(exc)},
                 )
+            return JSONResponse(status_code=200, content=result)
+
+        @router.post("/halt")
+        async def halt_endpoint(
+            reason: str = Query(min_length=1),
+            actor: str = Query(default="admin-api"),
+            authorization: str | None = Header(default=None),
+        ) -> JSONResponse:
+            """Persist a halt. `reason` is required — an unexplained halt is
+            the one nobody can safely undo six weeks later."""
+            denied = _auth_error(authorization, admin_token)
+            if denied is not None:
+                return denied
+            try:
+                result = await trading_status.halt(reason=reason, actor=actor)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": str(exc)},
+                )
+            log.warning("admin_halt actor=%s reason=%s", actor, reason)
+            return JSONResponse(status_code=200, content=result)
+
+        @router.post("/resume")
+        async def resume_endpoint(
+            reason: str = Query(min_length=1),
+            actor: str = Query(default="admin-api"),
+            confirm: bool = Query(default=False),
+            authorization: str | None = Header(default=None),
+        ) -> JSONResponse:
+            """Clear the persisted halt. Requires `confirm=true`.
+
+            This restarts real-money lending. A token alone is not enough of a
+            gate for that — it is the same token used by read-only queries, so
+            a stray shell-history recall would otherwise resume trading.
+            """
+            denied = _auth_error(authorization, admin_token)
+            if denied is not None:
+                return denied
+            if not confirm:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": (
+                        "resuming restarts real-money lending; pass confirm=true"
+                    )},
+                )
+            try:
+                result = await trading_status.resume(reason=reason, actor=actor)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": str(exc)},
+                )
+            log.warning("admin_resume actor=%s reason=%s", actor, reason)
             return JSONResponse(status_code=200, content=result)
 
     return router

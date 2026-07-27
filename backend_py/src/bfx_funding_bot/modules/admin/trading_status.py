@@ -28,6 +28,7 @@ reachable from here.
 """
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
@@ -37,6 +38,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     resolve_for_symbol_with_source,
 )
@@ -64,6 +66,30 @@ class _LedgerProtocol(Protocol):
     def available_balance(self, symbol: str) -> Decimal: ...
 
 
+class _HaltStoreProtocol(Protocol):
+    async def current(self) -> HaltState | None: ...
+    async def set_halted(
+        self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
+    ) -> HaltState: ...
+    async def history(self, *, limit: int = 20) -> list[HaltState]: ...
+
+
+def _env_kill_switch_set() -> bool:
+    return os.environ.get("BFX_KILL_SWITCH", "").lower() in ("true", "1", "yes")
+
+
+def _halt_state_dict(state: HaltState | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "halted": state.halted,
+        "reason": state.reason,
+        "actor": state.actor,
+        "at_ms": state.created_at_ms,
+        "id": state.id,
+    }
+
+
 class TradingStatusService:
     def __init__(
         self,
@@ -80,6 +106,7 @@ class TradingStatusService:
         env_fallback_buffer: Decimal | None,
         phase: Phase,
         attempts: SubmitAttemptRecorder,
+        halt_store: _HaltStoreProtocol | None = None,
     ) -> None:
         self._chain = chain
         self._ledger = ledger
@@ -93,6 +120,7 @@ class TradingStatusService:
         self._env_fallback_buffer = env_fallback_buffer
         self._phase = phase
         self._attempts = attempts
+        self._halt_store = halt_store
         self._symbols = sorted(configured_symbols(cells))
         # symbol → reference amount, so the probe's default size has a source.
         self._reference_amount: dict[str, float] = {}
@@ -133,6 +161,19 @@ class TradingStatusService:
         exists to block" both produce halted=False, and reporting them
         identically would let a disabled safety control read as a healthy one.
         """
+        sources: dict[str, Any] = {"env_kill_switch": _env_kill_switch_set()}
+        history: list[dict[str, Any]] = []
+        if self._halt_store is not None:
+            sources["persisted"] = _halt_state_dict(await self._halt_store.current())
+            history = [
+                d for d in (
+                    _halt_state_dict(h)
+                    for h in await self._halt_store.history(limit=5)
+                ) if d is not None
+            ]
+        else:
+            sources["persisted"] = None
+
         guard = next(
             (g for g in self._chain.guards if g.name == MANUAL_KILL_GUARD_NAME), None,
         )
@@ -142,9 +183,12 @@ class TradingStatusService:
                 "reason": None,
                 "guard_installed": False,
                 "note": (
-                    f"{MANUAL_KILL_GUARD_NAME} guard is not installed — the kill "
-                    "switch env var has no effect in this process"
+                    f"{MANUAL_KILL_GUARD_NAME} guard is not installed — neither the "
+                    "kill switch env var nor the persisted halt has any effect in "
+                    "this process"
                 ),
+                "sources": sources,
+                "history": history,
             }
         result = await guard.evaluate(self._probe_decision(self._symbols[0]), self._ctx)
         return {
@@ -152,7 +196,49 @@ class TradingStatusService:
             "reason": result.reason,
             "guard_installed": True,
             "note": None,
+            # Which mechanism is holding the bot decides how you resume it.
+            # Collapsing them into one boolean is how "I removed the env var,
+            # why is it still halted?" becomes a mystery.
+            "sources": sources,
+            "history": history,
         }
+
+    # ------------------------------------------------------------ halt/resume
+
+    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
+        state = await self._require_store().set_halted(
+            True, reason=reason, actor=actor,
+        )
+        return {**_halt_state_dict(state), "still_halted_by_env": _env_kill_switch_set()}  # type: ignore[dict-item]
+
+    async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
+        """Clear the persisted halt. Does NOT touch BFX_KILL_SWITCH.
+
+        When the env flag is still set the bot stays fully stopped, so the
+        response says so explicitly — reporting "resumed" while nothing resumed
+        is exactly the class of lie this endpoint exists to prevent.
+        """
+        state = await self._require_store().set_halted(
+            False, reason=reason, actor=actor,
+        )
+        env_holds = _env_kill_switch_set()
+        return {
+            **_halt_state_dict(state),  # type: ignore[dict-item]
+            "still_halted_by_env": env_holds,
+            "note": (
+                "persisted halt cleared, but BFX_KILL_SWITCH is still set — the bot "
+                "remains halted until that env var is removed and the daemon redeployed"
+                if env_holds else None
+            ),
+        }
+
+    def _require_store(self) -> _HaltStoreProtocol:
+        if self._halt_store is None:
+            raise ValueError(
+                "persisted halt is not configured for this daemon (no halt store); "
+                "accepting the request would report success while changing nothing",
+            )
+        return self._halt_store
 
     def _symbol_status(self, symbol: str) -> dict[str, Any]:
         cap = resolve_for_symbol_with_source(
