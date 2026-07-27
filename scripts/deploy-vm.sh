@@ -65,7 +65,14 @@ if [ "$PHASE" = canary ]; then
   echo "--- effective real-money limits ---"
   echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
   echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
-  echo "  BFX_KILL_SWITCH          : $(grep '^BFX_KILL_SWITCH=' .env.runtime | cut -d= -f2 || echo '<unset>') (true = ManualKillGuard blocks every submit)"
+  # `set -o pipefail` is on, so a failing grep here poisons the whole pipeline
+  # and `|| echo '<unset>'` never fires — the line just printed blank. Capture
+  # first, default second. (Third bug in this banner today; it keeps proving
+  # that a block written to prevent misreading can itself mislead.)
+  KILL_SWITCH=$(grep '^BFX_KILL_SWITCH=' .env.runtime | cut -d= -f2- || true)
+  echo "  BFX_KILL_SWITCH          : ${KILL_SWITCH:-<unset>} (break-glass only)"
+  echo "  ⚠ the durable halt is a row in trading_halt, NOT visible in this file."
+  echo "    check it:  GET /admin/trading-status  ·  POST /admin/dry-evaluate"
   echo "-----------------------------------"
 fi
 
