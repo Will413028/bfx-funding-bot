@@ -65,10 +65,10 @@ if [ "$PHASE" = canary ]; then
   echo "--- effective real-money limits ---"
   echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
   echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
-  # `set -o pipefail` is on, so a failing grep here poisons the whole pipeline
-  # and `|| echo '<unset>'` never fires — the line just printed blank. Capture
-  # first, default second. (Third bug in this banner today; it keeps proving
-  # that a block written to prevent misreading can itself mislead.)
+  # Captured rather than inlined so the "unset" case is explicit at a glance.
+  # (The previous inline `... || echo '<unset>'` was in fact correct: `||` binds
+  # to the whole pipeline, and under pipefail a failing grep does trigger it.
+  # Verified on the 2026-07-27 deploy that unset the flag — it printed <unset>.)
   KILL_SWITCH=$(grep '^BFX_KILL_SWITCH=' .env.runtime | cut -d= -f2- || true)
   echo "  BFX_KILL_SWITCH          : ${KILL_SWITCH:-<unset>} (break-glass only)"
   echo "  ⚠ the durable halt is a row in trading_halt, NOT visible in this file."
