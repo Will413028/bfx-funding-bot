@@ -1,0 +1,11 @@
+[Unit]
+Description=bfx L3 24h stability check (divergence must stay off across a full day)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Scans 24h of container logs plus several psql round-trips.
+TimeoutStartSec=600
+User=ubuntu
+ExecStart=/home/ubuntu/l3-verify-24h.sh
