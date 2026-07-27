@@ -110,9 +110,18 @@ async def _diagnose(session: AsyncSession, cell: CellConfig, ticks: int) -> None
     )
 
     # ---- Walk forward: live observes each boundary; replay rebuilds each time ---
+    #
+    # The first boundary a live daemon consumes is `boot_mts` ITSELF, not boot+step:
+    # build_strategy_at_boundary drops the boundary slot, so warmup leaves state
+    # observed only through boot-step, and the scheduler's first tick (at the next
+    # wall-clock boundary) reads mts = boot. Starting the walk at boot+step would
+    # skip one candle on the live arm and manufacture a gap that production does
+    # not have — an earlier revision of this script did exactly that and reported
+    # ~1.5e-2, three times the real figure.
+    print(f"  (warmup left state observed through {boot_mts - step}; walk starts at {boot_mts})")
     live = warm.strategy
     for i in range(1, ticks + 1):
-        boundary_mts = boot_mts + i * step
+        boundary_mts = boot_mts + (i - 1) * step
         boundary = await get_up_to(
             session, symbol=cell.symbol, timeframe=cell.timeframe,
             period_agg=cell.period_agg, mts_inclusive=boundary_mts, lookback=1,
