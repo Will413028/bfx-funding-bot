@@ -51,6 +51,21 @@ done
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
 set -a; . ./.env.frontend.runtime; set +a
 
+# Show what will ACTUALLY bind before anyone confirms. BFX_ALLOCATION_CAP_USDT is
+# only a fallback for a symbol missing from the safety config's caps, and
+# assert_caps_invariant guarantees no canary symbol is missing — so that env var
+# binds nothing here. Setting it to 0 on 2026-07-27 read as "paused" and halted
+# nothing; the bot kept lending for hours against caps.fUST=10000.
+if [ "$PHASE" = canary ]; then
+  SAFETY_HOST="backend_py/${BFX_SAFETY_CONFIG#/app/}"
+  [ -f "$SAFETY_HOST" ] || SAFETY_HOST=$(grep -oE 'configs/safety[^ ]*\.yaml' .env.runtime | head -1 | sed 's#^#backend_py/#')
+  echo "--- effective real-money limits ---"
+  echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
+  echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
+  echo "  BFX_KILL_SWITCH          : $(grep '^BFX_KILL_SWITCH=' .env.runtime | cut -d= -f2 || echo '<unset>') (true = ManualKillGuard blocks every submit)"
+  echo "-----------------------------------"
+fi
+
 # Real-money gate.
 if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
   # Without this check a non-interactive run (ssh 'cmd', CI, cron) reaches `read`,
