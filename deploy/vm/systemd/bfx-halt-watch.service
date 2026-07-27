@@ -1,0 +1,11 @@
+[Unit]
+Description=bfx halt watchdog (verifies a halt is actually blocking submits)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Two docker exec round-trips plus two HTTP calls; well under a minute normally.
+TimeoutStartSec=120
+User=ubuntu
+ExecStart=/home/ubuntu/halt-watch.sh
