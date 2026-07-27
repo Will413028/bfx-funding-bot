@@ -14,6 +14,22 @@ WHAT THIS CAN AND CANNOT ANSWER
   can:    "do the conclusions survive plausible distortion" (robustness)
   cannot: "what would live actually have earned" (needs the lost series)
 
+!! KNOWN DEFECT — the 2026-07-26 N=500 run is NOT valid evidence !!
+close plays two roles in a backtest: the strategy's observation (POST/SKIP and
+offer rate) AND the market rate that decides fills and P&L. Perturbing the single
+series moves both together, so the error cancels between the decision side and
+the payoff side. That models "the market rate really changed", whereas live means
+"the bot saw a distorted price while the market was at the settled value".
+
+The experiment therefore almost cannot fail, and its passing proves nothing —
+exactly the tautology-verification failure mode in
+wiki/tech/verification-discriminating-power.
+
+Fixing this needs evaluate_oos_windows to accept TWO series (observe the
+distorted one, price fills off the true one); it currently takes only `candles`.
+Until then WFO/OOS conclusions stay "unconfirmed" and must not be released on
+the strength of this script's output.
+
 Sample + biases: docs/research/2026-07-27-candle-distortion-sample.md
 ADR D2: wiki/projects/bfx-funding-bot/decisions/2026-07-27-candle-immutability-bitemporal.md
 
