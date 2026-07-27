@@ -30,6 +30,9 @@ from bfx_funding_bot.modules.execution.deployment.sizing import (
     effective_min_usdt,
 )
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
+    SubmitAttemptRecorder,
+)
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.protocols import (
@@ -98,6 +101,7 @@ class DeploymentReconciler:
         ticker_source: _TickerSourceProtocol | None = None,
         clamp: ClampPolicy | None = None,
         ladder: LadderPolicy | None = None,
+        attempt_recorder: SubmitAttemptRecorder | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -127,6 +131,10 @@ class DeploymentReconciler:
         self._ticker_source = ticker_source
         self._clamp = clamp
         self._ladder = ladder
+        # Optional (None on paper/shadow and in most tests): mirrors each submit
+        # outcome into a slot GET /admin/trading-status can read. Purely
+        # observational — never consulted for a decision.
+        self._attempts = attempt_recorder
         # cell_id → strategy, for the structured ORDER_SUBMIT event envelope.
         self._cell_strategy: dict[str, StrategyName] = {
             c.cell_id: c.strategy for c in cells
@@ -335,11 +343,20 @@ class DeploymentReconciler:
                         "deployment_skip cell=%s amount=%s guard=%s reason=%s",
                         cell_id, amount, guard.guard_name, guard.reason,
                     )
+                    if self._attempts is not None:
+                        self._attempts.record_blocked(
+                            cell=cell_id, symbol=symbol, amount=amount,
+                            guard_name=guard.guard_name, reason=guard.reason,
+                        )
                     continue
                 try:
                     result = await self._executor.submit(decision, self._ctx)
-                except Exception:
+                except Exception as exc:
                     log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
+                    if self._attempts is not None:
+                        self._attempts.record_error(
+                            cell=cell_id, symbol=symbol, amount=amount, reason=repr(exc),
+                        )
                     continue
                 # The live executor does NOT raise on a venue reject (e.g. 10001
                 # "not enough balance"): it returns a SubmittedOrder with status
@@ -351,10 +368,24 @@ class DeploymentReconciler:
                         "deployment_submit_rejected cell=%s amount=%s status=%s",
                         cell_id, amount, result.status,
                     )
+                    if self._attempts is not None:
+                        # Recorded as "rejected", never "blocked": the guards
+                        # PASSED and an offer really did leave the process.
+                        self._attempts.record_rejected(
+                            cell=cell_id, symbol=symbol, amount=amount,
+                            reason=(
+                                str(result.raw_response) if result.raw_response
+                                else "venue_rejected"
+                            ),
+                        )
                     await self._emit_submit(cell_id, decision, result)
                     continue
                 self._tracker.record_deploy(cell_id, amount)
                 log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
+                if self._attempts is not None:
+                    self._attempts.record_submitted(
+                        cell=cell_id, symbol=symbol, amount=amount,
+                    )
                 await self._emit_submit(cell_id, decision, result)
 
     async def _emit_submit(
