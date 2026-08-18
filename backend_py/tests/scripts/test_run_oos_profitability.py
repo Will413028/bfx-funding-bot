@@ -16,12 +16,14 @@ def test_canary_yaml_loads_cells():
     yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.canary.yaml"
     cells = mod.load_cells_only(yaml_path)
     # canary runs fUST (live) + fUSD (DRY-RUN 2026-06-02: cap>0 but USD unfunded ->
-    # per-symbol balance gate hard-blocks fUSD). Both currencies use the same
-    # MeanReversion a30 + p2 set (p30-sparse + RatePercentile excluded).
-    assert len(cells) == 4
-    assert {c.period_agg for c in cells} == {"a30", "p2"}
+    # per-symbol balance gate hard-blocks fUSD). MR set: a30 + p2 for both currencies.
+    # B3 adds one adaptive_period fUST a30 cell (shadow canary, gated on Gate A + B).
+    assert len(cells) == 5
+    assert {c.period_agg for c in cells} >= {"a30", "p2"}
     assert {c.symbol for c in cells} == {"fUST", "fUSD"}
-    assert all(c.strategy.value == "mean_reversion" for c in cells)
+    # Mixed strategies: 4 MR + 1 adaptive_period
+    assert sum(1 for c in cells if c.strategy.value == "mean_reversion") == 4
+    assert sum(1 for c in cells if c.strategy.value == "adaptive_period") == 1
 
 
 def test_render_markdown_handles_infinity_sortino_and_ir():

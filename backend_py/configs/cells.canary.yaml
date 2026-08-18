@@ -50,4 +50,15 @@ cells:
     timeframe: 1h
     params: {threshold_sigma: 0.5, ratio_sigma: 0.3450137927640065, ema_span: 24}
 
+  # B3 canary: adaptive_period p14. START DARK (shadow/tiny cap) — size up only after
+  # Gate A (live MR G3 >=8 weekly windows, favorable) + Gate B (B1 divergence reporter
+  # shadow parity) + human sign-off. fUST cap shared with the 2 MR fUST cells above;
+  # decide the adaptive cell's allocation share before arming.
+  # DO NOT MERGE / DEPLOY until both gates clear and Will signs off.
+  - strategy: adaptive_period
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {ema_span: 24, ratio_sigma: 0.42049266874194213, t1: 0.5, t2: 1.5, p_mid: 7, p_long: 14}
+
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md

@@ -73,15 +73,9 @@ def test_canary_config_present() -> None:
 @pytest.mark.parametrize("cell", _load_canary_cells())
 def test_deployed_canary_cell_beats_passive(cell: CellConfig) -> None:
     candles = load_candles(FIXTURES / f"{cell.symbol}_{cell.period_agg}_{cell.timeframe}.jsonl.gz")
-    p = cell.params
-    result = _gate_for(
-        lambda: MeanReversionStrategy(
-            ema_span=int(p["ema_span"]),
-            threshold_sigma=Decimal(str(p["threshold_sigma"])),
-            ratio_sigma=Decimal(str(p["ratio_sigma"])),
-        ),
-        candles,
-    )
+    # Use generic build_strategy so adaptive_period (and any future) cells are
+    # dispatched correctly rather than hardcoded as MeanReversionStrategy.
+    result = _gate_for(lambda: build_strategy(cell), candles)
     assert result.passed, f"{cell.symbol}_{cell.period_agg} failed deploy gate: {result.reasons}"
 
 
