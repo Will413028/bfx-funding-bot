@@ -160,7 +160,13 @@ class FundingBookStore(FundingBookProvider):
         levels: Sequence[FundingBookLevel],
         *,
         expected_generation: int | None = None,
+        expected_reconciliation_epoch: int | None = None,
     ) -> bool:
+        if (
+            expected_reconciliation_epoch is not None
+            and self._reconciliation_epoch != expected_reconciliation_epoch
+        ):
+            return False
         state = self._state_for(symbol)
         if expected_generation is not None and state.generation != expected_generation:
             return False
@@ -189,6 +195,9 @@ class FundingBookStore(FundingBookProvider):
     def generation(self, symbol: str) -> int:
         state = self._states.get(symbol)
         return state.generation if state is not None else 0
+
+    def reconciliation_epoch(self) -> int:
+        return self._reconciliation_epoch
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         state = self._states.get(symbol)
@@ -325,13 +334,19 @@ class FundingBookService(FundingBookProvider):
     async def reconcile_once(self) -> None:
         for symbol in self._symbols:
             generation = self._store.generation(symbol)
+            reconciliation_epoch = self._store.reconciliation_epoch()
             try:
                 levels = await self._rest.get_funding_book(symbol=symbol, length=self._length)
             except Exception:
                 # A REST error cannot poison an independently fresh WS snapshot.
                 log.exception("funding_book_rest_reconcile_failed symbol=%s", symbol)
                 continue
-            if not self._store.apply_rest_snapshot(symbol, levels, expected_generation=generation):
+            if not self._store.apply_rest_snapshot(
+                symbol,
+                levels,
+                expected_generation=generation,
+                expected_reconciliation_epoch=reconciliation_epoch,
+            ):
                 log.info("funding_book_rest_reconcile_deferred symbol=%s", symbol)
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
