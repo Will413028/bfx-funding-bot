@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from bfx_funding_bot.modules.execution.contracts import GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 
@@ -33,13 +34,6 @@ class AccountContext:
     account_id: str
     credentials: Credentials
     allocation_cap_usdt: Decimal
-
-
-@dataclass(frozen=True, slots=True)
-class GuardResult:
-    allowed: bool
-    guard_name: str
-    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +67,7 @@ class ExecutorPort(Protocol):
     provided and fall back to deterministic generation only for direct callers.
     """
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder: ...
 
 
