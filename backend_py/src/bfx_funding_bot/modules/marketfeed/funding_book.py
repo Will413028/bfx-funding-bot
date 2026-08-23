@@ -70,6 +70,7 @@ class _BookState:
     captured_at_ms: int | None = None
     received_at_ms: int | None = None
     sequence: int | None = None
+    generation: int = 0
     ws_snapshot_received: bool = False
     sequence_valid: bool = False
     checksum_valid: bool = False
@@ -99,12 +100,11 @@ class FundingBookStore(FundingBookProvider):
         state.ws_snapshot_received = True
         state.source = "ws"
         state.sequence = sequence
-        if state.requires_reconciliation:
-            state.sequence_valid = False
-            state.checksum_valid = False
-        else:
-            state.sequence_valid = True
-            state.checksum_valid = True
+        # The snapshot only establishes a sequence baseline. A subsequent
+        # continuous sequence and matching checksum are required before use.
+        state.sequence_valid = False
+        state.checksum_valid = False
+        state.generation += 1
 
     def apply_update(
         self, symbol: str, level: FundingBookLevel, *, sequence: int | None = None
@@ -120,10 +120,12 @@ class FundingBookStore(FundingBookProvider):
             side[key] = level
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
+        state.generation += 1
 
     def apply_sequence(self, symbol: str, sequence: int) -> None:
         state = self._states.setdefault(symbol, _BookState())
         self._apply_sequence(state, sequence)
+        state.generation += 1
 
     def apply_checksum(
         self,
@@ -144,25 +146,36 @@ class FundingBookStore(FundingBookProvider):
         )
         if checksum != computed:
             self._invalidate(state)
-        elif not state.requires_reconciliation and state.ws_snapshot_received:
+        elif state.sequence_valid and state.ws_snapshot_received:
             state.checksum_valid = True
+        state.generation += 1
 
-    def apply_rest_snapshot(self, symbol: str, levels: Sequence[FundingBookLevel]) -> None:
+    def apply_rest_snapshot(
+        self,
+        symbol: str,
+        levels: Sequence[FundingBookLevel],
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
         state = self._states.setdefault(symbol, _BookState())
-        if not state.ws_snapshot_received:
-            return
+        if (expected_generation is not None and state.generation != expected_generation) or not (
+            state.ws_snapshot_received and state.sequence_valid and state.checksum_valid
+        ):
+            return False
         state.bids, state.asks = self._split_levels(levels)
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
         state.source = "rest_reconciled"
         state.requires_reconciliation = False
-        state.sequence_valid = True
-        state.checksum_valid = True
+        return True
 
     def mark_disconnected(self) -> None:
         for state in self._states.values():
             self._invalidate(state)
-            state.ws_snapshot_received = False
+
+    def generation(self, symbol: str) -> int:
+        state = self._states.get(symbol)
+        return state.generation if state is not None else 0
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         state = self._states.get(symbol)
@@ -210,8 +223,10 @@ class FundingBookStore(FundingBookProvider):
     def _apply_sequence(state: _BookState, sequence: int | None) -> None:
         if sequence is None:
             return
-        if state.sequence is not None and sequence != state.sequence + 1:
+        if state.sequence is None or sequence != state.sequence + 1:
             FundingBookStore._invalidate(state)
+        else:
+            state.sequence_valid = True
         state.sequence = sequence
 
     @staticmethod
@@ -285,13 +300,15 @@ class FundingBookService(FundingBookProvider):
 
     async def reconcile_once(self) -> None:
         for symbol in self._symbols:
+            generation = self._store.generation(symbol)
             try:
                 levels = await self._rest.get_funding_book(symbol=symbol, length=self._length)
             except Exception:
                 # A REST error cannot poison an independently fresh WS snapshot.
                 log.exception("funding_book_rest_reconcile_failed symbol=%s", symbol)
                 continue
-            self._store.apply_rest_snapshot(symbol, levels)
+            if not self._store.apply_rest_snapshot(symbol, levels, expected_generation=generation):
+                log.info("funding_book_rest_reconcile_deferred symbol=%s", symbol)
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         return self._store.snapshot(symbol, now_ms=now_ms)
