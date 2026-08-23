@@ -77,6 +77,44 @@ def test_valid_sequence_and_checksum_make_ws_snapshot_available() -> None:
     assert store.snapshot("fUST", now_ms=1_000) is not None
 
 
+def test_recovery_requires_rest_rebase_then_fresh_ws_evidence() -> None:
+    store = _valid_ws_store()
+    store.mark_disconnected()
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
+    store.apply_sequence("fUST", 21)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=22)
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+    assert store.apply_rest_snapshot("fUST", _book_snapshot())
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=30)
+    store.apply_sequence("fUST", 31)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=32)
+
+    snapshot = store.snapshot("fUST", now_ms=1_000)
+    assert snapshot is not None
+    assert snapshot.source == "ws"
+
+
+def test_ws_update_retires_the_previous_checksum_evidence() -> None:
+    store = _valid_ws_store()
+
+    store.apply_update("fUST", _level(rate="0.00022", period=7, amount="100"), sequence=13)
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+
+def test_rest_replacement_retires_previous_ws_evidence() -> None:
+    store = _valid_ws_store()
+
+    assert store.apply_rest_snapshot("fUST", _book_snapshot())
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+
 def test_exact_period_requires_depth_and_uses_absolute_bid_amount() -> None:
     snapshot = _snapshot(
         bids=[_level(rate="0.00020", period=7, amount="-100")],
@@ -121,11 +159,10 @@ def test_sequence_gap_requires_ws_snapshot_then_rest_reconciliation() -> None:
     store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
     store.apply_sequence("fUST", 21)
     store.apply_checksum("fUST", checksum=123, expected=123, sequence=22)
-    store.apply_rest_snapshot("fUST", _book_snapshot())
 
     snapshot = store.snapshot("fUST", now_ms=1_000)
     assert snapshot is not None
-    assert snapshot.source == "rest_reconciled"
+    assert snapshot.source == "ws"
     assert snapshot.sequence_valid and snapshot.checksum_valid
 
 
@@ -191,8 +228,7 @@ async def test_service_uses_one_store_provider_and_periodically_reconciles_rest(
 
     assert ws.started and ws.stopped
     assert rest.calls == [("fUST", 25)]
-    assert snapshot is not None
-    assert snapshot.source == "rest_reconciled"
+    assert snapshot is None
 
 
 @pytest.mark.asyncio
@@ -236,6 +272,7 @@ async def test_reconciliation_does_not_overwrite_ws_update_received_during_rest_
     store.apply_update("fUST", _level(rate="0.00022", period=7, amount="100"), sequence=13)
     release.set()
     await reconcile
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=14)
 
     snapshot = service.snapshot("fUST", now_ms=1_000)
     assert snapshot is not None
