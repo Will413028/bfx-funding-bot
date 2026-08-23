@@ -18,6 +18,7 @@ from sqlalchemy.engine import Connection
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.accounts.user_profile
 import bfx_funding_bot.modules.candles.tables
+import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.diagnostics.tables
 import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
