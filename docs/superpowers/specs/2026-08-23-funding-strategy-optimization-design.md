@@ -1,7 +1,7 @@
 # Funding Strategy Execution Integrity & Rate Optimization Design
 
 **Date:** 2026-08-23
-**Status:** Architecture approved; spec amendment pending review
+**Status:** Architecture and implementation spec approved
 **Scope:** repository changes only; no remote deployment and no live canary parameter changes
 
 ## Goal
