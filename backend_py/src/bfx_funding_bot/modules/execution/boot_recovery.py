@@ -32,6 +32,7 @@ from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import (
@@ -85,6 +86,11 @@ class LocalClaim:
     signal_correlation_id: UUID
     occurred_at_ms: int
     symbol: str
+    reservation_ref: ReservationRef | None = None
+
+
+class RecoveryCorrelationError(RuntimeError):
+    """Recovery cannot safely emit a lifecycle event without audited identity."""
 
 
 def synth_orphan_cid(venue_offer_id: str) -> int:
@@ -140,13 +146,9 @@ def compute_recovery_actions(
             continue
         if (now_ms - offer.mts_created) < action_grace_ms:
             continue  # too fresh — local claim may still be committing
-        actions.append(ReservationClaimed(
-            cid=synth_orphan_cid(voi), venue_offer_id=voi,
-            size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
-            account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
-            symbol=offer.symbol,
-            is_legacy_uncorrelated=True,
-        ))
+        raise RecoveryCorrelationError(
+            f"unresolved recovery orphan voi={voi}: no audited reservation reference",
+        )
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
     for voi, claim in claimed_by_voi.items():
@@ -158,12 +160,16 @@ def compute_recovery_actions(
             raise ValueError(
                 f"recovery release for cid={claim.cid} has symbol={claim.symbol!r} "
                 f"not in configured {sorted(configured_symbols)}")
+        if claim.reservation_ref is None:
+            raise RecoveryCorrelationError(
+                f"unresolved recovery release voi={voi}: missing reservation reference",
+            )
         actions.append(ReservationReleased(
             cid=claim.cid, venue_offer_id=voi, size_usdt=claim.size_usdt,
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
             symbol=claim.symbol,
-            is_legacy_uncorrelated=True,
+            reservation_ref=claim.reservation_ref,
         ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
@@ -173,13 +179,17 @@ def compute_recovery_actions(
                 raise ValueError(
                     f"recovery fail for cid={c.cid} has symbol={c.symbol!r} "
                     f"not in configured {sorted(configured_symbols)}")
+            if c.reservation_ref is None:
+                raise RecoveryCorrelationError(
+                    f"unresolved recovery pending cid={c.cid}: missing reservation reference",
+                )
             actions.append(ReservationFailed(
                 cid=c.cid, size_usdt=c.size_usdt,
                 signal_correlation_id=c.signal_correlation_id,
                 account_id=account_id, is_simulated=is_simulated,
                 reason="unresolved_at_boot", occurred_at_ms=now_ms,
                 symbol=c.symbol,
-                is_legacy_uncorrelated=True,
+                reservation_ref=c.reservation_ref,
             ))
 
     return actions
@@ -497,6 +507,16 @@ class BootRecovery:
                 state=RegistryState(r.state), size_usdt=Decimal(str(r.size_usdt)),
                 signal_correlation_id=UUID(r.signal_correlation_id),
                 occurred_at_ms=r.occurred_at_ms, symbol=r.symbol,
+                reservation_ref=(
+                    ReservationRef(
+                        execution_decision_id=r.execution_decision_id,
+                        cid=r.cid,
+                        signal_correlation_id=UUID(r.signal_correlation_id),
+                        venue_offer_id=r.venue_offer_id,
+                    )
+                    if r.execution_decision_id is not None
+                    else None
+                ),
             )
             for r in rows
         ]

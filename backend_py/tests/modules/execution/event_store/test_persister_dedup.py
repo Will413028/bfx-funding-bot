@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import (
     EventStorePersister,
     NoopEventPersister,
@@ -21,6 +22,13 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationReleased
 
 _SCID = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _ref(cid: int, venue_offer_id: str | None) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-persister-{cid}", cid=cid,
+        signal_correlation_id=_SCID, venue_offer_id=venue_offer_id,
+    )
 
 
 async def _create_all(session: AsyncSession) -> None:
@@ -42,7 +50,9 @@ def _fill(cid: int = 1, venue_offer_id: str = "v1", venue_seq: int = 10) -> Orde
         is_simulated=False,
         venue_seq=venue_seq,
         occurred_at_ms=2000,
-    symbol="fUST")
+        symbol="fUST",
+        reservation_ref=_ref(cid, venue_offer_id),
+    )
 
 
 def _release(cid: int = 2, venue_offer_id: str = "v2", venue_seq: int = 20) -> ReservationReleased:
@@ -56,7 +66,9 @@ def _release(cid: int = 2, venue_offer_id: str = "v2", venue_seq: int = 20) -> R
         is_simulated=False,
         venue_seq=venue_seq,
         occurred_at_ms=3000,
-    symbol="fUST")
+        symbol="fUST",
+        reservation_ref=_ref(cid, venue_offer_id),
+    )
 
 
 async def _make_persister(

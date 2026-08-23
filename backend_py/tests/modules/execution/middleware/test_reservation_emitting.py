@@ -12,6 +12,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
+    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -22,12 +23,18 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
+from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    DecisionPayload,
+    Phase,
+    StrategyName,
+)
 
 
 def _decision(symbol: str = "fUST") -> DecisionPayload:
@@ -160,6 +167,52 @@ async def test_reservation_reference_threads_from_intent_to_submit_response_and_
     assert intent.reservation_ref.execution_decision_id == "d-threaded-reference"
     assert claimed.reservation_ref == filled.reservation_ref == result.reservation_ref
     assert result.reservation_ref.venue_offer_id == "paper_ref"
+
+
+@pytest.mark.asyncio
+async def test_real_paper_executor_merges_venue_bound_reservation_reference() -> None:
+    class _EventSink:
+        async def emit(self, _event: dict[object, object]) -> None:
+            return None
+
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    result = await ReservationEmittingMiddleware(
+        EchoPaperExecutor(
+            event_sink=_EventSink(), phase=Phase.PAPER,
+            strategy=StrategyName.RATE_PERCENTILE, cell="test",
+        ),
+        bus=bus, persister=persister, is_simulated=True,
+    ).submit(_ready_to_submit(decision_id="d-real-paper"), _ctx())
+
+    assert result.status == "filled"
+    assert result.reservation_ref is not None
+    assert result.reservation_ref.execution_decision_id == "d-real-paper"
+    assert result.reservation_ref.venue_offer_id == result.venue_offer_id
+
+
+@pytest.mark.asyncio
+async def test_conflicting_executor_reference_is_rejected_by_identity() -> None:
+    class _ConflictingInner:
+        async def submit(
+            self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+            reservation_ref: ReservationRef | None = None,
+        ) -> SubmittedOrder:
+            assert cid is not None
+            return SubmittedOrder(
+                cid=cid, venue_offer_id="venue-1", status="submitted", raw_response=None,
+                reservation_ref=ReservationRef(
+                    execution_decision_id="d-conflict", cid=cid,
+                    signal_correlation_id=ready.decision.signal_correlation_id,
+                    venue_offer_id="venue-1",
+                ),
+            )
+
+    with pytest.raises(RuntimeError, match="identity"):
+        await ReservationEmittingMiddleware(
+            _ConflictingInner(), bus=DomainEventBus(),
+            persister=_RecordingPersister(), is_simulated=False,
+        ).submit(_ready_to_submit(), _ctx())
 
 
 @pytest.mark.asyncio

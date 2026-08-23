@@ -19,6 +19,7 @@ def _claim(symbol: str, amount: str, account_id: str = "default") -> Reservation
     return ReservationClaimed(
         cid=1, venue_offer_id="x", symbol=symbol, amount=Decimal(amount),
         signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
+        is_legacy_uncorrelated=True,
     )
 
 
@@ -28,6 +29,7 @@ def _fill(symbol: str, amount: str, venue_offer_id: str = "x",
         cid=1, venue_offer_id=venue_offer_id, credit_id=None, symbol=symbol,
         amount=Decimal(amount), fill_rate=0.0001, signal_correlation_id=uuid4(),
         account_id=account_id, is_simulated=True, venue_seq=venue_seq,
+        is_legacy_uncorrelated=True,
     )
 
 
@@ -37,6 +39,7 @@ def _release(symbol: str, amount: str, venue_offer_id: str = "x",
         cid=1, venue_offer_id=venue_offer_id, symbol=symbol, amount=Decimal(amount),
         reason="venue_cancel", signal_correlation_id=uuid4(),
         account_id=account_id, is_simulated=True, venue_seq=venue_seq,
+        is_legacy_uncorrelated=True,
     )
 
 

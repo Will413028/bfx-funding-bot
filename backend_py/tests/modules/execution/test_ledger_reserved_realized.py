@@ -18,7 +18,7 @@ def _claim(size: float, account_id: str = "default") -> ReservationClaimed:
     return ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal(str(size)),
         signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", is_legacy_uncorrelated=True)
 
 
 def _fill(size: float, account_id: str = "default") -> OrderFilled:
@@ -26,7 +26,7 @@ def _fill(size: float, account_id: str = "default") -> OrderFilled:
         cid=1, venue_offer_id="x", credit_id=None,
         size_usdt=Decimal(str(size)), fill_rate=0.0001,
         signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", is_legacy_uncorrelated=True)
 
 
 def _release(size: float, account_id: str = "default") -> ReservationReleased:
@@ -34,7 +34,7 @@ def _release(size: float, account_id: str = "default") -> ReservationReleased:
         cid=1, venue_offer_id="x", size_usdt=Decimal(str(size)),
         reason="venue_cancel", signal_correlation_id=uuid4(),
         account_id=account_id, is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", is_legacy_uncorrelated=True)
 
 
 @pytest.mark.asyncio

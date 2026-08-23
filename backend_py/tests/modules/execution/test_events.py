@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -14,6 +15,49 @@ from bfx_funding_bot.modules.execution.events import (
 )
 
 
+def _reservation_ref(*, cid: int, scid: UUID, voi: str | None = None) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id="d-events", cid=cid,
+        signal_correlation_id=scid, venue_offer_id=voi,
+    )
+
+
+@pytest.mark.parametrize("make", [
+    lambda scid: ReservationClaimed(
+        cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
+    ),
+    lambda scid: OrderFilled(
+        cid=42, venue_offer_id="v1", credit_id=None, size_usdt=Decimal("100"),
+        symbol="fUST", fill_rate=0.0005, signal_correlation_id=scid,
+        account_id="default", is_simulated=False,
+    ),
+    lambda scid: ReservationReleased(
+        cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
+        reason="venue_cancel", signal_correlation_id=scid, account_id="default",
+        is_simulated=False,
+    ),
+    lambda scid: ReservationFailed(
+        cid=42, size_usdt=Decimal("100"), symbol="fUST", reason="submit_failed",
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
+    ),
+])
+def test_new_lifecycle_event_requires_reservation_reference(make: object) -> None:
+    scid = uuid4()
+    with pytest.raises(TypeError, match="reservation_ref"):
+        make(scid)  # type: ignore[operator]
+
+
+def test_new_lifecycle_event_accepts_matching_reservation_reference() -> None:
+    scid = uuid4()
+    event = ReservationClaimed(
+        cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
+        reservation_ref=_reservation_ref(cid=42, scid=scid, voi="v1"),
+    )
+    assert event.reservation_ref is not None
+
+
 def test_reservation_claimed_optional_fields_default_none() -> None:
     e = ReservationClaimed(
         cid=42,
@@ -23,6 +67,7 @@ def test_reservation_claimed_optional_fields_default_none() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.venue_seq is None
     assert e.event_seq is None
@@ -41,6 +86,7 @@ def test_order_filled_optional_fields_default_none() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.venue_seq is None
     assert e.event_seq is None
@@ -58,6 +104,7 @@ def test_reservation_released_optional_fields_default_none() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.venue_seq is None
     assert e.event_seq is None
@@ -138,6 +185,7 @@ def test_events_are_frozen() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.cid = 99  # type: ignore[misc]
@@ -178,6 +226,7 @@ def test_reservation_failed_fields() -> None:
         is_simulated=False,
         reason="submit_failed",
         occurred_at_ms=2000,
+        is_legacy_uncorrelated=True,
     )
     assert ev.reason == "submit_failed"
     assert ev.is_simulated is False
@@ -196,7 +245,7 @@ def test_reservation_failed_has_symbol_and_amount() -> None:
     e = ReservationFailed(
         cid=1, size_usdt=Decimal("100"), symbol="fUST",
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-        reason="submit_failed")
+        reason="submit_failed", is_legacy_uncorrelated=True)
     assert e.symbol == "fUST"
     assert e.amount == Decimal("100")
 
@@ -210,6 +259,7 @@ def test_reservation_claimed_has_symbol_and_amount() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("100")
     assert e.symbol == "fUST"
@@ -241,6 +291,7 @@ def test_reservation_claimed_back_compat_size_usdt_kwarg() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("250")
     assert e.size_usdt == Decimal("250")
@@ -258,6 +309,7 @@ def test_order_filled_has_symbol_and_amount() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("100")
     assert e.symbol == "fUST"
@@ -275,6 +327,7 @@ def test_order_filled_back_compat_size_usdt_kwarg() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("70")
     assert e.symbol == "fUSD"
@@ -290,6 +343,7 @@ def test_reservation_released_has_symbol_and_amount() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("100")
     assert e.symbol == "fUST"
@@ -306,6 +360,7 @@ def test_reservation_released_back_compat_size_usdt_kwarg() -> None:
         signal_correlation_id=uuid4(),
         account_id="default",
         is_simulated=False,
+        is_legacy_uncorrelated=True,
     )
     assert e.amount == Decimal("30")
     assert e.symbol == "fUSD"
@@ -322,6 +377,7 @@ def test_resolve_amount_rejects_conflicting_amount_and_size_usdt() -> None:
             signal_correlation_id=uuid4(),
             account_id="default",
             is_simulated=False,
+            is_legacy_uncorrelated=True,
         )
 
 
@@ -334,6 +390,7 @@ def test_resolve_amount_rejects_when_both_missing() -> None:
             signal_correlation_id=uuid4(),
             account_id="default",
             is_simulated=False,
+            is_legacy_uncorrelated=True,
         )
 
 
@@ -411,13 +468,17 @@ def test_position_reconciled_rejects_conflicting_canonical_and_usdt() -> None:
     lambda s: ReservationIntent(cid=1, amount=Decimal("100"), symbol=s,
         execution_decision_id="d-events", signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
     lambda s: ReservationFailed(cid=1, amount=Decimal("100"), symbol=s,
-        signal_correlation_id=uuid4(), account_id="a", is_simulated=False, reason="x"),
+        signal_correlation_id=uuid4(), account_id="a", is_simulated=False, reason="x",
+        is_legacy_uncorrelated=True),
     lambda s: ReservationClaimed(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,
-        signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+        signal_correlation_id=uuid4(), account_id="a", is_simulated=False,
+        is_legacy_uncorrelated=True),
     lambda s: OrderFilled(cid=1, venue_offer_id="v1", credit_id=None, amount=Decimal("100"),
-        symbol=s, fill_rate=0.0, signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+        symbol=s, fill_rate=0.0, signal_correlation_id=uuid4(), account_id="a", is_simulated=False,
+        is_legacy_uncorrelated=True),
     lambda s: ReservationReleased(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,
-        reason="x", signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+        reason="x", signal_correlation_id=uuid4(), account_id="a", is_simulated=False,
+        is_legacy_uncorrelated=True),
 ])
 def test_reserve_events_reject_none_symbol(make: object) -> None:
     """symbol=None must fail loud, not silently construct. A frozen dataclass does

@@ -5,8 +5,6 @@ from decimal import Decimal
 from typing import Any, cast
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_store.serialization import (
@@ -28,6 +26,10 @@ from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 class SnapshotDrift:
     reserved_drift: Decimal
     realized_drift: Decimal
+
+
+class OfferClaimIdentityConflictError(RuntimeError):
+    """A CID projection attempted to change an established reservation identity."""
 
 
 # Event types whose re-delivery must be deduped (idempotent fills/releases).
@@ -181,47 +183,36 @@ class PostgresEventStore:
         occurred_at_ms: int,
         last_updated_ms: int,
     ) -> None:
-        dialect = session.bind.dialect.name if session.bind else "postgresql"
-        ins = pg_insert if dialect == "postgresql" else sqlite_insert
-        values: dict[str, Any] = {
-            "cid": cid,
-            "account_id": account_id,
-            "deployment_environment": self._env,
-            "symbol": symbol,
-            "state": state.value,
-            "venue_offer_id": venue_offer_id,
-            "size_usdt": size_usdt,
-            "signal_correlation_id": signal_correlation_id,
-            "execution_decision_id": execution_decision_id,
-            "occurred_at_ms": occurred_at_ms,
-            "last_updated_ms": last_updated_ms,
-            # FSM state is the SoT for claims; position_state carries the
-            # high-water mark, so last_event_seq stays 0 here (by-design,
-            # carry-forward (d)).
-            "last_event_seq": 0,
-        }
-        update_values = {k: values[k] for k in (
-            "state", "venue_offer_id", "last_updated_ms", "symbol",
-        )}
-        # A historical lifecycle row has no audited decision id. It must not
-        # erase a correlation already projected from a post-Task-4 intent.
-        update_values["execution_decision_id"] = func.coalesce(
-            values["execution_decision_id"], OfferClaimRow.execution_decision_id,
-        )
-        stmt = ins(OfferClaimRow).values(values).on_conflict_do_update(
-            index_elements=["account_id", "deployment_environment", "cid"],
-            set_=update_values,
-        )
-        await session.execute(stmt)
-        # Core-level upsert bypasses the ORM, so any instance already loaded into
-        # this session's identity map for the same composite PK is now stale.
-        # Expire it so a subsequent select() re-fetches the updated row. The PK
-        # tuple order follows the OfferClaimRow PrimaryKeyConstraint declaration.
-        cached = session.identity_map.get(
-            (OfferClaimRow, (account_id, self._env, cid), None)
-        )
-        if cached is not None:
-            session.expire(cached)
+        existing = await session.get(OfferClaimRow, (account_id, self._env, cid))
+        if existing is None:
+            session.add(OfferClaimRow(
+                cid=cid, account_id=account_id, deployment_environment=self._env,
+                symbol=symbol, state=state.value, venue_offer_id=venue_offer_id,
+                size_usdt=size_usdt, signal_correlation_id=signal_correlation_id,
+                execution_decision_id=execution_decision_id,
+                occurred_at_ms=occurred_at_ms, last_updated_ms=last_updated_ms,
+                last_event_seq=0,
+            ))
+            return
+        if existing.signal_correlation_id != signal_correlation_id:
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: signal")
+        if (
+            existing.execution_decision_id is not None
+            and existing.execution_decision_id != execution_decision_id
+        ):
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: decision")
+        if (
+            existing.venue_offer_id is not None
+            and existing.venue_offer_id != venue_offer_id
+        ):
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: venue offer")
+        if existing.execution_decision_id is None:
+            existing.execution_decision_id = execution_decision_id
+        if existing.venue_offer_id is None:
+            existing.venue_offer_id = venue_offer_id
+        existing.state = state.value
+        existing.symbol = symbol
+        existing.last_updated_ms = last_updated_ms
 
     async def _project_position_state(
         self,

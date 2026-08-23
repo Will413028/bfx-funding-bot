@@ -20,6 +20,7 @@ async def test_fill_and_reconcile_are_isolated_per_symbol() -> None:
             cid=1, venue_offer_id="v1", credit_id="C1",
             amount=Decimal("50"), symbol="fUST", fill_rate=0.0005,
             signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+            is_legacy_uncorrelated=True,
         )
     )
     assert led.current_exposure("fUST") == Decimal("350")  # 300 realized + 50 filled

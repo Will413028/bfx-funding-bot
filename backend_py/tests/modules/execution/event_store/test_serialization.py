@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
     event_type_of,
@@ -22,10 +23,17 @@ _VOI = "venue-1"
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
 
+def _ref(cid: int = _CID, voi: str | None = _VOI) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-serialization-{cid}", cid=cid,
+        signal_correlation_id=_SCID, venue_offer_id=voi,
+    )
+
+
 def _claimed() -> ReservationClaimed:
     return ReservationClaimed(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("10.5"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=7, occurred_at_ms=1000, symbol="fUST")
+        venue_seq=7, occurred_at_ms=1000, symbol="fUST", reservation_ref=_ref())
 
 
 def test_event_type_of() -> None:
@@ -36,10 +44,10 @@ def test_event_type_of() -> None:
     _claimed(),
     OrderFilled(cid=_CID, venue_offer_id=_VOI, credit_id="cr-1", size_usdt=Decimal("3.25"),
         fill_rate=0.0004, signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=8, occurred_at_ms=2000, symbol="fUST"),
+        venue_seq=8, occurred_at_ms=2000, symbol="fUST", reservation_ref=_ref()),
     ReservationReleased(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("2"),
         reason="missing_from_venue", signal_correlation_id=_SCID, account_id="acct",
-        is_simulated=True, venue_seq=9, occurred_at_ms=3000, symbol="fUST"),
+        is_simulated=True, venue_seq=9, occurred_at_ms=3000, symbol="fUST", reservation_ref=_ref()),
 ])
 def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)
@@ -64,7 +72,7 @@ def test_intent_failed_event_type_of() -> None:
         occurred_at_ms=1000)
     failed = ReservationFailed(cid=1, size_usdt=Decimal("5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        reason="submit_failed", occurred_at_ms=1000)
+        reason="submit_failed", occurred_at_ms=1000, reservation_ref=_ref(1, None))
     assert event_type_of(intent) == "RESERVATION_INTENT"
     assert event_type_of(failed) == "RESERVATION_FAILED"
 
@@ -75,7 +83,7 @@ def test_intent_failed_event_type_of() -> None:
         occurred_at_ms=1000),
     ReservationFailed(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=False,
-        reason="submit_failed", occurred_at_ms=2000),
+        reason="submit_failed", occurred_at_ms=2000, reservation_ref=_ref(9, None)),
 ])
 def test_intent_failed_roundtrip(event: object) -> None:
     etype = event_type_of(event)
@@ -135,3 +143,5 @@ def test_legacy_position_event_without_symbol_upcasts_to_fust(
     ev = deserialize_event(etype, legacy)
     assert ev.symbol == "fUST"           # type: ignore[attr-defined]
     assert ev.amount == Decimal("12.5")  # type: ignore[attr-defined]
+    assert ev.reservation_ref is None  # type: ignore[attr-defined]
+    assert ev.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
