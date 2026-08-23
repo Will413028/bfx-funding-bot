@@ -120,6 +120,8 @@ class FundingBookStore(FundingBookProvider):
             side[key] = level
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
+        state.source = "ws"
+        state.checksum_valid = False
         state.generation += 1
 
     def apply_sequence(self, symbol: str, sequence: int) -> None:
@@ -158,20 +160,27 @@ class FundingBookStore(FundingBookProvider):
         expected_generation: int | None = None,
     ) -> bool:
         state = self._states.setdefault(symbol, _BookState())
-        if (expected_generation is not None and state.generation != expected_generation) or not (
-            state.ws_snapshot_received and state.sequence_valid and state.checksum_valid
-        ):
+        if expected_generation is not None and state.generation != expected_generation:
             return False
         state.bids, state.asks = self._split_levels(levels)
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
         state.source = "rest_reconciled"
+        # REST levels replace the book, so all prior WS evidence is stale. A
+        # new WS snapshot, contiguous sequence, and matching checksum must
+        # establish eligibility after this rebase.
+        state.sequence = None
+        state.ws_snapshot_received = False
+        state.sequence_valid = False
+        state.checksum_valid = False
         state.requires_reconciliation = False
+        state.generation += 1
         return True
 
     def mark_disconnected(self) -> None:
         for state in self._states.values():
             self._invalidate(state)
+            state.generation += 1
 
     def generation(self, symbol: str) -> int:
         state = self._states.get(symbol)
@@ -193,7 +202,9 @@ class FundingBookStore(FundingBookProvider):
             checksum_valid=state.checksum_valid,
             sequence=state.sequence,
         )
-        if not snapshot.is_fresh(symbol=symbol, now_ms=now_ms, max_age_ms=self._max_age_ms):
+        if state.requires_reconciliation or not snapshot.is_fresh(
+            symbol=symbol, now_ms=now_ms, max_age_ms=self._max_age_ms
+        ):
             return None
         return snapshot
 
