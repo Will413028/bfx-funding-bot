@@ -16,6 +16,10 @@ class ExecutionAuditUnavailable(RuntimeError):  # noqa: N818 - public typed cont
     """Raised when durable audit persistence cannot be confirmed."""
 
 
+class ExecutionAuditConflict(ExecutionAuditUnavailable):
+    """Raised when a retry reuses a decision id with different audit evidence."""
+
+
 class ExecutionDecisionRecorder:
     """Persist one decision before the execution path can reach a venue."""
 
@@ -26,14 +30,24 @@ class ExecutionDecisionRecorder:
         """Commit one idempotent append-only insert or fail closed.
 
         `decision_id` is the idempotency key: concurrent/retried delivery of the
-        same candidate can produce only one durable row. No conflicting update is
-        attempted, so the original evidence remains immutable.
+        same candidate can produce only one durable row. A duplicate succeeds
+        only when every persisted value matches the original row; a conflicting
+        payload rolls back and fails closed.
         """
         try:
             async with session_scope(self._session_factory) as session:
-                await session.execute(
-                    _idempotent_insert(session, decision.persistence_values())
+                values = decision.persistence_values()
+                result = await session.execute(
+                    _idempotent_insert(session, values).returning(
+                        ExecutionDecisionRow.decision_id
+                    )
                 )
+                if result.scalar_one_or_none() is None:
+                    existing = await session.get(ExecutionDecisionRow, decision.decision_id)
+                    if existing is None or not _has_canonical_values(existing, values):
+                        raise ExecutionAuditConflict("execution decision audit conflicts with retry")
+        except ExecutionAuditUnavailable:
+            raise
         except Exception as exc:
             raise ExecutionAuditUnavailable("execution decision audit is unavailable") from exc
 
@@ -53,3 +67,7 @@ def _idempotent_insert(session: AsyncSession, values: dict[str, object]) -> Any:
         )
 
     raise RuntimeError(f"unsupported audit database dialect: {bind.dialect.name}")
+
+
+def _has_canonical_values(row: ExecutionDecisionRow, values: dict[str, object]) -> bool:
+    return all(getattr(row, field) == expected for field, expected in values.items())
