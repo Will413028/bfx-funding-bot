@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import logging
 
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 log = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ class HeartbeatMiddleware:
         self._probe = probe
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
         try:
-            return await self._inner.submit(decision, ctx, cid=cid)
+            return await self._inner.submit(ready, ctx, cid=cid)
         finally:
             try:
                 self._probe.record_heartbeat("executor")

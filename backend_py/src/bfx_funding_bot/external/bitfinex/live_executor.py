@@ -29,6 +29,7 @@ from bfx_funding_bot.core.errors import (
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -43,11 +44,7 @@ from bfx_funding_bot.modules.execution.retry import (
     classify_httpx_response,
     transient_retry,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
-    Phase,
-    StrategyName,
-)
+from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 log = logging.getLogger(__name__)
 
@@ -199,8 +196,9 @@ class BitfinexLiveExecutor:
         self._base_url = base_url.rstrip("/")
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
+        decision = ready.decision
         if not decision.symbol or decision.symbol not in self._configured_symbols:
             raise InvariantViolation(
                 f"submit rejected: decision.symbol={decision.symbol!r} not in "

@@ -1,12 +1,22 @@
+import inspect
+from typing import get_type_hints
+
 import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import (
+    BitfinexLiveExecutor,
     build_offer_payload,
     format_venue_decimal,
     parse_offer_response,
 )
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+
+
+def test_live_executor_submit_accepts_only_ready_to_submit() -> None:
+    assert get_type_hints(BitfinexLiveExecutor.submit)["ready"] is ReadyToSubmit
+    assert list(inspect.signature(BitfinexLiveExecutor.submit).parameters)[1] == "ready"
 
 
 def test_format_venue_decimal_no_scientific_notation() -> None:

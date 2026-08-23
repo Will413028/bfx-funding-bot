@@ -148,6 +148,7 @@ _SCID_T1 = UUID("11111111-1111-1111-1111-111111111111")
 
 def test_reservation_intent_fields() -> None:
     ev = ReservationIntent(
+        execution_decision_id="d-events",
         cid=42,
         size_usdt=Decimal("100"),
         symbol="fUST",
@@ -157,6 +158,7 @@ def test_reservation_intent_fields() -> None:
         occurred_at_ms=1000,
     )
     assert ev.cid == 42
+    assert ev.execution_decision_id == "d-events"
     assert ev.size_usdt == Decimal("100")
     assert ev.account_id == "acct"
     # uniform bitemporal optionals default None
@@ -183,7 +185,7 @@ def test_reservation_failed_fields() -> None:
 
 def test_reservation_intent_has_symbol_and_amount() -> None:
     e = ReservationIntent(
-        cid=1, size_usdt=Decimal("100"), symbol="fUST",
+        execution_decision_id="d-events", cid=1, size_usdt=Decimal("100"), symbol="fUST",
         signal_correlation_id=uuid4(), account_id="default", is_simulated=False)
     assert e.symbol == "fUST"
     assert e.amount == Decimal("100")      # mirrored from size_usdt
@@ -407,7 +409,7 @@ def test_position_reconciled_rejects_conflicting_canonical_and_usdt() -> None:
 
 @pytest.mark.parametrize("make", [
     lambda s: ReservationIntent(cid=1, amount=Decimal("100"), symbol=s,
-        signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
+        execution_decision_id="d-events", signal_correlation_id=uuid4(), account_id="a", is_simulated=False),
     lambda s: ReservationFailed(cid=1, amount=Decimal("100"), symbol=s,
         signal_correlation_id=uuid4(), account_id="a", is_simulated=False, reason="x"),
     lambda s: ReservationClaimed(cid=1, venue_offer_id="v1", amount=Decimal("100"), symbol=s,

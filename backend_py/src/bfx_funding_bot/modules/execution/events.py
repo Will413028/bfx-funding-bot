@@ -69,6 +69,13 @@ def _require_symbol(ev: object) -> None:
         raise TypeError(f"{type(ev).__name__} requires a non-empty `symbol`")
 
 
+def _require_execution_decision_id(ev: object) -> None:
+    """Reject intents that cannot be correlated to their pre-trade audit row."""
+    decision_id = getattr(ev, "execution_decision_id", None)
+    if not isinstance(decision_id, str) or not decision_id:
+        raise TypeError(f"{type(ev).__name__} requires a non-empty `execution_decision_id`")
+
+
 def _resolve_position_fields(ev: object) -> None:
     """Reconcile transitional `*_usdt` with canonical reserved/realized/available.
 
@@ -117,6 +124,7 @@ class ReservationIntent:
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
+    execution_decision_id: str
     amount: Decimal | None = None
     size_usdt: Decimal | None = None  # transitional alias; mapped to amount
     venue_seq: int | None = None
@@ -126,6 +134,7 @@ class ReservationIntent:
 
     def __post_init__(self) -> None:
         _require_symbol(self)
+        _require_execution_decision_id(self)
         _resolve_amount(self)
 
 

@@ -20,6 +20,11 @@ import httpx
 import pytest
 
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -59,6 +64,18 @@ def _decision() -> DecisionPayload:
         offer_amount_usdt=150.0,
         offer_duration_days=2,
         symbol="fUST",
+    )
+
+
+def _ready() -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(),
+        decision_id="d-metrics",
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-metrics",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
     )
 
 
@@ -162,11 +179,13 @@ class _StubExecutor:
         self._order = order
         self._exc = exc
         self.calls: list[int | None] = []
+        self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
         self.calls.append(cid)
+        self.readies.append(ready)
         if self._exc is not None:
             raise self._exc
         assert self._order is not None
@@ -179,9 +198,11 @@ async def test_submit_middleware_passes_result_and_records() -> None:
     order = SubmittedOrder(cid=7, venue_offer_id="paper_x", status="filled", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
-    got = await mw.submit(_decision(), _ctx(), cid=7)
+    ready = _ready()
+    got = await mw.submit(ready, _ctx(), cid=7)
     assert got is order                       # byte-identical passthrough
     assert inner.calls == [7]                 # cid threaded down unchanged
+    assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "filled"},
     ) == 1.0
@@ -194,7 +215,7 @@ async def test_submit_middleware_reraises_and_counts_exception() -> None:
     boom = ValueError("venue said no")
     mw = MetricsSubmitMiddleware(_StubExecutor(exc=boom), metrics=m)
     with pytest.raises(ValueError) as ei:
-        await mw.submit(_decision(), _ctx())
+        await mw.submit(_ready(), _ctx())
     assert ei.value is boom                   # exception object unchanged
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "exception"},
@@ -206,7 +227,7 @@ async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
     m = DaemonMetrics()
     order = SubmittedOrder(cid=1, venue_offer_id=None, status="weird_venue_string", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready(), _ctx())
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "other"},
     ) == 1.0
@@ -222,7 +243,7 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
     m.observe_submit = _boom  # type: ignore[method-assign]
     order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    got = await mw.submit(_decision(), _ctx())   # must NOT raise
+    got = await mw.submit(_ready(), _ctx())   # must NOT raise
     assert got is order
 
 

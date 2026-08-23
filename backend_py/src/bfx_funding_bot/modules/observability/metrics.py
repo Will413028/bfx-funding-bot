@@ -68,7 +68,8 @@ if TYPE_CHECKING:
         ExecutorPort,
         SubmittedOrder,
     )
-    from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 
 log = logging.getLogger(__name__)
 
@@ -388,11 +389,11 @@ class MetricsSubmitMiddleware:
             log.debug("metrics_submit_observe_failed", exc_info=True)
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
         start = time.perf_counter()
         try:
-            order = await self._inner.submit(decision, ctx, cid=cid)
+            order = await self._inner.submit(ready, ctx, cid=cid)
         except BaseException:
             self._safe_observe("exception", start)
             raise

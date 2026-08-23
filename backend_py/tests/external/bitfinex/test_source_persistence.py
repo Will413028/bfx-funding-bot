@@ -61,7 +61,7 @@ async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_f
     scid = uuid4()
     # seed a CLAIMED row so the offer is reserved (reserved=100)
     await persister.persist(
-        ReservationIntent(cid=11, size_usdt=Decimal("100"), symbol="fUSD",
+        ReservationIntent(cid=11, execution_decision_id="d-source-11", size_usdt=Decimal("100"), symbol="fUSD",
                          signal_correlation_id=scid,
                          account_id=_ACC, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=11, venue_offer_id="888", size_usdt=Decimal("100"),
@@ -127,7 +127,7 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()
     await persister.persist(
-        ReservationIntent(cid=11, size_usdt=Decimal("100"), symbol="fUSD",
+        ReservationIntent(cid=11, execution_decision_id="d-source-11", size_usdt=Decimal("100"), symbol="fUSD",
                          signal_correlation_id=scid,
                          account_id=_ACC_FT, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=11, venue_offer_id="888", size_usdt=Decimal("100"),
@@ -177,7 +177,7 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
     real = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()
     await real.persist(
-        ReservationIntent(cid=12, size_usdt=Decimal("70"), symbol="fUSD",
+        ReservationIntent(cid=12, execution_decision_id="d-source-12", size_usdt=Decimal("70"), symbol="fUSD",
                          signal_correlation_id=scid,
                          account_id=acc, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=12, venue_offer_id="889", size_usdt=Decimal("70"),
