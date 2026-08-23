@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     FundingBookService,
@@ -22,6 +23,14 @@ def _book_snapshot() -> list[FundingBookLevel]:
         _level(rate="0.00020", period=7, amount="-100"),
         _level(rate="0.00021", period=7, amount="100"),
     ]
+
+
+def _valid_ws_store() -> FundingBookStore:
+    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store.apply_sequence("fUST", 11)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=12)
+    return store
 
 
 def _snapshot(
@@ -52,6 +61,20 @@ def test_invalid_checksum_makes_snapshot_unusable() -> None:
     store.apply_checksum("fUST", checksum=123, expected=456)
 
     assert store.snapshot("fUST", now_ms=1_000) is None
+
+
+def test_ws_snapshot_is_blocked_until_sequence_and_checksum_evidence_exists() -> None:
+    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+
+def test_valid_sequence_and_checksum_make_ws_snapshot_available() -> None:
+    store = _valid_ws_store()
+
+    assert store.snapshot("fUST", now_ms=1_000) is not None
 
 
 def test_exact_period_requires_depth_and_uses_absolute_bid_amount() -> None:
@@ -96,6 +119,8 @@ def test_sequence_gap_requires_ws_snapshot_then_rest_reconciliation() -> None:
     assert store.snapshot("fUST", now_ms=1_000) is None
 
     store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
+    store.apply_sequence("fUST", 21)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=22)
     store.apply_rest_snapshot("fUST", _book_snapshot())
 
     snapshot = store.snapshot("fUST", now_ms=1_000)
@@ -105,8 +130,7 @@ def test_sequence_gap_requires_ws_snapshot_then_rest_reconciliation() -> None:
 
 
 def test_disconnect_makes_previous_snapshot_unusable() -> None:
-    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
-    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store = _valid_ws_store()
 
     store.mark_disconnected()
 
@@ -149,8 +173,7 @@ class _CountingWS(_FakeWS):
 
 @pytest.mark.asyncio
 async def test_service_uses_one_store_provider_and_periodically_reconciles_rest() -> None:
-    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
-    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store = _valid_ws_store()
     rest = _FakeRest()
     ws = _FakeWS()
     service = FundingBookService(
@@ -174,8 +197,7 @@ async def test_service_uses_one_store_provider_and_periodically_reconciles_rest(
 
 @pytest.mark.asyncio
 async def test_rest_reconciliation_error_keeps_a_fresh_ws_snapshot_usable() -> None:
-    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
-    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store = _valid_ws_store()
     service = FundingBookService(
         store=store,
         rest=_FakeRest(RuntimeError("rest unavailable")),
@@ -188,6 +210,46 @@ async def test_rest_reconciliation_error_keeps_a_fresh_ws_snapshot_usable() -> N
     snapshot = service.snapshot("fUST", now_ms=1_000)
     assert snapshot is not None
     assert snapshot.source == "ws"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_does_not_overwrite_ws_update_received_during_rest_request() -> None:
+    store = _valid_ws_store()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _DeferredRest:
+        async def get_funding_book(self, *, symbol: str, length: int) -> list[FundingBookLevel]:
+            started.set()
+            await release.wait()
+            return _book_snapshot()
+
+    service = FundingBookService(
+        store=store,
+        rest=_DeferredRest(),
+        ws=_FakeWS(),
+        symbols=("fUST",),
+    )
+
+    reconcile = asyncio.create_task(service.reconcile_once())
+    await started.wait()
+    store.apply_update("fUST", _level(rate="0.00022", period=7, amount="100"), sequence=13)
+    release.set()
+    await reconcile
+
+    snapshot = service.snapshot("fUST", now_ms=1_000)
+    assert snapshot is not None
+    assert any(level.rate == 0.00022 for level in snapshot.asks)
+    assert snapshot.source == "ws"
+
+
+def test_ws_error_event_invalidates_the_canonical_store() -> None:
+    store = _valid_ws_store()
+    client = FundingBookWSClient(symbols=("fUST",), on_disconnect=store.mark_disconnected)
+
+    client.handle_raw('{"event":"error","msg":"stream failed"}')
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
 
 
 @pytest.mark.asyncio

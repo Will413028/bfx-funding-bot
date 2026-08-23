@@ -176,6 +176,7 @@ class FundingBookWSClient:
                 self._snapshot_channels.discard(chan_id)
         elif event == "error":
             log.error("bitfinex_funding_book_error %s", frame)
+            self.mark_disconnected()
 
     def _handle_data(self, frame: list[object]) -> None:
         chan_id = frame[0]
