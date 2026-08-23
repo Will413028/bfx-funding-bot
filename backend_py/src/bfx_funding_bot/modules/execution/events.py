@@ -15,6 +15,7 @@ Migration: 4.3 legacy rows lack these fields; PG-sourced rows set them from even
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
@@ -32,6 +33,20 @@ __SCHEMA_VERSION__ = 2
 # symbol). Every live event now carries an explicit symbol; the canary was
 # fUST-only when those rows existed.
 DEFAULT_RECONCILE_SYMBOL = "fUST"
+
+# Historical replay is the sole authority allowed to construct an
+# uncorrelated lifecycle event.  The marker remains persisted on the event for
+# consumers, but ordinary public dataclass construction cannot opt into it.
+_LEGACY_DECODE_ACTIVE: ContextVar[bool] = ContextVar("legacy_decode_active", default=False)
+
+
+def _construct_legacy_event(cls: type[object], kwargs: dict[str, Any]) -> object:
+    """Construct a pre-Task-4 event while the controlled decode authority is set."""
+    token = _LEGACY_DECODE_ACTIVE.set(True)
+    try:
+        return cls(**kwargs)
+    finally:
+        _LEGACY_DECODE_ACTIVE.reset(token)
 
 
 def _resolve_amount(ev: object) -> None:
@@ -85,9 +100,14 @@ def _validate_reservation_ref(ev: object, *, requires_venue_offer: bool) -> None
     Live producers must supply a reference; consumers reject legacy rows for
     venue correlation.
     """
+    legacy = getattr(ev, "is_legacy_uncorrelated", False)
+    if legacy and not _LEGACY_DECODE_ACTIVE.get():
+        raise TypeError(
+            f"{type(ev).__name__} legacy marker is reserved for the legacy decoder",
+        )
     reference = getattr(ev, "reservation_ref", None)
     if reference is None:
-        if getattr(ev, "is_legacy_uncorrelated", False):
+        if legacy:
             return
         raise TypeError(
             f"{type(ev).__name__} requires reservation_ref unless legacy uncorrelated",

@@ -102,6 +102,30 @@ async def test_submit_returns_failed_on_http_error() -> None:
     assert result.venue_offer_id is None
 
 
+@pytest.mark.asyncio
+async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
+    venue_error = [
+        1716383500000, "fon-req", None, None,
+        None, None, "ERROR", None, "Funds insufficient",
+    ]
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=venue_error),
+    ))
+    executor = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
+        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+    )
+
+    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+
+    assert result.status == "failed"
+    assert result.venue_offer_id is None
+    assert result.reservation_ref is not None
+    assert result.reservation_ref.venue_offer_id is None
+
+
 SUCCESS = [
     1716383500000, "fon-req", None, None,
     [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",

@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from uuid import UUID
 
@@ -21,6 +22,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationReleased,
 )
+from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -200,6 +202,102 @@ async def test_conflicting_claim_reference_fails_without_mutating_projection(
     row = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 992))).scalar_one()
     assert row.execution_decision_id == "d-original"
+
+
+async def test_same_venue_offer_id_under_different_cid_fails_without_second_projection(
+    sqlite_session: AsyncSession,
+) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    first = ReservationRef(
+        execution_decision_id="d-external-original", cid=993,
+        signal_correlation_id=_SCID, venue_offer_id="v-shared",
+    )
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=993, venue_offer_id="v-shared", size_usdt=Decimal("8"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        venue_seq=1, occurred_at_ms=1000, reservation_ref=first,
+    ))
+    conflicting = ReservationRef(
+        execution_decision_id="d-external-conflict", cid=994,
+        signal_correlation_id=_SCID, venue_offer_id="v-shared",
+    )
+    with pytest.raises(RuntimeError, match="claim identity conflict"):
+        await store.append(sqlite_session, ReservationClaimed(
+            cid=994, venue_offer_id="v-shared", size_usdt=Decimal("8"), symbol="fUST",
+            signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+            venue_seq=2, occurred_at_ms=1001, reservation_ref=conflicting,
+        ))
+    rows = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.venue_offer_id == "v-shared"),
+    )).scalars().all()
+    assert [(row.cid, row.execution_decision_id) for row in rows] == [
+        (993, "d-external-original"),
+    ]
+
+
+async def test_interleaved_same_cid_claims_are_idempotent_without_integrity_error(
+    sqlite_engine: object,
+) -> None:
+    """Two writers that both observe no CID must converge atomically.
+
+    The barrier deterministically exposes the old `get(); add()` TOCTOU window:
+    both sessions return ``None`` before either can add the projection row.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)  # type: ignore[arg-type]
+    async with factory() as bootstrap:
+        await _create_all(bootstrap)
+
+    barrier = asyncio.Barrier(2)
+
+    class _InterleavingSession:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+            self._waited = False
+
+        async def _interleave_once(self) -> None:
+            if not self._waited:
+                self._waited = True
+                await barrier.wait()
+
+        async def get(self, *args: object, **kwargs: object) -> object:
+            result = await self._session.get(*args, **kwargs)  # type: ignore[arg-type]
+            await self._interleave_once()
+            return result
+
+        async def execute(self, *args: object, **kwargs: object) -> object:
+            result = await self._session.execute(*args, **kwargs)  # type: ignore[arg-type]
+            await self._interleave_once()
+            return result
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._session, name)
+
+    async with factory() as first, factory() as second:
+        left = _InterleavingSession(first)
+        right = _InterleavingSession(second)
+        kwargs = {
+            "cid": 995, "account_id": "acct", "state": RegistryState.CLAIMED,
+            "venue_offer_id": "v-race", "symbol": "fUST", "size_usdt": Decimal("8"),
+            "signal_correlation_id": str(_SCID), "execution_decision_id": "d-race",
+            "occurred_at_ms": 1000, "last_updated_ms": 1000,
+        }
+        await asyncio.gather(
+            PostgresEventStore(deployment_environment="ci")._upsert_claim(left, **kwargs),  # type: ignore[arg-type]
+            PostgresEventStore(deployment_environment="ci")._upsert_claim(right, **kwargs),  # type: ignore[arg-type]
+        )
+        await first.flush()
+        await second.flush()
+        await first.commit()
+        await second.commit()
+
+    async with factory() as verify:
+        rows = (await verify.execute(
+            select(OfferClaimRow).where(OfferClaimRow.cid == 995),
+        )).scalars().all()
+    assert [(row.cid, row.execution_decision_id) for row in rows] == [(995, "d-race")]
 
 
 async def test_position_state_tracks_event_time_deterministically(sqlite_session: AsyncSession) -> None:

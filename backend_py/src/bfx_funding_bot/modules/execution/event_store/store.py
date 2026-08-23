@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_store.serialization import (
@@ -99,12 +101,13 @@ class PostgresEventStore:
         if etype in _AUDIT_ONLY_TYPES:
             return True  # log-only: no claims/position projection
         # Snapshot maintenance (same txn).
-        await self._project_offer_claims(session, event, account_id)
-        await self._project_position_state(
-            session, etype, account_id, getattr(_ev, "amount", None),
-            row.event_seq, occurred_at_ms,
-            symbol=_ev.symbol,
-        )
+        projection_changed = await self._project_offer_claims(session, event, account_id)
+        if projection_changed:
+            await self._project_position_state(
+                session, etype, account_id, getattr(_ev, "amount", None),
+                row.event_seq, occurred_at_ms,
+                symbol=_ev.symbol,
+            )
         return True
 
     async def _already_logged(
@@ -129,7 +132,7 @@ class PostgresEventStore:
         session: AsyncSession,
         event: object,
         account_id: str,
-    ) -> None:
+    ) -> bool:
         """Project event onto the cid-keyed offer_claims snapshot (same txn).
 
         Direct event_type -> state mapping; no pre-select, no voi-keyed
@@ -139,18 +142,18 @@ class PostgresEventStore:
         etype = event_type_of(event)
         state = _CLAIM_STATE_BY_TYPE.get(etype)
         if state is None:
-            return  # audit-only events (e.g. cancel) are not claim-bearing
+            return False  # audit-only events (e.g. cancel) are not claim-bearing
         _ev: Any = cast(Any, event)
         cid: int | None = getattr(_ev, "cid", None)
         if cid is None:
-            return  # no cid -> nothing to key on
+            return False  # no cid -> nothing to key on
         now_ms: int = _ev.occurred_at_ms or 0
         # All claim-bearing events now carry canonical native `amount` (mirrored
         # from size_usdt by events._resolve_amount); use it directly.
         symbol = getattr(_ev, "symbol", None)
         if symbol is None:
             raise ValueError(f"{etype} reached offer_claims projection without symbol")
-        await self._upsert_claim(
+        return await self._upsert_claim(
             session,
             cid=cid,
             account_id=account_id,
@@ -182,20 +185,55 @@ class PostgresEventStore:
         execution_decision_id: str | None,
         occurred_at_ms: int,
         last_updated_ms: int,
-    ) -> None:
-        existing = await session.get(OfferClaimRow, (account_id, self._env, cid))
-        if existing is None:
-            session.add(OfferClaimRow(
-                cid=cid, account_id=account_id, deployment_environment=self._env,
-                symbol=symbol, state=state.value, venue_offer_id=venue_offer_id,
-                size_usdt=size_usdt, signal_correlation_id=signal_correlation_id,
-                execution_decision_id=execution_decision_id,
-                occurred_at_ms=occurred_at_ms, last_updated_ms=last_updated_ms,
-                last_event_seq=0,
-            ))
-            return
+    ) -> bool:
+        """Atomically insert then compare every available reservation identity.
+
+        The database owns concurrent first-writer arbitration.  A losing writer
+        re-reads the canonical row by CID, venue offer id, or audited decision
+        id and may only continue for an exact identity match.
+        """
+        values: dict[str, Any] = {
+            "cid": cid,
+            "account_id": account_id,
+            "deployment_environment": self._env,
+            "symbol": symbol,
+            "state": state.value,
+            "venue_offer_id": venue_offer_id,
+            "size_usdt": size_usdt,
+            "signal_correlation_id": signal_correlation_id,
+            "execution_decision_id": execution_decision_id,
+            "occurred_at_ms": occurred_at_ms,
+            "last_updated_ms": last_updated_ms,
+            "last_event_seq": 0,
+        }
+        dialect = session.bind.dialect.name if session.bind else "postgresql"
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        insert_result: Any = await session.execute(
+            insert(OfferClaimRow).values(values).on_conflict_do_nothing(),
+        )
+        inserted = insert_result.rowcount == 1
+
+        identity_terms = [OfferClaimRow.cid == cid]
+        if venue_offer_id is not None:
+            identity_terms.append(OfferClaimRow.venue_offer_id == venue_offer_id)
+        if execution_decision_id is not None:
+            identity_terms.append(OfferClaimRow.execution_decision_id == execution_decision_id)
+        matches = (await session.execute(
+            select(OfferClaimRow).where(
+                OfferClaimRow.account_id == account_id,
+                OfferClaimRow.deployment_environment == self._env,
+                or_(*identity_terms),
+            ),
+        )).scalars().all()
+        if len(matches) != 1:
+            raise OfferClaimIdentityConflictError(
+                f"claim identity conflict cid={cid}: canonical matches={len(matches)}",
+            )
+        existing = matches[0]
         if existing.signal_correlation_id != signal_correlation_id:
             raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: signal")
+        if existing.cid != cid:
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: cid")
         if (
             existing.execution_decision_id is not None
             and existing.execution_decision_id != execution_decision_id
@@ -206,13 +244,22 @@ class PostgresEventStore:
             and existing.venue_offer_id != venue_offer_id
         ):
             raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: venue offer")
-        if existing.execution_decision_id is None:
+        if existing.symbol != symbol:
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: symbol")
+        if Decimal(str(existing.size_usdt)) != size_usdt:
+            raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: amount")
+
+        changed = inserted or existing.state != state.value
+        if existing.execution_decision_id is None and execution_decision_id is not None:
             existing.execution_decision_id = execution_decision_id
-        if existing.venue_offer_id is None:
+            changed = True
+        if existing.venue_offer_id is None and venue_offer_id is not None:
             existing.venue_offer_id = venue_offer_id
-        existing.state = state.value
-        existing.symbol = symbol
-        existing.last_updated_ms = last_updated_ms
+            changed = True
+        if changed:
+            existing.state = state.value
+            existing.last_updated_ms = last_updated_ms
+        return changed
 
     async def _project_position_state(
         self,

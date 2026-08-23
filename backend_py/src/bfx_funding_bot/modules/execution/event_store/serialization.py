@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationIntent,
     ReservationReleased,
+    _construct_legacy_event,
 )
 
 # event_type string <-> domain class. Clean field names (we own this schema).
@@ -88,7 +89,8 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     # Task 4 introduced the immutable reservation reference. Rows written
     # before that schema have neither key; they remain explicitly
     # uncorrelated legacy data rather than receiving an invented decision id.
-    if event_type in _CORRELATION_EVENT_TYPES and _REF_FIELD not in payload:
+    is_historical_legacy = event_type in _CORRELATION_EVENT_TYPES and _REF_FIELD not in payload
+    if is_historical_legacy:
         payload = {
             **payload,
             "reservation_ref": None,
@@ -97,6 +99,8 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     if event_type == "RESERVATION_INTENT" and "execution_decision_id" not in payload:
         payload = {**payload, "execution_decision_id": None}
     kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
+    if is_historical_legacy:
+        return _construct_legacy_event(cls, kwargs)
     return cls(**kwargs)
 
 
