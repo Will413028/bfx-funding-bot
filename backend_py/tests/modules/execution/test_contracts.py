@@ -65,15 +65,19 @@ def test_no_recommendation_has_explicit_outcome_without_candidate() -> None:
     assert outcome.candidate is None
 
 
-def test_executor_port_submit_requires_ready_to_submit() -> None:
+def test_protocol_annotations_are_runtime_resolvable() -> None:
+    guard_hints = get_type_hints(protocols.GuardRule.evaluate)
     signature = inspect.signature(protocols.ExecutorPort.submit)
-    hints = get_type_hints(protocols.ExecutorPort.submit)
+    submit_hints = get_type_hints(protocols.ExecutorPort.submit)
 
+    assert guard_hints["decision"] is schemas.DecisionPayload
+    assert guard_hints["ctx"] is protocols.AccountContext
+    assert guard_hints["return"] is contracts.GuardResult
     assert list(signature.parameters) == ["self", "ready", "ctx", "cid"]
     assert signature.parameters["cid"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert hints["ready"] is contracts.ReadyToSubmit
-    assert hints["ctx"] is protocols.AccountContext
-    assert hints["return"] is protocols.SubmittedOrder
+    assert submit_hints["ready"] is contracts.ReadyToSubmit
+    assert submit_hints["ctx"] is protocols.AccountContext
+    assert submit_hints["return"] is protocols.SubmittedOrder
 
 
 def test_execution_contract_enum_values_are_stable() -> None:

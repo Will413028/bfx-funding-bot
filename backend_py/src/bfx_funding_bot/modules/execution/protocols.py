@@ -12,13 +12,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import GuardResult, ReadyToSubmit
-
-if TYPE_CHECKING:
-    from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 
 @dataclass(frozen=True, slots=True)
