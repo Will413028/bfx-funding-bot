@@ -60,7 +60,7 @@ def test_credit_closed_roundtrip() -> None:
 
 def test_intent_failed_event_type_of() -> None:
     intent = ReservationIntent(cid=1, size_usdt=Decimal("5"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        execution_decision_id="d-serialization", signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000)
     failed = ReservationFailed(cid=1, size_usdt=Decimal("5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
@@ -71,7 +71,7 @@ def test_intent_failed_event_type_of() -> None:
 
 @pytest.mark.parametrize("event", [
     ReservationIntent(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        execution_decision_id="d-serialization", signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000),
     ReservationFailed(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=False,
@@ -85,12 +85,26 @@ def test_intent_failed_roundtrip(event: object) -> None:
 
 def test_intent_failed_legacy_payload_upcasts_symbol() -> None:
     """Pre-symbol event_log rows have no `symbol`; deserialize injects fUST."""
-    legacy = {"cid": 9, "size_usdt": "7.5",
+    legacy = {"execution_decision_id": "d-legacy", "cid": 9, "size_usdt": "7.5",
               "signal_correlation_id": str(_SCID), "account_id": "acct",
               "is_simulated": True, "occurred_at_ms": 1000}
     ev = deserialize_event("RESERVATION_INTENT", legacy)
     assert ev.symbol == "fUST"          # type: ignore[attr-defined]
     assert ev.amount == Decimal("7.5")  # type: ignore[attr-defined]
+
+
+def test_intent_missing_execution_decision_id_fails_closed() -> None:
+    payload = {
+        "cid": 9,
+        "size_usdt": "7.5",
+        "symbol": "fUST",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+    }
+
+    with pytest.raises(TypeError, match="execution_decision_id"):
+        deserialize_event("RESERVATION_INTENT", payload)
 
 
 def test_decimal_preserved_as_string() -> None:

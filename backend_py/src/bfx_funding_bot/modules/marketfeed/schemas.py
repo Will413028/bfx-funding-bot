@@ -170,6 +170,7 @@ class OrderSubmitPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cid: int
     offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None on failed submit
+    execution_decision_id: str
     signal_correlation_id: UUID
     offer_rate: float
     offer_amount_usdt: float

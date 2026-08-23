@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.emit import (
     emit_order_fill,
     emit_order_submit,
@@ -21,7 +22,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionPayload,
     Phase,
     StrategyName,
 )
@@ -56,8 +56,9 @@ class EchoPaperExecutor:
         self._date_provider = date_provider or _default_date
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
+        decision = ready.decision
         # cid is centralized by ReservationEmittingMiddleware (A2). Direct callers
         # (tests) omit it -> fall back to deterministic generation. CC2: capture
         # date once at submit entry (midnight-race immune).
@@ -71,7 +72,7 @@ class EchoPaperExecutor:
         await emit_order_submit(
             event_sink=self._events,
             phase=self.phase, strategy=self.strategy, cell=self.cell,
-            decision=decision, ctx=ctx,
+            ready=ready, ctx=ctx,
             cid=cid, offer_id=offer_id,
             is_simulated=True, status="submitted",
         )
@@ -85,5 +86,8 @@ class EchoPaperExecutor:
             is_simulated=True,
         )
         return SubmittedOrder(
-            cid=cid, venue_offer_id=offer_id, status="filled", raw_response=None,
+            cid=cid,
+            venue_offer_id=offer_id,
+            status="filled",
+            raw_response={"offer_rate": str(decision.offer_rate)},
         )

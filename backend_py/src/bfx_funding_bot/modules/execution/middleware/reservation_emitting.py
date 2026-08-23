@@ -25,6 +25,7 @@ from decimal import Decimal
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -37,7 +38,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 log = logging.getLogger(__name__)
 
@@ -63,10 +63,11 @@ class ReservationEmittingMiddleware:
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
     ) -> SubmittedOrder:
         # This middleware is the cid authority (A2). Ignore any incoming cid;
         # compute once so INTENT and outcome share the exact same value.
+        decision = ready.decision
         cid = generate_cid(decision.signal_correlation_id, self._date_provider())
         size = Decimal(str(decision.offer_amount_usdt or 0.0))
         scid = decision.signal_correlation_id
@@ -77,9 +78,10 @@ class ReservationEmittingMiddleware:
             cid=cid, size_usdt=size, signal_correlation_id=scid,
             account_id=ctx.account_id, is_simulated=self._is_simulated,
             occurred_at_ms=intent_ms, symbol=decision.symbol,
+            execution_decision_id=ready.decision_id,
         ))
 
-        result = await self._inner.submit(decision, ctx, cid=cid)
+        result = await self._inner.submit(ready, ctx, cid=cid)
         outcome_ms = self._clock()
 
         if result.status in ("submitted", "filled"):

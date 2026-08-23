@@ -7,6 +7,11 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.middleware.heartbeat import HeartbeatMiddleware
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -27,6 +32,18 @@ def _decision() -> DecisionPayload:
     symbol="fUST")
 
 
+def _ready() -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(),
+        decision_id="d-heartbeat",
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-heartbeat",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
+    )
+
+
 def _ctx() -> AccountContext:
     return AccountContext(
         account_id="default",
@@ -36,12 +53,12 @@ def _ctx() -> AccountContext:
 
 
 class _InnerOk:
-    async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
         return SubmittedOrder(cid=1, venue_offer_id="x", status="filled", raw_response=None)
 
 
 class _InnerRaises:
-    async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
         raise ExecutorTransientError("network_blip")
 
 
@@ -49,7 +66,7 @@ class _InnerRaises:
 async def test_heartbeat_fires_on_inner_success() -> None:
     probe = HealthProbe()
     mw = HeartbeatMiddleware(_InnerOk(), probe=probe)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready(), _ctx())
     assert probe.last_active_ts.get("executor") is not None
 
 
@@ -58,7 +75,7 @@ async def test_heartbeat_fires_on_inner_failure() -> None:
     probe = HealthProbe()
     mw = HeartbeatMiddleware(_InnerRaises(), probe=probe)
     with pytest.raises(ExecutorTransientError):
-        await mw.submit(_decision(), _ctx())
+        await mw.submit(_ready(), _ctx())
     # I1 invariant: heartbeat outcome-independent (try/finally)
     assert probe.last_active_ts.get("executor") is not None
 
@@ -71,5 +88,5 @@ async def test_heartbeat_record_failure_does_not_break_submit() -> None:
             raise RuntimeError("probe broken")
     probe = _BrokenProbe()
     mw = HeartbeatMiddleware(_InnerOk(), probe=probe)  # type: ignore[arg-type]
-    result = await mw.submit(_decision(), _ctx())
+    result = await mw.submit(_ready(), _ctx())
     assert result.status == "filled"

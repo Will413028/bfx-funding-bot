@@ -24,6 +24,7 @@ def test_order_submit_payload_minimal() -> None:
     p = OrderSubmitPayload(
         cid=12345,
         offer_id="paper_abc123",
+        execution_decision_id="d-schema",
         signal_correlation_id=uuid4(),
         offer_rate=0.0001,
         offer_amount_usdt=100.0,
@@ -32,15 +33,25 @@ def test_order_submit_payload_minimal() -> None:
         status="submitted",
     )
     assert p.cid == 12345
+    assert p.execution_decision_id == "d-schema"
     assert p.is_simulated is True
 
 
 def test_order_submit_failed_requires_failure_reason() -> None:
     with pytest.raises(ValidationError, match="failure_reason"):
         OrderSubmitPayload(
-            cid=1, offer_id=None, signal_correlation_id=uuid4(),
+            cid=1, offer_id=None, execution_decision_id="d-schema", signal_correlation_id=uuid4(),
             offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
             is_simulated=False, status="failed",
+        )
+
+
+def test_order_submit_payload_requires_execution_decision_id() -> None:
+    with pytest.raises(ValidationError, match="execution_decision_id"):
+        OrderSubmitPayload(
+            cid=1, offer_id="paper_abc", signal_correlation_id=uuid4(),
+            offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
+            is_simulated=True, status="submitted",
         )
 
 
