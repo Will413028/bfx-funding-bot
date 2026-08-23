@@ -41,6 +41,7 @@ Thumbs.db
 .agents/
 .codex/
 AGENTS.md
+.worktrees/
 
 # Go
 backend/server
