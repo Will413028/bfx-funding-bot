@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import inspect
+from dataclasses import FrozenInstanceError
+from typing import get_type_hints
 from uuid import uuid4
 
-from bfx_funding_bot.modules.execution import contracts
+import pytest
+
+from bfx_funding_bot.modules.execution import contracts, protocols
 from bfx_funding_bot.modules.marketfeed import schemas
 
 
@@ -28,6 +33,47 @@ def test_blocked_execution_is_not_submit_ready() -> None:
 
     assert blocked.outcome is contracts.DecisionOutcome.BLOCKED
     assert not isinstance(blocked, contracts.ReadyToSubmit)
+
+
+def test_ready_to_submit_has_ready_outcome_and_immutable_safety() -> None:
+    safety = contracts.GuardResult(allowed=True, guard_name="allocation_cap")
+    ready = contracts.ReadyToSubmit(
+        decision=_decision(),
+        decision_id="d-1",
+        policy=contracts.ExecutionPolicy.BOOK_GUARDED,
+        market_snapshot_id="snapshot-1",
+        model_version=None,
+        evidence={"period_days": 30},
+        safety=safety,
+    )
+
+    assert ready.outcome is contracts.DecisionOutcome.READY
+    assert ready.safety == safety
+    with pytest.raises(FrozenInstanceError):
+        safety.allowed = False
+
+
+def test_no_recommendation_has_explicit_outcome_without_candidate() -> None:
+    outcome = contracts.NoRecommendation(
+        decision_id="d-2",
+        candidate=None,
+        reason=contracts.BlockReason.OPTIMIZER_UNAVAILABLE,
+        evidence={"model": "unavailable"},
+    )
+
+    assert outcome.outcome is contracts.DecisionOutcome.NO_RECOMMENDATION
+    assert outcome.candidate is None
+
+
+def test_executor_port_submit_requires_ready_to_submit() -> None:
+    signature = inspect.signature(protocols.ExecutorPort.submit)
+    hints = get_type_hints(protocols.ExecutorPort.submit)
+
+    assert list(signature.parameters) == ["self", "ready", "ctx", "cid"]
+    assert signature.parameters["cid"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert hints["ready"] is contracts.ReadyToSubmit
+    assert hints["ctx"] is protocols.AccountContext
+    assert hints["return"] is protocols.SubmittedOrder
 
 
 def test_execution_contract_enum_values_are_stable() -> None:
