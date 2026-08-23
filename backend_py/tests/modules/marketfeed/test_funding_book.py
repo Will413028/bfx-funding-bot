@@ -289,6 +289,27 @@ def test_ws_error_event_invalidates_the_canonical_store() -> None:
     assert store.snapshot("fUST", now_ms=1_000) is None
 
 
+def test_ws_error_before_first_state_requires_rest_rebase_before_fresh_ws_evidence() -> None:
+    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+    client = FundingBookWSClient(symbols=("fUST",), on_disconnect=store.mark_disconnected)
+
+    client.handle_raw('{"event":"error","msg":"stream failed"}')
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store.apply_sequence("fUST", 11)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=12)
+
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+    assert store.apply_rest_snapshot("fUST", _book_snapshot())
+    assert store.snapshot("fUST", now_ms=1_000) is None
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
+    store.apply_sequence("fUST", 21)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=22)
+
+    assert store.snapshot("fUST", now_ms=1_000) is not None
+
+
 @pytest.mark.asyncio
 async def test_run_restarts_the_ws_client_after_each_reconcile_interval() -> None:
     stop_event = asyncio.Event()

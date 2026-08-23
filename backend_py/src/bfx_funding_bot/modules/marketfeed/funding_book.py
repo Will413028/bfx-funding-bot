@@ -75,6 +75,7 @@ class _BookState:
     sequence_valid: bool = False
     checksum_valid: bool = False
     requires_reconciliation: bool = False
+    reconciliation_epoch: int = 0
     source: Literal["ws", "rest_reconciled"] = "ws"
 
 
@@ -85,6 +86,7 @@ class FundingBookStore(FundingBookProvider):
         self._max_age_ms = int(max_age_seconds * 1_000)
         self._clock = clock or (lambda: int(time.time() * 1_000))
         self._states: dict[str, _BookState] = {}
+        self._reconciliation_epoch = 0
 
     def apply_snapshot(
         self,
@@ -93,7 +95,7 @@ class FundingBookStore(FundingBookProvider):
         *,
         sequence: int | None = None,
     ) -> None:
-        state = self._states.setdefault(symbol, _BookState())
+        state = self._state_for(symbol)
         state.bids, state.asks = self._split_levels(levels)
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
@@ -109,7 +111,7 @@ class FundingBookStore(FundingBookProvider):
     def apply_update(
         self, symbol: str, level: FundingBookLevel, *, sequence: int | None = None
     ) -> None:
-        state = self._states.setdefault(symbol, _BookState())
+        state = self._state_for(symbol)
         self._apply_sequence(state, sequence)
         side = state.asks if level.amount > 0 else state.bids
         key = (level.rate, level.period)
@@ -125,7 +127,7 @@ class FundingBookStore(FundingBookProvider):
         state.generation += 1
 
     def apply_sequence(self, symbol: str, sequence: int) -> None:
-        state = self._states.setdefault(symbol, _BookState())
+        state = self._state_for(symbol)
         self._apply_sequence(state, sequence)
         state.generation += 1
 
@@ -137,7 +139,7 @@ class FundingBookStore(FundingBookProvider):
         expected: int | None = None,
         sequence: int | None = None,
     ) -> None:
-        state = self._states.setdefault(symbol, _BookState())
+        state = self._state_for(symbol)
         self._apply_sequence(state, sequence)
         computed = (
             expected
@@ -159,7 +161,7 @@ class FundingBookStore(FundingBookProvider):
         *,
         expected_generation: int | None = None,
     ) -> bool:
-        state = self._states.setdefault(symbol, _BookState())
+        state = self._state_for(symbol)
         if expected_generation is not None and state.generation != expected_generation:
             return False
         state.bids, state.asks = self._split_levels(levels)
@@ -174,10 +176,12 @@ class FundingBookStore(FundingBookProvider):
         state.sequence_valid = False
         state.checksum_valid = False
         state.requires_reconciliation = False
+        state.reconciliation_epoch = self._reconciliation_epoch
         state.generation += 1
         return True
 
     def mark_disconnected(self) -> None:
+        self._reconciliation_epoch += 1
         for state in self._states.values():
             self._invalidate(state)
             state.generation += 1
@@ -202,11 +206,20 @@ class FundingBookStore(FundingBookProvider):
             checksum_valid=state.checksum_valid,
             sequence=state.sequence,
         )
-        if state.requires_reconciliation or not snapshot.is_fresh(
-            symbol=symbol, now_ms=now_ms, max_age_ms=self._max_age_ms
+        if (
+            state.requires_reconciliation
+            or state.reconciliation_epoch != self._reconciliation_epoch
+            or not snapshot.is_fresh(symbol=symbol, now_ms=now_ms, max_age_ms=self._max_age_ms)
         ):
             return None
         return snapshot
+
+    def _state_for(self, symbol: str) -> _BookState:
+        state = self._states.get(symbol)
+        if state is None:
+            state = _BookState(requires_reconciliation=self._reconciliation_epoch > 0)
+            self._states[symbol] = state
+        return state
 
     @staticmethod
     def _split_levels(
