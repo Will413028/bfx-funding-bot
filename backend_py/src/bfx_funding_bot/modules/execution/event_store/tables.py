@@ -75,6 +75,9 @@ class OfferClaimRow(Base):
     symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     size_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     signal_correlation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable only for pre-Task-4 historical rows. New submit paths always
+    # project the immutable reservation reference's audited decision id.
+    execution_decision_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_updated_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)

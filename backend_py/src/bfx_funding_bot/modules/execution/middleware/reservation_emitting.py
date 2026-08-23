@@ -20,12 +20,13 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -64,11 +65,23 @@ class ReservationEmittingMiddleware:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         # This middleware is the cid authority (A2). Ignore any incoming cid;
         # compute once so INTENT and outcome share the exact same value.
         decision = ready.decision
         cid = generate_cid(decision.signal_correlation_id, self._date_provider())
+        reference = reservation_ref or ReservationRef(
+            execution_decision_id=ready.decision_id,
+            cid=cid,
+            signal_correlation_id=decision.signal_correlation_id,
+        )
+        if (
+            reference.execution_decision_id != ready.decision_id
+            or reference.cid != cid
+            or reference.signal_correlation_id != decision.signal_correlation_id
+        ):
+            raise ValueError("reservation_ref conflicts with ReadyToSubmit request")
         size = Decimal(str(decision.offer_amount_usdt or 0.0))
         scid = decision.signal_correlation_id
         intent_ms = self._clock()
@@ -79,10 +92,18 @@ class ReservationEmittingMiddleware:
             account_id=ctx.account_id, is_simulated=self._is_simulated,
             occurred_at_ms=intent_ms, symbol=decision.symbol,
             execution_decision_id=ready.decision_id,
+            reservation_ref=reference,
         ))
 
-        result = await self._inner.submit(ready, ctx, cid=cid)
+        result = await self._inner.submit(ready, ctx, cid=cid, reservation_ref=reference)
         outcome_ms = self._clock()
+
+        if result.reservation_ref is not None and result.reservation_ref != reference:
+            raise RuntimeError("executor returned a conflicting reservation reference")
+        bound_reference = reference
+        if result.venue_offer_id is not None:
+            bound_reference = reference.bind_venue_offer(result.venue_offer_id)
+        result = replace(result, reservation_ref=bound_reference)
 
         if result.status in ("submitted", "filled"):
             claimed = ReservationClaimed(
@@ -90,6 +111,7 @@ class ReservationEmittingMiddleware:
                 size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 occurred_at_ms=outcome_ms, symbol=decision.symbol,
+                reservation_ref=bound_reference,
             )
             filled: OrderFilled | None = None
             if result.status == "filled":
@@ -98,7 +120,7 @@ class ReservationEmittingMiddleware:
                     size_usdt=size, fill_rate=decision.offer_rate or 0.0,
                     signal_correlation_id=scid, account_id=ctx.account_id,
                     is_simulated=self._is_simulated, occurred_at_ms=outcome_ms,
-                    symbol=decision.symbol,
+                    symbol=decision.symbol, reservation_ref=bound_reference,
                 )
             # txn2: outcome (event_log + snapshot, atomic)
             if filled is not None:
@@ -115,7 +137,7 @@ class ReservationEmittingMiddleware:
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 reason="submit_failed", occurred_at_ms=outcome_ms,
-                symbol=decision.symbol,
+                symbol=decision.symbol, reservation_ref=bound_reference,
             ))
         return result
 

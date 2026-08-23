@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from bfx_funding_bot.external.bitfinex.auth_ws import FccEvent, FcnEvent, FcuEvent, FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import translate_bfx_event
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     CreditClosed,
     OrderFilled,
@@ -15,10 +16,15 @@ from bfx_funding_bot.modules.execution.registry_offers import (
 
 
 def _claim_record(voi: str = "v1", state: RegistryState = RegistryState.CLAIMED) -> ClaimRecord:
+    scid = uuid4()
     return ClaimRecord(
-        venue_offer_id=voi, cid=42, signal_correlation_id=uuid4(),
+        venue_offer_id=voi, cid=42, signal_correlation_id=scid,
         size_usdt=Decimal("100"), account_id="default",
         state=state, occurred_at_ms=1000, last_updated_ms=1000,
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-ws", cid=42,
+            signal_correlation_id=scid, venue_offer_id=voi,
+        ),
     )
 
 
@@ -101,8 +107,19 @@ def test_foc_executed_on_claimed_emits_orderfilled() -> None:
     assert events[0].fill_rate == 0.0005
     assert events[0].venue_seq == 7
     assert events[0].occurred_at_ms == 2000   # _foc mts_update
+    assert events[0].reservation_ref.execution_decision_id == "d-ws"
     assert len(mutations) == 1
     assert mutations[0].new_state == RegistryState.RELEASED
+
+
+def test_unmatched_foc_is_correlation_error() -> None:
+    events, mutations, diags = translate_bfx_event(
+        _foc("unknown", status="EXECUTED"), {}, {}, now_ms=2500,
+    )
+
+    assert events == [] and mutations == []
+    assert diags[0].level == "error"
+    assert "unmatched" in diags[0].message
 
 
 def test_any_event_on_released_state_is_idempotent_no_op() -> None:

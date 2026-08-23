@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     DEFAULT_RECONCILE_SYMBOL,
     CreditClosed,
@@ -32,6 +33,14 @@ _FIELDS: dict[type, list[str]] = {
 }
 _DECIMAL_FIELDS = {"size_usdt", "amount"}
 _UUID_FIELDS = {"signal_correlation_id"}
+_REF_FIELD = "reservation_ref"
+_CORRELATION_EVENT_TYPES = frozenset({
+    "RESERVATION_INTENT",
+    "RESERVATION_CLAIMED",
+    "RESERVATION_FAILED",
+    "ORDER_FILL",
+    "RESERVATION_RELEASED",
+})
 
 
 def event_type_of(event: object) -> str:
@@ -47,7 +56,14 @@ def serialize_event(event: object) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for field in _FIELDS[type(event)]:
         value = getattr(event, field)
-        if isinstance(value, (Decimal, UUID)):
+        if isinstance(value, ReservationRef):
+            out[field] = {
+                "execution_decision_id": value.execution_decision_id,
+                "cid": value.cid,
+                "signal_correlation_id": str(value.signal_correlation_id),
+                "venue_offer_id": value.venue_offer_id,
+            }
+        elif isinstance(value, (Decimal, UUID)):
             out[field] = str(value)
         else:
             out[field] = value
@@ -69,6 +85,17 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     # when every symbol-less row existed.
     if payload.get("symbol") is None:
         payload = {**payload, "symbol": DEFAULT_RECONCILE_SYMBOL}
+    # Task 4 introduced the immutable reservation reference. Rows written
+    # before that schema have neither key; they remain explicitly
+    # uncorrelated legacy data rather than receiving an invented decision id.
+    if event_type in _CORRELATION_EVENT_TYPES and _REF_FIELD not in payload:
+        payload = {
+            **payload,
+            "reservation_ref": None,
+            "is_legacy_uncorrelated": True,
+        }
+    if event_type == "RESERVATION_INTENT" and "execution_decision_id" not in payload:
+        payload = {**payload, "execution_decision_id": None}
     kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
     return cls(**kwargs)
 
@@ -80,4 +107,13 @@ def _coerce(field: str, raw: Any) -> Any:
         return Decimal(str(raw))
     if field in _UUID_FIELDS:
         return UUID(str(raw))
+    if field == _REF_FIELD:
+        if not isinstance(raw, dict):
+            raise TypeError("reservation_ref must be an object or null")
+        return ReservationRef(
+            execution_decision_id=str(raw["execution_decision_id"]),
+            cid=int(raw["cid"]),
+            signal_correlation_id=UUID(str(raw["signal_correlation_id"])),
+            venue_offer_id=raw.get("venue_offer_id"),
+        )
     return raw

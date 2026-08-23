@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
+
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 
 __SCHEMA_VERSION__ = 2
 
@@ -76,6 +78,27 @@ def _require_execution_decision_id(ev: object) -> None:
         raise TypeError(f"{type(ev).__name__} requires a non-empty `execution_decision_id`")
 
 
+def _validate_reservation_ref(ev: object, *, requires_venue_offer: bool) -> None:
+    """Reject internally contradictory correlation data before it is persisted.
+
+    No reference is permitted only for explicitly decoded historical events;
+    consumers that correlate venue lifecycle frames reject those legacy rows.
+    Transitional unit callers without a reference remain readable, but no live
+    producer uses that path.
+    """
+    reference = getattr(ev, "reservation_ref", None)
+    if reference is None:
+        return
+    typed_event: Any = ev
+    if (
+        reference.cid != typed_event.cid
+        or reference.signal_correlation_id != typed_event.signal_correlation_id
+    ):
+        raise TypeError(f"{type(ev).__name__} reservation_ref correlation conflicts")
+    if requires_venue_offer and reference.venue_offer_id != typed_event.venue_offer_id:
+        raise TypeError(f"{type(ev).__name__} reservation_ref venue offer conflicts")
+
+
 def _resolve_position_fields(ev: object) -> None:
     """Reconcile transitional `*_usdt` with canonical reserved/realized/available.
 
@@ -124,7 +147,9 @@ class ReservationIntent:
     signal_correlation_id: UUID
     account_id: str
     is_simulated: bool
-    execution_decision_id: str
+    execution_decision_id: str | None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = False
     amount: Decimal | None = None
     size_usdt: Decimal | None = None  # transitional alias; mapped to amount
     venue_seq: int | None = None
@@ -134,7 +159,20 @@ class ReservationIntent:
 
     def __post_init__(self) -> None:
         _require_symbol(self)
-        _require_execution_decision_id(self)
+        if self.execution_decision_id is None:
+            if not self.is_legacy_uncorrelated:
+                _require_execution_decision_id(self)
+        else:
+            _require_execution_decision_id(self)
+            if self.reservation_ref is None:
+                object.__setattr__(self, "reservation_ref", ReservationRef(
+                    execution_decision_id=self.execution_decision_id,
+                    cid=self.cid,
+                    signal_correlation_id=self.signal_correlation_id,
+                ))
+            elif self.reservation_ref.execution_decision_id != self.execution_decision_id:
+                raise TypeError("ReservationIntent reservation_ref decision id conflicts")
+        _validate_reservation_ref(self, requires_venue_offer=False)
         _resolve_amount(self)
 
 
@@ -157,9 +195,12 @@ class ReservationFailed:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = False
 
     def __post_init__(self) -> None:
         _require_symbol(self)
+        _validate_reservation_ref(self, requires_venue_offer=False)
         _resolve_amount(self)
 
 
@@ -187,9 +228,12 @@ class ReservationClaimed:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = False
 
     def __post_init__(self) -> None:
         _require_symbol(self)
+        _validate_reservation_ref(self, requires_venue_offer=True)
         _resolve_amount(self)
 
 
@@ -217,9 +261,12 @@ class OrderFilled:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = False
 
     def __post_init__(self) -> None:
         _require_symbol(self)
+        _validate_reservation_ref(self, requires_venue_offer=True)
         _resolve_amount(self)
 
 
@@ -243,9 +290,12 @@ class ReservationReleased:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = False
 
     def __post_init__(self) -> None:
         _require_symbol(self)
+        _validate_reservation_ref(self, requires_venue_offer=True)
         _resolve_amount(self)
 
 

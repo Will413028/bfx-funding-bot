@@ -53,6 +53,29 @@ def test_ready_to_submit_has_ready_outcome_and_immutable_safety() -> None:
         safety.allowed = False
 
 
+def test_ready_to_submit_rejects_blank_decision_id() -> None:
+    with pytest.raises(ValueError, match="decision_id"):
+        contracts.ReadyToSubmit(
+            decision=_decision(), decision_id=" ",
+            policy=contracts.ExecutionPolicy.PAPER,
+            market_snapshot_id="snapshot-1", model_version=None,
+            evidence={}, safety=contracts.GuardResult(True, "test"),
+        )
+
+
+def test_reservation_ref_binds_venue_offer_once() -> None:
+    ref = contracts.ReservationRef(
+        execution_decision_id="d-1", cid=42,
+        signal_correlation_id=_decision().signal_correlation_id,
+    )
+    bound = ref.bind_venue_offer("voi-1")
+
+    assert bound.venue_offer_id == "voi-1"
+    assert bound.bind_venue_offer("voi-1") is bound
+    with pytest.raises(ValueError, match="already bound"):
+        bound.bind_venue_offer("voi-2")
+
+
 def test_no_recommendation_has_explicit_outcome_without_candidate() -> None:
     outcome = contracts.NoRecommendation(
         decision_id="d-2",
@@ -73,8 +96,9 @@ def test_protocol_annotations_are_runtime_resolvable() -> None:
     assert guard_hints["decision"] is schemas.DecisionPayload
     assert guard_hints["ctx"] is protocols.AccountContext
     assert guard_hints["return"] is contracts.GuardResult
-    assert list(signature.parameters) == ["self", "ready", "ctx", "cid"]
+    assert list(signature.parameters) == ["self", "ready", "ctx", "cid", "reservation_ref"]
     assert signature.parameters["cid"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["reservation_ref"].kind is inspect.Parameter.KEYWORD_ONLY
     assert submit_hints["ready"] is contracts.ReadyToSubmit
     assert submit_hints["ctx"] is protocols.AccountContext
     assert submit_hints["return"] is protocols.SubmittedOrder

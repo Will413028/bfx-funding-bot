@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Protocol
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.emit import (
     emit_order_fill,
     emit_order_submit,
@@ -57,6 +57,7 @@ class EchoPaperExecutor:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         decision = ready.decision
         # cid is centralized by ReservationEmittingMiddleware (A2). Direct callers
@@ -65,6 +66,18 @@ class EchoPaperExecutor:
         if cid is None:
             submit_date = self._date_provider()
             cid = generate_cid(decision.signal_correlation_id, submit_date)
+        reference = reservation_ref or ReservationRef(
+            execution_decision_id=ready.decision_id,
+            cid=cid,
+            signal_correlation_id=decision.signal_correlation_id,
+        )
+        if (
+            reference.execution_decision_id != ready.decision_id
+            or reference.cid != cid
+            or reference.signal_correlation_id != decision.signal_correlation_id
+            or reference.venue_offer_id is not None
+        ):
+            raise ValueError("reservation_ref conflicts with ReadyToSubmit request")
         # CC4: "paper_" prefix is invariant relied on by fill_tracker to skip
         # venue polling for simulated offers.
         offer_id = f"paper_{uuid.uuid4().hex[:12]}"
@@ -90,4 +103,5 @@ class EchoPaperExecutor:
             venue_offer_id=offer_id,
             status="filled",
             raw_response={"offer_rate": str(decision.offer_rate)},
+            reservation_ref=reference.bind_venue_offer(offer_id),
         )

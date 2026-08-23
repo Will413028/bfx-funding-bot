@@ -29,7 +29,7 @@ from bfx_funding_bot.core.errors import (
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -197,6 +197,7 @@ class BitfinexLiveExecutor:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         decision = ready.decision
         if not decision.symbol or decision.symbol not in self._configured_symbols:
@@ -208,6 +209,18 @@ class BitfinexLiveExecutor:
         # fall back to deterministic generation (CC2 capture-once date).
         if cid is None:
             cid = generate_cid(decision.signal_correlation_id, self._date_provider())
+        reference = reservation_ref or ReservationRef(
+            execution_decision_id=ready.decision_id,
+            cid=cid,
+            signal_correlation_id=decision.signal_correlation_id,
+        )
+        if (
+            reference.execution_decision_id != ready.decision_id
+            or reference.cid != cid
+            or reference.signal_correlation_id != decision.signal_correlation_id
+            or reference.venue_offer_id is not None
+        ):
+            raise InvariantViolation("reservation_ref conflicts with ReadyToSubmit request")
         payload = build_offer_payload(
             symbol=decision.symbol,
             amount_usdt=decision.offer_amount_usdt or 0.0,
@@ -243,14 +256,14 @@ class BitfinexLiveExecutor:
             )
             return SubmittedOrder(
                 cid=cid, venue_offer_id=None, status="failed",
-                raw_response={"http_status": status, "body": body},
+                raw_response={"http_status": status, "body": body}, reservation_ref=reference,
             )
         except httpx.HTTPError as e:
             log.warning("bitfinex_submit_network_error symbol=%s err=%r", decision.symbol, e)
-            return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None)
+            return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None, reservation_ref=reference)
 
         parsed = parse_offer_response(resp.json())
-        return replace(parsed, cid=cid)
+        return replace(parsed, cid=cid, reservation_ref=reference.bind_venue_offer(parsed.venue_offer_id or ""))
 
     async def cancel(
         self,

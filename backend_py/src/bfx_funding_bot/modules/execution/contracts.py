@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from uuid import UUID
 
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
@@ -48,6 +49,41 @@ class GuardResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ReservationRef:
+    """Immutable correlation between an audited decision and a venue offer.
+
+    Bitfinex funding submits have no client-id field.  The reference therefore
+    remains in internal request context and is bound to the venue offer id only
+    after the acknowledgement is received.
+    """
+
+    execution_decision_id: str
+    cid: int
+    signal_correlation_id: UUID
+    venue_offer_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.execution_decision_id.strip():
+            raise ValueError("execution_decision_id must be non-empty")
+        if self.venue_offer_id is not None and not self.venue_offer_id:
+            raise ValueError("venue_offer_id must be non-empty when bound")
+
+    def bind_venue_offer(self, venue_offer_id: str) -> ReservationRef:
+        if not venue_offer_id:
+            raise ValueError("venue_offer_id must be non-empty")
+        if self.venue_offer_id is None:
+            return ReservationRef(
+                execution_decision_id=self.execution_decision_id,
+                cid=self.cid,
+                signal_correlation_id=self.signal_correlation_id,
+                venue_offer_id=venue_offer_id,
+            )
+        if self.venue_offer_id != venue_offer_id:
+            raise ValueError("reservation reference already bound to another venue offer")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class ReadyToSubmit:
     decision: DecisionPayload
     decision_id: str
@@ -56,6 +92,10 @@ class ReadyToSubmit:
     model_version: str | None
     evidence: Mapping[str, object]
     safety: GuardResult
+
+    def __post_init__(self) -> None:
+        if not self.decision_id.strip():
+            raise ValueError("decision_id must be non-empty")
 
     @property
     def outcome(self) -> DecisionOutcome:

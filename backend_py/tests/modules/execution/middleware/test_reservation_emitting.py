@@ -76,7 +76,8 @@ class _StubInner:
         self.persist_calls_at_submit: int | None = None
         self.cid_seen: int | None = None
 
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+                     reservation_ref: object | None = None) -> SubmittedOrder:
         self.cid_seen = cid
         if self._persister is not None:
             self.persist_calls_at_submit = len(self._persister.txns)
@@ -145,6 +146,23 @@ async def test_same_cid_threaded_to_inner_and_all_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reservation_reference_threads_from_intent_to_submit_response_and_events() -> None:
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    ready = _ready_to_submit(decision_id="d-threaded-reference")
+    result = await ReservationEmittingMiddleware(
+        _StubInner("filled", "paper_ref", persister=persister),
+        bus=bus, persister=persister, is_simulated=True,
+    ).submit(ready, _ctx())
+
+    intent = persister.txns[0][0]
+    claimed, filled = persister.txns[1]
+    assert intent.reservation_ref.execution_decision_id == "d-threaded-reference"
+    assert claimed.reservation_ref == filled.reservation_ref == result.reservation_ref
+    assert result.reservation_ref.venue_offer_id == "paper_ref"
+
+
+@pytest.mark.asyncio
 async def test_bus_publish_failure_does_not_break_submit() -> None:
     class _BrokenBus:
         async def publish(self, event: object) -> None:
@@ -159,7 +177,10 @@ async def test_bus_publish_failure_does_not_break_submit() -> None:
 @pytest.mark.asyncio
 async def test_inner_raise_after_intent_propagates() -> None:
     class _RaisingInner:
-        async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+        async def submit(
+            self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+            reservation_ref: object | None = None,
+        ) -> SubmittedOrder:
             raise ExecutorTransientError("blip")
     bus, _ = _bus_capture()
     persister = _RecordingPersister()

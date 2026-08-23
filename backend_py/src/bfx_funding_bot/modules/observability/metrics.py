@@ -69,7 +69,7 @@ if TYPE_CHECKING:
         SubmittedOrder,
     )
 
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 
 log = logging.getLogger(__name__)
 
@@ -390,10 +390,13 @@ class MetricsSubmitMiddleware:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         start = time.perf_counter()
         try:
-            order = await self._inner.submit(ready, ctx, cid=cid)
+            order = await self._inner.submit(
+                ready, ctx, cid=cid, reservation_ref=reservation_ref,
+            )
         except BaseException:
             self._safe_observe("exception", start)
             raise

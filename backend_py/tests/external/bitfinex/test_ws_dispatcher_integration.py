@@ -9,6 +9,7 @@ import pytest
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent, FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
@@ -19,6 +20,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     OfferRegistry,
     RegistryState,
+    ReservationCorrelationError,
 )
 
 
@@ -41,6 +43,13 @@ class _EventCapture:
         pass
 
 
+def _ref(voi: str, cid: int, scid) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-ws-{cid}", cid=cid,
+        signal_correlation_id=scid, venue_offer_id=voi,
+    )
+
+
 @pytest.mark.asyncio
 async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
     bus = DomainEventBus(clock=lambda: 5000)
@@ -49,11 +58,12 @@ async def test_dispatcher_publishes_orderfilled_on_foc_executed() -> None:
     bus.subscribe(OrderFilled, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
 
+    scid = uuid4()
     await bus.publish(ReservationClaimed(
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUSD"))
+        symbol="fUSD", reservation_ref=_ref("42", 42, scid)))
 
     foc = FocEvent(
         venue_offer_id="42", symbol="fUSD",
@@ -96,11 +106,12 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
     bus.subscribe(ReservationClaimed, registry.handle)
     bus.subscribe(ReservationReleased, registry.handle)
 
+    scid = uuid4()
     await bus.publish(ReservationClaimed(
         cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUSD"))
+        symbol="fUSD", reservation_ref=_ref("42", 42, scid)))
 
     captured: list = []
     async def capture(ev: ReservationReleased) -> None:
@@ -140,6 +151,17 @@ async def test_dispatcher_cancel_requested_subscriber_tracks_recent_cancels() ->
     assert captured[0].reason == "user_cancel"
 
 
+@pytest.mark.asyncio
+async def test_dispatcher_fails_closed_on_unmatched_venue_event() -> None:
+    dispatcher = BitfinexLiveWSDispatcher(
+        ws_client=_FakeWSClient([]), registry=OfferRegistry(clock=lambda: 0),
+        bus=DomainEventBus(), event_sink=_EventCapture(), clock=lambda: 5000,
+    )
+
+    with pytest.raises(ReservationCorrelationError, match="unmatched"):
+        await dispatcher._process(_foc_executed("missing"))
+
+
 # ---------------------------------------------------------------------------
 # Audit I1: dedup-aware _persist_then_publish — skip publish on dedup
 # ---------------------------------------------------------------------------
@@ -159,16 +181,18 @@ class _FakePersister:
 
 def _registry_with_claim(voi: str) -> OfferRegistry:
     reg = OfferRegistry(clock=lambda: 5000)
+    scid = uuid4()
     reg._snapshot = {
         voi: ClaimRecord(
             venue_offer_id=voi,
             cid=42,
-            signal_correlation_id=uuid4(),
+            signal_correlation_id=scid,
             size_usdt=Decimal("100"),
             account_id="default",
             state=RegistryState.CLAIMED,
             occurred_at_ms=1000,
             last_updated_ms=1000,
+            reservation_ref=_ref(voi, 42, scid),
         )
     }
     return reg
