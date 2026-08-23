@@ -280,6 +280,53 @@ async def test_reconciliation_does_not_overwrite_ws_update_received_during_rest_
     assert snapshot.source == "ws"
 
 
+@pytest.mark.asyncio
+async def test_disconnect_during_first_rest_request_rejects_stale_rebase() -> None:
+    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _DeferredFirstRest:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_funding_book(
+            self, *, symbol: str, length: int
+        ) -> list[FundingBookLevel]:
+            self.calls += 1
+            if self.calls == 1:
+                started.set()
+                await release.wait()
+            return _book_snapshot()
+
+    ws = FundingBookWSClient(symbols=("fUST",))
+    service = FundingBookService(
+        store=store,
+        rest=_DeferredFirstRest(),
+        ws=ws,
+        symbols=("fUST",),
+    )
+
+    reconcile = asyncio.create_task(service.reconcile_once())
+    await started.wait()
+    ws.handle_raw('{"event":"error","msg":"stream failed"}')
+    release.set()
+    await reconcile
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    store.apply_sequence("fUST", 11)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=12)
+
+    assert service.snapshot("fUST", now_ms=1_000) is None
+
+    await service.reconcile_once()
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
+    store.apply_sequence("fUST", 21)
+    store.apply_checksum("fUST", checksum=123, expected=123, sequence=22)
+
+    assert service.snapshot("fUST", now_ms=1_000) is not None
+
+
 def test_ws_error_event_invalidates_the_canonical_store() -> None:
     store = _valid_ws_store()
     client = FundingBookWSClient(symbols=("fUST",), on_disconnect=store.mark_disconnected)
