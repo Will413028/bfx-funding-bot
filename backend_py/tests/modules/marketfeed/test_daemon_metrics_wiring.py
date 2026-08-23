@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
@@ -119,10 +120,15 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
     assert len(hooks["request"]) >= 1 and len(hooks["response"]) >= 1
 
     # Bus traffic counter — behavioral: publish moves the counter.
+    scid = uuid4()
     await daemon.bus.publish(ReservationClaimed(
         symbol="fUST", cid=99, venue_offer_id="99",
-        signal_correlation_id=uuid4(), account_id="default",
+        signal_correlation_id=scid, account_id="default",
         is_simulated=True, amount=Decimal("100"),
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-daemon-metrics", cid=99,
+            signal_correlation_id=scid, venue_offer_id="99",
+        ),
     ))
     assert daemon.metrics.registry.get_sample_value(
         "bfx_domain_events_total", {"event_type": "ReservationClaimed"},

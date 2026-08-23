@@ -11,7 +11,12 @@ import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -45,13 +50,16 @@ class _FailingSubscriber:
 class _PaperInner:
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
-        reservation_ref: object | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
+        assert cid is not None
+        assert reservation_ref is not None
         return SubmittedOrder(
-            cid=42,
+            cid=cid,
             venue_offer_id="paper_xyz",
             status="filled",
             raw_response=None,
+            reservation_ref=reservation_ref.bind_venue_offer("paper_xyz"),
         )
 
 
@@ -174,19 +182,23 @@ async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
     executor, _probe, bus = _build_chain(ledger)
 
     # Submit once to create the paper sync claim+fill (reserved goes to 0, realized 100)
-    await executor.submit(_ready(), _ctx())
+    result = await executor.submit(_ready(), _ctx())
+    reference = result.reservation_ref
+    assert isinstance(reference, ReservationRef)
     # Then simulate fill_tracker observing offer disappear → emit RELEASE
     # Since paper FILL already 0'd reserved, RELEASE triggers floor (count++)
     await bus.publish(
         ReservationReleased(
-            cid=42,
+            cid=reference.cid,
             venue_offer_id="paper_xyz",
             size_usdt=Decimal("100"),
             reason="missing_from_venue",
-            signal_correlation_id=uuid4(),
+            signal_correlation_id=reference.signal_correlation_id,
             account_id="default",
             is_simulated=False,
-        symbol="fUST")
+            symbol="fUST",
+            reservation_ref=reference,
+        )
     )
     assert ledger.replay_floor_hit_count == 1
 

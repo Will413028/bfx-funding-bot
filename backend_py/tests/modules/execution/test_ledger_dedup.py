@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -12,27 +13,39 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
 
 def _filled(venue_seq: int | None, venue_offer_id: str = "v1") -> OrderFilled:
+    scid = uuid4()
     return OrderFilled(
         cid=42, venue_offer_id=venue_offer_id, credit_id="C-1",
         size_usdt=Decimal("100"), fill_rate=0.0005,
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
         venue_seq=venue_seq,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id=f"d-dedup-{venue_offer_id}", cid=42,
+            signal_correlation_id=scid, venue_offer_id=venue_offer_id,
+        ))
 
 
 def _released(venue_seq: int | None, venue_offer_id: str = "v1") -> ReservationReleased:
+    scid = uuid4()
     return ReservationReleased(
         cid=42, venue_offer_id=venue_offer_id, size_usdt=Decimal("100"),
-        reason="venue_cancel", signal_correlation_id=uuid4(),
+        reason="venue_cancel", signal_correlation_id=scid,
         account_id="default", is_simulated=False, venue_seq=venue_seq,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id=f"d-dedup-{venue_offer_id}", cid=42,
+            signal_correlation_id=scid, venue_offer_id=venue_offer_id,
+        ))
 
 
 def _claimed(venue_offer_id: str = "v1") -> ReservationClaimed:
+    scid = uuid4()
     return ReservationClaimed(
         cid=42, venue_offer_id=venue_offer_id, size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        signal_correlation_id=scid, account_id="default", is_simulated=False,
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id=f"d-dedup-{venue_offer_id}", cid=42,
+            signal_correlation_id=scid, venue_offer_id=venue_offer_id,
+        ))
 
 
 @pytest.mark.asyncio

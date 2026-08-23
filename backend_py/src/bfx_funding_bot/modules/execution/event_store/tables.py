@@ -85,6 +85,20 @@ class OfferClaimRow(Base):
     __table_args__ = (
         PrimaryKeyConstraint("account_id", "deployment_environment", "cid"),
         Index("idx_offer_claims_voi", "venue_offer_id"),
+        Index(
+            "uq_offer_claims_venue_offer_id",
+            "account_id", "deployment_environment", "venue_offer_id",
+            unique=True,
+            postgresql_where=text("venue_offer_id IS NOT NULL"),
+            sqlite_where=text("venue_offer_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_offer_claims_execution_decision_id",
+            "account_id", "deployment_environment", "execution_decision_id",
+            unique=True,
+            postgresql_where=text("execution_decision_id IS NOT NULL"),
+            sqlite_where=text("execution_decision_id IS NOT NULL"),
+        ),
     )
 
 

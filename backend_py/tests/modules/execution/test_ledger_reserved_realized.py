@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -15,26 +16,38 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
 
 def _claim(size: float, account_id: str = "default") -> ReservationClaimed:
+    scid = uuid4()
     return ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal(str(size)),
-        signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        signal_correlation_id=scid, account_id=account_id, is_simulated=True,
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-reserved-realized", cid=1,
+            signal_correlation_id=scid, venue_offer_id="x",
+        ))
 
 
 def _fill(size: float, account_id: str = "default") -> OrderFilled:
+    scid = uuid4()
     return OrderFilled(
         cid=1, venue_offer_id="x", credit_id=None,
         size_usdt=Decimal(str(size)), fill_rate=0.0001,
-        signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        signal_correlation_id=scid, account_id=account_id, is_simulated=True,
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-reserved-realized", cid=1,
+            signal_correlation_id=scid, venue_offer_id="x",
+        ))
 
 
 def _release(size: float, account_id: str = "default") -> ReservationReleased:
+    scid = uuid4()
     return ReservationReleased(
         cid=1, venue_offer_id="x", size_usdt=Decimal(str(size)),
-        reason="venue_cancel", signal_correlation_id=uuid4(),
+        reason="venue_cancel", signal_correlation_id=scid,
         account_id=account_id, is_simulated=True,
-        symbol="fUST", is_legacy_uncorrelated=True)
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-reserved-realized", cid=1,
+            signal_correlation_id=scid, venue_offer_id="x",
+        ))
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     PositionReconciled,
@@ -16,30 +17,42 @@ from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
 
 def _claim(symbol: str, amount: str, account_id: str = "default") -> ReservationClaimed:
+    scid = uuid4()
     return ReservationClaimed(
         cid=1, venue_offer_id="x", symbol=symbol, amount=Decimal(amount),
-        signal_correlation_id=uuid4(), account_id=account_id, is_simulated=True,
-        is_legacy_uncorrelated=True,
+        signal_correlation_id=scid, account_id=account_id, is_simulated=True,
+        reservation_ref=ReservationRef(
+            execution_decision_id=f"d-symbol-{symbol}-x", cid=1,
+            signal_correlation_id=scid, venue_offer_id="x",
+        ),
     )
 
 
 def _fill(symbol: str, amount: str, venue_offer_id: str = "x",
           venue_seq: int | None = None, account_id: str = "default") -> OrderFilled:
+    scid = uuid4()
     return OrderFilled(
         cid=1, venue_offer_id=venue_offer_id, credit_id=None, symbol=symbol,
-        amount=Decimal(amount), fill_rate=0.0001, signal_correlation_id=uuid4(),
+        amount=Decimal(amount), fill_rate=0.0001, signal_correlation_id=scid,
         account_id=account_id, is_simulated=True, venue_seq=venue_seq,
-        is_legacy_uncorrelated=True,
+        reservation_ref=ReservationRef(
+            execution_decision_id=f"d-symbol-{symbol}-{venue_offer_id}", cid=1,
+            signal_correlation_id=scid, venue_offer_id=venue_offer_id,
+        ),
     )
 
 
 def _release(symbol: str, amount: str, venue_offer_id: str = "x",
              venue_seq: int | None = None, account_id: str = "default") -> ReservationReleased:
+    scid = uuid4()
     return ReservationReleased(
         cid=1, venue_offer_id=venue_offer_id, symbol=symbol, amount=Decimal(amount),
-        reason="venue_cancel", signal_correlation_id=uuid4(),
+        reason="venue_cancel", signal_correlation_id=scid,
         account_id=account_id, is_simulated=True, venue_seq=venue_seq,
-        is_legacy_uncorrelated=True,
+        reservation_ref=ReservationRef(
+            execution_decision_id=f"d-symbol-{symbol}-{venue_offer_id}", cid=1,
+            signal_correlation_id=scid, venue_offer_id=venue_offer_id,
+        ),
     )
 
 

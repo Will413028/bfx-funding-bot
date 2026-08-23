@@ -76,6 +76,15 @@ def test_reservation_ref_binds_venue_offer_once() -> None:
         bound.bind_venue_offer("voi-2")
 
 
+def test_reservation_ref_rejects_whitespace_venue_offer_id() -> None:
+    with pytest.raises(ValueError, match="venue_offer_id"):
+        contracts.ReservationRef(
+            execution_decision_id="d-1", cid=42,
+            signal_correlation_id=_decision().signal_correlation_id,
+            venue_offer_id="  ",
+        )
+
+
 def test_no_recommendation_has_explicit_outcome_without_candidate() -> None:
     outcome = contracts.NoRecommendation(
         decision_id="d-2",

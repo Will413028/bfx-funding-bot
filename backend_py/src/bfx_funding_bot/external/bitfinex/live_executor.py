@@ -263,7 +263,16 @@ class BitfinexLiveExecutor:
             return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None, reservation_ref=reference)
 
         parsed = parse_offer_response(resp.json())
-        return replace(parsed, cid=cid, reservation_ref=reference.bind_venue_offer(parsed.venue_offer_id or ""))
+        if parsed.venue_offer_id is None:
+            # Bitfinex uses HTTP 200 for some venue rejections.  It is not an
+            # acknowledgement, so preserve the unbound internal reference for
+            # ReservationEmittingMiddleware's FAILED lifecycle path.
+            return replace(parsed, cid=cid, reservation_ref=reference)
+        return replace(
+            parsed,
+            cid=cid,
+            reservation_ref=reference.bind_venue_offer(parsed.venue_offer_id),
+        )
 
     async def cancel(
         self,

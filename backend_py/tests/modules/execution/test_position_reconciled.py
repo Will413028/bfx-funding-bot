@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     PositionReconciled,
@@ -163,12 +164,16 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
     )
 
     # WS foc EXECUTED arrives for a NEW fill (not yet in the snapshot)
+    scid = uuid4()
     fill = OrderFilled(
         cid=1, venue_offer_id="v1", credit_id=None,
         size_usdt=Decimal("150"), fill_rate=0.0003,
-        signal_correlation_id=uuid4(), account_id=_ACC, is_simulated=False,
+        signal_correlation_id=scid, account_id=_ACC, is_simulated=False,
         symbol="fUSD",
-        is_legacy_uncorrelated=True,
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-position-reconciled", cid=1,
+            signal_correlation_id=scid, venue_offer_id="v1",
+        ),
     )
     await ledger.on_order_filled(fill)
     # In-memory: realized = 300 (snapshot 150 + WS delta 150)

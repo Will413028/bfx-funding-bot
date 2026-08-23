@@ -65,11 +65,11 @@ class ReservationRef:
     def __post_init__(self) -> None:
         if not self.execution_decision_id.strip():
             raise ValueError("execution_decision_id must be non-empty")
-        if self.venue_offer_id is not None and not self.venue_offer_id:
+        if self.venue_offer_id is not None and not self.venue_offer_id.strip():
             raise ValueError("venue_offer_id must be non-empty when bound")
 
     def bind_venue_offer(self, venue_offer_id: str) -> ReservationRef:
-        if not venue_offer_id:
+        if not venue_offer_id.strip():
             raise ValueError("venue_offer_id must be non-empty")
         if self.venue_offer_id is None:
             return ReservationRef(
