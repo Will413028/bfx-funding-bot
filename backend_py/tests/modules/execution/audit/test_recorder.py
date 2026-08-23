@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -10,6 +11,7 @@ from bfx_funding_bot.modules.execution.audit.model import (
     ExecutionDecision,
 )
 from bfx_funding_bot.modules.execution.audit.recorder import (
+    ExecutionAuditConflict,
     ExecutionAuditUnavailable,
     ExecutionDecisionRecorder,
 )
@@ -92,8 +94,9 @@ class _CommitFailingSession:
     async def __aexit__(self, *args: object) -> None:
         return None
 
-    async def execute(self, statement: object) -> None:
+    async def execute(self, statement: object) -> _InsertedResult:
         del statement
+        return _InsertedResult()
 
     async def commit(self) -> None:
         raise RuntimeError("commit unavailable")
@@ -108,6 +111,11 @@ class _CommitFailingFactory:
 
     def __call__(self) -> _CommitFailingSession:
         return self.session
+
+
+class _InsertedResult:
+    def scalar_one_or_none(self) -> str:
+        return "decision-9"
 
 
 @pytest.fixture
@@ -146,6 +154,37 @@ async def test_duplicate_decision_id_is_idempotent_under_retry(
     async with db_factory() as session:
         rows = (await session.execute(ExecutionDecisionRow.__table__.select())).all()
     assert len(rows) == 1
+
+
+async def test_conflicting_duplicate_decision_id_fails_closed_and_keeps_original_row(
+    db_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Changing canonical audit evidence under one id must never count as a retry."""
+    recorder = ExecutionDecisionRecorder(db_factory)
+    original = _ready_audit_decision()
+    conflicting = replace(
+        original,
+        account_id="acct-other",
+        reconcile_id="reconcile-other",
+        signal_rate=Decimal("0.00031"),
+        model_evidence={"fill_probability": "0.50", "samples": 7},
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        config_hash="sha256:other-config",
+    )
+    await recorder.record(original)
+
+    with pytest.raises(ExecutionAuditConflict):
+        await recorder.record(conflicting)
+
+    async with db_factory() as session:
+        row = await session.get(ExecutionDecisionRow, original.decision_id)
+    assert row is not None
+    assert row.account_id == original.account_id
+    assert row.reconcile_id == original.reconcile_id
+    assert row.signal_rate == original.signal_rate
+    assert row.model_evidence == dict(original.model_evidence)
+    assert row.execution_policy == original.execution_policy.value
+    assert row.config_hash == original.config_hash
 
 
 async def test_audit_commit_failure_raises_typed_error(
