@@ -81,14 +81,17 @@ def _require_execution_decision_id(ev: object) -> None:
 def _validate_reservation_ref(ev: object, *, requires_venue_offer: bool) -> None:
     """Reject internally contradictory correlation data before it is persisted.
 
-    No reference is permitted only for explicitly decoded historical events;
-    consumers that correlate venue lifecycle frames reject those legacy rows.
-    Transitional unit callers without a reference remain readable, but no live
-    producer uses that path.
+    No reference is permitted only for explicitly decoded historical events.
+    Live producers must supply a reference; consumers reject legacy rows for
+    venue correlation.
     """
     reference = getattr(ev, "reservation_ref", None)
     if reference is None:
-        return
+        if getattr(ev, "is_legacy_uncorrelated", False):
+            return
+        raise TypeError(
+            f"{type(ev).__name__} requires reservation_ref unless legacy uncorrelated",
+        )
     typed_event: Any = ev
     if (
         reference.cid != typed_event.cid

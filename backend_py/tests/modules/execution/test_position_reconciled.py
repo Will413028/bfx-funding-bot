@@ -168,6 +168,7 @@ async def test_ws_fill_after_reconcile_overwritten_by_next_reconcile():
         size_usdt=Decimal("150"), fill_rate=0.0003,
         signal_correlation_id=uuid4(), account_id=_ACC, is_simulated=False,
         symbol="fUSD",
+        is_legacy_uncorrelated=True,
     )
     await ledger.on_order_filled(fill)
     # In-memory: realized = 300 (snapshot 150 + WS delta 150)

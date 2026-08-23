@@ -98,10 +98,27 @@ class ReservationEmittingMiddleware:
         result = await self._inner.submit(ready, ctx, cid=cid, reservation_ref=reference)
         outcome_ms = self._clock()
 
-        if result.reservation_ref is not None and result.reservation_ref != reference:
-            raise RuntimeError("executor returned a conflicting reservation reference")
-        bound_reference = reference
-        if result.venue_offer_id is not None:
+        returned_reference = result.reservation_ref
+        if returned_reference is not None and (
+            returned_reference.execution_decision_id != reference.execution_decision_id
+            or returned_reference.cid != reference.cid
+            or returned_reference.signal_correlation_id != reference.signal_correlation_id
+        ):
+            raise RuntimeError("executor returned a reservation reference identity conflict")
+        if (
+            returned_reference is not None
+            and returned_reference.venue_offer_id is not None
+            and returned_reference.venue_offer_id != result.venue_offer_id
+        ):
+            raise RuntimeError("executor returned a reservation reference venue conflict")
+        if result.venue_offer_id is None:
+            if returned_reference is not None and returned_reference.venue_offer_id is not None:
+                raise RuntimeError("executor bound a venue id for a failed submit")
+            bound_reference = reference
+        else:
+            # The adapter may bind the same immutable identity after venue ack.
+            # Merge the acknowledged external id instead of comparing the full
+            # dataclass, whose venue_offer_id is intentionally different.
             bound_reference = reference.bind_venue_offer(result.venue_offer_id)
         result = replace(result, reservation_ref=bound_reference)
 

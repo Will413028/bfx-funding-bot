@@ -1,6 +1,7 @@
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,13 @@ from bfx_funding_bot.modules.execution.events import (
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
 
+def _ref(cid: int, voi: str | None = None) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-store-{cid}", cid=cid,
+        signal_correlation_id=_SCID, venue_offer_id=voi,
+    )
+
+
 async def _create_all(session: AsyncSession) -> None:
     bind = session.bind
     assert bind is not None
@@ -32,9 +40,12 @@ async def _create_all(session: AsyncSession) -> None:
 
 
 def _claimed(seq: int) -> ReservationClaimed:
-    return ReservationClaimed(cid=100 + seq, venue_offer_id=f"v{seq}", size_usdt=Decimal("5"),
+    cid = 100 + seq
+    voi = f"v{seq}"
+    return ReservationClaimed(cid=cid, venue_offer_id=voi, size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=seq, occurred_at_ms=1000 + seq, symbol="fUSD")
+        venue_seq=seq, occurred_at_ms=1000 + seq, symbol="fUSD",
+        reservation_ref=_ref(cid, voi))
 
 
 async def test_append_inserts_event_row(sqlite_session: AsyncSession) -> None:
@@ -62,7 +73,8 @@ async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSess
 
     await store.append(sqlite_session, ReservationReleased(cid=105, venue_offer_id="v5",
         size_usdt=Decimal("5"), reason="venue_cancel", signal_correlation_id=_SCID,
-        account_id="acct", is_simulated=True, venue_seq=6, occurred_at_ms=2000, symbol="fUSD"))
+        account_id="acct", is_simulated=True, venue_seq=6, occurred_at_ms=2000, symbol="fUSD",
+        reservation_ref=_ref(105, "v5")))
     await sqlite_session.flush()
     row2 = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 105))).scalar_one()
@@ -75,7 +87,7 @@ async def test_offer_claims_persists_symbol(sqlite_session: AsyncSession) -> Non
     await store.append(sqlite_session, ReservationClaimed(
         cid=820, venue_offer_id="v820", amount=Decimal("100"), symbol="fUSD",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        occurred_at_ms=1000))
+        occurred_at_ms=1000, reservation_ref=_ref(820, "v820")))
     await sqlite_session.flush()
     row = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 820))).scalar_one()
@@ -87,7 +99,7 @@ async def test_append_fill_dedup_skips_duplicate(sqlite_session: AsyncSession) -
     store = PostgresEventStore(deployment_environment="ci")
     fill = OrderFilled(cid=200, venue_offer_id="v9", credit_id=None, size_usdt=Decimal("2"),
         fill_rate=0.0, signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=9, occurred_at_ms=2000, symbol="fUSD")
+        venue_seq=9, occurred_at_ms=2000, symbol="fUSD", reservation_ref=_ref(200, "v9"))
     inserted_first = await store.append(sqlite_session, fill)
     inserted_second = await store.append(sqlite_session, fill)  # same (voi, venue_seq)
     await sqlite_session.flush()
@@ -135,6 +147,61 @@ async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSes
     assert rows[0].execution_decision_id == "d-store-301"
 
 
+async def test_exact_duplicate_claim_reference_is_projection_idempotent(
+    sqlite_session: AsyncSession,
+) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    reference = ReservationRef(
+        execution_decision_id="d-projection", cid=991,
+        signal_correlation_id=_SCID, venue_offer_id="v991",
+    )
+    claim = ReservationClaimed(
+        cid=991, venue_offer_id="v991", size_usdt=Decimal("8"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        venue_seq=1, occurred_at_ms=1000, reservation_ref=reference,
+    )
+    await store.append(sqlite_session, claim)
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=991, venue_offer_id="v991", size_usdt=Decimal("8"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        venue_seq=2, occurred_at_ms=1001, reservation_ref=reference,
+    ))
+    row = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 991))).scalar_one()
+    assert row.execution_decision_id == "d-projection"
+    assert row.venue_offer_id == "v991"
+
+
+async def test_conflicting_claim_reference_fails_without_mutating_projection(
+    sqlite_session: AsyncSession,
+) -> None:
+    await _create_all(sqlite_session)
+    store = PostgresEventStore(deployment_environment="ci")
+    initial = ReservationRef(
+        execution_decision_id="d-original", cid=992,
+        signal_correlation_id=_SCID, venue_offer_id="v992",
+    )
+    await store.append(sqlite_session, ReservationClaimed(
+        cid=992, venue_offer_id="v992", size_usdt=Decimal("8"), symbol="fUST",
+        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        venue_seq=1, occurred_at_ms=1000, reservation_ref=initial,
+    ))
+    conflicting = ReservationRef(
+        execution_decision_id="d-conflict", cid=992,
+        signal_correlation_id=_SCID, venue_offer_id="v992",
+    )
+    with pytest.raises(RuntimeError, match="claim identity conflict"):
+        await store.append(sqlite_session, ReservationClaimed(
+            cid=992, venue_offer_id="v992", size_usdt=Decimal("8"), symbol="fUST",
+            signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+            venue_seq=2, occurred_at_ms=1001, reservation_ref=conflicting,
+        ))
+    row = (await sqlite_session.execute(
+        select(OfferClaimRow).where(OfferClaimRow.cid == 992))).scalar_one()
+    assert row.execution_decision_id == "d-original"
+
+
 async def test_position_state_tracks_event_time_deterministically(sqlite_session: AsyncSession) -> None:
     """last_updated_ms is sourced from the event's occurred_at_ms (domain time),
     not a wall-clock projection-time default — so it advances on every projected
@@ -144,7 +211,7 @@ async def test_position_state_tracks_event_time_deterministically(sqlite_session
     await store.append(sqlite_session, ReservationClaimed(
         cid=400, venue_offer_id="v400", size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
-        venue_seq=1, occurred_at_ms=1000, symbol="fUSD"))
+        venue_seq=1, occurred_at_ms=1000, symbol="fUSD", reservation_ref=_ref(400, "v400")))
     await sqlite_session.flush()
     ps = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctT"))).scalar_one()
@@ -154,7 +221,7 @@ async def test_position_state_tracks_event_time_deterministically(sqlite_session
     await store.append(sqlite_session, ReservationReleased(
         cid=400, venue_offer_id="v400", size_usdt=Decimal("5"), reason="venue_cancel",
         signal_correlation_id=_SCID, account_id="acctT", is_simulated=True,
-        venue_seq=2, occurred_at_ms=5000, symbol="fUSD"))
+        venue_seq=2, occurred_at_ms=5000, symbol="fUSD", reservation_ref=_ref(400, "v400")))
     await sqlite_session.flush()
     ps2 = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctT"))).scalar_one()
@@ -170,12 +237,12 @@ async def test_last_updated_ms_follows_event_seq_not_max_time(sqlite_session: As
     await store.append(sqlite_session, ReservationClaimed(
         cid=410, venue_offer_id="v410", size_usdt=Decimal("5"),
         signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
-        venue_seq=1, occurred_at_ms=9000, symbol="fUSD"))
+        venue_seq=1, occurred_at_ms=9000, symbol="fUSD", reservation_ref=_ref(410, "v410")))
     # appended later (higher event_seq) but with an EARLIER event time
     await store.append(sqlite_session, ReservationReleased(
         cid=410, venue_offer_id="v410", size_usdt=Decimal("5"), reason="venue_cancel",
         signal_correlation_id=_SCID, account_id="acctOOO", is_simulated=True,
-        venue_seq=2, occurred_at_ms=1000, symbol="fUSD"))
+        venue_seq=2, occurred_at_ms=1000, symbol="fUSD", reservation_ref=_ref(410, "v410")))
     await sqlite_session.flush()
     ps = (await sqlite_session.execute(select(PositionStateRow).where(
         PositionStateRow.account_id == "acctOOO"))).scalar_one()
@@ -212,7 +279,7 @@ async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session
     await store.append(sqlite_session, ReservationFailed(
         cid=302, size_usdt=Decimal("8"), symbol="fUST", signal_correlation_id=_SCID,
         account_id="acctF", is_simulated=True, reason="submit_failed",
-        occurred_at_ms=1100))
+        occurred_at_ms=1100, reservation_ref=_ref(302)))
     await sqlite_session.flush()
     claim = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 302))).scalar_one()
