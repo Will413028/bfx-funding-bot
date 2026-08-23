@@ -105,6 +105,7 @@ class _StubExecutor:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls.append(cid)
         self.readies.append(ready)
@@ -244,6 +245,7 @@ async def test_submit_middleware_passthrough_and_span() -> None:
     assert span.name == "executor.submit"
     assert span.attributes is not None
     assert span.attributes["bfx.symbol"] == "fUST"
+    assert span.attributes["bfx.execution_decision_id"] == "d-trace"
     assert span.attributes["bfx.cid"] == 7
     assert span.attributes["bfx.submit.status"] == "filled"
     t.shutdown()

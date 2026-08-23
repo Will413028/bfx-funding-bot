@@ -204,6 +204,11 @@ class RestPollingFillTracker:
                     venue_offer_id,
                 )
                 continue
+            if claim.reservation_ref is None:
+                raise InvariantError(
+                    f"fill_tracker cannot release uncorrelated legacy claim "
+                    f"voi={venue_offer_id}"
+                )
             # CLAIMED: emit with registry-sourced fields (G3 deterministic correlation_id)
             release = ReservationReleased(
                 cid=claim.cid,
@@ -215,6 +220,7 @@ class RestPollingFillTracker:
                 is_simulated=False,
                 occurred_at_ms=int(time.time() * 1000),
                 symbol=claim.symbol,
+                reservation_ref=claim.reservation_ref,
             )
             try:
                 await self._persister.persist(release)

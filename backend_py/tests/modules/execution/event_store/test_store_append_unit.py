@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
@@ -109,6 +110,7 @@ async def test_intent_creates_pending_claim_with_null_voi(sqlite_session: AsyncS
     assert row.state == "pending"
     assert row.venue_offer_id is None
     assert row.size_usdt == Decimal("8")
+    assert row.execution_decision_id == "d-store-300"
 
 
 async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSession) -> None:
@@ -120,13 +122,17 @@ async def test_intent_then_claimed_updates_same_cid_row(sqlite_session: AsyncSes
     await store.append(sqlite_session, ReservationClaimed(
         cid=301, venue_offer_id="v301", size_usdt=Decimal("8"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=1, occurred_at_ms=1100, symbol="fUSD"))
+        venue_seq=1, occurred_at_ms=1100, symbol="fUSD", reservation_ref=ReservationRef(
+            execution_decision_id="d-store-301", cid=301,
+            signal_correlation_id=_SCID, venue_offer_id="v301",
+        )))
     await sqlite_session.flush()
     rows = (await sqlite_session.execute(
         select(OfferClaimRow).where(OfferClaimRow.cid == 301))).scalars().all()
     assert len(rows) == 1  # cid-keyed: PENDING row promoted in place, not a 2nd row
     assert rows[0].state == "claimed"
     assert rows[0].venue_offer_id == "v301"
+    assert rows[0].execution_decision_id == "d-store-301"
 
 
 async def test_position_state_tracks_event_time_deterministically(sqlite_session: AsyncSession) -> None:

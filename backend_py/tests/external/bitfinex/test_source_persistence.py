@@ -14,6 +14,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.fill_tracker import RestPollingFillTracker
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
@@ -50,6 +51,10 @@ def _registry_with_claim(voi, cid, scid, size, account_id=_ACC):
         venue_offer_id=voi, cid=cid, signal_correlation_id=scid,
         size_usdt=Decimal(str(size)), account_id=account_id, state=RegistryState.CLAIMED,
         occurred_at_ms=0, last_updated_ms=0,
+        reservation_ref=ReservationRef(
+            execution_decision_id=f"d-source-{cid}", cid=cid,
+            signal_correlation_id=scid, venue_offer_id=voi,
+        ),
     )}
     return reg
 
@@ -66,7 +71,10 @@ async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_f
                          account_id=_ACC, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=11, venue_offer_id="888", size_usdt=Decimal("100"),
                           signal_correlation_id=scid, account_id=_ACC, is_simulated=False,
-                          occurred_at_ms=2, symbol="fUSD"),
+                          occurred_at_ms=2, symbol="fUSD", reservation_ref=ReservationRef(
+                              execution_decision_id="d-source-11", cid=11,
+                              signal_correlation_id=scid, venue_offer_id="888",
+                          )),
     )
     foc = FocEvent(venue_offer_id="888", symbol="fUSD", mts_create=10, mts_update=10,
                    amount=Decimal("100"), status="EXECUTED @ 0.0003 (100.0)",
@@ -132,7 +140,10 @@ async def test_fill_tracker_release_persisted_before_publish(pg_session_factory)
                          account_id=_ACC_FT, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=11, venue_offer_id="888", size_usdt=Decimal("100"),
                           signal_correlation_id=scid, account_id=_ACC_FT, is_simulated=False,
-                          occurred_at_ms=2, symbol="fUSD"),
+                          occurred_at_ms=2, symbol="fUSD", reservation_ref=ReservationRef(
+                              execution_decision_id="d-source-11", cid=11,
+                              signal_correlation_id=scid, venue_offer_id="888",
+                          )),
     )
     tracker = RestPollingFillTracker(
         http=_OneTickHttp(), event_sink=_EventCapture(), probe=HealthProbe(), bus=DomainEventBus(),
@@ -182,7 +193,10 @@ async def test_fill_tracker_release_retried_after_persist_failure(pg_session_fac
                          account_id=acc, is_simulated=False, occurred_at_ms=1),
         ReservationClaimed(cid=12, venue_offer_id="889", size_usdt=Decimal("70"),
                           signal_correlation_id=scid, account_id=acc, is_simulated=False,
-                          occurred_at_ms=2, symbol="fUSD"),
+                          occurred_at_ms=2, symbol="fUSD", reservation_ref=ReservationRef(
+                              execution_decision_id="d-source-12", cid=12,
+                              signal_correlation_id=scid, venue_offer_id="889",
+                          )),
     )
 
     class _GoneAfterFirst:

@@ -145,6 +145,7 @@ def compute_recovery_actions(
             size_usdt=offer.amount, signal_correlation_id=synth_orphan_scid(voi),
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
             symbol=offer.symbol,
+            is_legacy_uncorrelated=True,
         ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
@@ -162,6 +163,7 @@ def compute_recovery_actions(
             reason="missing_from_venue", signal_correlation_id=claim.signal_correlation_id,
             account_id=account_id, is_simulated=is_simulated, occurred_at_ms=now_ms,
             symbol=claim.symbol,
+            is_legacy_uncorrelated=True,
         ))
 
     # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
@@ -177,6 +179,7 @@ def compute_recovery_actions(
                 account_id=account_id, is_simulated=is_simulated,
                 reason="unresolved_at_boot", occurred_at_ms=now_ms,
                 symbol=c.symbol,
+                is_legacy_uncorrelated=True,
             ))
 
     return actions

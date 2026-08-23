@@ -15,7 +15,11 @@ from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from bfx_funding_bot.modules.execution.contracts import GuardResult, ReadyToSubmit
+from bfx_funding_bot.modules.execution.contracts import (
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 __all__ = [
@@ -55,6 +59,7 @@ class SubmittedOrder:
     venue_offer_id: str | None     # paper: "paper_<uuid12>"; real: str(int) from venue; None on failed submit
     status: str                    # "submitted" / "failed" / "filled" (paper synchronous)
     raw_response: dict[str, Any] | None    # debug audit; None for paper
+    reservation_ref: ReservationRef | None = None
 
 
 class GuardRule(Protocol):
@@ -81,6 +86,7 @@ class ExecutorPort(Protocol):
     """
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder: ...
 
 

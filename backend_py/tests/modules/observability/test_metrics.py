@@ -183,6 +183,7 @@ class _StubExecutor:
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls.append(cid)
         self.readies.append(ready)

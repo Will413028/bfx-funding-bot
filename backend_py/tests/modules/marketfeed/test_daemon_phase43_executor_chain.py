@@ -11,6 +11,7 @@ import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.event_store.persister import NoopEventPersister
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -43,7 +44,8 @@ class _FailingSubscriber:
 
 class _PaperInner:
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         return SubmittedOrder(
             cid=42,
@@ -61,7 +63,8 @@ class _TransientInner:
         self.calls = 0
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls += 1
         raise ExecutorTransientError("network_blip")
@@ -82,6 +85,14 @@ def _ctx() -> AccountContext:
         account_id="default",
         credentials=Credentials(api_key="k", api_secret="s"),
         allocation_cap_usdt=Decimal("10000"),
+    )
+
+
+def _ready() -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(), decision_id="d-daemon-chain",
+        policy=ExecutionPolicy.PAPER, market_snapshot_id="snapshot-daemon-chain",
+        model_version=None, evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
     )
 
 
@@ -135,7 +146,7 @@ async def test_chain_does_not_retry_submit_on_transient() -> None:
     executor, _probe, _bus = _build_chain(ledger, inner=inner)
 
     with pytest.raises(ExecutorTransientError):
-        await executor.submit(_decision(), _ctx())
+        await executor.submit(_ready(), _ctx())
 
     assert inner.calls == 1
 
@@ -146,7 +157,7 @@ async def test_paper_end_to_end_ledger_heartbeat() -> None:
     ledger = PaperPositionLedger(account_id="default")
     executor, probe, _bus = _build_chain(ledger)
 
-    result = await executor.submit(_decision(), _ctx())
+    result = await executor.submit(_ready(), _ctx())
 
     assert result.status == "filled"
     # Ledger: paper CLAIMED + FILLED back-to-back → reserved=0, realized=100
@@ -163,7 +174,7 @@ async def test_fill_tracker_emits_release_via_bus_reduces_ledger() -> None:
     executor, _probe, bus = _build_chain(ledger)
 
     # Submit once to create the paper sync claim+fill (reserved goes to 0, realized 100)
-    await executor.submit(_decision(), _ctx())
+    await executor.submit(_ready(), _ctx())
     # Then simulate fill_tracker observing offer disappear → emit RELEASE
     # Since paper FILL already 0'd reserved, RELEASE triggers floor (count++)
     await bus.publish(
@@ -205,7 +216,7 @@ async def test_sad_path_failing_subscriber_does_not_break_ledger() -> None:
         probe=probe,
     )
 
-    result = await executor.submit(_decision(), _ctx())  # 不 raise
+    result = await executor.submit(_ready(), _ctx())  # 不 raise
     assert result.status == "filled"
     # Ledger 仍正確 (failing subscriber 不影響 — bus.gather isolates subscribers)
     assert ledger.realized_exposure("fUST") == Decimal("100")

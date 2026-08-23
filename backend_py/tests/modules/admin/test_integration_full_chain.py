@@ -1,5 +1,5 @@
-"""Full chain integration: SmokeRunner end-to-end with real bus + middleware
-+ prod_ledger. Verifies (1) prod ledger untouched, (2) smoke passes via PG path.
+"""SmokeRunner gate integration: verifies the disabled submit path leaves the
+production ledger untouched until an audited ReadyToSubmit producer exists.
 
 Note: NOT marked pytest.mark.integration — runs without network
 (no network calls / pure in-process). Lives in tests/modules/admin/ for
@@ -77,8 +77,8 @@ async def test_smoke_does_not_touch_prod_ledger() -> None:
 
     result = await runner.run_l2()
 
-    assert result.status == "pass"
+    assert result.status == "fail"
+    assert "audited ReadyToSubmit" in (result.error or "")
     assert prod_ledger.total_exposure_all_symbols() == before_total
     assert prod_ledger.replay_floor_hit_count == 0
-
 

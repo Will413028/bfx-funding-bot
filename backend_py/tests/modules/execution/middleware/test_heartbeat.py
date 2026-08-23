@@ -53,12 +53,14 @@ def _ctx() -> AccountContext:
 
 
 class _InnerOk:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+                     reservation_ref: object | None = None) -> SubmittedOrder:
         return SubmittedOrder(cid=1, venue_offer_id="x", status="filled", raw_response=None)
 
 
 class _InnerRaises:
-    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+                     reservation_ref: object | None = None) -> SubmittedOrder:
         raise ExecutorTransientError("network_blip")
 
 

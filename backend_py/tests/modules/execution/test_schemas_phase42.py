@@ -55,6 +55,16 @@ def test_order_submit_payload_requires_execution_decision_id() -> None:
         )
 
 
+def test_order_submit_payload_rejects_blank_execution_decision_id() -> None:
+    with pytest.raises(ValidationError, match="execution_decision_id"):
+        OrderSubmitPayload(
+            cid=1, offer_id="paper_abc", execution_decision_id=" ",
+            signal_correlation_id=uuid4(), offer_rate=0.0001,
+            offer_amount_usdt=100.0, offer_duration_days=2,
+            is_simulated=True, status="submitted",
+        )
+
+
 def test_order_fill_payload_minimal() -> None:
     p = OrderFillPayload(
         cid=12345, offer_id="paper_abc",

@@ -157,6 +157,11 @@ class PostgresEventStore:
             symbol=symbol,
             size_usdt=Decimal(str(_ev.amount)),
             signal_correlation_id=str(_ev.signal_correlation_id),
+            execution_decision_id=(
+                _ev.reservation_ref.execution_decision_id
+                if getattr(_ev, "reservation_ref", None) is not None
+                else None
+            ),
             occurred_at_ms=now_ms,
             last_updated_ms=now_ms,
         )
@@ -172,6 +177,7 @@ class PostgresEventStore:
         symbol: str,
         size_usdt: Decimal,
         signal_correlation_id: str,
+        execution_decision_id: str | None,
         occurred_at_ms: int,
         last_updated_ms: int,
     ) -> None:
@@ -186,6 +192,7 @@ class PostgresEventStore:
             "venue_offer_id": venue_offer_id,
             "size_usdt": size_usdt,
             "signal_correlation_id": signal_correlation_id,
+            "execution_decision_id": execution_decision_id,
             "occurred_at_ms": occurred_at_ms,
             "last_updated_ms": last_updated_ms,
             # FSM state is the SoT for claims; position_state carries the
@@ -193,9 +200,17 @@ class PostgresEventStore:
             # carry-forward (d)).
             "last_event_seq": 0,
         }
+        update_values = {k: values[k] for k in (
+            "state", "venue_offer_id", "last_updated_ms", "symbol",
+        )}
+        # A historical lifecycle row has no audited decision id. It must not
+        # erase a correlation already projected from a post-Task-4 intent.
+        update_values["execution_decision_id"] = func.coalesce(
+            values["execution_decision_id"], OfferClaimRow.execution_decision_id,
+        )
         stmt = ins(OfferClaimRow).values(values).on_conflict_do_update(
             index_elements=["account_id", "deployment_environment", "cid"],
-            set_={k: values[k] for k in ("state", "venue_offer_id", "last_updated_ms", "symbol")},
+            set_=update_values,
         )
         await session.execute(stmt)
         # Core-level upsert bypasses the ORM, so any instance already loaded into
