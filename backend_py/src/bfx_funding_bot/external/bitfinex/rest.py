@@ -278,7 +278,8 @@ class BitfinexREST:
         Endpoint: GET /v2/book/f{sym}/P0?len={length}（免認證）。
         用途：定期 snapshot 落 `funding_book_snapshots`（自錄歷史 book——
         Bitfinex 不提供歷史 book，book-aware 策略的可回測資料只能從現在
-        開始累積）。E2 clamp 照舊用 ticker，不共用此路徑。
+        開始累積）。Live eligibility uses the separate reconciled in-memory
+        funding-book provider; this REST response is its reconciliation input.
         """
         sym = symbol[1:] if symbol.startswith("f") else symbol
         path = f"/v2/book/f{sym}/P0"
