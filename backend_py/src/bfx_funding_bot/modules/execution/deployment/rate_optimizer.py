@@ -20,7 +20,11 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
 )
 
 CandidateSource = Literal["signal", "maker", "taker"]
-OptimizerNoRecommendationReason = Literal["no_eligible_candidate"]
+OptimizerNoRecommendationReason = Literal[
+    "no_eligible_candidate",
+    "evidence_scope_mismatch",
+    "optimizer_error",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +101,17 @@ class RateOptimizer:
             ),
         ]
         candidates.extend(candidate for candidate in (maker, taker) if candidate is not None)
+
+        for candidate in (maker, taker):
+            if (
+                candidate is not None
+                and candidate.fill_evidence is not None
+                and not _same_evidence_scope(candidate.fill_evidence, fill_evidence)
+            ):
+                return OptimizerNoRecommendation(
+                    reason="evidence_scope_mismatch",
+                    candidates=(),
+                )
 
         eligible = tuple(
             candidate
@@ -196,16 +211,57 @@ def _freeze_scores(scores: Mapping[str, Decimal]) -> Mapping[str, Decimal]:
 
 
 def _validate_fill_evidence(evidence: FillModelEvidence) -> None:
-    """Reject canonical objects whose frozen shell contains mutable aliases."""
-    for value in (
-        evidence.fill_prob,
-        evidence.expected_ttf_ms,
-        evidence.n_samples,
-        evidence.symbol,
-        evidence.period_agg,
-        evidence.horizon_h,
-        evidence.model_version,
-        evidence.artifact_hash,
-        evidence.cutoff_ms,
+    """Reject malformed canonical values before they can retain mutable aliases."""
+    if not isinstance(evidence.fill_prob, Decimal):
+        raise TypeError("canonical fill evidence fill_prob must be a Decimal")
+    if (
+        not evidence.fill_prob.is_finite()
+        or evidence.fill_prob < Decimal("0")
+        or evidence.fill_prob > Decimal("1")
     ):
-        _freeze_value(value)
+        raise TypeError("canonical fill evidence fill_prob must be finite between zero and one")
+    if evidence.expected_ttf_ms is not None and (
+        isinstance(evidence.expected_ttf_ms, bool)
+        or not isinstance(evidence.expected_ttf_ms, int)
+        or evidence.expected_ttf_ms < 0
+    ):
+        raise TypeError("canonical fill evidence expected_ttf_ms must be a non-negative integer")
+    if (
+        isinstance(evidence.n_samples, bool)
+        or not isinstance(evidence.n_samples, int)
+        or evidence.n_samples < 0
+    ):
+        raise TypeError("canonical fill evidence n_samples must be a non-negative integer")
+    if not isinstance(evidence.symbol, str) or not evidence.symbol:
+        raise TypeError("canonical fill evidence symbol must be a non-empty string")
+    if not isinstance(evidence.period_agg, str) or not evidence.period_agg:
+        raise TypeError("canonical fill evidence period_agg must be a non-empty string")
+    if (
+        isinstance(evidence.horizon_h, bool)
+        or not isinstance(evidence.horizon_h, int)
+        or evidence.horizon_h <= 0
+    ):
+        raise TypeError("canonical fill evidence horizon_h must be a positive integer")
+    if not isinstance(evidence.model_version, str) or not evidence.model_version:
+        raise TypeError("canonical fill evidence model_version must be a non-empty string")
+    if not isinstance(evidence.artifact_hash, str) or not evidence.artifact_hash:
+        raise TypeError("canonical fill evidence artifact_hash must be a non-empty string")
+    if (
+        isinstance(evidence.cutoff_ms, bool)
+        or not isinstance(evidence.cutoff_ms, int)
+        or evidence.cutoff_ms < 0
+    ):
+        raise TypeError("canonical fill evidence cutoff_ms must be a non-negative integer")
+
+
+def _same_evidence_scope(
+    candidate: FillModelEvidence,
+    global_evidence: FillModelEvidence,
+) -> bool:
+    return (
+        candidate.symbol == global_evidence.symbol
+        and candidate.period_agg == global_evidence.period_agg
+        and candidate.horizon_h == global_evidence.horizon_h
+        and candidate.model_version == global_evidence.model_version
+        and candidate.artifact_hash == global_evidence.artifact_hash
+    )

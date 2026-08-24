@@ -362,6 +362,7 @@ class DeploymentReconciler:
                 gate_price = price
                 fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
                 optimizer_evidence: Mapping[str, object] | None = None
+                optimizer_block_reason: BlockReason | None = None
                 period_agg = self._cell_period_agg[cell_id]
                 expected_horizon_h, expected_model_version, expected_artifact_hash = (
                     self._optimizer_scope()
@@ -380,11 +381,19 @@ class DeploymentReconciler:
                         now_ms=now,
                         period_agg=period_agg,
                     )
-                    optimization = self._optimize(
-                        candidate=decision,
-                        price=price,
-                        fill_evidence=fill_evidence,
-                    )
+                    try:
+                        optimization = self._optimize(
+                            candidate=decision,
+                            price=price,
+                            fill_evidence=fill_evidence,
+                        )
+                    except Exception:
+                        log.exception(
+                            "optimizer_failed symbol=%s cell=%s", decision.symbol, cell_id,
+                        )
+                        optimization = OptimizerNoRecommendation(
+                            reason="optimizer_error", candidates=(),
+                        )
                     optimizer_evidence = _optimizer_evidence(
                         optimization, price, fill_evidence,
                     )
@@ -396,8 +405,10 @@ class DeploymentReconciler:
                                 evidence=price.evidence,
                             )
                     elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
-                        # Never reinterpret unavailable optimization as an implicit
-                        # signal fallback.  The gate maps it to a typed block.
+                        # Never reinterpret a failed optimizer as an implicit signal
+                        # fallback.  Valid fill evidence remains visible in audit.
+                        if isinstance(optimization, OptimizerNoRecommendation):
+                            optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
                         if fill_evidence is None:
                             fill_evidence = FillModelUnavailable("missing")
                     else:
@@ -419,6 +430,7 @@ class DeploymentReconciler:
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
                     ),
                     optimizer_evidence=optimizer_evidence,
+                    optimizer_block_reason=optimizer_block_reason,
                     expected_period_agg=period_agg,
                     expected_horizon_h=expected_horizon_h,
                     expected_model_version=expected_model_version,

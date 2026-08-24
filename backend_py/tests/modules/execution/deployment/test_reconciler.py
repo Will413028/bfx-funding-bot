@@ -17,6 +17,12 @@ from bfx_funding_bot.modules.execution.contracts import (
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    OptimizationResult,
+    OptimizerNoRecommendation,
+    RateCandidate,
+    RateOptimizer,
+)
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
@@ -161,6 +167,34 @@ class _FillModelProvider:
         return self._evidence
 
 
+class _NoRecommendationOptimizer(RateOptimizer):
+    def select(
+        self,
+        signal_rate: Decimal,
+        *,
+        maker: RateCandidate | None,
+        taker: RateCandidate | None,
+        fill_evidence: FillModelEvidence,
+        fee_rate: Decimal,
+    ) -> OptimizationResult | OptimizerNoRecommendation:
+        return OptimizerNoRecommendation(
+            reason="no_eligible_candidate", candidates=(),
+        )
+
+
+class _ErrorOptimizer(RateOptimizer):
+    def select(
+        self,
+        signal_rate: Decimal,
+        *,
+        maker: RateCandidate | None,
+        taker: RateCandidate | None,
+        fill_evidence: FillModelEvidence,
+        fee_rate: Decimal,
+    ) -> OptimizationResult | OptimizerNoRecommendation:
+        raise ValueError("candidate evidence rejected")
+
+
 class _AuditContexts:
     def build(self, *, candidate, cell_id: str, reconcile_id: str):
         from bfx_funding_bot.modules.execution.audit.model import AuditContext
@@ -191,6 +225,17 @@ def _ask_snapshot() -> MarketSnapshot:
         snapshot_id="book-ask", symbol="fUST", bids=(),
         asks=(FundingBookLevel(rate=0.00025, period=2, count=1, amount=100_000),),
         captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _bid_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-bid", symbol="fUST",
+        bids=(FundingBookLevel(rate=0.00013, period=2, count=1, amount=-100_000),),
+        asks=(), captured_at_ms=1_000, received_at_ms=1_000, source="ws",
         sequence_valid=True, checksum_valid=True, sequence=2,
     )
 
@@ -287,7 +332,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            execution_policy=ExecutionPolicy.BOOK_GUARDED,
            fill_model_provider: _FillModelProvider | None = None,
            optimizer_fee_rate: Decimal | None = None,
-           optimizer_horizon_h: int | None = None):
+           optimizer_horizon_h: int | None = None,
+           rate_optimizer: RateOptimizer | None = None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -325,6 +371,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         ),
         ladder=ladder,
         attempt_recorder=attempt_recorder,
+        rate_optimizer=rate_optimizer,
         optimizer_fee_rate=optimizer_fee_rate,
         **optimizer_kwargs,
     )
@@ -472,6 +519,85 @@ async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit()
     assert audit.last.outcome is ExecutionDecisionOutcome.READY
     assert audit.last.applied_rate == D("0.00024999")
     assert audit.last.model_evidence["optimizer"]["selected_source"] == "maker"
+
+
+@pytest.mark.parametrize(
+    "optimizer", [_NoRecommendationOptimizer(), _ErrorOptimizer()],
+    ids=["no_recommendation", "error"],
+)
+async def test_optimizer_live_optimizer_failure_is_audited_blocked_without_submit(
+    optimizer: RateOptimizer,
+) -> None:
+    """Valid fill evidence cannot turn an optimizer failure into signal fallback."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+        rate_optimizer=optimizer,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.OPTIMIZER_UNAVAILABLE
+    assert audit.last.failed_dependency == "optimizer"
+    assert audit.last.model_evidence["fill_prob"] == "0.95"
+    assert "unavailable_reason" not in audit.last.model_evidence
+    assert audit.last.model_evidence["optimizer"]["outcome"] == "no_recommendation"
+
+
+async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects() -> None:
+    """A valid shadow result is observational; the existing book price is submitted."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_horizon_h=1,
+        rate_optimizer=RateOptimizer(),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.applied_rate == D("0.00024999")
+    assert audit.last.model_evidence["optimizer"]["outcome"] == "selected"
+
+
+async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> None:
+    """TAKER is a real exact-period candidate and is never relabeled as maker."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_bid_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00012]
+    optimizer = audit.last.model_evidence["optimizer"]
+    assert [candidate["source"] for candidate in optimizer["candidates"]] == [
+        "signal", "taker",
+    ]
+    assert all(candidate["source"] != "maker" for candidate in optimizer["candidates"])
 
 
 async def test_optimizer_live_requires_explicit_fee_rate() -> None:

@@ -32,9 +32,11 @@ _EXECUTION_EVENT_NAMES = frozenset({
     "funding.execution.submitted",
     "funding.book.snapshot_invalid",
     "funding.fill_model.unavailable",
+    "funding.optimizer.no_recommendation",
 })
 _EXECUTION_EVIDENCE_KEYS = frozenset({
     "dependency", "branch", "snapshot_id", "period_days", "guard_name",
+    "optimizer_outcome",
 })
 
 

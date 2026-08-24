@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -13,6 +14,9 @@ from bfx_funding_bot.modules.lending.tracking.artifact import FillModelEvidence
 def _evidence(
     *,
     fill_probability: str = "0.95",
+    symbol: str = "fUST",
+    period_agg: str = "p2",
+    horizon_h: int = 1,
     model_version: str = "fill-v1",
     artifact_hash: str = "sha256:model",
 ) -> FillModelEvidence:
@@ -22,9 +26,9 @@ def _evidence(
         fill_prob=Decimal(fill_probability),
         expected_ttf_ms=500,
         n_samples=100,
-        symbol="fUST",
-        period_agg="p2",
-        horizon_h=1,
+        symbol=symbol,
+        period_agg=period_agg,
+        horizon_h=horizon_h,
         cutoff_ms=1_000,
     )
 
@@ -34,15 +38,20 @@ def _candidate(
     source: str,
     *,
     fill_probability: str | None = None,
+    fill_evidence: FillModelEvidence | None = None,
     book_evidence: dict[str, object] | None = None,
 ) -> RateCandidate:
     return RateCandidate(
         rate=Decimal(rate),
         source=source,  # type: ignore[arg-type]
         fill_evidence=(
-            _evidence(fill_probability=fill_probability)
-            if fill_probability is not None
-            else None
+            fill_evidence
+            if fill_evidence is not None
+            else (
+                _evidence(fill_probability=fill_probability)
+                if fill_probability is not None
+                else None
+            )
         ),
         book_evidence=book_evidence or {"snapshot_id": "book-1", "period_days": 2},
     )
@@ -140,6 +149,62 @@ def test_accepts_task7_canonical_fill_model_evidence() -> None:
     assert result.artifact_hash == evidence.artifact_hash
     assert result.scores["signal"] == Decimal("0.0001615")
     assert result.selected.source == "maker"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("symbol", "fUSD"),
+        ("period_agg", "a30"),
+        ("horizon_h", 2),
+        ("model_version", "fill-v2"),
+        ("artifact_hash", "sha256:other"),
+    ],
+)
+def test_rejects_candidate_evidence_outside_global_model_scope(
+    field: str,
+    value: object,
+) -> None:
+    """Every candidate must use the exact global model provenance scope."""
+    candidate_evidence = replace(_evidence(), **{field: value})
+
+    result = RateOptimizer().select(
+        signal_rate=Decimal("0.00020"),
+        maker=_candidate(
+            "0.00021", "maker", fill_evidence=candidate_evidence,
+        ),
+        taker=None,
+        fill_evidence=_evidence(),
+        fee_rate=Decimal("0.15"),
+    )
+
+    assert isinstance(result, OptimizerNoRecommendation)
+    assert result.reason == "evidence_scope_mismatch"
+    assert result.candidates == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("symbol", ["fUST"]),
+        ("period_agg", bytearray(b"p2")),
+        ("model_version", ["fill-v1"]),
+    ],
+)
+def test_rejects_mutable_aliases_in_canonical_evidence_fields(
+    field: str,
+    value: object,
+) -> None:
+    """Canonical scalar fields cannot retain runtime-injected mutable aliases."""
+    evidence = replace(_evidence(), **{field: value})
+
+    with pytest.raises(TypeError, match="canonical fill evidence"):
+        RateCandidate(
+            rate=Decimal("0.00021"),
+            source="maker",
+            fill_evidence=evidence,
+            book_evidence={},
+        )
 
 
 def test_rejects_unsupported_mutable_provenance() -> None:
