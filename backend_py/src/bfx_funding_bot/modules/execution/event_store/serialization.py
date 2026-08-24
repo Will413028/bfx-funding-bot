@@ -6,7 +6,10 @@ from typing import Any
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.event_store.replay import HistoricalReplayProvenance
+from bfx_funding_bot.modules.execution.event_store.replay import (
+    HistoricalReplayProvenance,
+    _HistoricalReplayAuthorization,
+)
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
     __SCHEMA_VERSION__,
@@ -17,6 +20,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationIntent,
     ReservationReleased,
+    _construct_historical_legacy_event,
 )
 
 # event_type string <-> domain class. Clean field names (we own this schema).
@@ -105,10 +109,14 @@ def deserialize_stored_event(row: EventLogRow) -> object:
     if "__schema_version__" in payload:
         return deserialize_event(row.event_type, payload)
     provenance = HistoricalReplayProvenance.from_stored_event(row)
+    authorization = provenance.authorize_legacy_payload(
+        event_type=row.event_type,
+        payload=payload,
+    )
     return _decode_payload(
         row.event_type,
         payload,
-        historical_provenance=provenance,
+        historical_authorization=authorization,
     )
 
 
@@ -116,16 +124,11 @@ def _decode_payload(
     event_type: str,
     payload: dict[str, Any],
     *,
-    historical_provenance: HistoricalReplayProvenance | None = None,
+    historical_authorization: _HistoricalReplayAuthorization | None = None,
 ) -> object:
     cls = _CLASS_BY_TYPE.get(event_type)
     if cls is None:
         raise ValueError(f"unknown event_type: {event_type}")
-    if historical_provenance is not None and not historical_provenance.authorizes(
-        event_type=event_type,
-        payload=payload,
-    ):
-        raise TypeError("historical replay provenance does not match stored payload")
     # Upcast: each of the 5 reserve events gained a mandatory `symbol` (the 4
     # position events in Phase 2; Intent/Failed in the fUSD-prereq work) AFTER
     # early event_log rows were written. Inject the historically-correct value
@@ -134,13 +137,13 @@ def _decode_payload(
     # the offer_claims symbol guard or the position_state tail fold drops them.
     # New rows already carry symbol so this is a no-op. The canary was fUST-only
     # when every symbol-less row existed.
-    if historical_provenance is not None and payload.get("symbol") is None:
+    if historical_authorization is not None and payload.get("symbol") is None:
         payload = {**payload, "symbol": DEFAULT_RECONCILE_SYMBOL}
     # Task 4 introduced the immutable reservation reference. Rows written
     # before that schema have neither key; they remain explicitly
     # uncorrelated legacy data rather than receiving an invented decision id.
     is_historical_legacy = (
-        historical_provenance is not None
+        historical_authorization is not None
         and event_type in _CORRELATION_EVENT_TYPES
         and _REF_FIELD not in payload
     )
@@ -157,8 +160,15 @@ def _decode_payload(
         payload = {**payload, "execution_decision_id": None}
     kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
     if is_historical_legacy:
-        assert historical_provenance is not None
-        kwargs["replay_provenance"] = historical_provenance
+        assert historical_authorization is not None
+        return _construct_historical_legacy_event(
+            cls=cls,
+            event_type=event_type,
+            kwargs=kwargs,
+            historical_authorization=historical_authorization,
+        )
+    if historical_authorization is not None:
+        historical_authorization.consume(event_type=event_type)
     return cls(**kwargs)
 
 

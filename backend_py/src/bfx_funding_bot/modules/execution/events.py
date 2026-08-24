@@ -15,13 +15,13 @@ Migration: 4.3 legacy rows lack these fields; PG-sourced rows set them from even
 """
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.event_store.replay import HistoricalReplayProvenance
+from bfx_funding_bot.modules.execution.event_store.replay import _HistoricalReplayAuthorization
 
 __SCHEMA_VERSION__ = 2
 
@@ -81,31 +81,17 @@ def _require_execution_decision_id(ev: object) -> None:
 def _validate_reservation_ref(
     ev: object,
     *,
-    event_type: str,
     requires_venue_offer: bool,
-    replay_provenance: HistoricalReplayProvenance | None,
 ) -> None:
     """Reject internally contradictory correlation data before it is persisted.
 
-    No reference is permitted only for explicitly decoded historical events.
-    Live producers must supply a reference; consumers reject legacy rows for
-    venue correlation.
+    Live producers must supply a reference. Historical rows bypass public
+    constructors through the stored-row replay factory below.
     """
-    if replay_provenance is not None:
-        if type(replay_provenance) is not HistoricalReplayProvenance:
-            raise TypeError(
-                f"{type(ev).__name__} requires persistent EventStore replay provenance",
-            )
-        if replay_provenance.event_type != event_type:
-            raise TypeError(f"{type(ev).__name__} historical replay provenance conflicts")
-        object.__setattr__(ev, "is_legacy_uncorrelated", True)
-    legacy = getattr(ev, "is_legacy_uncorrelated", False)
     reference = getattr(ev, "reservation_ref", None)
     if reference is None:
-        if legacy:
-            return
         raise TypeError(
-            f"{type(ev).__name__} requires reservation_ref unless legacy uncorrelated",
+            f"{type(ev).__name__} requires reservation_ref",
         )
     typed_event: Any = ev
     if (
@@ -174,13 +160,10 @@ class ReservationIntent:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
-    replay_provenance: InitVar[HistoricalReplayProvenance | None] = None
-
-    def __post_init__(self, replay_provenance: HistoricalReplayProvenance | None) -> None:
+    def __post_init__(self) -> None:
         _require_symbol(self)
         if self.execution_decision_id is None:
-            if replay_provenance is None:
-                _require_execution_decision_id(self)
+            _require_execution_decision_id(self)
         else:
             _require_execution_decision_id(self)
             if self.reservation_ref is None:
@@ -193,9 +176,7 @@ class ReservationIntent:
                 raise TypeError("ReservationIntent reservation_ref decision id conflicts")
         _validate_reservation_ref(
             self,
-            event_type="RESERVATION_INTENT",
             requires_venue_offer=False,
-            replay_provenance=replay_provenance,
         )
         _resolve_amount(self)
 
@@ -221,15 +202,11 @@ class ReservationFailed:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
-    replay_provenance: InitVar[HistoricalReplayProvenance | None] = None
-
-    def __post_init__(self, replay_provenance: HistoricalReplayProvenance | None) -> None:
+    def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
             self,
-            event_type="RESERVATION_FAILED",
             requires_venue_offer=False,
-            replay_provenance=replay_provenance,
         )
         _resolve_amount(self)
 
@@ -260,15 +237,11 @@ class ReservationClaimed:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
-    replay_provenance: InitVar[HistoricalReplayProvenance | None] = None
-
-    def __post_init__(self, replay_provenance: HistoricalReplayProvenance | None) -> None:
+    def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
             self,
-            event_type="RESERVATION_CLAIMED",
             requires_venue_offer=True,
-            replay_provenance=replay_provenance,
         )
         _resolve_amount(self)
 
@@ -299,15 +272,11 @@ class OrderFilled:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
-    replay_provenance: InitVar[HistoricalReplayProvenance | None] = None
-
-    def __post_init__(self, replay_provenance: HistoricalReplayProvenance | None) -> None:
+    def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
             self,
-            event_type="ORDER_FILL",
             requires_venue_offer=True,
-            replay_provenance=replay_provenance,
         )
         _resolve_amount(self)
 
@@ -334,15 +303,11 @@ class ReservationReleased:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
-    replay_provenance: InitVar[HistoricalReplayProvenance | None] = None
-
-    def __post_init__(self, replay_provenance: HistoricalReplayProvenance | None) -> None:
+    def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
             self,
-            event_type="RESERVATION_RELEASED",
             requires_venue_offer=True,
-            replay_provenance=replay_provenance,
         )
         _resolve_amount(self)
 
@@ -448,3 +413,41 @@ class CancelAcknowledged:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+
+
+_HISTORICAL_LIFECYCLE_TYPES: dict[str, type[object]] = {
+    "RESERVATION_INTENT": ReservationIntent,
+    "RESERVATION_FAILED": ReservationFailed,
+    "RESERVATION_CLAIMED": ReservationClaimed,
+    "ORDER_FILL": OrderFilled,
+    "RESERVATION_RELEASED": ReservationReleased,
+}
+
+
+def _construct_historical_legacy_event(
+    *,
+    cls: type[object],
+    event_type: str,
+    kwargs: dict[str, Any],
+    historical_authorization: _HistoricalReplayAuthorization,
+) -> object:
+    """Build an uncorrelated lifecycle event only from a consumed replay grant.
+
+    Public lifecycle constructors deliberately cannot represent this state.
+    The stored-row decoder has already bound ``historical_authorization`` to the
+    exact durable payload before calling this factory; consuming it here makes
+    the grant unusable for another event.
+    """
+    if _HISTORICAL_LIFECYCLE_TYPES.get(event_type) is not cls:
+        raise TypeError("historical replay event type conflicts")
+    if kwargs.get("reservation_ref") is not None:
+        raise TypeError("historical legacy event must be uncorrelated")
+    historical_authorization.consume(event_type=event_type)
+
+    event = object.__new__(cls)
+    for name, value in kwargs.items():
+        object.__setattr__(event, name, value)
+    object.__setattr__(event, "is_legacy_uncorrelated", True)
+    _require_symbol(event)
+    _resolve_amount(event)
+    return event

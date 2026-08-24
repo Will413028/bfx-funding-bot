@@ -57,17 +57,14 @@ def test_public_constructor_cannot_forge_legacy_uncorrelated_lifecycle_event() -
         )
 
 
-def test_public_constructor_rejects_forged_historical_replay_provenance() -> None:
-    """Only the EventStore may supply the legacy capability during rebuild."""
+def test_public_constructor_does_not_accept_historical_replay_provenance() -> None:
+    """Legacy authority is available only to the stored-row replay factory."""
 
-    class _ForgedReplayProvenance:
-        event_type = "RESERVATION_CLAIMED"
-
-    with pytest.raises(TypeError, match="persistent EventStore replay provenance"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'replay_provenance'"):
         ReservationClaimed(
             cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
             signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
-            replay_provenance=_ForgedReplayProvenance(),  # type: ignore[arg-type]
+            replay_provenance=object(),  # type: ignore[call-arg]
         )
 
 
