@@ -433,6 +433,71 @@ async def test_rebuild_decodes_persisted_pre_task4_rows_as_explicit_legacy(
     assert projection.execution_decision_id is None
 
 
+async def test_historical_replay_authorization_is_one_shot_and_payload_bound(
+    sqlite_session: AsyncSession,
+) -> None:
+    """A legacy capability cannot construct a second or different event."""
+    await _create_all(sqlite_session)
+    payload = {
+        "cid": 881,
+        "size_usdt": "5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "historical-acct",
+        "is_simulated": False,
+        "occurred_at_ms": 1000,
+    }
+    row = EventLogRow(
+        account_id="historical-acct",
+        deployment_environment="prod",
+        event_type="RESERVATION_INTENT",
+        cid=881,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=payload,
+        occurred_at_ms=1000,
+    )
+    sqlite_session.add(row)
+    await sqlite_session.flush()
+
+    from bfx_funding_bot.modules.execution.event_store.replay import (
+        HistoricalReplayProvenance,
+    )
+    from bfx_funding_bot.modules.execution.event_store.serialization import _decode_payload
+
+    provenance = HistoricalReplayProvenance.from_stored_event(row)
+    with pytest.raises(TypeError, match="does not match stored payload"):
+        provenance.authorize_legacy_payload(
+            event_type="RESERVATION_INTENT",
+            payload={**payload, "cid": 999},
+        )
+
+    authorization = provenance.authorize_legacy_payload(
+        event_type="RESERVATION_INTENT",
+        payload=payload,
+    )
+    with pytest.raises(TypeError, match="already consumed"):
+        provenance.authorize_legacy_payload(
+            event_type="RESERVATION_INTENT",
+            payload=payload,
+        )
+
+    decoded = _decode_payload(
+        "RESERVATION_INTENT",
+        payload,
+        historical_authorization=authorization,
+    )
+    assert decoded.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    assert decoded.execution_decision_id is None  # type: ignore[attr-defined]
+    assert decoded.reservation_ref is None  # type: ignore[attr-defined]
+
+    with pytest.raises(TypeError, match="already consumed"):
+        _decode_payload(
+            "RESERVATION_INTENT",
+            payload,
+            historical_authorization=authorization,
+        )
+
+
 async def test_stored_event_decoder_rejects_transient_row() -> None:
     from bfx_funding_bot.modules.execution.event_store.serialization import (
         deserialize_stored_event,
