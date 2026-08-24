@@ -15,6 +15,73 @@ from bfx_funding_bot.modules.lending.tracking.tables import (
 )
 
 _PK = ["source", "symbol", "period_agg", "horizon_h", "spread_bucket_bps"]
+_ARTIFACT_FIELDS = (
+    "artifact_hash",
+    "source",
+    "symbol",
+    "period_agg",
+    "horizon_h",
+    "model_version",
+    "schema_version",
+    "training_start_ms",
+    "training_end_ms",
+    "cutoff_ms",
+    "sample_count",
+    "confidence_min_samples",
+    "metadata_json",
+)
+
+
+def _artifact_values(artifact: FillModelArtifact) -> dict[str, object]:
+    return {
+        "artifact_hash": artifact.artifact_hash,
+        "source": artifact.source,
+        "symbol": artifact.symbol,
+        "period_agg": artifact.period_agg,
+        "horizon_h": artifact.horizon_h,
+        "model_version": artifact.model_version,
+        "schema_version": artifact.schema_version,
+        "training_start_ms": artifact.training_start_ms,
+        "training_end_ms": artifact.training_end_ms,
+        "cutoff_ms": artifact.cutoff_ms,
+        "sample_count": artifact.sample_count,
+        "confidence_min_samples": artifact.confidence_min_samples,
+        "metadata_json": artifact.metadata_for_storage(),
+    }
+
+
+async def ensure_fill_model_artifact(
+    session: AsyncSession,
+    *,
+    artifact: FillModelArtifact,
+    created_at: datetime,
+) -> None:
+    """Insert an artifact once, rejecting any hash/provenance collision."""
+    expected = _artifact_values(artifact)
+    result = await session.execute(
+        select(FillRateModelArtifactRow).where(
+            FillRateModelArtifactRow.artifact_hash == artifact.artifact_hash,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing is None:
+        session.add(FillRateModelArtifactRow(
+            **expected,
+            created_at=created_at.astimezone(UTC),
+        ))
+        return
+
+    mismatches = [
+        field
+        for field in _ARTIFACT_FIELDS
+        if getattr(existing, field) != expected[field]
+    ]
+    if mismatches:
+        fields = ", ".join(mismatches)
+        raise ValueError(
+            f"artifact hash {artifact.artifact_hash!r} conflicts with existing "
+            f"artifact fields: {fields}"
+        )
 
 
 async def upsert_fill_rate_stats(
@@ -62,22 +129,11 @@ async def upsert_fill_rate_stats(
         }
         for s in stats
     ]
-    await session.merge(FillRateModelArtifactRow(
-        artifact_hash=artifact.artifact_hash,
-        source=artifact.source,
-        symbol=artifact.symbol,
-        period_agg=artifact.period_agg,
-        horizon_h=artifact.horizon_h,
-        model_version=artifact.model_version,
-        schema_version=artifact.schema_version,
-        training_start_ms=artifact.training_start_ms,
-        training_end_ms=artifact.training_end_ms,
-        cutoff_ms=artifact.cutoff_ms,
-        sample_count=artifact.sample_count,
-        confidence_min_samples=artifact.confidence_min_samples,
-        metadata_json=dict(artifact.metadata),
-        created_at=learned_at.astimezone(UTC),
-    ))
+    await ensure_fill_model_artifact(
+        session,
+        artifact=artifact,
+        created_at=learned_at,
+    )
     stmt = sqlite_insert(FillRateStatsRow).values(values)
     update_cols = {
         c: getattr(stmt.excluded, c)

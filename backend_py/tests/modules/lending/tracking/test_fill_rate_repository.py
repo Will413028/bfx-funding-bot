@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -90,3 +91,42 @@ async def test_upsert_rejects_artifact_with_a_different_scope(session_factory):
                 learned_at=datetime.now(UTC),
                 artifact=_artifact(),
             )
+
+
+async def test_upsert_rejects_existing_hash_with_conflicting_scope(session_factory):
+    original = _artifact()
+    conflicting = replace(original, symbol="fUST")
+
+    async with session_factory() as session:
+        await upsert_fill_rate_stats(
+            session,
+            source="candle",
+            symbol="fUSD",
+            period_agg="p2",
+            stats=_stats(),
+            candle_range_start_ms=1000,
+            candle_range_end_ms=2000,
+            learned_at=datetime.now(UTC),
+            artifact=original,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="artifact hash"):
+            await upsert_fill_rate_stats(
+                session,
+                source="candle",
+                symbol="fUST",
+                period_agg="p2",
+                stats=_stats(),
+                candle_range_start_ms=1000,
+                candle_range_end_ms=2000,
+                learned_at=datetime.now(UTC),
+                artifact=conflicting,
+            )
+        await session.rollback()
+
+    async with session_factory() as session:
+        stored = await load_fill_model_artifact(session, artifact_hash=original.artifact_hash)
+    assert stored is not None
+    assert stored.symbol == "fUSD"

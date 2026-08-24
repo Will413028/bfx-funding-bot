@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     PrimaryKeyConstraint,
     Text,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,7 +35,12 @@ class FillRateModelArtifactRow(Base):
     cutoff_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
     confidence_min_samples: Mapped[int] = mapped_column(Integer, nullable=False)
-    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
