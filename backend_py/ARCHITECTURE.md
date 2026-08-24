@@ -277,7 +277,7 @@ sequenceDiagram
 |---|---|
 | `event_log` | SoT，append-only。dedup unique index gate `ORDER_FILL` / `RESERVATION_RELEASED`（key 含 `venue_offer_id` + `venue_seq`）。 |
 | `position_state` | ledger 投影（singleton per account+env）：`reserved_usdt`、`realized_usdt`、`last_event_seq`（high-water mark）、`last_reconciled_at`、`n_credits`。每次 `append()` 同 txn 內更新。 |
-| `offer_claims` | FSM 快照，PK `(account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。`upsert`（on_conflict_do_update）。 |
+| `offer_claims` | FSM 快照，PK `(account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 realm 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
 | `reconcile_observation` | 不可變 checkpoint：venue 快照 + `event_seq_fence`（快照當下 max event_seq）+ `n_offers` / `n_credits`。rebuild 的 base state。 |
 | `diagnostics` | **非 SoT** forensic 軌跡（DECISION / SAFETY_TRIGGER / CANCEL_AUDIT），best-effort 寫入（失敗不擋交易），prunable 30–90d。 |
 
@@ -334,8 +334,12 @@ position_state         (ledger 投影, singleton per account+env)
 offer_claims           (FSM 快照, per-offer)
   PK (account_id, deployment_environment, cid)
   state{PENDING|CLAIMED|RELEASED|FAILED}, venue_offer_id,
-  size_usdt, signal_correlation_id,
+  size_usdt, signal_correlation_id, execution_decision_id,
   occurred_at_ms, last_updated_ms, last_event_seq
+  UNIQUE partial (account_id, deployment_environment, venue_offer_id)
+    WHERE venue_offer_id IS NOT NULL
+  UNIQUE partial (account_id, deployment_environment, execution_decision_id)
+    WHERE execution_decision_id IS NOT NULL
 
 reconcile_observation  (checkpoint, append-only audit)
   PK id

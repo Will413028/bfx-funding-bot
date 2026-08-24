@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.event_store.serialization import (
-    deserialize_event,
+    deserialize_stored_event,
     event_type_of,
     serialize_event,
 )
@@ -415,7 +415,7 @@ class PostgresEventStore:
 
         # offer_claims: full fold.
         for r in rows:
-            event = deserialize_event(r.event_type, r.payload)
+            event = deserialize_stored_event(r)
             await self._project_offer_claims(session, event, account_id)
 
         # position_state: checkpoint + tail. The checkpoint base is now per-symbol
