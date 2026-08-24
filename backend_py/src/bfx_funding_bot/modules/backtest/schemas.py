@@ -69,4 +69,6 @@ class BacktestResult(BaseModel):
     artifact_hash: str | None = None
     model_cutoff_ms: int | None = None
     model_sample_count: int | None = None
-    incomplete_reason: Literal["fill_model_missing", "fill_model_low_confidence"] | None = None
+    incomplete_reason: Literal[
+        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+    ] | None = None

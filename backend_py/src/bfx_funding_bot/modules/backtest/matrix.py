@@ -67,7 +67,9 @@ class WindowOutcome:
     oos_sortino: Decimal | None
     baseline_net: Decimal | None
     baseline_sortino: Decimal | None
-    incomplete_reason: Literal["fill_model_missing", "fill_model_low_confidence"] | None = None
+    incomplete_reason: Literal[
+        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -286,7 +288,7 @@ def run_cell_wfo(
                 oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
                 baseline_net=None,
                 baseline_sortino=None,
-                incomplete_reason=error.reason,  # type: ignore[arg-type]
+                incomplete_reason=error.reason,
             ))
 
     return window_outcomes, baseline_results
