@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from decimal import Decimal
+from math import isfinite
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -30,8 +31,6 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceDecision,
 )
 from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
-    FillModelEvidence,
-    FillModelUnavailable,
     OptimizationResult,
     OptimizerNoRecommendation,
     RateCandidate,
@@ -59,6 +58,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol
+from bfx_funding_bot.modules.lending.tracking.artifact import (
+    FillModelEvidence,
+    FillModelUnavailable,
+)
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -96,13 +99,12 @@ class _AuditContextFactory(Protocol):
 class FillModelEvidenceProvider(Protocol):
     """Supplies evidence; absence is intentionally distinct from a score of one."""
 
-    def evidence_for(
+    def estimate_fill(
         self,
-        *,
-        candidate: DecisionPayload,
-        snapshot: object,
-        price: PriceDecision,
-        now_ms: int,
+        reference_rate: Decimal,
+        offer_rate: Decimal,
+        period_agg: str,
+        horizon_h: int,
     ) -> FillModelEvidence | FillModelUnavailable | None: ...
 
 
@@ -140,6 +142,7 @@ class DeploymentReconciler:
         fill_model_provider: FillModelEvidenceProvider | None = None,
         rate_optimizer: RateOptimizer | None = None,
         optimizer_fee_rate: Decimal | None = None,
+        optimizer_horizon_h: int | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -176,7 +179,14 @@ class DeploymentReconciler:
         self._audit_context_factory = audit_context_factory
         self._fill_model_provider = fill_model_provider
         self._rate_optimizer = rate_optimizer or RateOptimizer()
-        self._optimizer_fee_rate = optimizer_fee_rate or Decimal("0")
+        if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE and optimizer_fee_rate is None:
+            raise ValueError("optimizer_live requires optimizer_fee_rate")
+        if optimizer_horizon_h is not None and optimizer_horizon_h <= 0:
+            raise ValueError("optimizer_horizon_h must be positive")
+        self._optimizer_fee_rate = (
+            optimizer_fee_rate if optimizer_fee_rate is not None else Decimal("0")
+        )
+        self._optimizer_horizon_h = optimizer_horizon_h
         # Optional (None on paper/shadow and in most tests): mirrors each submit
         # outcome into a slot GET /admin/trading-status can read. Purely
         # observational — never consulted for a decision.
@@ -189,6 +199,9 @@ class DeploymentReconciler:
         # so the per-symbol guards (allocation cap / buying power) can read it, and
         # used for the per-symbol balance clamp.
         self._cell_symbol: dict[str, str] = {c.cell_id: c.symbol for c in cells}
+        self._cell_period_agg: dict[str, str] = {
+            c.cell_id: c.period_agg for c in cells
+        }
 
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
@@ -349,6 +362,10 @@ class DeploymentReconciler:
                 gate_price = price
                 fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
                 optimizer_evidence: Mapping[str, object] | None = None
+                period_agg = self._cell_period_agg[cell_id]
+                expected_horizon_h, expected_model_version, expected_artifact_hash = (
+                    self._optimizer_scope()
+                )
                 if (
                     isinstance(price, PriceDecision)
                     and self._execution_policy in {
@@ -361,13 +378,16 @@ class DeploymentReconciler:
                         snapshot=snapshot,
                         price=price,
                         now_ms=now,
+                        period_agg=period_agg,
                     )
                     optimization = self._optimize(
                         candidate=decision,
                         price=price,
                         fill_evidence=fill_evidence,
                     )
-                    optimizer_evidence = _optimizer_evidence(optimization, price)
+                    optimizer_evidence = _optimizer_evidence(
+                        optimization, price, fill_evidence,
+                    )
                     if isinstance(optimization, OptimizationResult):
                         if self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
                             gate_price = PriceDecision(
@@ -378,13 +398,14 @@ class DeploymentReconciler:
                     elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
                         # Never reinterpret unavailable optimization as an implicit
                         # signal fallback.  The gate maps it to a typed block.
-                        fill_evidence = FillModelUnavailable("missing")
+                        if fill_evidence is None:
+                            fill_evidence = FillModelUnavailable("missing")
                     else:
                         await self._emit_shadow_optimizer_unavailable(
                             decision=decision,
                             cell_id=cell_id,
                             reconcile_id=reconcile_id,
-                            reason=_optimizer_reason(optimization),
+                            reason=_optimizer_reason(optimization, fill_evidence),
                         )
                 outcome = await self._execution_gate.prepare(
                     decision,
@@ -398,6 +419,10 @@ class DeploymentReconciler:
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
                     ),
                     optimizer_evidence=optimizer_evidence,
+                    expected_period_agg=period_agg,
+                    expected_horizon_h=expected_horizon_h,
+                    expected_model_version=expected_model_version,
+                    expected_artifact_hash=expected_artifact_hash,
                 )
                 if not isinstance(outcome, ReadyToSubmit):
                     if isinstance(outcome, BlockedExecution):
@@ -479,19 +504,42 @@ class DeploymentReconciler:
         snapshot: object,
         price: PriceDecision,
         now_ms: int,
+        period_agg: str,
     ) -> FillModelEvidence | FillModelUnavailable | None:
         if self._fill_model_provider is None:
             return None
+        horizon_h, _model_version, _artifact_hash = self._optimizer_scope()
+        requested_horizon_h = horizon_h if horizon_h is not None else 1
+        signal_rate = Decimal(str(candidate.offer_rate))
+        reference_rate = _reference_rate(price, fallback=signal_rate)
         try:
-            return self._fill_model_provider.evidence_for(
-                candidate=candidate,
-                snapshot=snapshot,
-                price=price,
-                now_ms=now_ms,
+            evidence = self._fill_model_provider.estimate_fill(
+                reference_rate=reference_rate,
+                offer_rate=price.rate,
+                period_agg=period_agg,
+                horizon_h=requested_horizon_h,
             )
+            if isinstance(evidence, FillModelEvidence) and horizon_h is None:
+                return FillModelUnavailable("scope_mismatch")
+            return evidence
         except Exception:
             log.exception("fill_model_provider_failed symbol=%s", candidate.symbol)
             return FillModelUnavailable("missing")
+
+    def _optimizer_scope(self) -> tuple[int | None, str | None, str | None]:
+        artifact = getattr(self._fill_model_provider, "artifact", None)
+        horizon_h = self._optimizer_horizon_h
+        if horizon_h is None:
+            artifact_horizon_h = getattr(artifact, "horizon_h", None)
+            if isinstance(artifact_horizon_h, int):
+                horizon_h = artifact_horizon_h
+        model_version = getattr(artifact, "model_version", None)
+        if not isinstance(model_version, str):
+            model_version = None
+        artifact_hash = getattr(artifact, "artifact_hash", None)
+        if not isinstance(artifact_hash, str):
+            artifact_hash = None
+        return horizon_h, model_version, artifact_hash
 
     def _optimize(
         self,
@@ -510,20 +558,20 @@ class DeploymentReconciler:
         }
         exact_period_candidate = RateCandidate(
             rate=price.rate,
-            source="taker" if price.branch is PriceBranch.TAKER else "maker",
+            source=("taker" if price.branch is PriceBranch.TAKER else "maker"),
             fill_evidence=fill_evidence,
             book_evidence=book_evidence,
-        )
+        ) if price.branch in {PriceBranch.TAKER, PriceBranch.UNDERCUT} else None
         return self._rate_optimizer.select(
             signal_rate,
             maker=(
                 exact_period_candidate
-                if exact_period_candidate.source == "maker"
+                if price.branch is PriceBranch.UNDERCUT
                 else None
             ),
             taker=(
                 exact_period_candidate
-                if exact_period_candidate.source == "taker"
+                if price.branch is PriceBranch.TAKER
                 else None
             ),
             fill_evidence=fill_evidence,
@@ -553,7 +601,12 @@ class DeploymentReconciler:
                 "reason_code": reason,
                 "evidence": {"optimizer_outcome": "no_recommendation"},
             }
-            if reason == "fill_model_missing":
+            if reason in {
+                "fill_model_missing",
+                "fill_model_low_confidence",
+                "fill_model_scope_mismatch",
+                "fill_model_unversioned",
+            }:
                 await emit_execution_event("funding.fill_model.unavailable", **event_kwargs)
             await emit_execution_event("funding.optimizer.no_recommendation", **event_kwargs)
         except Exception:
@@ -684,6 +737,7 @@ class DeploymentReconciler:
 def _optimizer_evidence(
     optimization: OptimizationResult | OptimizerNoRecommendation | None,
     price: PriceDecision,
+    fill_evidence: FillModelEvidence | FillModelUnavailable | None,
 ) -> Mapping[str, object]:
     exact_period_book = _json_evidence(price.evidence)
     if isinstance(optimization, OptimizationResult):
@@ -708,16 +762,19 @@ def _optimizer_evidence(
         }
     return {
         "outcome": "no_recommendation",
-        "reason": _optimizer_reason(optimization),
+        "reason": _optimizer_reason(optimization, fill_evidence),
         "exact_period_book": exact_period_book,
     }
 
 
 def _optimizer_reason(
     optimization: OptimizationResult | OptimizerNoRecommendation | None,
+    fill_evidence: FillModelEvidence | FillModelUnavailable | None = None,
 ) -> str:
     if isinstance(optimization, OptimizerNoRecommendation):
         return optimization.reason
+    if isinstance(fill_evidence, FillModelUnavailable):
+        return f"fill_model_{fill_evidence.reason}"
     return "fill_model_missing"
 
 
@@ -725,7 +782,7 @@ def _fill_evidence_for_audit(evidence: FillModelEvidence | None) -> Mapping[str,
     if evidence is None:
         return {}
     return {
-        "fill_probability": str(evidence.fill_probability),
+        "fill_probability": str(evidence.fill_prob),
         "expected_ttf_ms": evidence.expected_ttf_ms,
         "n_samples": evidence.n_samples,
         "symbol": evidence.symbol,
@@ -737,9 +794,35 @@ def _fill_evidence_for_audit(evidence: FillModelEvidence | None) -> Mapping[str,
 
 def _json_evidence(value: object) -> object:
     if isinstance(value, Mapping):
-        return {key: _json_evidence(item) for key, item in value.items()}
+        copied: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("evidence keys must be strings")
+            copied[key] = _json_evidence(item)
+        return copied
     if isinstance(value, tuple | list):
         return [_json_evidence(item) for item in value]
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError("evidence decimal must be finite")
         return str(value)
-    return value
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise TypeError("evidence float must be finite")
+        return value
+    raise TypeError(f"unsupported JSON evidence value: {type(value).__name__}")
+
+
+def _reference_rate(price: PriceDecision, *, fallback: Decimal) -> Decimal:
+    for key in ("bid_rate", "ask_rate"):
+        value = price.evidence.get(key)
+        if isinstance(value, str):
+            try:
+                rate = Decimal(value)
+            except Exception:
+                continue
+            if rate.is_finite() and rate > 0:
+                return rate
+    return fallback

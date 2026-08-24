@@ -1,11 +1,13 @@
 from decimal import Decimal
 
+import pytest
+
 from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
-    FillModelEvidence,
     OptimizerNoRecommendation,
     RateCandidate,
     RateOptimizer,
 )
+from bfx_funding_bot.modules.lending.tracking.artifact import FillModelEvidence
 
 
 def _evidence(
@@ -17,7 +19,7 @@ def _evidence(
     return FillModelEvidence(
         model_version=model_version,
         artifact_hash=artifact_hash,
-        fill_probability=Decimal(fill_probability),
+        fill_prob=Decimal(fill_probability),
         expected_ttf_ms=500,
         n_samples=100,
         symbol="fUST",
@@ -120,3 +122,32 @@ def test_returns_optimizer_local_no_recommendation_for_no_eligible_candidates() 
 
     assert isinstance(result, OptimizerNoRecommendation)
     assert result.reason == "no_eligible_candidate"
+
+
+def test_accepts_task7_canonical_fill_model_evidence() -> None:
+    """The optimizer consumes the canonical Task 7 evidence contract."""
+    evidence = _evidence()
+
+    result = RateOptimizer().select(
+        signal_rate=Decimal("0.00020"),
+        maker=_candidate("0.00021", "maker"),
+        taker=None,
+        fill_evidence=evidence,
+        fee_rate=Decimal("0.15"),
+    )
+
+    assert result.model_version == evidence.model_version
+    assert result.artifact_hash == evidence.artifact_hash
+    assert result.scores["signal"] == Decimal("0.0001615")
+    assert result.selected.source == "maker"
+
+
+def test_rejects_unsupported_mutable_provenance() -> None:
+    """Frozen audit values must not retain aliases to unsupported mutables."""
+    with pytest.raises(TypeError, match=r"immutable|JSON-safe|unsupported"):
+        RateCandidate(
+            rate=Decimal("0.00021"),
+            source="maker",
+            fill_evidence=None,
+            book_evidence={"raw": bytearray(b"mutable")},
+        )

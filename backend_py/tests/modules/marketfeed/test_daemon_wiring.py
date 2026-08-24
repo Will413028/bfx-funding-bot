@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -269,10 +270,12 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_live")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUST-fill.json")
+    monkeypatch.setenv("BFX_OPTIMIZER_FEE_RATE", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "integrity_bootstrap.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -313,6 +316,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     deployment = daemon.periodic_reconcile._deployment
     assert deployment._book_provider is daemon.funding_book_service
     assert deployment._execution_gate._readiness is daemon.trading_readiness
+    assert deployment._optimizer_fee_rate == Decimal("0.15")
 
 
 @pytest.mark.asyncio
