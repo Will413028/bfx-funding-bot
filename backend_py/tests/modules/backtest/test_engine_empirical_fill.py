@@ -4,9 +4,14 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import _apply_friction, run_backtest
+from bfx_funding_bot.modules.backtest.engine import (
+    BacktestIncomplete,
+    _apply_friction,
+    run_backtest,
+)
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
 from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
+from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
@@ -49,6 +54,15 @@ def _model() -> FillRateModel:
     ], artifact=artifact)
 
 
+class _NeverLendsStrategy(Strategy):
+    @property
+    def name(self) -> str:
+        return "never_lends"
+
+    def decide(self, candle: FundingCandle) -> LendDecision | None:
+        return None
+
+
 def test_empirical_uses_learned_fill_prob():
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
     _, fill_prob = _apply_friction(_decision(), _candle(), cfg, _model())
@@ -61,6 +75,20 @@ def test_empirical_backtest_does_not_use_linear_when_model_is_missing():
     with pytest.raises(Exception, match="fill_model_missing") as exc_info:
         run_backtest([_candle()], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=None)
     assert type(exc_info.value).__name__ == "BacktestIncomplete"
+
+
+def test_empirical_backtest_rejects_empty_candles_without_model():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_missing"):
+        run_backtest([], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=None)
+
+
+def test_empirical_backtest_rejects_zero_decision_without_model():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_missing"):
+        run_backtest([_candle()], _NeverLendsStrategy(), cfg, fill_model=None)
 
 
 def test_linear_baseline_mode_ignores_model():

@@ -1,6 +1,8 @@
 """Immutable provenance for a learned empirical fill-rate model."""
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -9,18 +11,46 @@ from typing import Literal, cast
 
 
 def _freeze_metadata(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TypeError("unsupported non-finite fill model metadata value")
+        return value
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze_metadata(item) for key, item in value.items()})
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("fill model metadata keys must be strings")
+            frozen[key] = _freeze_metadata(item)
+        return MappingProxyType(frozen)
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_metadata(item) for item in value)
-    return value
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_metadata(item) for item in value)
+    raise TypeError(
+        f"unsupported fill model metadata value: {type(value).__name__}"
+    )
+
+
+def _json_sort_key(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def _thaw_metadata(value: object) -> object:
     if isinstance(value, Mapping):
-        return {key: _thaw_metadata(item) for key, item in value.items()}
+        return {key: _thaw_metadata(value[key]) for key in sorted(value)}
     if isinstance(value, tuple):
         return [_thaw_metadata(item) for item in value]
+    if isinstance(value, frozenset):
+        items = [_thaw_metadata(item) for item in value]
+        return sorted(items, key=_json_sort_key)
     return value
 
 

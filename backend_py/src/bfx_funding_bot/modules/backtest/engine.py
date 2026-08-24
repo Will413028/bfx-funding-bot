@@ -94,6 +94,10 @@ def run_backtest(
     rate. Passing one series to both sides makes `spread_pct` collapse to 0 and
     the distortion appear harmless — the artifact that invalidated the first L4 run.
     """
+    if config.fill_model == "empirical" and (
+        fill_model is None or fill_model.artifact is None
+    ):
+        raise BacktestIncomplete("fill_model_missing")
     if not candles:
         return BacktestResult(
             strategy_name=strategy.name, symbol="",
