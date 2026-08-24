@@ -24,8 +24,8 @@ from bfx_funding_bot.modules.lending.tracking.fill_rate import (
     BucketStat,
     FillRateLearner,
 )
+from bfx_funding_bot.modules.lending.tracking.repository import ensure_fill_model_artifact
 from bfx_funding_bot.modules.lending.tracking.tables import (
-    FillRateModelArtifactRow,
     FillRateStatsRow,
 )
 
@@ -159,22 +159,11 @@ async def learn_and_store(
             training_end_ms=range_end,
             timeframe=timeframe,
         )
-        await session.merge(FillRateModelArtifactRow(
-            artifact_hash=artifact.artifact_hash,
-            source=artifact.source,
-            symbol=artifact.symbol,
-            period_agg=artifact.period_agg,
-            horizon_h=artifact.horizon_h,
-            model_version=artifact.model_version,
-            schema_version=artifact.schema_version,
-            training_start_ms=artifact.training_start_ms,
-            training_end_ms=artifact.training_end_ms,
-            cutoff_ms=artifact.cutoff_ms,
-            sample_count=artifact.sample_count,
-            confidence_min_samples=artifact.confidence_min_samples,
-            metadata_json=dict(artifact.metadata),
+        await ensure_fill_model_artifact(
+            session,
+            artifact=artifact,
             created_at=learned_at,
-        ))
+        )
         session.add_all([
             FillRateStatsRow(
                 source=_SOURCE,
