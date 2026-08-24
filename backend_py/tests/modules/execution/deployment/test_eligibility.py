@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from bfx_funding_bot.modules.execution.audit.model import AuditContext
 from bfx_funding_bot.modules.execution.audit.recorder import ExecutionAuditUnavailable
 from bfx_funding_bot.modules.execution.contracts import (
@@ -288,6 +290,22 @@ class _BoolStyleLowConfidence:
     low_confidence: bool
 
 
+def _fill_evidence(**overrides: object) -> _FillModelEvidence:
+    values: dict[str, object] = {
+        "model_version": "fill-v1",
+        "artifact_hash": "abc123",
+        "fill_prob": 0.8,
+        "expected_ttf_ms": 30_000,
+        "n_samples": 200,
+        "symbol": "fUST",
+        "period_agg": "a30",
+        "horizon_h": 1,
+        "cutoff_ms": 1_000,
+    }
+    values.update(overrides)
+    return _FillModelEvidence(**values)
+
+
 async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> None:
     candidate = _candidate()
     gate = ExecutionGate(
@@ -302,23 +320,79 @@ async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> N
         reconcile_id="reconcile-1",
         snapshot=_snapshot(),
         price=_price(),
-        fill_evidence=_FillModelEvidence(
-            model_version="fill-v1",
-            artifact_hash="abc123",
-            fill_prob=0.8,
-            expected_ttf_ms=30_000,
-            n_samples=200,
-            symbol="fUST",
-            period_agg="a30",
-            horizon_h=1,
-            cutoff_ms=1_000,
-        ),
+        fill_evidence=_fill_evidence(),
         safety=GuardResult(True, "risk"),
         audit_context=_context(candidate),
     )
 
     assert isinstance(result, ReadyToSubmit)
     assert result.model_version == "fill-v1"
+
+
+async def test_optimizer_live_other_symbol_fill_evidence_is_blocked() -> None:
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-evidence-symbol",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=_fill_evidence(symbol="fUSD"),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.FILL_MODEL_MISSING
+    assert result.failed_dependency == "fill_model"
+    assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fill_prob", float("nan")),
+        ("fill_prob", float("inf")),
+        ("fill_prob", -0.01),
+        ("fill_prob", 1.01),
+        ("n_samples", -1),
+        ("expected_ttf_ms", -1),
+        ("horizon_h", 0),
+        ("cutoff_ms", -1),
+    ],
+)
+async def test_optimizer_live_invalid_fill_evidence_numbers_are_blocked(
+    field: str,
+    value: object,
+) -> None:
+    candidate = _candidate()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=_Audit(),
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id=f"decision-invalid-{field}",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=_fill_evidence(**{field: value}),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.FILL_MODEL_MISSING
+    assert result.failed_dependency == "fill_model"
 
 
 async def test_optimizer_live_low_confidence_unavailable_evidence_is_blocked() -> None:
