@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler
 from pydantic_core import core_schema
@@ -64,3 +64,9 @@ class BacktestResult(BaseModel):
     n_trades: int
     fill_rate: Decimal                  # avg fill_prob across trades; 1.0 = always filled
     sortino: InfDecimal = Decimal("0")  # monthly-equity-sampled Sortino; 0 = untrustworthy (n<3); +inf = no downside
+    model_kind: Literal["empirical", "linear-baseline"] = "empirical"
+    model_version: str | None = None
+    artifact_hash: str | None = None
+    model_cutoff_ms: int | None = None
+    model_sample_count: int | None = None
+    incomplete_reason: Literal["fill_model_missing", "fill_model_low_confidence"] | None = None

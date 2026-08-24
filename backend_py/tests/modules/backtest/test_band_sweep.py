@@ -63,7 +63,7 @@ def test_simulate_period_path_matches_engine_trade_count() -> None:
     periods = simulate_period_path(candles, **params)
 
     strat = AdaptivePeriodStrategy(**params)
-    rb = run_backtest(candles, strat, BacktestConfig(fill_model="linear"))
+    rb = run_backtest(candles, strat, BacktestConfig(fill_model="linear-baseline"))
     assert len(periods) == rb.n_trades  # the cooldown loop is mirrored exactly
     assert all(p in (2, 7, 14) for p in periods)
 

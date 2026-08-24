@@ -7,6 +7,7 @@ looks harmless, which is exactly how the first L4 run produced a false all-clear
 """
 from decimal import Decimal
 
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import run_backtest
 from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
     AlwaysMarketRateStrategy,
@@ -14,6 +15,7 @@ from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
 _HOUR = 3_600_000
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
 def _series(close: str, n: int = 120) -> list[FundingCandle]:
@@ -33,9 +35,9 @@ def test_quoting_off_a_distorted_series_hurts_fills() -> None:
     observed = _series("0.0002")  # what the bot saw
     market = _series("0.0001")  # where the market actually was
 
-    naive = run_backtest(observed, AlwaysMarketRateStrategy(period_days=2))
+    naive = run_backtest(observed, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG)
     dual = run_backtest(
-        observed, AlwaysMarketRateStrategy(period_days=2), market_candles=market
+        observed, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG, market_candles=market
     )
 
     assert naive.fill_rate == Decimal("1"), "single series: spread is 0 by construction"
@@ -49,9 +51,9 @@ def test_identical_series_matches_single_series_behaviour() -> None:
     """Passing the same series twice must change nothing — guards the default path."""
     candles = _series("0.00015")
 
-    single = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2))
+    single = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG)
     dual = run_backtest(
-        candles, AlwaysMarketRateStrategy(period_days=2), market_candles=list(candles)
+        candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG, market_candles=list(candles)
     )
 
     assert dual.fill_rate == single.fill_rate
@@ -76,7 +78,7 @@ def test_evaluate_oos_windows_forwards_the_market_series() -> None:
     def _mk():
         return AlwaysMarketRateStrategy(period_days=2)
 
-    single, _ = evaluate_oos_windows(observed, [window], _mk)
-    dual, _ = evaluate_oos_windows(observed, [window], _mk, market_candles=market)
+    single, _ = evaluate_oos_windows(observed, [window], _mk, config=_LINEAR_CONFIG, fill_model=None)
+    dual, _ = evaluate_oos_windows(observed, [window], _mk, config=_LINEAR_CONFIG, fill_model=None, market_candles=market)
 
     assert single[0].fill_rate > dual[0].fill_rate

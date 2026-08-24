@@ -9,14 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from bfx_funding_bot.modules.backtest.engine import run_backtest
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
+from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 FILL_FLOOR = Decimal("0.3")
 MIN_TRADES_TRAIN = 10
@@ -57,7 +59,7 @@ class WindowOutcome:
     train_end_mts: int
     test_start_mts: int
     test_end_mts: int
-    status: str  # "ok" | "skipped:no_valid_candidate" | "errored"
+    status: str  # "ok" | "skipped:no_valid_candidate" | "incomplete"
     best_params: dict[str, Any] | None
     oos_net: Decimal | None
     oos_max_dd: Decimal | None
@@ -65,6 +67,7 @@ class WindowOutcome:
     oos_sortino: Decimal | None
     baseline_net: Decimal | None
     baseline_sortino: Decimal | None
+    incomplete_reason: Literal["fill_model_missing", "fill_model_low_confidence"] | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class CellVerdict:
     mean_baseline_net: Decimal
     relative_margin: Decimal  # (mean_strat - mean_base) / mean_base
     health_pct: Decimal       # fraction of eligible windows with fill+trades floors met
+    incomplete_windows: int
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,7 @@ class StrategyVerdict:
     qualifies: bool
     cells_qualifying: int
     cells_played: int
+    incomplete_cells: int
 
 
 def evaluate_cell_qualification(
@@ -104,6 +109,7 @@ def evaluate_cell_qualification(
       - relative_margin > margin_threshold (default 5%)
       - health_pct >= health_threshold (default 80%)
     """
+    incomplete_windows = sum(1 for outcome in window_outcomes if outcome.status == "incomplete")
     eligible = [o for o in window_outcomes if o.status == "ok"]
     if not eligible:
         return CellVerdict(
@@ -112,6 +118,7 @@ def evaluate_cell_qualification(
             pct_windows_won=Decimal("0"),
             mean_strategy_net=Decimal("0"), mean_baseline_net=Decimal("0"),
             relative_margin=Decimal("0"), health_pct=Decimal("0"),
+            incomplete_windows=incomplete_windows,
         )
 
     n = Decimal(len(eligible))
@@ -138,7 +145,12 @@ def evaluate_cell_qualification(
     pass_health = health_pct >= health_threshold
 
     return CellVerdict(
-        qualifies=pass_consistency and pass_margin and pass_health,
+        qualifies=(
+            incomplete_windows == 0
+            and pass_consistency
+            and pass_margin
+            and pass_health
+        ),
         windows_eligible=len(eligible),
         windows_strategy_beats_baseline=wins,
         pct_windows_won=pct_won,
@@ -146,6 +158,7 @@ def evaluate_cell_qualification(
         mean_baseline_net=mean_base,
         relative_margin=margin,
         health_pct=health_pct,
+        incomplete_windows=incomplete_windows,
     )
 
 
@@ -159,10 +172,12 @@ def evaluate_strategy_qualification(
     """
     cells_qualifying = sum(1 for v in per_cell_verdicts if v.qualifies)
     cells_played = len(per_cell_verdicts)
+    incomplete_cells = sum(1 for verdict in per_cell_verdicts if verdict.incomplete_windows > 0)
     return StrategyVerdict(
-        qualifies=cells_qualifying >= cells_required,
+        qualifies=incomplete_cells == 0 and cells_qualifying >= cells_required,
         cells_qualifying=cells_qualifying,
         cells_played=cells_played,
+        incomplete_cells=incomplete_cells,
     )
 
 
@@ -172,6 +187,8 @@ def run_cell_wfo(
     eda_cell: dict[str, Any],
     cell_key: str,
     wfo_windows: list[WfoWindow],
+    config: BacktestConfig,
+    fill_model: FillRateModel | None,
 ) -> tuple[list[WindowOutcome], list[BacktestResult]]:
     """Run sweep + OOS eval for one (strategy, cell) across all WFO windows.
 
@@ -188,14 +205,16 @@ def run_cell_wfo(
     baseline_results: list[BacktestResult] = []
 
     for w in wfo_windows:
-        baseline_result = run_backtest(
-            candles, AlwaysMarketRateStrategy(period_days=2),
-            record_start_mts=w.test_start_mts,
-            record_end_mts=w.test_end_mts,
-        )
-        baseline_results.append(baseline_result)
-
         try:
+            baseline_result = run_backtest(
+                candles,
+                AlwaysMarketRateStrategy(period_days=2),
+                config,
+                record_start_mts=w.test_start_mts,
+                record_end_mts=w.test_end_mts,
+                fill_model=fill_model,
+            )
+            baseline_results.append(baseline_result)
             grid = strategy_class.param_grid_for_cell(
                 symbol=candles[0].symbol, period_agg=candles[0].period_agg,
                 eda=eda_cell,
@@ -216,9 +235,10 @@ def run_cell_wfo(
             candidates = []
             for params in grid:
                 train_result = run_backtest(
-                    candles, strategy_class(**params),
+                    candles, strategy_class(**params), config,
                     record_start_mts=w.train_start_mts,
                     record_end_mts=w.train_end_mts,
+                    fill_model=fill_model,
                 )
                 candidates.append((params, train_result))
 
@@ -238,9 +258,10 @@ def run_cell_wfo(
 
             best_params, _ = winner
             test_result = run_backtest(
-                candles, strategy_class(**best_params),
+                candles, strategy_class(**best_params), config,
                 record_start_mts=w.test_start_mts,
                 record_end_mts=w.test_end_mts,
+                fill_model=fill_model,
             )
             window_outcomes.append(WindowOutcome(
                 window_idx=len(window_outcomes),
@@ -255,16 +276,17 @@ def run_cell_wfo(
                 baseline_net=baseline_result.net_monthly_return_pct,
                 baseline_sortino=baseline_result.sortino,
             ))
-        except Exception:
+        except BacktestIncomplete as error:
             window_outcomes.append(WindowOutcome(
                 window_idx=len(window_outcomes),
                 train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
                 test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
-                status="errored",
+                status="incomplete",
                 best_params=None,
                 oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
-                baseline_net=baseline_result.net_monthly_return_pct,
-                baseline_sortino=baseline_result.sortino,
+                baseline_net=None,
+                baseline_sortino=None,
+                incomplete_reason=error.reason,  # type: ignore[arg-type]
             ))
 
     return window_outcomes, baseline_results

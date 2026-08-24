@@ -9,7 +9,12 @@ from bfx_funding_bot.modules.backtest.cell_derivation import (
     derive_cell_params,
     select_winner,
 )
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
+_UNUSED_LINEAR_MODEL = FillRateModel.from_rows([], artifact=None)
 
 
 def _combo(
@@ -72,8 +77,8 @@ def _synthetic_series() -> list[FundingCandle]:
 
 def test_derive_cell_params_is_deterministic_and_distinguishable() -> None:
     candles = _synthetic_series()
-    d1 = derive_cell_params(candles)
-    d2 = derive_cell_params(candles)
+    d1 = derive_cell_params(candles, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
+    d2 = derive_cell_params(candles, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
     assert (d1.ema_span, d1.threshold_sigma, d1.ratio_sigma) == (
         d2.ema_span,
         d2.threshold_sigma,

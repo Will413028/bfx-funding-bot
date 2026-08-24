@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.frr_series import FrrSeries
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
@@ -48,7 +49,12 @@ def test_evaluate_arms_returns_aligned_outcomes_per_arm() -> None:
         frr_at=series.at,
     )
     assert set(factories) == {mod.ARM_MR, mod.ARM_FLOOR, mod.ARM_AMR, mod.ARM_FRR}
-    outcomes = mod.evaluate_arms(candles, windows, factories)
+    outcomes = mod.evaluate_arms(
+        candles,
+        windows,
+        factories,
+        BacktestConfig(fill_model="linear-baseline"),
+    )
     assert set(outcomes) == set(factories)
     lengths = {len(v) for v in outcomes.values()}
     assert lengths == {len(windows)}
