@@ -42,6 +42,10 @@ class _NormalizedFillEvidence:
     fill_prob: Decimal
     expected_ttf_ms: int | None
     n_samples: int
+    symbol: str
+    period_agg: str
+    horizon_h: int
+    cutoff_ms: int
 
 
 class ExecutionGate:
@@ -325,6 +329,10 @@ def _fill_evidence(
             "fill_prob": str(fill_evidence.fill_prob),
             "expected_ttf_ms": fill_evidence.expected_ttf_ms,
             "n_samples": fill_evidence.n_samples,
+            "symbol": fill_evidence.symbol,
+            "period_agg": fill_evidence.period_agg,
+            "horizon_h": fill_evidence.horizon_h,
+            "cutoff_ms": fill_evidence.cutoff_ms,
         }
     if isinstance(fill_evidence, BlockReason):
         return {"unavailable_reason": fill_evidence.value}
@@ -349,7 +357,7 @@ def _normalize_fill_evidence(
     low_confidence = getattr(fill_evidence, "low_confidence", None)
     if low_confidence is True:
         return BlockReason.FILL_MODEL_LOW_CONFIDENCE
-    if low_confidence is not False:
+    if low_confidence is not None and low_confidence is not False:
         return BlockReason.FILL_MODEL_MISSING
 
     model_version = getattr(fill_evidence, "model_version", None)
@@ -357,6 +365,10 @@ def _normalize_fill_evidence(
     fill_prob = getattr(fill_evidence, "fill_prob", None)
     expected_ttf_ms = getattr(fill_evidence, "expected_ttf_ms", None)
     n_samples = getattr(fill_evidence, "n_samples", None)
+    symbol = getattr(fill_evidence, "symbol", None)
+    period_agg = getattr(fill_evidence, "period_agg", None)
+    horizon_h = getattr(fill_evidence, "horizon_h", None)
+    cutoff_ms = getattr(fill_evidence, "cutoff_ms", None)
     if (
         not isinstance(model_version, str)
         or not model_version
@@ -368,6 +380,14 @@ def _normalize_fill_evidence(
         or not isinstance(expected_ttf_ms, int | None)
         or isinstance(n_samples, bool)
         or not isinstance(n_samples, int)
+        or not isinstance(symbol, str)
+        or not symbol
+        or not isinstance(period_agg, str)
+        or not period_agg
+        or isinstance(horizon_h, bool)
+        or not isinstance(horizon_h, int)
+        or isinstance(cutoff_ms, bool)
+        or not isinstance(cutoff_ms, int)
     ):
         return BlockReason.FILL_MODEL_MISSING
     return _NormalizedFillEvidence(
@@ -376,6 +396,10 @@ def _normalize_fill_evidence(
         fill_prob=Decimal(str(fill_prob)),
         expected_ttf_ms=expected_ttf_ms,
         n_samples=n_samples,
+        symbol=symbol,
+        period_agg=period_agg,
+        horizon_h=horizon_h,
+        cutoff_ms=cutoff_ms,
     )
 
 

@@ -272,7 +272,10 @@ class _FillModelEvidence:
     fill_prob: float
     expected_ttf_ms: int
     n_samples: int
-    low_confidence: bool = False
+    symbol: str
+    period_agg: str
+    horizon_h: int
+    cutoff_ms: int
 
 
 @dataclass(frozen=True)
@@ -305,6 +308,10 @@ async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> N
             fill_prob=0.8,
             expected_ttf_ms=30_000,
             n_samples=200,
+            symbol="fUST",
+            period_agg="a30",
+            horizon_h=1,
+            cutoff_ms=1_000,
         ),
         safety=GuardResult(True, "risk"),
         audit_context=_context(candidate),
