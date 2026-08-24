@@ -60,7 +60,6 @@ from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.deployment.book_clamp import clamp_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
@@ -1186,7 +1185,6 @@ async def build_daemon(
     # wrapped_executor) and injected into PeriodicReconcile.
     if not spec.is_simulated:
         reprice_policy = policy_from_env(os.environ)
-        clamp_policy = clamp_policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
         deployment_reconciler = DeploymentReconciler(
             store=quote_store,
@@ -1218,12 +1216,6 @@ async def build_daemon(
             # 本區塊本來就 live-only）。
             canceller=executor if isinstance(executor, CancelPort) else None,
             reprice=reprice_policy,
-            # E2 book-aware clamp：ticker 用既有 public BitfinexREST（共用
-            # FundingRateLimiter；~2 call/90s ≪ 30/min budget）。預設
-            # observe-only（BFX_CLAMP_ENABLED=false）：抓 ticker、log
-            # clamp_would_adjust，submit 與 sweep 行為 = 現狀。
-            ticker_source=bitfinex,
-            clamp=clamp_policy,
             ladder=ladder_policy,
             attempt_recorder=attempt_recorder,
         )
@@ -1234,7 +1226,7 @@ async def build_daemon(
             session_factory,
             account_id=account_id,
             deployment_environment=env_str,
-            clamp_enabled=clamp_policy.enabled,
+            clamp_enabled=False,
             reprice_enabled=reprice_policy.enabled,
             git_sha=os.environ.get("GIT_SHA") or os.environ.get("BFX_SERVICE_VERSION"),
             now_ms=now_ms_utc(),
