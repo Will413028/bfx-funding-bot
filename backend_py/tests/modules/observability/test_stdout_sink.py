@@ -77,6 +77,33 @@ async def test_execution_event_uses_fixed_identity_and_redacts_unbounded_evidenc
     assert "raw_book" not in line
 
 
+@pytest.mark.asyncio
+async def test_optimizer_no_recommendation_event_is_allowlisted_and_bounded(caplog) -> None:
+    """The production sink must retain the reconciler's bounded no-rec event."""
+    sink = StdoutEventSink(resource=_resource())
+    with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
+        await sink.emit_execution_event(
+            "funding.optimizer.no_recommendation",
+            level="warn",
+            decision_id="decision-optimizer",
+            reconcile_id="reconcile-1",
+            symbol="fUST",
+            cell="fUST_p2",
+            policy="optimizer_shadow",
+            outcome="no_recommendation",
+            reason_code="evidence_scope_mismatch",
+            evidence={
+                "optimizer_outcome": "no_recommendation",
+                "candidate_rates": ["0.00021"],
+            },
+        )
+
+    line = json.loads(caplog.records[0].getMessage())
+    assert line["event_name"] == "funding.optimizer.no_recommendation"
+    assert line["reason_code"] == "evidence_scope_mismatch"
+    assert line["evidence"] == {"optimizer_outcome": "no_recommendation"}
+
+
 # ── Four Golden Signals metrics hook (observe-only, fail-open) ────────────────
 
 

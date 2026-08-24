@@ -115,6 +115,7 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
         optimizer_evidence: Mapping[str, object] | None = None,
+        optimizer_block_reason: BlockReason | None = None,
         expected_period_agg: str | None = None,
         expected_horizon_h: int | None = None,
         expected_model_version: str | None = None,
@@ -132,6 +133,7 @@ class ExecutionGate:
                 safety=safety,
                 audit_context=audit_context,
                 optimizer_evidence=optimizer_evidence,
+                optimizer_block_reason=optimizer_block_reason,
                 expected_period_agg=expected_period_agg,
                 expected_horizon_h=expected_horizon_h,
                 expected_model_version=expected_model_version,
@@ -158,6 +160,7 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
         optimizer_evidence: Mapping[str, object] | None,
+        optimizer_block_reason: BlockReason | None,
         expected_period_agg: str | None,
         expected_horizon_h: int | None,
         expected_model_version: str | None,
@@ -189,6 +192,7 @@ class ExecutionGate:
             price=price,
             fill_evidence=normalized_fill_evidence,
             safety=safety,
+            optimizer_block_reason=optimizer_block_reason,
         )
         if blocked is not None:
             result = await self._audit_blocked(
@@ -328,6 +332,7 @@ class ExecutionGate:
         price: PriceDecision | BlockedExecution,
         fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
+        optimizer_block_reason: BlockReason | None,
     ) -> BlockedExecution | None:
         if not safety.allowed:
             return _blocked(
@@ -381,6 +386,14 @@ class ExecutionGate:
                 price.evidence,
             )
         if self._policy is ExecutionPolicy.OPTIMIZER_LIVE:
+            if optimizer_block_reason is not None:
+                return _blocked(
+                    decision_id,
+                    candidate,
+                    optimizer_block_reason,
+                    "optimizer",
+                    {"optimizer_outcome": "no_recommendation"},
+                )
             if isinstance(fill_evidence, BlockReason):
                 return _blocked(
                     decision_id,
