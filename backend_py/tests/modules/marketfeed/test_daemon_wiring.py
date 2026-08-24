@@ -217,6 +217,54 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
 
 
 @pytest.mark.asyncio
+async def test_live_boot_explicitly_disables_deployment_until_integrity_dependencies_are_wired(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """Live boot remains fail-closed until Task 6 provides real book/readiness deps."""
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+
+    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
+    db_path = tmp_path / "integrity_bootstrap.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
+    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
+    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[], is_reusable=True, is_optional=True,
+    )
+
+    daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+
+    assert daemon.periodic_reconcile is not None
+    assert daemon.periodic_reconcile._deployment is None
+
+
+@pytest.mark.asyncio
 async def test_smoke_runner_present_for_simulated_paper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

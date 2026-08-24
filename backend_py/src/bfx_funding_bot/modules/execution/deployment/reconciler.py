@@ -143,6 +143,8 @@ class DeploymentReconciler:
         self._reprice = reprice
         self._ladder = ladder
         self._book_provider = book_provider
+        if execution_gate.policy is not execution_policy:
+            raise ValueError("execution_gate policy must match execution_policy")
         self._execution_gate = execution_gate
         self._execution_policy = execution_policy
         self._period_pricer = period_pricer

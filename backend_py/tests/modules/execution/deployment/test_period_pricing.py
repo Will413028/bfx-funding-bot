@@ -29,17 +29,22 @@ def _decision(
     )
 
 
-def _snapshot(*levels: FundingBookLevel) -> MarketSnapshot:
+def _snapshot(
+    *levels: FundingBookLevel,
+    symbol: str = "fUST",
+    sequence_valid: bool = True,
+    checksum_valid: bool = True,
+) -> MarketSnapshot:
     return MarketSnapshot(
         snapshot_id="book-1",
-        symbol="fUST",
+        symbol=symbol,
         bids=tuple(level for level in levels if level.amount < 0),
         asks=tuple(level for level in levels if level.amount > 0),
         captured_at_ms=1_000,
         received_at_ms=1_000,
         source="ws",
-        sequence_valid=True,
-        checksum_valid=True,
+        sequence_valid=sequence_valid,
+        checksum_valid=checksum_valid,
         sequence=2,
     )
 
@@ -63,6 +68,53 @@ def test_missing_exact_period_returns_period_not_found() -> None:
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.PERIOD_NOT_FOUND
     assert result.candidate is candidate
+
+
+def test_other_symbol_snapshot_is_rejected_with_expected_and_actual_symbols() -> None:
+    candidate = _decision(symbol="fUST")
+
+    result = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(
+            _level(rate=0.00021, amount=-100, period=14), symbol="fUSD",
+        ),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.BOOK_STALE
+    assert result.failed_dependency == "market_snapshot_symbol"
+    assert result.evidence["expected_symbol"] == "fUST"
+    assert result.evidence["actual_symbol"] == "fUSD"
+
+
+def test_invalid_sequence_snapshot_is_rejected_before_pricing() -> None:
+    candidate = _decision()
+
+    result = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(
+            _level(rate=0.00021, amount=-100, period=14), sequence_valid=False,
+        ),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.BOOK_SEQUENCE_INVALID
+    assert result.failed_dependency == "market_snapshot"
+
+
+def test_invalid_checksum_snapshot_is_rejected_before_pricing() -> None:
+    candidate = _decision()
+
+    result = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(
+            _level(rate=0.00021, amount=-100, period=14), checksum_valid=False,
+        ),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.BOOK_CHECKSUM_INVALID
+    assert result.failed_dependency == "market_snapshot"
 
 
 def test_exact_period_bid_with_sufficient_depth_keeps_signal_rate_as_taker() -> None:

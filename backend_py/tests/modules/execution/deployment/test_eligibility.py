@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from decimal import Decimal
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
 )
+from bfx_funding_bot.modules.execution.deployment import eligibility
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceBranch,
@@ -76,17 +78,22 @@ def _price() -> PriceDecision:
     )
 
 
-def _snapshot() -> MarketSnapshot:
+def _snapshot(
+    *,
+    symbol: str = "fUST",
+    sequence_valid: bool = True,
+    checksum_valid: bool = True,
+) -> MarketSnapshot:
     return MarketSnapshot(
         snapshot_id="book-1",
-        symbol="fUST",
+        symbol=symbol,
         bids=(),
         asks=(),
         captured_at_ms=1_000,
         received_at_ms=1_000,
         source="ws",
-        sequence_valid=True,
-        checksum_valid=True,
+        sequence_valid=sequence_valid,
+        checksum_valid=checksum_valid,
         sequence=2,
     )
 
@@ -171,6 +178,68 @@ async def test_audit_failure_blocks_and_updates_readiness_without_ready_value() 
     assert readiness.blocked == (BlockReason.EXECUTION_AUDIT_UNAVAILABLE, "audit")
 
 
+async def test_audit_failure_does_not_construct_ready_to_submit(
+    monkeypatch,
+) -> None:
+    candidate = _candidate()
+    constructed = False
+
+    class _ReadySpy:
+        def __init__(self, **_kwargs) -> None:
+            nonlocal constructed
+            constructed = True
+
+    monkeypatch.setattr(eligibility, "ReadyToSubmit", _ReadySpy)
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.BOOK_GUARDED,
+        audit=_Audit(unavailable=True),
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-3a",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=None,
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.EXECUTION_AUDIT_UNAVAILABLE
+    assert constructed is False
+
+
+async def test_other_symbol_snapshot_blocks_before_ready_with_symbol_evidence() -> None:
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.BOOK_GUARDED,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-symbol",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(symbol="fUSD"),
+        price=_price(),
+        fill_evidence=None,
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.BOOK_STALE
+    assert result.failed_dependency == "market_snapshot_symbol"
+    assert result.evidence["expected_symbol"] == "fUST"
+    assert result.evidence["actual_symbol"] == "fUSD"
+    assert audit.last.outcome is DecisionOutcome.BLOCKED
+
+
 async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> None:
     candidate = _candidate()
     audit = _Audit()
@@ -194,3 +263,100 @@ async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> 
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.FILL_MODEL_MISSING
     assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+
+
+@dataclass(frozen=True)
+class _FillModelEvidence:
+    model_version: str
+    artifact_hash: str
+    fill_prob: float
+    expected_ttf_ms: int
+    n_samples: int
+    low_confidence: bool = False
+
+
+@dataclass(frozen=True)
+class _FillModelUnavailable:
+    reason: str
+
+
+@dataclass(frozen=True)
+class _BoolStyleLowConfidence:
+    low_confidence: bool
+
+
+async def test_optimizer_live_accepts_only_structural_fill_model_evidence() -> None:
+    candidate = _candidate()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=_Audit(),
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-evidence",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=_FillModelEvidence(
+            model_version="fill-v1",
+            artifact_hash="abc123",
+            fill_prob=0.8,
+            expected_ttf_ms=30_000,
+            n_samples=200,
+        ),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, ReadyToSubmit)
+    assert result.model_version == "fill-v1"
+
+
+async def test_optimizer_live_low_confidence_unavailable_evidence_is_blocked() -> None:
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-low-confidence",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=_FillModelUnavailable(reason="low_confidence"),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.FILL_MODEL_LOW_CONFIDENCE
+    assert audit.last.reason_code is BlockReason.FILL_MODEL_LOW_CONFIDENCE
+
+
+async def test_optimizer_live_bool_style_low_confidence_is_blocked() -> None:
+    candidate = _candidate()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=_Audit(),
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-bool-low-confidence",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=_BoolStyleLowConfidence(low_confidence=True),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.FILL_MODEL_LOW_CONFIDENCE

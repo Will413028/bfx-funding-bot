@@ -41,6 +41,20 @@ class PeriodPricer:
         period_days = candidate.offer_duration_days
         if period_days is None:
             raise ValueError("POST candidate requires offer_duration_days")
+        if snapshot.symbol != candidate.symbol:
+            return _blocked(
+                candidate,
+                BlockReason.BOOK_STALE,
+                "market_snapshot_symbol",
+                {
+                    "expected_symbol": candidate.symbol,
+                    "actual_symbol": snapshot.symbol,
+                },
+            )
+        if not snapshot.sequence_valid:
+            return _blocked(candidate, BlockReason.BOOK_SEQUENCE_INVALID, "market_snapshot")
+        if not snapshot.checksum_valid:
+            return _blocked(candidate, BlockReason.BOOK_CHECKSUM_INVALID, "market_snapshot")
 
         bids = tuple(level for level in snapshot.bids if level.period == period_days)
         asks = tuple(level for level in snapshot.asks if level.period == period_days)
@@ -93,13 +107,20 @@ def _blocked(
     candidate: DecisionPayload,
     reason: BlockReason,
     dependency: str,
+    evidence: Mapping[str, object] | None = None,
 ) -> BlockedExecution:
+    result_evidence: dict[str, object] = {
+        "symbol": candidate.symbol,
+        "period_days": candidate.offer_duration_days,
+    }
+    if evidence is not None:
+        result_evidence.update(evidence)
     return BlockedExecution(
         decision_id=str(candidate.signal_correlation_id),
         candidate=candidate,
         reason=reason,
         failed_dependency=dependency,
-        evidence={"symbol": candidate.symbol, "period_days": candidate.offer_duration_days},
+        evidence=result_evidence,
     )
 
 
