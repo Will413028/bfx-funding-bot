@@ -74,3 +74,9 @@ def test_artifact_scope_mismatch_is_unavailable() -> None:
 
     assert isinstance(result, FillModelUnavailable)
     assert result.reason == "scope_mismatch"
+
+
+def test_empty_artifact_model_exposes_missing_readiness() -> None:
+    model = FillRateModel.from_rows([], artifact=_artifact())
+
+    assert model.unavailable_reason == "missing"

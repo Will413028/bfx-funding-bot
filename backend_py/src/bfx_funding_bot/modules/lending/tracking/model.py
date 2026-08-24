@@ -69,6 +69,17 @@ class FillRateModel:
         self._artifact = artifact
         self._unavailable_reason = unavailable_reason
 
+    @property
+    def unavailable_reason(self) -> Literal[
+        "missing", "low_confidence", "scope_mismatch", "unversioned"
+    ] | None:
+        """Return a typed readiness failure, including empty evidence models."""
+        if self._unavailable_reason is not None:
+            return self._unavailable_reason
+        if not self._by_key:
+            return "missing"
+        return None
+
     @classmethod
     def from_rows(
         cls,
@@ -113,8 +124,8 @@ class FillRateModel:
     ) -> FillModelEvidence | FillModelUnavailable:
         if reference_rate is None or reference_rate <= 0:
             raise ValueError(f"reference_rate must be > 0, got {reference_rate!r}")
-        if self._unavailable_reason is not None:
-            return FillModelUnavailable(self._unavailable_reason)
+        if self.unavailable_reason is not None:
+            return FillModelUnavailable(self.unavailable_reason)
         if self._artifact is None:
             return FillModelUnavailable("unversioned")
         if (period_agg, horizon_h) != (
