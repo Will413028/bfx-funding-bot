@@ -11,9 +11,8 @@ available. The selected live rate still crosses the existing audit-before-
 `ReadyToSubmit` gate.
 
 Fix-round 1 commit SHA: `eae8637`.
-Fix-round 2 commit SHA: `cb9da064249f1d559a667e5c0454baf5e3d9c79f` (amended
-after inserting this final report SHA).
-Fix-round 3 implementation commit SHA: `6ba656471afaa1f855b0378e718a3f73976801f1`.
+Fix-round 2 commit SHA: `9e95141`.
+Fix-round 3 implementation commit SHA: `af2c028`.
 
 ## Fix-round RED
 
