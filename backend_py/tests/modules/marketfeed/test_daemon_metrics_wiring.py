@@ -86,6 +86,7 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_paper.db")
 
@@ -151,6 +152,10 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -159,6 +164,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     )
 
     assert isinstance(daemon.metrics, DaemonMetrics)
+    assert daemon.metrics.registry.get_sample_value("bfx_trading_ready") == 0.0
 
     # Reconcile backbone timing: PeriodicReconcile's recovery is the timing
     # wrapper; PeriodicReconcile itself is untouched.

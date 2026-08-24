@@ -47,9 +47,13 @@ class _CapturingSink:
 
     def __init__(self) -> None:
         self.events: list[dict] = []
+        self.execution_events: list[tuple[str, dict[str, object]]] = []
 
     async def emit(self, event: dict) -> None:
         self.events.append(event)
+
+    async def emit_execution_event(self, event_name: str, **kwargs: object) -> None:
+        self.execution_events.append((event_name, kwargs))
 
 
 class _FakeLedger:
@@ -450,6 +454,9 @@ async def test_successful_submit_emits_order_submit_structured_event():
     assert payload["offer_amount_usdt"] == 200.0
     assert payload["cid"] == 1
     assert payload["offer_id"] == "x"
+    assert [name for name, _ in sink.execution_events] == [
+        "funding.execution.submitted",
+    ]
 
 
 async def test_venue_rejected_submit_emits_failed_order_submit_event():

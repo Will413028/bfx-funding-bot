@@ -48,6 +48,28 @@ class _Readiness:
         self.blocked = (reason, dependency)
 
 
+class _ExecutionEvents:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    async def emit_execution_event(self, event_name: str, **kwargs: object) -> None:
+        self.events.append((event_name, kwargs))
+
+
+class _ExecutionMetrics:
+    def __init__(self) -> None:
+        self.decisions: list[dict[str, str]] = []
+
+    def observe_execution_decision(self, **kwargs: str) -> None:
+        self.decisions.append(kwargs)
+
+    def observe_audit_persist_failure(self) -> None:
+        pass
+
+    def observe_execution_gate_duration(self, *, seconds: float) -> None:
+        pass
+
+
 def _candidate() -> DecisionPayload:
     return DecisionPayload(
         decision_outcome=PayloadOutcome.POST,
@@ -153,6 +175,40 @@ async def test_safety_block_is_audited_with_stable_reason() -> None:
     assert result.reason is BlockReason.SAFETY_GUARD_BLOCKED
     assert audit.last.outcome is DecisionOutcome.BLOCKED
     assert audit.last.reason_code is BlockReason.SAFETY_GUARD_BLOCKED
+
+
+async def test_blocked_candidate_emits_bounded_execution_events_and_metrics() -> None:
+    candidate = _candidate()
+    events = _ExecutionEvents()
+    metrics = _ExecutionMetrics()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.BOOK_GUARDED,
+        audit=_Audit(),
+        readiness=_Readiness(),
+        events=events,
+        metrics=metrics,
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-observed",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=None,
+        safety=GuardResult(False, "risk", "limit"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert [name for name, _ in events.events] == [
+        "funding.execution.eligibility", "funding.execution.blocked",
+    ]
+    assert metrics.decisions == [{
+        "outcome": "blocked",
+        "reason": "safety_guard_blocked",
+        "policy": "book_guarded",
+    }]
 
 
 async def test_audit_failure_blocks_and_updates_readiness_without_ready_value() -> None:

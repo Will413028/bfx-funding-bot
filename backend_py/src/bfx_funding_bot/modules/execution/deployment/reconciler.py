@@ -393,7 +393,7 @@ class DeploymentReconciler:
                                 else "venue_rejected"
                             ),
                         )
-                    await self._emit_submit(cell_id, outcome, result)
+                    await self._emit_submit(cell_id, outcome, result, reconcile_id)
                     continue
                 self._tracker.record_deploy(cell_id, amount)
                 log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
@@ -401,10 +401,14 @@ class DeploymentReconciler:
                     self._attempts.record_submitted(
                         cell=cell_id, symbol=symbol, amount=amount,
                     )
-                await self._emit_submit(cell_id, outcome, result)
+                await self._emit_submit(cell_id, outcome, result, reconcile_id)
 
     async def _emit_submit(
-        self, cell_id: str, ready: ReadyToSubmit, result: SubmittedOrder,
+        self,
+        cell_id: str,
+        ready: ReadyToSubmit,
+        result: SubmittedOrder,
+        reconcile_id: str,
     ) -> None:
         """Structured ORDER_SUBMIT event for the live deploy path — parity with
         SIGNAL/DECISION + the paper executor, so a structured-event dashboard can
@@ -429,6 +433,26 @@ class DeploymentReconciler:
             status=result.status,
             failure_reason=failure_reason,
         )
+        if result.status != "submitted":
+            return
+        emit_execution_event = getattr(self._event_sink, "emit_execution_event", None)
+        if not callable(emit_execution_event):
+            return
+        try:
+            await emit_execution_event(
+                "funding.execution.submitted",
+                level="info",
+                decision_id=ready.decision_id,
+                reconcile_id=reconcile_id,
+                symbol=ready.decision.symbol,
+                cell=cell_id,
+                policy=ready.policy.value,
+                outcome="ready",
+                reason_code=None,
+                evidence={"snapshot_id": ready.market_snapshot_id},
+            )
+        except Exception:
+            log.debug("execution_submitted_event_failed", exc_info=True)
 
     async def _reprice_sweep(
         self,

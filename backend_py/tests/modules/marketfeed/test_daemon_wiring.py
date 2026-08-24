@@ -8,10 +8,13 @@ Phase 3c T10: AxiomClient removed; invariant migrated to stdout_sink path,
 accessed via daemon.monitor._events._resource (StdoutEventSink injected into
 HealthMonitor which is a Daemon field).
 """
+
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -53,6 +56,14 @@ async def test_build_daemon_emit_and_query_env_symmetric(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", phase)
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", env_value)
+    monkeypatch.setenv(
+        "BFX_EXECUTION_POLICY",
+        "paper" if phase == "paper" else "book_guarded",
+    )
+    if phase != "paper":
+        monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+        monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+        monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     if phase == "canary":
         # canary boot requires all safety guards enabled (assert_canary_guard_invariant).
         # Executor stays paper (BFX_EXECUTOR unset) — fine for an env-wiring unit test.
@@ -73,6 +84,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -81,13 +93,18 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     # warmup_cell fetches Bitfinex candles with file-based sqlite.
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+
     daemon = await build_daemon(
-        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
+        cells_yaml_path=_write_cells_yaml(tmp_path),
+        skip_ws=True,
     )
 
     # Invariant: StdoutEventSink (the live emit path) must be wired with the
@@ -96,6 +113,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     # the same stdout_sink instance, so one check suffices).
     # Phase 4.4c: PG-store env correctness covered by unit tests on build_daemon.
     from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
+
     sink = daemon.monitor._events
     assert isinstance(sink, StdoutEventSink)
     assert sink._resource.deployment_environment.value == env_value
@@ -122,6 +140,10 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.setenv("BFX_RECONCILE_INTERVAL_S", "0")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     # Must use the live executor path to enter the `if not spec.is_simulated` block
     # where the guard lives; paper executor sets is_simulated=True and skips it.
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
@@ -130,6 +152,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -137,8 +160,11 @@ async def test_build_daemon_reconcile_interval_zero_raises(
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -178,6 +204,10 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "resync_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -187,10 +217,15 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.setenv("BFX_RESYNC_MIN_INTERVAL_S", "7")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -198,8 +233,11 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
@@ -217,12 +255,12 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
 
 
 @pytest.mark.asyncio
-async def test_live_boot_explicitly_disables_deployment_until_integrity_dependencies_are_wired(
+async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    """Live boot remains fail-closed until Task 6 provides real book/readiness deps."""
+    """Live boot re-enables deployment only with the concrete integrity set."""
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
     safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
@@ -255,13 +293,74 @@ async def test_live_boot_explicitly_disables_deployment_until_integrity_dependen
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[], is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
 
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService
+    from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
+
+    assert isinstance(daemon.trading_readiness, TradingReadiness)
+    assert isinstance(daemon.funding_book_service, FundingBookService)
     assert daemon.periodic_reconcile is not None
-    assert daemon.periodic_reconcile._deployment is None
+    assert isinstance(daemon.periodic_reconcile._deployment, DeploymentReconciler)
+    deployment = daemon.periodic_reconcile._deployment
+    assert deployment._book_provider is daemon.funding_book_service
+    assert deployment._execution_gate._readiness is daemon.trading_readiness
+
+
+@pytest.mark.asyncio
+async def test_daemon_taskgroup_runs_book_service_through_its_finally_shutdown() -> None:
+    """Daemon owns TaskGroup supervision; service.run owns exactly-one stop."""
+    from bfx_funding_bot.modules.marketfeed.daemon import Daemon
+
+    class _BookService:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.stops = 0
+
+        async def run(self, stop_event: asyncio.Event) -> None:
+            try:
+                self.started.set()
+                await stop_event.wait()
+            finally:
+                self.stops += 1
+
+    async def wait_for_stop() -> None:
+        await daemon._stop_event.wait()
+
+    daemon = object.__new__(Daemon)
+    daemon.config = SimpleNamespace(cells=[])
+    daemon.boot_recovery = None
+    daemon.writer_lock = None
+    daemon.ws_client = None
+    daemon.fill_tracker = None
+    daemon.ws_dispatcher = None
+    daemon.book_snapshot_writer = None
+    daemon.auth_ws = None
+    daemon.periodic_reconcile = None
+    daemon._stop_event = asyncio.Event()
+    daemon._candle_writer_loop = wait_for_stop
+    daemon._scheduler_loop = wait_for_stop
+    daemon._monitor_loop = wait_for_stop
+    daemon._heartbeat_scan_loop = wait_for_stop
+    daemon._db_keepalive_loop = wait_for_stop
+    daemon._healthz_server_loop = wait_for_stop
+    service = _BookService()
+    daemon.funding_book_service = service
+
+    task = asyncio.create_task(daemon.run())
+    await service.started.wait()
+    daemon._stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert service.stops == 1
 
 
 @pytest.mark.asyncio
@@ -276,6 +375,7 @@ async def test_smoke_runner_present_for_simulated_paper(
 
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "smoke_paper.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -290,6 +390,7 @@ async def test_smoke_runner_present_for_simulated_paper(
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -297,8 +398,11 @@ async def test_smoke_runner_present_for_simulated_paper(
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
@@ -327,6 +431,14 @@ async def test_smoke_runner_gated_off_for_live_executor(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "smoke_live.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -339,6 +451,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -346,8 +459,11 @@ async def test_smoke_runner_gated_off_for_live_executor(
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
@@ -374,6 +490,10 @@ async def test_canary_build_wires_writer_lock_and_guard(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "writer_lock_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -386,6 +506,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
@@ -393,8 +514,11 @@ async def test_canary_build_wires_writer_lock_and_guard(
 
     httpx_mock.add_response(
         url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[],
-        is_reusable=True, is_optional=True,
+        method="GET",
+        status_code=200,
+        json=[],
+        is_reusable=True,
+        is_optional=True,
     )
 
     daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)

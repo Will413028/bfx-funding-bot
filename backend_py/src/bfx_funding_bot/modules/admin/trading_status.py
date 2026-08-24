@@ -43,6 +43,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     resolve_for_symbol_with_source,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
+from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -107,6 +108,7 @@ class TradingStatusService:
         phase: Phase,
         attempts: SubmitAttemptRecorder,
         halt_store: _HaltStoreProtocol | None = None,
+        readiness: TradingReadiness | None = None,
     ) -> None:
         self._chain = chain
         self._ledger = ledger
@@ -121,6 +123,7 @@ class TradingStatusService:
         self._phase = phase
         self._attempts = attempts
         self._halt_store = halt_store
+        self._readiness = readiness
         self._symbols = sorted(configured_symbols(cells))
         # symbol → reference amount, so the probe's default size has a source.
         self._reference_amount: dict[str, float] = {}
@@ -148,6 +151,16 @@ class TradingStatusService:
                 "buffer",
             ),
             "last_submit_attempt": self._attempts.as_dict(),
+            "trading_readiness": self._readiness_dict(),
+        }
+
+    def _readiness_dict(self) -> dict[str, object] | None:
+        if self._readiness is None:
+            return None
+        snapshot = self._readiness.snapshot()
+        return {
+            "trading_ready": snapshot.trading_ready,
+            "reason": snapshot.reason,
         }
 
     async def _halt_state(self) -> dict[str, Any]:
