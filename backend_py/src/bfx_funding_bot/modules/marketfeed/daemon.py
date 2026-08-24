@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import signal
@@ -42,6 +44,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
 from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
+from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
@@ -58,14 +61,20 @@ from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_pe
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
+from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
+from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
+from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
+from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -86,6 +95,7 @@ from bfx_funding_bot.modules.execution.middleware import (
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
+    CancelPort,
     Credentials,
     ExecutorPort,
     GuardRule,
@@ -123,17 +133,23 @@ from bfx_funding_bot.modules.marketfeed.config import (
     configured_symbols,
     load_config,
 )
+from bfx_funding_bot.modules.marketfeed.funding_book import (
+    FundingBookService,
+    FundingBookStore,
+)
 from bfx_funding_bot.modules.marketfeed.health_monitor import (
     HealthMonitor,
     HealthProbe,
     assess_auth_ws_health,
 )
 from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
+from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionPayload,
     EventType,
     HealthStatus,
     HealthTarget,
@@ -166,6 +182,28 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
+
+
+@dataclass(frozen=True, slots=True)
+class _DaemonAuditContextFactory:
+    account_id: str
+    deployment_environment: str
+    service_version: str
+    config_hash: str
+
+    def build(
+        self, *, candidate: DecisionPayload, cell_id: str, reconcile_id: str,
+    ) -> AuditContext:
+        return AuditContext(
+            account_id=self.account_id,
+            deployment_environment=self.deployment_environment,
+            reconcile_id=reconcile_id,
+            cell_id=cell_id,
+            symbol=candidate.symbol,
+            signal_correlation_id=str(candidate.signal_correlation_id),
+            service_version=self.service_version,
+            config_hash=self.config_hash,
+        )
 
 
 def _require_env(name: str) -> str:
@@ -211,11 +249,13 @@ class Daemon:
     boot_recovery: BootRecovery | None = None
     periodic_reconcile: PeriodicReconcile | None = None
     book_snapshot_writer: BookSnapshotWriter | None = None
+    funding_book_service: FundingBookService | None = None
     healthz_host: str = "0.0.0.0"
     healthz_port: int = 8080
     admin_token: str | None = None
     # Behaviour-reporting service behind /admin/trading-status + /admin/dry-evaluate.
     trading_status: TradingStatusService | None = None
+    trading_readiness: TradingReadiness | None = None
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
@@ -277,6 +317,13 @@ class Daemon:
                 tg.create_task(
                     self.book_snapshot_writer.run(self._stop_event),
                     name="book_snapshot",
+                )
+            # The live eligibility provider owns its own WS shutdown in run()'s
+            # finally block. TaskGroup supervision ensures that path is used once.
+            if self.funding_book_service is not None:
+                tg.create_task(
+                    self.funding_book_service.run(self._stop_event),
+                    name="funding_book",
                 )
             # Observe-only auth-WS health poll (2026-07 nonce-flap fix): surfaces
             # "enabled but never authenticates" in the HEALTH_CHECK stream. NOT a
@@ -419,6 +466,7 @@ class Daemon:
             admin_token=self.admin_token,
             metrics=self.metrics,
             trading_status=self.trading_status,
+            readiness=self.trading_readiness,
         )
         log.info("sub_task_exit name=healthz")
 
@@ -763,6 +811,7 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
+    trading_readiness = TradingReadiness(on_change=metrics.set_trading_ready)
     # deployment_environment comes from config (BFX_DEPLOYMENT_ENV via load_config).
     event_resource = EventResource(
         deployment_environment=config.deployment_environment,
@@ -789,6 +838,23 @@ async def build_daemon(
         base_url=_BITFINEX_REST_BASE_URL,
         limiter=FundingRateLimiter(),
     )
+    funding_book_service: FundingBookService | None = None
+    if config.execution_policy is not ExecutionPolicy.PAPER:
+        if (
+            config.book_max_age_seconds is None
+            or config.book_reconcile_interval_seconds is None
+            or config.book_max_down_pct is None
+        ):
+            raise ValueError(
+                "book-capable execution policy requires FundingBookService configuration",
+            )
+        funding_book_service = FundingBookService(
+            store=FundingBookStore(max_age_seconds=config.book_max_age_seconds),
+            rest=bitfinex,
+            ws=FundingBookWSClient(symbols=sorted(configured_symbols(config.cells))),
+            symbols=sorted(configured_symbols(config.cells)),
+            reconcile_interval_seconds=config.book_reconcile_interval_seconds,
+        )
     registry = StrategyRegistry()
     monitor = HealthMonitor(phase=config.phase, event_sink=stdout_sink, probe=probe)
     candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
@@ -1178,19 +1244,62 @@ async def build_daemon(
     # empty — which correctly reads as "this process has submitted nothing".
     attempt_recorder = SubmitAttemptRecorder()
 
-    # Task 6 owns the live FundingBookService / TradingReadiness lifecycle.
-    # Until it supplies those real dependencies, leave deployment explicitly
-    # disabled rather than creating a partial reconciler or bypassing the gate.
     deployment_reconciler = None
     if not spec.is_simulated:
+        if funding_book_service is None:
+            raise ValueError(
+                "live execution requires a FundingBookService for the configured policy",
+            )
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
-        log.error(
-            "deployment_disabled_pending_execution_integrity_wiring "
-            "policy=%s reprice_enabled=%s ladder_configured=%s",
-            os.environ.get("BFX_EXECUTION_POLICY"),
-            reprice_policy.enabled,
-            ladder_policy is not None,
+        execution_gate = ExecutionGate(
+            policy=config.execution_policy,
+            audit=ExecutionDecisionRecorder(session_factory),
+            readiness=trading_readiness,
+            events=stdout_sink,
+            metrics=metrics,
+        )
+        config_hash = hashlib.sha256(
+            json.dumps(config.model_dump(mode="json"), sort_keys=True).encode(),
+        ).hexdigest()
+        deployment_reconciler = DeploymentReconciler(
+            store=quote_store,
+            tracker=CellDeploymentTracker(),
+            ledger=ledger,
+            safety_chain=safety_chain,
+            executor=wrapped_executor,
+            account_ctx=account_ctx,
+            cells=config.cells,
+            venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
+            min_offer_buffer_pct=Decimal(
+                os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02"),
+            ),
+            concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
+            balance_buffer_usdt=balance_buffer_usdt,
+            caps=hg.allocation_cap.caps,
+            default_cap=hg.allocation_cap.default_cap,
+            buffers=hg.buying_power.buffers,
+            default_buffer=hg.buying_power.default_buffer,
+            clock=now_ms_utc,
+            event_sink=stdout_sink,
+            phase=config.phase,
+            canceller=executor if isinstance(executor, CancelPort) else None,
+            reprice=reprice_policy,
+            ladder=ladder_policy,
+            attempt_recorder=attempt_recorder,
+            book_provider=funding_book_service,
+            execution_gate=execution_gate,
+            execution_policy=config.execution_policy,
+            period_pricer=PeriodPricer(
+                max_down_pct=Decimal(str(config.book_max_down_pct)),
+                tick=Decimal("0.00000001"),
+            ),
+            audit_context_factory=_DaemonAuditContextFactory(
+                account_id=account_id,
+                deployment_environment=env_str,
+                service_version=event_resource.service_version,
+                config_hash=config_hash,
+            ),
         )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —
@@ -1432,6 +1541,7 @@ async def build_daemon(
         phase=config.phase,
         attempts=attempt_recorder,
         halt_store=halt_store,
+        readiness=trading_readiness,
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
@@ -1517,11 +1627,13 @@ async def build_daemon(
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
         book_snapshot_writer=book_snapshot_writer,
+        funding_book_service=funding_book_service,
         periodic_reconcile=periodic_reconcile,
         healthz_host=healthz_host,
         healthz_port=healthz_port,
         admin_token=admin_token,
         trading_status=trading_status,
+        trading_readiness=trading_readiness,
         writer_lock=writer_lock,
         metrics=metrics,
         tracing=tracing,

@@ -21,6 +21,7 @@ import pytest
 
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
 from bfx_funding_bot.modules.execution.contracts import (
+    BlockReason,
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
@@ -94,6 +95,48 @@ def test_operational_event_counter_increments() -> None:
     assert m.registry.get_sample_value(
         "bfx_operational_events_total", {"event_type": "health_check", "level": "warn"},
     ) == 1.0
+
+
+def test_execution_metric_labels_are_bounded() -> None:
+    m = DaemonMetrics()
+
+    m.observe_execution_decision(
+        outcome="blocked",
+        reason=BlockReason.BOOK_STALE.value,
+        policy=ExecutionPolicy.BOOK_GUARDED.value,
+    )
+
+    assert m.registry.get_sample_value(
+        "bfx_execution_decisions_total",
+        {
+            "outcome": "blocked",
+            "reason": "book_stale",
+            "policy": "book_guarded",
+        },
+    ) == 1.0
+
+
+def test_execution_metrics_fail_open_and_normalize_unknown_labels() -> None:
+    m = DaemonMetrics()
+
+    m.observe_execution_decision(outcome="unexpected", reason="raw-error", policy="other")
+    m.observe_audit_persist_failure()
+    m.observe_book_snapshot(result="unexpected")
+    m.observe_book_snapshot_age(age_seconds=12.5)
+    m.observe_execution_gate_duration(seconds=0.2)
+    m.set_trading_ready(True)
+
+    assert m.registry.get_sample_value(
+        "bfx_execution_decisions_total",
+        {"outcome": "other", "reason": "other", "policy": "other"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_execution_audit_persist_failures_total") == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_funding_book_snapshots_total", {"result": "other"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_funding_book_snapshot_age_seconds") == 12.5
+    assert m.registry.get_sample_value("bfx_execution_gate_duration_seconds_count") == 1.0
+    assert m.registry.get_sample_value("bfx_trading_ready") == 1.0
 
 
 def test_diagnostic_event_counter_increments() -> None:

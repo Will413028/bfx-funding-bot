@@ -1,4 +1,5 @@
 """Fail-closed audit gate between deployment candidates and the executor."""
+
 from __future__ import annotations
 
 import logging
@@ -35,6 +36,37 @@ class _TradingReadiness(Protocol):
     def set_blocked(self, reason: BlockReason, dependency: str) -> None: ...
 
 
+class _ExecutionEvents(Protocol):
+    async def emit_execution_event(
+        self,
+        event_name: str,
+        *,
+        level: str,
+        decision_id: str,
+        reconcile_id: str,
+        symbol: str,
+        cell: str,
+        policy: str,
+        outcome: str,
+        reason_code: str | None,
+        evidence: dict[str, object],
+    ) -> None: ...
+
+
+class _ExecutionMetrics(Protocol):
+    def observe_execution_decision(
+        self,
+        *,
+        outcome: str,
+        reason: str,
+        policy: str,
+    ) -> None: ...
+    def observe_audit_persist_failure(self) -> None: ...
+    def observe_execution_gate_duration(self, *, seconds: float) -> None: ...
+    def observe_book_snapshot(self, *, result: str) -> None: ...
+    def observe_book_snapshot_age(self, *, age_seconds: float) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _NormalizedFillEvidence:
     model_version: str
@@ -57,10 +89,14 @@ class ExecutionGate:
         policy: ExecutionPolicy,
         audit: ExecutionDecisionRecorder,
         readiness: _TradingReadiness,
+        events: _ExecutionEvents | None = None,
+        metrics: _ExecutionMetrics | None = None,
     ) -> None:
         self._policy = policy
         self._audit = audit
         self._readiness = readiness
+        self._events = events
+        self._metrics = metrics
 
     @property
     def policy(self) -> ExecutionPolicy:
@@ -78,10 +114,54 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
+        started = time.perf_counter()
+        try:
+            return await self._prepare(
+                candidate,
+                decision_id=decision_id,
+                reconcile_id=reconcile_id,
+                snapshot=snapshot,
+                price=price,
+                fill_evidence=fill_evidence,
+                safety=safety,
+                audit_context=audit_context,
+            )
+        finally:
+            if self._metrics is not None:
+                try:
+                    self._metrics.observe_execution_gate_duration(
+                        seconds=time.perf_counter() - started,
+                    )
+                except Exception:
+                    log.debug("execution_gate_duration_metric_failed", exc_info=True)
+
+    async def _prepare(
+        self,
+        candidate: DecisionPayload,
+        *,
+        decision_id: str,
+        reconcile_id: str,
+        snapshot: MarketSnapshot | None,
+        price: PriceDecision | BlockedExecution,
+        fill_evidence: object | None,
+        safety: GuardResult,
+        audit_context: AuditContext,
+    ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
         normalized_fill_evidence = _normalize_fill_evidence(
             fill_evidence,
             candidate_symbol=candidate.symbol,
         )
+        if self._metrics is not None:
+            try:
+                if snapshot is None:
+                    self._metrics.observe_book_snapshot(result="unavailable")
+                else:
+                    self._metrics.observe_book_snapshot(result="valid")
+                    self._metrics.observe_book_snapshot_age(
+                        age_seconds=max((time.time() * 1_000 - snapshot.captured_at_ms) / 1_000, 0),
+                    )
+            except Exception:
+                log.debug("funding_book_metric_failed", exc_info=True)
         blocked = self._blocked_dependency(
             candidate=candidate,
             decision_id=decision_id,
@@ -91,7 +171,7 @@ class ExecutionGate:
             safety=safety,
         )
         if blocked is not None:
-            return await self._audit_blocked(
+            result = await self._audit_blocked(
                 blocked=blocked,
                 reconcile_id=reconcile_id,
                 snapshot=snapshot,
@@ -99,6 +179,8 @@ class ExecutionGate:
                 safety=safety,
                 audit_context=audit_context,
             )
+            await self._observe_result(result, reconcile_id, audit_context)
+            return result
 
         assert isinstance(price, PriceDecision)
         assert snapshot is not None
@@ -120,14 +202,21 @@ class ExecutionGate:
             await self._audit.record(audit_decision)
         except ExecutionAuditUnavailable:
             log.exception("execution_audit_unavailable decision_id=%s", decision_id)
+            if self._metrics is not None:
+                try:
+                    self._metrics.observe_audit_persist_failure()
+                except Exception:
+                    log.debug("execution_audit_failure_metric_failed", exc_info=True)
             self._readiness.set_blocked(BlockReason.EXECUTION_AUDIT_UNAVAILABLE, "audit")
-            return BlockedExecution(
+            result = BlockedExecution(
                 decision_id=decision_id,
                 candidate=candidate,
                 reason=BlockReason.EXECUTION_AUDIT_UNAVAILABLE,
                 failed_dependency="audit",
                 evidence={"policy": self._policy.value},
             )
+            await self._observe_result(result, reconcile_id, audit_context)
+            return result
         ready = ReadyToSubmit(
             decision=applied_candidate,
             decision_id=decision_id,
@@ -138,7 +227,73 @@ class ExecutionGate:
             safety=safety,
         )
         self._readiness.set_ready()
+        await self._observe_result(ready, reconcile_id, audit_context)
         return ready
+
+    async def _observe_result(
+        self,
+        result: ReadyToSubmit | BlockedExecution | NoRecommendation,
+        reconcile_id: str,
+        context: AuditContext,
+    ) -> None:
+        reason = result.reason.value if not isinstance(result, ReadyToSubmit) else "none"
+        if self._metrics is not None:
+            try:
+                self._metrics.observe_execution_decision(
+                    outcome=result.outcome.value,
+                    reason=reason,
+                    policy=self._policy.value,
+                )
+            except Exception:
+                log.debug("execution_decision_metric_failed", exc_info=True)
+        events = self._events
+        if events is None:
+            return
+        evidence: dict[str, object] = {}
+        if isinstance(result, BlockedExecution):
+            evidence["dependency"] = result.failed_dependency
+        elif isinstance(result, ReadyToSubmit):
+            evidence["snapshot_id"] = result.market_snapshot_id
+            branch = result.evidence.get("branch")
+            if isinstance(branch, str):
+                evidence["branch"] = branch
+        try:
+
+            async def emit(event_name: str, level: str) -> None:
+                await events.emit_execution_event(
+                    event_name,
+                    level=level,
+                    decision_id=result.decision_id,
+                    reconcile_id=reconcile_id,
+                    symbol=context.symbol,
+                    cell=context.cell_id,
+                    policy=self._policy.value,
+                    outcome=result.outcome.value,
+                    reason_code=None if reason == "none" else reason,
+                    evidence=evidence,
+                )
+
+            await emit(
+                "funding.execution.eligibility",
+                "info" if isinstance(result, ReadyToSubmit) else "warn",
+            )
+            if isinstance(result, BlockedExecution):
+                await emit("funding.execution.blocked", "warn")
+                if result.reason in {
+                    BlockReason.BOOK_FETCH_FAILED,
+                    BlockReason.BOOK_NOT_INITIALIZED,
+                    BlockReason.BOOK_STALE,
+                    BlockReason.BOOK_SEQUENCE_INVALID,
+                    BlockReason.BOOK_CHECKSUM_INVALID,
+                }:
+                    await emit("funding.book.snapshot_invalid", "warn")
+                if result.reason in {
+                    BlockReason.FILL_MODEL_MISSING,
+                    BlockReason.FILL_MODEL_LOW_CONFIDENCE,
+                }:
+                    await emit("funding.fill_model.unavailable", "warn")
+        except Exception:
+            log.debug("execution_event_emit_failed", exc_info=True)
 
     def _blocked_dependency(
         self,
@@ -152,12 +307,19 @@ class ExecutionGate:
     ) -> BlockedExecution | None:
         if not safety.allowed:
             return _blocked(
-                decision_id, candidate, BlockReason.SAFETY_GUARD_BLOCKED, safety.guard_name,
+                decision_id,
+                candidate,
+                BlockReason.SAFETY_GUARD_BLOCKED,
+                safety.guard_name,
                 {"guard_reason": safety.reason},
             )
         if snapshot is None:
             return _blocked(
-                decision_id, candidate, BlockReason.BOOK_STALE, "market_snapshot", {},
+                decision_id,
+                candidate,
+                BlockReason.BOOK_STALE,
+                "market_snapshot",
+                {},
             )
         if snapshot.symbol != candidate.symbol:
             return _blocked(
@@ -172,15 +334,27 @@ class ExecutionGate:
             )
         if not snapshot.sequence_valid:
             return _blocked(
-                decision_id, candidate, BlockReason.BOOK_SEQUENCE_INVALID, "market_snapshot", {},
+                decision_id,
+                candidate,
+                BlockReason.BOOK_SEQUENCE_INVALID,
+                "market_snapshot",
+                {},
             )
         if not snapshot.checksum_valid:
             return _blocked(
-                decision_id, candidate, BlockReason.BOOK_CHECKSUM_INVALID, "market_snapshot", {},
+                decision_id,
+                candidate,
+                BlockReason.BOOK_CHECKSUM_INVALID,
+                "market_snapshot",
+                {},
             )
         if isinstance(price, BlockedExecution):
             return _blocked(
-                decision_id, candidate, price.reason, price.failed_dependency, price.evidence,
+                decision_id,
+                candidate,
+                price.reason,
+                price.failed_dependency,
+                price.evidence,
             )
         if self._policy is ExecutionPolicy.OPTIMIZER_LIVE:
             if isinstance(fill_evidence, BlockReason):
@@ -228,6 +402,11 @@ class ExecutionGate:
             await self._audit.record(audit_decision)
         except ExecutionAuditUnavailable:
             log.exception("execution_audit_unavailable decision_id=%s", blocked.decision_id)
+            if self._metrics is not None:
+                try:
+                    self._metrics.observe_audit_persist_failure()
+                except Exception:
+                    log.debug("execution_audit_failure_metric_failed", exc_info=True)
             self._readiness.set_blocked(BlockReason.EXECUTION_AUDIT_UNAVAILABLE, "audit")
             return _blocked(
                 blocked.decision_id,

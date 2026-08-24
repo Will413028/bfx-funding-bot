@@ -69,7 +69,11 @@ if TYPE_CHECKING:
         SubmittedOrder,
     )
 
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
+from bfx_funding_bot.modules.execution.contracts import (
+    BlockReason,
+    ReadyToSubmit,
+    ReservationRef,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +81,12 @@ log = logging.getLogger(__name__)
 # a venue-fed string; anything outside the known set becomes "other" so a venue
 # quirk can never explode timeseries cardinality.
 _KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "filled", "failed"})
+_KNOWN_EXECUTION_OUTCOMES = frozenset({"ready", "blocked", "no_recommendation"})
+_KNOWN_EXECUTION_REASONS = frozenset({"none", *(reason.value for reason in BlockReason)})
+_KNOWN_EXECUTION_POLICIES = frozenset({
+    "paper", "book_guarded", "optimizer_shadow", "optimizer_live",
+})
+_KNOWN_BOOK_SNAPSHOT_RESULTS = frozenset({"valid", "invalid", "unavailable", "error"})
 
 _HEALTH_STATUS_CODE: dict[HealthStatus, float] = {
     HealthStatus.HEALTHY: 0.0,
@@ -238,12 +248,45 @@ class DaemonMetrics:
             ["level", "logger"],
             registry=self.registry,
         )
+        self.execution_decisions = Counter(
+            "bfx_execution_decisions",
+            "Execution eligibility outcomes with bounded decision labels.",
+            ["outcome", "reason", "policy"],
+            registry=self.registry,
+        )
+        self.execution_audit_persist_failures = Counter(
+            "bfx_execution_audit_persist_failures",
+            "Execution audit persistence failures before a venue submit.",
+            registry=self.registry,
+        )
+        self.funding_book_snapshots = Counter(
+            "bfx_funding_book_snapshots",
+            "Funding book snapshot validation outcomes.",
+            ["result"],
+            registry=self.registry,
+        )
 
         # ── Info ─────────────────────────────────────────────────────────────
         self.daemon_info = Gauge(
             "bfx_daemon_info",
             "Static daemon build/deployment labels; value is always 1.",
             ["service_version", "deployment_environment", "phase"],
+            registry=self.registry,
+        )
+        self.funding_book_snapshot_age = Gauge(
+            "bfx_funding_book_snapshot_age_seconds",
+            "Age of the current funding-book snapshot.",
+            registry=self.registry,
+        )
+        self.execution_gate_duration = Histogram(
+            "bfx_execution_gate_duration_seconds",
+            "Execution eligibility and pre-trade audit duration.",
+            registry=self.registry,
+            buckets=_SUBMIT_BUCKETS,
+        )
+        self.trading_ready = Gauge(
+            "bfx_trading_ready",
+            "Whether trading business dependencies are currently ready.",
             registry=self.registry,
         )
 
@@ -320,6 +363,48 @@ class DaemonMetrics:
             self.log_messages.labels(level=level, logger=logger).inc()
         except Exception:
             log.debug("metrics_observe_failed metric=log_messages", exc_info=True)
+
+    def observe_execution_decision(self, *, outcome: str, reason: str, policy: str) -> None:
+        try:
+            self.execution_decisions.labels(
+                outcome=outcome if outcome in _KNOWN_EXECUTION_OUTCOMES else "other",
+                reason=reason if reason in _KNOWN_EXECUTION_REASONS else "other",
+                policy=policy if policy in _KNOWN_EXECUTION_POLICIES else "other",
+            ).inc()
+        except Exception:
+            log.debug("metrics_observe_failed metric=execution_decisions", exc_info=True)
+
+    def observe_audit_persist_failure(self) -> None:
+        try:
+            self.execution_audit_persist_failures.inc()
+        except Exception:
+            log.debug("metrics_observe_failed metric=execution_audit_persist_failures", exc_info=True)
+
+    def observe_book_snapshot(self, *, result: str) -> None:
+        try:
+            self.funding_book_snapshots.labels(
+                result=result if result in _KNOWN_BOOK_SNAPSHOT_RESULTS else "other",
+            ).inc()
+        except Exception:
+            log.debug("metrics_observe_failed metric=funding_book_snapshots", exc_info=True)
+
+    def observe_book_snapshot_age(self, *, age_seconds: float) -> None:
+        try:
+            self.funding_book_snapshot_age.set(max(age_seconds, 0.0))
+        except Exception:
+            log.debug("metrics_observe_failed metric=funding_book_snapshot_age", exc_info=True)
+
+    def observe_execution_gate_duration(self, *, seconds: float) -> None:
+        try:
+            self.execution_gate_duration.observe(max(seconds, 0.0))
+        except Exception:
+            log.debug("metrics_observe_failed metric=execution_gate_duration", exc_info=True)
+
+    def set_trading_ready(self, value: bool) -> None:
+        try:
+            self.trading_ready.set(1.0 if value else 0.0)
+        except Exception:
+            log.debug("metrics_observe_failed metric=trading_ready", exc_info=True)
 
     # ── binding / registration ───────────────────────────────────────────────
 
