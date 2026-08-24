@@ -113,6 +113,7 @@ class ExecutionGate:
         fill_evidence: object | None,
         safety: GuardResult,
         audit_context: AuditContext,
+        optimizer_evidence: Mapping[str, object] | None = None,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
         started = time.perf_counter()
         try:
@@ -125,6 +126,7 @@ class ExecutionGate:
                 fill_evidence=fill_evidence,
                 safety=safety,
                 audit_context=audit_context,
+                optimizer_evidence=optimizer_evidence,
             )
         finally:
             if self._metrics is not None:
@@ -146,6 +148,7 @@ class ExecutionGate:
         fill_evidence: object | None,
         safety: GuardResult,
         audit_context: AuditContext,
+        optimizer_evidence: Mapping[str, object] | None,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
         normalized_fill_evidence = _normalize_fill_evidence(
             fill_evidence,
@@ -178,6 +181,7 @@ class ExecutionGate:
                 fill_evidence=normalized_fill_evidence,
                 safety=safety,
                 audit_context=audit_context,
+                optimizer_evidence=optimizer_evidence,
             )
             await self._observe_result(result, reconcile_id, audit_context)
             return result
@@ -197,6 +201,7 @@ class ExecutionGate:
             fill_evidence=normalized_fill_evidence,
             safety=safety,
             audit_context=audit_context,
+            optimizer_evidence=optimizer_evidence,
         )
         try:
             await self._audit.record(audit_decision)
@@ -384,6 +389,7 @@ class ExecutionGate:
         fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
         audit_context: AuditContext,
+        optimizer_evidence: Mapping[str, object] | None,
     ) -> BlockedExecution:
         audit_decision = self._audit_decision(
             candidate=blocked.candidate,
@@ -397,6 +403,7 @@ class ExecutionGate:
             fill_evidence=fill_evidence,
             safety=safety,
             audit_context=audit_context,
+            optimizer_evidence=optimizer_evidence,
         )
         try:
             await self._audit.record(audit_decision)
@@ -432,6 +439,7 @@ class ExecutionGate:
         fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
         audit_context: AuditContext,
+        optimizer_evidence: Mapping[str, object] | None,
     ) -> ExecutionDecision:
         now_ms = int(time.time() * 1_000)
         signal_rate = _required_decimal(candidate.offer_rate, "offer_rate")
@@ -461,7 +469,7 @@ class ExecutionGate:
             snapshot_age_ms=None,
             model_version=_model_value(fill_evidence),
             model_hash=_model_hash(fill_evidence),
-            model_evidence=_fill_evidence(fill_evidence),
+            model_evidence=_model_evidence(fill_evidence, optimizer_evidence),
             safety_result={
                 "allowed": safety.allowed,
                 "guard_name": safety.guard_name,
@@ -521,6 +529,24 @@ def _fill_evidence(
     if fill_evidence is None:
         return {}
     raise AssertionError("unreachable")
+
+
+def _model_evidence(
+    fill_evidence: _NormalizedFillEvidence | BlockReason | None,
+    optimizer_evidence: Mapping[str, object] | None,
+) -> Mapping[str, object]:
+    evidence = dict(_fill_evidence(fill_evidence))
+    if optimizer_evidence is not None:
+        evidence["optimizer"] = _copy_evidence(optimizer_evidence)
+    return evidence
+
+
+def _copy_evidence(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _copy_evidence(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_copy_evidence(item) for item in value]
+    return value
 
 
 def _normalize_fill_evidence(
