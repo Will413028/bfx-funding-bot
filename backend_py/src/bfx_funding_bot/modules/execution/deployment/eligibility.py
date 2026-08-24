@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
@@ -34,6 +35,15 @@ class _TradingReadiness(Protocol):
     def set_blocked(self, reason: BlockReason, dependency: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _NormalizedFillEvidence:
+    model_version: str
+    artifact_hash: str
+    fill_prob: Decimal
+    expected_ttf_ms: int | None
+    n_samples: int
+
+
 class ExecutionGate:
     """Audit every candidate and release only a committed READY decision."""
 
@@ -48,6 +58,10 @@ class ExecutionGate:
         self._audit = audit
         self._readiness = readiness
 
+    @property
+    def policy(self) -> ExecutionPolicy:
+        return self._policy
+
     async def prepare(
         self,
         candidate: DecisionPayload,
@@ -60,12 +74,13 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
+        normalized_fill_evidence = _normalize_fill_evidence(fill_evidence)
         blocked = self._blocked_dependency(
             candidate=candidate,
             decision_id=decision_id,
             snapshot=snapshot,
             price=price,
-            fill_evidence=fill_evidence,
+            fill_evidence=normalized_fill_evidence,
             safety=safety,
         )
         if blocked is not None:
@@ -73,7 +88,7 @@ class ExecutionGate:
                 blocked=blocked,
                 reconcile_id=reconcile_id,
                 snapshot=snapshot,
-                fill_evidence=fill_evidence,
+                fill_evidence=normalized_fill_evidence,
                 safety=safety,
                 audit_context=audit_context,
             )
@@ -81,15 +96,6 @@ class ExecutionGate:
         assert isinstance(price, PriceDecision)
         assert snapshot is not None
         applied_candidate = candidate.model_copy(update={"offer_rate": float(price.rate)})
-        ready = ReadyToSubmit(
-            decision=applied_candidate,
-            decision_id=decision_id,
-            policy=self._policy,
-            market_snapshot_id=snapshot.snapshot_id,
-            model_version=_model_value(fill_evidence, "model_version"),
-            evidence={"price": dict(price.evidence), "branch": price.branch.value},
-            safety=safety,
-        )
         audit_decision = self._audit_decision(
             candidate=candidate,
             decision_id=decision_id,
@@ -99,7 +105,7 @@ class ExecutionGate:
             dependency=None,
             snapshot=snapshot,
             price=price,
-            fill_evidence=fill_evidence,
+            fill_evidence=normalized_fill_evidence,
             safety=safety,
             audit_context=audit_context,
         )
@@ -115,6 +121,15 @@ class ExecutionGate:
                 failed_dependency="audit",
                 evidence={"policy": self._policy.value},
             )
+        ready = ReadyToSubmit(
+            decision=applied_candidate,
+            decision_id=decision_id,
+            policy=self._policy,
+            market_snapshot_id=snapshot.snapshot_id,
+            model_version=_model_value(normalized_fill_evidence),
+            evidence={"price": dict(price.evidence), "branch": price.branch.value},
+            safety=safety,
+        )
         self._readiness.set_ready()
         return ready
 
@@ -125,7 +140,7 @@ class ExecutionGate:
         decision_id: str,
         snapshot: MarketSnapshot | None,
         price: PriceDecision | BlockedExecution,
-        fill_evidence: object | None,
+        fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
     ) -> BlockedExecution | None:
         if not safety.allowed:
@@ -136,6 +151,17 @@ class ExecutionGate:
         if snapshot is None:
             return _blocked(
                 decision_id, candidate, BlockReason.BOOK_STALE, "market_snapshot", {},
+            )
+        if snapshot.symbol != candidate.symbol:
+            return _blocked(
+                decision_id,
+                candidate,
+                BlockReason.BOOK_STALE,
+                "market_snapshot_symbol",
+                {
+                    "expected_symbol": candidate.symbol,
+                    "actual_symbol": snapshot.symbol,
+                },
             )
         if not snapshot.sequence_valid:
             return _blocked(
@@ -150,14 +176,21 @@ class ExecutionGate:
                 decision_id, candidate, price.reason, price.failed_dependency, price.evidence,
             )
         if self._policy is ExecutionPolicy.OPTIMIZER_LIVE:
-            unavailable_reason = _unavailable_fill_reason(fill_evidence)
-            if unavailable_reason is not None:
+            if isinstance(fill_evidence, BlockReason):
                 return _blocked(
                     decision_id,
                     candidate,
-                    unavailable_reason,
+                    fill_evidence,
                     "fill_model",
                     _fill_evidence(fill_evidence),
+                )
+            if fill_evidence is None:
+                return _blocked(
+                    decision_id,
+                    candidate,
+                    BlockReason.FILL_MODEL_MISSING,
+                    "fill_model",
+                    {},
                 )
         return None
 
@@ -167,7 +200,7 @@ class ExecutionGate:
         blocked: BlockedExecution,
         reconcile_id: str,
         snapshot: MarketSnapshot | None,
-        fill_evidence: object | None,
+        fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
         audit_context: AuditContext,
     ) -> BlockedExecution:
@@ -210,7 +243,7 @@ class ExecutionGate:
         dependency: str | None,
         snapshot: MarketSnapshot | None,
         price: PriceDecision | None,
-        fill_evidence: object | None,
+        fill_evidence: _NormalizedFillEvidence | BlockReason | None,
         safety: GuardResult,
         audit_context: AuditContext,
     ) -> ExecutionDecision:
@@ -240,8 +273,8 @@ class ExecutionGate:
             snapshot_captured_at_ms=snapshot.captured_at_ms if snapshot is not None else None,
             snapshot_source=snapshot.source if snapshot is not None else None,
             snapshot_age_ms=None,
-            model_version=_model_value(fill_evidence, "model_version"),
-            model_hash=_model_value(fill_evidence, "artifact_hash"),
+            model_version=_model_value(fill_evidence),
+            model_hash=_model_hash(fill_evidence),
             model_evidence=_fill_evidence(fill_evidence),
             safety_result={
                 "allowed": safety.allowed,
@@ -272,34 +305,78 @@ def _blocked(
     )
 
 
-def _model_value(fill_evidence: object | None, name: str) -> str | None:
-    value = getattr(fill_evidence, name, None)
-    return str(value) if value is not None else None
+def _model_value(fill_evidence: _NormalizedFillEvidence | BlockReason | None) -> str | None:
+    if isinstance(fill_evidence, _NormalizedFillEvidence):
+        return fill_evidence.model_version
+    return None
 
 
-def _fill_evidence(fill_evidence: object | None) -> Mapping[str, object]:
+def _model_hash(fill_evidence: _NormalizedFillEvidence | BlockReason | None) -> str | None:
+    if isinstance(fill_evidence, _NormalizedFillEvidence):
+        return fill_evidence.artifact_hash
+    return None
+
+
+def _fill_evidence(
+    fill_evidence: _NormalizedFillEvidence | BlockReason | None,
+) -> Mapping[str, object]:
+    if isinstance(fill_evidence, _NormalizedFillEvidence):
+        return {
+            "fill_prob": str(fill_evidence.fill_prob),
+            "expected_ttf_ms": fill_evidence.expected_ttf_ms,
+            "n_samples": fill_evidence.n_samples,
+        }
+    if isinstance(fill_evidence, BlockReason):
+        return {"unavailable_reason": fill_evidence.value}
     if fill_evidence is None:
         return {}
-    values = getattr(fill_evidence, "__dict__", None)
-    if isinstance(values, dict):
-        return {key: value for key, value in values.items() if _json_scalar(value)}
-    reason = getattr(fill_evidence, "reason", None)
-    return {"reason": str(reason)} if reason is not None else {}
+    raise AssertionError("unreachable")
 
 
-def _json_scalar(value: object) -> bool:
-    return isinstance(value, str | int | float | bool) or value is None
-
-
-def _unavailable_fill_reason(fill_evidence: object | None) -> BlockReason | None:
+def _normalize_fill_evidence(
+    fill_evidence: object | None,
+) -> _NormalizedFillEvidence | BlockReason | None:
+    """Accept only the narrow future fill-model seam required for live optimizer use."""
     if fill_evidence is None:
-        return BlockReason.FILL_MODEL_MISSING
+        return None
+
     reason = getattr(fill_evidence, "reason", None)
-    if reason == "low_confidence":
-        return BlockReason.FILL_MODEL_LOW_CONFIDENCE
-    if reason is not None:
+    if isinstance(reason, str):
+        if reason == "low_confidence":
+            return BlockReason.FILL_MODEL_LOW_CONFIDENCE
         return BlockReason.FILL_MODEL_MISSING
-    return None
+
+    low_confidence = getattr(fill_evidence, "low_confidence", None)
+    if low_confidence is True:
+        return BlockReason.FILL_MODEL_LOW_CONFIDENCE
+    if low_confidence is not False:
+        return BlockReason.FILL_MODEL_MISSING
+
+    model_version = getattr(fill_evidence, "model_version", None)
+    artifact_hash = getattr(fill_evidence, "artifact_hash", None)
+    fill_prob = getattr(fill_evidence, "fill_prob", None)
+    expected_ttf_ms = getattr(fill_evidence, "expected_ttf_ms", None)
+    n_samples = getattr(fill_evidence, "n_samples", None)
+    if (
+        not isinstance(model_version, str)
+        or not model_version
+        or not isinstance(artifact_hash, str)
+        or not artifact_hash
+        or isinstance(fill_prob, bool)
+        or not isinstance(fill_prob, int | float | Decimal)
+        or isinstance(expected_ttf_ms, bool)
+        or not isinstance(expected_ttf_ms, int | None)
+        or isinstance(n_samples, bool)
+        or not isinstance(n_samples, int)
+    ):
+        return BlockReason.FILL_MODEL_MISSING
+    return _NormalizedFillEvidence(
+        model_version=model_version,
+        artifact_hash=artifact_hash,
+        fill_prob=Decimal(str(fill_prob)),
+        expected_ttf_ms=expected_ttf_ms,
+        n_samples=n_samples,
+    )
 
 
 def _required_decimal(value: float | None, name: str) -> Decimal:

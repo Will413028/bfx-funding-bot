@@ -61,13 +61,11 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
-from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
-from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -88,7 +86,6 @@ from bfx_funding_bot.modules.execution.middleware import (
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
-    CancelPort,
     Credentials,
     ExecutorPort,
     GuardRule,
@@ -1181,43 +1178,19 @@ async def build_daemon(
     # empty — which correctly reads as "this process has submitted nothing".
     attempt_recorder = SubmitAttemptRecorder()
 
-    # DeploymentReconciler needs wrapped_executor — constructed here (after
-    # wrapped_executor) and injected into PeriodicReconcile.
+    # Task 6 owns the live FundingBookService / TradingReadiness lifecycle.
+    # Until it supplies those real dependencies, leave deployment explicitly
+    # disabled rather than creating a partial reconciler or bypassing the gate.
+    deployment_reconciler = None
     if not spec.is_simulated:
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
-        deployment_reconciler = DeploymentReconciler(
-            store=quote_store,
-            tracker=CellDeploymentTracker(),
-            ledger=ledger,
-            safety_chain=safety_chain,
-            executor=wrapped_executor,
-            account_ctx=account_ctx,
-            cells=config.cells,
-            venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
-            min_offer_buffer_pct=Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02")),
-            concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
-            balance_buffer_usdt=balance_buffer_usdt,
-            # Phase 2: per-symbol caps/buffers so the reconciler sizes each
-            # currency against its own cap[symbol] (the real-money sizing
-            # authority). Same maps + env-fallback scalars as the per-offer
-            # guards, so sizing and guard enforcement agree on the cap.
-            caps=hg.allocation_cap.caps,
-            default_cap=hg.allocation_cap.default_cap,
-            buffers=hg.buying_power.buffers,
-            default_buffer=hg.buying_power.default_buffer,
-            clock=lambda: int(time.time() * 1000),
-            event_sink=stdout_sink,
-            phase=config.phase,
-            # E1 reprice sweep：canceller 用 RAW executor（middleware onion 只包
-            # submit；cancel 的 audit/retry 已在 BitfinexLiveExecutor 內建）。
-            # isinstance(CancelPort) 是 runtime_checkable 結構檢查 — paper
-            # executor 無 cancel → None → sweep 恆 noop（defense-in-depth，
-            # 本區塊本來就 live-only）。
-            canceller=executor if isinstance(executor, CancelPort) else None,
-            reprice=reprice_policy,
-            ladder=ladder_policy,
-            attempt_recorder=attempt_recorder,
+        log.error(
+            "deployment_disabled_pending_execution_integrity_wiring "
+            "policy=%s reprice_enabled=%s ladder_configured=%s",
+            os.environ.get("BFX_EXECUTION_POLICY"),
+            reprice_policy.enabled,
+            ladder_policy is not None,
         )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —

@@ -173,14 +173,18 @@ def _ask_snapshot() -> MarketSnapshot:
     )
 
 
-def _eligibility_kwargs(*, audit=None, book_provider=None) -> dict:
+def _eligibility_kwargs(
+    *, audit=None, book_provider=None,
+    gate_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
+    execution_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
+) -> dict:
     return {
         "book_provider": book_provider or _SnapshotProvider(_valid_snapshot()),
         "execution_gate": ExecutionGate(
-            policy=ExecutionPolicy.BOOK_GUARDED,
+            policy=gate_policy,
             audit=audit or _Audit(), readiness=_Readiness(),
         ),
-        "execution_policy": ExecutionPolicy.BOOK_GUARDED,
+        "execution_policy": execution_policy,
         "period_pricer": PeriodPricer(
             max_down_pct=D("0.15"), tick=D("0.00000001"),
         ),
@@ -232,7 +236,9 @@ class _SeqSafety:
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            available=None, event_sink=None, canceller=None, reprice=None,
            ladder=None, cap=None,
-           attempt_recorder=None, book_provider=None, audit=None):
+           attempt_recorder=None, book_provider=None, audit=None,
+           gate_policy=ExecutionPolicy.BOOK_GUARDED,
+           execution_policy=ExecutionPolicy.BOOK_GUARDED):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -258,11 +264,25 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         phase=Phase.CANARY,
         canceller=canceller,
         reprice=reprice,
-        **_eligibility_kwargs(audit=audit, book_provider=book_provider),
+        **_eligibility_kwargs(
+            audit=audit,
+            book_provider=book_provider,
+            gate_policy=gate_policy,
+            execution_policy=execution_policy,
+        ),
         ladder=ladder,
         attempt_recorder=attempt_recorder,
     )
     return rec, ex, tracker, safety
+
+
+def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
+    with pytest.raises(ValueError, match="execution_gate policy"):
+        _build(
+            exposure=D("370"),
+            quotes=[_post_quote("fUST_a30")],
+            execution_policy=ExecutionPolicy.PAPER,
+        )
 
 
 async def test_book_failure_never_submits_original_quote():
