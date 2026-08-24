@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -57,6 +58,39 @@ def test_fill_model_artifact_metadata_is_defensively_deep_immutable() -> None:
         nested["new"] = "value"  # type: ignore[index]
     with pytest.raises(TypeError):
         values[0] = 2  # type: ignore[index]
+
+
+def test_fill_model_artifact_snapshots_set_metadata() -> None:
+    labels = {"stable"}
+    artifact = _artifact(metadata={"labels": labels})
+
+    labels.add("mutated")
+    frozen_labels = cast(frozenset[str], artifact.metadata["labels"])
+
+    assert frozen_labels == frozenset({"stable"})
+    with pytest.raises(AttributeError):
+        frozen_labels.add("mutated")
+
+
+def test_fill_model_artifact_set_metadata_is_deterministic_json() -> None:
+    artifact = _artifact(metadata={"labels": {"stable", "priority"}})
+
+    encoded = json.dumps(
+        artifact.metadata_for_storage(),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+    assert encoded == '{"labels":["priority","stable"]}'
+
+
+def test_fill_model_artifact_rejects_unsupported_metadata_values() -> None:
+    class MutableMetadata:
+        pass
+
+    with pytest.raises(TypeError, match="unsupported"):
+        _artifact(metadata={"custom": MutableMetadata()})
 
 
 def test_artifact_metadata_server_default_matches_migration(monkeypatch) -> None:
