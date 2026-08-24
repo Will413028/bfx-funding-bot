@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -114,7 +115,8 @@ class MarketfeedConfig(BaseModel):
     book_max_age_seconds: float | None = Field(default=None, gt=0)
     book_reconcile_interval_seconds: float | None = Field(default=None, gt=0)
     book_max_down_pct: float | None = Field(default=None, ge=0, le=1)
-    optimizer_fee_rate: float | None = Field(default=None, ge=0, le=1)
+    optimizer_fee_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    fill_model_artifact: str | None = None
     redis_url: str | None = None
     run_duration_hours: int | None = Field(default=None, gt=0)
     # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
@@ -226,9 +228,17 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         raise ValueError("BFX_FILL_MODEL_ARTIFACT required for optimizer_live execution policy")
 
     optimizer_fee_rate_raw = os.environ.get("BFX_OPTIMIZER_FEE_RATE", "").strip()
-    optimizer_fee_rate = (
-        required_float("BFX_OPTIMIZER_FEE_RATE") if optimizer_fee_rate_raw else None
-    )
+    if optimizer_fee_rate_raw:
+        try:
+            optimizer_fee_rate = Decimal(optimizer_fee_rate_raw)
+        except Exception:
+            raise ValueError(
+                f"BFX_OPTIMIZER_FEE_RATE must be a decimal, got {optimizer_fee_rate_raw!r}",
+            ) from None
+        if not optimizer_fee_rate.is_finite() or not Decimal("0") <= optimizer_fee_rate <= Decimal("1"):
+            raise ValueError("BFX_OPTIMIZER_FEE_RATE must be between 0 and 1")
+    else:
+        optimizer_fee_rate = None
 
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
     run_duration_h: int | None
@@ -341,6 +351,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "book_reconcile_interval_seconds": book_reconcile_interval_seconds,
         "book_max_down_pct": book_max_down_pct,
         "optimizer_fee_rate": optimizer_fee_rate,
+        "fill_model_artifact": fill_model_artifact or None,
         "redis_url": redis_url,
         "run_duration_hours": run_duration_h,
         "scheduler_buffer_s": scheduler_buffer_s,

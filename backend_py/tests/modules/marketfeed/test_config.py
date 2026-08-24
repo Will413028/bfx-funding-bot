@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,34 @@ def test_optimizer_live_requires_fill_model_artifact(
 
     with pytest.raises(ValueError, match="BFX_FILL_MODEL_ARTIFACT"):
         load_config(cells_yaml_path=yaml_path)
+
+
+def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_live")
+    monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUST-fill.json")
+    monkeypatch.setenv("BFX_OPTIMIZER_FEE_RATE", "0.15")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    config = load_config(cells_yaml_path=yaml_path)
+
+    assert config.fill_model_artifact == "models/fUST-fill.json"
+    assert config.optimizer_fee_rate == Decimal("0.15")
+
+
+def test_optimizer_shadow_allows_missing_model_and_fee_for_observation_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_shadow")
+    monkeypatch.delenv("BFX_FILL_MODEL_ARTIFACT", raising=False)
+    monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    config = load_config(cells_yaml_path=yaml_path)
+
+    assert config.fill_model_artifact is None
+    assert config.optimizer_fee_rate is None
 
 
 @pytest.mark.parametrize(

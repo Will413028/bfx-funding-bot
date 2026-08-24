@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceBranch,
     PriceDecision,
 )
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import FillModelUnavailable
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome as PayloadOutcome
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
@@ -321,6 +322,58 @@ async def test_optimizer_live_without_fill_evidence_is_blocked_and_audited() -> 
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.FILL_MODEL_MISSING
     assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+
+
+async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audited() -> None:
+    """The optimizer-live gate must not convert a model outage into a signal fallback."""
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-model-missing",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelUnavailable("missing"),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason is BlockReason.FILL_MODEL_MISSING
+    assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+
+
+async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailable() -> None:
+    """Shadow telemetry is observational and cannot change the submitted price."""
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-shadow-model-missing",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelUnavailable("missing"),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, ReadyToSubmit)
+    assert result.decision.offer_rate == 0.00021
+    assert audit.last.model_evidence == {"unavailable_reason": "fill_model_missing"}
 
 
 @dataclass(frozen=True)

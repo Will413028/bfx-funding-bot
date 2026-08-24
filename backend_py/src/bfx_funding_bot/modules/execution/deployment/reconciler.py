@@ -8,7 +8,7 @@ signal layer no longer submits (single-writer; spec 2026-05-29).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -26,7 +26,16 @@ from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGa
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy, spike_rungs
 from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PeriodPricer,
+    PriceBranch,
     PriceDecision,
+)
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    FillModelEvidence,
+    FillModelUnavailable,
+    OptimizationResult,
+    OptimizerNoRecommendation,
+    RateCandidate,
+    RateOptimizer,
 )
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
@@ -84,6 +93,19 @@ class _AuditContextFactory(Protocol):
     ) -> AuditContext: ...
 
 
+class FillModelEvidenceProvider(Protocol):
+    """Supplies evidence; absence is intentionally distinct from a score of one."""
+
+    def evidence_for(
+        self,
+        *,
+        candidate: DecisionPayload,
+        snapshot: object,
+        price: PriceDecision,
+        now_ms: int,
+    ) -> FillModelEvidence | FillModelUnavailable | None: ...
+
+
 class DeploymentReconciler:
     def __init__(
         self,
@@ -115,6 +137,9 @@ class DeploymentReconciler:
         execution_policy: ExecutionPolicy,
         period_pricer: PeriodPricer,
         audit_context_factory: _AuditContextFactory,
+        fill_model_provider: FillModelEvidenceProvider | None = None,
+        rate_optimizer: RateOptimizer | None = None,
+        optimizer_fee_rate: Decimal | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -149,6 +174,9 @@ class DeploymentReconciler:
         self._execution_policy = execution_policy
         self._period_pricer = period_pricer
         self._audit_context_factory = audit_context_factory
+        self._fill_model_provider = fill_model_provider
+        self._rate_optimizer = rate_optimizer or RateOptimizer()
+        self._optimizer_fee_rate = optimizer_fee_rate or Decimal("0")
         # Optional (None on paper/shadow and in most tests): mirrors each submit
         # outcome into a slot GET /admin/trading-status can read. Purely
         # observational — never consulted for a decision.
@@ -318,17 +346,58 @@ class DeploymentReconciler:
                     )
                 else:
                     price = self._period_pricer.price(candidate=decision, snapshot=snapshot)
+                gate_price = price
+                fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
+                optimizer_evidence: Mapping[str, object] | None = None
+                if (
+                    isinstance(price, PriceDecision)
+                    and self._execution_policy in {
+                        ExecutionPolicy.OPTIMIZER_SHADOW,
+                        ExecutionPolicy.OPTIMIZER_LIVE,
+                    }
+                ):
+                    fill_evidence = self._fill_evidence_for(
+                        candidate=decision,
+                        snapshot=snapshot,
+                        price=price,
+                        now_ms=now,
+                    )
+                    optimization = self._optimize(
+                        candidate=decision,
+                        price=price,
+                        fill_evidence=fill_evidence,
+                    )
+                    optimizer_evidence = _optimizer_evidence(optimization, price)
+                    if isinstance(optimization, OptimizationResult):
+                        if self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+                            gate_price = PriceDecision(
+                                rate=optimization.selected.rate,
+                                branch=price.branch,
+                                evidence=price.evidence,
+                            )
+                    elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+                        # Never reinterpret unavailable optimization as an implicit
+                        # signal fallback.  The gate maps it to a typed block.
+                        fill_evidence = FillModelUnavailable("missing")
+                    else:
+                        await self._emit_shadow_optimizer_unavailable(
+                            decision=decision,
+                            cell_id=cell_id,
+                            reconcile_id=reconcile_id,
+                            reason=_optimizer_reason(optimization),
+                        )
                 outcome = await self._execution_gate.prepare(
                     decision,
                     decision_id=decision_id,
                     reconcile_id=reconcile_id,
                     snapshot=snapshot,
-                    price=price,
-                    fill_evidence=None,
+                    price=gate_price,
+                    fill_evidence=fill_evidence,
                     safety=guard,
                     audit_context=self._audit_context_factory.build(
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
                     ),
+                    optimizer_evidence=optimizer_evidence,
                 )
                 if not isinstance(outcome, ReadyToSubmit):
                     if isinstance(outcome, BlockedExecution):
@@ -402,6 +471,93 @@ class DeploymentReconciler:
                         cell=cell_id, symbol=symbol, amount=amount,
                     )
                 await self._emit_submit(cell_id, outcome, result, reconcile_id)
+
+    def _fill_evidence_for(
+        self,
+        *,
+        candidate: DecisionPayload,
+        snapshot: object,
+        price: PriceDecision,
+        now_ms: int,
+    ) -> FillModelEvidence | FillModelUnavailable | None:
+        if self._fill_model_provider is None:
+            return None
+        try:
+            return self._fill_model_provider.evidence_for(
+                candidate=candidate,
+                snapshot=snapshot,
+                price=price,
+                now_ms=now_ms,
+            )
+        except Exception:
+            log.exception("fill_model_provider_failed symbol=%s", candidate.symbol)
+            return FillModelUnavailable("missing")
+
+    def _optimize(
+        self,
+        *,
+        candidate: DecisionPayload,
+        price: PriceDecision,
+        fill_evidence: FillModelEvidence | FillModelUnavailable | None,
+    ) -> OptimizationResult | OptimizerNoRecommendation | None:
+        if not isinstance(fill_evidence, FillModelEvidence):
+            return None
+        signal_rate = Decimal(str(candidate.offer_rate))
+        book_evidence = {
+            "snapshot_id": price.evidence.get("snapshot_id"),
+            "branch": price.branch.value,
+            "exact_period": dict(price.evidence),
+        }
+        exact_period_candidate = RateCandidate(
+            rate=price.rate,
+            source="taker" if price.branch is PriceBranch.TAKER else "maker",
+            fill_evidence=fill_evidence,
+            book_evidence=book_evidence,
+        )
+        return self._rate_optimizer.select(
+            signal_rate,
+            maker=(
+                exact_period_candidate
+                if exact_period_candidate.source == "maker"
+                else None
+            ),
+            taker=(
+                exact_period_candidate
+                if exact_period_candidate.source == "taker"
+                else None
+            ),
+            fill_evidence=fill_evidence,
+            fee_rate=self._optimizer_fee_rate,
+        )
+
+    async def _emit_shadow_optimizer_unavailable(
+        self,
+        *,
+        decision: DecisionPayload,
+        cell_id: str,
+        reconcile_id: str,
+        reason: str,
+    ) -> None:
+        emit_execution_event = getattr(self._event_sink, "emit_execution_event", None)
+        if not callable(emit_execution_event):
+            return
+        try:
+            event_kwargs = {
+                "level": "warn",
+                "decision_id": str(decision.signal_correlation_id),
+                "reconcile_id": reconcile_id,
+                "symbol": decision.symbol,
+                "cell": cell_id,
+                "policy": self._execution_policy.value,
+                "outcome": "no_recommendation",
+                "reason_code": reason,
+                "evidence": {"optimizer_outcome": "no_recommendation"},
+            }
+            if reason == "fill_model_missing":
+                await emit_execution_event("funding.fill_model.unavailable", **event_kwargs)
+            await emit_execution_event("funding.optimizer.no_recommendation", **event_kwargs)
+        except Exception:
+            log.debug("shadow_optimizer_event_emit_failed", exc_info=True)
 
     async def _emit_submit(
         self,
@@ -523,3 +679,67 @@ class DeploymentReconciler:
                 offer.venue_offer_id, symbol, offer.rate, ref_rate, age_min,
             )
         return issued
+
+
+def _optimizer_evidence(
+    optimization: OptimizationResult | OptimizerNoRecommendation | None,
+    price: PriceDecision,
+) -> Mapping[str, object]:
+    exact_period_book = _json_evidence(price.evidence)
+    if isinstance(optimization, OptimizationResult):
+        return {
+            "outcome": "selected",
+            "selected_source": optimization.selected.source,
+            "candidate_scores": {
+                source: str(score) for source, score in optimization.scores.items()
+            },
+            "model_version": optimization.model_version,
+            "artifact_hash": optimization.artifact_hash,
+            "exact_period_book": exact_period_book,
+            "candidates": [
+                {
+                    "source": candidate.source,
+                    "rate": str(candidate.rate),
+                    "fill_evidence": _fill_evidence_for_audit(candidate.fill_evidence),
+                    "book_evidence": _json_evidence(candidate.book_evidence),
+                }
+                for candidate in optimization.candidates
+            ],
+        }
+    return {
+        "outcome": "no_recommendation",
+        "reason": _optimizer_reason(optimization),
+        "exact_period_book": exact_period_book,
+    }
+
+
+def _optimizer_reason(
+    optimization: OptimizationResult | OptimizerNoRecommendation | None,
+) -> str:
+    if isinstance(optimization, OptimizerNoRecommendation):
+        return optimization.reason
+    return "fill_model_missing"
+
+
+def _fill_evidence_for_audit(evidence: FillModelEvidence | None) -> Mapping[str, object]:
+    if evidence is None:
+        return {}
+    return {
+        "fill_probability": str(evidence.fill_probability),
+        "expected_ttf_ms": evidence.expected_ttf_ms,
+        "n_samples": evidence.n_samples,
+        "symbol": evidence.symbol,
+        "period_agg": evidence.period_agg,
+        "horizon_h": evidence.horizon_h,
+        "cutoff_ms": evidence.cutoff_ms,
+    }
+
+
+def _json_evidence(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _json_evidence(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_json_evidence(item) for item in value]
+    if isinstance(value, Decimal):
+        return str(value)
+    return value

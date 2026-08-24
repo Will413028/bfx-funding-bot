@@ -17,6 +17,10 @@ from bfx_funding_bot.modules.execution.contracts import (
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    FillModelEvidence,
+    FillModelUnavailable,
+)
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
@@ -143,6 +147,14 @@ class _SnapshotProvider:
         return self._snapshot
 
 
+class _FillModelProvider:
+    def __init__(self, evidence: FillModelEvidence | FillModelUnavailable | None) -> None:
+        self._evidence = evidence
+
+    def evidence_for(self, **_: object) -> FillModelEvidence | FillModelUnavailable | None:
+        return self._evidence
+
+
 class _AuditContexts:
     def build(self, *, candidate, cell_id: str, reconcile_id: str):
         from bfx_funding_bot.modules.execution.audit.model import AuditContext
@@ -181,6 +193,7 @@ def _eligibility_kwargs(
     *, audit=None, book_provider=None,
     gate_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
     execution_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
+    fill_model_provider: _FillModelProvider | None = None,
 ) -> dict:
     return {
         "book_provider": book_provider or _SnapshotProvider(_valid_snapshot()),
@@ -193,6 +206,7 @@ def _eligibility_kwargs(
             max_down_pct=D("0.15"), tick=D("0.00000001"),
         ),
         "audit_context_factory": _AuditContexts(),
+        "fill_model_provider": fill_model_provider,
     }
 
 
@@ -242,7 +256,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            ladder=None, cap=None,
            attempt_recorder=None, book_provider=None, audit=None,
            gate_policy=ExecutionPolicy.BOOK_GUARDED,
-           execution_policy=ExecutionPolicy.BOOK_GUARDED):
+           execution_policy=ExecutionPolicy.BOOK_GUARDED,
+           fill_model_provider: _FillModelProvider | None = None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -273,11 +288,26 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
             book_provider=book_provider,
             gate_policy=gate_policy,
             execution_policy=execution_policy,
+            fill_model_provider=fill_model_provider,
         ),
         ladder=ladder,
         attempt_recorder=attempt_recorder,
     )
     return rec, ex, tracker, safety
+
+
+def _fill_evidence() -> FillModelEvidence:
+    return FillModelEvidence(
+        model_version="fill-v1",
+        artifact_hash="sha256:model",
+        fill_probability=D("0.95"),
+        expected_ttf_ms=500,
+        n_samples=100,
+        symbol="fUST",
+        period_agg="p2",
+        horizon_h=1,
+        cutoff_ms=1_000,
+    )
 
 
 def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
@@ -327,6 +357,53 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     assert ready.decision_id == audit.last.decision_id
     order_submit = next(event for event in sink.events if event["event_type"] == "order_submit")
     assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
+
+
+async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():
+    """Shadow model failure is observable but cannot change deploy eligibility or rate."""
+    audit = _Audit()
+    sink = _CapturingSink()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        event_sink=sink,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(FillModelUnavailable("missing")),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.model_evidence["unavailable_reason"] == "fill_model_missing"
+    assert [name for name, _ in sink.execution_events] == [
+        "funding.fill_model.unavailable",
+        "funding.optimizer.no_recommendation",
+        "funding.execution.submitted",
+    ]
+
+
+async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit():
+    """Live optimizer selection remains behind the existing audit-before-submit gate."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.outcome is ExecutionDecisionOutcome.READY
+    assert audit.last.applied_rate == D("0.00024999")
+    assert audit.last.model_evidence["optimizer"]["selected_source"] == "maker"
 
 
 async def test_deploys_gap_to_active_cell():
