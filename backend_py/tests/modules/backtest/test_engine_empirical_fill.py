@@ -30,8 +30,8 @@ class _Row:
     artifact_hash: str | None
 
 
-def _candle(*, symbol: str = "fUSD") -> FundingCandle:
-    return FundingCandle(symbol=symbol, timeframe="1h", period_agg="p2", mts=0,
+def _candle(*, symbol: str = "fUSD", period_agg: str = "p2") -> FundingCandle:
+    return FundingCandle(symbol=symbol, timeframe="1h", period_agg=period_agg, mts=0,
                          open=Decimal("0.0003"), close=Decimal("0.0003"),
                          high=Decimal("0.0003"), low=Decimal("0.0003"), volume=Decimal("0"))
 
@@ -145,6 +145,46 @@ def test_empirical_backtest_rejects_scope_mismatch_model_on_zero_decision():
 
     with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
         run_backtest([_candle()], _NeverLendsStrategy(), cfg, fill_model=model)
+
+
+def test_empirical_backtest_rejects_period_scope_mismatch_on_zero_decision():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
+        run_backtest(
+            [_candle(period_agg="p30")],
+            _NeverLendsStrategy(),
+            cfg,
+            fill_model=_model(),
+        )
+
+
+def test_empirical_backtest_rejects_horizon_scope_mismatch_on_zero_decision():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=6)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
+        run_backtest([_candle()], _NeverLendsStrategy(), cfg, fill_model=_model())
+
+
+def test_empirical_backtest_rejects_horizon_scope_mismatch_on_empty_candles():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=6)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
+        run_backtest([], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=_model())
+
+
+def test_empirical_backtest_preflights_period_before_record_window_decision():
+    cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
+
+    with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
+        run_backtest(
+            [_candle(period_agg="p30")],
+            _NeverLendsStrategy(),
+            cfg,
+            record_start_mts=1_000,
+            record_end_mts=1_000,
+            fill_model=_model(),
+        )
 
 
 def test_linear_baseline_mode_ignores_model():

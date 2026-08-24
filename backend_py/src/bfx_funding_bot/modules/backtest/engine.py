@@ -36,7 +36,7 @@ def _raise_for_unavailable(evidence: FillModelUnavailable) -> NoReturn:
 
 
 def _preflight_empirical_model(
-    candles: list[FundingCandle], fill_model: FillRateModel | None
+    candles: list[FundingCandle], fill_horizon_h: int, fill_model: FillRateModel | None
 ) -> None:
     if fill_model is None or fill_model.artifact is None:
         raise BacktestIncomplete("fill_model_missing")
@@ -44,8 +44,14 @@ def _preflight_empirical_model(
         _raise_for_unavailable(FillModelUnavailable(fill_model.unavailable_reason))
 
     artifact = fill_model.artifact
-    if artifact.source != "candle" or any(
-        candle.symbol != artifact.symbol for candle in candles
+    if (
+        artifact.source != "candle"
+        or artifact.horizon_h != fill_horizon_h
+        or any(
+            candle.symbol != artifact.symbol
+            or candle.period_agg != artifact.period_agg
+            for candle in candles
+        )
     ):
         _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
 
@@ -131,7 +137,7 @@ def run_backtest(
     the distortion appear harmless — the artifact that invalidated the first L4 run.
     """
     if config.fill_model == "empirical":
-        _preflight_empirical_model(candles, fill_model)
+        _preflight_empirical_model(candles, config.fill_horizon_h, fill_model)
     if not candles:
         return BacktestResult(
             strategy_name=strategy.name, symbol="",
