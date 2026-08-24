@@ -368,6 +368,91 @@ async def test_rebuild_reproduces_identical_position_state(sqlite_session: Async
     assert after.last_updated_ms == 1007  # identical — no wall-clock drift
 
 
+async def test_rebuild_decodes_persisted_pre_task4_rows_as_explicit_legacy(
+    sqlite_session: AsyncSession,
+) -> None:
+    """Only a persistent event_log row supplies historical replay provenance."""
+    await _create_all(sqlite_session)
+    intent_payload = {
+        "cid": 880,
+        "size_usdt": "5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "historical-acct",
+        "is_simulated": False,
+        "occurred_at_ms": 1000,
+    }
+    intent_row = EventLogRow(
+        account_id="historical-acct",
+        deployment_environment="prod",
+        event_type="RESERVATION_INTENT",
+        cid=880,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=intent_payload,
+        occurred_at_ms=1000,
+    )
+    claim_row = EventLogRow(
+        account_id="historical-acct",
+        deployment_environment="prod",
+        event_type="RESERVATION_CLAIMED",
+        cid=880,
+        venue_offer_id="legacy-offer-880",
+        venue_seq=1,
+        payload={
+            **intent_payload,
+            "venue_offer_id": "legacy-offer-880",
+            "amount": "5",
+        },
+        occurred_at_ms=1100,
+    )
+    sqlite_session.add_all([intent_row, claim_row])
+    await sqlite_session.flush()
+
+    from bfx_funding_bot.modules.execution.event_store.serialization import (
+        deserialize_stored_event,
+    )
+
+    decoded = deserialize_stored_event(intent_row)
+    assert decoded.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    assert decoded.execution_decision_id is None  # type: ignore[attr-defined]
+    assert decoded.reservation_ref is None  # type: ignore[attr-defined]
+
+    await PostgresEventStore(deployment_environment="prod").rebuild_snapshot_from_log(
+        sqlite_session,
+        account_id="historical-acct",
+        deployment_environment="prod",
+        symbol="fUST",
+    )
+    projection = await sqlite_session.get(
+        OfferClaimRow,
+        ("historical-acct", "prod", 880),
+    )
+    assert projection is not None
+    assert projection.state == "claimed"
+    assert projection.venue_offer_id == "legacy-offer-880"
+    assert projection.execution_decision_id is None
+
+
+async def test_stored_event_decoder_rejects_transient_row() -> None:
+    from bfx_funding_bot.modules.execution.event_store.serialization import (
+        deserialize_stored_event,
+    )
+
+    row = EventLogRow(
+        account_id="arbitrary",
+        deployment_environment="ci",
+        event_type="RESERVATION_INTENT",
+        cid=1,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload={"cid": 1},
+        occurred_at_ms=1,
+    )
+
+    with pytest.raises(TypeError, match="persistent event_log row"):
+        deserialize_stored_event(row)
+
+
 async def test_intent_then_failed_marks_failed_reserved_untouched(sqlite_session: AsyncSession) -> None:
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")

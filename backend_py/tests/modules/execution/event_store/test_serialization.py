@@ -53,6 +53,7 @@ def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)
     payload = serialize_event(event)
     assert isinstance(payload, dict)
+    assert payload["__schema_version__"] == 2
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
 
@@ -91,20 +92,24 @@ def test_intent_failed_roundtrip(event: object) -> None:
     assert restored == event
 
 
-def test_intent_failed_legacy_payload_upcasts_symbol() -> None:
-    """Pre-symbol event_log rows have no `symbol`; deserialize injects fUST."""
-    legacy = {"cid": 9, "size_usdt": "7.5",
-              "signal_correlation_id": str(_SCID), "account_id": "acct",
-              "is_simulated": True, "occurred_at_ms": 1000}
-    ev = deserialize_event("RESERVATION_INTENT", legacy)
-    assert ev.symbol == "fUST"          # type: ignore[attr-defined]
-    assert ev.amount == Decimal("7.5")  # type: ignore[attr-defined]
-    assert ev.execution_decision_id is None  # type: ignore[attr-defined]
-    assert ev.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
-
-
-def test_historical_intent_without_execution_decision_id_is_explicitly_legacy() -> None:
+def test_public_deserializer_rejects_arbitrary_unversioned_payload() -> None:
     payload = {
+        "cid": 9,
+        "size_usdt": "7.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+    }
+
+    with pytest.raises(ValueError, match="unversioned event payload"):
+        deserialize_event("RESERVATION_INTENT", payload)
+
+
+def test_public_deserializer_rejects_versioned_lifecycle_without_reservation_ref() -> None:
+    payload = {
+        "__schema_version__": 2,
+        "__event_type__": "RESERVATION_INTENT",
         "cid": 9,
         "size_usdt": "7.5",
         "symbol": "fUST",
@@ -113,10 +118,8 @@ def test_historical_intent_without_execution_decision_id_is_explicitly_legacy() 
         "is_simulated": True,
     }
 
-    event = deserialize_event("RESERVATION_INTENT", payload)
-    assert event.execution_decision_id is None  # type: ignore[attr-defined]
-    assert event.reservation_ref is None  # type: ignore[attr-defined]
-    assert event.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    with pytest.raises(TypeError, match=r"execution_decision_id|reservation_ref"):
+        deserialize_event("RESERVATION_INTENT", payload)
 
 
 def test_decimal_preserved_as_string() -> None:
@@ -129,19 +132,18 @@ def test_decimal_preserved_as_string() -> None:
     ("RESERVATION_CLAIMED", {"venue_offer_id": "v1"}),
     ("RESERVATION_RELEASED", {"venue_offer_id": "v1", "reason": "venue_cancel"}),
 ])
-def test_legacy_position_event_without_symbol_upcasts_to_fust(
+def test_public_deserializer_rejects_unversioned_position_event(
     etype: str, extra: dict[str, object],
 ) -> None:
-    """The 4 position events gained a mandatory `symbol` in Phase 2; event_log
-    rows written before that carry no `symbol`. deserialize must upcast them to
-    fUST exactly like INTENT/FAILED — otherwise a manual rebuild_snapshot_from_log
-    crashes at the offer_claims projection or silently drops the legacy fUST fills
-    in the position_state tail fold."""
-    legacy = {"cid": 9, "size_usdt": "12.5",
-              "signal_correlation_id": str(_SCID), "account_id": "acct",
-              "is_simulated": True, "occurred_at_ms": 1000, **extra}
-    ev = deserialize_event(etype, legacy)
-    assert ev.symbol == "fUST"           # type: ignore[attr-defined]
-    assert ev.amount == Decimal("12.5")  # type: ignore[attr-defined]
-    assert ev.reservation_ref is None  # type: ignore[attr-defined]
-    assert ev.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    payload = {
+        "cid": 9,
+        "size_usdt": "12.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+        **extra,
+    }
+
+    with pytest.raises(ValueError, match="unversioned event payload"):
+        deserialize_event(etype, payload)

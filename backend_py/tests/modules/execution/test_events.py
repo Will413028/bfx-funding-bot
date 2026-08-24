@@ -49,11 +49,25 @@ def test_new_lifecycle_event_requires_reservation_reference(make: object) -> Non
 
 
 def test_public_constructor_cannot_forge_legacy_uncorrelated_lifecycle_event() -> None:
-    with pytest.raises(TypeError, match="legacy decoder"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'is_legacy_uncorrelated'"):
         ReservationClaimed(
             cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
             signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
             is_legacy_uncorrelated=True,
+        )
+
+
+def test_public_constructor_rejects_forged_historical_replay_provenance() -> None:
+    """Only the EventStore may supply the legacy capability during rebuild."""
+
+    class _ForgedReplayProvenance:
+        event_type = "RESERVATION_CLAIMED"
+
+    with pytest.raises(TypeError, match="persistent EventStore replay provenance"):
+        ReservationClaimed(
+            cid=42, venue_offer_id="v1", size_usdt=Decimal("100"), symbol="fUST",
+            signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+            replay_provenance=_ForgedReplayProvenance(),  # type: ignore[arg-type]
         )
 
 
