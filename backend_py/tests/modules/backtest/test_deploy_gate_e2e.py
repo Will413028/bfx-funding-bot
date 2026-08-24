@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.deploy_gate import GateResult, evaluate_gate
 from bfx_funding_bot.modules.backtest.fixture_io import load_candles
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
@@ -24,6 +25,8 @@ from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_only
 from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
+
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 pytestmark = pytest.mark.gate
 
@@ -52,7 +55,10 @@ def _gate_for(
     candles: list[FundingCandle],
 ) -> GateResult:
     windows = compute_wfo_windows(candles)
-    strat_out, base_out = evaluate_oos_windows(candles, windows, make_strategy=make_strategy)
+    strat_out, base_out = evaluate_oos_windows(
+        candles, windows, make_strategy=make_strategy,
+        config=_LINEAR_CONFIG, fill_model=None,
+    )
     active = active_return_summary(strat_out, base_out)
     actives = paired_active_returns(strat_out, base_out)
     ci_low, _ = _bootstrap_ci_mean(actives)

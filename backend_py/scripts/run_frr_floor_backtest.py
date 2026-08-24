@@ -197,16 +197,15 @@ def evaluate_arms(
     candles: list[FundingCandle],
     windows: list[WfoWindow],
     factories: dict[str, Callable[[], Strategy]],
-    config: BacktestConfig | None = None,
+    config: BacktestConfig,
 ) -> dict[str, list[WindowOutcome]]:
     """evaluate_oos_windows generalized to N arms — same slicing/recording rules."""
-    effective_config = config if config is not None else BacktestConfig(fill_model="linear")
     outcomes: dict[str, list[WindowOutcome]] = {name: [] for name in factories}
     for w in windows:
         sliced = [c for c in candles if w.train_start_mts <= c.mts <= w.test_end_mts]
         for name, make in factories.items():
             r = run_backtest(
-                sliced, make(), effective_config, w.test_start_mts, w.test_end_mts
+                sliced, make(), config, w.test_start_mts, w.test_end_mts
             )
             outcomes[name].append(
                 WindowOutcome(
@@ -522,8 +521,8 @@ async def _amain() -> int:
         help="cells yaml with deployed MR params (default: configs/cells.canary.yaml)",
     )
     parser.add_argument(
-        "--fill-model", default="linear", choices=["linear", "empirical"],
-        help="linear (default) matches run_oos_profitability determinism",
+        "--fill-model", default="linear-baseline", choices=["linear-baseline"],
+        help="linear-baseline (default) matches run_oos_profitability determinism",
     )
     parser.add_argument(
         "--fill-alpha", default="5.0",

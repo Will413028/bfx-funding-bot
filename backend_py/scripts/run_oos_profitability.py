@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     ActiveReturnSummary,
@@ -57,6 +58,7 @@ DEFAULT_N_TRIALS = 34  # cumulative strategy-layer configs tried on this data: 9
 # wiki/projects/bfx-funding-bot/strategy-registry.md 「DSR trials」段 — verdict 落地時同步更新這裡。
 # Undercounting trials inflates DSR (Bailey & López de Prado); the deflated-Sharpe factor
 DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
 @dataclass(frozen=True)
@@ -108,7 +110,7 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
     lines.append(f"**Run date**: {datetime.now(UTC).isoformat()}")
     lines.append(f"**Data window**: {data_window}")
     lines.append("**Config**: `configs/cells.canary.yaml` (deployed params, fixed — not re-swept)")
-    lines.append("**Fill model**: linear (deterministic) — see methodology.\n")
+    lines.append("**Fill model**: linear-baseline (explicit deterministic baseline) — see methodology.\n")
 
     lines.append("## TL;DR\n")
     lines.append(
@@ -231,7 +233,8 @@ async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> C
         return build_strategy(cell)  # type: ignore[return-value]
 
     strat_outcomes, base_outcomes = evaluate_oos_windows(
-        candles, windows, make_strategy=_make_strategy
+        candles, windows, make_strategy=_make_strategy,
+        config=RESEARCH_CONFIG, fill_model=None,
     )
     logger.info("%s: %d windows", cell.cell_id, len(windows))
     return build_cell_report(cell, strat_outcomes, base_outcomes, n_trials)

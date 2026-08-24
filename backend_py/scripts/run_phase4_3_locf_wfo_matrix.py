@@ -33,6 +33,7 @@ from typing import Any
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
     evaluate_cell_qualification,
     pick_sweep_winner,
@@ -55,6 +56,7 @@ START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
 TRAIN_MONTHS = 3
 TEST_MONTHS = 1
 STEP_MONTHS = 1
+RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 # Ship-gate thresholds (mirror Phase 3b qualification rules)
 WIN_PCT_THRESHOLD = Decimal("0.60")
@@ -83,6 +85,7 @@ def run_cell_wfo_with_locf(
     cell_key: str,
     wfo_windows: list[WfoWindow],
     budget_hours: int,
+    config: BacktestConfig,
 ) -> tuple[list[Any], list[Any]]:
     """Run WFO for one (cell, strategy, budget_hours) with LOCF preprocessing.
 
@@ -98,7 +101,7 @@ def run_cell_wfo_with_locf(
 
     Implementation: replicate run_cell_wfo iteration inline to apply LOCF per window.
     """
-    from bfx_funding_bot.modules.backtest.engine import run_backtest
+    from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
     from bfx_funding_bot.modules.backtest.matrix import WindowOutcome
     from bfx_funding_bot.modules.backtest.schemas import BacktestResult
     from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
@@ -116,6 +119,7 @@ def run_cell_wfo_with_locf(
         # Baseline uses LOCF-preprocessed test candles
         baseline_result = run_backtest(
             test_locf, AlwaysMarketRateStrategy(period_days=2),
+            config,
             record_start_mts=w.test_start_mts,
             record_end_mts=w.test_end_mts,
         )
@@ -144,7 +148,7 @@ def run_cell_wfo_with_locf(
             candidates = []
             for params in grid:
                 train_result = run_backtest(
-                    all_candles, strategy_class(**params),
+                    all_candles, strategy_class(**params), config,
                     record_start_mts=w.train_start_mts,
                     record_end_mts=w.train_end_mts,
                 )
@@ -167,7 +171,7 @@ def run_cell_wfo_with_locf(
             best_params, _ = winner
             # OOS test: LOCF-preprocessed candles for this budget
             test_result = run_backtest(
-                test_locf, strategy_class(**best_params),
+                test_locf, strategy_class(**best_params), config,
                 record_start_mts=w.test_start_mts,
                 record_end_mts=w.test_end_mts,
             )
@@ -184,17 +188,17 @@ def run_cell_wfo_with_locf(
                 baseline_net=baseline_result.net_monthly_return_pct,
                 baseline_sortino=baseline_result.sortino,
             ))
-        except Exception:
-            logger.exception("Window %d errored", len(window_outcomes))
+        except BacktestIncomplete as error:
             window_outcomes.append(WindowOutcome(
                 window_idx=len(window_outcomes),
                 train_start_mts=w.train_start_mts, train_end_mts=w.train_end_mts,
                 test_start_mts=w.test_start_mts, test_end_mts=w.test_end_mts,
-                status="errored",
+                status="incomplete",
                 best_params=None,
                 oos_net=None, oos_max_dd=None, oos_fill_rate=None, oos_sortino=None,
-                baseline_net=baseline_result.net_monthly_return_pct,
-                baseline_sortino=baseline_result.sortino,
+                baseline_net=None,
+                baseline_sortino=None,
+                incomplete_reason=error.reason,
             ))
 
     return window_outcomes, baseline_results
@@ -390,6 +394,7 @@ async def _amain() -> int:
                         cell_key=cell_key,
                         wfo_windows=windows,
                         budget_hours=budget_hours,
+                        config=RESEARCH_CONFIG,
                     )
                     verdict = evaluate_cell_qualification(window_outcomes)
                     row = _cell_verdict_to_dict(

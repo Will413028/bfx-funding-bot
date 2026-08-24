@@ -1,21 +1,28 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pytest
+
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import _apply_friction
+from bfx_funding_bot.modules.backtest.engine import _apply_friction, run_backtest
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
+from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 
 @dataclass
 class _Row:
+    source: str
+    symbol: str
     period_agg: str
     horizon_h: int
     spread_bucket_bps: int
     fill_prob: float
     n_samples: int
     mean_ttf_ms: int | None
+    artifact_hash: str
 
 
 def _candle() -> FundingCandle:
@@ -30,10 +37,16 @@ def _decision() -> LendDecision:
 
 
 def _model() -> FillRateModel:
+    artifact = FillModelArtifact(
+        symbol="fUSD", period_agg="p2", horizon_h=4, source="candle",
+        model_version="g13-candle-v1", schema_version=1, artifact_hash="artifact-v1",
+        training_start_ms=0, training_end_ms=10_000, cutoff_ms=10_000,
+        sample_count=200, confidence_min_samples=30,
+    )
     return FillRateModel.from_rows([
-        _Row("p2", 4, 0, 1.0, 100, 1000),
-        _Row("p2", 4, 100, 0.5, 100, 5000),
-    ])
+        _Row("candle", "fUSD", "p2", 4, 0, 1.0, 100, 1000, "artifact-v1"),
+        _Row("candle", "fUSD", "p2", 4, 100, 0.5, 100, 5000, "artifact-v1"),
+    ], artifact=artifact)
 
 
 def test_empirical_uses_learned_fill_prob():
@@ -43,14 +56,14 @@ def test_empirical_uses_learned_fill_prob():
     assert fill_prob == Decimal("0.75")
 
 
-def test_empirical_falls_back_to_linear_when_model_none():
+def test_empirical_backtest_does_not_use_linear_when_model_is_missing():
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
-    _, fp_fallback = _apply_friction(_decision(), _candle(), cfg, None)
-    # linear: spread_pct = 0.005 → 1 - 5*0.005 = 0.975
-    assert fp_fallback == Decimal("0.975")
+    with pytest.raises(Exception, match="fill_model_missing") as exc_info:
+        run_backtest([_candle()], AlwaysMarketRateStrategy(period_days=2), cfg, fill_model=None)
+    assert type(exc_info.value).__name__ == "BacktestIncomplete"
 
 
-def test_linear_mode_ignores_model():
-    cfg = BacktestConfig(fill_model="linear")
+def test_linear_baseline_mode_ignores_model():
+    cfg = BacktestConfig(fill_model="linear-baseline")
     _, fp = _apply_friction(_decision(), _candle(), cfg, _model())
     assert fp == Decimal("0.975")  # linear, model ignored

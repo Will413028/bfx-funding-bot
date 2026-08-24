@@ -30,11 +30,15 @@ from bfx_funding_bot.modules.backtest.cell_pipeline import (
     check_against_fixture,
     write_outputs,
 )
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 logger = logging.getLogger("derive_cells")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
+RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
+UNUSED_LINEAR_MODEL = FillRateModel.from_rows([], artifact=None)
 
 
 async def _write_main() -> int:
@@ -64,7 +68,9 @@ async def _write_main() -> int:
                 return 2
             key: CellKey = ("mean_reversion", symbol, period_agg)
             series[key] = candles
-            d = derive_cell_params(candles)
+            d = derive_cell_params(
+                candles, config=RESEARCH_CONFIG, fill_model=UNUSED_LINEAR_MODEL,
+            )
             derived[key] = d
             logger.info(
                 "derived %s_%s: ema_span=%d thr=%s ratio=%s mean_active=%s IR=%s",
@@ -102,7 +108,13 @@ def main() -> None:
 
     if args.write:
         sys.exit(asyncio.run(_write_main()))
-    problems = check_against_fixture(FIXTURES, [CELLS_YAML, CANARY_YAML], canary_path=CANARY_YAML)
+    problems = check_against_fixture(
+        FIXTURES,
+        [CELLS_YAML, CANARY_YAML],
+        canary_path=CANARY_YAML,
+        config=RESEARCH_CONFIG,
+        fill_model=UNUSED_LINEAR_MODEL,
+    )
     if problems:
         for p in problems:
             logger.error("DRIFT: %s", p)

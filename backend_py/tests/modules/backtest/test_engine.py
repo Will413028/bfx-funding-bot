@@ -7,6 +7,8 @@ from bfx_funding_bot.modules.backtest.strategies.always_market_rate import Alway
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
+
 
 def _candles_constant_rate(rate: str, n: int = 720) -> list[FundingCandle]:
     """720 hourly candles ≈ 30 days. Constant rate makes math hand-checkable."""
@@ -36,7 +38,7 @@ def test_run_backtest_constant_rate_produces_expected_monthly_return() -> None:
     candles = _candles_constant_rate("0.0001", n=720)
     strategy = AlwaysMarketRateStrategy(period_days=2)
 
-    result = run_backtest(candles, strategy)
+    result = run_backtest(candles, strategy, _LINEAR_CONFIG)
 
     assert result.strategy_name == "always_market_rate_p2"
     assert result.symbol == "fUST"
@@ -54,7 +56,7 @@ def test_run_backtest_constant_rate_produces_expected_monthly_return() -> None:
 def test_run_backtest_handles_empty_candles() -> None:
     candles: list[FundingCandle] = []
     strategy = AlwaysMarketRateStrategy(period_days=2)
-    result = run_backtest(candles, strategy)
+    result = run_backtest(candles, strategy, _LINEAR_CONFIG)
     assert result.n_candles == 0
     assert result.n_trades == 0
     assert result.gross_monthly_return_pct == Decimal("0")
@@ -72,7 +74,7 @@ def test_run_backtest_skips_candles_with_no_close() -> None:
         else:
             candles_with_holes.append(c)
     strategy = AlwaysMarketRateStrategy(period_days=2)
-    result = run_backtest(candles_with_holes, strategy)
+    result = run_backtest(candles_with_holes, strategy, _LINEAR_CONFIG)
     assert result.n_candles == 720
     assert result.n_trades > 0
 
@@ -83,7 +85,7 @@ def test_run_backtest_applies_15pct_fee() -> None:
     candles = _candles_constant_rate("0.0001", n=720)
     strategy = AlwaysMarketRateStrategy(period_days=2)
 
-    result = run_backtest(candles, strategy)
+    result = run_backtest(candles, strategy, _LINEAR_CONFIG)
 
     # Per-trade gross ~0.0002, net ~0.00017 -> ratio 0.85 holds at compounded level
     ratio = result.net_monthly_return_pct / result.gross_monthly_return_pct
@@ -101,8 +103,8 @@ def test_run_backtest_gap_minutes_extends_cooldown() -> None:
     candles = _candles_constant_rate("0.0001", n=720)
     strategy = AlwaysMarketRateStrategy(period_days=2)
 
-    no_gap = run_backtest(candles, strategy, BacktestConfig(gap_minutes=0))
-    big_gap = run_backtest(candles, strategy, BacktestConfig(gap_minutes=180))
+    no_gap = run_backtest(candles, strategy, BacktestConfig(gap_minutes=0, fill_model="linear-baseline"))
+    big_gap = run_backtest(candles, strategy, BacktestConfig(gap_minutes=180, fill_model="linear-baseline"))
 
     assert big_gap.n_trades < no_gap.n_trades
     assert big_gap.net_monthly_return_pct < no_gap.net_monthly_return_pct
@@ -127,7 +129,7 @@ def test_run_backtest_observe_called_for_every_candle_including_cooldown() -> No
                 return None
             return LendDecision(mts=candle.mts, rate=candle.close, period_days=2)
 
-    run_backtest(candles, ObservingStrategy())
+    run_backtest(candles, ObservingStrategy(), _LINEAR_CONFIG)
     assert observations == [c.mts for c in candles]
 
 
@@ -139,9 +141,9 @@ def test_run_backtest_record_window_excludes_trades_outside() -> None:
     record_start_mts = candles[480].mts
     record_end_mts = candles[-1].mts
 
-    full = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2))
+    full = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG)
     windowed = run_backtest(
-        candles, AlwaysMarketRateStrategy(period_days=2),
+        candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG,
         record_start_mts=record_start_mts,
         record_end_mts=record_end_mts,
     )
@@ -167,7 +169,7 @@ def test_run_backtest_sortino_populated_on_long_series() -> None:
     """720+ hourly candles spans ~1 month. Single-month series has no
     monthly returns -> sortino should stay at 0 (n<3 floor)."""
     candles = _candles_constant_rate("0.0001", n=720)
-    result = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2))
+    result = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG)
     # 30 days starting 2024-01-01 ends at 2024-01-30 23:00 UTC.
     # Jan-end (2024-01-31 23:59:59) is AFTER the series end, so month_end_timestamps_within
     # returns [] -> early return Decimal("0").
@@ -183,7 +185,7 @@ def test_run_backtest_sortino_with_multi_month_series_positive_finite() -> None:
     -> sortino = +inf.
     """
     candles = _candles_constant_rate("0.0001", n=24 * 30 * 5)  # ~5 months
-    result = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2))
+    result = run_backtest(candles, AlwaysMarketRateStrategy(period_days=2), _LINEAR_CONFIG)
     assert result.sortino == Decimal("Infinity")
 
 
@@ -208,7 +210,7 @@ def test_run_backtest_spread_above_market_reduces_fill() -> None:
                 period_days=2,
             )
 
-    result = run_backtest(candles, BidAboveMarketStrategy())
+    result = run_backtest(candles, BidAboveMarketStrategy(), _LINEAR_CONFIG)
 
     # fill_rate = 0.5 (every trade had spread_pct=0.10)
     assert abs(result.fill_rate - Decimal("0.5")) < Decimal("0.001")

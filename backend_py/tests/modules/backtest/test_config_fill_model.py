@@ -9,9 +9,9 @@ def test_default_fill_model_is_empirical():
     assert cfg.fill_horizon_h == 4
 
 
-def test_explicit_linear_allowed():
-    cfg = BacktestConfig(fill_model="linear")
-    assert cfg.fill_model == "linear"
+def test_explicit_linear_baseline_allowed():
+    cfg = BacktestConfig(fill_model="linear-baseline")
+    assert cfg.fill_model == "linear-baseline"
 
 
 def test_invalid_fill_horizon_rejected():

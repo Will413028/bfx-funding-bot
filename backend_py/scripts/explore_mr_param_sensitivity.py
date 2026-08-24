@@ -38,7 +38,7 @@ from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 logger = logging.getLogger("explore_mr")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
-LINEAR = BacktestConfig(fill_model="linear")
+LINEAR = BacktestConfig(fill_model="linear-baseline")
 CELLS = [("fUST", "a30"), ("fUST", "p2")]
 EMA_SPANS = [24, 168]
 THRESHOLDS = [Decimal("0.5"), Decimal("1.0"), Decimal("1.5")]

@@ -1,11 +1,16 @@
 from decimal import Decimal
 
+import pytest
+
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.schemas import LendDecision
 from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
 def _candles(start_mts: int, n: int, close: str, step_ms: int = 3_600_000) -> list[FundingCandle]:
@@ -43,7 +48,8 @@ def test_evaluate_oos_windows_pairs_outcomes_per_window() -> None:
                   test_start_mts=500_000_000, test_end_mts=900_000_000),
     ]
     strat_out, base_out = evaluate_oos_windows(
-        candles, windows, make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2)
+        candles, windows, make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2),
+        config=_LINEAR_CONFIG, fill_model=None,
     )
     assert len(strat_out) == len(base_out) == 1
     assert strat_out[0].month_mts == base_out[0].month_mts == 500_000_000
@@ -77,7 +83,8 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
                   test_start_mts=700_000_000, test_end_mts=900_000_000),
     ]
     strat_out, base_out = evaluate_oos_windows(
-        candles, windows, make_strategy=_NeverLendsStrategy
+        candles, windows, make_strategy=_NeverLendsStrategy,
+        config=_LINEAR_CONFIG, fill_model=None,
     )
 
     # Both lists must have one outcome per window, in window order.
@@ -100,3 +107,22 @@ def test_evaluate_oos_windows_candidate_differs_from_baseline() -> None:
     # Core contract: the two arms produce DIFFERENT outcomes.
     assert strat_out[0].net_monthly != base_out[0].net_monthly
     assert strat_out[1].net_monthly != base_out[1].net_monthly
+
+
+def test_evaluate_oos_windows_requires_explicit_config() -> None:
+    candles = _candles(0, 300, "0.0003")
+    windows = [
+        WfoWindow(
+            train_start_mts=0,
+            train_end_mts=100_000_000,
+            test_start_mts=200_000_000,
+            test_end_mts=300_000_000,
+        )
+    ]
+
+    with pytest.raises(TypeError):
+        evaluate_oos_windows(
+            candles,
+            windows,
+            make_strategy=lambda: AlwaysMarketRateStrategy(period_days=2),
+        )

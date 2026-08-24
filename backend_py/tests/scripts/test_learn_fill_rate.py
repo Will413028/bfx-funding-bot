@@ -7,10 +7,30 @@ from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.modules.candles.repository import upsert_candles
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.lending.tracking import tables as _t  # noqa: F401
+from bfx_funding_bot.modules.lending.tracking.fill_rate import BucketStat
 from bfx_funding_bot.modules.lending.tracking.repository import load_fill_rate_stats
-from scripts.learn_fill_rate import learn_and_store
+from scripts.learn_fill_rate import build_fill_model_artifact, learn_and_store
 
 _H = 3_600_000
+
+
+def test_fill_model_artifact_hash_is_stable_across_stat_order() -> None:
+    stats = [
+        BucketStat(4, 100, Decimal("0.5"), 80, 5_000, 9_000, 6_000),
+        BucketStat(4, 0, Decimal("1"), 100, 1_000, 2_000, 1_500),
+    ]
+
+    first = build_fill_model_artifact(
+        source="candle", symbol="fUSD", period_agg="p2", horizon_h=4,
+        stats=stats, training_start_ms=0, training_end_ms=10_000, timeframe="1h",
+    )
+    second = build_fill_model_artifact(
+        source="candle", symbol="fUSD", period_agg="p2", horizon_h=4,
+        stats=list(reversed(stats)), training_start_ms=0, training_end_ms=10_000, timeframe="1h",
+    )
+
+    assert first.artifact_hash == second.artifact_hash
+    assert first.sample_count == 180
 
 
 @pytest.fixture

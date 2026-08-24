@@ -25,6 +25,8 @@ class WindowOutcome:
     net_monthly: Decimal  # net_monthly_return_pct for the month (percent, >= 0)
     n_trades: int
     fill_rate: Decimal  # avg fill prob across trades; 0 when n_trades == 0
+    status: str = "ok"
+    incomplete_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ def summarize_oos(outcomes: list[WindowOutcome]) -> OosSummary:
     """Distribution + yield-native risk summary over per-window outcomes."""
     if not outcomes:
         raise ValueError("summarize_oos: no outcomes")
+    if any(outcome.status == "incomplete" for outcome in outcomes):
+        raise ValueError("summarize_oos: incomplete window evidence")
     n = len(outcomes)
     monthly = sorted(o.net_monthly for o in outcomes)
 
@@ -124,6 +128,8 @@ def paired_active_returns(
         raise ValueError(f"paired_active_returns: length mismatch {len(strat)} != {len(base)}")
     if not strat:
         raise ValueError("paired_active_returns: no outcomes")
+    if any(outcome.status == "incomplete" for outcome in [*strat, *base]):
+        raise ValueError("paired_active_returns: incomplete window evidence")
     out: list[Decimal] = []
     for s, b in zip(strat, base, strict=True):  # strict=True is belt-and-suspenders; length guarded above
         if s.month_mts != b.month_mts:
@@ -142,6 +148,8 @@ def active_return_summary(
         )
     if not strat:
         raise ValueError("active_return_summary: no outcomes")
+    if any(outcome.status == "incomplete" for outcome in [*strat, *base]):
+        raise ValueError("active_return_summary: incomplete window evidence")
     actives: list[Decimal] = []
     outperform = 0
     for s, b in zip(strat, base, strict=True):
