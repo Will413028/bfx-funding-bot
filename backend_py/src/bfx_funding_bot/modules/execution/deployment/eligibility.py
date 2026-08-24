@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from bfx_funding_bot.modules.execution.audit import (
@@ -78,7 +78,10 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
-        normalized_fill_evidence = _normalize_fill_evidence(fill_evidence)
+        normalized_fill_evidence = _normalize_fill_evidence(
+            fill_evidence,
+            candidate_symbol=candidate.symbol,
+        )
         blocked = self._blocked_dependency(
             candidate=candidate,
             decision_id=decision_id,
@@ -343,6 +346,8 @@ def _fill_evidence(
 
 def _normalize_fill_evidence(
     fill_evidence: object | None,
+    *,
+    candidate_symbol: str,
 ) -> _NormalizedFillEvidence | BlockReason | None:
     """Accept only the narrow future fill-model seam required for live optimizer use."""
     if fill_evidence is None:
@@ -380,20 +385,35 @@ def _normalize_fill_evidence(
         or not isinstance(expected_ttf_ms, int | None)
         or isinstance(n_samples, bool)
         or not isinstance(n_samples, int)
+        or n_samples < 0
         or not isinstance(symbol, str)
         or not symbol
+        or symbol != candidate_symbol
         or not isinstance(period_agg, str)
         or not period_agg
         or isinstance(horizon_h, bool)
         or not isinstance(horizon_h, int)
+        or horizon_h <= 0
         or isinstance(cutoff_ms, bool)
         or not isinstance(cutoff_ms, int)
+        or cutoff_ms < 0
+        or (expected_ttf_ms is not None and expected_ttf_ms < 0)
+    ):
+        return BlockReason.FILL_MODEL_MISSING
+    try:
+        normalized_fill_prob = Decimal(str(fill_prob))
+    except (InvalidOperation, ValueError):
+        return BlockReason.FILL_MODEL_MISSING
+    if (
+        not normalized_fill_prob.is_finite()
+        or normalized_fill_prob < Decimal("0")
+        or normalized_fill_prob > Decimal("1")
     ):
         return BlockReason.FILL_MODEL_MISSING
     return _NormalizedFillEvidence(
         model_version=model_version,
         artifact_hash=artifact_hash,
-        fill_prob=Decimal(str(fill_prob)),
+        fill_prob=normalized_fill_prob,
         expected_ttf_ms=expected_ttf_ms,
         n_samples=n_samples,
         symbol=symbol,
