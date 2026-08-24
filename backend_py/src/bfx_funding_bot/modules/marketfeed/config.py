@@ -238,6 +238,10 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         if not optimizer_fee_rate.is_finite() or not Decimal("0") <= optimizer_fee_rate <= Decimal("1"):
             raise ValueError("BFX_OPTIMIZER_FEE_RATE must be between 0 and 1")
     else:
+        if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+            raise ValueError(
+                "BFX_OPTIMIZER_FEE_RATE required for optimizer_live execution policy",
+            )
         optimizer_fee_rate = None
 
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")

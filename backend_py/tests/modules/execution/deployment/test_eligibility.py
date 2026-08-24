@@ -20,7 +20,10 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PriceBranch,
     PriceDecision,
 )
-from bfx_funding_bot.modules.execution.deployment.rate_optimizer import FillModelUnavailable
+from bfx_funding_bot.modules.lending.tracking.artifact import (
+    FillModelEvidence,
+    FillModelUnavailable,
+)
 from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome as PayloadOutcome
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
@@ -374,6 +377,140 @@ async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailabl
     assert isinstance(result, ReadyToSubmit)
     assert result.decision.offer_rate == 0.00021
     assert audit.last.model_evidence == {"unavailable_reason": "fill_model_missing"}
+
+
+@pytest.mark.parametrize(
+    ("expected_period_agg", "expected_horizon_h"),
+    [("a30", 1), ("p2", 2)],
+)
+async def test_optimizer_live_scope_mismatch_is_fail_closed(
+    expected_period_agg: str,
+    expected_horizon_h: int,
+) -> None:
+    """A model from another exact period or horizon cannot become ReadyToSubmit."""
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-scope-mismatch",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelEvidence(
+            fill_prob=Decimal("0.8"),
+            expected_ttf_ms=30_000,
+            n_samples=200,
+            symbol="fUST",
+            period_agg="p2",
+            horizon_h=1,
+            model_version="fill-v1",
+            artifact_hash="abc123",
+            cutoff_ms=1_000,
+        ),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+        expected_period_agg=expected_period_agg,
+        expected_horizon_h=expected_horizon_h,
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason.value == "fill_model_scope_mismatch"
+    assert audit.last.reason_code.value == "fill_model_scope_mismatch"
+
+
+async def test_optimizer_live_accepts_canonical_task7_fill_evidence() -> None:
+    candidate = _candidate()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=_Audit(),
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-canonical-evidence",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelEvidence(
+            fill_prob=Decimal("0.8"),
+            expected_ttf_ms=30_000,
+            n_samples=200,
+            symbol="fUST",
+            period_agg="p2",
+            horizon_h=1,
+            model_version="fill-v1",
+            artifact_hash="abc123",
+            cutoff_ms=1_000,
+        ),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+        expected_period_agg="p2",
+        expected_horizon_h=1,
+    )
+
+    assert isinstance(result, ReadyToSubmit)
+    assert result.model_version == "fill-v1"
+
+
+@pytest.mark.parametrize("reason", ["scope_mismatch", "unversioned"])
+async def test_typed_unavailable_reason_is_preserved_for_live_and_audit(
+    reason: str,
+) -> None:
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id=f"decision-{reason}",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelUnavailable(reason=reason),  # type: ignore[arg-type]
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, BlockedExecution)
+    assert result.reason.value == f"fill_model_{reason}"
+    assert audit.last.model_evidence == {"unavailable_reason": f"fill_model_{reason}"}
+
+
+async def test_shadow_preserves_typed_unavailable_reason_without_blocking() -> None:
+    candidate = _candidate()
+    audit = _Audit()
+    gate = ExecutionGate(
+        policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        audit=audit,
+        readiness=_Readiness(),
+    )
+
+    result = await gate.prepare(
+        candidate,
+        decision_id="decision-shadow-scope-mismatch",
+        reconcile_id="reconcile-1",
+        snapshot=_snapshot(),
+        price=_price(),
+        fill_evidence=FillModelUnavailable(reason="scope_mismatch"),
+        safety=GuardResult(True, "risk"),
+        audit_context=_context(candidate),
+    )
+
+    assert isinstance(result, ReadyToSubmit)
+    assert audit.last.model_evidence == {
+        "unavailable_reason": "fill_model_scope_mismatch",
+    }
 
 
 @dataclass(frozen=True)

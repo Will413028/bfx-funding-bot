@@ -36,6 +36,8 @@ class BlockReason(StrEnum):
     INSUFFICIENT_PERIOD_DEPTH = "insufficient_period_depth"
     FILL_MODEL_MISSING = "fill_model_missing"
     FILL_MODEL_LOW_CONFIDENCE = "fill_model_low_confidence"
+    FILL_MODEL_SCOPE_MISMATCH = "fill_model_scope_mismatch"
+    FILL_MODEL_UNVERSIONED = "fill_model_unversioned"
     OPTIMIZER_UNAVAILABLE = "optimizer_unavailable"
     SAFETY_GUARD_BLOCKED = "safety_guard_blocked"
     EXECUTION_AUDIT_UNAVAILABLE = "execution_audit_unavailable"

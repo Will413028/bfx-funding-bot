@@ -135,6 +135,8 @@ def test_execution_contract_enum_values_are_stable() -> None:
         "insufficient_period_depth",
         "fill_model_missing",
         "fill_model_low_confidence",
+        "fill_model_scope_mismatch",
+        "fill_model_unversioned",
         "optimizer_unavailable",
         "safety_guard_blocked",
         "execution_audit_unavailable",

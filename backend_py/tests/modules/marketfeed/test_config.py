@@ -113,6 +113,17 @@ def test_optimizer_live_requires_fill_model_artifact(
         load_config(cells_yaml_path=yaml_path)
 
 
+def test_optimizer_live_requires_optimizer_fee_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_live")
+    monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_OPTIMIZER_FEE_RATE"):
+        load_config(cells_yaml_path=yaml_path)
+
+
 def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

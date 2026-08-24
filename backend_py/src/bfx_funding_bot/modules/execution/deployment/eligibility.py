@@ -7,6 +7,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 from typing import Protocol
 
 from bfx_funding_bot.modules.execution.audit import (
@@ -114,6 +115,10 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
         optimizer_evidence: Mapping[str, object] | None = None,
+        expected_period_agg: str | None = None,
+        expected_horizon_h: int | None = None,
+        expected_model_version: str | None = None,
+        expected_artifact_hash: str | None = None,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
         started = time.perf_counter()
         try:
@@ -127,6 +132,10 @@ class ExecutionGate:
                 safety=safety,
                 audit_context=audit_context,
                 optimizer_evidence=optimizer_evidence,
+                expected_period_agg=expected_period_agg,
+                expected_horizon_h=expected_horizon_h,
+                expected_model_version=expected_model_version,
+                expected_artifact_hash=expected_artifact_hash,
             )
         finally:
             if self._metrics is not None:
@@ -149,10 +158,18 @@ class ExecutionGate:
         safety: GuardResult,
         audit_context: AuditContext,
         optimizer_evidence: Mapping[str, object] | None,
+        expected_period_agg: str | None,
+        expected_horizon_h: int | None,
+        expected_model_version: str | None,
+        expected_artifact_hash: str | None,
     ) -> ReadyToSubmit | BlockedExecution | NoRecommendation:
         normalized_fill_evidence = _normalize_fill_evidence(
             fill_evidence,
             candidate_symbol=candidate.symbol,
+            expected_period_agg=expected_period_agg,
+            expected_horizon_h=expected_horizon_h,
+            expected_model_version=expected_model_version,
+            expected_artifact_hash=expected_artifact_hash,
         )
         if self._metrics is not None:
             try:
@@ -295,6 +312,8 @@ class ExecutionGate:
                 if result.reason in {
                     BlockReason.FILL_MODEL_MISSING,
                     BlockReason.FILL_MODEL_LOW_CONFIDENCE,
+                    BlockReason.FILL_MODEL_SCOPE_MISMATCH,
+                    BlockReason.FILL_MODEL_UNVERSIONED,
                 }:
                     await emit("funding.fill_model.unavailable", "warn")
         except Exception:
@@ -543,16 +562,35 @@ def _model_evidence(
 
 def _copy_evidence(value: object) -> object:
     if isinstance(value, Mapping):
-        return {key: _copy_evidence(item) for key, item in value.items()}
+        copied: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("audit evidence keys must be strings")
+            copied[key] = _copy_evidence(item)
+        return copied
     if isinstance(value, tuple | list):
         return [_copy_evidence(item) for item in value]
-    return value
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError("audit evidence decimals must be finite")
+        return str(value)
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise TypeError("audit evidence floats must be finite")
+        return value
+    raise TypeError(f"unsupported audit evidence value: {type(value).__name__}")
 
 
 def _normalize_fill_evidence(
     fill_evidence: object | None,
     *,
     candidate_symbol: str,
+    expected_period_agg: str | None = None,
+    expected_horizon_h: int | None = None,
+    expected_model_version: str | None = None,
+    expected_artifact_hash: str | None = None,
 ) -> _NormalizedFillEvidence | BlockReason | None:
     """Accept only the narrow future fill-model seam required for live optimizer use."""
     if fill_evidence is None:
@@ -560,9 +598,7 @@ def _normalize_fill_evidence(
 
     reason = getattr(fill_evidence, "reason", None)
     if isinstance(reason, str):
-        if reason == "low_confidence":
-            return BlockReason.FILL_MODEL_LOW_CONFIDENCE
-        return BlockReason.FILL_MODEL_MISSING
+        return _fill_model_block_reason(reason)
 
     low_confidence = getattr(fill_evidence, "low_confidence", None)
     if low_confidence is True:
@@ -615,6 +651,16 @@ def _normalize_fill_evidence(
         or normalized_fill_prob > Decimal("1")
     ):
         return BlockReason.FILL_MODEL_MISSING
+    if (
+        expected_period_agg is not None and period_agg != expected_period_agg
+    ) or (
+        expected_horizon_h is not None and horizon_h != expected_horizon_h
+    ) or (
+        expected_model_version is not None and model_version != expected_model_version
+    ) or (
+        expected_artifact_hash is not None and artifact_hash != expected_artifact_hash
+    ):
+        return BlockReason.FILL_MODEL_SCOPE_MISMATCH
     return _NormalizedFillEvidence(
         model_version=model_version,
         artifact_hash=artifact_hash,
@@ -626,6 +672,15 @@ def _normalize_fill_evidence(
         horizon_h=horizon_h,
         cutoff_ms=cutoff_ms,
     )
+
+
+def _fill_model_block_reason(reason: str) -> BlockReason:
+    return {
+        "missing": BlockReason.FILL_MODEL_MISSING,
+        "low_confidence": BlockReason.FILL_MODEL_LOW_CONFIDENCE,
+        "scope_mismatch": BlockReason.FILL_MODEL_SCOPE_MISMATCH,
+        "unversioned": BlockReason.FILL_MODEL_UNVERSIONED,
+    }.get(reason, BlockReason.FILL_MODEL_MISSING)
 
 
 def _required_decimal(value: float | None, name: str) -> Decimal:

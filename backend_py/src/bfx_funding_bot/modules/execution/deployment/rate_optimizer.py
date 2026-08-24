@@ -2,47 +2,25 @@
 
 This module deliberately has no dependency on the executor or execution
 contracts.  Its local no-recommendation value therefore cannot accidentally be
-submitted as an execution decision.
+submitted as an execution decision.  Fill evidence is imported from the
+lending-tracking contract so the optimizer and fill model cannot drift apart.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from math import isfinite
 from types import MappingProxyType
 from typing import Literal
 
+from bfx_funding_bot.modules.lending.tracking.artifact import (
+    FillModelEvidence,
+    FillModelUnavailable,  # noqa: F401 - canonical compatibility re-export
+)
+
 CandidateSource = Literal["signal", "maker", "taker"]
 OptimizerNoRecommendationReason = Literal["no_eligible_candidate"]
-FillModelUnavailableReason = Literal["missing", "low_confidence"]
-
-
-@dataclass(frozen=True, slots=True)
-class FillModelEvidence:
-    """High-confidence fill estimate for a single exact-period decision."""
-
-    model_version: str
-    artifact_hash: str
-    fill_probability: Decimal
-    expected_ttf_ms: int | None
-    n_samples: int
-    symbol: str
-    period_agg: str
-    horizon_h: int
-    cutoff_ms: int
-    low_confidence: bool = False
-
-    @property
-    def fill_prob(self) -> Decimal:
-        """Compatibility spelling used at the pre-optimizer gate seam."""
-        return self.fill_probability
-
-
-@dataclass(frozen=True, slots=True)
-class FillModelUnavailable:
-    """Typed provider outcome; it is never interpreted as usable evidence."""
-
-    reason: FillModelUnavailableReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +33,10 @@ class RateCandidate:
     def __post_init__(self) -> None:
         if self.source not in {"signal", "maker", "taker"}:
             raise ValueError(f"unsupported candidate source {self.source!r}")
+        if self.fill_evidence is not None:
+            if not isinstance(self.fill_evidence, FillModelEvidence):
+                raise TypeError("fill_evidence must use the canonical FillModelEvidence")
+            _validate_fill_evidence(self.fill_evidence)
         object.__setattr__(self, "book_evidence", _freeze_mapping(self.book_evidence))
 
 
@@ -67,8 +49,14 @@ class OptimizationResult:
     artifact_hash: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.selected, RateCandidate):
+            raise TypeError("selected must be a RateCandidate")
         object.__setattr__(self, "candidates", tuple(self.candidates))
-        object.__setattr__(self, "scores", MappingProxyType(dict(self.scores)))
+        if not all(isinstance(candidate, RateCandidate) for candidate in self.candidates):
+            raise TypeError("candidates must contain only RateCandidate values")
+        object.__setattr__(self, "scores", _freeze_scores(self.scores))
+        if not isinstance(self.model_version, str) or not isinstance(self.artifact_hash, str):
+            raise TypeError("optimizer provenance must use string model and artifact identifiers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +65,11 @@ class OptimizerNoRecommendation:
 
     reason: OptimizerNoRecommendationReason
     candidates: tuple[RateCandidate, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        if not all(isinstance(candidate, RateCandidate) for candidate in self.candidates):
+            raise TypeError("candidates must contain only RateCandidate values")
 
 
 class RateOptimizer:
@@ -91,6 +84,9 @@ class RateOptimizer:
         fill_evidence: FillModelEvidence,
         fee_rate: Decimal,
     ) -> OptimizationResult | OptimizerNoRecommendation:
+        if not isinstance(fill_evidence, FillModelEvidence):
+            raise TypeError("fill_evidence must use the canonical FillModelEvidence")
+        _validate_fill_evidence(fill_evidence)
         _validate_fee_rate(fee_rate)
         candidates = [
             RateCandidate(
@@ -125,7 +121,7 @@ class RateOptimizer:
             eligible,
             key=lambda candidate: (
                 scores[candidate.source],
-                (candidate.fill_evidence or fill_evidence).fill_probability,
+                (candidate.fill_evidence or fill_evidence).fill_prob,
                 -candidate.rate,
             ),
         )
@@ -149,7 +145,7 @@ def _is_eligible(candidate: RateCandidate, signal_rate: Decimal) -> bool:
 
 
 def _score(rate: Decimal, evidence: FillModelEvidence, fee_rate: Decimal) -> Decimal:
-    return rate * evidence.fill_probability * (Decimal("1") - fee_rate)
+    return rate * evidence.fill_prob * (Decimal("1") - fee_rate)
 
 
 def _validate_fee_rate(fee_rate: Decimal) -> None:
@@ -158,14 +154,58 @@ def _validate_fee_rate(fee_rate: Decimal) -> None:
 
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
-    return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if not isinstance(value, Mapping):
+        raise TypeError("book evidence must be a mapping")
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("book evidence keys must be strings")
+        frozen[key] = _freeze_value(item)
+    return MappingProxyType(frozen)
 
 
 def _freeze_value(value: object) -> object:
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise TypeError("book evidence floats must be finite")
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError("book evidence decimals must be finite")
+        return value
     if isinstance(value, Mapping):
         return _freeze_mapping(value)
     if isinstance(value, list | tuple):
         return tuple(_freeze_value(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return frozenset(_freeze_value(item) for item in value)
-    return value
+    raise TypeError(
+        f"unsupported mutable or non-JSON-safe evidence value: {type(value).__name__}",
+    )
+
+
+def _freeze_scores(scores: Mapping[str, Decimal]) -> Mapping[str, Decimal]:
+    frozen: dict[str, Decimal] = {}
+    for source, score in scores.items():
+        if not isinstance(source, str) or not isinstance(score, Decimal):
+            raise TypeError("optimizer scores must map string sources to Decimal values")
+        if not score.is_finite():
+            raise TypeError("optimizer scores must be finite")
+        frozen[source] = score
+    return MappingProxyType(frozen)
+
+
+def _validate_fill_evidence(evidence: FillModelEvidence) -> None:
+    """Reject canonical objects whose frozen shell contains mutable aliases."""
+    for value in (
+        evidence.fill_prob,
+        evidence.expected_ttf_ms,
+        evidence.n_samples,
+        evidence.symbol,
+        evidence.period_agg,
+        evidence.horizon_h,
+        evidence.model_version,
+        evidence.artifact_hash,
+        evidence.cutoff_ms,
+    ):
+        _freeze_value(value)

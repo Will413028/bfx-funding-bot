@@ -1290,6 +1290,7 @@ async def build_daemon(
             book_provider=funding_book_service,
             execution_gate=execution_gate,
             execution_policy=config.execution_policy,
+            optimizer_fee_rate=config.optimizer_fee_rate,
             period_pricer=PeriodPricer(
                 max_down_pct=Decimal(str(config.book_max_down_pct)),
                 tick=Decimal("0.00000001"),
