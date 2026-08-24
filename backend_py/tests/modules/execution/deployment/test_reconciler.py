@@ -167,6 +167,31 @@ class _FillModelProvider:
         return self._evidence
 
 
+class _StructuralFillEvidence:
+    """Looks structurally valid to the gate but is not the canonical contract."""
+
+    fill_prob = D("0.95")
+    expected_ttf_ms = 500
+    n_samples = 100
+    symbol = "fUST"
+    period_agg = "p2"
+    horizon_h = 1
+    model_version = "fill-v1"
+    artifact_hash = "sha256:model"
+    cutoff_ms = 1_000
+
+
+class _StructuralFillModelProvider:
+    def estimate_fill(
+        self,
+        reference_rate: Decimal,
+        offer_rate: Decimal,
+        period_agg: str,
+        horizon_h: int,
+    ) -> object:
+        return _StructuralFillEvidence()
+
+
 class _NoRecommendationOptimizer(RateOptimizer):
     def select(
         self,
@@ -552,6 +577,29 @@ async def test_optimizer_live_optimizer_failure_is_audited_blocked_without_submi
     assert audit.last.model_evidence["fill_prob"] == "0.95"
     assert "unavailable_reason" not in audit.last.model_evidence
     assert audit.last.model_evidence["optimizer"]["outcome"] == "no_recommendation"
+
+
+async def test_optimizer_live_structural_evidence_is_blocked_without_submit() -> None:
+    """Gate-shaped non-canonical evidence cannot become a live optimizer fallback."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_StructuralFillModelProvider(),  # type: ignore[arg-type]
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.OPTIMIZER_UNAVAILABLE
+    assert audit.last.failed_dependency == "optimizer"
 
 
 async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects() -> None:

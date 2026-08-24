@@ -407,10 +407,8 @@ class DeploymentReconciler:
                     elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
                         # Never reinterpret a failed optimizer as an implicit signal
                         # fallback.  Valid fill evidence remains visible in audit.
-                        if isinstance(optimization, OptimizerNoRecommendation):
+                        if not isinstance(fill_evidence, FillModelUnavailable):
                             optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
-                        if fill_evidence is None:
-                            fill_evidence = FillModelUnavailable("missing")
                     else:
                         await self._emit_shadow_optimizer_unavailable(
                             decision=decision,
