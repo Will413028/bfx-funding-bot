@@ -1,17 +1,15 @@
 #!/bin/bash
 # Deploy the bfx canary stack on the Oracle VM. Run ON THE VM from the repo root.
-# Usage: ./scripts/deploy-vm.sh <paper|shadow|canary>
+# Usage: ./scripts/deploy-vm.sh <paper|shadow|shadow-p14|canary>
 set -euo pipefail
 
 PHASE="${1:-}"
-case "$PHASE" in paper|shadow|canary) ;; *) echo "usage: $0 <paper|shadow|canary>"; exit 1 ;; esac
+case "$PHASE" in paper|shadow|shadow-p14|canary) ;; *) echo "usage: $0 <paper|shadow|shadow-p14|canary>"; exit 1 ;; esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-# Pull FIRST: the env assembly below reads deploy/vm/<phase>.env from the repo —
-# pulling after it deploys the PREVIOUS commit's env config (bit us 2026-07-10:
-# freshly committed BFX_REPRICE/CLAMP flags were silently absent from .env.runtime,
-# reverting E1 to observe-only for ~15 min on a live bot).
+# Pull FIRST: the env assembly below reads deploy/vm/<phase>.env from the repo.
+# Pulling after assembly would deploy the previous commit's profile.
 git pull --ff-only origin main
 SECRETS="$HOME/bfx/bot.env"
 PHASE_ENV="deploy/vm/${PHASE}.env"
@@ -51,11 +49,7 @@ done
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
 set -a; . ./.env.frontend.runtime; set +a
 
-# Show what will ACTUALLY bind before anyone confirms. BFX_ALLOCATION_CAP_USDT is
-# only a fallback for a symbol missing from the safety config's caps, and
-# assert_caps_invariant guarantees no canary symbol is missing — so that env var
-# binds nothing here. Setting it to 0 on 2026-07-27 read as "paused" and halted
-# nothing; the bot kept lending for hours against caps.fUST=10000.
+# Show the committed canary safety configuration before confirmation.
 if [ "$PHASE" = canary ]; then
   # Read from .env.runtime, never from the shell env: this script runs under
   # `set -u` and never sources that file, so ${BFX_SAFETY_CONFIG} is unbound and
@@ -63,8 +57,8 @@ if [ "$PHASE" = canary ]; then
   # failure was invisible because the caller happened to be grepping the output.
   SAFETY_HOST=$(grep -oE 'configs/safety[^ ]*\.yaml' .env.runtime | head -1 | sed 's#^#backend_py/#')
   echo "--- effective real-money limits ---"
-  echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
-  echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
+  echo "  per-symbol caps: $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
+  echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2)"
   # Captured rather than inlined so the "unset" case is explicit at a glance.
   # (The previous inline `... || echo '<unset>'` was in fact correct: `||` binds
   # to the whole pipeline, and under pipefail a failing grep does trigger it.

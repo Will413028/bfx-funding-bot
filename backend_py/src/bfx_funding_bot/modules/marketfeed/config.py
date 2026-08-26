@@ -175,16 +175,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             "Use shadow (or ci for tests)."
         )
 
-    for legacy_name in (
-        "BFX_CLAMP_ENABLED",
-        "BFX_CLAMP_MAX_DOWN_PCT",
-        "BFX_CLAMP_TAKER_MAX_PERIOD_D",
-    ):
-        if legacy_name in os.environ:
-            raise ValueError(
-                f"{legacy_name} is no longer supported; use BFX_EXECUTION_POLICY"
-            )
-
     execution_policy_raw = os.environ.get("BFX_EXECUTION_POLICY", "").strip()
     if not execution_policy_raw:
         raise ValueError("BFX_EXECUTION_POLICY env var required")
