@@ -29,6 +29,7 @@ import bfx_funding_bot.modules.lending.tracking.tables
 import bfx_funding_bot.modules.live_validation.tables
 import bfx_funding_bot.modules.marketfeed.tables
 from alembic import context
+from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
 
@@ -48,11 +49,6 @@ target_metadata = Base.metadata
 _MIGRATE_LOCK_KEY = int.from_bytes(
     hashlib.blake2b(b"bfx-migrate:alembic", digest_size=8).digest(), "big", signed=True
 )
-
-
-def include_object(object, name, type_, reflected, compare_to):
-    """Filter out legacy Atlas revision-tracking table from autogenerate."""
-    return not (type_ == "table" and name == "atlas_schema_revisions")
 
 
 def do_run_migrations(connection: Connection) -> None:
@@ -92,7 +88,7 @@ def do_run_migrations(connection: Connection) -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
-            compare_server_default=True,
+            compare_server_default=compare_server_default,
             include_object=include_object,
         )
         with context.begin_transaction():
