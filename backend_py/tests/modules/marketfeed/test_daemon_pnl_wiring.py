@@ -90,6 +90,10 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
     monkeypatch.setenv("BFX_PHASE", "canary")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "pnl_wiring.db"

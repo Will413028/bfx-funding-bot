@@ -50,8 +50,8 @@ def spike_rungs(
     for n in range(len(policy.rung_multipliers), 0, -1):
         per_rung = budget / n
         if per_rung >= policy.min_rung_usdt:
-            # round(..., 10): same float-noise guard as book_clamp's
-            # `round(ticker.ask - TICK, 10)` — ask×k lands on values like
+            # round(..., 10) keeps IEEE-754 float noise out of submitted rates:
+            # ask×k otherwise lands on values like
             # 0.00030000000000000003 without it (IEEE-754, not a real rate).
             return [
                 (per_rung, round(ask * k, 10)) for k in policy.rung_multipliers[:n]

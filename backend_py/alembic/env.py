@@ -7,6 +7,7 @@ core.db._prepare_engine_kwargs (separate transform path).
 Side-effect imports register tables with Base.metadata so autogenerate
 sees a unified schema.
 """
+# ruff: noqa: F401
 
 import hashlib
 from logging.config import fileConfig
@@ -25,8 +26,8 @@ import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.external_signals.tables
 import bfx_funding_bot.modules.funding_stats.tables
 import bfx_funding_bot.modules.lending.tracking.tables
+import bfx_funding_bot.modules.live_validation.tables
 import bfx_funding_bot.modules.marketfeed.tables
-import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from alembic import context
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings

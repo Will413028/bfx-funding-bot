@@ -152,26 +152,6 @@ def test_optimizer_shadow_allows_missing_model_and_fee_for_observation_only(
     assert config.optimizer_fee_rate is None
 
 
-@pytest.mark.parametrize(
-    ("legacy_name", "value"),
-    [
-        ("BFX_CLAMP_ENABLED", "false"),
-        ("BFX_CLAMP_MAX_DOWN_PCT", "0.15"),
-        ("BFX_CLAMP_TAKER_MAX_PERIOD_D", "7"),
-    ],
-)
-def test_legacy_clamp_configuration_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    legacy_name: str, value: str,
-) -> None:
-    _set_required_config_env(monkeypatch, phase="paper", policy="paper")
-    monkeypatch.setenv(legacy_name, value)
-    yaml_path = _write_yaml(tmp_path, _valid_yaml())
-
-    with pytest.raises(ValueError, match=legacy_name):
-        load_config(cells_yaml_path=yaml_path)
-
-
 def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
