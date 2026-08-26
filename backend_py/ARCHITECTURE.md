@@ -264,7 +264,7 @@ sequenceDiagram
 
 | 參數 | 值 | env |
 |---|---|---|
-| Allocation cap（canary on Koyeb） | 10000 USDT | `BFX_ALLOCATION_CAP_USDT`（程式預設 500；canary 3000→10000 見 commit `aa4842c`，原文件曾誤留 570） |
+| Canary allocation caps | fUST 10000 USDT；fUSD 400 USDT | `safety.canary.yaml` 的 `allocation_cap.caps` 是 binding per-symbol cap；`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅是 caps map 缺少 symbol 時的 fallback，不能覆寫 map |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
 | Per-cell concentration | `max(70% × target, target / n_active_cells)`；≥2 active cells 等同 70%，僅 1 active cell 時可達 100%（見 commit `0d29fc8`） | `BFX_CONCENTRATION_PCT`=0.70 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
@@ -315,13 +315,13 @@ sequenceDiagram
 
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Kill switch**：翻 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 config（`koyeb service update ... --env BFX_KILL_SWITCH=true`）。
+**Kill switch**：設定 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 safety config；由目前 VM deployment 的環境組裝提供此 break-glass env。
 
 **Canary gate（`assert_canary_guard_invariant`）**：`BFX_PHASE=canary` 啟動時強制 hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
 
 **Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.yaml`），改 threshold 需 redeploy。
 
-**/healthz liveness**：獨立 HTTP server（port 8080）供 Koyeb 探活。Liveness（own-loop，如 `ws`）staleness 致命 → daemon restart；Activity-class（reactive，如 `executor`/`safety_chain`）只 WARN 不致命——這是 2026-05-26 idle-market restart loop 修法的核心。
+**/healthz liveness**：獨立 HTTP server（port 8080）供目前 VM compose deployment 探活。Liveness（own-loop，如 `ws`）staleness 致命 → daemon restart；Activity-class（reactive，如 `executor`/`safety_chain`）只 WARN 不致命——這是 2026-05-26 idle-market restart loop 修法的核心。
 
 **`/readyz` trading readiness**：`/healthz` 只回答 process liveness；`/readyz` 回傳 `200 {"trading_ready": true, "reason": null}` 或 `503 {"trading_ready": false, "reason": <stable reason>}`。book、model 或 audit dependency 不可用會將 `trading_ready=0`，供 operator status/metrics 告警，但不會令 liveness restart loop 啟動。
 
@@ -405,11 +405,11 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
 | `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
-| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；cap 10000 USDT（`canary.env`），fUST 2 cells（a30 + p2，mean_reversion）+ fUSD 2 cells armed（cap 400、未入金 0 submit） |
+| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；binding cap 在 `safety.canary.yaml` 的 per-symbol map（fUST 10000、fUSD 400），`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅為 map 未列 symbol 的 fallback；四個 armed mean_reversion cells 為 fUST a30/p2 與 fUSD a30/p2，fUSD 未入金時由 balance gate 擋住所有 offer |
 
 **Phase ⟷ Realm guard**（`load_config()`）：canary 只能配 prod realm（真錢不可污染校準資料），paper/shadow 只能配 shadow|ci（模擬不可污染真錢分析）。違規 `ValueError` fail-fast。
 
-**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；`cells.canary.yaml`（2 對 fUST，皆 mean_reversion，RatePercentile 在 LOCF 下未 qualify；fUSD 待 per-currency 獨立分配功能再加）。`shadow-p14` 專用 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、`t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由 deployment reconciler 依 gap 動態決定。
+**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；`cells.canary.yaml`（四個 armed mean_reversion cells：fUST a30/p2、fUSD a30/p2；RatePercentile 與 p30 不在 canary set）。`shadow-p14` 專用 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、`t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由 deployment reconciler 依 gap 動態決定。
 
 **基礎設施**
 
@@ -420,7 +420,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 | Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
-**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env`（`paper`、`shadow`、`shadow-p14`、`canary`）組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數 → canary 仍需 `BFX_CANARY_CONFIRM=yes` 與 cap/safety 顯示 → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
+**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env`（`paper`、`shadow`、`shadow-p14`、`canary`）組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數、phase-policy 契約與 required book/model evidence → canary 仍需 `BFX_CANARY_CONFIRM=yes`，並顯示 binding per-symbol safety caps 與 env fallback → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、`BFX_ALLOCATION_CAP_USDT`、`BFX_API_KEY`/`BFX_API_SECRET`、`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_ACCOUNT_ID`。
 
@@ -428,7 +428,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ compose one-shot `weekly-report`（`--profile ops`）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`）。值得留存的報告手動 promote 進 `backend_py/docs/research/` 並 commit。
 - **儀表**：webapi `GET /api/v1/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 的 realm（`BFX_DEPLOYMENT_ENV`/`BFX_ACCOUNT_ID`）必須一致，否則 endpoint 靜默回空（router build 時 log 出 filter realm 供比對）。
-- **政策（cap 加碼 gate）**：`BFX_ALLOCATION_CAP_USDT` 再加碼前必須：最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時一律不加碼）。本次 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的 — 此政策防重演。
+- **政策（per-symbol cap 加碼 gate）**：調高 `safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前必須：最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時一律不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的 — 此政策防重演；`BFX_ALLOCATION_CAP_USDT` 不覆寫已設定的 per-symbol cap。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 
 ---

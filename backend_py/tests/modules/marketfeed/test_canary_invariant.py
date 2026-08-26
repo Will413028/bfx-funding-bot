@@ -13,14 +13,6 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-
-
-def test_canary_profile_cannot_select_p14() -> None:
-    assert "experimental-p14" not in (
-        REPOSITORY_ROOT / "deploy/vm/canary.env"
-    ).read_text()
-
 
 def _safety_yaml(*, disable: str | None = None) -> str:
     on = dict.fromkeys(

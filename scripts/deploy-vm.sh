@@ -22,12 +22,32 @@ cat "$SECRETS" "$PHASE_ENV" > .env.runtime
 chmod 600 .env.runtime
 
 # Preflight: required vars present.
-need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV"
+need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY"
 need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_API_KEY BFX_API_SECRET BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
 req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary"
 for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
 done
+
+EXECUTION_POLICY=$(grep '^BFX_EXECUTION_POLICY=' .env.runtime | tail -1 | cut -d= -f2-)
+case "$PHASE:$EXECUTION_POLICY" in
+  paper:paper|shadow:book_guarded|shadow-p14:optimizer_shadow|canary:book_guarded|canary:optimizer_live) ;;
+  *)
+    echo "ERROR: execution policy $EXECUTION_POLICY is incompatible with phase $PHASE"
+    exit 1
+    ;;
+esac
+
+if [ "$EXECUTION_POLICY" != paper ]; then
+  for v in BFX_BOOK_MAX_AGE_SECONDS BFX_BOOK_RECONCILE_INTERVAL_SECONDS BFX_BOOK_MAX_DOWN_PCT; do
+    grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for policy $EXECUTION_POLICY"; exit 1; }
+  done
+fi
+if [ "$EXECUTION_POLICY" = optimizer_live ]; then
+  for v in BFX_FILL_MODEL_ARTIFACT BFX_OPTIMIZER_FEE_RATE; do
+    grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for policy optimizer_live"; exit 1; }
+  done
+fi
 
 # --- web-API env (separate from the daemon: scoped DB role, NO daemon secrets) ---
 WEBAPI_SECRETS="$HOME/bfx/webapi.env"
