@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +36,7 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
+    WindowOutcome,
     evaluate_cell_qualification,
     pick_sweep_winner,
 )
@@ -62,6 +64,41 @@ RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
 WIN_PCT_THRESHOLD = Decimal("0.60")
 MARGIN_THRESHOLD = Decimal("0.05")
 HEALTH_PCT_THRESHOLD = Decimal("0.80")
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def serialize_window_outcomes(
+    outcomes: Iterable[WindowOutcome],
+    *,
+    cell: str,
+    strategy: str,
+    budget_hours: int,
+) -> list[dict[str, Any]]:
+    """Serialize WFO window parameters while preserving unavailable windows."""
+    return [
+        {
+            "cell": cell,
+            "strategy": strategy,
+            "budget_hours": budget_hours,
+            "window_idx": outcome.window_idx,
+            "train_start_mts": outcome.train_start_mts,
+            "train_end_mts": outcome.train_end_mts,
+            "test_start_mts": outcome.test_start_mts,
+            "test_end_mts": outcome.test_end_mts,
+            "status": outcome.status,
+            "best_params": _json_safe(outcome.best_params),
+        }
+        for outcome in outcomes
+    ]
 
 
 def apply_locf_and_unwrap(
@@ -102,7 +139,6 @@ def run_cell_wfo_with_locf(
     Implementation: replicate run_cell_wfo iteration inline to apply LOCF per window.
     """
     from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
-    from bfx_funding_bot.modules.backtest.matrix import WindowOutcome
     from bfx_funding_bot.modules.backtest.schemas import BacktestResult
     from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
         AlwaysMarketRateStrategy,
@@ -402,6 +438,12 @@ async def _amain() -> int:
                         strategy=strategy_class.__name__,
                         budget_hours=budget_hours,
                         verdict=verdict,
+                    )
+                    row["windows"] = serialize_window_outcomes(
+                        window_outcomes,
+                        cell=cell_key,
+                        strategy=strategy_class.__name__,
+                        budget_hours=budget_hours,
                     )
                     results.append(row)
                     print(
