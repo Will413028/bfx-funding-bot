@@ -4,7 +4,7 @@ set -euo pipefail
 
 WINDOW="${1:-90m}"
 REPORTS_DIR="${BFX_REPORTS_DIR:-/home/ubuntu/bfx/reports}"
-export BFX_HEALTHZ_BASE_URL="${BFX_HEALTHZ_BASE_URL:-http://127.0.0.1:8080}"
+HEALTHZ_BASE_URL="${BFX_HEALTHZ_BASE_URL:-http://127.0.0.1:8080}"
 case "$REPORTS_DIR" in
   /*) ;;
   *) printf '%s\n' 'BFX_REPORTS_DIR must be an absolute path' >&2; exit 2 ;;
@@ -34,11 +34,12 @@ probe_http() {
   docker exec bfx-bot python -c '
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 
 token = os.environ.get("BFX_ADMIN_TOKEN", "")
-base_url = os.environ["BFX_HEALTHZ_BASE_URL"].rstrip("/")
+base_url = sys.argv[1].rstrip("/")
 
 def call(path, method="GET"):
     headers = {"Authorization": "Bearer " + token} if token else {}
@@ -70,7 +71,7 @@ for path, method in (("/healthz", "GET"), ("/readyz", "GET"),
         print(path + ": HTTP " + str(exc.code) + " body=" + redact(body or "<empty>"))
     except Exception as exc:
         print(path + ": unavailable (" + type(exc).__name__ + ")")
-' 2>&1 </dev/null || printf '%s\n' 'container probe unavailable'
+' "$HEALTHZ_BASE_URL" 2>&1 </dev/null || printf '%s\n' 'container probe unavailable'
 }
 
 readonly_sql() {
