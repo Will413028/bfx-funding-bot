@@ -6,6 +6,8 @@ from json import loads
 from pathlib import Path
 from threading import Thread
 
+import pytest
+
 SCRIPT = Path(__file__).parents[3] / "deploy" / "vm" / "soak-checkpoint.sh"
 
 
@@ -34,6 +36,8 @@ def test_checkpoint_script_captures_logs_once_and_counts_idle_canary_safely():
     assert "grep -cE" in source
     assert "|| true" in source
     assert 'docker logs --since "$WINDOW" bfx-bot > "$LOG_FILE"' in source
+    assert "LOG_CAPTURE_OK" in source
+    assert "LOG_CAPTURE_STATUS" in source
 
 
 def test_checkpoint_script_probes_only_readonly_admin_and_health_paths():
@@ -88,7 +92,8 @@ def test_checkpoint_script_preserves_http_error_status_and_body_diagnostics():
     assert 'str(exc.code) + " body="' in source
 
 
-def test_checkpoint_invocation_is_read_only_and_does_not_leak_admin_token(tmp_path):
+@pytest.mark.parametrize("logs_failure", [False, True], ids=["logs-ok", "logs-failure"])
+def test_checkpoint_invocation_is_read_only_and_does_not_leak_admin_token(tmp_path, logs_failure):
     calls = tmp_path / "calls.log"
     reports = tmp_path / "reports"
     fake_docker = tmp_path / "docker"
@@ -134,6 +139,10 @@ with open(sys.argv[1], "a", encoding="utf-8") as calls:
     calls.write("\\n")
 PY
 if [ "$#" -eq 4 ] && [ "$1" = logs ] && [ "$2" = --since ] && [ "$4" = bfx-bot ]; then
+  if [ "${FAKE_LOGS_FAILURE:-0}" = 1 ]; then
+    printf '%s\\n' 'docker logs failed: fake daemon unavailable' >&2
+    exit 42
+  fi
   exit 0
 fi
     if [ "$#" -eq 3 ] && [ "$1" = inspect ] && [ "$2" = --format=* ] && [ "$3" = bfx-bot ]; then
@@ -162,6 +171,7 @@ exit 99
             "BFX_REPORTS_DIR": str(reports),
             "BFX_HEALTHZ_BASE_URL": base_url,
             "BFX_ADMIN_TOKEN": "TOKEN-SENTINEL",
+            "FAKE_LOGS_FAILURE": "1" if logs_failure else "0",
         },
         capture_output=True,
         text=True,
@@ -171,9 +181,20 @@ exit 99
     server.shutdown()
     assert result.returncode == 0, result.stderr
     report = next(reports.glob("soak-checkpoint-*.txt")).read_text()
-    assert "/healthz: HTTP 503 body={\"state\":\"degraded [redacted]\"}" in report
-    assert "/readyz: HTTP 503 body={\"state\":\"starting [redacted]\"}" in report
-    assert '"note": "[redacted]"' in report
+    if logs_failure:
+        assert "log_capture=unavailable" in report
+        assert "docker logs" in report
+        assert "exit_status=42" in report
+        assert "scheduler_tick=0" not in report
+        assert "reconcile=0" not in report
+        assert "divergence=0" not in report
+        assert "blocked=0" not in report
+        assert "submit=0" not in report
+        assert "error=0" not in report
+    else:
+        assert "/healthz: HTTP 503 body={\"state\":\"degraded [redacted]\"}" in report
+        assert "/readyz: HTTP 503 body={\"state\":\"starting [redacted]\"}" in report
+        assert '"note": "[redacted]"' in report
     assert "TOKEN-SENTINEL" not in report
     assert "TOKEN-SENTINEL" not in result.stdout
     assert "TOKEN-SENTINEL" not in result.stderr

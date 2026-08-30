@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -137,6 +139,42 @@ def _strategy_label(value: Any) -> str | None:
     return names.get(value) if isinstance(value, str) else None
 
 
+_CANONICAL_NUMERIC_STRING = re.compile(
+    r"^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$"
+)
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Return an exact finite number, including JSON-safe Decimal strings."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        candidate = value
+    elif isinstance(value, int):
+        candidate = Decimal(value)
+    elif isinstance(value, float):
+        try:
+            candidate = Decimal(str(value))
+        except InvalidOperation:
+            return None
+    elif isinstance(value, str):
+        if _CANONICAL_NUMERIC_STRING.fullmatch(value) is None:
+            return None
+        try:
+            candidate = Decimal(value)
+        except InvalidOperation:
+            return None
+    else:
+        return None
+    return candidate if candidate.is_finite() else None
+
+
+def _budget_hours(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
     if manifest is None:
         return _unavailable("WFO window manifest not provided")
@@ -145,7 +183,7 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
     results = manifest.get("results")
     if not isinstance(results, list):
         return _unavailable("manifest results is missing or malformed")
-    groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str, int], list[Mapping[str, Any]]] = defaultdict(list)
     labels: set[str] = set()
     for result in results:
         if not isinstance(result, Mapping):
@@ -165,33 +203,52 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
         input_strategy = result["strategy"]
         if not isinstance(input_strategy, str):
             return _unavailable("manifest result row has malformed strategy")
+        result_budget = (
+            _budget_hours(result["budget_hours"])
+            if "budget_hours" in result
+            else None
+        )
+        if "budget_hours" in result and result_budget is None:
+            return _unavailable("manifest result row has malformed budget_hours")
+        cohort_budget: int | None = result_budget
         labels.add(input_strategy)
         for window in windows:
             if not isinstance(window, Mapping) or not isinstance(
                 window.get("best_params"), Mapping
             ):
                 return _unavailable("manifest window has malformed best_params")
+            budget = _budget_hours(window.get("budget_hours", result_budget))
+            if budget is None:
+                return _unavailable("manifest window has missing or malformed budget_hours")
+            if result_budget is not None and budget != result_budget:
+                return _unavailable("manifest result/window budget_hours are inconsistent")
+            if cohort_budget is None:
+                cohort_budget = budget
+            elif budget != cohort_budget:
+                return _unavailable("manifest windows have inconsistent budget_hours")
             start = window.get("test_start_mts", window.get("window_idx"))
             if not isinstance(start, (int, float)):
                 return _unavailable("manifest window lacks test_start_mts or window_idx")
-            groups[(cell, input_strategy)].append({"start": start, "params": window["best_params"]})
+            groups[(cell, input_strategy, budget)].append(
+                {"start": start, "params": window["best_params"]}
+            )
     if not groups or any(len(windows) < 2 for windows in groups.values()):
         return _unavailable("fewer than two WFO windows for a cell and strategy")
     rows: list[dict[str, Any]] = []
-    for (cell, strategy), windows in sorted(groups.items()):
+    for (cell, strategy, budget_hours), windows in sorted(groups.items()):
         ordered = sorted(windows, key=lambda item: item["start"])
         for old, new in pairwise(ordered):
             shared = set(old["params"]) & set(new["params"])
             drifts = []
             for field in sorted(shared):
                 before, after = old["params"][field], new["params"][field]
-                if (
-                    isinstance(before, (int, float))
-                    and isinstance(after, (int, float))
-                    and not isinstance(before, bool)
-                    and not isinstance(after, bool)
-                ):
-                    drift = abs(after - before) / max(abs(before), abs(after), 1e-12)
+                before_number = _finite_decimal(before)
+                after_number = _finite_decimal(after)
+                if before_number is not None and after_number is not None:
+                    drift = float(
+                        abs(after_number - before_number)
+                        / max(abs(before_number), abs(after_number), Decimal("1e-12"))
+                    )
                 else:
                     drift = 1 if before != after else 0
                 drifts.append({"parameter": field, "drift": drift})
@@ -199,6 +256,7 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
                 {
                     "cell": cell,
                     "strategy": strategy,
+                    "budget_hours": budget_hours,
                     "from": old["start"],
                     "to": new["start"],
                     "fields": drifts,

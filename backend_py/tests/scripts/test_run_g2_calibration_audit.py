@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts.run_g2_calibration_audit import (
     build_report,
     compute_m1,
@@ -101,9 +103,10 @@ def test_m2_reports_adjacent_numeric_and_categorical_drift() -> None:
                 {
                     "cell": "fUSD_p30",
                     "strategy": "MeanReversionStrategy",
+                    "budget_hours": 12,
                     "windows": [
-                        {"test_start_mts": 1, "best_params": {"span": 10, "mode": "a"}},
-                        {"test_start_mts": 2, "best_params": {"span": 20, "mode": "b"}},
+                        {"test_start_mts": 1, "budget_hours": 12, "best_params": {"span": 10, "mode": "a"}},
+                        {"test_start_mts": 2, "budget_hours": 12, "best_params": {"span": 20, "mode": "b"}},
                     ],
                 }
             ]
@@ -118,7 +121,7 @@ def test_m2_is_unavailable_without_two_valid_windows() -> None:
     assert compute_m2(None)["status"] == "unavailable"
     assert (
         compute_m2(
-            {"results": [{"cell": "fUSD_p30", "strategy": "mean_reversion", "windows": []}]}
+            {"results": [{"cell": "fUSD_p30", "strategy": "mean_reversion", "budget_hours": 12, "windows": []}]}
         )["status"]
         == "unavailable"
     )
@@ -207,9 +210,10 @@ def test_m2_preserves_class_name_strategy_label_in_output() -> None:
                 {
                     "cell": "fUSD_p30",
                     "strategy": "MeanReversionStrategy",
+                    "budget_hours": 12,
                     "windows": [
-                        {"test_start_mts": 1, "best_params": {"span": 10}},
-                        {"test_start_mts": 2, "best_params": {"span": 20}},
+                        {"test_start_mts": 1, "budget_hours": 12, "best_params": {"span": 10}},
+                        {"test_start_mts": 2, "budget_hours": 12, "best_params": {"span": 20}},
                     ],
                 }
             ]
@@ -217,6 +221,125 @@ def test_m2_preserves_class_name_strategy_label_in_output() -> None:
     )
     assert result["rows"][0]["strategy"] == "MeanReversionStrategy"
     assert result["strategies"] == ["MeanReversionStrategy"]
+
+
+def test_m2_treats_serialized_decimal_strings_as_numeric_and_keeps_categories() -> None:
+    result = compute_m2(
+        {
+            "results": [
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "mean_reversion",
+                    "budget_hours": 12,
+                    "windows": [
+                        {
+                            "test_start_mts": 1,
+                            "budget_hours": 12,
+                            "best_params": {
+                                "span": "1.0",
+                                "mode": "a",
+                                "leading_zero_label": "01",
+                                "scientific": "1e-1",
+                                "nonfinite": "NaN",
+                                "flag": True,
+                            },
+                        },
+                        {
+                            "test_start_mts": 2,
+                            "budget_hours": 12,
+                            "best_params": {
+                                "span": "1.2",
+                                "mode": "b",
+                                "leading_zero_label": "02",
+                                "scientific": "2e-1",
+                                "nonfinite": "Infinity",
+                                "flag": False,
+                            },
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    fields = {field["parameter"]: field["drift"] for field in result["rows"][0]["fields"]}
+    assert fields["span"] == pytest.approx(1 / 6)
+    assert fields["scientific"] == pytest.approx(1 / 2)
+    assert fields["mode"] == 1
+    assert fields["leading_zero_label"] == 1
+    assert fields["nonfinite"] == 1
+    assert fields["flag"] == 1
+
+
+def test_m2_keeps_different_budget_hours_in_separate_cohorts() -> None:
+    result = compute_m2(
+        {
+            "results": [
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "mean_reversion",
+                    "budget_hours": 6,
+                    "windows": [
+                        {"test_start_mts": 1, "budget_hours": 6, "best_params": {"span": 1}},
+                        {"test_start_mts": 3, "budget_hours": 6, "best_params": {"span": 2}},
+                    ],
+                },
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "mean_reversion",
+                    "budget_hours": 12,
+                    "windows": [
+                        {"test_start_mts": 2, "budget_hours": 12, "best_params": {"span": 10}},
+                        {"test_start_mts": 4, "budget_hours": 12, "best_params": {"span": 20}},
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert result["status"] == "available"
+    assert {(row["budget_hours"], row["from"], row["to"]) for row in result["rows"]} == {
+        (6, 1, 3),
+        (12, 2, 4),
+    }
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {
+            "results": [
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "mean_reversion",
+                    "windows": [
+                        {"test_start_mts": 1, "best_params": {"span": 1}},
+                        {"test_start_mts": 2, "best_params": {"span": 2}},
+                    ],
+                }
+            ]
+        },
+        {
+            "results": [
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "mean_reversion",
+                    "budget_hours": 6,
+                    "windows": [
+                        {"test_start_mts": 1, "budget_hours": 6, "best_params": {"span": 1}},
+                        {"test_start_mts": 2, "budget_hours": 12, "best_params": {"span": 2}},
+                    ],
+                }
+            ]
+        },
+    ],
+    ids=["missing-budget", "inconsistent-budget"],
+)
+def test_m2_rejects_missing_or_inconsistent_budget_hours(manifest: dict) -> None:
+    result = compute_m2(manifest)
+
+    assert result["status"] == "unavailable"
+    assert "budget_hours" in result["reason"]
 
 
 def test_markdown_includes_computed_evidence_and_unavailable_reason() -> None:
