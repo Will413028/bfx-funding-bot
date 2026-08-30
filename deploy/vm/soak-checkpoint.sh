@@ -4,6 +4,7 @@ set -euo pipefail
 
 WINDOW="${1:-90m}"
 REPORTS_DIR="${BFX_REPORTS_DIR:-/home/ubuntu/bfx/reports}"
+export BFX_HEALTHZ_BASE_URL="${BFX_HEALTHZ_BASE_URL:-http://127.0.0.1:8080}"
 case "$REPORTS_DIR" in
   /*) ;;
   *) printf '%s\n' 'BFX_REPORTS_DIR must be an absolute path' >&2; exit 2 ;;
@@ -37,11 +38,12 @@ import urllib.error
 import urllib.request
 
 token = os.environ.get("BFX_ADMIN_TOKEN", "")
+base_url = os.environ["BFX_HEALTHZ_BASE_URL"].rstrip("/")
 
 def call(path, method="GET"):
     headers = {"Authorization": "Bearer " + token} if token else {}
     request = urllib.request.Request(
-        "http://127.0.0.1:8080" + path, headers=headers, method=method,
+        base_url + path, headers=headers, method=method,
         data=b"" if method == "POST" else None,
     )
     with urllib.request.urlopen(request, timeout=15) as response:
