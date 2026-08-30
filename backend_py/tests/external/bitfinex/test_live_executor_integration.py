@@ -9,6 +9,7 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
@@ -42,6 +43,14 @@ def _make_ctx() -> AccountContext:
     )
 
 
+def _ready(decision: DecisionPayload) -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=decision, decision_id="d-live-test", policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-live-test", model_version=None,
+        evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
+    )
+
+
 class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
         pass
@@ -69,7 +78,7 @@ async def test_submit_returns_submitted_on_success() -> None:
         date_provider=lambda: date(2026, 5, 22),
     )
 
-    result = await executor.submit(_make_decision(), _make_ctx())
+    result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "submitted"
     assert result.venue_offer_id == "42"
 
@@ -88,9 +97,33 @@ async def test_submit_returns_failed_on_http_error() -> None:
         nonce_provider=lambda: 1000,
         date_provider=lambda: date(2026, 5, 22),
     )
-    result = await executor.submit(_make_decision(), _make_ctx())
+    result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "failed"
     assert result.venue_offer_id is None
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
+    venue_error = [
+        1716383500000, "fon-req", None, None,
+        None, None, "ERROR", None, "Funds insufficient",
+    ]
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=venue_error),
+    ))
+    executor = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
+        nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
+    )
+
+    result = await executor.submit(_ready(_make_decision()), _make_ctx())
+
+    assert result.status == "failed"
+    assert result.venue_offer_id is None
+    assert result.reservation_ref is not None
+    assert result.reservation_ref.venue_offer_id is None
 
 
 SUCCESS = [
@@ -124,7 +157,7 @@ async def test_submit_fixed_point_rate_serialization() -> None:
         offer_rate=5.531e-05, offer_amount_usdt=150.0, offer_duration_days=2,
         symbol="fUST",
     )
-    result = await executor.submit(decision, _make_ctx())
+    result = await executor.submit(_ready(decision), _make_ctx())
 
     assert result.status == "submitted"
     assert captured["body"]["rate"] == "0.00005531"
@@ -148,7 +181,7 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
         nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
     )
     decision = _make_decision(symbol="fUST")
-    result = await ex.submit(decision, _make_ctx())
+    result = await ex.submit(_ready(decision), _make_ctx())
     assert captured[0]["symbol"] == "fUST" == decision.symbol
     assert result.status == "submitted"
 
@@ -166,7 +199,7 @@ async def test_submit_rejects_unconfigured_symbol() -> None:
         nonce_provider=lambda: 1, date_provider=lambda: date(2026, 5, 22),
     )
     with pytest.raises(InvariantViolation):
-        await ex.submit(_make_decision(symbol="fUSD"), _make_ctx())  # fUSD not configured
+        await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
 
 
 @pytest.mark.asyncio
@@ -183,7 +216,7 @@ async def test_submit_failure_captures_venue_response_body() -> None:
         configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
         nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
     )
-    result = await executor.submit(_make_decision(), _make_ctx())
+    result = await executor.submit(_ready(_make_decision()), _make_ctx())
     assert result.status == "failed"
     assert result.venue_offer_id is None
     assert result.raw_response is not None

@@ -15,7 +15,25 @@ from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from bfx_funding_bot.modules.execution.contracts import (
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
+
+__all__ = [
+    "AccountContext",
+    "CancelPort",
+    "Credentials",
+    "ExecutorPort",
+    "FillTracker",
+    "GuardResult",
+    "GuardRule",
+    "ReadyToSubmit",
+    "SubmittedOrder",
+    "WriterLockHandle",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,18 +54,12 @@ class AccountContext:
 
 
 @dataclass(frozen=True, slots=True)
-class GuardResult:
-    allowed: bool
-    guard_name: str
-    reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class SubmittedOrder:
     cid: int
     venue_offer_id: str | None     # paper: "paper_<uuid12>"; real: str(int) from venue; None on failed submit
     status: str                    # "submitted" / "failed" / "filled" (paper synchronous)
     raw_response: dict[str, Any] | None    # debug audit; None for paper
+    reservation_ref: ReservationRef | None = None
 
 
 class GuardRule(Protocol):
@@ -73,7 +85,8 @@ class ExecutorPort(Protocol):
     provided and fall back to deterministic generation only for direct callers.
     """
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder: ...
 
 

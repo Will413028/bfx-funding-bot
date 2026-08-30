@@ -9,15 +9,17 @@ sweep, and the OOS research script all share. No DB.
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import run_backtest
+from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.strategies.always_market_rate import AlwaysMarketRateStrategy
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 
 def _outcome(result: BacktestResult, month_mts: int) -> WindowOutcome:
@@ -34,7 +36,8 @@ def evaluate_oos_windows(
     windows: list[WfoWindow],
     make_strategy: Callable[[], Strategy],
     *,
-    config: BacktestConfig | None = None,
+    config: BacktestConfig,
+    fill_model: FillRateModel | None,
     baseline_period_days: int = 2,
     market_candles: list[FundingCandle] | None = None,
 ) -> tuple[list[WindowOutcome], list[WindowOutcome]]:
@@ -51,18 +54,14 @@ def evaluate_oos_windows(
             portion before recording only the test month.
         make_strategy: Factory called once per window to produce a fresh
             strategy instance (prevents cross-window state leakage).
-        config: BacktestConfig to use. Defaults to linear fill model to match
-            the OOS research script (run_oos_profitability.py).
+        config: Explicit fill/friction model configuration.
+        fill_model: Explicit versioned empirical model, or None only for the
+            deliberately selected linear-baseline model.
         baseline_period_days: period_days for AlwaysMarketRateStrategy. Default 2.
         market_candles: Optional true-market series for pricing fills, when
             `candles` is a distorted view of what the strategy saw. Sliced to the
             same window. Defaults to `candles` (unchanged behaviour).
     """
-    # Construct inside the function to avoid shared mutable default state.
-    # "linear" matches the OOS research script (run_oos_profitability.py) which
-    # also uses BacktestConfig(fill_model="linear") for deterministic results.
-    effective_config = config if config is not None else BacktestConfig(fill_model="linear")
-
     strat_outcomes: list[WindowOutcome] = []
     base_outcomes: list[WindowOutcome] = []
     for w in windows:
@@ -72,15 +71,31 @@ def evaluate_oos_windows(
             if market_candles is not None
             else None
         )
-        rs = run_backtest(
-            sliced, make_strategy(), effective_config,
-            w.test_start_mts, w.test_end_mts, market_candles=sliced_market,
-        )
-        rb = run_backtest(
-            sliced, AlwaysMarketRateStrategy(period_days=baseline_period_days),
-            effective_config, w.test_start_mts, w.test_end_mts,
-            market_candles=sliced_market,
-        )
+        try:
+            rs = run_backtest(
+                sliced, make_strategy(), config,
+                w.test_start_mts, w.test_end_mts,
+                fill_model=fill_model,
+                market_candles=sliced_market,
+            )
+            rb = run_backtest(
+                sliced, AlwaysMarketRateStrategy(period_days=baseline_period_days),
+                config, w.test_start_mts, w.test_end_mts,
+                fill_model=fill_model,
+                market_candles=sliced_market,
+            )
+        except BacktestIncomplete as error:
+            incomplete = WindowOutcome(
+                month_mts=w.test_start_mts,
+                net_monthly=Decimal("0"),
+                n_trades=0,
+                fill_rate=Decimal("0"),
+                status="incomplete",
+                incomplete_reason=error.reason,
+            )
+            strat_outcomes.append(incomplete)
+            base_outcomes.append(incomplete)
+            continue
         strat_outcomes.append(_outcome(rs, w.test_start_mts))
         base_outcomes.append(_outcome(rb, w.test_start_mts))
     return strat_outcomes, base_outcomes

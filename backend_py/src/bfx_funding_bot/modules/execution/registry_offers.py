@@ -41,6 +41,7 @@ from uuid import UUID
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -68,13 +69,18 @@ class ClaimRecord:
     occurred_at_ms: int
     last_updated_ms: int
     symbol: str = "fUSD"  # populated from ReservationClaimed.symbol
+    reservation_ref: ReservationRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class DiagnosticLog:
-    level: str  # "info" | "warn"
+    level: str  # "info" | "warn" | "error"
     message: str
     venue_offer_id: str | None = None
+
+
+class ReservationCorrelationError(RuntimeError):
+    """A venue lifecycle event cannot be uniquely matched to one reservation."""
 
 
 def transition(
@@ -112,9 +118,27 @@ def transition(
 
     # ── ReservationClaimed ──────────────────────────────────────────────────
     if isinstance(incoming, ReservationClaimed):
+        if incoming.reservation_ref is None:
+            return snapshot, [DiagnosticLog(
+                level="error",
+                message=f"uncorrelated reservation claim for voi={voi}",
+                venue_offer_id=voi,
+            )]
         if voi in snapshot:
-            # Idempotent dedup — already claimed
-            return snapshot, []
+            existing = snapshot[voi]
+            if (
+                existing.reservation_ref is not None
+                and incoming.reservation_ref is not None
+                and existing.cid == incoming.cid
+                and existing.reservation_ref == incoming.reservation_ref
+                and existing.signal_correlation_id == incoming.signal_correlation_id
+            ):
+                return snapshot, []  # exact idempotent duplicate
+            return snapshot, [DiagnosticLog(
+                level="error",
+                message=f"conflicting reservation correlation for voi={voi}",
+                venue_offer_id=voi,
+            )]
         occurred = incoming.occurred_at_ms if incoming.occurred_at_ms is not None else now_ms
         assert incoming.amount is not None  # invariant: _resolve_amount guarantees this
         record = ClaimRecord(
@@ -127,22 +151,29 @@ def transition(
             occurred_at_ms=occurred,
             last_updated_ms=now_ms,
             symbol=incoming.symbol,
+            reservation_ref=incoming.reservation_ref,
         )
         return {**snapshot, voi: record}, []
 
     # ── OrderFilled ─────────────────────────────────────────────────────────
     if isinstance(incoming, OrderFilled):
+        if incoming.reservation_ref is None:
+            return snapshot, [DiagnosticLog(
+                level="error",
+                message=f"uncorrelated fill for voi={voi}",
+                venue_offer_id=voi,
+            )]
         if voi not in snapshot:
             return snapshot, [
                 DiagnosticLog(
-                    level="info",
-                    message=(
-                        f"fill before claim — no mutation; reconcile converges (voi={voi})"
-                    ),
+                    level="error",
+                    message=f"unmatched fill correlation for voi={voi}",
                     venue_offer_id=voi,
                 )
             ]
         existing = snapshot[voi]
+        if existing.reservation_ref is None or existing.reservation_ref != incoming.reservation_ref:
+            return snapshot, [DiagnosticLog("error", f"conflicting fill correlation for voi={voi}", voi)]
         if existing.state == RegistryState.RELEASED:
             # Idempotent
             return snapshot, []
@@ -152,18 +183,23 @@ def transition(
 
     # ── ReservationReleased ─────────────────────────────────────────────────
     if isinstance(incoming, ReservationReleased):
+        if incoming.reservation_ref is None:
+            return snapshot, [DiagnosticLog(
+                level="error",
+                message=f"uncorrelated release for voi={voi}",
+                venue_offer_id=voi,
+            )]
         if voi not in snapshot:
             return snapshot, [
                 DiagnosticLog(
-                    level="warn",
-                    message=(
-                        f"release event for voi={voi} not in registry"
-                        " — fill_tracker should have dedupped"
-                    ),
+                    level="error",
+                    message=f"unmatched release correlation for voi={voi}",
                     venue_offer_id=voi,
                 )
             ]
         existing = snapshot[voi]
+        if existing.reservation_ref is None or existing.reservation_ref != incoming.reservation_ref:
+            return snapshot, [DiagnosticLog("error", f"conflicting release correlation for voi={voi}", voi)]
         if existing.state == RegistryState.RELEASED:
             # Idempotent
             return snapshot, []
@@ -209,6 +245,8 @@ class OfferRegistry:
         now_ms = self._clock()
         new_snapshot, diags = transition(self._snapshot, event, now_ms)
         for d in diags:
+            if d.level == "error":
+                raise ReservationCorrelationError(d.message)
             level_fn = log.info if d.level == "info" else log.warning
             level_fn(
                 "offer_registry_diag voi=%s msg=%s",
@@ -244,6 +282,18 @@ class OfferRegistry:
         ).scalars().all()
         for r in rows:
             assert r.venue_offer_id is not None
+            if r.venue_offer_id in reg._snapshot:
+                raise ReservationCorrelationError(
+                    f"ambiguous offer claim rows for voi={r.venue_offer_id}",
+                )
+            reference = None
+            if r.execution_decision_id is not None:
+                reference = ReservationRef(
+                    execution_decision_id=r.execution_decision_id,
+                    cid=r.cid,
+                    signal_correlation_id=UUID(r.signal_correlation_id),
+                    venue_offer_id=r.venue_offer_id,
+                )
             reg._snapshot[r.venue_offer_id] = ClaimRecord(
                 venue_offer_id=r.venue_offer_id,
                 cid=r.cid,
@@ -254,6 +304,7 @@ class OfferRegistry:
                 occurred_at_ms=r.occurred_at_ms,
                 last_updated_ms=r.last_updated_ms,
                 symbol=r.symbol,
+                reservation_ref=reference,
             )
         return reg
 
@@ -271,4 +322,3 @@ class OfferRegistry:
             voi: rec for voi, rec in self._snapshot.items()
             if rec.state != RegistryState.RELEASED or rec.last_updated_ms >= threshold
         }
-

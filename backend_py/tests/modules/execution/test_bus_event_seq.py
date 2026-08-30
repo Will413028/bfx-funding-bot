@@ -4,10 +4,12 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import OrderFilled
 
 
 def _make_filled(**overrides) -> OrderFilled:
+    scid = uuid4()
     base = {
         "cid": 42,
         "venue_offer_id": "v1",
@@ -15,11 +17,16 @@ def _make_filled(**overrides) -> OrderFilled:
         "size_usdt": Decimal("100"),
         "symbol": "fUST",
         "fill_rate": 0.0005,
-        "signal_correlation_id": uuid4(),
+        "signal_correlation_id": scid,
         "account_id": "default",
         "is_simulated": False,
     }
     base.update(overrides)
+    base.setdefault("reservation_ref", ReservationRef(
+        execution_decision_id="d-bus-seq", cid=base["cid"],
+        signal_correlation_id=base["signal_correlation_id"],
+        venue_offer_id=base["venue_offer_id"],
+    ))
     return OrderFilled(**base)  # type: ignore[arg-type]
 
 

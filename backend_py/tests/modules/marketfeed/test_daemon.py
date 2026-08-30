@@ -36,6 +36,7 @@ phase3b_wfo_results_ref: x
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     # Phase 4.4c: file-based sqlite so event-store tables created below are
     # visible to build_daemon's engine (per-connection :memory: would not share
     # the schema across two engine instances).
@@ -104,6 +105,7 @@ cells:
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     # File-based sqlite so from_snapshot inside build_daemon can open sessions.
     db_path = tmp_path / "daemon_d3.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -172,6 +174,7 @@ phase3b_wfo_results_ref: x
 """)
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     db_path = tmp_path / "daemon_pr.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401

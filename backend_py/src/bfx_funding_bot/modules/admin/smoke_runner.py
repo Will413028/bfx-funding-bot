@@ -12,26 +12,17 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
-from uuid import uuid4
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
-    ReservationReleased,
 )
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    Credentials,
-    ExecutorPort,
-    SubmittedOrder,
-)
+from bfx_funding_bot.modules.execution.protocols import ExecutorPort, SubmittedOrder
 from bfx_funding_bot.modules.marketfeed.schemas import (
-    DecisionOutcome,
-    DecisionPayload,
     Phase,
     StrategyName,
 )
@@ -147,27 +138,12 @@ class SmokeRunner:
         Returns (before_timestamp, submit_result). Bus subscriptions are
         scoped via async-with — handlers auto-unsubscribe on exit.
         """
-        decision = DecisionPayload(
-            decision_outcome=DecisionOutcome.POST,
-            signal_correlation_id=uuid4(),
-            offer_rate=SMOKE_RATE,
-            offer_amount_usdt=SMOKE_SIZE_USDT,
-            offer_duration_days=SMOKE_DURATION_DAYS,
-            symbol="fUST",  # synthetic smoke decision — canary currency
+        # Smoke has no audited decision producer. Calling ExecutorPort with a
+        # raw DecisionPayload would bypass the ReadyToSubmit boundary, so keep
+        # this submit path explicitly disabled until Task 5 supplies one.
+        raise SmokeAssertionError(
+            "smoke submit disabled: audited ReadyToSubmit producer is unavailable",
         )
-        smoke_ctx = AccountContext(
-            account_id=SMOKE_ACCOUNT_ID,
-            credentials=Credentials(api_key="smoke", api_secret="smoke"),
-            allocation_cap_usdt=Decimal("1000"),
-        )
-        before_ts = datetime.now(UTC)
-        async with (
-            self._bus.subscription(ReservationClaimed, recorder.record),
-            self._bus.subscription(OrderFilled, recorder.record),
-            self._bus.subscription(ReservationReleased, recorder.record),
-        ):
-            result = await self._executor.submit(decision, smoke_ctx)
-        return before_ts, result
 
     def _assert_l2(
         self,

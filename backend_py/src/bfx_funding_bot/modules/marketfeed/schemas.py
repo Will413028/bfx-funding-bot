@@ -170,6 +170,7 @@ class OrderSubmitPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cid: int
     offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None on failed submit
+    execution_decision_id: str = Field(..., min_length=1)
     signal_correlation_id: UUID
     offer_rate: float
     offer_amount_usdt: float
@@ -182,6 +183,8 @@ class OrderSubmitPayload(BaseModel):
 
     @model_validator(mode="after")
     def _check_failed(self) -> OrderSubmitPayload:
+        if not self.execution_decision_id.strip():
+            raise ValueError("execution_decision_id must be non-empty")
         if self.status == "failed" and not self.failure_reason:
             raise ValueError("status=failed requires failure_reason")
         return self

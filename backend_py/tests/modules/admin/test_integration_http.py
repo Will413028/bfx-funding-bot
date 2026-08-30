@@ -70,7 +70,7 @@ def _build_app(token: str = "secret") -> tuple[Any, SmokeRunner]:
     return app, runner
 
 
-def test_http_smoke_l3_pass_end_to_end() -> None:
+def test_http_smoke_l3_reports_gated_submit_path() -> None:
     app, _ = _build_app()
     client = TestClient(app)
     resp = client.post(
@@ -78,10 +78,9 @@ def test_http_smoke_l3_pass_end_to_end() -> None:
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "pass"
-    assert body["level"] == "L3"
-    assert body["checks"]["l2_passed"] is True
-    assert body["checks"]["pg_events_seen"] >= 2
+    assert body["status"] == "fail"
+    assert body["level"] == "L2"
+    assert "audited ReadyToSubmit" in body["error"]
 
 
 def test_http_smoke_l2_query_param() -> None:

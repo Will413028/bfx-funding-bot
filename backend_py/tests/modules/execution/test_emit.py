@@ -7,6 +7,11 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.emit import (
     emit_order_fill,
     emit_order_submit,
@@ -49,13 +54,25 @@ def _decision(corr: Any) -> DecisionPayload:
     symbol="fUST")
 
 
+def _ready(corr: Any, *, decision_id: str = "d-emit") -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(corr),
+        decision_id=decision_id,
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-emit",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_emit_order_submit_paper_shape() -> None:
     axiom = _EventCapture()
     corr = uuid4()
     await emit_order_submit(
         event_sink=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
-        cell="fUSD_a30", decision=_decision(corr), ctx=_ctx(),
+        cell="fUSD_a30", ready=_ready(corr, decision_id="d-emit-1"), ctx=_ctx(),
         cid=42, offer_id="paper_abc", is_simulated=True, status="submitted",
     )
     assert len(axiom.events) == 1
@@ -64,6 +81,7 @@ async def test_emit_order_submit_paper_shape() -> None:
     assert ev["account_id"] == "default"
     assert ev["correlation_id"] == str(corr)
     assert ev["payload"]["cid"] == 42
+    assert ev["payload"]["execution_decision_id"] == "d-emit-1"
     assert ev["payload"]["is_simulated"] is True
 
 
@@ -73,7 +91,7 @@ async def test_emit_order_submit_failed_requires_reason() -> None:
     with pytest.raises(ValueError, match="failure_reason"):
         await emit_order_submit(
             event_sink=axiom, phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION,
-            cell="fUSD_a30", decision=_decision(uuid4()), ctx=_ctx(),
+            cell="fUSD_a30", ready=_ready(uuid4()), ctx=_ctx(),
             cid=1, offer_id=None, is_simulated=False, status="failed",
             failure_reason=None,
         )

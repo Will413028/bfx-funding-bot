@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import (
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.admin.smoke_runner import SmokeRunner
     from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
+    from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
     from bfx_funding_bot.modules.observability.metrics import DaemonMetrics
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ def make_app(
     admin_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
+    readiness: TradingReadiness | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to a given HealthProbe instance.
 
@@ -101,6 +103,18 @@ def make_app(
             content={"status": "ok", "tasks": len(liveness)},
         )
 
+    if readiness is not None:
+        @app.get("/readyz")
+        async def readyz() -> JSONResponse:
+            snapshot = readiness.snapshot()
+            return JSONResponse(
+                status_code=200 if snapshot.trading_ready else 503,
+                content={
+                    "trading_ready": snapshot.trading_ready,
+                    "reason": snapshot.reason,
+                },
+            )
+
     if metrics is not None:
         @app.get("/metrics")
         async def metrics_exposition() -> Response:
@@ -136,6 +150,7 @@ async def run_healthz_server(
     admin_token: str | None = None,
     metrics: DaemonMetrics | None = None,
     trading_status: TradingStatusService | None = None,
+    readiness: TradingReadiness | None = None,
 ) -> None:
     """Run uvicorn until stop_event fires; cancellation safe.
 
@@ -147,7 +162,7 @@ async def run_healthz_server(
     """
     app = make_app(
         probe, smoke_runner=smoke_runner, admin_token=admin_token, metrics=metrics,
-        trading_status=trading_status,
+        trading_status=trading_status, readiness=readiness,
     )
     config = uvicorn.Config(
         app=app, host=host, port=port,

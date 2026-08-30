@@ -28,6 +28,7 @@ from typing import Any
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
     CellVerdict,
     evaluate_cell_qualification,
@@ -49,6 +50,7 @@ STRATEGIES: list[type[Strategy]] = [RatePercentileStrategy, MeanReversionStrateg
 TRAIN_MONTHS = 3
 TEST_MONTHS = 1
 STEP_MONTHS = 1
+RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -123,9 +125,12 @@ async def _amain() -> int:
                     eda_cell=eda_cell,
                     cell_key=cell_key,
                     wfo_windows=windows,
+                    config=RESEARCH_CONFIG,
+                    fill_model=None,
                 )
                 verdict = evaluate_cell_qualification(outcomes)
                 per_strategy_cells[strategy_class.__name__].append(verdict)
+                model = _baselines[0] if _baselines else None
 
                 print(
                     f"- {strategy_class.__name__}: "
@@ -134,7 +139,16 @@ async def _amain() -> int:
                     f"({verdict.pct_windows_won:.2%}), "
                     f"margin={verdict.relative_margin:.3f}, "
                     f"health={verdict.health_pct:.2%}, "
+                    f"incomplete={verdict.incomplete_windows}, "
                     f"qualifies={verdict.qualifies}"
+                )
+                print(
+                    f"  model_kind={model.model_kind if model else RESEARCH_CONFIG.fill_model} "
+                    f"model_version={model.model_version if model else None} "
+                    f"artifact_hash={model.artifact_hash if model else None} "
+                    f"cutoff_ms={model.model_cutoff_ms if model else None} "
+                    f"sample_count={model.model_sample_count if model else None} "
+                    f"incomplete_reasons={[o.incomplete_reason for o in outcomes if o.incomplete_reason]}"
                 )
 
         print("\n## Strategy-level verdicts\n")
@@ -144,6 +158,7 @@ async def _amain() -> int:
             print(
                 f"- {strategy_class.__name__}: "
                 f"{sverdict.cells_qualifying}/{sverdict.cells_played} cells qualify, "
+                f"incomplete_cells={sverdict.incomplete_cells}, "
                 f"Phase 4 candidate = {sverdict.qualifies}"
             )
 

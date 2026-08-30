@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import OrderFilled
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.protocols import (
@@ -47,11 +48,15 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
 
     # Pre-load ledger with 600 USDT realized so AllocationCap (cap=500) fires
     ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
     await ledger.on_order_filled(OrderFilled(
         cid=1, venue_offer_id="paper_x", credit_id=None,
         size_usdt=Decimal("600"), fill_rate=0.0001,
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    symbol="fUST"))
+        signal_correlation_id=scid, account_id="default", is_simulated=True,
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-path-b", cid=1,
+            signal_correlation_id=scid, venue_offer_id="paper_x",
+        )))
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
 
     chain = SafetyGuardChain(

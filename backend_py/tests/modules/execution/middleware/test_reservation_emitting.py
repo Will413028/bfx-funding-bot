@@ -8,6 +8,12 @@ import pytest
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -17,12 +23,18 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
+from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
+    DecisionPayload,
+    Phase,
+    StrategyName,
+)
 
 
 def _decision(symbol: str = "fUST") -> DecisionPayload:
@@ -30,6 +42,18 @@ def _decision(symbol: str = "fUST") -> DecisionPayload:
         decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
         offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2,
         symbol=symbol)
+
+
+def _ready_to_submit(*, decision_id: str = "d-reservation", symbol: str = "fUST") -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(symbol),
+        decision_id=decision_id,
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-reservation",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
+    )
 
 
 def _ctx() -> AccountContext:
@@ -59,7 +83,8 @@ class _StubInner:
         self.persist_calls_at_submit: int | None = None
         self.cid_seen: int | None = None
 
-    async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+    async def submit(self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+                     reservation_ref: object | None = None) -> SubmittedOrder:
         self.cid_seen = cid
         if self._persister is not None:
             self.persist_calls_at_submit = len(self._persister.txns)
@@ -82,7 +107,7 @@ async def test_paper_filled_persists_intent_then_claim_and_fill() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("filled", "paper_abc", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready_to_submit(), _ctx())
     assert len(persister.txns) == 2
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationClaimed, OrderFilled]
@@ -96,7 +121,7 @@ async def test_live_submitted_persists_intent_then_claim_only() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "123456", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationClaimed]
     assert [type(e) for e in seen] == [ReservationClaimed]
@@ -109,7 +134,7 @@ async def test_failed_persists_intent_then_failed_no_publish() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("failed", None, persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationFailed]
     assert seen == []
@@ -121,10 +146,73 @@ async def test_same_cid_threaded_to_inner_and_all_events() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("filled", "paper_x", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready_to_submit(), _ctx())
     intent_cid = persister.txns[0][0].cid
     claim_cid = persister.txns[1][0].cid
     assert inner.cid_seen == intent_cid == claim_cid
+
+
+@pytest.mark.asyncio
+async def test_reservation_reference_threads_from_intent_to_submit_response_and_events() -> None:
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    ready = _ready_to_submit(decision_id="d-threaded-reference")
+    result = await ReservationEmittingMiddleware(
+        _StubInner("filled", "paper_ref", persister=persister),
+        bus=bus, persister=persister, is_simulated=True,
+    ).submit(ready, _ctx())
+
+    intent = persister.txns[0][0]
+    claimed, filled = persister.txns[1]
+    assert intent.reservation_ref.execution_decision_id == "d-threaded-reference"
+    assert claimed.reservation_ref == filled.reservation_ref == result.reservation_ref
+    assert result.reservation_ref.venue_offer_id == "paper_ref"
+
+
+@pytest.mark.asyncio
+async def test_real_paper_executor_merges_venue_bound_reservation_reference() -> None:
+    class _EventSink:
+        async def emit(self, _event: dict[object, object]) -> None:
+            return None
+
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    result = await ReservationEmittingMiddleware(
+        EchoPaperExecutor(
+            event_sink=_EventSink(), phase=Phase.PAPER,
+            strategy=StrategyName.RATE_PERCENTILE, cell="test",
+        ),
+        bus=bus, persister=persister, is_simulated=True,
+    ).submit(_ready_to_submit(decision_id="d-real-paper"), _ctx())
+
+    assert result.status == "filled"
+    assert result.reservation_ref is not None
+    assert result.reservation_ref.execution_decision_id == "d-real-paper"
+    assert result.reservation_ref.venue_offer_id == result.venue_offer_id
+
+
+@pytest.mark.asyncio
+async def test_conflicting_executor_reference_is_rejected_by_identity() -> None:
+    class _ConflictingInner:
+        async def submit(
+            self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+            reservation_ref: ReservationRef | None = None,
+        ) -> SubmittedOrder:
+            assert cid is not None
+            return SubmittedOrder(
+                cid=cid, venue_offer_id="venue-1", status="submitted", raw_response=None,
+                reservation_ref=ReservationRef(
+                    execution_decision_id="d-conflict", cid=cid,
+                    signal_correlation_id=ready.decision.signal_correlation_id,
+                    venue_offer_id="venue-1",
+                ),
+            )
+
+    with pytest.raises(RuntimeError, match="identity"):
+        await ReservationEmittingMiddleware(
+            _ConflictingInner(), bus=DomainEventBus(),
+            persister=_RecordingPersister(), is_simulated=False,
+        ).submit(_ready_to_submit(), _ctx())
 
 
 @pytest.mark.asyncio
@@ -135,20 +223,23 @@ async def test_bus_publish_failure_does_not_break_submit() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("filled", "paper_abc", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=_BrokenBus(), persister=persister, is_simulated=True)  # type: ignore[arg-type]
-    result = await mw.submit(_decision(), _ctx())
+    result = await mw.submit(_ready_to_submit(), _ctx())
     assert result.status == "filled"
 
 
 @pytest.mark.asyncio
 async def test_inner_raise_after_intent_propagates() -> None:
     class _RaisingInner:
-        async def submit(self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None) -> SubmittedOrder:
+        async def submit(
+            self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+            reservation_ref: object | None = None,
+        ) -> SubmittedOrder:
             raise ExecutorTransientError("blip")
     bus, _ = _bus_capture()
     persister = _RecordingPersister()
     mw = ReservationEmittingMiddleware(_RaisingInner(), bus=bus, persister=persister, is_simulated=True)
     with pytest.raises(ExecutorTransientError):
-        await mw.submit(_decision(), _ctx())
+        await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert len(persister.txns) == 1
 
@@ -159,11 +250,7 @@ async def test_symbol_threaded_from_decision_into_claimed_and_filled() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("filled", "paper_sym", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=True)
-    decision = DecisionPayload(
-        decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
-        offer_rate=0.0001, offer_amount_usdt=100.0, offer_duration_days=2, symbol="fUST",
-    )
-    await mw.submit(decision, _ctx())
+    await mw.submit(_ready_to_submit(symbol="fUST"), _ctx())
     claimed = persister.txns[1][0]
     filled = persister.txns[1][1]
     assert claimed.symbol == "fUST"
@@ -182,5 +269,23 @@ async def test_symbol_propagates_from_decision() -> None:
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "999", persister=persister)
     mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
-    await mw.submit(_decision(symbol="fUSD"), _ctx())
+    await mw.submit(_ready_to_submit(symbol="fUSD"), _ctx())
     assert persister.txns[1][0].symbol == "fUSD"
+
+
+@pytest.mark.asyncio
+async def test_reservation_intent_links_execution_decision_id() -> None:
+    bus, _ = _bus_capture()
+    persister = _RecordingPersister()
+    mw = ReservationEmittingMiddleware(
+        _StubInner("submitted", "123", persister=persister),
+        bus=bus,
+        persister=persister,
+        is_simulated=False,
+    )
+
+    await mw.submit(_ready_to_submit(decision_id="d-8"), _ctx(), cid=123)
+
+    intent = persister.txns[0][0]
+    assert isinstance(intent, ReservationIntent)
+    assert intent.execution_decision_id == "d-8"

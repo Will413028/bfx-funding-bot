@@ -82,6 +82,7 @@ async def test_build_daemon_default_tracing_disabled_nothing_wrapped(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_OTEL_ENABLED", raising=False)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_off.db")
@@ -107,6 +108,7 @@ async def test_build_daemon_paper_tracing_enabled_wraps_submit_outermost(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_paper.db")
@@ -135,6 +137,10 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
     monkeypatch.setenv("BFX_PHASE", "canary")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")

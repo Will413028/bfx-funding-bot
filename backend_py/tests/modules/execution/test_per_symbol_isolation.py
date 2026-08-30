@@ -1,6 +1,7 @@
 from decimal import Decimal
 from uuid import uuid4
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import OrderFilled, PositionReconciled
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
@@ -15,11 +16,16 @@ async def test_fill_and_reconcile_are_isolated_per_symbol() -> None:
             n_offers=0, n_credits=3, occurred_at_ms=1,
         )
     )
+    scid = uuid4()
     await led.on_order_filled(
         OrderFilled(
             cid=1, venue_offer_id="v1", credit_id="C1",
             amount=Decimal("50"), symbol="fUST", fill_rate=0.0005,
-            signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+            signal_correlation_id=scid, account_id="default", is_simulated=False,
+            reservation_ref=ReservationRef(
+                execution_decision_id="d-per-symbol", cid=1,
+                signal_correlation_id=scid, venue_offer_id="v1",
+            ),
         )
     )
     assert led.current_exposure("fUST") == Decimal("350")  # 300 realized + 50 filled

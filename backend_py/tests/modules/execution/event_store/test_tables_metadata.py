@@ -33,3 +33,7 @@ def test_registry_state_has_failed() -> None:
 def test_offer_claims_composite_pk() -> None:
     pk_cols = [c.name for c in OfferClaimRow.__table__.primary_key.columns]
     assert pk_cols == ["account_id", "deployment_environment", "cid"]
+
+
+def test_offer_claims_persists_audited_execution_decision_id() -> None:
+    assert "execution_decision_id" in OfferClaimRow.__table__.columns

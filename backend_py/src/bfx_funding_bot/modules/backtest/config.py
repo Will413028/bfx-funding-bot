@@ -21,10 +21,9 @@ class BacktestConfig:
     gap_minutes: int = 30
     fill_alpha: Decimal = Decimal("5.0")
     market_rate_source: Literal["candle_close"] = "candle_close"
-    # G13: "empirical" uses the learned FillRateModel (injected into run_backtest),
-    # falling back to the linear model per-lookup when stats are absent/low-confidence.
-    # "linear" forces the legacy compute_fill_prob (deterministic).
-    fill_model: Literal["empirical", "linear"] = "empirical"
+    # "empirical" requires versioned high-confidence FillRateModel evidence.
+    # "linear-baseline" is an explicit offline sensitivity baseline only.
+    fill_model: Literal["empirical", "linear-baseline"] = "empirical"
     fill_horizon_h: int = 4
 
     def __post_init__(self) -> None:

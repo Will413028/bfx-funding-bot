@@ -40,8 +40,9 @@ if TYPE_CHECKING:
         ExecutorPort,
         SubmittedOrder,
     )
-    from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
     from bfx_funding_bot.modules.observability.resource import EventResource
+
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 
 log = logging.getLogger(__name__)
 
@@ -237,16 +238,20 @@ class TracingSubmitMiddleware:
         self._tracing = tracing
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         attrs: dict[str, Any] = {}
         # Defense-in-depth on the money path: even attr harvesting must not raise.
         with contextlib.suppress(Exception):
-            attrs["bfx.symbol"] = decision.symbol
+            attrs["bfx.symbol"] = ready.decision.symbol
+            attrs["bfx.execution_decision_id"] = ready.decision_id
             if cid is not None:
                 attrs["bfx.cid"] = cid
         with self._tracing.span("executor.submit", attributes=attrs) as span:
-            order = await self._inner.submit(decision, ctx, cid=cid)
+            order = await self._inner.submit(
+                ready, ctx, cid=cid, reservation_ref=reservation_ref,
+            )
             span.set_attribute("bfx.submit.status", order.status)
             return order
 

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.matrix import (
     CellVerdict,
     WindowOutcome,
@@ -14,6 +15,8 @@ from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanRever
 from bfx_funding_bot.modules.backtest.strategies.rate_percentile import RatePercentileStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+
+_LINEAR_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
 def _result(sortino: str, net: str, fill: str = "1.0", n_trades: int = 100) -> BacktestResult:
@@ -75,8 +78,8 @@ def test_pick_sweep_winner_returns_none_when_all_filtered() -> None:
 
 
 def _outcome(
-    idx: int, oos_net: str | None, baseline_net: str, fill: str = "1.0",
-    n_trades: int = 100, status: str = "ok",
+    idx: int, oos_net: str | None, baseline_net: str | None, fill: str = "1.0",
+    n_trades: int = 100, status: str = "ok", incomplete_reason: str | None = None,
 ) -> WindowOutcome:
     return WindowOutcome(
         window_idx=idx,
@@ -88,8 +91,9 @@ def _outcome(
         oos_max_dd=Decimal("0"),
         oos_fill_rate=Decimal(fill),
         oos_sortino=Decimal("1.0"),
-        baseline_net=Decimal(baseline_net),
+        baseline_net=Decimal(baseline_net) if baseline_net is not None else None,
         baseline_sortino=Decimal("0.5"),
+        incomplete_reason=incomplete_reason,
     )
 
 
@@ -131,6 +135,18 @@ def test_evaluate_cell_qualification_excludes_skipped_windows_from_denominator()
     assert verdict.qualifies is True
 
 
+def test_evaluate_cell_qualification_cannot_qualify_when_a_window_is_incomplete() -> None:
+    outcomes = [_outcome(i, "0.50", "0.30") for i in range(10)]
+    outcomes.append(
+        _outcome(10, None, None, status="incomplete", incomplete_reason="fill_model_missing")
+    )
+
+    verdict = evaluate_cell_qualification(outcomes)
+
+    assert verdict.qualifies is False
+    assert verdict.incomplete_windows == 1
+
+
 def test_evaluate_cell_qualification_fails_when_health_pct_below_threshold() -> None:
     healthy = [_outcome(i, "0.50", "0.30", fill="1.0", n_trades=50) for i in range(5)]
     unhealthy = [_outcome(i, "0.50", "0.30", fill="0.1", n_trades=2) for i in range(5, 10)]
@@ -159,6 +175,7 @@ def _cell_verdict(qualifies: bool) -> CellVerdict:
         mean_strategy_net=Decimal("0.5"), mean_baseline_net=Decimal("0.3"),
         relative_margin=Decimal("0.66") if qualifies else Decimal("0"),
         health_pct=Decimal("0.95"),
+        incomplete_windows=0,
     )
 
 
@@ -206,11 +223,13 @@ def test_run_cell_wfo_with_rate_percentile_produces_outcomes_per_window() -> Non
         eda_cell=eda_cell,
         cell_key="fUST_p2",
         wfo_windows=windows,
+        config=_LINEAR_CONFIG,
+        fill_model=None,
     )
     assert len(outcomes) == len(windows)
     assert len(baselines) == len(windows)
     for o in outcomes:
-        assert o.status in ("ok", "skipped:no_valid_candidate", "errored")
+        assert o.status in ("ok", "skipped:no_valid_candidate", "incomplete")
         assert o.window_idx >= 0
 
 
@@ -227,6 +246,8 @@ def test_run_cell_wfo_with_mean_reversion_produces_outcomes_per_window() -> None
         eda_cell=eda_cell,
         cell_key="fUST_p2",
         wfo_windows=windows,
+        config=_LINEAR_CONFIG,
+        fill_model=None,
     )
     assert len(outcomes) == len(windows)
     assert len(baselines) == len(windows)
@@ -247,6 +268,8 @@ def test_run_cell_wfo_handles_empty_param_grid_gracefully() -> None:
         strategy_class=_StubEmptyGridStrategy,
         candles=candles, eda_cell={}, cell_key="fUST_p2",
         wfo_windows=windows,
+        config=_LINEAR_CONFIG,
+        fill_model=None,
     )
     for o in outcomes:
         assert o.status == "skipped:no_valid_candidate"

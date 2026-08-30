@@ -59,6 +59,7 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock):
 
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     db_path = tmp_path / "daemon_status.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
@@ -95,6 +96,10 @@ async def test_service_is_wired_and_reads_the_daemons_own_chain(
         g.name for g in daemon.safety_chain.guards
     ]
     assert "manual_kill" in [g["name"] for g in snap["guards"]]
+    assert snap["trading_readiness"] == {
+        "trading_ready": False,
+        "reason": "startup_not_ready",
+    }
 
 
 async def test_reported_cap_is_the_one_the_guards_enforce(

@@ -52,6 +52,58 @@ async def test_emit_is_lossless_and_json_safe(caplog) -> None:
     assert line["amt"] == "1.5"
 
 
+@pytest.mark.asyncio
+async def test_execution_event_uses_fixed_identity_and_redacts_unbounded_evidence(caplog) -> None:
+    sink = StdoutEventSink(resource=_resource())
+    with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
+        await sink.emit_execution_event(
+            "funding.execution.blocked",
+            level="warn",
+            decision_id="decision-1",
+            reconcile_id="reconcile-1",
+            symbol="fUST",
+            cell="fUST_a30",
+            policy="book_guarded",
+            outcome="blocked",
+            reason_code="book_stale",
+            evidence={"dependency": "market_snapshot", "raw_book": "secret"},
+        )
+
+    line = json.loads(caplog.records[0].getMessage())
+    assert line["event_name"] == "funding.execution.blocked"
+    assert line["level"] == "warn"
+    assert line["decision_id"] == "decision-1"
+    assert line["evidence"] == {"dependency": "market_snapshot"}
+    assert "raw_book" not in line
+
+
+@pytest.mark.asyncio
+async def test_optimizer_no_recommendation_event_is_allowlisted_and_bounded(caplog) -> None:
+    """The production sink must retain the reconciler's bounded no-rec event."""
+    sink = StdoutEventSink(resource=_resource())
+    with caplog.at_level(logging.INFO, logger="bfx_funding_bot.events"):
+        await sink.emit_execution_event(
+            "funding.optimizer.no_recommendation",
+            level="warn",
+            decision_id="decision-optimizer",
+            reconcile_id="reconcile-1",
+            symbol="fUST",
+            cell="fUST_p2",
+            policy="optimizer_shadow",
+            outcome="no_recommendation",
+            reason_code="evidence_scope_mismatch",
+            evidence={
+                "optimizer_outcome": "no_recommendation",
+                "candidate_rates": ["0.00021"],
+            },
+        )
+
+    line = json.loads(caplog.records[0].getMessage())
+    assert line["event_name"] == "funding.optimizer.no_recommendation"
+    assert line["reason_code"] == "evidence_scope_mismatch"
+    assert line["evidence"] == {"optimizer_outcome": "no_recommendation"}
+
+
 # ── Four Golden Signals metrics hook (observe-only, fail-open) ────────────────
 
 

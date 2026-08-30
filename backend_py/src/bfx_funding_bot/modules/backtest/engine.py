@@ -1,5 +1,6 @@
 import math
 from decimal import Decimal
+from typing import Literal, NoReturn
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig, compute_fill_prob
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult, LendDecision
@@ -10,7 +11,59 @@ from bfx_funding_bot.modules.backtest.sortino import (
 )
 from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.artifact import FillModelUnavailable
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+
+BacktestIncompleteReason = Literal[
+    "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+]
+
+
+class BacktestIncomplete(RuntimeError):  # noqa: N818 - contract name is prescribed
+    """A requested empirical backtest lacks usable versioned fill evidence."""
+
+    def __init__(self, reason: BacktestIncompleteReason) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _raise_for_unavailable(evidence: FillModelUnavailable) -> NoReturn:
+    if evidence.reason == "low_confidence":
+        raise BacktestIncomplete("fill_model_low_confidence")
+    if evidence.reason == "scope_mismatch":
+        raise BacktestIncomplete("fill_model_scope_mismatch")
+    raise BacktestIncomplete("fill_model_missing")
+
+
+def _preflight_empirical_model(
+    candles: list[FundingCandle], fill_horizon_h: int, fill_model: FillRateModel | None
+) -> None:
+    if fill_model is None or fill_model.artifact is None:
+        raise BacktestIncomplete("fill_model_missing")
+    if fill_model.unavailable_reason is not None:
+        _raise_for_unavailable(FillModelUnavailable(fill_model.unavailable_reason))
+
+    artifact = fill_model.artifact
+    if (
+        artifact.source != "candle"
+        or artifact.horizon_h != fill_horizon_h
+        or any(
+            candle.symbol != artifact.symbol
+            or candle.period_agg != artifact.period_agg
+            for candle in candles
+        )
+    ):
+        _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
+
+
+def _validate_candle_artifact_scope(
+    candle: FundingCandle, fill_model: FillRateModel
+) -> None:
+    artifact = fill_model.artifact
+    if artifact is not None and (
+        artifact.source != "candle" or artifact.symbol != candle.symbol
+    ):
+        _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
 
 
 def _resolve_market_rate(candle: FundingCandle, source: str) -> Decimal | None:
@@ -34,16 +87,23 @@ def _apply_friction(
         return decision.rate, Decimal("1")
     spread_pct = (decision.rate - market_rate) / market_rate
 
-    fill_prob: Decimal | None = None
-    if config.fill_model == "empirical" and fill_model is not None:
+    if config.fill_model == "empirical":
+        if fill_model is None:
+            raise BacktestIncomplete("fill_model_missing")
+        if fill_model.artifact is None:
+            raise BacktestIncomplete("fill_model_missing")
+        _validate_candle_artifact_scope(candle, fill_model)
         est = fill_model.estimate_fill(
             reference_rate=market_rate, offer_rate=decision.rate,
             period_agg=candle.period_agg, horizon_h=config.fill_horizon_h,
         )
-        if est is not None and not est.low_confidence:
-            fill_prob = est.fill_prob
-    if fill_prob is None:  # linear mode, or empirical fallback (no/low-confidence stats)
+        if isinstance(est, FillModelUnavailable):
+            _raise_for_unavailable(est)
+        fill_prob = est.fill_prob
+    elif config.fill_model == "linear-baseline":
         fill_prob = compute_fill_prob(spread_pct, config.fill_alpha)
+    else:  # pragma: no cover - BacktestConfig validates the literal at construction.
+        raise ValueError(f"unsupported fill_model: {config.fill_model!r}")
 
     gross_rate = decision.rate * fill_prob
     return gross_rate, fill_prob
@@ -52,7 +112,7 @@ def _apply_friction(
 def run_backtest(
     candles: list[FundingCandle],
     strategy: Strategy,
-    config: BacktestConfig | None = None,
+    config: BacktestConfig,
     record_start_mts: int | None = None,
     record_end_mts: int | None = None,
     fill_model: FillRateModel | None = None,
@@ -76,8 +136,8 @@ def run_backtest(
     rate. Passing one series to both sides makes `spread_pct` collapse to 0 and
     the distortion appear harmless — the artifact that invalidated the first L4 run.
     """
-    config = config or BacktestConfig()
-
+    if config.fill_model == "empirical":
+        _preflight_empirical_model(candles, config.fill_horizon_h, fill_model)
     if not candles:
         return BacktestResult(
             strategy_name=strategy.name, symbol="",
@@ -87,6 +147,7 @@ def run_backtest(
             max_drawdown_pct=Decimal("0"),
             n_trades=0, fill_rate=Decimal("0"),
             sortino=Decimal("0"),
+            model_kind=config.fill_model,
         )
 
     sorted_candles = sorted(candles, key=lambda c: c.mts)
@@ -182,6 +243,13 @@ def run_backtest(
         max_drawdown_pct=max_dd * Decimal("100"),
         n_trades=n_trades, fill_rate=fill_rate,
         sortino=sortino_value,
+        model_kind=config.fill_model,
+        model_version=(fill_model.artifact.model_version if fill_model and fill_model.artifact else None),
+        artifact_hash=(fill_model.artifact.artifact_hash if fill_model and fill_model.artifact else None),
+        model_cutoff_ms=(fill_model.artifact.cutoff_ms if fill_model and fill_model.artifact else None),
+        model_sample_count=(
+            fill_model.artifact.sample_count if fill_model and fill_model.artifact else None
+        ),
     )
 
 

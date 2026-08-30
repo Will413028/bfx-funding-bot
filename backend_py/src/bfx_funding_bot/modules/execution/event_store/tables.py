@@ -75,6 +75,9 @@ class OfferClaimRow(Base):
     symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     size_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     signal_correlation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable only for pre-Task-4 historical rows. New submit paths always
+    # project the immutable reservation reference's audited decision id.
+    execution_decision_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_updated_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -82,6 +85,20 @@ class OfferClaimRow(Base):
     __table_args__ = (
         PrimaryKeyConstraint("account_id", "deployment_environment", "cid"),
         Index("idx_offer_claims_voi", "venue_offer_id"),
+        Index(
+            "uq_offer_claims_venue_offer_id",
+            "account_id", "deployment_environment", "venue_offer_id",
+            unique=True,
+            postgresql_where=text("venue_offer_id IS NOT NULL"),
+            sqlite_where=text("venue_offer_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_offer_claims_execution_decision_id",
+            "account_id", "deployment_environment", "execution_decision_id",
+            unique=True,
+            postgresql_where=text("execution_decision_id IS NOT NULL"),
+            sqlite_where=text("execution_decision_id IS NOT NULL"),
+        ),
     )
 
 

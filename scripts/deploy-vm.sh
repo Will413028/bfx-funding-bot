@@ -1,17 +1,15 @@
 #!/bin/bash
 # Deploy the bfx canary stack on the Oracle VM. Run ON THE VM from the repo root.
-# Usage: ./scripts/deploy-vm.sh <paper|shadow|canary>
+# Usage: ./scripts/deploy-vm.sh <paper|shadow|shadow-p14|canary>
 set -euo pipefail
 
 PHASE="${1:-}"
-case "$PHASE" in paper|shadow|canary) ;; *) echo "usage: $0 <paper|shadow|canary>"; exit 1 ;; esac
+case "$PHASE" in paper|shadow|shadow-p14|canary) ;; *) echo "usage: $0 <paper|shadow|shadow-p14|canary>"; exit 1 ;; esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-# Pull FIRST: the env assembly below reads deploy/vm/<phase>.env from the repo —
-# pulling after it deploys the PREVIOUS commit's env config (bit us 2026-07-10:
-# freshly committed BFX_REPRICE/CLAMP flags were silently absent from .env.runtime,
-# reverting E1 to observe-only for ~15 min on a live bot).
+# Pull FIRST: the env assembly below reads deploy/vm/<phase>.env from the repo.
+# Pulling after assembly would deploy the previous commit's profile.
 git pull --ff-only origin main
 SECRETS="$HOME/bfx/bot.env"
 PHASE_ENV="deploy/vm/${PHASE}.env"
@@ -24,12 +22,32 @@ cat "$SECRETS" "$PHASE_ENV" > .env.runtime
 chmod 600 .env.runtime
 
 # Preflight: required vars present.
-need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV"
+need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY"
 need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_API_KEY BFX_API_SECRET BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
 req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary"
 for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
 done
+
+EXECUTION_POLICY=$(grep '^BFX_EXECUTION_POLICY=' .env.runtime | tail -1 | cut -d= -f2-)
+case "$PHASE:$EXECUTION_POLICY" in
+  paper:paper|shadow:book_guarded|shadow-p14:optimizer_shadow|canary:book_guarded|canary:optimizer_live) ;;
+  *)
+    echo "ERROR: execution policy $EXECUTION_POLICY is incompatible with phase $PHASE"
+    exit 1
+    ;;
+esac
+
+if [ "$EXECUTION_POLICY" != paper ]; then
+  for v in BFX_BOOK_MAX_AGE_SECONDS BFX_BOOK_RECONCILE_INTERVAL_SECONDS BFX_BOOK_MAX_DOWN_PCT; do
+    grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for policy $EXECUTION_POLICY"; exit 1; }
+  done
+fi
+if [ "$EXECUTION_POLICY" = optimizer_live ]; then
+  for v in BFX_FILL_MODEL_ARTIFACT BFX_OPTIMIZER_FEE_RATE; do
+    grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for policy optimizer_live"; exit 1; }
+  done
+fi
 
 # --- web-API env (separate from the daemon: scoped DB role, NO daemon secrets) ---
 WEBAPI_SECRETS="$HOME/bfx/webapi.env"
@@ -51,11 +69,7 @@ done
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
 set -a; . ./.env.frontend.runtime; set +a
 
-# Show what will ACTUALLY bind before anyone confirms. BFX_ALLOCATION_CAP_USDT is
-# only a fallback for a symbol missing from the safety config's caps, and
-# assert_caps_invariant guarantees no canary symbol is missing — so that env var
-# binds nothing here. Setting it to 0 on 2026-07-27 read as "paused" and halted
-# nothing; the bot kept lending for hours against caps.fUST=10000.
+# Show the committed canary safety configuration before confirmation.
 if [ "$PHASE" = canary ]; then
   # Read from .env.runtime, never from the shell env: this script runs under
   # `set -u` and never sources that file, so ${BFX_SAFETY_CONFIG} is unbound and
@@ -63,8 +77,8 @@ if [ "$PHASE" = canary ]; then
   # failure was invisible because the caller happened to be grepping the output.
   SAFETY_HOST=$(grep -oE 'configs/safety[^ ]*\.yaml' .env.runtime | head -1 | sed 's#^#backend_py/#')
   echo "--- effective real-money limits ---"
-  echo "  per-symbol caps (BINDING): $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
-  echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2) (fallback only — does NOT bind configured symbols)"
+  echo "  per-symbol caps: $(grep -E '^\s+caps:' "$SAFETY_HOST" 2>/dev/null | sed 's/^ *//' || echo '??? could not read '"$SAFETY_HOST")"
+  echo "  BFX_ALLOCATION_CAP_USDT  : $(grep '^BFX_ALLOCATION_CAP_USDT=' .env.runtime | cut -d= -f2)"
   # Captured rather than inlined so the "unset" case is explicit at a glance.
   # (The previous inline `... || echo '<unset>'` was in fact correct: `||` binds
   # to the whole pipeline, and under pipefail a failing grep does trigger it.

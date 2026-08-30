@@ -23,6 +23,11 @@ from opentelemetry.trace import StatusCode
 
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
@@ -70,6 +75,18 @@ def _decision() -> DecisionPayload:
     )
 
 
+def _ready() -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(),
+        decision_id="d-trace",
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-trace",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
+    )
+
+
 def _enabled_tracing(exporter: InMemorySpanExporter) -> DaemonTracing:
     return DaemonTracing(
         enabled=True,
@@ -84,11 +101,14 @@ class _StubExecutor:
         self.order = order
         self.exc = exc
         self.calls: list[int | None] = []
+        self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls.append(cid)
+        self.readies.append(ready)
         if self.exc is not None:
             raise self.exc
         assert self.order is not None
@@ -216,13 +236,16 @@ async def test_submit_middleware_passthrough_and_span() -> None:
     order = SubmittedOrder(cid=7, venue_offer_id="x", status="filled", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
-    got = await mw.submit(_decision(), _ctx(), cid=7)
+    ready = _ready()
+    got = await mw.submit(ready, _ctx(), cid=7)
     assert got is order                 # byte-identical passthrough
     assert inner.calls == [7]           # cid threaded down unchanged
+    assert inner.readies == [ready]      # immutable boundary object is not rebuilt
     (span,) = exporter.get_finished_spans()
     assert span.name == "executor.submit"
     assert span.attributes is not None
     assert span.attributes["bfx.symbol"] == "fUST"
+    assert span.attributes["bfx.execution_decision_id"] == "d-trace"
     assert span.attributes["bfx.cid"] == 7
     assert span.attributes["bfx.submit.status"] == "filled"
     t.shutdown()
@@ -234,7 +257,7 @@ async def test_submit_middleware_exception_passthrough() -> None:
     boom = RuntimeError("venue down")
     mw = TracingSubmitMiddleware(_StubExecutor(exc=boom), tracing=t)
     with pytest.raises(RuntimeError) as exc_info:
-        await mw.submit(_decision(), _ctx(), cid=3)
+        await mw.submit(_ready(), _ctx(), cid=3)
     assert exc_info.value is boom       # the SAME exception object, unchanged
     (span,) = exporter.get_finished_spans()
     assert span.status.status_code is StatusCode.ERROR
@@ -246,7 +269,7 @@ async def test_submit_middleware_transparent_when_disabled() -> None:
     order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = TracingSubmitMiddleware(inner, tracing=t)
-    got = await mw.submit(_decision(), _ctx())
+    got = await mw.submit(_ready(), _ctx())
     assert got is order
     assert inner.calls == [None]
 

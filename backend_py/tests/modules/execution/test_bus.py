@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -15,10 +16,14 @@ from bfx_funding_bot.modules.execution.events import (
 
 
 def _make_claim() -> ReservationClaimed:
+    scid = uuid4()
     return ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    symbol="fUST")
+        signal_correlation_id=scid, account_id="default", is_simulated=True,
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-bus", cid=1, signal_correlation_id=scid,
+            venue_offer_id="x"),
+    )
 
 
 @pytest.mark.asyncio
@@ -107,11 +112,15 @@ async def test_release_event_routes_separately() -> None:
     async def h(e: ReservationReleased) -> None:
         received.append(e)
     bus.subscribe(ReservationReleased, h)
+    scid = uuid4()
     rel = ReservationReleased(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
-        reason="venue_cancel", signal_correlation_id=uuid4(),
+        reason="venue_cancel", signal_correlation_id=scid,
         account_id="default", is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-bus", cid=1, signal_correlation_id=scid,
+            venue_offer_id="x"),
+    )
     await bus.publish(rel)
     # Bus attaches event_seq and recorded_at_ms; verify core fields match.
     assert len(received) == 1

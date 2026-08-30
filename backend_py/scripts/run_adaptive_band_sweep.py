@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.backtest.band_sweep import (
     render_report,
     simulate_period_path,
 )
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.strategies.adaptive_period import AdaptivePeriodStrategy
@@ -74,7 +75,13 @@ async def _run_cell(
         def _make(p: dict[str, object] = params) -> Strategy:  # default-bind per iteration
             return AdaptivePeriodStrategy(**p)  # type: ignore[arg-type]
 
-        strat_outcomes, base_outcomes = evaluate_oos_windows(candles, windows, make_strategy=_make)
+        strat_outcomes, base_outcomes = evaluate_oos_windows(
+            candles,
+            windows,
+            make_strategy=_make,
+            config=BacktestConfig(fill_model="linear-baseline"),
+            fill_model=None,
+        )
         periods = simulate_period_path(candles, **params)  # type: ignore[arg-type]
         results.append(build_band_result(
             t1=t1, t2=t2, strat_outcomes=strat_outcomes, base_outcomes=base_outcomes,
