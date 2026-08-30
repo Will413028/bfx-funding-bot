@@ -140,10 +140,13 @@ def _strategy_label(value: Any) -> str | None:
 def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
     if manifest is None:
         return _unavailable("WFO window manifest not provided")
+    if not isinstance(manifest, Mapping):
+        return _unavailable("WFO manifest must be a JSON object")
     results = manifest.get("results")
     if not isinstance(results, list):
         return _unavailable("manifest results is missing or malformed")
     groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    labels: set[str] = set()
     for result in results:
         if not isinstance(result, Mapping):
             return _unavailable("manifest result row is malformed")
@@ -159,6 +162,10 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
             or not isinstance(windows, list)
         ):
             return _unavailable("manifest result row has malformed cell, strategy, or windows")
+        input_strategy = result["strategy"]
+        if not isinstance(input_strategy, str):
+            return _unavailable("manifest result row has malformed strategy")
+        labels.add(input_strategy)
         for window in windows:
             if not isinstance(window, Mapping) or not isinstance(
                 window.get("best_params"), Mapping
@@ -167,7 +174,7 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
             start = window.get("test_start_mts", window.get("window_idx"))
             if not isinstance(start, (int, float)):
                 return _unavailable("manifest window lacks test_start_mts or window_idx")
-            groups[(cell, strategy)].append({"start": start, "params": window["best_params"]})
+            groups[(cell, input_strategy)].append({"start": start, "params": window["best_params"]})
     if not groups or any(len(windows) < 2 for windows in groups.values()):
         return _unavailable("fewer than two WFO windows for a cell and strategy")
     rows: list[dict[str, Any]] = []
@@ -202,6 +209,7 @@ def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         "status": "available",
         "rows": rows,
+        "strategies": sorted(labels),
         "max_drift": max(values),
         "mean_drift": sum(values) / len(values),
     }
@@ -280,18 +288,31 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "## M1 — Signal parity",
         "",
         f"- signals: {m1['total']}",
+        f"- divergent: {m1['divergent']}",
+        f"- direction unknown: {m1['direction_unknown']}",
         f"- signal match rate: {m1['signal_match_rate']}",
         f"- state match rate: {m1['state_match_rate']}",
+        "- per-cell:",
+        *[
+            f"  - {row['cell']}: total={row['total']}, "
+            f"signal_match_rate={row['signal_match_rate']}, "
+            f"state_match_rate={row['state_match_rate']}"
+            for row in m1["per_cell"]
+        ],
         "",
         "## M2 — WFO parameter drift",
         "",
         f"- status: {m2['status']}",
+        f"- pairwise rows: {len(m2['rows'])}",
         f"- max drift: {m2['max_drift']}",
+        f"- mean drift: {m2['mean_drift']}",
+        *([f"- unavailable reason: {m2['reason']}"] if m2["status"] == "unavailable" else []),
         "",
         "## M3 — Feed gaps",
         "",
         f"- stale events: {m3['total_stale_events']}",
         f"- gaps over threshold: {m3['gaps_over_threshold']}",
+        f"- maximum known gap: {m3['max_known_gap_seconds']}",
         f"- unknown gaps: {m3['unknown_gap_count']}",
         "",
     ]

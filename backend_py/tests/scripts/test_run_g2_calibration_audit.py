@@ -192,3 +192,63 @@ def test_cli_reads_stdin_and_writes_markdown_and_sibling_json(tmp_path: Path) ->
     assert completed.returncode == 0
     assert output.exists() and output.with_suffix(".json").exists()
     assert json.loads(output.with_suffix(".json").read_text())["decision"] == "not_evaluated"
+
+
+def test_report_handles_non_object_wfo_json_as_unavailable() -> None:
+    report = build_report([], manifest=[])
+    assert report["m2"]["status"] == "unavailable"
+    assert report["m2"]["reason"] == "WFO manifest must be a JSON object"
+
+
+def test_m2_preserves_class_name_strategy_label_in_output() -> None:
+    result = compute_m2(
+        {
+            "results": [
+                {
+                    "cell": "fUSD_p30",
+                    "strategy": "MeanReversionStrategy",
+                    "windows": [
+                        {"test_start_mts": 1, "best_params": {"span": 10}},
+                        {"test_start_mts": 2, "best_params": {"span": 20}},
+                    ],
+                }
+            ]
+        }
+    )
+    assert result["rows"][0]["strategy"] == "MeanReversionStrategy"
+    assert result["strategies"] == ["MeanReversionStrategy"]
+
+
+def test_markdown_includes_computed_evidence_and_unavailable_reason() -> None:
+    report = build_report(
+        [
+            json.dumps(event("signal")),
+            json.dumps(
+                event(
+                    "signal_divergence", payload={"divergence_detail": {"live": {}, "replay": {}}}
+                )
+            ),
+            json.dumps(
+                event(
+                    "health_check",
+                    payload={
+                        "check_target": "signal_pipeline",
+                        "reason": "stale_exceeded",
+                        "stale_seconds": 301,
+                    },
+                )
+            ),
+        ]
+    )
+    markdown = render_markdown(report)
+    for expected in (
+        "divergent",
+        "direction unknown",
+        "fUSD_p30",
+        "pairwise",
+        "mean drift",
+        "WFO window manifest not provided",
+        "maximum known gap",
+        "301.0",
+    ):
+        assert expected in markdown
