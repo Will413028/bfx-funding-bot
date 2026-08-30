@@ -94,6 +94,7 @@ def test_checkpoint_script_preserves_http_error_status_and_body_diagnostics():
 
 @pytest.mark.parametrize("logs_failure", [False, True], ids=["logs-ok", "logs-failure"])
 def test_checkpoint_invocation_is_read_only_and_does_not_leak_admin_token(tmp_path, logs_failure):
+    log_counters = ("scheduler_tick", "reconcile", "divergence", "blocked", "submit", "error")
     calls = tmp_path / "calls.log"
     reports = tmp_path / "reports"
     fake_docker = tmp_path / "docker"
@@ -181,17 +182,15 @@ exit 99
     server.shutdown()
     assert result.returncode == 0, result.stderr
     report = next(reports.glob("soak-checkpoint-*.txt")).read_text()
+    report_lines = report.splitlines()
     if logs_failure:
-        assert "log_capture=unavailable" in report
-        assert "docker logs" in report
-        assert "exit_status=42" in report
-        assert "scheduler_tick=0" not in report
-        assert "reconcile=0" not in report
-        assert "divergence=0" not in report
-        assert "blocked=0" not in report
-        assert "submit=0" not in report
-        assert "error=0" not in report
+        assert "log_capture=unavailable source=docker logs bfx-bot exit_status=42" in report
+        for counter in log_counters:
+            assert f"{counter}=unavailable (docker logs exit status 42)" in report_lines
     else:
+        assert "log_capture=ok source=docker logs bfx-bot" in report
+        for counter in log_counters:
+            assert f"{counter}=0" in report_lines
         assert "/healthz: HTTP 503 body={\"state\":\"degraded [redacted]\"}" in report
         assert "/readyz: HTTP 503 body={\"state\":\"starting [redacted]\"}" in report
         assert '"note": "[redacted]"' in report
