@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.eda import close_over_ema_sigma
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import active_return_summary
@@ -22,6 +23,7 @@ from bfx_funding_bot.modules.backtest.split import compute_train_end_mts
 from bfx_funding_bot.modules.backtest.strategies.mean_reversion import MeanReversionStrategy
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 # A scored combo: (params, mean_active, information_ratio, pct_months_outperform)
 ScoredCombo = tuple[dict[str, Any], Decimal, Decimal, Decimal]
@@ -73,7 +75,12 @@ def select_winner(scored: list[ScoredCombo]) -> dict[str, Any]:
     )[0]
 
 
-def derive_cell_params(candles: list[FundingCandle]) -> DerivedCell:
+def derive_cell_params(
+    candles: list[FundingCandle],
+    *,
+    config: BacktestConfig,
+    fill_model: FillRateModel,
+) -> DerivedCell:
     """Derive the deployed MeanReversion params for one cell from its candles.
 
     Deterministic given `candles`. ratio_sigma per ema_span is computed from
@@ -120,6 +127,8 @@ def derive_cell_params(candles: list[FundingCandle]) -> DerivedCell:
             candles,
             windows,
             make_strategy=functools.partial(_make_strategy, params),
+            config=config,
+            fill_model=fill_model,
         )
         active = active_return_summary(strat_out, base_out)
         scored.append((

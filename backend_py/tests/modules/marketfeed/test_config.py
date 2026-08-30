@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols, load_config
 from bfx_funding_bot.modules.marketfeed.schemas import StrategyName
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
@@ -41,6 +43,115 @@ def _valid_yaml() -> dict:
     }
 
 
+def _set_required_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    phase: str,
+    policy: str,
+    deployment_environment: str = "ci",
+) -> None:
+    monkeypatch.setenv("BFX_PHASE", phase)
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", policy)
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", deployment_environment)
+    if policy in {
+        ExecutionPolicy.BOOK_GUARDED.value,
+        ExecutionPolicy.OPTIMIZER_SHADOW.value,
+        ExecutionPolicy.OPTIMIZER_LIVE.value,
+    }:
+        monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+        monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+        monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    if policy == ExecutionPolicy.OPTIMIZER_LIVE.value:
+        monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUSD.json")
+
+
+@pytest.fixture(autouse=True)
+def _set_explicit_paper_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every config-load test declares an execution policy by default."""
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", ExecutionPolicy.PAPER.value)
+
+
+def test_missing_execution_policy_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BFX_PHASE", "shadow")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.delenv("BFX_EXECUTION_POLICY", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_EXECUTION_POLICY"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_canary_rejects_paper_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_config_env(monkeypatch, phase="canary", policy="paper")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match=r"canary.*execution_policy"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_book_guarded_requires_all_book_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="book_guarded")
+    monkeypatch.delenv("BFX_BOOK_MAX_DOWN_PCT")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_BOOK_MAX_DOWN_PCT"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_optimizer_live_requires_fill_model_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_live")
+    monkeypatch.delenv("BFX_FILL_MODEL_ARTIFACT")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_FILL_MODEL_ARTIFACT"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_optimizer_live_requires_optimizer_fee_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_live")
+    monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    with pytest.raises(ValueError, match="BFX_OPTIMIZER_FEE_RATE"):
+        load_config(cells_yaml_path=yaml_path)
+
+
+def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_live")
+    monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUST-fill.json")
+    monkeypatch.setenv("BFX_OPTIMIZER_FEE_RATE", "0.15")
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    config = load_config(cells_yaml_path=yaml_path)
+
+    assert config.fill_model_artifact == "models/fUST-fill.json"
+    assert config.optimizer_fee_rate == Decimal("0.15")
+
+
+def test_optimizer_shadow_allows_missing_model_and_fee_for_observation_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_config_env(monkeypatch, phase="shadow", policy="optimizer_shadow")
+    monkeypatch.delenv("BFX_FILL_MODEL_ARTIFACT", raising=False)
+    monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
+    yaml_path = _write_yaml(tmp_path, _valid_yaml())
+
+    config = load_config(cells_yaml_path=yaml_path)
+
+    assert config.fill_model_artifact is None
+    assert config.optimizer_fee_rate is None
+
+
 def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
@@ -60,6 +171,7 @@ def test_load_config_accepts_canary_phase(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("BFX_PHASE", "canary")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    _set_required_config_env(monkeypatch, phase="canary", policy="book_guarded")
     monkeypatch.delenv("BFX_CELLS", raising=False)
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
@@ -88,6 +200,12 @@ def test_canary_phase_accepts_prod_realm(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("BFX_PHASE", "canary")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    _set_required_config_env(
+        monkeypatch,
+        phase="canary",
+        policy="book_guarded",
+        deployment_environment="prod",
+    )
     monkeypatch.delenv("BFX_CELLS", raising=False)
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())

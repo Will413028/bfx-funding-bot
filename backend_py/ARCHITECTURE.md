@@ -155,7 +155,10 @@ sequenceDiagram
     participant LED as PaperPositionLedger
     participant DR as DeploymentReconciler
     participant SQ as StandingQuoteStore
+    participant BK as FundingBookService
     participant SA as SafetyGuardChain
+    participant EG as ExecutionEligibility
+    participant AD as ExecutionDecisionStore
     participant EX as Executor middleware
 
     Note over PR: 每 ~90s 一 tick（min 10s debounce）
@@ -173,9 +176,14 @@ sequenceDiagram
     DR->>DR: allocate_gap(target=cap, current=current_exposure)  greedy emptiest-first
     loop each fill
         DR->>SQ: get_active(cell_id, now_ms)  (POST 且未過 TTL)
+        DR->>BK: current MarketSnapshot(symbol, period_days, amount)
+        BK-->>DR: valid exact-period book evidence | typed unavailable
         DR->>SA: evaluate(decision)  (短路於第一個 BLOCK，2s/guard fail-closed)
         SA-->>DR: allowed
-        DR->>EX: submit(decision)
+        DR->>EG: prepare(candidate, snapshot, safety)
+        EG->>AD: append READY / BLOCKED decision（先於 venue）
+        AD-->>EG: committed decision id
+        EG->>EX: submit(ReadyToSubmit)（READY only）
         EX->>ST: txn1 ReservationIntent(PENDING) → REST → txn2 ReservationClaimed(+OrderFilled)
         DR->>DR: tracker.record_deploy(cell_id, amount)  (僅成交/submitted 才記)
     end
@@ -234,11 +242,13 @@ sequenceDiagram
    - **greedy emptiest-first**：依目前各 cell 已部署量由小到大排序，先填最空的；
    - 每 cell 上限 `cap_per_cell = max(concentration_pct * target, target / n_active_cells)`（`concentration_pct` 預設 70%，`n_active_cells` 為當下 active cell 數）：≥2 active cells 時與舊公式 byte-identical；僅 1 active cell 時可吃下全部 target（同幣別多 cell 皆跑同一策略，cap 對單一 active cell 本就不提供分散效果，見 commit `0d29fc8`）；
    - 低於 `effective_min_usdt = ceil(150 * 1.02) = 153` USDT 的零頭（dust）丟棄；總分配 ≤ gap，全域 cap 永不超過。
-7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ `SafetyGuardChain.evaluate` → executor submit。executor 對 venue reject（如 10001）回 `status="failed"` 而非 raise，故 reconciler 檢查 `status`，僅 submitted 才 `tracker.record_deploy`（否則記 `deployment_submit_rejected`、不記 phantom intent）。
+7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ 讀取同一 symbol、**exact `period_days`** 與所需 amount 的 `MarketSnapshot` → `SafetyGuardChain.evaluate` → `ExecutionEligibility.prepare`。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
 
 7b. **Reprice sweep（E1）**：allocation 前，對每個 symbol 比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。
 
-7c. **Book-aware clamp（E2）**：步驟 7 建 DecisionPayload 前，每 symbol 每 tick 抓一次 public funding ticker（`GET /v2/ticker/f{sym}`，免認證，共用 FundingRateLimiter），把 quote rate 對齊 live book：`BID ≥ quote.rate` 且 `bid_size ≥ amount` 且 `bid_period ≤ BFX_CLAMP_TAKER_MAX_PERIOD_D` → 掛 quote.rate 直接吃單（taker，唯一保證成交路徑；fill 繼承 bid 的 rate/period）；否則掛 `ASK − 1 tick`（搶隊首），但競爭價低於 `quote.rate × (1 − BFX_CLAMP_MAX_DOWN_PCT)` 時維持 quote.rate（深度下移屬 signal 層職權）。ticker 抓失敗 → 全 fallback quote.rate（= 現狀）。`BFX_CLAMP_ENABLED=false`（預設）僅 log `clamp_would_adjust`。clamp enabled 時 7b 的 sweep ref 同步對齊 `max(quote ref, ASK − 1 tick)` — sustained spike 中不自砍 E2 剛掛的高價單。
+7c. **Execution eligibility（fail-closed）**：snapshot 必須已完成 initial snapshot、在 `BFX_BOOK_MAX_AGE_SECONDS` 內、sequence/checksum valid（或完成 REST reconcile）、symbol 相符、存在 exact period level，且該 side 的絕對 depth 足以覆蓋 amount。任一條件不足，或 model/safety/audit 不可用，皆產生 `BlockedExecution`／`NoRecommendation` 並不送單；不得重用 signal quote、ticker 值或 linear estimate。`book_guarded` 以 exact-period book 價格送單；`optimizer_shadow` 只記錄候選與評分，仍送 book-guarded rate；`optimizer_live` 僅在 empirical evidence、fee 與其餘依賴全部有效時才可選擇 optimizer rate。
+
+7d. **Audit ordering**：每個 allocation candidate 先 append 一筆不可變 `execution_decisions`（`ready`、`blocked` 或 `no_recommendation`）。只有 READY audit commit 成功，才建立 `ReadyToSubmit` 並交給 executor；audit 失敗一律 block。成功送出的 `ReservationIntent` 帶相同 `decision_id`，但 execution audit 不是 ledger projection，也不改變 capital state。executor 對 venue reject（如 10001）回 `status="failed"` 而非 raise，故 reconciler 僅 submitted 才 `tracker.record_deploy`（否則記 `deployment_submit_rejected`、不記 phantom intent）。
 
 **成交與重部署**
 
@@ -254,20 +264,20 @@ sequenceDiagram
 
 | 參數 | 值 | env |
 |---|---|---|
-| Allocation cap（canary on Koyeb） | 10000 USDT | `BFX_ALLOCATION_CAP_USDT`（程式預設 500；canary 3000→10000 見 commit `aa4842c`，原文件曾誤留 570） |
+| Canary allocation caps | fUST 10000 USDT；fUSD 400 USDT | `safety.canary.yaml` 的 `allocation_cap.caps` 是 binding per-symbol cap；`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅是 caps map 缺少 symbol 時的 fallback，不能覆寫 map |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
 | Per-cell concentration | `max(70% × target, target / n_active_cells)`；≥2 active cells 等同 70%，僅 1 active cell 時可達 100%（見 commit `0d29fc8`） | `BFX_CONCENTRATION_PCT`=0.70 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
 | Reprice sweep（E1） | enabled（canary 2026-07-07 起）；tolerance 10%；min age 30min；≤3 cancels/tick | `BFX_REPRICE_ENABLED`、`BFX_REPRICE_TOLERANCE_PCT`、`BFX_REPRICE_MIN_AGE_S`、`BFX_REPRICE_MAX_CANCELS_PER_TICK` |
-| Book clamp（E2） | enabled（canary 2026-07-10 起）；down floor 15%；taker ≤7d；flags source of truth = `deploy/vm/canary.env` | `BFX_CLAMP_ENABLED`、`BFX_CLAMP_MAX_DOWN_PCT`、`BFX_CLAMP_TAKER_MAX_PERIOD_D` |
+| Execution policy | `paper`、`book_guarded`、`optimizer_shadow`、`optimizer_live`；非 paper 必須設定 book freshness/reconcile/down-bound，optimizer_live 另需 empirical artifact + fee | `BFX_EXECUTION_POLICY`、`BFX_BOOK_*`、`BFX_FILL_MODEL_ARTIFACT`、`BFX_OPTIMIZER_FEE_RATE` |
 
 ---
 
 ## 5. Event Model & Source-of-Truth
 
-`event_log` 是不可變、append-only 的 SoT（PK `event_seq` BigInteger auto-increment，無 UPDATE/DELETE）。所有其他狀態都是它的投影。
+`event_log` 是不可變、append-only 的財務 SoT（PK `event_seq` BigInteger auto-increment，無 UPDATE/DELETE）。所有 ledger 狀態都是它的投影；pre-trade eligibility 則另存於同樣 append-only、但不影響 ledger 的 `execution_decisions`。
 
 **Domain events（frozen dataclass）**：`ReservationIntent`（write-ahead，PENDING，不上 bus）、`ReservationClaimed`（reserved += size）、`OrderFilled`（reserved → realized）、`ReservationReleased`（cancel/expire/missing）、`ReservationFailed`（terminal，capital-neutral，不上 bus）、`CancelRequested` / `CancelAcknowledged`（audit-only）、`PositionReconciled`（bus-only，絕對覆寫）。每個 event 帶 `occurred_at_ms`（domain 時間）、`recorded_at`（wall-clock）、`event_seq`、`venue_seq`（WS dedup 用）。
 
@@ -277,8 +287,9 @@ sequenceDiagram
 |---|---|
 | `event_log` | SoT，append-only。dedup unique index gate `ORDER_FILL` / `RESERVATION_RELEASED`（key 含 `venue_offer_id` + `venue_seq`）。 |
 | `position_state` | ledger 投影（singleton per account+env）：`reserved_usdt`、`realized_usdt`、`last_event_seq`（high-water mark）、`last_reconciled_at`、`n_credits`。每次 `append()` 同 txn 內更新。 |
-| `offer_claims` | FSM 快照，PK `(account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。`upsert`（on_conflict_do_update）。 |
+| `offer_claims` | FSM 快照，PK `(account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 realm 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
 | `reconcile_observation` | 不可變 checkpoint：venue 快照 + `event_seq_fence`（快照當下 max event_seq）+ `n_offers` / `n_credits`。rebuild 的 base state。 |
+| `execution_decisions` | 每筆 allocation candidate 的 durable eligibility audit：decision/reconcile/account/realm/cell/symbol/correlation、`ready`/`blocked`/`no_recommendation`、stable reason/dependency、signal/applied rate、amount/period、exact-period book evidence、model evidence、safety/policy、config/service hash 與 timestamps。READY 必須在 submit 前 commit。 |
 | `diagnostics` | **非 SoT** forensic 軌跡（DECISION / SAFETY_TRIGGER / CANCEL_AUDIT），best-effort 寫入（失敗不擋交易），prunable 30–90d。 |
 
 **Dedup（雙層）**：`PostgresEventStore.append()` 透過 unique index（durable）回傳 bool（False=deduped、True=persisted）；`EventStorePersister.persist()` 傳播此 status，WS dispatcher 對 deduped（重連重送、同 `venue_seq`）的事件 skip publish，維持「persist 失敗就不 publish」不變式。`PaperPositionLedger` 額外有 in-memory `_processed_fills` / `_processed_releases` 防呆。
@@ -304,13 +315,17 @@ sequenceDiagram
 
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Kill switch**：翻 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 config（`koyeb service update ... --env BFX_KILL_SWITCH=true`）。
+**Kill switch**：設定 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 safety config；由目前 VM deployment 的環境組裝提供此 break-glass env。
 
 **Canary gate（`assert_canary_guard_invariant`）**：`BFX_PHASE=canary` 啟動時強制 hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
 
 **Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.yaml`），改 threshold 需 redeploy。
 
-**/healthz liveness**：獨立 HTTP server（port 8080）供 Koyeb 探活。Liveness（own-loop，如 `ws`）staleness 致命 → daemon restart；Activity-class（reactive，如 `executor`/`safety_chain`）只 WARN 不致命——這是 2026-05-26 idle-market restart loop 修法的核心。
+**/healthz liveness**：獨立 HTTP server（port 8080）供目前 VM compose deployment 探活。Liveness（own-loop，如 `ws`）staleness 致命 → daemon restart；Activity-class（reactive，如 `executor`/`safety_chain`）只 WARN 不致命——這是 2026-05-26 idle-market restart loop 修法的核心。
+
+**`/readyz` trading readiness**：`/healthz` 只回答 process liveness；`/readyz` 回傳 `200 {"trading_ready": true, "reason": null}` 或 `503 {"trading_ready": false, "reason": <stable reason>}`。book、model 或 audit dependency 不可用會將 `trading_ready=0`，供 operator status/metrics 告警，但不會令 liveness restart loop 啟動。
+
+**Execution observability**：固定 structured event names 為 `funding.execution.eligibility`、`funding.execution.blocked`、`funding.execution.submitted`、`funding.book.snapshot_invalid`、`funding.fill_model.unavailable` 與 `funding.optimizer.no_recommendation`。每筆帶 decision/reconcile id、policy、outcome、reason 與 bounded evidence；不含 secret 或未界定 exception text。Prometheus 使用 `bfx_execution_decisions_total{outcome,reason,policy}`、`bfx_execution_audit_persist_failures_total`、`bfx_funding_book_snapshots_total{result}`、`bfx_funding_book_snapshot_age_seconds`、`bfx_execution_gate_duration_seconds`、`bfx_trading_ready`。cell、symbol、candidate rate、artifact hash 與完整 book evidence 僅留在 logs/audit，絕不成為 metric label。
 
 ---
 
@@ -334,14 +349,25 @@ position_state         (ledger 投影, singleton per account+env)
 offer_claims           (FSM 快照, per-offer)
   PK (account_id, deployment_environment, cid)
   state{PENDING|CLAIMED|RELEASED|FAILED}, venue_offer_id,
-  size_usdt, signal_correlation_id,
+  size_usdt, signal_correlation_id, execution_decision_id,
   occurred_at_ms, last_updated_ms, last_event_seq
+  UNIQUE partial (account_id, deployment_environment, venue_offer_id)
+    WHERE venue_offer_id IS NOT NULL
+  UNIQUE partial (account_id, deployment_environment, execution_decision_id)
+    WHERE execution_decision_id IS NOT NULL
 
 reconcile_observation  (checkpoint, append-only audit)
   PK id
   account_id, deployment_environment,
   reserved_usdt, realized_usdt, n_offers, n_credits,
   observed_at_ms, event_seq_fence, recorded_at
+
+execution_decisions    (append-only pre-trade audit；非 ledger projection)
+  decision_id, reconcile_id, account_id, deployment_environment,
+  outcome, reason_code, failed_dependency, signal_rate, applied_rate,
+  amount_usdt, period_days, market_snapshot_evidence, model_evidence,
+  safety_result, execution_policy, service_version, config_hash,
+  occurred_at_ms, recorded_at
 
 diagnostics            (非 SoT forensic, prunable)
   account_id, deployment_environment, kind, payload(JSONB),
@@ -360,7 +386,7 @@ funding_candle_revisions (append-only，定稿後被拒寫入的證據)
 
 config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
   PK (deployment_environment, account_id, recorded_at_ms)
-  clamp_enabled, reprice_enabled (BFX_CLAMP_ENABLED/BFX_REPRICE_ENABLED),
+  clamp_enabled (legacy telemetry; always false), reprice_enabled,
   git_sha
   用途：flag flip 需重啟（config boot-immutable），boot 即為 regime
   boundary；供 execution-quality（fill latency、realized APR）歸因對應
@@ -378,12 +404,12 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 | Phase | 性質 | Realm | Executor | 備註 |
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
-| `shadow` | 模擬校準 | `shadow` | paper | 無 duration cap |
-| `canary` | **真錢** | `prod` | `bitfinex_live` | cap 10000 USDT（`canary.env`），fUST 2 cells（a30 + p2，mean_reversion）+ fUSD 2 cells armed（cap 400、未入金 0 submit） |
+| `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
+| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；binding cap 在 `safety.canary.yaml` 的 per-symbol map（fUST 10000、fUSD 400），`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅為 map 未列 symbol 的 fallback；四個 armed mean_reversion cells 為 fUST a30/p2 與 fUSD a30/p2，fUSD 未入金時由 balance gate 擋住所有 offer |
 
 **Phase ⟷ Realm guard**（`load_config()`）：canary 只能配 prod realm（真錢不可污染校準資料），paper/shadow 只能配 shadow|ci（模擬不可污染真錢分析）。違規 `ValueError` fail-fast。
 
-**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；`cells.canary.yaml`（2 對 fUST，皆 mean_reversion，RatePercentile 在 LOCF 下未 qualify；fUSD 待 per-currency 獨立分配功能再加）。單筆送單金額不在 yaml 設定——由 deployment reconciler 依 gap 動態決定。
+**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；`cells.canary.yaml`（四個 armed mean_reversion cells：fUST a30/p2、fUSD a30/p2；RatePercentile 與 p30 不在 canary set）。`shadow-p14` 專用 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、`t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由 deployment reconciler 依 gap 動態決定。
 
 **基礎設施**
 
@@ -394,7 +420,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 | Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
-**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env` 組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數 → canary 需 `BFX_CANARY_CONFIRM=yes` → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
+**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env`（`paper`、`shadow`、`shadow-p14`、`canary`）組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數、phase-policy 契約與 required book/model evidence → canary 仍需 `BFX_CANARY_CONFIRM=yes`，並顯示 binding per-symbol safety caps 與 env fallback → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、`BFX_ALLOCATION_CAP_USDT`、`BFX_API_KEY`/`BFX_API_SECRET`、`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_ACCOUNT_ID`。
 
@@ -402,7 +428,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ compose one-shot `weekly-report`（`--profile ops`）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`）。值得留存的報告手動 promote 進 `backend_py/docs/research/` 並 commit。
 - **儀表**：webapi `GET /api/v1/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 的 realm（`BFX_DEPLOYMENT_ENV`/`BFX_ACCOUNT_ID`）必須一致，否則 endpoint 靜默回空（router build 時 log 出 filter realm 供比對）。
-- **政策（cap 加碼 gate）**：`BFX_ALLOCATION_CAP_USDT` 再加碼前必須：最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時一律不加碼）。本次 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的 — 此政策防重演。
+- **政策（per-symbol cap 加碼 gate）**：調高 `safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前必須：最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時一律不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的 — 此政策防重演；`BFX_ALLOCATION_CAP_USDT` 不覆寫已設定的 per-symbol cap。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 
 ---
@@ -423,7 +449,7 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。
 - **TaskGroup 監督**：任何 sub-task 例外 → ExceptionGroup 傳播 → daemon 非零退出，無 silent task death。
 - **I-RP reprice-down only**：sweep 只砍「高於現行 active quote 超過 tolerance 且夠老」的 offer；不砍低於 quote 的、不砍 spike 當小時的（min-age）、無 active quote 不砍。cancel 失敗 fail-safe（offer 留在 book）；`ExecutorAuthError` propagate。sweep 不直接改 ledger/tracker。
-- **I-BC book-clamp bounded**：execution clamp 只調 submit rate — POST/SKIP、period、amount 權威不變（signal gate + sizing 不動）、不回寫 quote、不碰 ledger/tracker。taker 需 `bid ≥ quote.rate`（fill ≥ signal floor）+ `bid_size ≥ amount` + `bid_period ≤ 上限`；down-clamp 以 `BFX_CLAMP_MAX_DOWN_PCT` 為界（超界回 quote.rate）；up-clamp 無上界（風險由 I-RP sweep 收斂，閒置有界 ~min-age）。ticker 失敗 fail-closed（行為 = 無 clamp）、fetch 錯誤不得擋 deploy。clamp enabled 時 sweep ref = `max(quote ref, ASK − 1 tick)`（防自砍）。
+- **I-EG execution eligibility**：只有已 audit 的 `ReadyToSubmit` 能到 executor。每個 live-capable candidate 都需 fresh、symbol-matched、sequence/checksum-valid 的 exact-period book evidence；缺少 period、depth、model、safety 或 audit 時，產生 typed blocked outcome，絕不重用 signal quote、scalar ticker 或 linear estimate。
 
 ---
 

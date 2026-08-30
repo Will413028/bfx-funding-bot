@@ -12,12 +12,14 @@ import yaml
 from ruamel.yaml import YAML
 
 from bfx_funding_bot.modules.backtest.cell_derivation import DerivedCell, derive_cell_params
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.fixture_io import (
     fixture_data_hash,
     freeze_candles,
     load_candles,
 )
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 
 CONFIGS = Path("configs")
@@ -118,6 +120,8 @@ def check_against_fixture(
     yaml_paths: list[Path],
     *,
     canary_path: Path | None,
+    config: BacktestConfig,
+    fill_model: FillRateModel,
 ) -> list[str]:
     """Offline drift check. Returns a list of human-readable problems ([] = OK)."""
     problems: list[str] = []
@@ -150,7 +154,7 @@ def check_against_fixture(
         if not fpath.exists():
             continue
         derived[("mean_reversion", symbol, period_agg)] = derive_cell_params(
-            load_candles(fpath)
+            load_candles(fpath), config=config, fill_model=fill_model
         )
 
     # 3. Committed params must equal the re-derivation.

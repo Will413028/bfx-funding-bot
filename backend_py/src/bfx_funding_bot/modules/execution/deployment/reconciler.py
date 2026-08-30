@@ -8,19 +8,34 @@ signal layer no longer submits (single-writer; spec 2026-05-29).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
+from math import isfinite
 from typing import Any, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.external.bitfinex.rest import FundingTicker
-from bfx_funding_bot.modules.execution.deployment.book_clamp import (
-    TICK,
-    ClampPolicy,
-    clamp_rate,
+from bfx_funding_bot.modules.execution.audit import AuditContext
+from bfx_funding_bot.modules.execution.contracts import (
+    BlockedExecution,
+    BlockReason,
+    ExecutionPolicy,
+    ReadyToSubmit,
 )
+from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy, spike_rungs
+from bfx_funding_bot.modules.execution.deployment.period_pricing import (
+    PeriodPricer,
+    PriceBranch,
+    PriceDecision,
+)
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    OptimizationResult,
+    OptimizerNoRecommendation,
+    RateCandidate,
+    RateOptimizer,
+)
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
     stale_offers,
@@ -43,7 +58,12 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol
+from bfx_funding_bot.modules.lending.tracking.artifact import (
+    FillModelEvidence,
+    FillModelUnavailable,
+)
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
+from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -70,8 +90,22 @@ class _EventSinkProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
-class _TickerSourceProtocol(Protocol):
-    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker: ...
+class _AuditContextFactory(Protocol):
+    def build(
+        self, *, candidate: DecisionPayload, cell_id: str, reconcile_id: str,
+    ) -> AuditContext: ...
+
+
+class FillModelEvidenceProvider(Protocol):
+    """Supplies evidence; absence is intentionally distinct from a score of one."""
+
+    def estimate_fill(
+        self,
+        reference_rate: Decimal,
+        offer_rate: Decimal,
+        period_agg: str,
+        horizon_h: int,
+    ) -> FillModelEvidence | FillModelUnavailable | None: ...
 
 
 class DeploymentReconciler:
@@ -98,10 +132,17 @@ class DeploymentReconciler:
         phase: Phase,
         canceller: CancelPort | None = None,
         reprice: RepricePolicy | None = None,
-        ticker_source: _TickerSourceProtocol | None = None,
-        clamp: ClampPolicy | None = None,
         ladder: LadderPolicy | None = None,
         attempt_recorder: SubmitAttemptRecorder | None = None,
+        book_provider: FundingBookProvider,
+        execution_gate: ExecutionGate,
+        execution_policy: ExecutionPolicy,
+        period_pricer: PeriodPricer,
+        audit_context_factory: _AuditContextFactory,
+        fill_model_provider: FillModelEvidenceProvider | None = None,
+        rate_optimizer: RateOptimizer | None = None,
+        optimizer_fee_rate: Decimal | None = None,
+        optimizer_horizon_h: int | None = None,
     ) -> None:
         self._store = store
         self._tracker = tracker
@@ -128,9 +169,24 @@ class DeploymentReconciler:
         self._phase = phase
         self._canceller = canceller
         self._reprice = reprice
-        self._ticker_source = ticker_source
-        self._clamp = clamp
         self._ladder = ladder
+        self._book_provider = book_provider
+        if execution_gate.policy is not execution_policy:
+            raise ValueError("execution_gate policy must match execution_policy")
+        self._execution_gate = execution_gate
+        self._execution_policy = execution_policy
+        self._period_pricer = period_pricer
+        self._audit_context_factory = audit_context_factory
+        self._fill_model_provider = fill_model_provider
+        self._rate_optimizer = rate_optimizer or RateOptimizer()
+        if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE and optimizer_fee_rate is None:
+            raise ValueError("optimizer_live requires optimizer_fee_rate")
+        if optimizer_horizon_h is not None and optimizer_horizon_h <= 0:
+            raise ValueError("optimizer_horizon_h must be positive")
+        self._optimizer_fee_rate = (
+            optimizer_fee_rate if optimizer_fee_rate is not None else Decimal("0")
+        )
+        self._optimizer_horizon_h = optimizer_horizon_h
         # Optional (None on paper/shadow and in most tests): mirrors each submit
         # outcome into a slot GET /admin/trading-status can read. Purely
         # observational — never consulted for a decision.
@@ -143,6 +199,9 @@ class DeploymentReconciler:
         # so the per-symbol guards (allocation cap / buying power) can read it, and
         # used for the per-symbol balance clamp.
         self._cell_symbol: dict[str, str] = {c.cell_id: c.symbol for c in cells}
+        self._cell_period_agg: dict[str, str] = {
+            c.cell_id: c.period_agg for c in cells
+        }
 
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
@@ -152,6 +211,7 @@ class DeploymentReconciler:
         # RepricePolicy is configured (self._reprice is not None); otherwise
         # ignored — byte-identical to pre-E1 behavior.
         now = self._clock()
+        reconcile_id = f"reconcile:{now}"
         cancel_budget = (
             self._reprice.max_cancels_per_tick if self._reprice is not None else 0
         )
@@ -178,26 +238,6 @@ class DeploymentReconciler:
             )
             symbol_cells = [c for c in self._cells
                             if self._cell_symbol[c.cell_id] == symbol]
-            # E2 book-aware clamp：每 symbol 每 tick 一次 public ticker（免認證，
-            # 走共用 FundingRateLimiter，~2 call/90s ≪ 30/min budget）。抓不到
-            # → ticker=None → 本 tick 全 fallback（= 現狀行為）；絕不擋 deploy。
-            ticker: FundingTicker | None = None
-            if self._clamp is not None and self._ticker_source is not None:
-                try:
-                    ticker = await self._ticker_source.get_funding_ticker(symbol=symbol)
-                except Exception:
-                    log.warning("clamp_ticker_fetch_failed symbol=%s", symbol, exc_info=True)
-            # clamp enabled 時 sweep ref 對齊 book 競爭價（新掛單就掛在這個價位）：
-            # 否則 sustained spike 中 sweep 會把 E2 剛掛的高價單當 stale 自砍
-            # （cancel/repost churn）。只會抬高 ref（更少 cancel、更保守）；
-            # observe mode 不對齊（零行為差）。
-            book_competitive = (
-                round(ticker.ask - TICK, 10)
-                if ticker is not None
-                and self._clamp is not None and self._clamp.enabled
-                and ticker.ask > TICK
-                else None
-            )
             e_total = self._ledger.current_exposure(symbol)
             # Clamp the deployable gap to funds physically present in the funding
             # wallet (available − buffer) so the reconciler never sizes an offer the
@@ -237,7 +277,6 @@ class DeploymentReconciler:
                     venue_offers=venue_offers,
                     now=now,
                     budget=cancel_budget,
-                    book_competitive=book_competitive,
                 )
 
             # Fills are pre-computed from this single pre-loop snapshot; the per-cell
@@ -296,61 +335,141 @@ class DeploymentReconciler:
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue
-                # E2 clamp：guard chain、ORDER_SUBMIT event、venue 全部看到
-                # clamp 後的 rate（單一 rate 真相）。observe mode 只 log。
-                offer_rate = quote.rate
-                if self._clamp is not None and ticker is not None and quote.rate is not None:
-                    cd = clamp_rate(
-                        quote_rate=quote.rate, amount=float(amount),
-                        ticker=ticker, policy=self._clamp,
-                    )
-                    # E2 fix wave: log every branch (TAKER/UNDERCUT/RAISE/FLOOR/
-                    # FALLBACK) evaluated here — FLOOR/FALLBACK are the down-side
-                    # protection events the observe rollout exists to measure, and
-                    # were previously silent (only rate-changed/TAKER logged).
-                    log.info(
-                        "clamp_%s cell=%s branch=%s quote_rate=%s clamped=%s "
-                        "bid=%s ask=%s bid_period=%s amount=%s",
-                        "applied" if self._clamp.enabled else "would_adjust",
-                        cell_id, cd.branch, quote.rate, cd.rate,
-                        ticker.bid, ticker.ask, ticker.bid_period, amount,
-                    )
-                    if self._clamp.enabled:
-                        offer_rate = cd.rate
-                # Observe-only spike-rung ladder（2026-07-10 review）：只 log
-                # 會掛什麼 rungs，submit 行為零改變。enforce 見 ladder.py 頂註。
-                if self._ladder is not None and ticker is not None and ticker.ask > TICK:
-                    rungs = spike_rungs(
-                        amount=float(amount), ask=ticker.ask, policy=self._ladder,
-                    )
-                    if rungs:
-                        log.info(
-                            "ladder_would_post cell=%s base_rate=%s rungs=%s ask=%s",
-                            cell_id, offer_rate,
-                            [(round(a, 2), r) for a, r in rungs], ticker.ask,
-                        )
                 decision = DecisionPayload(
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
-                    offer_rate=offer_rate,
+                    offer_rate=quote.rate,
                     offer_amount_usdt=float(amount),
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
                 )
                 guard = await self._safety.evaluate(decision, self._ctx)
-                if not guard.allowed:
-                    log.info(
-                        "deployment_skip cell=%s amount=%s guard=%s reason=%s",
-                        cell_id, amount, guard.guard_name, guard.reason,
+                snapshot = self._book_provider.snapshot(symbol, now_ms=now)
+                decision_id = str(uuid5(
+                    NAMESPACE_URL,
+                    f"{reconcile_id}:{cell_id}:{decision.signal_correlation_id}:{amount}",
+                ))
+                if snapshot is None:
+                    price: PriceDecision | BlockedExecution = BlockedExecution(
+                        decision_id=decision_id,
+                        candidate=decision,
+                        reason=BlockReason.BOOK_STALE,
+                        failed_dependency="market_snapshot",
+                        evidence={"symbol": symbol},
                     )
-                    if self._attempts is not None:
-                        self._attempts.record_blocked(
-                            cell=cell_id, symbol=symbol, amount=amount,
-                            guard_name=guard.guard_name, reason=guard.reason,
+                else:
+                    price = self._period_pricer.price(candidate=decision, snapshot=snapshot)
+                gate_price = price
+                fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
+                optimizer_evidence: Mapping[str, object] | None = None
+                optimizer_block_reason: BlockReason | None = None
+                period_agg = self._cell_period_agg[cell_id]
+                expected_horizon_h, expected_model_version, expected_artifact_hash = (
+                    self._optimizer_scope()
+                )
+                if (
+                    isinstance(price, PriceDecision)
+                    and self._execution_policy in {
+                        ExecutionPolicy.OPTIMIZER_SHADOW,
+                        ExecutionPolicy.OPTIMIZER_LIVE,
+                    }
+                ):
+                    fill_evidence = self._fill_evidence_for(
+                        candidate=decision,
+                        snapshot=snapshot,
+                        price=price,
+                        now_ms=now,
+                        period_agg=period_agg,
+                    )
+                    try:
+                        optimization = self._optimize(
+                            candidate=decision,
+                            price=price,
+                            fill_evidence=fill_evidence,
+                        )
+                    except Exception:
+                        log.exception(
+                            "optimizer_failed symbol=%s cell=%s", decision.symbol, cell_id,
+                        )
+                        optimization = OptimizerNoRecommendation(
+                            reason="optimizer_error", candidates=(),
+                        )
+                    optimizer_evidence = _optimizer_evidence(
+                        optimization, price, fill_evidence,
+                    )
+                    if isinstance(optimization, OptimizationResult):
+                        if self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+                            gate_price = PriceDecision(
+                                rate=optimization.selected.rate,
+                                branch=price.branch,
+                                evidence=price.evidence,
+                            )
+                    elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+                        # Never reinterpret a failed optimizer as an implicit signal
+                        # fallback.  Valid fill evidence remains visible in audit.
+                        if not isinstance(fill_evidence, FillModelUnavailable):
+                            optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
+                    else:
+                        await self._emit_shadow_optimizer_unavailable(
+                            decision=decision,
+                            cell_id=cell_id,
+                            reconcile_id=reconcile_id,
+                            reason=_optimizer_reason(optimization, fill_evidence),
+                        )
+                outcome = await self._execution_gate.prepare(
+                    decision,
+                    decision_id=decision_id,
+                    reconcile_id=reconcile_id,
+                    snapshot=snapshot,
+                    price=gate_price,
+                    fill_evidence=fill_evidence,
+                    safety=guard,
+                    audit_context=self._audit_context_factory.build(
+                        candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
+                    ),
+                    optimizer_evidence=optimizer_evidence,
+                    optimizer_block_reason=optimizer_block_reason,
+                    expected_period_agg=period_agg,
+                    expected_horizon_h=expected_horizon_h,
+                    expected_model_version=expected_model_version,
+                    expected_artifact_hash=expected_artifact_hash,
+                )
+                if not isinstance(outcome, ReadyToSubmit):
+                    if isinstance(outcome, BlockedExecution):
+                        log.info(
+                            "deployment_skip cell=%s amount=%s dependency=%s reason=%s",
+                            cell_id, amount, outcome.failed_dependency, outcome.reason.value,
+                        )
+                        if self._attempts is not None:
+                            self._attempts.record_blocked(
+                                cell=cell_id, symbol=symbol, amount=amount,
+                                guard_name=(
+                                    guard.guard_name
+                                    if not guard.allowed
+                                    else outcome.failed_dependency
+                                ),
+                                reason=(guard.reason if not guard.allowed else outcome.reason.value),
+                            )
+                    else:
+                        log.info(
+                            "deployment_no_recommendation cell=%s amount=%s reason=%s",
+                            cell_id, amount, outcome.reason.value,
                         )
                     continue
+                if self._ladder is not None and isinstance(price, PriceDecision):
+                    ask_rate = price.evidence.get("ask_rate")
+                    if isinstance(ask_rate, str):
+                        rungs = spike_rungs(
+                            amount=float(amount), ask=float(ask_rate), policy=self._ladder,
+                        )
+                        if rungs:
+                            log.info(
+                                "ladder_would_post cell=%s base_rate=%s rungs=%s ask=%s",
+                                cell_id, outcome.decision.offer_rate,
+                                [(round(a, 2), r) for a, r in rungs], ask_rate,
+                            )
                 try:
-                    result = await self._executor.submit(decision, self._ctx)
+                    result = await self._executor.submit(outcome, self._ctx)
                 except Exception as exc:
                     log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
                     if self._attempts is not None:
@@ -378,7 +497,7 @@ class DeploymentReconciler:
                                 else "venue_rejected"
                             ),
                         )
-                    await self._emit_submit(cell_id, decision, result)
+                    await self._emit_submit(cell_id, outcome, result, reconcile_id)
                     continue
                 self._tracker.record_deploy(cell_id, amount)
                 log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
@@ -386,10 +505,129 @@ class DeploymentReconciler:
                     self._attempts.record_submitted(
                         cell=cell_id, symbol=symbol, amount=amount,
                     )
-                await self._emit_submit(cell_id, decision, result)
+                await self._emit_submit(cell_id, outcome, result, reconcile_id)
+
+    def _fill_evidence_for(
+        self,
+        *,
+        candidate: DecisionPayload,
+        snapshot: object,
+        price: PriceDecision,
+        now_ms: int,
+        period_agg: str,
+    ) -> FillModelEvidence | FillModelUnavailable | None:
+        if self._fill_model_provider is None:
+            return None
+        horizon_h, _model_version, _artifact_hash = self._optimizer_scope()
+        requested_horizon_h = horizon_h if horizon_h is not None else 1
+        signal_rate = Decimal(str(candidate.offer_rate))
+        reference_rate = _reference_rate(price, fallback=signal_rate)
+        try:
+            evidence = self._fill_model_provider.estimate_fill(
+                reference_rate=reference_rate,
+                offer_rate=price.rate,
+                period_agg=period_agg,
+                horizon_h=requested_horizon_h,
+            )
+            if isinstance(evidence, FillModelEvidence) and horizon_h is None:
+                return FillModelUnavailable("scope_mismatch")
+            return evidence
+        except Exception:
+            log.exception("fill_model_provider_failed symbol=%s", candidate.symbol)
+            return FillModelUnavailable("missing")
+
+    def _optimizer_scope(self) -> tuple[int | None, str | None, str | None]:
+        artifact = getattr(self._fill_model_provider, "artifact", None)
+        horizon_h = self._optimizer_horizon_h
+        if horizon_h is None:
+            artifact_horizon_h = getattr(artifact, "horizon_h", None)
+            if isinstance(artifact_horizon_h, int):
+                horizon_h = artifact_horizon_h
+        model_version = getattr(artifact, "model_version", None)
+        if not isinstance(model_version, str):
+            model_version = None
+        artifact_hash = getattr(artifact, "artifact_hash", None)
+        if not isinstance(artifact_hash, str):
+            artifact_hash = None
+        return horizon_h, model_version, artifact_hash
+
+    def _optimize(
+        self,
+        *,
+        candidate: DecisionPayload,
+        price: PriceDecision,
+        fill_evidence: FillModelEvidence | FillModelUnavailable | None,
+    ) -> OptimizationResult | OptimizerNoRecommendation | None:
+        if not isinstance(fill_evidence, FillModelEvidence):
+            return None
+        signal_rate = Decimal(str(candidate.offer_rate))
+        book_evidence = {
+            "snapshot_id": price.evidence.get("snapshot_id"),
+            "branch": price.branch.value,
+            "exact_period": dict(price.evidence),
+        }
+        exact_period_candidate = RateCandidate(
+            rate=price.rate,
+            source=("taker" if price.branch is PriceBranch.TAKER else "maker"),
+            fill_evidence=fill_evidence,
+            book_evidence=book_evidence,
+        ) if price.branch in {PriceBranch.TAKER, PriceBranch.UNDERCUT} else None
+        return self._rate_optimizer.select(
+            signal_rate,
+            maker=(
+                exact_period_candidate
+                if price.branch is PriceBranch.UNDERCUT
+                else None
+            ),
+            taker=(
+                exact_period_candidate
+                if price.branch is PriceBranch.TAKER
+                else None
+            ),
+            fill_evidence=fill_evidence,
+            fee_rate=self._optimizer_fee_rate,
+        )
+
+    async def _emit_shadow_optimizer_unavailable(
+        self,
+        *,
+        decision: DecisionPayload,
+        cell_id: str,
+        reconcile_id: str,
+        reason: str,
+    ) -> None:
+        emit_execution_event = getattr(self._event_sink, "emit_execution_event", None)
+        if not callable(emit_execution_event):
+            return
+        try:
+            event_kwargs = {
+                "level": "warn",
+                "decision_id": str(decision.signal_correlation_id),
+                "reconcile_id": reconcile_id,
+                "symbol": decision.symbol,
+                "cell": cell_id,
+                "policy": self._execution_policy.value,
+                "outcome": "no_recommendation",
+                "reason_code": reason,
+                "evidence": {"optimizer_outcome": "no_recommendation"},
+            }
+            if reason in {
+                "fill_model_missing",
+                "fill_model_low_confidence",
+                "fill_model_scope_mismatch",
+                "fill_model_unversioned",
+            }:
+                await emit_execution_event("funding.fill_model.unavailable", **event_kwargs)
+            await emit_execution_event("funding.optimizer.no_recommendation", **event_kwargs)
+        except Exception:
+            log.debug("shadow_optimizer_event_emit_failed", exc_info=True)
 
     async def _emit_submit(
-        self, cell_id: str, decision: DecisionPayload, result: SubmittedOrder,
+        self,
+        cell_id: str,
+        ready: ReadyToSubmit,
+        result: SubmittedOrder,
+        reconcile_id: str,
     ) -> None:
         """Structured ORDER_SUBMIT event for the live deploy path — parity with
         SIGNAL/DECISION + the paper executor, so a structured-event dashboard can
@@ -406,7 +644,7 @@ class DeploymentReconciler:
             phase=self._phase,
             strategy=self._cell_strategy[cell_id],
             cell=cell_id,
-            decision=decision,
+            ready=ready,
             ctx=self._ctx,
             cid=result.cid,
             offer_id=result.venue_offer_id,
@@ -414,6 +652,26 @@ class DeploymentReconciler:
             status=result.status,
             failure_reason=failure_reason,
         )
+        if result.status != "submitted":
+            return
+        emit_execution_event = getattr(self._event_sink, "emit_execution_event", None)
+        if not callable(emit_execution_event):
+            return
+        try:
+            await emit_execution_event(
+                "funding.execution.submitted",
+                level="info",
+                decision_id=ready.decision_id,
+                reconcile_id=reconcile_id,
+                symbol=ready.decision.symbol,
+                cell=cell_id,
+                policy=ready.policy.value,
+                outcome="ready",
+                reason_code=None,
+                evidence={"snapshot_id": ready.market_snapshot_id},
+            )
+        except Exception:
+            log.debug("execution_submitted_event_failed", exc_info=True)
 
     async def _reprice_sweep(
         self,
@@ -423,7 +681,6 @@ class DeploymentReconciler:
         venue_offers: tuple[ActiveFundingOffer, ...],
         now: int,
         budget: int,
-        book_competitive: float | None = None,
     ) -> int:
         """砍掉 rate 已 stale-high 的 resting offers（policy 見 reprice.py）。
 
@@ -444,11 +701,6 @@ class DeploymentReconciler:
         ref = max(quotes, key=lambda q: q.rate or 0.0)
         assert ref.rate is not None  # POST quote 的 rate 必非 None
         ref_rate = ref.rate
-        if book_competitive is not None:
-            # E2：ref 對齊「現在會掛出的價」（clamp 後）。max() 只會抬高 ref
-            # （更少 cancel）；book 下移不加速砍單 — reprice-down 的節奏仍由
-            # quote 每小時更新決定（E1 語意不變）。
-            ref_rate = max(ref_rate, book_competitive)
         candidates = stale_offers(
             offers=[o for o in venue_offers if o.symbol == symbol],
             ref_rate=ref_rate,
@@ -490,3 +742,97 @@ class DeploymentReconciler:
                 offer.venue_offer_id, symbol, offer.rate, ref_rate, age_min,
             )
         return issued
+
+
+def _optimizer_evidence(
+    optimization: OptimizationResult | OptimizerNoRecommendation | None,
+    price: PriceDecision,
+    fill_evidence: FillModelEvidence | FillModelUnavailable | None,
+) -> Mapping[str, object]:
+    exact_period_book = _json_evidence(price.evidence)
+    if isinstance(optimization, OptimizationResult):
+        return {
+            "outcome": "selected",
+            "selected_source": optimization.selected.source,
+            "candidate_scores": {
+                source: str(score) for source, score in optimization.scores.items()
+            },
+            "model_version": optimization.model_version,
+            "artifact_hash": optimization.artifact_hash,
+            "exact_period_book": exact_period_book,
+            "candidates": [
+                {
+                    "source": candidate.source,
+                    "rate": str(candidate.rate),
+                    "fill_evidence": _fill_evidence_for_audit(candidate.fill_evidence),
+                    "book_evidence": _json_evidence(candidate.book_evidence),
+                }
+                for candidate in optimization.candidates
+            ],
+        }
+    return {
+        "outcome": "no_recommendation",
+        "reason": _optimizer_reason(optimization, fill_evidence),
+        "exact_period_book": exact_period_book,
+    }
+
+
+def _optimizer_reason(
+    optimization: OptimizationResult | OptimizerNoRecommendation | None,
+    fill_evidence: FillModelEvidence | FillModelUnavailable | None = None,
+) -> str:
+    if isinstance(optimization, OptimizerNoRecommendation):
+        return optimization.reason
+    if isinstance(fill_evidence, FillModelUnavailable):
+        return f"fill_model_{fill_evidence.reason}"
+    return "fill_model_missing"
+
+
+def _fill_evidence_for_audit(evidence: FillModelEvidence | None) -> Mapping[str, object]:
+    if evidence is None:
+        return {}
+    return {
+        "fill_probability": str(evidence.fill_prob),
+        "expected_ttf_ms": evidence.expected_ttf_ms,
+        "n_samples": evidence.n_samples,
+        "symbol": evidence.symbol,
+        "period_agg": evidence.period_agg,
+        "horizon_h": evidence.horizon_h,
+        "cutoff_ms": evidence.cutoff_ms,
+    }
+
+
+def _json_evidence(value: object) -> object:
+    if isinstance(value, Mapping):
+        copied: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("evidence keys must be strings")
+            copied[key] = _json_evidence(item)
+        return copied
+    if isinstance(value, tuple | list):
+        return [_json_evidence(item) for item in value]
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise TypeError("evidence decimal must be finite")
+        return str(value)
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise TypeError("evidence float must be finite")
+        return value
+    raise TypeError(f"unsupported JSON evidence value: {type(value).__name__}")
+
+
+def _reference_rate(price: PriceDecision, *, fallback: Decimal) -> Decimal:
+    for key in ("bid_rate", "ask_rate"):
+        value = price.evidence.get(key)
+        if isinstance(value, str):
+            try:
+                rate = Decimal(value)
+            except Exception:
+                continue
+            if rate.is_finite() and rate > 0:
+                return rate
+    return fallback

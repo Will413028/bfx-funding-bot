@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     PositionReconciled,
@@ -13,23 +14,34 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
 
+def _ref(cid: int, scid: UUID, venue_offer_id: str) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-ledger-{cid}-{venue_offer_id}",
+        cid=cid,
+        signal_correlation_id=scid,
+        venue_offer_id=venue_offer_id,
+    )
+
+
 async def test_handler_skips_foreign_account_id_claim() -> None:
     ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
     foreign = ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="smoke_test", is_simulated=True,
-    symbol="fUST")
+        signal_correlation_id=scid, account_id="smoke_test", is_simulated=True,
+        symbol="fUST", reservation_ref=_ref(1, scid, "x"))
     await ledger.on_reservation_claimed(foreign)
     assert ledger.current_exposure("fUST") == Decimal("0")
 
 
 async def test_handler_skips_foreign_account_id_fill() -> None:
     ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
     foreign = OrderFilled(
         cid=1, venue_offer_id="x", credit_id=None, size_usdt=Decimal("100"),
-        fill_rate=0.0001, signal_correlation_id=uuid4(),
+        fill_rate=0.0001, signal_correlation_id=scid,
         account_id="smoke_test", is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", reservation_ref=_ref(1, scid, "x"))
     await ledger.on_order_filled(foreign)
     assert ledger.realized_exposure("fUST") == Decimal("0")
     assert ledger.current_exposure("fUST") == Decimal("0")
@@ -38,11 +50,12 @@ async def test_handler_skips_foreign_account_id_fill() -> None:
 
 async def test_handler_skips_foreign_account_id_release() -> None:
     ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
     foreign = ReservationReleased(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
-        reason="venue_cancel", signal_correlation_id=uuid4(),
+        reason="venue_cancel", signal_correlation_id=scid,
         account_id="smoke_test", is_simulated=True,
-    symbol="fUST")
+        symbol="fUST", reservation_ref=_ref(1, scid, "x"))
     await ledger.on_reservation_released(foreign)
     assert ledger.current_exposure("fUST") == Decimal("0")
     assert ledger.replay_floor_hit_count == 0
@@ -51,10 +64,11 @@ async def test_handler_skips_foreign_account_id_release() -> None:
 async def test_handler_processes_matching_account_id_unchanged() -> None:
     """Regression: matching account_id still updates counters as before."""
     ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
     matching = ReservationClaimed(
         cid=1, venue_offer_id="x", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=True,
-    symbol="fUST")
+        signal_correlation_id=scid, account_id="default", is_simulated=True,
+        symbol="fUST", reservation_ref=_ref(1, scid, "x"))
     await ledger.on_reservation_claimed(matching)
     assert ledger.current_exposure("fUST") == Decimal("100")
 

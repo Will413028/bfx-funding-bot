@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.protocols import (
@@ -118,7 +119,11 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = await chain.evaluate(tentative, ctx)
     assert result.allowed is True
-    await executor.submit(tentative, ctx)
+    await executor.submit(ReadyToSubmit(
+        decision=tentative, decision_id="d-path-a", policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-path-a", model_version=None,
+        evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
+    ), ctx)
 
     types = [e["event_type"] for e in axiom.events]
     assert types == [

@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
     event_type_of,
@@ -22,10 +23,17 @@ _VOI = "venue-1"
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
 
+def _ref(cid: int = _CID, voi: str | None = _VOI) -> ReservationRef:
+    return ReservationRef(
+        execution_decision_id=f"d-serialization-{cid}", cid=cid,
+        signal_correlation_id=_SCID, venue_offer_id=voi,
+    )
+
+
 def _claimed() -> ReservationClaimed:
     return ReservationClaimed(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("10.5"),
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=7, occurred_at_ms=1000, symbol="fUST")
+        venue_seq=7, occurred_at_ms=1000, symbol="fUST", reservation_ref=_ref())
 
 
 def test_event_type_of() -> None:
@@ -36,15 +44,16 @@ def test_event_type_of() -> None:
     _claimed(),
     OrderFilled(cid=_CID, venue_offer_id=_VOI, credit_id="cr-1", size_usdt=Decimal("3.25"),
         fill_rate=0.0004, signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        venue_seq=8, occurred_at_ms=2000, symbol="fUST"),
+        venue_seq=8, occurred_at_ms=2000, symbol="fUST", reservation_ref=_ref()),
     ReservationReleased(cid=_CID, venue_offer_id=_VOI, size_usdt=Decimal("2"),
         reason="missing_from_venue", signal_correlation_id=_SCID, account_id="acct",
-        is_simulated=True, venue_seq=9, occurred_at_ms=3000, symbol="fUST"),
+        is_simulated=True, venue_seq=9, occurred_at_ms=3000, symbol="fUST", reservation_ref=_ref()),
 ])
 def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)
     payload = serialize_event(event)
     assert isinstance(payload, dict)
+    assert payload["__schema_version__"] == 2
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
 
@@ -60,22 +69,22 @@ def test_credit_closed_roundtrip() -> None:
 
 def test_intent_failed_event_type_of() -> None:
     intent = ReservationIntent(cid=1, size_usdt=Decimal("5"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        execution_decision_id="d-serialization", signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000)
     failed = ReservationFailed(cid=1, size_usdt=Decimal("5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
-        reason="submit_failed", occurred_at_ms=1000)
+        reason="submit_failed", occurred_at_ms=1000, reservation_ref=_ref(1, None))
     assert event_type_of(intent) == "RESERVATION_INTENT"
     assert event_type_of(failed) == "RESERVATION_FAILED"
 
 
 @pytest.mark.parametrize("event", [
     ReservationIntent(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        execution_decision_id="d-serialization", signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
         occurred_at_ms=1000),
     ReservationFailed(cid=9, size_usdt=Decimal("7.5"), symbol="fUST",
         signal_correlation_id=_SCID, account_id="acct", is_simulated=False,
-        reason="submit_failed", occurred_at_ms=2000),
+        reason="submit_failed", occurred_at_ms=2000, reservation_ref=_ref(9, None)),
 ])
 def test_intent_failed_roundtrip(event: object) -> None:
     etype = event_type_of(event)
@@ -83,14 +92,34 @@ def test_intent_failed_roundtrip(event: object) -> None:
     assert restored == event
 
 
-def test_intent_failed_legacy_payload_upcasts_symbol() -> None:
-    """Pre-symbol event_log rows have no `symbol`; deserialize injects fUST."""
-    legacy = {"cid": 9, "size_usdt": "7.5",
-              "signal_correlation_id": str(_SCID), "account_id": "acct",
-              "is_simulated": True, "occurred_at_ms": 1000}
-    ev = deserialize_event("RESERVATION_INTENT", legacy)
-    assert ev.symbol == "fUST"          # type: ignore[attr-defined]
-    assert ev.amount == Decimal("7.5")  # type: ignore[attr-defined]
+def test_public_deserializer_rejects_arbitrary_unversioned_payload() -> None:
+    payload = {
+        "cid": 9,
+        "size_usdt": "7.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+    }
+
+    with pytest.raises(ValueError, match="unversioned event payload"):
+        deserialize_event("RESERVATION_INTENT", payload)
+
+
+def test_public_deserializer_rejects_versioned_lifecycle_without_reservation_ref() -> None:
+    payload = {
+        "__schema_version__": 2,
+        "__event_type__": "RESERVATION_INTENT",
+        "cid": 9,
+        "size_usdt": "7.5",
+        "symbol": "fUST",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+    }
+
+    with pytest.raises(TypeError, match=r"execution_decision_id|reservation_ref"):
+        deserialize_event("RESERVATION_INTENT", payload)
 
 
 def test_decimal_preserved_as_string() -> None:
@@ -103,17 +132,18 @@ def test_decimal_preserved_as_string() -> None:
     ("RESERVATION_CLAIMED", {"venue_offer_id": "v1"}),
     ("RESERVATION_RELEASED", {"venue_offer_id": "v1", "reason": "venue_cancel"}),
 ])
-def test_legacy_position_event_without_symbol_upcasts_to_fust(
+def test_public_deserializer_rejects_unversioned_position_event(
     etype: str, extra: dict[str, object],
 ) -> None:
-    """The 4 position events gained a mandatory `symbol` in Phase 2; event_log
-    rows written before that carry no `symbol`. deserialize must upcast them to
-    fUST exactly like INTENT/FAILED — otherwise a manual rebuild_snapshot_from_log
-    crashes at the offer_claims projection or silently drops the legacy fUST fills
-    in the position_state tail fold."""
-    legacy = {"cid": 9, "size_usdt": "12.5",
-              "signal_correlation_id": str(_SCID), "account_id": "acct",
-              "is_simulated": True, "occurred_at_ms": 1000, **extra}
-    ev = deserialize_event(etype, legacy)
-    assert ev.symbol == "fUST"           # type: ignore[attr-defined]
-    assert ev.amount == Decimal("12.5")  # type: ignore[attr-defined]
+    payload = {
+        "cid": 9,
+        "size_usdt": "12.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "acct",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+        **extra,
+    }
+
+    with pytest.raises(ValueError, match="unversioned event payload"):
+        deserialize_event(etype, payload)

@@ -9,12 +9,13 @@ from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
     LocalClaim,
     ReconcileResult,
+    RecoveryCorrelationError,
     compute_recovery_actions,
     synth_orphan_cid,
     synth_orphan_scid,
 )
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
-    ReservationClaimed,
     ReservationFailed,
     ReservationReleased,
 )
@@ -33,10 +34,15 @@ def _offer(voi="555", amount="100", rate=0.0003, period=2):
 
 
 def _claim(cid, voi, state, size="100", scid=None, occurred=0, symbol="fUST"):
+    correlation_id = scid or uuid4()
     return LocalClaim(
         cid=cid, venue_offer_id=voi, state=state, size_usdt=Decimal(size),
-        signal_correlation_id=scid or uuid4(), occurred_at_ms=occurred,
+        signal_correlation_id=correlation_id, occurred_at_ms=occurred,
         symbol=symbol,
+        reservation_ref=ReservationRef(
+            execution_decision_id=f"d-recovery-{cid}", cid=cid,
+            signal_correlation_id=correlation_id, venue_offer_id=voi,
+        ),
     )
 
 
@@ -49,15 +55,8 @@ def _actions(venue, local, grace_ms=120_000, now=_NOW):
 
 
 def test_orphan_at_venue_is_claimed():
-    acts = _actions([_offer(voi="555", amount="250")], [])
-    assert len(acts) == 1
-    ev = acts[0]
-    assert isinstance(ev, ReservationClaimed)
-    assert ev.venue_offer_id == "555"
-    assert ev.size_usdt == Decimal("250")
-    assert ev.cid == synth_orphan_cid("555")
-    assert ev.signal_correlation_id == synth_orphan_scid("555")
-    assert ev.account_id == _ACC and ev.is_simulated is False
+    with pytest.raises(RuntimeError, match="unresolved recovery"):
+        _actions([_offer(voi="555", amount="250")], [])
 
 
 def test_local_claimed_missing_from_venue_is_released():
@@ -182,12 +181,12 @@ def test_action_grace_claims_stale_orphan():
         venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=_NOW - 300_000, status="ACTIVE",
     )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        configured_symbols=frozenset({"fUSD", "fUST"}),
-    )
-    assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        compute_recovery_actions(
+            venue_offers=[offer], local_claims=[], account_id=_ACC,
+            is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+            configured_symbols=frozenset({"fUSD", "fUST"}),
+        )
 
 
 def test_action_grace_zero_preserves_boot_behaviour():
@@ -195,12 +194,12 @@ def test_action_grace_zero_preserves_boot_behaviour():
         venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=_NOW - 1, status="ACTIVE",
     )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-        configured_symbols=frozenset({"fUSD", "fUST"}),
-    )
-    assert len(acts) == 1 and isinstance(acts[0], ReservationClaimed)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        compute_recovery_actions(
+            venue_offers=[offer], local_claims=[], account_id=_ACC,
+            is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+            configured_symbols=frozenset({"fUSD", "fUST"}),
+        )
 
 
 class _StubStore:
@@ -321,15 +320,9 @@ async def test_run_returns_reconcile_result_for_orphan_claim():
     auth = _StubAuthRest([_offer(voi="999", amount="200")])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
-    result = await rec.run()
-
-    assert isinstance(result, ReconcileResult)
-    assert result.n_claimed == 1
-    assert result.n_released == 0
-    assert result.n_failed == 0
-    # PositionReconciled is published first, then domain events
-    assert any(isinstance(e, ReservationClaimed) for e in bus.published)
-    assert any(isinstance(e, PositionReconciled) for e in bus.published)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
 
 
 @pytest.mark.asyncio
@@ -460,15 +453,9 @@ async def test_run_position_reconciled_includes_offer_reserved():
     auth = _StubAuthRestFull(offers=offers, credits=credits)
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
-    await rec.run()
-
-    pr_events = [e for e in bus.published if isinstance(e, PositionReconciled)]
-    assert len(pr_events) == 1
-    pr = pr_events[0]
-    assert pr.reserved_usdt == Decimal("100")
-    assert pr.realized_usdt == Decimal("200")
-    assert pr.n_offers == 1
-    assert pr.n_credits == 1
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
 
 
 @pytest.mark.asyncio
@@ -549,13 +536,10 @@ async def test_run_routes_recovery_actions_to_registry_not_bus():
     auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, offer_registry=registry)
 
-    await rec.run()
-
-    # bus carries the snapshot signal only
-    assert any(isinstance(e, PositionReconciled) for e in bus.published)
-    assert not any(isinstance(e, ReservationClaimed) for e in bus.published)
-    # registry receives the orphan claim (FSM)
-    assert any(isinstance(e, ReservationClaimed) for e in registry.handled)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
+    assert registry.handled == []
 
 
 @pytest.mark.asyncio
@@ -566,9 +550,9 @@ async def test_run_falls_back_to_bus_when_no_registry():
     auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)  # no offer_registry
 
-    await rec.run()
-
-    assert any(isinstance(e, ReservationClaimed) for e in bus.published)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
 
 
 # ── Balance-aware cap gate: wallet available in reconcile pass (Task 4) ───────
@@ -619,12 +603,12 @@ def test_orphan_claimed_carries_offer_symbol() -> None:
         venue_offer_id="555", symbol="fUST", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
     )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-        configured_symbols=frozenset({"fUST"}),
-    )
-    assert isinstance(acts[0], ReservationClaimed) and acts[0].symbol == "fUST"
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        compute_recovery_actions(
+            venue_offers=[offer], local_claims=[], account_id=_ACC,
+            is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+            configured_symbols=frozenset({"fUST"}),
+        )
 
 
 def test_missing_claim_released_carries_own_claim_symbol() -> None:
@@ -715,21 +699,9 @@ async def test_single_symbol_list_reproduces_current_event():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST"],
     )
 
-    result = await rec.run()
-
-    pr = [e for e in bus.published if isinstance(e, PositionReconciled)]
-    assert len(pr) == 1
-    assert pr[0].symbol == "fUST"
-    assert pr[0].reserved == Decimal("100")
-    assert pr[0].realized == Decimal("200")
-    assert pr[0].available == Decimal("47.5")
-    assert pr[0].n_offers == 1
-    assert pr[0].n_credits == 1
-    # result keeps the aggregate dims (single symbol == today)
-    assert result.reserved_usdt == Decimal("100")
-    assert result.realized_usdt == Decimal("200")
-    assert result.available_usdt == Decimal("47.5")
-    assert result.n_credits == 1
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
 
 
 @pytest.mark.asyncio
@@ -829,20 +801,9 @@ async def test_two_symbols_fire_two_position_reconciled_with_per_symbol_natives(
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    await rec.run()
-
-    pr = [e for e in bus.published if isinstance(e, PositionReconciled)]
-    assert len(pr) == 2
-    by_sym = {e.symbol: e for e in pr}
-    assert by_sym["fUST"].reserved == Decimal("100")
-    assert by_sym["fUST"].realized == Decimal("200")
-    assert by_sym["fUST"].available == Decimal("17.5")
-    assert by_sym["fUST"].n_offers == 1 and by_sym["fUST"].n_credits == 1
-    assert by_sym["fUSD"].reserved == Decimal("40")
-    assert by_sym["fUSD"].realized == Decimal("0")
-    assert by_sym["fUSD"].available == Decimal("9")
-    assert by_sym["fUSD"].n_offers == 1 and by_sym["fUSD"].n_credits == 0
-    # one wallet read per symbol's currency (no cross-symbol sum)
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
     assert auth.wallet_calls == ["UST", "USD"]
 
 
@@ -859,14 +820,9 @@ async def test_two_symbols_write_per_symbol_snapshot_rows():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    await rec.run()
-
-    assert len(store.snapshot_calls) == 2
-    by_sym = {c["symbol"]: c for c in store.snapshot_calls}
-    assert by_sym["fUST"]["reserved"] == Decimal("100")
-    assert by_sym["fUST"]["realized"] == Decimal("0")
-    assert by_sym["fUSD"]["reserved"] == Decimal("0")
-    assert by_sym["fUSD"]["realized"] == Decimal("55")
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert store.snapshot_calls == []
 
 
 @pytest.mark.asyncio
@@ -885,13 +841,9 @@ async def test_multi_symbol_result_aggregates_dims():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    result = await rec.run()
-
-    # aggregate across symbols (PeriodicReconcile divergence/drift unchanged)
-    assert result.reserved_usdt == Decimal("100")
-    assert result.realized_usdt == Decimal("230")
-    assert result.available_usdt == Decimal("12")
-    assert result.n_credits == 2
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await rec.run()
+    assert bus.published == []
 
 
 # --- from_snapshot loads each claim's own symbol (fUSD P2 Task 3) ------------

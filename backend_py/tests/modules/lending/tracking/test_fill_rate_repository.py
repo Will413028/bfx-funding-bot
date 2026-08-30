@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -6,9 +7,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 from bfx_funding_bot.modules.lending.tracking import tables as _t  # noqa: F401
+from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
 from bfx_funding_bot.modules.lending.tracking.fill_rate import BucketStat
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 from bfx_funding_bot.modules.lending.tracking.repository import (
+    load_fill_model_artifact,
     load_fill_rate_stats,
     upsert_fill_rate_stats,
 )
@@ -32,18 +35,30 @@ def _stats():
     ]
 
 
+def _artifact() -> FillModelArtifact:
+    return FillModelArtifact(
+        symbol="fUSD", period_agg="p2", horizon_h=4, source="candle",
+        model_version="g13-candle-v1", schema_version=1, artifact_hash="artifact-v1",
+        training_start_ms=1000, training_end_ms=2000, cutoff_ms=2000,
+        sample_count=180, confidence_min_samples=30,
+    )
+
+
 async def test_upsert_then_load_roundtrip(session_factory):
     async with session_factory() as s:
         await upsert_fill_rate_stats(
             s, source="candle", symbol="fUSD", period_agg="p2", stats=_stats(),
             candle_range_start_ms=1000, candle_range_end_ms=2000,
-            learned_at=datetime.now(UTC),
+            learned_at=datetime.now(UTC), artifact=_artifact(),
         )
         await s.commit()
     async with session_factory() as s:
         rows = await load_fill_rate_stats(s, source="candle", symbol="fUSD")
+        artifact = await load_fill_model_artifact(s, artifact_hash="artifact-v1")
     assert len(rows) == 2
-    model = FillRateModel.from_rows(rows)
+    assert artifact == _artifact()
+    assert {row.artifact_hash for row in rows} == {artifact.artifact_hash}
+    model = FillRateModel.from_rows(rows, artifact=artifact)
     est = model.estimate_fill(reference_rate=Decimal("0.0003"),
                               offer_rate=Decimal("0.0003"), period_agg="p2", horizon_h=4)
     assert est is not None and est.fill_prob == Decimal("1.0")
@@ -55,8 +70,63 @@ async def test_upsert_is_idempotent(session_factory):
             await upsert_fill_rate_stats(
                 s, source="candle", symbol="fUSD", period_agg="p2", stats=_stats(),
                 candle_range_start_ms=1000, candle_range_end_ms=2000,
-                learned_at=datetime.now(UTC),
+                learned_at=datetime.now(UTC), artifact=_artifact(),
             )
             await s.commit()
         rows = await load_fill_rate_stats(s, source="candle", symbol="fUSD")
     assert len(rows) == 2  # upsert, not duplicate insert
+
+
+async def test_upsert_rejects_artifact_with_a_different_scope(session_factory):
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="artifact scope"):
+            await upsert_fill_rate_stats(
+                session,
+                source="candle",
+                symbol="fUST",
+                period_agg="p2",
+                stats=_stats(),
+                candle_range_start_ms=1000,
+                candle_range_end_ms=2000,
+                learned_at=datetime.now(UTC),
+                artifact=_artifact(),
+            )
+
+
+async def test_upsert_rejects_existing_hash_with_conflicting_scope(session_factory):
+    original = _artifact()
+    conflicting = replace(original, symbol="fUST")
+
+    async with session_factory() as session:
+        await upsert_fill_rate_stats(
+            session,
+            source="candle",
+            symbol="fUSD",
+            period_agg="p2",
+            stats=_stats(),
+            candle_range_start_ms=1000,
+            candle_range_end_ms=2000,
+            learned_at=datetime.now(UTC),
+            artifact=original,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="artifact hash"):
+            await upsert_fill_rate_stats(
+                session,
+                source="candle",
+                symbol="fUST",
+                period_agg="p2",
+                stats=_stats(),
+                candle_range_start_ms=1000,
+                candle_range_end_ms=2000,
+                learned_at=datetime.now(UTC),
+                artifact=conflicting,
+            )
+        await session.rollback()
+
+    async with session_factory() as session:
+        stored = await load_fill_model_artifact(session, artifact_hash=original.artifact_hash)
+    assert stored is not None
+    assert stored.symbol == "fUSD"

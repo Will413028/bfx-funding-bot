@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.distortion import perturb_candles
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
 from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
@@ -112,7 +113,12 @@ def _evaluate(
         return build_strategy(cell)  # type: ignore[return-value]
 
     strat_outcomes, _ = evaluate_oos_windows(
-        observed, windows, make_strategy=_make_strategy, market_candles=market
+        observed,
+        windows,
+        make_strategy=_make_strategy,
+        config=BacktestConfig(fill_model="linear-baseline"),
+        fill_model=None,
+        market_candles=market,
     )
     return _summarize(strat_outcomes)
 

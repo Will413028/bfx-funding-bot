@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 if TYPE_CHECKING:
     from pydantic import ValidationInfo
 
+from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
@@ -109,6 +111,12 @@ class MarketfeedConfig(BaseModel):
     cells: list[CellConfig]
     database_url: str
     deployment_environment: DeploymentEnvironment
+    execution_policy: ExecutionPolicy
+    book_max_age_seconds: float | None = Field(default=None, gt=0)
+    book_reconcile_interval_seconds: float | None = Field(default=None, gt=0)
+    book_max_down_pct: float | None = Field(default=None, ge=0, le=1)
+    optimizer_fee_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    fill_model_artifact: str | None = None
     redis_url: str | None = None
     run_duration_hours: int | None = Field(default=None, gt=0)
     # Bug C fix (5/20): scheduler observe-after-close buffer. Was 5s
@@ -166,6 +174,65 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money analytics. "
             "Use shadow (or ci for tests)."
         )
+
+    execution_policy_raw = os.environ.get("BFX_EXECUTION_POLICY", "").strip()
+    if not execution_policy_raw:
+        raise ValueError("BFX_EXECUTION_POLICY env var required")
+    try:
+        execution_policy = ExecutionPolicy(execution_policy_raw)
+    except ValueError:
+        valid = ", ".join(policy.value for policy in ExecutionPolicy)
+        raise ValueError(
+            f"BFX_EXECUTION_POLICY must be one of {valid}, got {execution_policy_raw!r}"
+        ) from None
+
+    if phase_str == "canary" and execution_policy is ExecutionPolicy.PAPER:
+        raise ValueError("canary execution_policy must be live-capable, not paper")
+
+    def required_float(name: str) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            raise ValueError(f"{name} required for {execution_policy.value} execution policy")
+        try:
+            return float(raw)
+        except ValueError:
+            raise ValueError(f"{name} must be a number, got {raw!r}") from None
+
+    live_capable_policies = {
+        ExecutionPolicy.BOOK_GUARDED,
+        ExecutionPolicy.OPTIMIZER_SHADOW,
+        ExecutionPolicy.OPTIMIZER_LIVE,
+    }
+    book_max_age_seconds: float | None = None
+    book_reconcile_interval_seconds: float | None = None
+    book_max_down_pct: float | None = None
+    if execution_policy in live_capable_policies:
+        book_max_age_seconds = required_float("BFX_BOOK_MAX_AGE_SECONDS")
+        book_reconcile_interval_seconds = required_float(
+            "BFX_BOOK_RECONCILE_INTERVAL_SECONDS"
+        )
+        book_max_down_pct = required_float("BFX_BOOK_MAX_DOWN_PCT")
+
+    fill_model_artifact = os.environ.get("BFX_FILL_MODEL_ARTIFACT", "").strip()
+    if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE and not fill_model_artifact:
+        raise ValueError("BFX_FILL_MODEL_ARTIFACT required for optimizer_live execution policy")
+
+    optimizer_fee_rate_raw = os.environ.get("BFX_OPTIMIZER_FEE_RATE", "").strip()
+    if optimizer_fee_rate_raw:
+        try:
+            optimizer_fee_rate = Decimal(optimizer_fee_rate_raw)
+        except Exception:
+            raise ValueError(
+                f"BFX_OPTIMIZER_FEE_RATE must be a decimal, got {optimizer_fee_rate_raw!r}",
+            ) from None
+        if not optimizer_fee_rate.is_finite() or not Decimal("0") <= optimizer_fee_rate <= Decimal("1"):
+            raise ValueError("BFX_OPTIMIZER_FEE_RATE must be between 0 and 1")
+    else:
+        if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+            raise ValueError(
+                "BFX_OPTIMIZER_FEE_RATE required for optimizer_live execution policy",
+            )
+        optimizer_fee_rate = None
 
     run_duration = os.environ.get("BFX_RUN_DURATION_HOURS")
     run_duration_h: int | None
@@ -273,6 +340,12 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
+        "execution_policy": execution_policy,
+        "book_max_age_seconds": book_max_age_seconds,
+        "book_reconcile_interval_seconds": book_reconcile_interval_seconds,
+        "book_max_down_pct": book_max_down_pct,
+        "optimizer_fee_rate": optimizer_fee_rate,
+        "fill_model_artifact": fill_model_artifact or None,
         "redis_url": redis_url,
         "run_duration_hours": run_duration_h,
         "scheduler_buffer_s": scheduler_buffer_s,

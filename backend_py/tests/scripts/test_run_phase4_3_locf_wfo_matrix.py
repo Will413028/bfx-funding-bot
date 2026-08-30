@@ -6,6 +6,7 @@ No DB / Neon connectivity required.
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,10 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
 from run_phase4_3_locf_wfo_matrix import (  # type: ignore[import-not-found]
     compute_verdicts,
     emit_markdown,
+    serialize_window_outcomes,
 )
+
+from bfx_funding_bot.modules.backtest.matrix import WindowOutcome
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,6 +66,72 @@ def _three_budgets(
 # ---------------------------------------------------------------------------
 # compute_verdicts
 # ---------------------------------------------------------------------------
+
+
+def test_serialize_window_outcomes_preserves_identity_and_json_safety() -> None:
+    outcomes = [
+        WindowOutcome(
+            window_idx=3,
+            train_start_mts=100,
+            train_end_mts=200,
+            test_start_mts=300,
+            test_end_mts=400,
+            status="ok",
+            best_params={"threshold": Decimal("0.125"), "nested": [Decimal("2.5")]},
+            oos_net=None,
+            oos_max_dd=None,
+            oos_fill_rate=None,
+            oos_sortino=None,
+            baseline_net=None,
+            baseline_sortino=None,
+        ),
+        WindowOutcome(
+            window_idx=4,
+            train_start_mts=500,
+            train_end_mts=600,
+            test_start_mts=700,
+            test_end_mts=800,
+            status="incomplete",
+            best_params=None,
+            oos_net=None,
+            oos_max_dd=None,
+            oos_fill_rate=None,
+            oos_sortino=None,
+            baseline_net=None,
+            baseline_sortino=None,
+        ),
+    ]
+
+    rows = serialize_window_outcomes(
+        outcomes, cell="fUSD_p30", strategy="RatePercentileStrategy", budget_hours=12
+    )
+
+    assert rows == [
+        {
+            "cell": "fUSD_p30",
+            "strategy": "RatePercentileStrategy",
+            "budget_hours": 12,
+            "window_idx": 3,
+            "train_start_mts": 100,
+            "train_end_mts": 200,
+            "test_start_mts": 300,
+            "test_end_mts": 400,
+            "status": "ok",
+            "best_params": {"threshold": "0.125", "nested": ["2.5"]},
+        },
+        {
+            "cell": "fUSD_p30",
+            "strategy": "RatePercentileStrategy",
+            "budget_hours": 12,
+            "window_idx": 4,
+            "train_start_mts": 500,
+            "train_end_mts": 600,
+            "test_start_mts": 700,
+            "test_end_mts": 800,
+            "status": "incomplete",
+            "best_params": None,
+        },
+    ]
 
 
 def test_compute_verdicts_green_when_12h_qualifies() -> None:

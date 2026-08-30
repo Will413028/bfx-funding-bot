@@ -20,6 +20,13 @@ import httpx
 import pytest
 
 from bfx_funding_bot.modules.execution.boot_recovery import ReconcileResult
+from bfx_funding_bot.modules.execution.contracts import (
+    BlockReason,
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+    ReservationRef,
+)
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -62,6 +69,18 @@ def _decision() -> DecisionPayload:
     )
 
 
+def _ready() -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=_decision(),
+        decision_id="d-metrics",
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="snapshot-metrics",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="test"),
+    )
+
+
 # ── operational / diagnostic event counters ──────────────────────────────────
 
 
@@ -76,6 +95,48 @@ def test_operational_event_counter_increments() -> None:
     assert m.registry.get_sample_value(
         "bfx_operational_events_total", {"event_type": "health_check", "level": "warn"},
     ) == 1.0
+
+
+def test_execution_metric_labels_are_bounded() -> None:
+    m = DaemonMetrics()
+
+    m.observe_execution_decision(
+        outcome="blocked",
+        reason=BlockReason.BOOK_STALE.value,
+        policy=ExecutionPolicy.BOOK_GUARDED.value,
+    )
+
+    assert m.registry.get_sample_value(
+        "bfx_execution_decisions_total",
+        {
+            "outcome": "blocked",
+            "reason": "book_stale",
+            "policy": "book_guarded",
+        },
+    ) == 1.0
+
+
+def test_execution_metrics_fail_open_and_normalize_unknown_labels() -> None:
+    m = DaemonMetrics()
+
+    m.observe_execution_decision(outcome="unexpected", reason="raw-error", policy="other")
+    m.observe_audit_persist_failure()
+    m.observe_book_snapshot(result="unexpected")
+    m.observe_book_snapshot_age(age_seconds=12.5)
+    m.observe_execution_gate_duration(seconds=0.2)
+    m.set_trading_ready(True)
+
+    assert m.registry.get_sample_value(
+        "bfx_execution_decisions_total",
+        {"outcome": "other", "reason": "other", "policy": "other"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_execution_audit_persist_failures_total") == 1.0
+    assert m.registry.get_sample_value(
+        "bfx_funding_book_snapshots_total", {"result": "other"},
+    ) == 1.0
+    assert m.registry.get_sample_value("bfx_funding_book_snapshot_age_seconds") == 12.5
+    assert m.registry.get_sample_value("bfx_execution_gate_duration_seconds_count") == 1.0
+    assert m.registry.get_sample_value("bfx_trading_ready") == 1.0
 
 
 def test_diagnostic_event_counter_increments() -> None:
@@ -130,20 +191,35 @@ def test_observe_methods_fail_open_when_backend_broken() -> None:
 async def test_domain_event_handler_counts_by_class() -> None:
     m = DaemonMetrics()
     handler = m.domain_event_handler()
+    first_scid = uuid4()
     await handler(ReservationClaimed(
         symbol="fUST", cid=1, venue_offer_id="1",
-        signal_correlation_id=uuid4(), account_id="default",
+        signal_correlation_id=first_scid, account_id="default",
         is_simulated=True, amount=Decimal("100"),
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-metrics-1", cid=1,
+            signal_correlation_id=first_scid, venue_offer_id="1",
+        ),
     ))
+    fill_scid = uuid4()
     await handler(OrderFilled(
         symbol="fUST", cid=1, venue_offer_id="1", credit_id=None,
-        fill_rate=0.0005, signal_correlation_id=uuid4(), account_id="default",
+        fill_rate=0.0005, signal_correlation_id=fill_scid, account_id="default",
         is_simulated=True, amount=Decimal("100"),
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-metrics-fill-1", cid=1,
+            signal_correlation_id=fill_scid, venue_offer_id="1",
+        ),
     ))
+    second_scid = uuid4()
     await handler(OrderFilled(
         symbol="fUST", cid=2, venue_offer_id="2", credit_id=None,
-        fill_rate=0.0005, signal_correlation_id=uuid4(), account_id="default",
+        fill_rate=0.0005, signal_correlation_id=second_scid, account_id="default",
         is_simulated=True, amount=Decimal("100"),
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-metrics-2", cid=2,
+            signal_correlation_id=second_scid, venue_offer_id="2",
+        ),
     ))
     assert m.registry.get_sample_value(
         "bfx_domain_events_total", {"event_type": "ReservationClaimed"},
@@ -162,11 +238,14 @@ class _StubExecutor:
         self._order = order
         self._exc = exc
         self.calls: list[int | None] = []
+        self.readies: list[ReadyToSubmit] = []
 
     async def submit(
-        self, decision: DecisionPayload, ctx: AccountContext, *, cid: int | None = None,
+        self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
+        reservation_ref: object | None = None,
     ) -> SubmittedOrder:
         self.calls.append(cid)
+        self.readies.append(ready)
         if self._exc is not None:
             raise self._exc
         assert self._order is not None
@@ -179,9 +258,11 @@ async def test_submit_middleware_passes_result_and_records() -> None:
     order = SubmittedOrder(cid=7, venue_offer_id="paper_x", status="filled", raw_response=None)
     inner = _StubExecutor(order=order)
     mw = MetricsSubmitMiddleware(inner, metrics=m)
-    got = await mw.submit(_decision(), _ctx(), cid=7)
+    ready = _ready()
+    got = await mw.submit(ready, _ctx(), cid=7)
     assert got is order                       # byte-identical passthrough
     assert inner.calls == [7]                 # cid threaded down unchanged
+    assert inner.readies == [ready]            # immutable boundary object is not rebuilt
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "filled"},
     ) == 1.0
@@ -194,7 +275,7 @@ async def test_submit_middleware_reraises_and_counts_exception() -> None:
     boom = ValueError("venue said no")
     mw = MetricsSubmitMiddleware(_StubExecutor(exc=boom), metrics=m)
     with pytest.raises(ValueError) as ei:
-        await mw.submit(_decision(), _ctx())
+        await mw.submit(_ready(), _ctx())
     assert ei.value is boom                   # exception object unchanged
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "exception"},
@@ -206,7 +287,7 @@ async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
     m = DaemonMetrics()
     order = SubmittedOrder(cid=1, venue_offer_id=None, status="weird_venue_string", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    await mw.submit(_decision(), _ctx())
+    await mw.submit(_ready(), _ctx())
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "other"},
     ) == 1.0
@@ -222,7 +303,7 @@ async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
     m.observe_submit = _boom  # type: ignore[method-assign]
     order = SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
     mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    got = await mw.submit(_decision(), _ctx())   # must NOT raise
+    got = await mw.submit(_ready(), _ctx())   # must NOT raise
     assert got is order
 
 

@@ -10,8 +10,10 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
+from bfx_funding_bot.modules.execution.contracts import BlockReason
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.healthz import make_app
+from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 
 
 def _probe_with(
@@ -113,3 +115,31 @@ def test_healthz_ignores_reactive_executor_and_safety_chain() -> None:
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json()["tasks"] == 2  # only liveness tasks counted
+
+
+def test_readyz_returns_503_for_business_blocked_state_without_changing_healthz() -> None:
+    probe = _probe_with(fresh=["ws"])
+    readiness = TradingReadiness()
+    readiness.set_blocked(BlockReason.FILL_MODEL_MISSING, "fill_model")
+    client = TestClient(make_app(probe, readiness=readiness))
+
+    readyz = client.get("/readyz")
+    healthz = client.get("/healthz")
+
+    assert readyz.status_code == 503
+    assert readyz.json() == {
+        "trading_ready": False,
+        "reason": "fill_model_missing",
+    }
+    assert healthz.status_code == 200
+
+
+def test_readyz_returns_200_when_trading_is_ready() -> None:
+    readiness = TradingReadiness()
+    readiness.set_ready()
+    client = TestClient(make_app(_probe_with(fresh=["ws"]), readiness=readiness))
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {"trading_ready": True, "reason": None}

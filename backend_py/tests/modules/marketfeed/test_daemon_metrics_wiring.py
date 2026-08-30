@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 from pytest_httpx import HTTPXMock
 
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
@@ -85,6 +86,7 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
 ) -> None:
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_paper.db")
 
@@ -119,10 +121,15 @@ async def test_build_daemon_paper_wires_metrics_everywhere(
     assert len(hooks["request"]) >= 1 and len(hooks["response"]) >= 1
 
     # Bus traffic counter — behavioral: publish moves the counter.
+    scid = uuid4()
     await daemon.bus.publish(ReservationClaimed(
         symbol="fUST", cid=99, venue_offer_id="99",
-        signal_correlation_id=uuid4(), account_id="default",
+        signal_correlation_id=scid, account_id="default",
         is_simulated=True, amount=Decimal("100"),
+        reservation_ref=ReservationRef(
+            execution_decision_id="d-daemon-metrics", cid=99,
+            signal_correlation_id=scid, venue_offer_id="99",
+        ),
     ))
     assert daemon.metrics.registry.get_sample_value(
         "bfx_domain_events_total", {"event_type": "ReservationClaimed"},
@@ -145,6 +152,10 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -153,6 +164,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     )
 
     assert isinstance(daemon.metrics, DaemonMetrics)
+    assert daemon.metrics.registry.get_sample_value("bfx_trading_ready") == 0.0
 
     # Reconcile backbone timing: PeriodicReconcile's recovery is the timing
     # wrapper; PeriodicReconcile itself is untouched.

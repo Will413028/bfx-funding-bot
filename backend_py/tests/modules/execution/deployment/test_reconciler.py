@@ -6,9 +6,23 @@ import pytest
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.external.bitfinex.rest import FundingTicker
-from bfx_funding_bot.modules.execution.deployment.book_clamp import ClampPolicy
+from bfx_funding_bot.modules.execution.contracts import (
+    BlockReason,
+    ExecutionPolicy,
+    ReadyToSubmit,
+)
+from bfx_funding_bot.modules.execution.contracts import (
+    DecisionOutcome as ExecutionDecisionOutcome,
+)
+from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import LadderPolicy
+from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
+from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    OptimizationResult,
+    OptimizerNoRecommendation,
+    RateCandidate,
+    RateOptimizer,
+)
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import RepricePolicy
 from bfx_funding_bot.modules.execution.deployment.standing_quote import (
@@ -22,7 +36,12 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.lending.tracking.artifact import (
+    FillModelEvidence,
+    FillModelUnavailable,
+)
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     EventType,
@@ -38,9 +57,13 @@ class _CapturingSink:
 
     def __init__(self) -> None:
         self.events: list[dict] = []
+        self.execution_events: list[tuple[str, dict[str, object]]] = []
 
     async def emit(self, event: dict) -> None:
         self.events.append(event)
+
+    async def emit_execution_event(self, event_name: str, **kwargs: object) -> None:
+        self.execution_events.append((event_name, kwargs))
 
 
 class _FakeLedger:
@@ -98,10 +121,191 @@ class _FakeSafety:
 class _FakeExecutor:
     def __init__(self) -> None:
         self.submitted: list = []
+        self.ready_submissions: list[ReadyToSubmit] = []
 
     async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
-        self.submitted.append(decision)
+        self.ready_submissions.append(decision)
+        self.submitted.append(decision.decision)
         return SubmittedOrder(cid=1, venue_offer_id="x", status="submitted", raw_response=None)
+
+
+class _Audit:
+    def __init__(self) -> None:
+        self.last = None
+
+    async def record(self, decision) -> None:
+        self.last = decision
+
+
+class _Readiness:
+    def set_ready(self) -> None:
+        pass
+
+    def set_blocked(self, reason, dependency) -> None:
+        pass
+
+
+class _SnapshotProvider:
+    def __init__(self, snapshot: MarketSnapshot | None) -> None:
+        self._snapshot = snapshot
+
+    def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
+        return self._snapshot
+
+
+class _FillModelProvider:
+    def __init__(self, evidence: FillModelEvidence | FillModelUnavailable | None) -> None:
+        self._evidence = evidence
+
+    def estimate_fill(
+        self,
+        reference_rate: Decimal,
+        offer_rate: Decimal,
+        period_agg: str,
+        horizon_h: int,
+    ) -> FillModelEvidence | FillModelUnavailable | None:
+        return self._evidence
+
+
+class _StructuralFillEvidence:
+    """Looks structurally valid to the gate but is not the canonical contract."""
+
+    fill_prob = D("0.95")
+    expected_ttf_ms = 500
+    n_samples = 100
+    symbol = "fUST"
+    period_agg = "p2"
+    horizon_h = 1
+    model_version = "fill-v1"
+    artifact_hash = "sha256:model"
+    cutoff_ms = 1_000
+
+
+class _StructuralFillModelProvider:
+    def estimate_fill(
+        self,
+        reference_rate: Decimal,
+        offer_rate: Decimal,
+        period_agg: str,
+        horizon_h: int,
+    ) -> object:
+        return _StructuralFillEvidence()
+
+
+class _NoRecommendationOptimizer(RateOptimizer):
+    def select(
+        self,
+        signal_rate: Decimal,
+        *,
+        maker: RateCandidate | None,
+        taker: RateCandidate | None,
+        fill_evidence: FillModelEvidence,
+        fee_rate: Decimal,
+    ) -> OptimizationResult | OptimizerNoRecommendation:
+        return OptimizerNoRecommendation(
+            reason="no_eligible_candidate", candidates=(),
+        )
+
+
+class _ErrorOptimizer(RateOptimizer):
+    def select(
+        self,
+        signal_rate: Decimal,
+        *,
+        maker: RateCandidate | None,
+        taker: RateCandidate | None,
+        fill_evidence: FillModelEvidence,
+        fee_rate: Decimal,
+    ) -> OptimizationResult | OptimizerNoRecommendation:
+        raise ValueError("candidate evidence rejected")
+
+
+class _AuditContexts:
+    def build(self, *, candidate, cell_id: str, reconcile_id: str):
+        from bfx_funding_bot.modules.execution.audit.model import AuditContext
+
+        return AuditContext(
+            account_id="default", deployment_environment="test", reconcile_id=reconcile_id,
+            cell_id=cell_id, symbol=candidate.symbol,
+            signal_correlation_id=str(candidate.signal_correlation_id),
+            service_version="test", config_hash="test",
+        )
+
+
+def _valid_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-1", symbol="fUST",
+        bids=(FundingBookLevel(rate=0.001, period=2, count=1, amount=-100_000),),
+        asks=(), captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _ask_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-ask", symbol="fUST", bids=(),
+        asks=(FundingBookLevel(rate=0.00025, period=2, count=1, amount=100_000),),
+        captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _bid_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-bid", symbol="fUST",
+        bids=(FundingBookLevel(rate=0.00013, period=2, count=1, amount=-100_000),),
+        asks=(), captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _signal_floor_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-floor", symbol="fUST", bids=(),
+        asks=(FundingBookLevel(rate=0.0001, period=2, count=1, amount=100_000),),
+        captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _raise_snapshot() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-raise", symbol="fUST", bids=(),
+        asks=(FundingBookLevel(rate=0.00012, period=2, count=1, amount=100_000),),
+        captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+def _eligibility_kwargs(
+    *, audit=None, book_provider=None,
+    gate_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
+    execution_policy: ExecutionPolicy = ExecutionPolicy.BOOK_GUARDED,
+    fill_model_provider: _FillModelProvider | None = None,
+) -> dict:
+    return {
+        "book_provider": book_provider or _SnapshotProvider(_valid_snapshot()),
+        "execution_gate": ExecutionGate(
+            policy=gate_policy,
+            audit=audit or _Audit(), readiness=_Readiness(),
+        ),
+        "execution_policy": execution_policy,
+        "period_pricer": PeriodPricer(
+            max_down_pct=D("0.15"), tick=D("0.00000001"),
+        ),
+        "audit_context_factory": _AuditContexts(),
+        "fill_model_provider": fill_model_provider,
+    }
 
 
 def _cell(symbol: str, period_agg: str) -> CellConfig:
@@ -147,8 +351,14 @@ class _SeqSafety:
 
 def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            available=None, event_sink=None, canceller=None, reprice=None,
-           ticker_source=None, clamp=None, ladder=None, cap=None,
-           attempt_recorder=None):
+           ladder=None, cap=None,
+           attempt_recorder=None, book_provider=None, audit=None,
+           gate_policy=ExecutionPolicy.BOOK_GUARDED,
+           execution_policy=ExecutionPolicy.BOOK_GUARDED,
+           fill_model_provider: _FillModelProvider | None = None,
+           optimizer_fee_rate: Decimal | None = None,
+           optimizer_horizon_h: int | None = None,
+           rate_optimizer: RateOptimizer | None = None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -164,6 +374,9 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         credentials=Credentials(api_key="k", api_secret="s"),
         allocation_cap_usdt=cap,
     )
+    optimizer_kwargs: dict[str, object] = {}
+    if optimizer_horizon_h is not None:
+        optimizer_kwargs["optimizer_horizon_h"] = optimizer_horizon_h
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=_FakeLedger(exposure, available=available),
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
@@ -174,12 +387,306 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         phase=Phase.CANARY,
         canceller=canceller,
         reprice=reprice,
-        ticker_source=ticker_source,
-        clamp=clamp,
+        **_eligibility_kwargs(
+            audit=audit,
+            book_provider=book_provider,
+            gate_policy=gate_policy,
+            execution_policy=execution_policy,
+            fill_model_provider=fill_model_provider,
+        ),
         ladder=ladder,
         attempt_recorder=attempt_recorder,
+        rate_optimizer=rate_optimizer,
+        optimizer_fee_rate=optimizer_fee_rate,
+        **optimizer_kwargs,
     )
     return rec, ex, tracker, safety
+
+
+def _fill_evidence() -> FillModelEvidence:
+    return FillModelEvidence(
+        model_version="fill-v1",
+        artifact_hash="sha256:model",
+        fill_prob=D("0.95"),
+        expected_ttf_ms=500,
+        n_samples=100,
+        symbol="fUST",
+        period_agg="p2",
+        horizon_h=1,
+        cutoff_ms=1_000,
+    )
+
+
+def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
+    with pytest.raises(ValueError, match="execution_gate policy"):
+        _build(
+            exposure=D("370"),
+            quotes=[_post_quote("fUST_a30")],
+            execution_policy=ExecutionPolicy.PAPER,
+        )
+
+
+async def test_book_failure_never_submits_original_quote():
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        book_provider=_SnapshotProvider(None), audit=audit,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.BOOK_STALE
+
+
+async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
+    audit = _Audit()
+    sink = _CapturingSink()
+
+    class _AuditAwareExecutor(_FakeExecutor):
+        async def submit(self, ready, ctx, *, cid=None) -> SubmittedOrder:
+            assert isinstance(ready, ReadyToSubmit)
+            assert audit.last is not None
+            assert audit.last.outcome is ExecutionDecisionOutcome.READY
+            return await super().submit(ready, ctx, cid=cid)
+
+    executor = _AuditAwareExecutor()
+    rec, _executor, _tracker, _safety = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        executor=executor, event_sink=sink, audit=audit,
+    )
+
+    await rec.deploy()
+
+    assert len(executor.ready_submissions) == 1
+    ready = executor.ready_submissions[0]
+    assert ready.decision_id == audit.last.decision_id
+    order_submit = next(event for event in sink.events if event["event_type"] == "order_submit")
+    assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
+
+
+async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():
+    """Shadow model failure is observable but cannot change deploy eligibility or rate."""
+    audit = _Audit()
+    sink = _CapturingSink()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        event_sink=sink,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(FillModelUnavailable("missing")),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.model_evidence["unavailable_reason"] == "fill_model_missing"
+    assert [name for name, _ in sink.execution_events] == [
+        "funding.fill_model.unavailable",
+        "funding.optimizer.no_recommendation",
+        "funding.execution.submitted",
+    ]
+
+
+@pytest.mark.parametrize("unavailable_reason", [
+    "low_confidence", "scope_mismatch", "unversioned",
+])
+async def test_optimizer_shadow_emits_unavailable_event_for_canonical_reason(
+    unavailable_reason: str,
+) -> None:
+    audit = _Audit()
+    sink = _CapturingSink()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        event_sink=sink,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(
+            FillModelUnavailable(reason=unavailable_reason),  # type: ignore[arg-type]
+        ),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert [name for name, _ in sink.execution_events] == [
+        "funding.fill_model.unavailable",
+        "funding.optimizer.no_recommendation",
+        "funding.execution.submitted",
+    ]
+
+
+async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit():
+    """Live optimizer selection remains behind the existing audit-before-submit gate."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.outcome is ExecutionDecisionOutcome.READY
+    assert audit.last.applied_rate == D("0.00024999")
+    assert audit.last.model_evidence["optimizer"]["selected_source"] == "maker"
+
+
+@pytest.mark.parametrize(
+    "optimizer", [_NoRecommendationOptimizer(), _ErrorOptimizer()],
+    ids=["no_recommendation", "error"],
+)
+async def test_optimizer_live_optimizer_failure_is_audited_blocked_without_submit(
+    optimizer: RateOptimizer,
+) -> None:
+    """Valid fill evidence cannot turn an optimizer failure into signal fallback."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+        rate_optimizer=optimizer,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.OPTIMIZER_UNAVAILABLE
+    assert audit.last.failed_dependency == "optimizer"
+    assert audit.last.model_evidence["fill_prob"] == "0.95"
+    assert "unavailable_reason" not in audit.last.model_evidence
+    assert audit.last.model_evidence["optimizer"]["outcome"] == "no_recommendation"
+
+
+async def test_optimizer_live_structural_evidence_is_blocked_without_submit() -> None:
+    """Gate-shaped non-canonical evidence cannot become a live optimizer fallback."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_StructuralFillModelProvider(),  # type: ignore[arg-type]
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.OPTIMIZER_UNAVAILABLE
+    assert audit.last.failed_dependency == "optimizer"
+
+
+async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects() -> None:
+    """A valid shadow result is observational; the existing book price is submitted."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_horizon_h=1,
+        rate_optimizer=RateOptimizer(),
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert audit.last.applied_rate == D("0.00024999")
+    assert audit.last.model_evidence["optimizer"]["outcome"] == "selected"
+
+
+async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> None:
+    """TAKER is a real exact-period candidate and is never relabeled as maker."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_bid_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert [decision.offer_rate for decision in executor.submitted] == [0.00012]
+    optimizer = audit.last.model_evidence["optimizer"]
+    assert [candidate["source"] for candidate in optimizer["candidates"]] == [
+        "signal", "taker",
+    ]
+    assert all(candidate["source"] != "maker" for candidate in optimizer["candidates"])
+
+
+async def test_optimizer_live_requires_explicit_fee_rate() -> None:
+    with pytest.raises(ValueError, match="fee"):
+        _build(
+            exposure=D("370"),
+            quotes=[_post_quote("fUST_p2")],
+            book_provider=_SnapshotProvider(_ask_snapshot()),
+            gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+            execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+            fill_model_provider=_FillModelProvider(_fill_evidence()),
+        )
+
+
+@pytest.mark.parametrize(
+    "snapshot", [_raise_snapshot(), _signal_floor_snapshot()],
+    ids=["raise", "signal_floor"],
+)
+async def test_optimizer_live_does_not_fabricate_maker_for_signal_semantics(
+    snapshot: MarketSnapshot,
+) -> None:
+    """Raise and signal-floor pricing have no exact-period maker candidate."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(snapshot),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert len(executor.submitted) == 1
+    optimizer = audit.last.model_evidence["optimizer"]
+    assert optimizer["selected_source"] == "signal"
+    assert [candidate["source"] for candidate in optimizer["candidates"]] == ["signal"]
 
 
 async def test_deploys_gap_to_active_cell():
@@ -307,6 +814,9 @@ async def test_successful_submit_emits_order_submit_structured_event():
     assert payload["offer_amount_usdt"] == 200.0
     assert payload["cid"] == 1
     assert payload["offer_id"] == "x"
+    assert [name for name, _ in sink.execution_events] == [
+        "funding.execution.submitted",
+    ]
 
 
 async def test_venue_rejected_submit_emits_failed_order_submit_event():
@@ -412,6 +922,7 @@ async def test_stranded_log_names_concentration_when_balance_ample(caplog):
         min_offer_buffer_pct=D("0.02"), concentration_pct=D("0.70"),
         balance_buffer_usdt=D("3"), clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.CANARY,
+        **_eligibility_kwargs(),
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
@@ -443,6 +954,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.CANARY,
+        **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
 
@@ -505,6 +1017,7 @@ async def test_headroom_uses_cell_symbol_available():
         cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        **_eligibility_kwargs(),
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
@@ -542,6 +1055,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.CANARY,
+        **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
 
@@ -685,156 +1199,6 @@ async def test_no_reprice_config_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# E2: book-aware rate clamp (ticker fetch + clamp apply + sweep ref alignment).
-# observe mode = zero behavioural change; ticker_source=None OR clamp=None =
-# byte-identical to pre-E2 (zero fetch). Fetch failure never blocks deploy.
-# ---------------------------------------------------------------------------
-
-
-_CLAMP_ON = ClampPolicy(enabled=True, max_down_pct=0.15, taker_max_period_days=7)
-_CLAMP_OBSERVE = ClampPolicy(enabled=False, max_down_pct=0.15, taker_max_period_days=7)
-
-
-def _fticker(
-    *, bid: float = 0.00005, bid_period: int = 2, bid_size: float = 100_000.0,
-    ask: float = 0.001,
-) -> FundingTicker:
-    return FundingTicker(
-        symbol="fUST", frr=0.0002, bid=bid, bid_period=bid_period,
-        bid_size=bid_size, ask=ask, ask_period=2, ask_size=100_000.0,
-    )
-
-
-class _FakeTickerSource:
-    def __init__(self, ticker: FundingTicker) -> None:
-        self.ticker = ticker
-        self.fetched: list[str] = []
-
-    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
-        self.fetched.append(symbol)
-        return self.ticker
-
-
-class _BoomTickerSource:
-    async def get_funding_ticker(self, *, symbol: str) -> FundingTicker:
-        raise RuntimeError("venue 500")
-
-
-async def test_clamp_raises_stale_quote_to_book_front():
-    # quote 0.00012（_post_quote），book ask 0.001（spike）→ 掛 ask−tick
-    ts = _FakeTickerSource(_fticker())
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts, clamp=_CLAMP_ON,
-    )
-    await rec.deploy()
-    assert ts.fetched == ["fUST"]
-    assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00099999  # round(0.001 - 1e-8, 10)
-
-
-async def test_clamp_observe_mode_submits_quote_rate():
-    ts = _FakeTickerSource(_fticker())
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts, clamp=_CLAMP_OBSERVE,
-    )
-    await rec.deploy()
-    assert ts.fetched == ["fUST"]  # observe mode 照抓 ticker（rollout 需要 log）
-    assert ex.submitted[0].offer_rate == 0.00012  # 但 submit 行為 = 現狀
-
-
-async def test_clamp_taker_keeps_quote_rate():
-    # bid 0.0002 ≥ quote 0.00012，size/period 都在界內 → taker（rate 不變）
-    ts = _FakeTickerSource(_fticker(bid=0.0002, ask=0.00021))
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts, clamp=_CLAMP_ON,
-    )
-    await rec.deploy()
-    assert ex.submitted[0].offer_rate == 0.00012
-
-
-async def test_clamp_floor_keeps_quote_rate():
-    # book 崩到 ask 0.00005 → 競爭價 < 0.00012×0.85 → 不追砍，掛原價
-    ts = _FakeTickerSource(_fticker(bid=0.00001, ask=0.00005))
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts, clamp=_CLAMP_ON,
-    )
-    await rec.deploy()
-    assert ex.submitted[0].offer_rate == 0.00012
-
-
-async def test_clamp_floor_logs_would_adjust_in_observe_mode(caplog):
-    # E2 fix wave: FLOOR branch was previously silent (guard only fired on
-    # rate-changed/TAKER) — Task 5's enforce go/no-go needs FLOOR frequency
-    # evidence from observe mode, so it must now log every branch.
-    ts = _FakeTickerSource(_fticker(bid=0.00001, ask=0.00005))
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts, clamp=_CLAMP_OBSERVE,
-    )
-    with caplog.at_level(logging.INFO):
-        await rec.deploy()
-    assert ex.submitted[0].offer_rate == 0.00012  # submit 行為仍 = 現狀（observe-only）
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any(
-        "clamp_would_adjust" in m and "branch=floor" in m for m in msgs
-    )
-
-
-async def test_clamp_ticker_fetch_error_falls_back_and_deploys():
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=_BoomTickerSource(), clamp=_CLAMP_ON,
-    )
-    await rec.deploy()  # fetch 失敗絕不擋部署
-    assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00012
-
-
-async def test_no_clamp_config_never_fetches():
-    ts = _FakeTickerSource(_fticker())
-    rec, ex, _, _ = _build(
-        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
-        ticker_source=ts,  # clamp=None（預設）
-    )
-    await rec.deploy()
-    assert ts.fetched == []
-    assert ex.submitted[0].offer_rate == 0.00012
-
-
-async def test_sweep_ref_aligns_to_book_when_clamp_enabled():
-    # E1×E2 交互：sustained spike 中（ask 0.001 維持高檔），E2 上一 tick 以
-    # ~ask−tick 掛出的單（0.00099，齡 60min）不可被 sweep 當 stale 自砍 —
-    # ref 對齊 max(quote 0.00012, ask−tick 0.00099999) → 0.00099 在容忍內。
-    canc = _FakeCanceller()
-    ts = _FakeTickerSource(_fticker())
-    rec, _, _, _ = _build(
-        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
-        canceller=canc, reprice=_REPRICE,
-        ticker_source=ts, clamp=_CLAMP_ON,
-    )
-    await rec.deploy(venue_offers=(_venue_offer("42", 0.00099),))
-    assert canc.cancelled == []
-
-
-async def test_sweep_ref_unchanged_in_observe_mode():
-    # observe mode = 零行為差：sweep ref 仍用 quote ref（0.00012×1.1），
-    # 0.00099 是 stale → 照砍（與 E1 現狀 byte-identical）
-    canc = _FakeCanceller()
-    ts = _FakeTickerSource(_fticker())
-    rec, _, _, _ = _build(
-        exposure=D("570"), quotes=[_post_quote("fUST_a30")],
-        canceller=canc, reprice=_REPRICE,
-        ticker_source=ts, clamp=_CLAMP_OBSERVE,
-    )
-    await rec.deploy(venue_offers=(_venue_offer("42", 0.00099),))
-    assert canc.cancelled == ["42"]
-
-
-# ---------------------------------------------------------------------------
 # Single-active-cell stranding fix: the tracker's reconcile_to_total clamp
 # must stay aligned with allocate_gap's relaxed per-cell cap.
 # ---------------------------------------------------------------------------
@@ -873,6 +1237,7 @@ async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
         cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        **_eligibility_kwargs(),
     )
     await rec.deploy()
     # NOT clamped down to 7000: relaxed cap = max(7000, 10000/1) = 10000.
@@ -880,10 +1245,8 @@ async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
 
 
 # ---------------------------------------------------------------------------
-# Task 6: observe-only spike-rung ladder — log ladder_would_post, zero submit
-# behaviour change. clamp=_CLAMP_OBSERVE (not _CLAMP_ON) so this test isolates
-# the ladder's effect: the offer_rate/submit count must match the no-ladder
-# case exactly (see test_clamp_observe_mode_submits_quote_rate above).
+# Observe-only spike-rung ladder uses the exact-period ask already selected by
+# the period pricer; it keeps submit count unchanged.
 # ---------------------------------------------------------------------------
 
 
@@ -893,34 +1256,32 @@ _LADDER = LadderPolicy(spike_fraction=0.15, rung_multipliers=(1.5, 3.0), min_run
 async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
     # cap=10000, single active cell (fUST_p2) -> relaxed cap_per_cell = cap ->
     # full 10000 gap deploys to that one cell. budget = 10000*0.15 = 1500 ->
-    # 750/rung >= 153 -> two rungs get logged (ask=0.00025 from _fticker()).
-    ts = _FakeTickerSource(_fticker(ask=0.00025))
+    # 750/rung >= 153 -> two rungs get logged from the exact-period ask.
     rec, ex, _, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_p2")],
-        cap=D("10000"), ticker_source=ts, clamp=_CLAMP_OBSERVE, ladder=_LADDER,
+        cap=D("10000"), book_provider=_SnapshotProvider(_ask_snapshot()), ladder=_LADDER,
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
     assert any("ladder_would_post" in r.getMessage() for r in caplog.records)
     # observe-only invariant: exactly the same submit as without a ladder —
-    # one offer, at the (unclamped, observe-mode) quote rate.
+    # one offer, at the exact-period maker price.
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00012
+    assert ex.submitted[0].offer_rate == 0.00024999
 
 
 async def test_no_ladder_config_never_computes_rungs(caplog):
     # ladder=None (default) -> byte-identical to pre-Task-6: same submit, no
-    # ladder_would_post log line, even with an identical ticker/clamp/cap setup.
-    ts = _FakeTickerSource(_fticker(ask=0.00025))
+    # ladder_would_post log line, even with an identical exact-period ask/cap setup.
     rec, ex, _, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_p2")],
-        cap=D("10000"), ticker_source=ts, clamp=_CLAMP_OBSERVE,
+        cap=D("10000"), book_provider=_SnapshotProvider(_ask_snapshot()),
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
     assert not any("ladder_would_post" in r.getMessage() for r in caplog.records)
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00012
+    assert ex.submitted[0].offer_rate == 0.00024999
 
 
 # ---------------------------------------------------------------------------

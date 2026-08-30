@@ -17,12 +17,22 @@ trap 'rm -f "$LOG_FILE"' EXIT
 
 mkdir -p "$REPORTS_DIR"
 
-# Keep this as the only docker-log read. The || true is intentional: an idle
-# canary, or a container with no matching lines, must still produce a report.
-docker logs --since "$WINDOW" bfx-bot > "$LOG_FILE" 2>&1 || true
+# Keep this as the only docker-log read. Capture failures are recorded so an
+# unavailable log source cannot be reported as zero events.
+if docker logs --since "$WINDOW" bfx-bot > "$LOG_FILE" 2>&1; then
+  LOG_CAPTURE_OK=1
+  LOG_CAPTURE_STATUS=0
+else
+  LOG_CAPTURE_STATUS=$?
+  LOG_CAPTURE_OK=0
+fi
 
 count_log() {
   local pattern="$1"
+  if [[ "$LOG_CAPTURE_OK" -ne 1 ]]; then
+    printf 'unavailable (docker logs exit status %s)' "$LOG_CAPTURE_STATUS"
+    return 0
+  fi
   grep -cE "$pattern" "$LOG_FILE" || true
 }
 
@@ -85,6 +95,12 @@ readonly_sql() {
   inspect_bot
   echo "--- HTTP probes ---"
   probe_http
+  echo "--- log capture ---"
+  if [[ "$LOG_CAPTURE_OK" -eq 1 ]]; then
+    echo "log_capture=ok source=docker logs bfx-bot"
+  else
+    echo "log_capture=unavailable source=docker logs bfx-bot exit_status=$LOG_CAPTURE_STATUS"
+  fi
   echo "--- bounded log counters ---"
   echo "scheduler_tick=$(count_log 'scheduler_tick')"
   echo "reconcile=$(count_log 'reconcile')"

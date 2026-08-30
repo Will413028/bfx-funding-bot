@@ -5,8 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from bfx_funding_bot.modules.execution.safety.config import load_safety_config
-from bfx_funding_bot.modules.marketfeed.daemon import assert_canary_guard_invariant
+from bfx_funding_bot.modules.execution.safety.config import _AllocationCapCfg, load_safety_config
+from bfx_funding_bot.modules.marketfeed.config import CellConfig
+from bfx_funding_bot.modules.marketfeed.daemon import (
+    assert_canary_guard_invariant,
+    assert_caps_invariant,
+)
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
 
@@ -74,11 +78,6 @@ def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
     cfg = _load(tmp_path, disable="allocation_cap")
     assert_canary_guard_invariant(Phase.SHADOW, cfg)  # invariant is canary-only
 
-
-# ── assert_caps_invariant (Phase 2 Task 5) ───────────────────────────────────
-from bfx_funding_bot.modules.execution.safety.config import _AllocationCapCfg  # noqa: E402
-from bfx_funding_bot.modules.marketfeed.config import CellConfig  # noqa: E402
-from bfx_funding_bot.modules.marketfeed.daemon import assert_caps_invariant  # noqa: E402
 
 _MR_PARAMS = {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100}
 

@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.execution.registry_offers import (
     ClaimRecord,
     DiagnosticLog,
     RegistryState,
+    ReservationCorrelationError,
 )
 
 USER_CANCEL_WINDOW_MS = 5_000
@@ -98,8 +99,14 @@ def _translate_foc(
 
     if claim is None:
         return [], [], [DiagnosticLog(
-            "info",
-            f"foc voi={voi} status={foc.status} not in registry",
+            "error",
+            f"unmatched foc correlation voi={voi} status={foc.status}",
+            voi,
+        )]
+    if claim.reservation_ref is None:
+        return [], [], [DiagnosticLog(
+            "error",
+            f"uncorrelated legacy claim cannot consume foc voi={voi}",
             voi,
         )]
     if claim.state == RegistryState.RELEASED:
@@ -121,6 +128,7 @@ def _translate_foc(
             venue_seq=foc.raw_seq,
             occurred_at_ms=foc.mts_update,
             symbol=foc.symbol,
+            reservation_ref=claim.reservation_ref,
         )
         return [fill], [RegistryMutation(
             venue_offer_id=voi,
@@ -151,6 +159,7 @@ def _translate_foc(
         venue_seq=foc.raw_seq,
         occurred_at_ms=foc.mts_update,
         symbol=foc.symbol,
+        reservation_ref=claim.reservation_ref,
     )
     mutation = RegistryMutation(
         venue_offer_id=voi,
@@ -253,6 +262,8 @@ class BitfinexLiveWSDispatcher:
             account_id=self._account_id,
         )
         for d in diags:
+            if d.level == "error":
+                raise ReservationCorrelationError(d.message)
             (log.warning if d.level == "warn" else log.info)(
                 "ws_dispatcher_diag voi=%s msg=%s",
                 d.venue_offer_id, d.message,

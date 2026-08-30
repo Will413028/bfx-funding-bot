@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
 )
@@ -48,7 +49,7 @@ async def emit_order_submit(
     phase: Phase,
     strategy: StrategyName,
     cell: str,
-    decision: DecisionPayload,
+    ready: ReadyToSubmit,
     ctx: AccountContext,
     cid: int,
     offer_id: str | None,
@@ -58,9 +59,11 @@ async def emit_order_submit(
     attempts: int = 1,
     retry_total_ms: int | None = None,
 ) -> None:
+    decision = ready.decision
     payload = OrderSubmitPayload(
         cid=cid,
         offer_id=offer_id,
+        execution_decision_id=ready.decision_id,
         signal_correlation_id=decision.signal_correlation_id,
         offer_rate=decision.offer_rate or 0.0,
         offer_amount_usdt=decision.offer_amount_usdt or 0.0,

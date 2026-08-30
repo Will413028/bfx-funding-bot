@@ -18,6 +18,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, ReservationReleased
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
@@ -166,7 +167,11 @@ async def test_offer_disappearance_emits_reservation_released() -> None:
         cid=42, venue_offer_id="111", size_usdt=Decimal("100.0"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUST"))
+        symbol="fUST", reservation_ref=ReservationRef(
+            execution_decision_id="d-fill-tracker", cid=42,
+            signal_correlation_id=sig_id, venue_offer_id="111",
+        ),
+    ))
 
     tick_count = 0
 
