@@ -6,7 +6,6 @@ from json import loads
 from pathlib import Path
 from threading import Thread
 
-
 SCRIPT = Path(__file__).parents[3] / "deploy" / "vm" / "soak-checkpoint.sh"
 
 
@@ -103,7 +102,7 @@ def test_checkpoint_invocation_is_read_only_and_does_not_leak_admin_token(tmp_pa
             self.end_headers()
             self.wfile.write(payload)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             if self.path == "/healthz":
                 self._respond(503, '{"state":"degraded TOKEN-SENTINEL"}')
             elif self.path == "/readyz":
@@ -113,7 +112,7 @@ def test_checkpoint_invocation_is_read_only_and_does_not_leak_admin_token(tmp_pa
             else:
                 self._respond(404, '{"error":"TOKEN-SENTINEL missing route"}')
 
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             if self.path == "/admin/dry-evaluate":
                 self._respond(200, '{"note":"TOKEN-SENTINEL", "would_submit_any":false}')
             else:
