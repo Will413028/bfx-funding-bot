@@ -25,6 +25,7 @@ def test_checkpoint_script_has_fail_closed_shell_and_absolute_report_targets():
     assert 'WINDOW="${1:-90m}"' in source
     assert 'mktemp /tmp/soak-checkpoint.' in source
     assert 'BFX_HEALTHZ_BASE_URL:-http://127.0.0.1:8080' in source
+    assert "base_url = sys.argv[1].rstrip(\"/\")" in source
 
 
 def test_checkpoint_script_captures_logs_once_and_counts_idle_canary_safely():
@@ -140,8 +141,8 @@ fi
   printf '%s\\n' 'sha=sha256:test health=healthy restarts=0'
   exit 0
 fi
-if [ "$#" -eq 5 ] && [ "$1" = exec ] && [ "$2" = bfx-bot ] && [ "$3" = python ] && [ "$4" = -c ]; then
-  exec python -c "$5"
+if [ "$#" -eq 6 ] && [ "$1" = exec ] && [ "$2" = bfx-bot ] && [ "$3" = python ] && [ "$4" = -c ]; then
+  exec python -c "$5" "$6"
 fi
 if [ "$#" -eq 11 ] && [ "$1" = exec ] && [ "$2" = bfx-postgres ] && [ "$3" = psql ] && [ "$4" = -U ] && [ "$5" = bfx ] && [ "$6" = -d ] && [ "$7" = bfx ] && [ "$8" = -X ] && [ "$9" = -qAt ] && [ "${10}" = -c ]; then
   printf '%s\\n' '7'
@@ -152,6 +153,7 @@ exit 99
     )
     fake_docker.chmod(0o755)
 
+    base_url = f"http://127.0.0.1:{server.server_port}"
     result = subprocess.run(
         [str(SCRIPT), "1m"],
         env={
@@ -159,7 +161,7 @@ exit 99
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "FAKE_CALLS": str(calls),
             "BFX_REPORTS_DIR": str(reports),
-            "BFX_HEALTHZ_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            "BFX_HEALTHZ_BASE_URL": base_url,
             "BFX_ADMIN_TOKEN": "TOKEN-SENTINEL",
         },
         capture_output=True,
@@ -186,6 +188,7 @@ exit 99
     bot_execs = [argv for argv in invocations if argv[:2] == ["exec", "bfx-bot"]]
     assert len(bot_execs) == 1
     assert bot_execs[0][2:4] == ["python", "-c"]
+    assert len(bot_execs[0]) == 6 and bot_execs[0][5] == base_url
     assert "/healthz" in bot_execs[0][4] and "/readyz" in bot_execs[0][4]
     sql_calls = [argv for argv in invocations if argv[:2] == ["exec", "bfx-postgres"]]
     assert len(sql_calls) == 4
