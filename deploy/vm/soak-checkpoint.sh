@@ -3,7 +3,11 @@
 set -euo pipefail
 
 WINDOW="${1:-90m}"
-REPORTS_DIR="/home/ubuntu/bfx/reports"
+REPORTS_DIR="${BFX_REPORTS_DIR:-/home/ubuntu/bfx/reports}"
+case "$REPORTS_DIR" in
+  /*) ;;
+  *) printf '%s\n' 'BFX_REPORTS_DIR must be an absolute path' >&2; exit 2 ;;
+esac
 STAMP="$(date -u +%Y%m%d-%H%M)"
 REPORT="${REPORTS_DIR}/soak-checkpoint-${STAMP}.txt"
 LATEST="${REPORTS_DIR}/soak-checkpoint-latest.txt"
@@ -29,6 +33,7 @@ probe_http() {
   docker exec bfx-bot python -c '
 import json
 import os
+import urllib.error
 import urllib.request
 
 token = os.environ.get("BFX_ADMIN_TOKEN", "")
@@ -42,6 +47,9 @@ def call(path, method="GET"):
     with urllib.request.urlopen(request, timeout=15) as response:
         return response.read().decode("utf-8")
 
+def redact(body):
+    return body.replace(token, "[redacted]") if token else body
+
 for path, method in (("/healthz", "GET"), ("/readyz", "GET"),
                      ("/admin/trading-status", "GET"),
                      ("/admin/dry-evaluate", "POST")):
@@ -51,7 +59,13 @@ for path, method in (("/healthz", "GET"), ("/readyz", "GET"),
             body = json.dumps(json.loads(body), sort_keys=True)
         except json.JSONDecodeError:
             pass
-        print(path + ": " + body)
+        print(path + ": " + redact(body))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = "<unreadable>"
+        print(path + ": HTTP " + str(exc.code) + " body=" + redact(body or "<empty>"))
     except Exception as exc:
         print(path + ": unavailable (" + type(exc).__name__ + ")")
 ' 2>&1 </dev/null || printf '%s\n' 'container probe unavailable'
