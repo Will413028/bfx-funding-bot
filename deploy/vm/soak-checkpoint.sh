@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# One-shot, read-only checkpoint for a running canary VM.
+set -euo pipefail
+
+WINDOW="${1:-90m}"
+REPORTS_DIR="/home/ubuntu/bfx/reports"
+STAMP="$(date -u +%Y%m%d-%H%M)"
+REPORT="${REPORTS_DIR}/soak-checkpoint-${STAMP}.txt"
+LATEST="${REPORTS_DIR}/soak-checkpoint-latest.txt"
+LOG_FILE="$(mktemp /tmp/soak-checkpoint.XXXXXX.log)"
+trap 'rm -f "$LOG_FILE"' EXIT
+
+mkdir -p "$REPORTS_DIR"
+
+# Keep this as the only docker-log read. The || true is intentional: an idle
+# canary, or a container with no matching lines, must still produce a report.
+docker logs --since "$WINDOW" bfx-bot > "$LOG_FILE" 2>&1 || true
+
+count_log() {
+  local pattern="$1"
+  grep -cE "$pattern" "$LOG_FILE" || true
+}
+
+inspect_bot() {
+  docker inspect --format='sha={{.Image}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restarts={{.RestartCount}}' bfx-bot 2>&1 || printf '%s\n' 'unavailable'
+}
+
+probe_http() {
+  docker exec bfx-bot python -c '
+import json
+import os
+import urllib.request
+
+token = os.environ.get("BFX_ADMIN_TOKEN", "")
+
+def call(path, method="GET"):
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    request = urllib.request.Request(
+        "http://127.0.0.1:8080" + path, headers=headers, method=method,
+        data=b"" if method == "POST" else None,
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return response.read().decode("utf-8")
+
+for path, method in (("/healthz", "GET"), ("/readyz", "GET"),
+                     ("/admin/trading-status", "GET"),
+                     ("/admin/dry-evaluate", "POST")):
+    try:
+        body = call(path, method)
+        try:
+            body = json.dumps(json.loads(body), sort_keys=True)
+        except json.JSONDecodeError:
+            pass
+        print(path + ": " + body)
+    except Exception as exc:
+        print(path + ": unavailable (" + type(exc).__name__ + ")")
+' 2>&1 </dev/null || printf '%s\n' 'container probe unavailable'
+}
+
+readonly_sql() {
+  docker exec bfx-postgres psql -U bfx -d bfx -X -qAt -c "$1" </dev/null 2>&1 || printf '%s\n' 'unavailable'
+}
+
+{
+  echo "===== Read-only VM soak checkpoint @ $(date -u '+%Y-%m-%d %H:%M UTC') ====="
+  echo "window=$WINDOW"
+  echo "--- container ---"
+  inspect_bot
+  echo "--- HTTP probes ---"
+  probe_http
+  echo "--- bounded log counters ---"
+  echo "scheduler_tick=$(count_log 'scheduler_tick')"
+  echo "reconcile=$(count_log 'reconcile')"
+  echo "divergence=$(count_log 'divergence')"
+  echo "blocked=$(count_log 'blocked')"
+  echo "submit=$(count_log 'submit')"
+  echo "error=$(count_log '^[0-9-]+ [0-9:,]+ (ERROR|CRITICAL) ')"
+  echo "--- read-only candle/reconcile SQL ---"
+  echo "candle_revisions=$(readonly_sql "SELECT count(*) FROM funding_candle_revisions")"
+  echo "candles_finalized=$(readonly_sql "SELECT count(*) FROM funding_candles WHERE finalized_at_ms IS NOT NULL")"
+  echo "candles_not_final=$(readonly_sql "SELECT count(*) FROM funding_candles WHERE is_final = false")"
+  echo "reconcile_observations=$(readonly_sql "SELECT count(*) FROM reconcile_observation")"
+  echo "DONE"
+} > "$REPORT" 2>&1
+
+ln -sfn "$REPORT" "$LATEST"
