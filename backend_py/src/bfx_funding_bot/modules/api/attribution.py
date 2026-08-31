@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import WeeklyAttributionResponse
@@ -78,7 +78,7 @@ def build_attribution_router() -> APIRouter:
     @router.get("/attribution/weekly")
     async def weekly(
         cell: str | None = None,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         stmt = (

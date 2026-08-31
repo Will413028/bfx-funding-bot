@@ -14,7 +14,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.user_profile import UserProfile
 from bfx_funding_bot.modules.api.deps import get_session
 
@@ -28,7 +28,7 @@ def require_plan(minimum: str) -> Callable[..., Awaitable[None]]:
     floor = PLAN_TIERS[minimum]
 
     async def _check(
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> None:
         row = (

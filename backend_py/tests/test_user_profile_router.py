@@ -10,12 +10,12 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(build_router())
 
-    from bfx_funding_bot.core.auth import Principal, require_user
+    from bfx_funding_bot.core.auth import Principal, require_operator
 
     async def _fake_user():
         return Principal(user_id="user_abc", email="will@example.com", role="admin")
 
-    app.dependency_overrides[require_user] = _fake_user
+    app.dependency_overrides[require_operator] = _fake_user
     return TestClient(app)
 
 

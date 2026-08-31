@@ -2,17 +2,17 @@
 
 Read-only over position_state / offer_claims / event_log, realm-scoped to the
 BFX_ACCOUNT_ID / BFX_DEPLOYMENT_ENV env (operator console v1: single bot
-account), every route behind require_user.
+account), every route behind require_operator.
 """
 from decimal import Decimal
 
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
@@ -79,7 +79,7 @@ async def app_client(factory):
     app = FastAPI()
     app.include_router(build_projections_router())
 
-    async def _fake_user():
+    async def _fake_operator():
         return Principal(user_id="user_abc", email="will@example.com", role="operator")
 
     async def _override_session():
@@ -91,14 +91,14 @@ async def app_client(factory):
                 await s.rollback()
                 raise
 
-    app.dependency_overrides[require_user] = _fake_user
+    app.dependency_overrides[require_operator] = _fake_operator
     app.dependency_overrides[get_session] = _override_session
     return TestClient(app)
 
 
 @pytest_asyncio.fixture
 async def anon_client(factory):
-    """No require_user override — the real dependency must reject."""
+    """No require_operator override — the real dependency must reject."""
     app = FastAPI()
     app.include_router(build_projections_router())
 
@@ -173,6 +173,18 @@ def test_executions_event_type_filter(app_client):
 def test_executions_limit_capped(app_client):
     resp = app_client.get("/api/v1/executions", params={"limit": 999})
     assert resp.status_code == 422  # over cap rejected by validation
+
+
+def test_non_operator_is_rejected_by_every_projection_route(app_client):
+    """Catches any projection route wired to require_user instead of require_operator."""
+    async def _reject_non_operator():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
+
+    app_client.app.dependency_overrides[require_operator] = _reject_non_operator
+    headers = {"Authorization": "Bearer ignored"}
+    for path in ("/api/v1/positions", "/api/v1/offers", "/api/v1/executions"):
+        response = app_client.get(path, headers=headers)
+        assert response.status_code == 403, path
 
 
 def test_all_routes_require_auth(anon_client):

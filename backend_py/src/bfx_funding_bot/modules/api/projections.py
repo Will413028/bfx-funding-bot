@@ -3,7 +3,7 @@
 Read-only over position_state / offer_claims / event_log for the operator
 console. Realm = BFX_ACCOUNT_ID / BFX_DEPLOYMENT_ENV env (v1: single bot
 account, same convention as the attribution router; SP6 multi-tenant will
-replace this with a user→account mapping). Every route behind require_user.
+replace this with a user→account mapping). Every route behind require_operator.
 INERT for the daemon: webapi only reads the shared tables.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.attribution import _dec_str
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
@@ -50,7 +50,7 @@ def build_projections_router() -> APIRouter:
 
     @router.get("/positions")
     async def positions(
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         rows = (
@@ -79,7 +79,7 @@ def build_projections_router() -> APIRouter:
     @router.get("/offers")
     async def offers(
         state: str | None = None,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         stmt = select(OfferClaimRow).where(
@@ -110,7 +110,7 @@ def build_projections_router() -> APIRouter:
         limit: int = Query(default=50, ge=1, le=_EXECUTIONS_LIMIT_CAP),
         before: int | None = Query(default=None, description="event_seq cursor"),
         event_type: str | None = Query(default=None),
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         stmt = select(EventLogRow).where(

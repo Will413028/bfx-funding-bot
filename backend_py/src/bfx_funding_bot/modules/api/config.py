@@ -1,12 +1,12 @@
 """SP3 configs endpoints. Thin: maps config_service results to HTTP. Every route
-is gated by require_user and scoped to principal.user_id. {"data": ...} envelope.
+is gated by require_operator and scoped to principal.user_id. {"data": ...} envelope.
 INERT: stored config is never read by the lending daemon (SP6 will consume it)."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts import config_service
 from bfx_funding_bot.modules.accounts.tables import UserConfig
 from bfx_funding_bot.modules.api.deps import get_session
@@ -32,7 +32,7 @@ def build_config_router() -> APIRouter:
 
     @router.get("/configs")
     async def get_config(
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         row = await config_service.get_user_config(session, user_id=user.user_id)
@@ -43,7 +43,7 @@ def build_config_router() -> APIRouter:
     @router.put("/configs")
     async def put_config(
         body: StrategyConfigBody,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         row = await config_service.upsert_user_config(
@@ -53,7 +53,7 @@ def build_config_router() -> APIRouter:
 
     @router.delete("/configs", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_config(
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> Response:
         deleted = await config_service.delete_user_config(session, user_id=user.user_id)

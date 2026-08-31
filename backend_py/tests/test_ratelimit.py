@@ -5,7 +5,7 @@ import pytest
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.ratelimit import (
     TokenBucketLimiter,
     build_rate_limit_dependency,
@@ -68,7 +68,7 @@ def client() -> TestClient:
     async def _fake_user():
         return Principal(user_id="user_abc", email="w@e.com", role="operator")
 
-    app.dependency_overrides[require_user] = _fake_user
+    app.dependency_overrides[require_operator] = _fake_user
     return TestClient(app)
 
 
