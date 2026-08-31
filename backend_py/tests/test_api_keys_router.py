@@ -3,18 +3,20 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables  # registers APIKey in Base.metadata
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core import auth
+from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_bitfinex_auth_rest, get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 
 _KEK_B64 = base64.b64encode(bytes(range(32))).decode()
 
@@ -40,7 +42,7 @@ async def app_client(sqlite_engine, monkeypatch):
     app = FastAPI()
     app.include_router(build_api_keys_router())
 
-    async def _fake_user():
+    async def _fake_operator():
         return Principal(user_id="user_abc", email="will@example.com", role="operator")
 
     async def _override_session():
@@ -57,7 +59,7 @@ async def app_client(sqlite_engine, monkeypatch):
     async def _override_client():
         yield fake
 
-    app.dependency_overrides[require_user] = _fake_user
+    app.dependency_overrides[require_operator] = _fake_operator
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_bitfinex_auth_rest] = _override_client
     client = TestClient(app)
@@ -244,6 +246,58 @@ def test_delete(app_client):
     assert app_client.get("/api/v1/api-keys").json()["data"] == []
 
 
+def test_non_operator_is_rejected_by_every_api_key_route(app_client):
+    """Catches any route wired to require_user instead of require_operator."""
+    async def _reject_non_operator():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
+
+    async def _permissive_user():
+        return Principal(user_id="user_abc", email="will@example.com", role="operator")
+
+    async def _skip_rate_limit():
+        return None
+
+    app_client.app.dependency_overrides[require_operator] = _reject_non_operator
+    app_client.app.dependency_overrides[require_user] = _permissive_user
+    app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
+    requests = (
+        ("get", "/api/v1/api-keys", {}),
+        ("post", "/api/v1/api-keys", {"json": {"label": "a", "apiKey": "P", "apiSecret": "S"}}),
+        ("post", f"/api/v1/api-keys/{uuid.uuid4()}/verify", {}),
+        ("delete", f"/api/v1/api-keys/{uuid.uuid4()}", {}),
+    )
+
+    for method, path, kwargs in requests:
+        response = getattr(app_client, method)(path, **kwargs)
+        assert response.status_code == 403, path
+
+
+def test_missing_operator_config_rejects_before_session_access(monkeypatch):
+    """Catches a dependency order that opens a database session before authz."""
+    monkeypatch.delenv("BFX_OPERATOR_USER_ID", raising=False)
+    monkeypatch.setattr(
+        auth, "_verify", lambda _: Principal("operator-1", "will@example.com", "admin")
+    )
+    session_accessed = False
+
+    app = FastAPI()
+    app.include_router(build_api_keys_router())
+
+    async def _unexpected_session():
+        nonlocal session_accessed
+        session_accessed = True
+        raise AssertionError("database session must not be opened before operator auth")
+        yield
+
+    app.dependency_overrides[get_session] = _unexpected_session
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/api/v1/api-keys", headers={"Authorization": "Bearer ignored"}
+    )
+
+    assert response.status_code == 503
+    assert session_accessed is False
+
+
 def test_requires_auth():
     app = FastAPI()
     app.include_router(build_api_keys_router())
@@ -261,7 +315,7 @@ def test_delete_another_users_key_404(app_client):
     async def _other_user():
         return Principal(user_id="user_xyz", email="other@example.com", role="operator")
 
-    app_client.app.dependency_overrides[require_user] = _other_user
+    app_client.app.dependency_overrides[require_operator] = _other_user
     r = app_client.delete(f"/api/v1/api-keys/{created['id']}")
     assert r.status_code == 404
 
@@ -274,7 +328,7 @@ def test_verify_another_users_key_404(app_client):
     async def _other_user():
         return Principal(user_id="user_xyz", email="other@example.com", role="operator")
 
-    app_client.app.dependency_overrides[require_user] = _other_user
+    app_client.app.dependency_overrides[require_operator] = _other_user
     r = app_client.post(f"/api/v1/api-keys/{created['id']}/verify")
     assert r.status_code == 404
 

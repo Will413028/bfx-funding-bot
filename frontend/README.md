@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# BFX Funding Bot frontend
 
-## Getting Started
+Next.js 16 App Router frontend for the Release 0 operator-only deployment.
+Self-service signup is disabled; private API calls go through the same-origin
+BFF and only receive a server-side EdDSA execution JWT after fresh session and
+per-session MFA checks.
 
-First, run the development server:
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
+pnpm test
+pnpm lint
+pnpm build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The frontend uses `NEXT_PUBLIC_*` values at build time. Server-only values
+(`API_URL`, Better Auth/Postgres/Redis secrets and operator ID/role) are
+supplied at runtime; `src/lib/env.ts` validates them during Node startup.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## E2E
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+pnpm test:e2e
+E2E_FULL_STACK=1 pnpm test:e2e
+```
 
-## Learn More
+The full-stack tier covers signup denial, JWT endpoint/header containment and
+the exact anonymous public proof proxy allowlist. See [`e2e/README.md`](e2e/README.md)
+for the disposable Postgres/Redis setup.
 
-To learn more about Next.js, take a look at the following resources:
+## Deployment
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The current stack runs on the Oracle Cloud VM through Docker Compose. Use the
+root [`scripts/deploy-vm.sh`](../scripts/deploy-vm.sh) preflight and follow the
+[Release 0 operator containment runbook](../docs/runbooks/release-0-operator-containment.md).

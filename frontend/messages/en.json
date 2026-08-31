@@ -33,14 +33,15 @@
   },
   "auth": {
     "login": "Login",
-    "register": "Register",
     "email": "Email",
     "password": "Password",
     "forgotPassword": "Forgot password?",
-    "noAccount": "Don't have an account?",
-    "hasAccount": "Already have an account?",
     "loginFailed": "Login failed",
-    "registrationFailed": "Registration failed"
+    "twoFactorTitle": "Two-factor verification",
+    "twoFactorDescription": "Enter the authentication code from your authenticator app.",
+    "authenticationCode": "Authentication code",
+    "verify": "Verify",
+    "invalidTwoFactorCode": "Invalid authentication code"
   },
   "overview": {
     "title": "Dashboard",

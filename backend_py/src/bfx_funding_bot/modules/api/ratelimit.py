@@ -18,7 +18,7 @@ from typing import Literal
 
 from fastapi import Depends, HTTPException, Request, Response, status
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 
 Scope = Literal["read", "write"]
 
@@ -92,7 +92,7 @@ def build_rate_limit_dependency(
     async def enforce_rate_limit(
         request: Request,
         response: Response,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
     ) -> None:
         scope: Scope = "read" if request.method in ("GET", "HEAD") else "write"
         retry_in = _limiter.acquire(user.user_id, scope)

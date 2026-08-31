@@ -80,9 +80,9 @@ def test_pinned_issuer_contract(keypair, monkeypatch):
     needed for issuer at deploy (only the real JWKS URL must be set)."""
     # Robust against ambient env: assert the wired-in DEFAULT, not whatever a shell set.
     monkeypatch.delenv("BETTER_AUTH_ISSUER", raising=False)
-    from bfx_funding_bot.core.settings import Settings
+    from bfx_funding_bot.core.settings import AuthSettings
 
-    assert Settings().better_auth_issuer == "bfx-funding-bot"  # BE default == FE pin
+    assert AuthSettings().better_auth_issuer == "bfx-funding-bot"  # BE default == FE pin
     # A FE-shaped token (iss == the pin) verifies when the verifier uses the pin.
     monkeypatch.setattr(auth_mod, "_ISSUER", "bfx-funding-bot")
     token = _mint(_claims(iss="bfx-funding-bot"), keypair)

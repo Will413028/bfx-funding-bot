@@ -61,12 +61,38 @@ async function request<T>(
 
   if (isServer) {
     try {
-      const { auth } = await import("@/lib/auth");
+      const { auth, getOperatorMfaSessionAccess } = await import("@/lib/auth");
       const { headers: nextHeaders } = await import("next/headers");
-      const res = await auth.api.getToken({ headers: await nextHeaders() });
+      const requestHeaders = await nextHeaders();
+      const operatorUserId = process.env.BFX_OPERATOR_USER_ID?.trim();
+      if (!operatorUserId) {
+        throw new ApiError(
+          503,
+          "auth_not_configured",
+          "Operator authorization is not configured",
+        );
+      }
+      const access = await getOperatorMfaSessionAccess(
+        requestHeaders,
+        operatorUserId,
+      );
+      if (!access.allowed) {
+        throw new ApiError(403, access.error, access.error);
+      }
+      const res = await auth.api.getToken({ headers: requestHeaders });
       if (res?.token) headers.Authorization = `Bearer ${res.token}`;
-    } catch {
-      // Outside a request context (e.g. tests) — skip auth
+      else {
+        throw new ApiError(401, "UNAUTHORIZED", "Auth token unavailable");
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      // A missing request context or unavailable auth dependency is not a
+      // reason to send an unauthenticated request to a private backend route.
+      throw new ApiError(
+        403,
+        "operator_required",
+        "Operator session unavailable",
+      );
     }
   }
 

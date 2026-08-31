@@ -7,13 +7,6 @@ export const loginSchema = z.object({
 
 export type LoginFormInput = z.infer<typeof loginSchema>;
 
-export const registerSchema = z.object({
-  email: z.string().min(1, "required").email("invalidEmail"),
-  password: z.string().min(1, "required").min(8, "minLength"),
-});
-
-export type RegisterFormInput = z.infer<typeof registerSchema>;
-
 export const createApiKeySchema = z.object({
   label: z.string().min(1, "required").max(50, "maxLength"),
   apiKey: z.string().min(1, "required"),

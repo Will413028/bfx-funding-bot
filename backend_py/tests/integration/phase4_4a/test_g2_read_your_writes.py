@@ -9,6 +9,8 @@ import pytest
 
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 
+from .conftest import make_reservation_ref
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -18,12 +20,16 @@ async def test_after_publish_returns_ledger_already_updated(
     bus = domain_chain["bus"]
     ledger = domain_chain["ledger"]
     registry = domain_chain["registry"]
+    sig_id = uuid4()
+    voi = "42"
 
     await bus.publish(ReservationClaimed(
-        cid=42, venue_offer_id="42", size_usdt=Decimal("100"),
-        signal_correlation_id=uuid4(), account_id="default", is_simulated=False,
+        cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
+        signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUST"))
+        symbol="fUST",
+        reservation_ref=make_reservation_ref(42, sig_id, voi),
+    ))
 
     # Immediately after publish returns — both ledger + registry reflect
     assert ledger.current_exposure("fUST") == Decimal("100")

@@ -15,7 +15,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 
-from .conftest import ScriptedWSClient
+from .conftest import ScriptedWSClient, make_reservation_ref
 
 
 class _EventCapture:
@@ -40,7 +40,9 @@ async def test_duplicate_foc_executed_does_not_double_realize(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUSD"))
+        symbol="fUSD",
+        reservation_ref=make_reservation_ref(42, sig_id, voi),
+    ))
 
     # Same foc EXECUTED delivered twice — venue WS may redeliver
     foc1 = FocEvent(

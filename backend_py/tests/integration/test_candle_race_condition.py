@@ -1,4 +1,4 @@
-"""R4.1.2: WS upsert happening 0-5s into the scheduler buffer window must
+"""R4.1.2: a revision for a still-forming candle must
 not produce a divergence between what scheduler reads at +5s and the
 eventual "final" candle row.
 
@@ -22,8 +22,12 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 
 @pytest.mark.integration
 async def test_late_revision_within_buffer_window(sqlite_engine: AsyncEngine) -> None:
-    """Last-write-wins: a candle revision arriving within the scheduler's
-    5s buffer must overwrite the prior version in the DB."""
+    """Last-write-wins while the candle's period is still forming.
+
+    The writer's clock is held inside the candle period.  This is the
+    production sealing contract: revisions are accepted until period closure,
+    rather than for an arbitrary fixed number of seconds.
+    """
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -40,11 +44,21 @@ async def test_late_revision_within_buffer_window(sqlite_engine: AsyncEngine) ->
         symbol="fUSD", timeframe="1h", period_agg="a30", mts=mts,
         open=0.0001, close=0.00012, high=0.00012, low=0.00010, volume=120.0,
     )
+    next_period = CandleMessage(
+        symbol="fUSD", timeframe="1h", period_agg="a30", mts=mts + 60 * 60_000,
+        open=0.0001, close=0.00013, high=0.00013, low=0.00010, volume=130.0,
+    )
     await queue.put(initial)
     await queue.put(revision)
+    await queue.put(next_period)
     await queue.put(None)
 
-    writer = CandleWriter(queue=queue, session_factory=factory, probe=HealthProbe())
+    writer = CandleWriter(
+        queue=queue,
+        session_factory=factory,
+        probe=HealthProbe(),
+        clock=lambda: mts + 1_000,
+    )
     await writer.run()
 
     async with factory() as verify_session:

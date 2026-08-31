@@ -1,5 +1,5 @@
 """SP2 api-keys endpoints. Thin: maps vault service results to HTTP. Every route
-is gated by require_user and scoped to principal.user_id. {"data": ...} envelope."""
+is gated by require_operator and scoped to principal.user_id. {"data": ...} envelope."""
 from __future__ import annotations
 
 from uuid import UUID
@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
@@ -52,7 +52,7 @@ def build_api_keys_router() -> APIRouter:
 
     @router.get("/api-keys")
     async def list_keys(
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         rows = await vault.list_api_keys(session, user_id=user.user_id)
@@ -61,7 +61,7 @@ def build_api_keys_router() -> APIRouter:
     @router.post("/api-keys", status_code=status.HTTP_201_CREATED)
     async def create_key(
         body: CreateApiKeyRequest,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         kek = _require_kek()
@@ -82,7 +82,7 @@ def build_api_keys_router() -> APIRouter:
     @router.post("/api-keys/{key_id}/verify")
     async def verify_key(
         key_id: UUID,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         client: BitfinexAuthREST = Depends(get_bitfinex_auth_rest),  # noqa: B008
     ) -> dict[str, object]:
@@ -114,7 +114,7 @@ def build_api_keys_router() -> APIRouter:
     @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_key(
         key_id: UUID,
-        user: Principal = Depends(require_user),  # noqa: B008
+        user: Principal = Depends(require_operator),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> Response:
         deleted = await vault.delete_api_key(session, user_id=user.user_id, key_id=key_id)

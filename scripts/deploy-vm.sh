@@ -54,9 +54,25 @@ WEBAPI_SECRETS="$HOME/bfx/webapi.env"
 [ -f "$WEBAPI_SECRETS" ] || { echo "ERROR: missing $WEBAPI_SECRETS (chmod 600)"; exit 1; }
 cp "$WEBAPI_SECRETS" .env.webapi.runtime
 chmod 600 .env.webapi.runtime
-for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
+
+require_nonempty_env() {
+  local file="$1" var="$2" value
+  value=$(grep "^${var}=" "$file" | tail -1 | cut -d= -f2- || true)
+  [ -n "${value//[[:space:]]/}" ] || {
+    echo "ERROR: required var $var missing/empty in $file"
+    exit 1
+  }
+}
+
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK BFX_OPERATOR_ROLE; do
   grep -q "^$v=." .env.webapi.runtime || { echo "ERROR: web-API var $v missing/empty in $WEBAPI_SECRETS"; exit 1; }
 done
+require_nonempty_env .env.webapi.runtime BFX_OPERATOR_USER_ID
+BACKEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.webapi.runtime | tail -1 | cut -d= -f2-)
+[ "$BACKEND_OPERATOR_ROLE" = admin ] || {
+  echo "ERROR: web-API BFX_OPERATOR_ROLE must be admin for operator-only containment"
+  exit 1
+}
 
 # --- frontend env (Better Auth FE: scoped bfx_webauth role, VM redis, server-only) ---
 FRONTEND_SECRETS="$HOME/bfx/frontend.env"
@@ -66,6 +82,19 @@ chmod 600 .env.frontend.runtime
 for v in NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL API_URL BETTER_AUTH_SECRET BETTER_AUTH_URL DATABASE_URL REDIS_URL PASSKEY_RP_ID; do
   grep -q "^$v=." .env.frontend.runtime || { echo "ERROR: frontend var $v missing/empty in $FRONTEND_SECRETS"; exit 1; }
 done
+require_nonempty_env .env.frontend.runtime BFX_OPERATOR_USER_ID
+require_nonempty_env .env.frontend.runtime BFX_OPERATOR_ROLE
+FRONTEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
+BACKEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.webapi.runtime | tail -1 | cut -d= -f2-)
+[ "$FRONTEND_OPERATOR_ID" = "$BACKEND_OPERATOR_ID" ] || {
+  echo "ERROR: frontend and web-API BFX_OPERATOR_USER_ID values must match"
+  exit 1
+}
+FRONTEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
+[ "$FRONTEND_OPERATOR_ROLE" = admin ] || {
+  echo "ERROR: frontend BFX_OPERATOR_ROLE must be admin for operator-only containment"
+  exit 1
+}
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
 set -a; . ./.env.frontend.runtime; set +a
 
