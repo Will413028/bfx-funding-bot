@@ -29,7 +29,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 pytestmark = pytest.mark.integration
 _ENV = "ci"
-_ACC = "src_ws"
+_ACC = "00000000-0000-0000-0000-000000000011"
 
 
 class _StubWSClient:
@@ -103,7 +103,7 @@ async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_f
     assert Decimal(str(ps.realized)) == Decimal("100")  # realized += 100
 
 
-_ACC_FT = "src_ft"
+_ACC_FT = "00000000-0000-0000-0000-000000000012"
 
 
 class _OneTickHttp:
@@ -183,7 +183,7 @@ class _FlakyPersister:
 
 @pytest.mark.asyncio
 async def test_fill_tracker_release_retried_after_persist_failure(pg_session_factory):
-    acc = "src_ft_retry"
+    acc = "00000000-0000-0000-0000-000000000013"
     store = PostgresEventStore(deployment_environment=_ENV)
     real = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()

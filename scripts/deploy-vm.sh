@@ -22,11 +22,17 @@ cat "$SECRETS" "$PHASE_ENV" > .env.runtime
 chmod 600 .env.runtime
 
 # Preflight: required vars present.
-need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY"
-need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_API_KEY BFX_API_SECRET BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
+need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY BFX_EXCHANGE_ACCOUNT_ID BFX_VAULT_KEK"
+need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
 req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary"
 for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
+done
+for v in BFX_ACCOUNT_ID BFX_API_KEY BFX_API_SECRET; do
+  if grep -q "^$v=" .env.runtime; then
+    echo "ERROR: legacy identity/credential variable $v is not supported; use account-owned vault + BFX_EXCHANGE_ACCOUNT_ID"
+    exit 1
+  fi
 done
 
 EXECUTION_POLICY=$(grep '^BFX_EXECUTION_POLICY=' .env.runtime | tail -1 | cut -d= -f2-)

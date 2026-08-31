@@ -23,7 +23,7 @@ _SCID = UUID("22222222-2222-2222-2222-222222222222")
 @pytest.mark.asyncio
 async def test_query_returns_claimed_and_fill_for_account(pg_session_factory) -> None:
     env = "ci-query-t1"
-    acct = "SMOKE_T1"
+    acct = "00000000-0000-0000-0000-000000000026"
     store = PostgresEventStore(deployment_environment=env)
     since = datetime.now(UTC) - timedelta(minutes=1)
 
@@ -77,8 +77,8 @@ async def test_query_scopes_by_account_and_env(pg_session_factory) -> None:
     Also verify different deployment_environment is isolated.
     """
     env = "ci-query-t2"
-    acct_a = "SMOKE_SCOPE_A"
-    acct_b = "SMOKE_SCOPE_B"
+    acct_a = "00000000-0000-0000-0000-000000000027"
+    acct_b = "00000000-0000-0000-0000-000000000028"
     store = PostgresEventStore(deployment_environment=env)
     since = datetime.now(UTC) - timedelta(minutes=1)
 

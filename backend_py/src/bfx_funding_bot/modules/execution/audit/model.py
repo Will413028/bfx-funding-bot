@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
     DecisionOutcome,
@@ -64,6 +65,7 @@ class ExecutionDecision:
         return {
             "decision_id": self.decision_id,
             "account_id": self.account_id,
+            "exchange_account_id": account_id_uuid_or_none(self.account_id),
             "deployment_environment": self.deployment_environment,
             "reconcile_id": self.reconcile_id,
             "cell_id": self.cell_id,

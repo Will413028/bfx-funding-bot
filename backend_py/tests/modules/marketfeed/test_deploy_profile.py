@@ -34,6 +34,21 @@ def test_deployment_profiles_contain_no_legacy_clamp_flags() -> None:
         assert "BFX_CLAMP_" not in path.read_text()
 
 
+@pytest.mark.parametrize("legacy_var", ["BFX_ACCOUNT_ID", "BFX_API_KEY", "BFX_API_SECRET"])
+def test_deploy_script_rejects_legacy_identity_and_env_credentials(
+    tmp_path: Path, legacy_var: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    bot_env = root.parent / "home/bfx/bot.env"
+    bot_env.write_text(bot_env.read_text() + f"{legacy_var}=legacy\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert legacy_var in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(content)
     path.chmod(0o755)
@@ -59,8 +74,8 @@ def _deploy_root(tmp_path: Path) -> Path:
     home.mkdir(parents=True)
     (home / "bot.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
-        "BFX_API_KEY=safe-fake\n"
-        "BFX_API_SECRET=safe-fake\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=550e8400-e29b-41d4-a716-446655440000\n"
+        "BFX_VAULT_KEK=safe-fake\n"
     )
     (home / "webapi.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"

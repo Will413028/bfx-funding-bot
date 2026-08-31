@@ -30,6 +30,10 @@ from bfx_funding_bot.modules.observability.metrics import (
     MetricsSubmitMiddleware,
     TimedReconcileRecovery,
 )
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
 
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
@@ -58,7 +62,7 @@ async def _prepare_env(
     db_path = tmp_path / db_name
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -69,6 +73,7 @@ async def _prepare_env(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(

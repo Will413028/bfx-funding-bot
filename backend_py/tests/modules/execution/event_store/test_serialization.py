@@ -6,9 +6,11 @@ import pytest
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
+    deserialize_stored_event,
     event_type_of,
     serialize_event,
 )
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
     CreditClosed,
     OrderFilled,
@@ -21,6 +23,7 @@ from bfx_funding_bot.modules.execution.events import (
 _CID = 123
 _VOI = "venue-1"
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
+_EXCHANGE_ACCOUNT_ID = UUID("22222222-2222-2222-2222-222222222222")
 
 
 def _ref(cid: int = _CID, voi: str | None = _VOI) -> ReservationRef:
@@ -125,6 +128,35 @@ def test_public_deserializer_rejects_versioned_lifecycle_without_reservation_ref
 def test_decimal_preserved_as_string() -> None:
     payload = serialize_event(_claimed())
     assert payload["size_usdt"] == "10.5"  # Decimal serialized as str, not float
+
+
+def test_stored_event_uses_durable_exchange_account_identity() -> None:
+    """Replay must trust the row owner, not a legacy payload realm string."""
+    event = ReservationIntent(
+        cid=10,
+        size_usdt=Decimal("7.5"),
+        symbol="fUST",
+        execution_decision_id="d-serialization-10",
+        signal_correlation_id=_SCID,
+        account_id="legacy-realm",
+        is_simulated=True,
+        occurred_at_ms=1000,
+    )
+    row = EventLogRow(
+        account_id="legacy-realm",
+        exchange_account_id=_EXCHANGE_ACCOUNT_ID,
+        deployment_environment="ci",
+        event_type=event_type_of(event),
+        cid=event.cid,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=serialize_event(event),
+        occurred_at_ms=event.occurred_at_ms,
+    )
+
+    restored = deserialize_stored_event(row)
+
+    assert restored.account_id == str(_EXCHANGE_ACCOUNT_ID)  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("etype,extra", [

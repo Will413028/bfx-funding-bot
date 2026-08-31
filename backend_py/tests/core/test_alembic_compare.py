@@ -155,3 +155,19 @@ def test_include_object_keeps_unmanaged_or_metadata_objects() -> None:
         False,
         None,
     )
+
+
+def test_identity_column_is_only_ignored_after_reflection() -> None:
+    metadata = MetaData()
+    table = Table(
+        "event_log",
+        metadata,
+        Column("exchange_account_id", Integer),
+    )
+    column = table.c.exchange_account_id
+
+    # A pre-additive database must still surface the missing column.
+    assert include_object(column, "exchange_account_id", "column", False, None)
+    # The final PostgreSQL NOT NULL/FK shape is migration-owned, so its
+    # reflected nullable metadata is intentionally excluded from drift checks.
+    assert not include_object(column, "exchange_account_id", "column", True, None)

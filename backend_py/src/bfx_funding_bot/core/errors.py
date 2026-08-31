@@ -16,6 +16,10 @@ class FatalError(RuntimeError):
     """Non-retryable error. TaskGroup cancels siblings + daemon exits."""
 
 
+class ConfigurationError(ValueError):
+    """Operator-controlled configuration is missing, malformed, or unsafe."""
+
+
 class ExecutorTransientError(TransientError):
     """Network / 5xx from venue. tenacity retries within executor scope."""
 

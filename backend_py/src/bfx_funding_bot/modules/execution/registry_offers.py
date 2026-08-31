@@ -41,6 +41,7 @@ from uuid import UUID
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
@@ -274,7 +275,12 @@ class OfferRegistry:
         rows = (
             await session.execute(
                 select(OfferClaimRow).where(
-                    OfferClaimRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=OfferClaimRow.exchange_account_id,
+                        legacy_account_column=OfferClaimRow.account_id,
+                    ),
                     OfferClaimRow.deployment_environment == deployment_environment,
                     OfferClaimRow.venue_offer_id.is_not(None),
                 )
@@ -299,7 +305,12 @@ class OfferRegistry:
                 cid=r.cid,
                 signal_correlation_id=UUID(r.signal_correlation_id),
                 size_usdt=Decimal(str(r.size_usdt)),
-                account_id=r.account_id,
+                account_id=(
+                    str(exchange_account_id)
+                    if (exchange_account_id := getattr(r, "exchange_account_id", None))
+                    is not None
+                    else r.account_id
+                ),
                 state=RegistryState(r.state),
                 occurred_at_ms=r.occurred_at_ms,
                 last_updated_ms=r.last_updated_ms,

@@ -1,21 +1,20 @@
-"""E3 (b) — per-cell weekly attribution 讀端點（operator 儀表；read-only）。"""
+"""Explicit ExchangeAccount weekly attribution read endpoint."""
 from __future__ import annotations
 
-import logging
-import os
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.modules.api.account_scope import (
+    ExchangeAccountContext,
+    require_account_member,
+)
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import WeeklyAttributionResponse
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
-
-log = logging.getLogger(__name__)
 
 
 def _dec_str(value: Decimal) -> str:
@@ -66,32 +65,23 @@ def build_attribution_router() -> APIRouter:
         prefix="/api/v1", tags=["attribution"],
         dependencies=[Depends(shared_rate_limit_dependency())],
     )
-    # 儀表只看單一部署 realm — 多 env/account 的 row 不可混進同一 cell 序列
-    # （否則 FE 每週有重複點）。與 loader 寫入時的 env 對齊（同 default）。
-    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
-    deployment_environment = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
-    log.info(
-        "attribution_router filtering realm account_id=%s deployment_environment=%s",
-        account_id, deployment_environment,
-    )
-
-    @router.get("/attribution/weekly")
-    async def weekly(
+    @router.get("/exchange-accounts/{exchange_account_id}/attribution/weekly")
+    async def account_weekly(
         cell: str | None = None,
-        user: Principal = Depends(require_operator),  # noqa: B008
+        context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         stmt = (
             select(AttributionWeeklyRow)
             .where(
-                AttributionWeeklyRow.account_id == account_id,
-                AttributionWeeklyRow.deployment_environment == deployment_environment,
+                AttributionWeeklyRow.exchange_account_id == context.exchange_account_id,
+                AttributionWeeklyRow.deployment_environment == context.deployment_environment,
             )
             .order_by(AttributionWeeklyRow.cell, AttributionWeeklyRow.week_start_ms)
         )
         if cell is not None:
             stmt = stmt.where(AttributionWeeklyRow.cell == cell)
         rows = (await session.execute(stmt)).scalars().all()
-        return {"data": [_to_response(r) for r in rows]}
+        return {"data": [_to_response(row) for row in rows]}
 
     return router

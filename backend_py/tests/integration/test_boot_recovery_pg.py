@@ -2,10 +2,9 @@
 
 Run: cd backend_py && uv run pytest tests/integration/test_boot_recovery_pg.py -q -m integration
 
-Isolation: the testcontainer DB is session-scoped and tables are created via
-Base.metadata (no per-test reset), so rows accumulate across tests. Each test
-therefore uses a UNIQUE account_id and every query filters by it — the same
-convention as test_reservation_write_path.py.
+Isolation: the testcontainer is session-scoped for startup cost, while the
+``pg_engine`` fixture resets the application schemas before each test. Account
+IDs still use canonical UUID strings so the runtime path matches production.
 """
 from decimal import Decimal
 from uuid import uuid4
@@ -87,7 +86,7 @@ async def _reserved(session_factory, account_id) -> Decimal:
 
 @pytest.mark.asyncio
 async def test_orphan_at_venue_fails_closed_without_audited_reference(pg_session_factory):
-    acct = "br_orphan"
+    acct = "00000000-0000-0000-0000-000000000021"
     store = PostgresEventStore(deployment_environment=_ENV)
     offers = [ActiveFundingOffer("777", "fUST", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
     with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
@@ -99,7 +98,7 @@ async def test_orphan_at_venue_fails_closed_without_audited_reference(pg_session
 
 @pytest.mark.asyncio
 async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
-    acct = "br_pending"
+    acct = "00000000-0000-0000-0000-000000000022"
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     await persister.persist(ReservationIntent(
@@ -115,7 +114,7 @@ async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_missing_from_venue_releases(pg_session_factory):
-    acct = "br_missing"
+    acct = "00000000-0000-0000-0000-000000000023"
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()
@@ -140,7 +139,7 @@ async def test_missing_from_venue_releases(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_recovery_is_idempotent(pg_session_factory):
-    acct = "br_idem"
+    acct = "00000000-0000-0000-0000-000000000024"
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
     scid = uuid4()

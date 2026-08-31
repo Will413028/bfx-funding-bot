@@ -2,16 +2,20 @@
 
 import { useTranslations } from "next-intl";
 import { QueryError } from "@/components/shared/query-error";
+import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { AttributionChart } from "@/features/attribution/components/attribution-chart";
 import { useWeeklyAttribution } from "@/features/attribution/hooks/use-weekly-attribution";
 
 export default function AttributionPage() {
   const t = useTranslations("attribution");
-  const { data, isLoading, isError, refetch } = useWeeklyAttribution();
+  const account = useSelectedExchangeAccountId();
+  const { data, isLoading, isError, refetch } = useWeeklyAttribution(
+    account.exchangeAccountId,
+  );
 
-  if (isLoading)
+  if (account.isLoading || isLoading)
     return <div className="p-6 text-sm text-zinc-500">{t("loading")}</div>;
-  if (isError || !data)
+  if (account.isError || !account.exchangeAccountId || isError || !data)
     return <QueryError message={t("loadFailed")} onRetry={() => refetch()} />;
 
   const cells = [...new Set(data.map((p) => p.cell))].sort();

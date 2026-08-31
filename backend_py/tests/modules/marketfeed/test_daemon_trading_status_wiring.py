@@ -19,6 +19,10 @@ from pathlib import Path
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
 
 _CELLS_YAML = """
 cells:
@@ -67,10 +71,11 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock):
     eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(eng)
     await eng.dispose()
 
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety))

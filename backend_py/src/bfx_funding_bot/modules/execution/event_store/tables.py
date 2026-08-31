@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import (
     JSON,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -39,6 +41,9 @@ class EventLogRow(Base):
 
     event_seq: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     cid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -51,12 +56,15 @@ class EventLogRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_event_log_acct_env_seq", "account_id", "deployment_environment", "event_seq"),
+        Index(
+            "idx_event_log_acct_env_seq",
+            "exchange_account_id", "deployment_environment", "event_seq",
+        ),
         Index("idx_event_log_cid", "cid"),
         Index("idx_event_log_voi", "venue_offer_id"),
         Index(
             "uq_event_log_dedup",
-            "account_id", "deployment_environment", "event_type", "venue_offer_id", "venue_seq",
+            "exchange_account_id", "deployment_environment", "event_type", "venue_offer_id", "venue_seq",
             unique=True,
         ),
     )
@@ -69,6 +77,9 @@ class OfferClaimRow(Base):
 
     cid: Mapped[int] = mapped_column(BigInteger, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -83,21 +94,32 @@ class OfferClaimRow(Base):
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        PrimaryKeyConstraint("account_id", "deployment_environment", "cid"),
+        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "cid"),
         Index("idx_offer_claims_voi", "venue_offer_id"),
         Index(
             "uq_offer_claims_venue_offer_id",
-            "account_id", "deployment_environment", "venue_offer_id",
+            "exchange_account_id", "deployment_environment", "venue_offer_id",
             unique=True,
             postgresql_where=text("venue_offer_id IS NOT NULL"),
             sqlite_where=text("venue_offer_id IS NOT NULL"),
         ),
         Index(
             "uq_offer_claims_execution_decision_id",
-            "account_id", "deployment_environment", "execution_decision_id",
+            "exchange_account_id", "deployment_environment", "execution_decision_id",
             unique=True,
             postgresql_where=text("execution_decision_id IS NOT NULL"),
             sqlite_where=text("execution_decision_id IS NOT NULL"),
+        ),
+        # Only historical SQLite fixtures can have a NULL UUID owner.  The
+        # production contract migration removes this compatibility surface;
+        # keeping the fixture-only uniqueness prevents synthetic tests from
+        # creating duplicate projections while the ORM models the final PK.
+        Index(
+            "uq_offer_claims_legacy_fixture_identity",
+            "account_id", "deployment_environment", "cid",
+            unique=True,
+            sqlite_where=text("exchange_account_id IS NULL"),
+            info={"identity_legacy_fixture": True},
         ),
     )
 
@@ -113,6 +135,9 @@ class PositionStateRow(Base):
     __tablename__ = "position_state"
 
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     reserved: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
@@ -128,7 +153,7 @@ class PositionStateRow(Base):
     n_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
-        PrimaryKeyConstraint("account_id", "deployment_environment", "symbol"),
+        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
     )
 
 
@@ -142,6 +167,9 @@ class ReconcileObservationRow(Base):
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
@@ -155,6 +183,8 @@ class ReconcileObservationRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_reconcile_obs_acct_env_symbol_id",
-              "account_id", "deployment_environment", "symbol", "id"),
+        Index(
+            "idx_reconcile_obs_acct_env_symbol_id",
+            "exchange_account_id", "deployment_environment", "symbol", "id",
+        ),
     )

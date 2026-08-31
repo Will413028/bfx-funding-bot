@@ -104,7 +104,7 @@ def test_health_target_includes_phase42_targets() -> None:
     assert HealthTarget.FILL_TRACKER.value == "fill_tracker"
 
 
-def test_envelope_account_id_default() -> None:
+def test_envelope_does_not_invent_an_account_realm() -> None:
     env = Envelope(
         timestamp="2026-05-21T00:00:00+00:00",
         level=Level.INFO,
@@ -120,7 +120,7 @@ def test_envelope_account_id_default() -> None:
             "budget_seconds": 43200,
         },
     )
-    assert env.account_id == "default"
+    assert env.account_id is None
 
 
 def test_envelope_validates_order_submit_payload() -> None:

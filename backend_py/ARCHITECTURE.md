@@ -22,9 +22,27 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 
 部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於 Oracle Cloud VM `oci-a1`（docker compose：`bfx-bot`/`bfx-webapi`/`bfx-postgres`(PG 18)/`bfx-redis`/`bfx-frontend`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
-### Release 0 web API containment and probes
+### Release 0 web API containment and Halt 1 identity
 
-Release 0 沒有 self-service signup，也尚未引入 account membership 或 account-scoped URL。所有 private `/api/v1` route 僅接受 `BFX_OPERATOR_USER_ID` 指定的 Better Auth user，且 JWT role 必須是 `admin`（`BFX_OPERATOR_ROLE=admin`）。operator ID 缺失或空白、user ID 不符、或 role 不符時一律 fail closed；不得 fallback 到第一個 user、`BFX_ACCOUNT_ID` 或 user profile。
+Release 0 沒有 self-service signup；所有 private `/api/v1` route 仍僅接受
+`BFX_OPERATOR_USER_ID` 指定的 Better Auth user，且 JWT role 必須是 `admin`
+（`BFX_OPERATOR_ROLE=admin`）。operator ID 缺失或空白、user ID 不符、或 role
+不符時一律 fail closed；不得 fallback 到第一個 user、環境變數 realm 或 user
+profile。
+
+Halt 1 後，money-domain 的 aggregate root 是 immutable
+`ExchangeAccount.id`（UUID），不是登入 user、credential row 或 process-global
+realm。private account routes 必須使用
+`/api/v1/exchange-accounts/{exchange_account_id}/...`，dependency 依序驗證
+JWT operator、UUID path、membership/lifecycle，再進入 handler；不存在的帳號與
+沒有 membership 的帳號都回 non-enumerating 404。daemon 只接受
+`BFX_EXCHANGE_ACCOUNT_ID`，啟動時載入 active account、credential 與 config
+draft；缺少、未知、retired 或 halted account 都 fail closed。
+
+`account_id` text 欄位在 Halt 1 contract migration 後只保留為 immutable
+legacy/audit provenance；新讀寫的 owner/filter 是 `exchange_account_id`，新
+domain event 以 canonical lowercase UUID string 相容既有 event contract。credentials
+的 AEAD AAD 一律是 canonical UUID，絕不使用 user id 或舊 realm。
 
 FastAPI 的 process liveness 與 database readiness 是兩個獨立契約：
 
@@ -296,7 +314,7 @@ sequenceDiagram
 |---|---|
 | `event_log` | SoT，append-only。dedup unique index gate `ORDER_FILL` / `RESERVATION_RELEASED`（key 含 `venue_offer_id` + `venue_seq`）。 |
 | `position_state` | ledger 投影（singleton per account+env）：`reserved_usdt`、`realized_usdt`、`last_event_seq`（high-water mark）、`last_reconciled_at`、`n_credits`。每次 `append()` 同 txn 內更新。 |
-| `offer_claims` | FSM 快照，PK `(account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 realm 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
+| `offer_claims` | FSM 快照，PK `(exchange_account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 account UUID 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
 | `reconcile_observation` | 不可變 checkpoint：venue 快照 + `event_seq_fence`（快照當下 max event_seq）+ `n_offers` / `n_credits`。rebuild 的 base state。 |
 | `execution_decisions` | 每筆 allocation candidate 的 durable eligibility audit：decision/reconcile/account/realm/cell/symbol/correlation、`ready`/`blocked`/`no_recommendation`、stable reason/dependency、signal/applied rate、amount/period、exact-period book evidence、model evidence、safety/policy、config/service hash 與 timestamps。READY 必須在 submit 前 commit。 |
 | `diagnostics` | **非 SoT** forensic 軌跡（DECISION / SAFETY_TRIGGER / CANCEL_AUDIT），best-effort 寫入（失敗不擋交易），prunable 30–90d。 |
@@ -305,7 +323,7 @@ sequenceDiagram
 
 **Checkpoint ⊕ tail rebuild**：`rebuild_snapshot_from_log()` 若無 checkpoint 則 seed `(0,0,0)` 重放全部；若有 checkpoint 則 seed 自最新 checkpoint，**只重放 `event_seq > fence` 的尾段**（不重複計）。fence 單調遞增，rebuild 對同一 checkpoint idempotent。
 
-**Realm 隔離（deployment_environment）**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有查詢以 `(account_id, deployment_environment)` 複合過濾，單一 DB 內可並行跑 shadow/canary/CI 而無 cross-realm 污染。
+**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/canary/CI 而無 cross-account 或 cross-environment 污染。
 
 ---
 
@@ -343,43 +361,44 @@ sequenceDiagram
 ```
 event_log              (SoT, append-only)
   PK event_seq
-  account_id, deployment_environment, event_type, cid,
+  exchange_account_id (UUID NOT NULL FK RESTRICT), legacy account_id (audit only),
+  deployment_environment, event_type, cid,
   venue_offer_id, venue_seq, payload(JSONB),
   occurred_at_ms, recorded_at
-  UNIQUE dedup(account_id, deployment_environment,
+  UNIQUE dedup(exchange_account_id, deployment_environment,
                event_type, venue_offer_id, venue_seq)
 
 position_state         (ledger 投影, singleton per account+env)
-  PK (account_id, deployment_environment)
+  PK (exchange_account_id, deployment_environment, symbol)
   reserved_usdt, realized_usdt,
   last_updated_ms, last_event_seq,
   last_reconciled_at, n_credits
 
 offer_claims           (FSM 快照, per-offer)
-  PK (account_id, deployment_environment, cid)
+  PK (exchange_account_id, deployment_environment, cid)
   state{PENDING|CLAIMED|RELEASED|FAILED}, venue_offer_id,
   size_usdt, signal_correlation_id, execution_decision_id,
   occurred_at_ms, last_updated_ms, last_event_seq
-  UNIQUE partial (account_id, deployment_environment, venue_offer_id)
+  UNIQUE partial (exchange_account_id, deployment_environment, venue_offer_id)
     WHERE venue_offer_id IS NOT NULL
-  UNIQUE partial (account_id, deployment_environment, execution_decision_id)
+  UNIQUE partial (exchange_account_id, deployment_environment, execution_decision_id)
     WHERE execution_decision_id IS NOT NULL
 
 reconcile_observation  (checkpoint, append-only audit)
   PK id
-  account_id, deployment_environment,
+  exchange_account_id, legacy account_id (audit only), deployment_environment,
   reserved_usdt, realized_usdt, n_offers, n_credits,
   observed_at_ms, event_seq_fence, recorded_at
 
 execution_decisions    (append-only pre-trade audit；非 ledger projection)
-  decision_id, reconcile_id, account_id, deployment_environment,
+  decision_id, reconcile_id, exchange_account_id, deployment_environment,
   outcome, reason_code, failed_dependency, signal_rate, applied_rate,
   amount_usdt, period_days, market_snapshot_evidence, model_evidence,
   safety_result, execution_policy, service_version, config_hash,
   occurred_at_ms, recorded_at
 
 diagnostics            (非 SoT forensic, prunable)
-  account_id, deployment_environment, kind, payload(JSONB),
+  exchange_account_id, deployment_environment, kind, payload(JSONB),
   occurred_at(TIMESTAMPTZ), recorded_at
 
 funding_candles        (訊號層輸入)
@@ -394,7 +413,7 @@ funding_candle_revisions (append-only，定稿後被拒寫入的證據)
   -- 用來回答「venue 到底會不會修訂已收盤 bar」。長期為空 = bitemporal 層可降級。
 
 config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
-  PK (deployment_environment, account_id, recorded_at_ms)
+  PK (deployment_environment, exchange_account_id, recorded_at_ms)
   clamp_enabled (legacy telemetry; always false), reprice_enabled,
   git_sha
   用途：flag flip 需重啟（config boot-immutable），boot 即為 regime
@@ -402,7 +421,13 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
   的 flag regime，不必等 weekly window 累積。
 ```
 
-**Alembic**：遷移在 `backend_py/alembic/versions/`。套用一律 `cd backend_py && uv run alembic upgrade head`；驗證無 drift `uv run alembic check`。
+**Alembic**：遷移在 `backend_py/alembic/versions/`。Halt 1 先套用 additive
+revision `8a1b2c3d4e5f`，完成 `cutover_identity.py --dry-run/--apply/--verify`
+後才套用 contract revision `9b2c3d4e5f6a`。一般部署仍使用
+`cd backend_py && uv run alembic upgrade head`；驗證無 drift 使用
+`uv run alembic check`。contract revision 會在 DDL 前拒絕 NULL UUID、未映射
+realm、孤兒 FK 或非零 legacy scaffold，且為 forward-only（rollback 使用
+verified backup/PITR + venue reconcile，不使用 downgrade）。
 
 ---
 
@@ -431,12 +456,20 @@ config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
 
 **Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env`（`paper`、`shadow`、`shadow-p14`、`canary`）組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數、phase-policy 契約與 required book/model evidence → canary 仍需 `BFX_CANARY_CONFIRM=yes`，並顯示 binding per-symbol safety caps 與 env fallback → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
 
-**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、`BFX_ALLOCATION_CAP_USDT`、`BFX_API_KEY`/`BFX_API_SECRET`、`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_ACCOUNT_ID`。
+**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
+`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、`BFX_ALLOCATION_CAP_USDT`、
+`BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、
+`BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
+`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、
+`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
+Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
+credential vault 解密。public read model 另以明確的
+`BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 綁定 UUID。
 
 ### 量測自動化（E3，2026-07-06）
 
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ compose one-shot `weekly-report`（`--profile ops`）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`）。值得留存的報告手動 promote 進 `backend_py/docs/research/` 並 commit。
-- **儀表**：webapi `GET /api/v1/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 的 realm（`BFX_DEPLOYMENT_ENV`/`BFX_ACCOUNT_ID`）必須一致，否則 endpoint 靜默回空（router build 時 log 出 filter realm 供比對）。
+- **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID 與 `BFX_DEPLOYMENT_ENV`；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
 - **政策（per-symbol cap 加碼 gate）**：調高 `safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前必須：最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時一律不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的 — 此政策防重演；`BFX_ALLOCATION_CAP_USDT` 不覆寫已設定的 per-symbol cap。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 

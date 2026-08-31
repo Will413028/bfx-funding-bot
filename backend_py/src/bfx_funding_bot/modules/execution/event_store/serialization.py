@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
@@ -107,16 +107,32 @@ def deserialize_stored_event(row: EventLogRow) -> object:
     if not isinstance(payload, dict):
         raise TypeError("stored event payload must be an object")
     if "__schema_version__" in payload:
-        return deserialize_event(row.event_type, payload)
+        decoded = deserialize_event(row.event_type, payload)
+        return _with_canonical_account_id(decoded, row)
     provenance = HistoricalReplayProvenance.from_stored_event(row)
     authorization = provenance.authorize_legacy_payload(
         event_type=row.event_type,
         payload=payload,
     )
-    return _decode_payload(
+    decoded = _decode_payload(
         row.event_type,
         payload,
         historical_authorization=authorization,
+    )
+    return _with_canonical_account_id(decoded, row)
+
+
+def _with_canonical_account_id(event: object, row: EventLogRow) -> object:
+    """Use the durable UUID owner as replay identity, never legacy payload text."""
+    if row.exchange_account_id is None:
+        return event
+    if not dataclasses.is_dataclass(event) or not hasattr(event, "account_id"):
+        return event
+    # ``dataclasses.is_dataclass`` also accepts dataclass classes, so mypy
+    # cannot narrow ``object`` to an instance here.  The attribute guard above
+    # is the runtime boundary; keep the replacement typed as the domain event.
+    return dataclasses.replace(
+        cast(Any, event), account_id=str(row.exchange_account_id)
     )
 
 

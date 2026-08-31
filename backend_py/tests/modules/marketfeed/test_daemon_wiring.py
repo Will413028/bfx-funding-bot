@@ -20,6 +20,11 @@ from types import SimpleNamespace
 import pytest
 from pytest_httpx import HTTPXMock
 
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
+
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
@@ -76,7 +81,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     db_path = tmp_path / "daemon_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -89,6 +94,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     # warmup_cell fetches Bitfinex candles with file-based sqlite.
@@ -136,7 +142,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     db_path = tmp_path / "reconcile_guard.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -157,6 +163,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -213,7 +220,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     db_path = tmp_path / "resync_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -230,6 +237,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -280,7 +288,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     db_path = tmp_path / "integrity_bootstrap.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -292,6 +300,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
     await engine.dispose()
 
     httpx_mock.add_response(
@@ -384,7 +393,7 @@ async def test_smoke_runner_present_for_simulated_paper(
     db_path = tmp_path / "smoke_paper.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -398,6 +407,7 @@ async def test_smoke_runner_present_for_simulated_paper(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -447,7 +457,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
     db_path = tmp_path / "smoke_live.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -459,6 +469,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -502,7 +513,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
     db_path = tmp_path / "writer_lock_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -514,6 +525,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
