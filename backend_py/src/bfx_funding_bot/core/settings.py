@@ -12,8 +12,10 @@ Two accessors transform it for the two SQLAlchemy drivers we use:
 Both strip the `-pooler` suffix from the host (PgBouncer transaction-mode
 breaks asyncpg prepared statements and alembic transactional DDL).
 """
+import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,6 +52,16 @@ class Settings(BaseSettings):
     # Override via env BETTER_AUTH_ISSUER only if the FE issuer string ever changes.
     better_auth_issuer: str = "bfx-funding-bot"
     jwt_audience: str = "bfx-funding-backend"
+    operator_user_id: str = Field(default="", validation_alias="BFX_OPERATOR_USER_ID")
+    operator_role: str = Field(default="admin", validation_alias="BFX_OPERATOR_ROLE")
+
+    @model_validator(mode="after")
+    def _validate_production_operator_role(self) -> "Settings":
+        """Production is deliberately locked to the sole admin operator role."""
+        phase = os.environ.get("BFX_PHASE", "").lower()
+        if phase in {"canary", "live"} and self.operator_role != "admin":
+            raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in canary or live")
+        return self
 
     # SP2 vault: the api-key envelope KEK is the env var BFX_VAULT_KEK
     # (base64-encoded 32 bytes), read DIRECTLY from os.environ by

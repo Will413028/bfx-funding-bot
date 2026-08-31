@@ -55,3 +55,18 @@ async def require_user(
 ) -> Principal:
     """FastAPI dependency — the authz boundary for all /api/v1 endpoints."""
     return _verify(creds.credentials)
+
+
+async def require_operator(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer),  # noqa: B008  (FastAPI DI idiom)
+) -> Principal:
+    """FastAPI dependency that admits only the configured admin operator."""
+    principal = _verify(creds.credentials)
+    settings = Settings()
+    if not settings.operator_user_id:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="auth_not_configured")
+    if principal.user_id != settings.operator_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
+    if principal.role != settings.operator_role:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_role_required")
+    return principal
