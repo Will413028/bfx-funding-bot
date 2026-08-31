@@ -1,6 +1,5 @@
 import { getTranslations } from "next-intl/server";
 import { LoginForm } from "@/features/auth/components/login-form";
-import { Link } from "@/i18n/navigation";
 
 export default async function LoginPage() {
   const t = await getTranslations("auth");
@@ -13,16 +12,6 @@ export default async function LoginPage() {
       </div>
 
       <LoginForm />
-
-      <p className="text-center text-sm text-muted-foreground">
-        {t("noAccount")}{" "}
-        <Link
-          href="/register"
-          className="text-primary underline-offset-4 hover:underline"
-        >
-          {t("register")}
-        </Link>
-      </p>
     </div>
   );
 }

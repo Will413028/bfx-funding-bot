@@ -1,5 +1,6 @@
 import { passkey } from "@better-auth/passkey";
-import { betterAuth } from "better-auth";
+import { APIError, betterAuth } from "better-auth";
+import { createAuthMiddleware } from "better-auth/api";
 import { nextCookies } from "better-auth/next-js";
 import { admin, jwt, twoFactor } from "better-auth/plugins";
 import Redis from "ioredis";
@@ -32,6 +33,15 @@ function getRedis(): Redis {
   globalForAuth._bfxAuthRedis ??= new Redis(process.env.REDIS_URL!);
   return globalForAuth._bfxAuthRedis;
 }
+
+export const rejectSelfServiceSignup = createAuthMiddleware(async (ctx) => {
+  if (ctx.path === "/sign-up/email") {
+    throw new APIError("FORBIDDEN", {
+      code: "signup_disabled",
+      message: "signup_disabled",
+    });
+  }
+});
 
 export const auth = betterAuth({
   appName: "BFX Funding Bot",
@@ -77,6 +87,10 @@ export const auth = betterAuth({
       "/two-factor/*": { window: 60, max: 5 },
       "/forget-password": { window: 60, max: 3 },
     },
+  },
+
+  hooks: {
+    before: rejectSelfServiceSignup,
   },
 
   plugins: [

@@ -13,7 +13,7 @@ test.describe("Protected-route guard", () => {
 	});
 });
 
-test.describe("Auth happy path (full stack)", () => {
+test.describe("Signup containment (full stack)", () => {
 	// Needs the whole stack: Next dev server + standalone Python web-API +
 	// dev Postgres (auth migration applied) + Upstash + JWKS env.
 	// Gated so it doesn't fail spuriously in CI. See e2e/README.md.
@@ -22,34 +22,20 @@ test.describe("Auth happy path (full stack)", () => {
 		"requires full stack — see e2e/README.md",
 	);
 
-	test("sign up, land on overview, authenticated proxy GET returns 200", async ({
-		page,
+	test("direct email signup is rejected by the server hook", async ({
+		request,
 	}) => {
 		const email = `e2e+${Date.now()}@example.com`;
 		const password = "Sup3rSecret!";
 
-		await page.goto("/en/register");
+		const response = await request.post("/api/auth/sign-up/email", {
+			data: { email, password, name: "blocked signup" },
+		});
 
-		await page.getByLabel(/email/i).fill(email);
-		await page.getByLabel(/password/i).fill(password);
-
-		// `autoSignIn: true` mints a session on sign-up; the form then routes to
-		// /overview. Set up the response wait before submitting to avoid a race.
-		const proxyGet = page.waitForResponse(
-			(r) =>
-				r.url().includes("/api/proxy/") && r.request().method() === "GET",
-		);
-
-		await page
-			.getByRole("button", { name: /sign ?up|register/i })
-			.click();
-
-		// Authenticated dashboard loads at the localized overview route.
-		await expect(page).toHaveURL(/\/en\/overview/);
-
-		// The dashboard fires authenticated GETs through the proxy; a 200 proves
-		// the Better-Auth session cookie → server-minted backend JWT chain works.
-		const resp = await proxyGet;
-		expect(resp.status()).toBe(200);
+		expect(response.status()).toBe(403);
+		expect(await response.json()).toMatchObject({
+			code: "signup_disabled",
+			message: "signup_disabled",
+		});
 	});
 });

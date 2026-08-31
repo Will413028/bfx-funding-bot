@@ -32,22 +32,6 @@ export async function login(
   }
 }
 
-export async function register(
-  email: string,
-  password: string,
-): Promise<AuthResult> {
-  try {
-    const res = await auth.api.signUpEmail({
-      body: { email, password, name: email.split("@")[0] },
-      asResponse: true,
-    });
-    if (!res.ok) return { success: false, error: "Registration failed" };
-    return { success: true };
-  } catch {
-    return { success: false, error: "Registration failed" };
-  }
-}
-
 export async function logout(locale: string = "en") {
   const safeLocale = routing.locales.includes(
     locale as (typeof routing.locales)[number],

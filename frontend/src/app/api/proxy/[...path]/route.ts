@@ -23,10 +23,36 @@ async function proxyRequest(
       ? await request.text()
       : undefined;
 
+  const operatorUserId = process.env.BFX_OPERATOR_USER_ID?.trim();
+  if (!operatorUserId) {
+    return NextResponse.json({ error: "auth_not_configured" }, { status: 503 });
+  }
+
+  const requestHeaders = await headers();
+  let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
+  try {
+    session = await auth.api.getSession({ headers: requestHeaders });
+  } catch {
+    session = null;
+  }
+
+  if (session?.user.id !== operatorUserId) {
+    return NextResponse.json({ error: "operator_required" }, { status: 403 });
+  }
+
+  // Better Auth 1.6.14 does not expose a `twoFactorVerified` session field.
+  // Its two-factor plugin deletes the sign-in session for an enrolled user and
+  // creates the usable session only after server-side verification succeeds.
+  // A returned session plus this server-owned user flag is therefore the typed
+  // post-MFA boundary; client-provided state is never consulted.
+  if (session.user.twoFactorEnabled !== true) {
+    return NextResponse.json({ error: "mfa_required" }, { status: 403 });
+  }
+
   // Mint a short-lived EdDSA JWT for the current session (browser never holds it).
   let token: string | undefined;
   try {
-    const res = await auth.api.getToken({ headers: await headers() });
+    const res = await auth.api.getToken({ headers: requestHeaders });
     token = res?.token;
   } catch {
     token = undefined;
