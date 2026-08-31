@@ -13,6 +13,11 @@ import pytest
 from bfx_funding_bot.external.bitfinex.auth_ws import FocEvent
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -24,6 +29,8 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     Phase,
     StrategyName,
 )
+
+from .conftest import ScriptedWSClient, make_reservation_ref
 
 
 def _success_response(venue_offer_id: str = "42") -> list[Any]:
@@ -79,7 +86,16 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
     )
 
     # 1. Submit returns "submitted"
-    submitted = await executor.submit(decision, ctx)
+    ready = ReadyToSubmit(
+        decision=decision,
+        decision_id="phase4-4a-happy-path",
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="phase4-4a-test-snapshot",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="integration-test"),
+    )
+    submitted = await executor.submit(ready, ctx)
     assert submitted.status == "submitted"
     assert submitted.venue_offer_id == voi
 
@@ -88,7 +104,9 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         cid=submitted.cid, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUSD"))
+        symbol="fUSD",
+        reservation_ref=make_reservation_ref(submitted.cid, sig_id, voi),
+    ))
 
     assert ledger.current_exposure("fUSD") == Decimal("100")
     assert registry.snapshot()[voi].state.value == "claimed"
@@ -101,7 +119,6 @@ async def test_submit_then_foc_executed_completes_orderfilled_chain(
         rate=0.0005, period_days=2, raw_seq=5, raw=[],
     )
 
-    from .conftest import ScriptedWSClient
     fake_ws = ScriptedWSClient([foc])
 
     dispatcher = BitfinexLiveWSDispatcher(

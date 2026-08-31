@@ -2,13 +2,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.config import build_config_router
+from bfx_funding_bot.modules.api.deps import database_is_ready
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.public import build_public_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
@@ -46,3 +48,13 @@ app.include_router(build_public_router())
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready(request: Request) -> JSONResponse:
+    if await database_is_ready(request):
+        return JSONResponse({"status": "ready", "checks": {"database": "ok"}})
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"status": "not_ready", "checks": {"database": "failed"}},
+    )

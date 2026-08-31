@@ -1,25 +1,50 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+const authMocks = vi.hoisted(() => ({
+  getOperatorMfaSessionAccess: vi.fn(),
+}));
 vi.mock("@/lib/auth", () => ({
   auth: { api: { getToken: vi.fn(async () => ({ token: "jwt-123" })) } },
+  getOperatorMfaSessionAccess: authMocks.getOperatorMfaSessionAccess,
 }));
 
 import { createApiKeyAction } from "@/app/[locale]/(dashboard)/api-keys/actions";
 import { auth } from "@/lib/auth";
 
 const getTokenMock = vi.mocked(auth.api.getToken);
+const getOperatorMfaSessionAccess = authMocks.getOperatorMfaSessionAccess;
 
 beforeEach(() => {
+  vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
   getTokenMock.mockResolvedValue({ token: "jwt-123" });
+  getOperatorMfaSessionAccess.mockResolvedValue({ allowed: true });
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   getTokenMock.mockReset();
+  getOperatorMfaSessionAccess.mockReset();
 });
 
 describe("createApiKeyAction", () => {
+  it("does not send the secret when the session lacks the MFA marker", async () => {
+    getOperatorMfaSessionAccess.mockResolvedValue({
+      allowed: false,
+      error: "mfa_required",
+    });
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+    ).rejects.toThrow("authTokenUnavailable");
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
+    expect(getTokenMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("posts plaintext server-side with bearer and returns data", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

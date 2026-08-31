@@ -25,6 +25,8 @@ from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
+from .conftest import make_reservation_ref
+
 
 class _EventCapture:
     async def emit(self, event: dict[str, Any]) -> None:
@@ -48,7 +50,9 @@ async def test_fill_tracker_emits_missing_from_venue_when_ws_misses_event(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=1000,
-    symbol="fUST"))
+        symbol="fUST",
+        reservation_ref=make_reservation_ref(42, sig_id, voi),
+    ))
     assert ledger.current_exposure("fUST") == Decimal("100")
 
     # 2. WS missed the cancel event → registry still CLAIMED.

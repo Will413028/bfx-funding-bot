@@ -14,7 +14,10 @@ import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, synth_orphan_cid
+from bfx_funding_bot.modules.execution.boot_recovery import (
+    BootRecovery,
+    RecoveryCorrelationError,
+)
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -28,6 +31,8 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
+from .conftest import make_reservation_ref
+
 pytestmark = pytest.mark.integration
 _ENV = "ci"
 
@@ -37,6 +42,10 @@ class _StubAuthRest:
         self._offers = offers
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
+    async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
+        return []
+    async def get_funding_available(self, *, ctx, currency):
+        return Decimal("0")
 
 
 def _ctx(account_id):
@@ -77,17 +86,15 @@ async def _reserved(session_factory, account_id) -> Decimal:
 
 
 @pytest.mark.asyncio
-async def test_orphan_at_venue_is_claimed_and_reserved(pg_session_factory):
+async def test_orphan_at_venue_fails_closed_without_audited_reference(pg_session_factory):
     acct = "br_orphan"
     store = PostgresEventStore(deployment_environment=_ENV)
-    offers = [ActiveFundingOffer("777", "fUSD", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
-    await _recovery(offers, store, pg_session_factory, acct).run()
+    offers = [ActiveFundingOffer("777", "fUST", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
+    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
+        await _recovery(offers, store, pg_session_factory, acct).run()
 
-    claims = await _claims(pg_session_factory, acct)
-    assert len(claims) == 1
-    assert claims[0].cid == synth_orphan_cid("777")
-    assert claims[0].state == "claimed" and claims[0].venue_offer_id == "777"
-    assert await _reserved(pg_session_factory, acct) == Decimal("250")
+    assert await _claims(pg_session_factory, acct) == []
+    assert await _reserved(pg_session_factory, acct) == Decimal("0")
 
 
 @pytest.mark.asyncio
@@ -118,7 +125,9 @@ async def test_missing_from_venue_releases(pg_session_factory):
                           account_id=acct, is_simulated=False, occurred_at_ms=1_000),
         ReservationClaimed(cid=42, venue_offer_id="999", size_usdt=Decimal("80"),
                           signal_correlation_id=scid, account_id=acct, is_simulated=False,
-                          occurred_at_ms=2_000, symbol="fUST"),
+                          occurred_at_ms=2_000, symbol="fUST",
+                          reservation_ref=make_reservation_ref(
+                              42, scid, "999", execution_decision_id="d-recovery-42")),
     )
     assert await _reserved(pg_session_factory, acct) == Decimal("80")
 
@@ -133,7 +142,15 @@ async def test_missing_from_venue_releases(pg_session_factory):
 async def test_recovery_is_idempotent(pg_session_factory):
     acct = "br_idem"
     store = PostgresEventStore(deployment_environment=_ENV)
-    offers = [ActiveFundingOffer("777", "fUSD", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
+    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    scid = uuid4()
+    await persister.persist(ReservationClaimed(
+        cid=77, venue_offer_id="777", size_usdt=Decimal("250"),
+        signal_correlation_id=scid, account_id=acct, is_simulated=False,
+        occurred_at_ms=1_000, symbol="fUSD",
+        reservation_ref=make_reservation_ref(77, scid, "777"),
+    ))
+    offers = [ActiveFundingOffer("777", "fUST", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
     await _recovery(offers, store, pg_session_factory, acct).run()
     await _recovery(offers, store, pg_session_factory, acct).run()  # second boot
 

@@ -22,17 +22,18 @@ src/
     [locale]/                       # i18n 路由區段
       layout.tsx                    # Locale + providers
       (marketing)/                  # 公開頁面（landing, pricing）
-      (auth)/                       # 登入/註冊
-        actions.ts                  # Server Actions（login, register, logout）
+      (auth)/                       # 登入/雙因素驗證
+        actions.ts                  # Server Actions（login, logout）
       (dashboard)/                  # 受保護的 dashboard
         overview/, api-keys/, strategy/, history/, settings/
-    api/proxy/[...path]/route.ts    # Auth proxy → Go backend
+    api/auth/[...all]/route.ts      # Better Auth（JWT HTTP endpoints blocked）
+    api/proxy/[...path]/route.ts    # BFF → Python web-API
   components/
     ui/                             # shadcn/ui（自動產生，不要手改樣式邏輯）
     layout/                         # Sidebar, Topbar, LocaleSwitcher
     shared/                         # 共用元件
   features/                         # 依功能分模組
-    auth/components/                # LoginForm, RegisterForm
+    auth/components/                # LoginForm, TwoFactorForm
     api-keys/{components,hooks}/    # ApiKeyCard, useApiKeys
     dashboard/{components,hooks}/   # StatsGrid, OffersTable, Charts, useDashboard
     history/{components,hooks}/     # ExecutionTable, BillingTable
@@ -66,15 +67,20 @@ const keys = await apiClient.getList<ApiKey[]>("/api-keys");
 ```
 
 - 錯誤拋出 `ApiError`（含 `status`, `code`, `message`）
-- Proxy route 驗證路徑前綴 `/api/v1/`，防止 path traversal
+- Proxy route 只對 exact public GET allowlist anonymous；其他路徑需要 operator
+  identity + fresh session + server-owned MFA marker，再由 server mint JWT。
+- Proxy canonicalizes every path and rejects empty/dot/traversal segments before
+  constructing the backend URL。
 
 ### 認證
 
-- Better Auth（自托）處理 login/register/logout（Server Actions 包裝）
-- Session 存在 HttpOnly opaque cookie（Better Auth，secondaryStorage → Upstash，7 天）
+- Better Auth（自托）處理 login/logout/TOTP（Server Actions + auth API）；
+  self-service signup 永久關閉
+- Session 存在 HttpOnly opaque cookie（Better Auth，secondaryStorage → VM Redis，7 天）
 - Middleware 用 `getSessionCookie` 檢查 session，保護 dashboard 路由
-- Proxy 對後端請求 server-mint 短效 EdDSA JWT（pinned `iss=bfx-funding-bot` / `aud=bfx-funding-backend`，解耦部署 URL；後端用 JWKS 驗證）
-- 已登入用戶自動跳過 login/register 頁面
+- Proxy 對後端請求 server-mint 短效 EdDSA JWT（pinned `iss=bfx-funding-bot` / `aud=bfx-funding-backend`，解耦部署 URL；後端用 JWKS 驗證）；JWT 不會進 browser response
+- 未完成 TOTP 的 pending session 不得取得 execution JWT；僅 exact per-session MFA marker 可放行
+- 只有 `/login`、`/two-factor` auth pages；dashboard middleware 只用 session cookie 做路由級 guard
 
 ### 狀態管理
 
@@ -132,6 +138,8 @@ BETTER_AUTH_SECRET         # Better Auth 加密金鑰（≥ 32 chars）
 DATABASE_URL               # VM-local Postgres（Better Auth `auth` schema，bfx_webauth，direct 無 -pooler）
 REDIS_URL                  # VM-local Redis（session / rate-limit secondaryStorage，ioredis）
 PASSKEY_RP_ID              # Passkey relying-party ID（domain）
+BFX_OPERATOR_USER_ID       # Better Auth user ID；前後端必須完全一致
+BFX_OPERATOR_ROLE          # Release 0 固定為 admin
 ```
 
 驗證邏輯在 `lib/env.ts`（Zod schema）。
@@ -143,6 +151,7 @@ PASSKEY_RP_ID              # Passkey relying-party ID（domain）
 
 ## 部署
 
-- 平台：Vercel
-- Config：`vercel.json`（framework: nextjs）
+- 平台：Oracle Cloud VM（Docker Compose；Frontend、Python web-API、Postgres、Redis）
+- Config：`docker-compose.bot.yml`、`scripts/deploy-vm.sh`
+- Release 0 preflight 會拒絕缺值、非 admin role、或 frontend/backend operator ID 不一致
 - React Compiler 已啟用（自動 memoization）

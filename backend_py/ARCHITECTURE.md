@@ -22,6 +22,15 @@ bfx-funding-bot 在 Bitfinex 的 funding（放貸）市場上自動掛單放貸�
 
 部署形態：單一長駐 daemon，以 `asyncio.TaskGroup` 並行跑多個 sub-task；全 stack 自托於 Oracle Cloud VM `oci-a1`（docker compose：`bfx-bot`/`bfx-webapi`/`bfx-postgres`(PG 18)/`bfx-redis`/`bfx-frontend`）。Koyeb/Neon/Upstash 為歷史平台（2026-05-31 Koyeb cutover、2026-06-23 Neon/Vercel 歸零）。
 
+### Release 0 web API containment and probes
+
+Release 0 沒有 self-service signup，也尚未引入 account membership 或 account-scoped URL。所有 private `/api/v1` route 僅接受 `BFX_OPERATOR_USER_ID` 指定的 Better Auth user，且 JWT role 必須是 `admin`（`BFX_OPERATOR_ROLE=admin`）。operator ID 缺失或空白、user ID 不符、或 role 不符時一律 fail closed；不得 fallback 到第一個 user、`BFX_ACCOUNT_ID` 或 user profile。
+
+FastAPI 的 process liveness 與 database readiness 是兩個獨立契約：
+
+- `GET /health`：process 仍能服務 request 時永遠回 `200 {"status":"ok"}`，不做 DB probe。因此 DB 初始化失敗後 lifespan 保留 app serving，liveness 仍可用。
+- `GET /ready`：僅在 `app.state.session_factory` 存在、以獨立 read-only session 成功執行 `SELECT 1`，且 `alembic_version` 的 revision set 與 image 內 `alembic.ini` migration graph 的所有 head 完全相等時回 `200 {"status":"ready","checks":{"database":"ok"}}`。factory 缺失、migration table 缺失／空值／stale／多餘 head、SQLAlchemy/timeout/socket error 或 migration graph 無法讀取，均回 `503 {"status":"not_ready","checks":{"database":"failed"}}`，不洩漏 connection string。probe session 一律關閉、不 commit application data；timeout 由 `BFX_READINESS_TIMEOUT_SECONDS` 控制，預設 2.0 秒，最大固定為 10 秒（超過時 clamp）。
+
 ---
 
 ## 2. Layered Architecture

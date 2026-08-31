@@ -9,6 +9,11 @@ import pytest
 from sqlalchemy import func, select
 
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import (
+    ExecutionPolicy,
+    GuardResult,
+    ReadyToSubmit,
+)
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
@@ -44,6 +49,18 @@ def _ctx(account_id: str) -> AccountContext:
     )
 
 
+def _ready(decision: DecisionPayload, decision_id: str) -> ReadyToSubmit:
+    return ReadyToSubmit(
+        decision=decision,
+        decision_id=decision_id,
+        policy=ExecutionPolicy.PAPER,
+        market_snapshot_id="integration-test-snapshot",
+        model_version=None,
+        evidence={},
+        safety=GuardResult(allowed=True, guard_name="integration-test"),
+    )
+
+
 def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> ReservationEmittingMiddleware:
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(store=store, session_factory=pg_session_factory)
@@ -61,7 +78,7 @@ class _PgAssertingInner:
         self._status = status
         self._voi = voi
 
-    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+    async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
         async with self._sf() as s:
             row = (await s.execute(select(OfferClaimRow).where(
                 OfferClaimRow.cid == cid,
@@ -78,18 +95,20 @@ async def test_intent_committed_before_submit(pg_session_factory) -> None:
     inner = _PgAssertingInner(pg_session_factory=pg_session_factory, account_id=acct,
                               status="submitted", voi="v_intent")
     mw = _mw(inner, pg_session_factory)
-    await mw.submit(_decision(), _ctx(acct))  # inner asserts PENDING visible mid-flight
+    await mw.submit(
+        _ready(_decision(), "wp-intent-decision"), _ctx(acct),
+    )  # inner asserts PENDING visible mid-flight
 
 
 async def test_claimed_updates_same_cid_row(pg_session_factory) -> None:
     acct = "wp_claim"
 
     class _Inner:
-        async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
             return SubmittedOrder(cid=cid or 0, venue_offer_id="v_claim", status="submitted", raw_response=None)
 
     mw = _mw(_Inner(), pg_session_factory, account_simulated=False)
-    await mw.submit(_decision(), _ctx(acct))
+    await mw.submit(_ready(_decision(), "wp-claim-decision"), _ctx(acct))
     async with pg_session_factory() as s:
         rows = (await s.execute(select(OfferClaimRow).where(
             OfferClaimRow.account_id == acct,
@@ -110,11 +129,11 @@ async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
     acct = "wp_failed"
 
     class _Inner:
-        async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
             return SubmittedOrder(cid=cid or 0, venue_offer_id=None, status="failed", raw_response=None)
 
     mw = _mw(_Inner(), pg_session_factory, account_simulated=False)
-    await mw.submit(_decision(), _ctx(acct))
+    await mw.submit(_ready(_decision(), "wp-failed-decision"), _ctx(acct))
     async with pg_session_factory() as s:
         claim = (await s.execute(select(OfferClaimRow).where(
             OfferClaimRow.account_id == acct,
@@ -133,12 +152,12 @@ async def test_crash_mid_flight_leaves_pending(pg_session_factory) -> None:
     acct = "wp_crash"
 
     class _RaisingInner:
-        async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
             raise RuntimeError("crash between INTENT and outcome")
 
     mw = _mw(_RaisingInner(), pg_session_factory)
     with pytest.raises(RuntimeError):
-        await mw.submit(_decision(), _ctx(acct))
+        await mw.submit(_ready(_decision(), "wp-crash-decision"), _ctx(acct))
     async with pg_session_factory() as s:
         rows = (await s.execute(select(OfferClaimRow).where(
             OfferClaimRow.account_id == acct,

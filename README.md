@@ -8,11 +8,11 @@ Bitfinex 自動放貸 SaaS 平台 — 透過複合信號決策框架，自動化
 |------|------|
 | Frontend | Next.js 16 (App Router) + Tailwind CSS v4 + shadcn/ui |
 | Backend | Python 3.13（長駐 daemon，asyncio + SQLAlchemy 2.0 async + httpx + Alembic） |
-| Database | PostgreSQL (Neon) |
-| Cache | Redis (Upstash) |
-| Auth | JWT (RS256) + HttpOnly Cookie |
+| Database | PostgreSQL（Oracle VM，Better Auth `auth` schema + bot data） |
+| Cache | Redis（Oracle VM，session/rate-limit secondary storage） |
+| Auth | Better Auth EdDSA JWT (server-to-server only) + HttpOnly Cookie |
 | i18n | next-intl (en + zh-TW) |
-| Deploy | Vercel (Frontend) + Koyeb (Backend) |
+| Deploy | Oracle Cloud VM（Docker Compose：Frontend + Python web-API + PostgreSQL + Redis） |
 
 ## 專案結構
 
@@ -51,3 +51,4 @@ uv run bfx-shadow                  # 跑 daemon（phase 由 BFX_PHASE 控制）
 - [後端 runtime 架構（現行）](backend_py/ARCHITECTURE.md)
 - [前端架構設計文件](frontend_architecture.md)
 - [策略設計規範](strategy_specification.md)
+- [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)

@@ -33,14 +33,15 @@
   },
   "auth": {
     "login": "登入",
-    "register": "註冊",
     "email": "電子郵件",
     "password": "密碼",
     "forgotPassword": "忘記密碼？",
-    "noAccount": "還沒有帳號？",
-    "hasAccount": "已經有帳號？",
     "loginFailed": "登入失敗",
-    "registrationFailed": "註冊失敗"
+    "twoFactorTitle": "雙因素驗證",
+    "twoFactorDescription": "請輸入驗證器 App 顯示的驗證碼。",
+    "authenticationCode": "驗證碼",
+    "verify": "驗證",
+    "invalidTwoFactorCode": "驗證碼無效"
   },
   "overview": {
     "title": "儀表板",

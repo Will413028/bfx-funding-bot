@@ -1,15 +1,16 @@
 from decimal import Decimal
 
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  # registers ORM
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
 
@@ -57,7 +58,7 @@ async def app_client(sqlite_engine):
                 await s.rollback()
                 raise
 
-    app.dependency_overrides[require_user] = _fake_user
+    app.dependency_overrides[require_operator] = _fake_user
     app.dependency_overrides[get_session] = _override_session
     return TestClient(app)
 
@@ -99,6 +100,24 @@ def test_weekly_excludes_other_realm(app_client):
     cells = [d["cell"] for d in data]
     assert cells.count("fUST_p2") == 1
     assert cells.count("fUST_a30") == 1
+
+
+def test_weekly_rejects_non_operator_after_skipping_router_rate_limit(app_client):
+    """Catches weekly attribution regressing from require_operator to require_user."""
+    async def _reject_non_operator():
+        raise HTTPException(status_code=403, detail="operator_required")
+
+    async def _permissive_user():
+        return Principal(user_id="user_abc", email="will@example.com", role="operator")
+
+    async def _skip_rate_limit():
+        return None
+
+    app_client.app.dependency_overrides[require_operator] = _reject_non_operator
+    app_client.app.dependency_overrides[require_user] = _permissive_user
+    app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
+
+    assert app_client.get("/api/v1/attribution/weekly").status_code == 403
 
 
 def test_weekly_requires_auth(sqlite_engine):

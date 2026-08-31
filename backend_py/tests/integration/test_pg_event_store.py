@@ -19,6 +19,8 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry, RegistryState
 
+from .conftest import make_reservation_ref
+
 pytestmark = pytest.mark.integration
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -37,7 +39,22 @@ async def test_position_state_reserved_realized(pg_session_factory) -> None:
                 is_simulated=True,
                 venue_seq=1,
                 occurred_at_ms=1000,
-            symbol="fUST"),
+                symbol="fUST", reservation_ref=make_reservation_ref(1, _SCID, "v1"),
+            ),
+        )
+        await store.append(
+            s,
+            ReservationClaimed(
+                cid=3,
+                venue_offer_id="v3",
+                size_usdt=Decimal("6"),
+                signal_correlation_id=_SCID,
+                account_id="acct",
+                is_simulated=True,
+                venue_seq=3,
+                occurred_at_ms=1500,
+                symbol="fUST", reservation_ref=make_reservation_ref(3, _SCID, "v3"),
+            ),
         )
         await store.append(
             s,
@@ -45,14 +62,15 @@ async def test_position_state_reserved_realized(pg_session_factory) -> None:
                 cid=1,
                 venue_offer_id="v1",
                 credit_id="c1",
-                size_usdt=Decimal("4"),
+                size_usdt=Decimal("10"),
                 fill_rate=0.0,
                 signal_correlation_id=_SCID,
                 account_id="acct",
                 is_simulated=True,
                 venue_seq=2,
                 occurred_at_ms=2000,
-            symbol="fUST"),
+                symbol="fUST", reservation_ref=make_reservation_ref(1, _SCID, "v1"),
+            ),
         )
         await s.commit()
     async with pg_session_factory() as s:
@@ -64,8 +82,8 @@ async def test_position_state_reserved_realized(pg_session_factory) -> None:
                 )
             )
         ).scalar_one()
-        assert row.reserved == Decimal("6")  # 10 - 4
-        assert row.realized == Decimal("4")
+        assert row.reserved == Decimal("6")  # second claim remains open
+        assert row.realized == Decimal("10")
         assert row.last_event_seq > 0
 
 
@@ -82,7 +100,8 @@ async def test_fill_redelivery_does_not_double_count(pg_session_factory) -> None
         is_simulated=True,
         venue_seq=5,
         occurred_at_ms=2000,
-    symbol="fUST")
+        symbol="fUST", reservation_ref=make_reservation_ref(2, _SCID, "v2"),
+    )
     async with pg_session_factory() as s:
         await store.append(
             s,
@@ -95,7 +114,8 @@ async def test_fill_redelivery_does_not_double_count(pg_session_factory) -> None
                 is_simulated=True,
                 venue_seq=4,
                 occurred_at_ms=1000,
-            symbol="fUST"),
+                symbol="fUST", reservation_ref=make_reservation_ref(2, _SCID, "v2"),
+            ),
         )
         await store.append(s, fill)
         await store.append(s, fill)  # duplicate — must be deduped
@@ -117,7 +137,8 @@ async def test_ledger_from_snapshot(pg_session_factory) -> None:
     async with pg_session_factory() as s:
         await store.append(s, ReservationClaimed(cid=10, venue_offer_id="v10",
             size_usdt=Decimal("7"), signal_correlation_id=_SCID, account_id="snapA",
-            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST"))
+            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST",
+            reservation_ref=make_reservation_ref(10, _SCID, "v10")))
         await s.commit()
     async with pg_session_factory() as s:
         ledger = await PaperPositionLedger.from_snapshot(s, account_id="snapA",
@@ -130,7 +151,8 @@ async def test_registry_from_snapshot(pg_session_factory) -> None:
     async with pg_session_factory() as s:
         await store.append(s, ReservationClaimed(cid=11, venue_offer_id="v11",
             size_usdt=Decimal("1"), signal_correlation_id=_SCID, account_id="snapB",
-            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST"))
+            is_simulated=True, venue_seq=1, occurred_at_ms=1000, symbol="fUST",
+            reservation_ref=make_reservation_ref(11, _SCID, "v11")))
         await s.commit()
     async with pg_session_factory() as s:
         reg = await OfferRegistry.from_snapshot(s, account_id="snapB",
@@ -146,16 +168,20 @@ async def test_rebuild_matches_incremental(pg_session_factory) -> None:
     events = [
         ReservationClaimed(cid=101, venue_offer_id="ra", size_usdt=Decimal("10"),
             signal_correlation_id=_SCID, account_id="R", is_simulated=True,
-            venue_seq=1, occurred_at_ms=1000, symbol="fUST"),
+            venue_seq=1, occurred_at_ms=1000, symbol="fUST",
+            reservation_ref=make_reservation_ref(101, _SCID, "ra")),
         ReservationClaimed(cid=102, venue_offer_id="rb", size_usdt=Decimal("5"),
             signal_correlation_id=_SCID, account_id="R", is_simulated=True,
-            venue_seq=2, occurred_at_ms=1100, symbol="fUST"),
-        OrderFilled(cid=101, venue_offer_id="ra", credit_id="c", size_usdt=Decimal("4"),
+            venue_seq=2, occurred_at_ms=1100, symbol="fUST",
+            reservation_ref=make_reservation_ref(102, _SCID, "rb")),
+        OrderFilled(cid=101, venue_offer_id="ra", credit_id="c", size_usdt=Decimal("10"),
             fill_rate=0.0, signal_correlation_id=_SCID, account_id="R", is_simulated=True,
-            venue_seq=3, occurred_at_ms=1200, symbol="fUST"),
+            venue_seq=3, occurred_at_ms=1200, symbol="fUST",
+            reservation_ref=make_reservation_ref(101, _SCID, "ra")),
         ReservationReleased(cid=102, venue_offer_id="rb", size_usdt=Decimal("5"),
             reason="venue_cancel", signal_correlation_id=_SCID, account_id="R",
-            is_simulated=True, venue_seq=4, occurred_at_ms=1300, symbol="fUST"),
+            is_simulated=True, venue_seq=4, occurred_at_ms=1300, symbol="fUST",
+            reservation_ref=make_reservation_ref(102, _SCID, "rb")),
     ]
     async def _claims(session) -> dict[int, tuple[str, str | None, int]]:  # type: ignore[type-arg]
         rows = (await session.execute(select(OfferClaimRow).where(
@@ -181,8 +207,8 @@ async def test_rebuild_matches_incremental(pg_session_factory) -> None:
             PositionStateRow.account_id == "R",
             PositionStateRow.symbol == "fUST",
         ))).scalar_one()
-        assert Decimal(str(rb.reserved)) == incr_reserved == Decimal("6")
-        assert Decimal(str(rb.realized)) == incr_realized == Decimal("4")
+        assert Decimal(str(rb.reserved)) == incr_reserved == Decimal("0")
+        assert Decimal(str(rb.realized)) == incr_realized == Decimal("10")
         # offer_claims must also match incremental vs rebuild
         rb_claims = await _claims(s)
         assert len(incr_claims) == 2
