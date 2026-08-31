@@ -283,7 +283,10 @@ class APIKey(Base):
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
 
-    __table_args__ = (Index("idx_api_keys_user_id", "user_id", unique=True),)
+    __table_args__ = (
+        Index("idx_api_keys_user_id", "user_id", unique=True),
+        Index("idx_api_keys_exchange_account", "exchange_account_id"),
+    )
 
 
 class UserConfig(Base):
@@ -331,7 +334,10 @@ class UserConfig(Base):
         onupdate=func.current_timestamp(),
     )
 
-    __table_args__ = (Index("idx_user_configs_user_id", "user_id", unique=True),)
+    __table_args__ = (
+        Index("idx_user_configs_user_id", "user_id", unique=True),
+        Index("idx_user_configs_exchange_account", "exchange_account_id"),
+    )
 
 
 class Execution(Base):

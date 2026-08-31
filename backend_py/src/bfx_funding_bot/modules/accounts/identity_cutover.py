@@ -422,6 +422,15 @@ class IdentityCutover:
                 "duplicate active credentials for accounts: "
                 + ", ".join(report.duplicate_active_credentials)
             )
+        nonzero_legacy_tables = sorted(
+            table_name
+            for table_name, is_zero in report.zero_row_legacy_tables.items()
+            if not is_zero
+        )
+        if nonzero_legacy_tables:
+            raise CutoverManifestError(
+                "legacy tables must be empty: " + ", ".join(nonzero_legacy_tables)
+            )
 
     async def _upsert_identity_rows(
         self, session: AsyncSession, manifest: IdentityManifest

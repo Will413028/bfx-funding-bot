@@ -56,5 +56,5 @@ class DiagnosticsRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_diagnostics_acct_occurred", "account_id", "occurred_at"),
+        Index("idx_diagnostics_acct_occurred", "exchange_account_id", "occurred_at"),
     )

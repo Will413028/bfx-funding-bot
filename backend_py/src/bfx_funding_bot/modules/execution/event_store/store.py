@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_stored_event,
     event_type_of,
@@ -75,6 +76,7 @@ class PostgresEventStore:
         # Cast to Any so attribute access works on the dynamically-typed event object.
         _ev: Any = cast(Any, event)
         account_id: str = _ev.account_id
+        exchange_account_id = account_id_uuid_or_none(account_id)
         venue_offer_id: str | None = getattr(_ev, "venue_offer_id", None)
         venue_seq: int | None = getattr(_ev, "venue_seq", None)
         cid: int | None = getattr(_ev, "cid", None)
@@ -88,6 +90,7 @@ class PostgresEventStore:
         payload: dict[str, Any] = serialize_event(event)
         row = EventLogRow(
             account_id=account_id,
+            exchange_account_id=exchange_account_id,
             deployment_environment=self._env,
             event_type=etype,
             cid=cid,
@@ -195,6 +198,7 @@ class PostgresEventStore:
         values: dict[str, Any] = {
             "cid": cid,
             "account_id": account_id,
+            "exchange_account_id": account_id_uuid_or_none(account_id),
             "deployment_environment": self._env,
             "symbol": symbol,
             "state": state.value,
@@ -285,6 +289,7 @@ class PostgresEventStore:
         if ps is None:
             ps = PositionStateRow(
                 account_id=account_id,
+                exchange_account_id=account_id_uuid_or_none(account_id),
                 deployment_environment=self._env,
                 symbol=symbol,
                 reserved=Decimal("0"),
@@ -293,6 +298,8 @@ class PostgresEventStore:
                 last_event_seq=0,
             )
             session.add(ps)
+        elif ps.exchange_account_id is None:
+            ps.exchange_account_id = account_id_uuid_or_none(account_id)
         reserved = Decimal(str(ps.reserved))
         realized = Decimal(str(ps.realized))
         if etype == "RESERVATION_CLAIMED":
@@ -355,6 +362,7 @@ class PostgresEventStore:
         if ps is None:
             ps = PositionStateRow(
                 account_id=account_id,
+                exchange_account_id=account_id_uuid_or_none(account_id),
                 deployment_environment=self._env,
                 symbol=symbol,
                 reserved=Decimal("0"),
@@ -363,6 +371,8 @@ class PostgresEventStore:
                 last_event_seq=0,
             )
             session.add(ps)
+        elif ps.exchange_account_id is None:
+            ps.exchange_account_id = account_id_uuid_or_none(account_id)
         ps.reserved = reserved_usdt
         ps.realized = realized_usdt
         ps.last_updated_ms = occurred_at_ms
@@ -372,6 +382,7 @@ class PostgresEventStore:
 
         session.add(ReconcileObservationRow(
             account_id=account_id,
+            exchange_account_id=account_id_uuid_or_none(account_id),
             deployment_environment=self._env,
             symbol=symbol,
             reserved_usdt=reserved_usdt,
@@ -443,6 +454,7 @@ class PostgresEventStore:
 
         ps = PositionStateRow(
             account_id=account_id,
+            exchange_account_id=account_id_uuid_or_none(account_id),
             deployment_environment=deployment_environment,
             symbol=symbol,
             reserved=base_reserved,

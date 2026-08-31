@@ -5,7 +5,8 @@ series, close) from Postgres, builds FillRecord / MarketRatePoint lists, and
 delegates all computation to the pure modules/live_validation/live_attribution
 module.
 
-account_id  = BFX_ACCOUNT_ID env-var (defaults "default", same as daemon.py)
+account_id  = canonical UUID from BFX_EXCHANGE_ACCOUNT_ID (required for the
+production DB path; injected sqlite tests use a synthetic in-memory realm)
 environment = BFX_DEPLOYMENT_ENV env-var (required; "prod" for the live canary)
 """
 from __future__ import annotations
@@ -121,7 +122,17 @@ async def build_verdict_from_neon(
     pre-2026-06-23 Neon era; kept as-is (many call sites, rename is behavior-free
     churn).
     """
-    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
+    raw_account_id = os.environ.get("BFX_EXCHANGE_ACCOUNT_ID", "").strip()
+    if not raw_account_id:
+        if session_factory is None:
+            raise RuntimeError("BFX_EXCHANGE_ACCOUNT_ID is required")
+        # Unit tests inject a sqlite session and intentionally use a synthetic
+        # realm; no production invocation can reach this branch.
+        account_id = "default"
+    else:
+        from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
+
+        account_id = account_id_canonical(raw_account_id)
     deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
 
     engine = None

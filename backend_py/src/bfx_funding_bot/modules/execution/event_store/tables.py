@@ -56,12 +56,15 @@ class EventLogRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_event_log_acct_env_seq", "account_id", "deployment_environment", "event_seq"),
+        Index(
+            "idx_event_log_acct_env_seq",
+            "exchange_account_id", "deployment_environment", "event_seq",
+        ),
         Index("idx_event_log_cid", "cid"),
         Index("idx_event_log_voi", "venue_offer_id"),
         Index(
             "uq_event_log_dedup",
-            "account_id", "deployment_environment", "event_type", "venue_offer_id", "venue_seq",
+            "exchange_account_id", "deployment_environment", "event_type", "venue_offer_id", "venue_seq",
             unique=True,
         ),
     )
@@ -95,14 +98,14 @@ class OfferClaimRow(Base):
         Index("idx_offer_claims_voi", "venue_offer_id"),
         Index(
             "uq_offer_claims_venue_offer_id",
-            "account_id", "deployment_environment", "venue_offer_id",
+            "exchange_account_id", "deployment_environment", "venue_offer_id",
             unique=True,
             postgresql_where=text("venue_offer_id IS NOT NULL"),
             sqlite_where=text("venue_offer_id IS NOT NULL"),
         ),
         Index(
             "uq_offer_claims_execution_decision_id",
-            "account_id", "deployment_environment", "execution_decision_id",
+            "exchange_account_id", "deployment_environment", "execution_decision_id",
             unique=True,
             postgresql_where=text("execution_decision_id IS NOT NULL"),
             sqlite_where=text("execution_decision_id IS NOT NULL"),
@@ -169,6 +172,8 @@ class ReconcileObservationRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_reconcile_obs_acct_env_symbol_id",
-              "account_id", "deployment_environment", "symbol", "id"),
+        Index(
+            "idx_reconcile_obs_acct_env_symbol_id",
+            "exchange_account_id", "deployment_environment", "symbol", "id",
+        ),
     )

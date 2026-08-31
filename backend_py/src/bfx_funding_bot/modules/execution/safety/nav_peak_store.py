@@ -11,6 +11,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow
 
 
@@ -43,6 +44,7 @@ class NavPeakStore:
             await session.merge(
                 NavPeakRow(
                     account_id=self._account_id,
+                    exchange_account_id=account_id_uuid_or_none(self._account_id),
                     deployment_environment=self._env,
                     symbol=symbol,
                     peak=peak,

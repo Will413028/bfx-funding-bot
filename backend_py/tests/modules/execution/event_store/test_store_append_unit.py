@@ -25,6 +25,7 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
+_CANONICAL_ACCOUNT = "550e8400-e29b-41d4-a716-446655440000"
 
 
 def _ref(cid: int, voi: str | None = None) -> ReservationRef:
@@ -186,7 +187,7 @@ async def test_conflicting_claim_reference_fails_without_mutating_projection(
     )
     await store.append(sqlite_session, ReservationClaimed(
         cid=992, venue_offer_id="v992", size_usdt=Decimal("8"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+        signal_correlation_id=_SCID, account_id=_CANONICAL_ACCOUNT, is_simulated=True,
         venue_seq=1, occurred_at_ms=1000, reservation_ref=initial,
     ))
     conflicting = ReservationRef(
@@ -196,7 +197,7 @@ async def test_conflicting_claim_reference_fails_without_mutating_projection(
     with pytest.raises(RuntimeError, match="claim identity conflict"):
         await store.append(sqlite_session, ReservationClaimed(
             cid=992, venue_offer_id="v992", size_usdt=Decimal("8"), symbol="fUST",
-            signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+            signal_correlation_id=_SCID, account_id=_CANONICAL_ACCOUNT, is_simulated=True,
             venue_seq=2, occurred_at_ms=1001, reservation_ref=conflicting,
         ))
     row = (await sqlite_session.execute(
@@ -215,7 +216,7 @@ async def test_same_venue_offer_id_under_different_cid_fails_without_second_proj
     )
     await store.append(sqlite_session, ReservationClaimed(
         cid=993, venue_offer_id="v-shared", size_usdt=Decimal("8"), symbol="fUST",
-        signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+                signal_correlation_id=_SCID, account_id=_CANONICAL_ACCOUNT, is_simulated=True,
         venue_seq=1, occurred_at_ms=1000, reservation_ref=first,
     ))
     conflicting = ReservationRef(
@@ -225,7 +226,7 @@ async def test_same_venue_offer_id_under_different_cid_fails_without_second_proj
     with pytest.raises(RuntimeError, match="claim identity conflict"):
         await store.append(sqlite_session, ReservationClaimed(
             cid=994, venue_offer_id="v-shared", size_usdt=Decimal("8"), symbol="fUST",
-            signal_correlation_id=_SCID, account_id="acct", is_simulated=True,
+            signal_correlation_id=_SCID, account_id=_CANONICAL_ACCOUNT, is_simulated=True,
             venue_seq=2, occurred_at_ms=1001, reservation_ref=conflicting,
         ))
     rows = (await sqlite_session.execute(

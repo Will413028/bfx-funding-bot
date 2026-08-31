@@ -280,10 +280,9 @@ class SignalEngine:
     ) -> None:
         """Single immutable DECISION emit per cycle (event-sourcing best practice).
 
-        Envelope: standard event fields (timestamp/level/phase/strategy/cell/
-        event_type/correlation_id) + account_id ('default'; account binding
-        is resolved at submit time by the DeploymentReconciler) + payload from
-        the strategy-level DecisionPayload model_dump.
+        The diagnostics sink injects the daemon's account scope.  The signal
+        layer deliberately does not invent a realm or use a ``default``
+        fallback; account binding is explicit at daemon bootstrap.
         """
         await self.diagnostics.emit({
             "timestamp": datetime.now(UTC).isoformat(),
@@ -293,7 +292,6 @@ class SignalEngine:
             "cell": cell.cell_id,
             "event_type": EventType.DECISION.value,
             "correlation_id": str(correlation_id),
-            "account_id": "default",
             "payload": decision.model_dump(mode="json"),
         })
 

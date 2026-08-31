@@ -60,7 +60,7 @@ def translate_bfx_event(
     recent_cancels: dict[str, int],
     now_ms: int,
     *,
-    account_id: str = "default",
+    account_id: str | None = None,
 ) -> tuple[list[Any], list[RegistryMutation], list[DiagnosticLog]]:
     """Pure mapping. Returns (domain_events, mutations, diagnostics)."""
     if isinstance(bfx_event, FcnEvent):
@@ -68,6 +68,8 @@ def translate_bfx_event(
     if isinstance(bfx_event, FocEvent):
         return _translate_foc(bfx_event, snapshot, recent_cancels, now_ms)
     if isinstance(bfx_event, FccEvent):
+        if account_id is None:
+            raise ValueError("account_id is required to persist a credit-close event")
         # Audit-only release truth for attribution (no offer linkage on the
         # venue credit object, no registry mutation, zero ledger effect).
         closed = CreditClosed(
@@ -199,7 +201,7 @@ class BitfinexLiveWSDispatcher:
         clock: Callable[[], int] | None = None,
         queue_max: int = 10_000,
         persister: EventPersister | None = None,
-        account_id: str = "default",
+        account_id: str | None = None,
     ) -> None:
         self._ws_client = ws_client
         self._registry = registry

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -9,12 +9,6 @@ from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-import bfx_funding_bot.modules.accounts.tables  # noqa: F401
-import bfx_funding_bot.modules.execution.audit.tables  # noqa: F401
-import bfx_funding_bot.modules.execution.diagnostics.tables  # noqa: F401
-import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-import bfx_funding_bot.modules.execution.safety.tables  # noqa: F401
-import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.crypto import (
     Envelope,
     decrypt_secret,
@@ -22,11 +16,6 @@ from bfx_funding_bot.core.crypto import (
     encrypt_secret,
 )
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.identity_cutover import (
-    CutoverManifestError,
-    IdentityCutover,
-    IdentityManifest,
-)
 from bfx_funding_bot.modules.accounts.config_service import (
     get_account_config_draft,
     upsert_account_config_draft_for_user,
@@ -35,22 +24,29 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     MembershipDenied,
     grant_membership,
 )
+from bfx_funding_bot.modules.accounts.identity_cutover import (
+    CutoverManifestError,
+    IdentityCutover,
+    IdentityManifest,
+)
+from bfx_funding_bot.modules.accounts.tables import (
+    AccountConfigDraft,
+    APIKey,
+    ExchangeAccount,
+    ExchangeAccountCredential,
+    User,
+    UserConfig,
+)
 from bfx_funding_bot.modules.accounts.vault import (
     create_account_credential,
     delete_account_credential,
     list_account_credentials,
 )
-from bfx_funding_bot.modules.accounts.tables import (
-    APIKey,
-    AccountConfigDraft,
-    ExchangeAccount,
-    ExchangeAccountCredential,
-    UserConfig,
-)
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 
 _KEK = bytes(range(32))
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+_LEGACY_USER_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
 @pytest_asyncio.fixture
@@ -153,6 +149,28 @@ async def test_wrong_manifest_fails_before_any_write(session: AsyncSession) -> N
     row = await session.scalar(select(EventLogRow))
     assert row is not None
     assert row.exchange_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_nonzero_legacy_scaffold_blocks_cutover_before_writes(
+    session: AsyncSession,
+) -> None:
+    session.add(
+        User(
+            id=_LEGACY_USER_ID,
+            email="legacy@test.invalid",
+            password_hash="redacted",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+    with pytest.raises(CutoverManifestError, match="legacy tables must be empty"):
+        await IdentityCutover(kek=_KEK).apply(session, _manifest())
+
+    assert await session.scalar(select(func.count()).select_from(ExchangeAccount)) == 0
+    assert await session.scalar(select(func.count()).select_from(User)) == 1
 
 
 @pytest.mark.asyncio

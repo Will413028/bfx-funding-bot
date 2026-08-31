@@ -23,6 +23,23 @@ _MIGRATION_MANAGED_FOREIGN_KEYS = frozenset(
         ("public", "user_profiles", "fk_user_profiles_user"),
     }
 )
+_IDENTITY_CONTRACT_TABLES = frozenset(
+    {
+        "event_log",
+        "offer_claims",
+        "position_state",
+        "reconcile_observation",
+        "execution_decisions",
+        "diagnostics",
+        "nav_peak",
+        "trading_halt",
+        "attribution_weekly",
+        "config_regime",
+        "api_keys",
+        "user_configs",
+    }
+)
+_LEGACY_REMOVED_TABLES = frozenset({"users", "executions", "billing_records"})
 
 
 def _normalize_json_default(rendered_default: str) -> str:
@@ -69,11 +86,37 @@ def include_object(
     schema = getattr(table, "schema", None) or "public"
     table_name = getattr(table, "name", None)
     del compare_to
+    # ``exchange_account_id`` is nullable in ORM metadata solely so the
+    # SQLite unit fixtures can continue to construct historical synthetic
+    # realms.  PostgreSQL's forward-only Halt 1 contract migration owns the
+    # NOT NULL/FK transition; do not report that intentional database-only
+    # constraint as autogenerate drift.
+    if (
+        type_ == "column"
+        and name == "exchange_account_id"
+        and table_name in _IDENTITY_CONTRACT_TABLES
+    ):
+        # Ignore the database-only NOT NULL/FK contract once the column is
+        # reflected, but keep metadata-only columns visible so an old database
+        # still reports the required additive migration as drift.
+        return not reflected
+    # These scaffold models remain importable by the pre-cutover application
+    # migration, but their public tables are deliberately dropped at the
+    # contract boundary.  They are not part of the post-cutover metadata
+    # surface and must not make ``alembic check`` suggest recreating them.
+    if type_ == "table" and name in _LEGACY_REMOVED_TABLES:
+        return False
     return not (
         (type_ == "table" and name == "atlas_schema_revisions")
         or (
             type_ == "foreign_key_constraint"
             and reflected
-            and (schema, table_name, name) in _MIGRATION_MANAGED_FOREIGN_KEYS
+            and (
+                (schema, table_name, name) in _MIGRATION_MANAGED_FOREIGN_KEYS
+                or (
+                    table_name in _IDENTITY_CONTRACT_TABLES
+                    and name == f"fk_{table_name}_exchange_account"
+                )
+            )
         )
     )

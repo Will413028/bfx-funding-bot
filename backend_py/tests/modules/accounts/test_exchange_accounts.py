@@ -13,6 +13,7 @@ from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountRetired,
     account_id_canonical,
+    account_id_uuid_or_none,
     ensure_account_active,
     upsert_account_config_draft,
     validate_membership_role,
@@ -87,6 +88,15 @@ def test_uuid_canonicalization_is_stable_for_aad() -> None:
     assert account_id_canonical(raw) == "550e8400-e29b-41d4-a716-446655440000"
     with pytest.raises(ValueError, match="UUID"):
         account_id_canonical("legacy-default")
+
+
+def test_runtime_identity_projection_parses_only_canonical_uuid_realms() -> None:
+    account_id = UUID("550e8400-e29b-41d4-a716-446655440000")
+    assert account_id_uuid_or_none(str(account_id).upper()) == account_id
+    assert account_id_uuid_or_none(account_id) == account_id
+    # Transitional/unit-test realms are not silently assigned an account.
+    # The post-cutover NOT NULL/FK contract will reject such a write.
+    assert account_id_uuid_or_none("legacy-default") is None
 
 
 @pytest.mark.asyncio

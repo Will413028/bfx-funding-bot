@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
 
 
@@ -74,6 +75,7 @@ class HaltStateStore:
         """Append a transition. Never updates or deletes an existing row."""
         row = TradingHaltRow(
             account_id=self._account_id,
+            exchange_account_id=account_id_uuid_or_none(self._account_id),
             deployment_environment=self._env,
             halted=halted,
             reason=reason,

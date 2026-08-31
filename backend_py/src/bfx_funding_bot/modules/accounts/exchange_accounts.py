@@ -58,6 +58,22 @@ def account_id_canonical(value: UUID | str) -> str:
         raise ValueError(f"account identity must be a UUID, got {value!r}") from exc
 
 
+def account_id_uuid_or_none(value: UUID | str) -> UUID | None:
+    """Parse the UUID alias carried by the transitional event contract.
+
+    During Halt 1, domain events retain their historical ``account_id: str``
+    field so existing serializers and synthetic unit realms remain readable.
+    A daemon boot supplies the canonical UUID string, so writers can populate
+    the durable UUID owner column without consulting a process-global mapping.
+    Legacy-only test/audit rows deliberately return ``None``; the contract
+    migration's NOT NULL/FK gate is the final production guard against them.
+    """
+    try:
+        return value if isinstance(value, UUID) else UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def validate_membership_role(value: str) -> AccountRole:
     """Validate and narrow a membership role to the closed domain set."""
     if value not in {"owner", "operator", "viewer"}:
@@ -255,6 +271,7 @@ __all__ = [
     "CredentialLifecycleStatus",
     "MembershipDenied",
     "account_id_canonical",
+    "account_id_uuid_or_none",
     "create_exchange_account_credential",
     "ensure_account_active",
     "get_exchange_account",

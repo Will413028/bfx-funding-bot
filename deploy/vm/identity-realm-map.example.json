@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "accounts": [
+    {
+      "exchange_account_id": "550e8400-e29b-41d4-a716-446655440000",
+      "venue": "bitfinex",
+      "label": "primary-operator-account",
+      "legacy_realms": ["prod"],
+      "user_ids": ["<better-auth-operator-user-id>"],
+      "memberships": {
+        "<better-auth-operator-user-id>": "owner"
+      }
+    }
+  ]
+}

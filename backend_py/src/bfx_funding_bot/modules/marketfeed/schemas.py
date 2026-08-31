@@ -255,7 +255,11 @@ class Envelope(BaseModel):
     cell: str | None = None
     event_type: EventType
     correlation_id: UUID
-    account_id: str = "default"
+    # Signal/health telemetry is emitted before the deployment layer binds a
+    # money-domain account.  ``None`` means "not applicable"; it is never a
+    # hidden realm or a ``default`` account.  Execution events built by
+    # ``emit.py`` always provide the canonical UUID string.
+    account_id: str | None = None
     payload: dict[str, Any]
 
     @model_validator(mode="after")

@@ -75,6 +75,6 @@ class TradingHaltRow(Base):
     __table_args__ = (
         Index(
             "ix_trading_halt_realm_id",
-            "account_id", "deployment_environment", "id",
+            "exchange_account_id", "deployment_environment", "id",
         ),
     )
