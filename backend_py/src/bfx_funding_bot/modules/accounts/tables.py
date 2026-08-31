@@ -5,13 +5,16 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
     Text,
+    event,
     func,
     text,
 )
@@ -42,6 +45,201 @@ class User(Base):
     )
 
     __table_args__ = (Index("idx_users_email", "email", unique=True),)
+
+
+class ExchangeAccount(Base):
+    """Canonical money-domain aggregate for one venue account.
+
+    The UUID is assigned once and is the stable identity used by all later
+    account-scoped tables.  Lifecycle transitions are represented by
+    ``lifecycle_status``; an account with money history is never hard-deleted.
+    """
+
+    __tablename__ = "exchange_accounts"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    venue: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('active', 'halted', 'retired')",
+            name="ck_exchange_accounts_lifecycle_status",
+        ),
+        Index("idx_exchange_accounts_venue_status", "venue", "lifecycle_status"),
+    )
+
+
+@event.listens_for(ExchangeAccount.id, "set", retval=True)
+def _reject_exchange_account_id_change(target: ExchangeAccount, value: UUID, oldvalue: object, _initiator: object) -> UUID:
+    """Prevent changing a persisted aggregate identity in the ORM."""
+    oldvalue_name = getattr(oldvalue, "name", None)
+    if oldvalue is not None and oldvalue_name not in {"NO_VALUE", "NEVER_SET"} and value != oldvalue:
+        raise ValueError("ExchangeAccount.id is immutable")
+    return value
+
+
+class ExchangeAccountMembership(Base):
+    """Data-backed authorization membership for an exchange account."""
+
+    __tablename__ = "exchange_account_memberships"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("exchange_account_id", "user_id"),
+        CheckConstraint(
+            "role IN ('owner', 'operator', 'viewer')",
+            name="ck_exchange_account_memberships_role",
+        ),
+        Index("idx_exchange_account_memberships_user", "user_id"),
+    )
+
+
+class ExchangeAccountCredential(Base):
+    """Account-owned envelope-encrypted Bitfinex credential.
+
+    Credential rows are lifecycle records.  The partial unique index prevents
+    two active execution keys for the same account and venue while retaining
+    retired/revoked rows for audit and rotation history.
+    """
+
+    __tablename__ = "exchange_account_credentials"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    venue: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    secret_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    wrapped_dek: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    lifecycle_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'active'")
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_status IN ('active', 'revoked', 'retired')",
+            name="ck_exchange_account_credentials_lifecycle_status",
+        ),
+        Index(
+            "uq_exchange_account_credentials_active_venue",
+            "exchange_account_id",
+            "venue",
+            unique=True,
+            postgresql_where=text("lifecycle_status = 'active'"),
+            sqlite_where=text("lifecycle_status = 'active'"),
+        ),
+        Index(
+            "idx_exchange_account_credentials_account",
+            "exchange_account_id",
+            "created_at",
+        ),
+    )
+
+
+_ACCOUNT_JSON = JSON().with_variant(JSONB, "postgresql")
+
+
+class AccountConfigDraft(Base):
+    """Account-scoped user-editable configuration draft.
+
+    This row is intentionally not applied execution state.  ``revision`` is a
+    monotonic application-owned version incremented by the config service.
+    """
+
+    __tablename__ = "account_config_drafts"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(_ACCOUNT_JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+    __table_args__ = (
+        Index("uq_account_config_drafts_account", "exchange_account_id", unique=True),
+    )
+
+
+class LegacyAccountRealmMap(Base):
+    """Auditable legacy realm-to-account mapping used only by Halt 1 tooling."""
+
+    __tablename__ = "legacy_account_realm_map"
+
+    realm_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
 
 
 class APIKey(Base):
