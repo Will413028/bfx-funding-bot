@@ -16,7 +16,7 @@ pytestmark = pytest.mark.integration
 
 
 async def test_emit_decision_round_trip(pg_session_factory) -> None:
-    acct = f"acct-{uuid4().hex[:8]}"  # session-scoped container -> unique per test
+    acct = str(uuid4())
     sink = DiagnosticsSink(session_factory=pg_session_factory, account_id=acct, deployment_environment="ci")
     scid = str(uuid4())
     await sink.emit({

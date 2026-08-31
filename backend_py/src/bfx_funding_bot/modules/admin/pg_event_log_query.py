@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.event_store.serialization import _CLASS_BY_TYPE
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 
@@ -58,24 +59,33 @@ class PostgresEventLogQueryAdapter:
         matching the shape expected by the L3 smoke runner.
         """
         since_ms = int(since.timestamp() * 1000)
-        stmt = (
-            select(EventLogRow)
-            .where(
-                EventLogRow.account_id == account_id,
-                EventLogRow.deployment_environment == self._env,
-                EventLogRow.event_type.in_(_ORDER_EVENT_TYPES),
-                # Non-indexed range filter: acceptable for smoke's small/short-window
-                # use. Add an index on occurred_at_ms if event_log grows large.
-                EventLogRow.occurred_at_ms >= since_ms,
-            )
-            .order_by(EventLogRow.occurred_at_ms.asc())
-        )
         async with self._sf() as s:
+            stmt = (
+                select(EventLogRow)
+                .where(
+                    account_scope_clause(
+                        s,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
+                    EventLogRow.deployment_environment == self._env,
+                    EventLogRow.event_type.in_(_ORDER_EVENT_TYPES),
+                    # Non-indexed range filter: acceptable for smoke's small/short-window
+                    # use. Add an index on occurred_at_ms if event_log grows large.
+                    EventLogRow.occurred_at_ms >= since_ms,
+                )
+                .order_by(EventLogRow.occurred_at_ms.asc())
+            )
             rows = (await s.execute(stmt)).scalars().all()
         return [
             {
                 "event_type": r.event_type,
-                "account_id": r.account_id,
+                "account_id": (
+                    str(r.exchange_account_id)
+                    if r.exchange_account_id is not None
+                    else r.account_id
+                ),
                 "occurred_at_ms": r.occurred_at_ms,
             }
             for r in rows

@@ -6,10 +6,11 @@ import { ApiKeyCard } from "../api-key-card";
 function makeKey(overrides: Partial<ApiKey> = {}): ApiKey {
   return {
     id: "1",
+    exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
     label: "main",
     apiKey: "PUBKEY12345",
     apiSecret: "****",
-    exchangeStatus: "verified",
+    status: "verified",
     createdAt: "2026-01-01",
     ...overrides,
   };
@@ -20,11 +21,43 @@ const noop = vi.fn();
 afterEach(() => cleanup());
 
 describe("ApiKeyCard", () => {
+  it("labels a newly created credential as pending verification", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({ status: "pending" })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(screen.getByText("Pending verification").textContent).toContain(
+      "Pending verification",
+    );
+  });
+
+  it("does not offer verification for terminal credential states", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({ status: "retired" })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Verify" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
   it("surfaces lastVerifyError reason when status is failed", () => {
     render(
       <ApiKeyCard
         apiKey={makeKey({
-          exchangeStatus: "failed",
+          status: "failed",
           lastVerifyError: "withdraw permission is enabled",
         })}
         onVerify={noop}
@@ -38,10 +71,29 @@ describe("ApiKeyCard", () => {
     expect(reason.textContent).toContain("withdraw permission is enabled");
   });
 
+  it("surfaces a permission error while a credential remains pending", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({
+          status: "pending",
+          lastVerifyError: "funding write permission required",
+        })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(screen.getByTestId("verify-error-reason").textContent).toContain(
+      "funding write permission required",
+    );
+  });
+
   it("does not render a reason when failed but no lastVerifyError", () => {
     render(
       <ApiKeyCard
-        apiKey={makeKey({ exchangeStatus: "failed", lastVerifyError: null })}
+        apiKey={makeKey({ status: "failed", lastVerifyError: null })}
         onVerify={noop}
         onDelete={noop}
         isVerifying={false}
@@ -56,7 +108,7 @@ describe("ApiKeyCard", () => {
     render(
       <ApiKeyCard
         apiKey={makeKey({
-          exchangeStatus: "verified",
+          status: "verified",
           lastVerifyError: "old failure",
         })}
         onVerify={noop}

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     PositionReconciled,
@@ -73,7 +74,12 @@ class PaperPositionLedger:
         rows = (
             await session.execute(
                 select(PositionStateRow).where(
-                    PositionStateRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=PositionStateRow.exchange_account_id,
+                        legacy_account_column=PositionStateRow.account_id,
+                    ),
                     PositionStateRow.deployment_environment == deployment_environment,
                 )
             )
@@ -207,5 +213,4 @@ class PaperPositionLedger:
         return sum(self._reserved.values(), Decimal("0")) + sum(
             self._realized.values(), Decimal("0")
         )
-
 

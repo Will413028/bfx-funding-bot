@@ -14,10 +14,11 @@ async def test_position_state_per_symbol_pk_after_upgrade(
     pg_engine, monkeypatch
 ) -> None:
     # Phase 2 migration b7c1d2e3f4a5 DROP/CREATEs position_state with the
-    # composite PK (account_id, deployment_environment, symbol). Drive a real
-    # alembic upgrade against the testcontainer Postgres and assert the live PK
-    # matches. alembic/env.py builds Settings() from DATABASE_URL, so point it
-    # at the testcontainer's sync (psycopg) URL.
+    # per-symbol composite PK. Halt 1 extends that identity to the canonical
+    # exchange account UUID. Drive a real alembic upgrade against the
+    # testcontainer Postgres and assert the live PK matches. alembic/env.py
+    # builds Settings() from DATABASE_URL, so point it at the testcontainer's
+    # sync (psycopg) URL.
     sync_url = pg_engine.url.render_as_string(hide_password=False).replace(
         "+asyncpg", "+psycopg"
     )
@@ -56,4 +57,4 @@ async def test_position_state_per_symbol_pk_after_upgrade(
     finally:
         verify_eng.dispose()
 
-    assert set(pk) == {"account_id", "deployment_environment", "symbol"}
+    assert set(pk) == {"exchange_account_id", "deployment_environment", "symbol"}

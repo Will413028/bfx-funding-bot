@@ -32,6 +32,10 @@ from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, Decision
 
 pytestmark = pytest.mark.integration
 _ENV = "ci"
+_ACCOUNT_INTENT = "00000000-0000-0000-0000-000000000041"
+_ACCOUNT_CLAIM = "00000000-0000-0000-0000-000000000042"
+_ACCOUNT_FAILED = "00000000-0000-0000-0000-000000000043"
+_ACCOUNT_CRASH = "00000000-0000-0000-0000-000000000044"
 
 
 def _decision() -> DecisionPayload:
@@ -91,7 +95,7 @@ class _PgAssertingInner:
 
 
 async def test_intent_committed_before_submit(pg_session_factory) -> None:
-    acct = "wp_intent"
+    acct = _ACCOUNT_INTENT
     inner = _PgAssertingInner(pg_session_factory=pg_session_factory, account_id=acct,
                               status="submitted", voi="v_intent")
     mw = _mw(inner, pg_session_factory)
@@ -101,7 +105,7 @@ async def test_intent_committed_before_submit(pg_session_factory) -> None:
 
 
 async def test_claimed_updates_same_cid_row(pg_session_factory) -> None:
-    acct = "wp_claim"
+    acct = _ACCOUNT_CLAIM
 
     class _Inner:
         async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
@@ -126,7 +130,7 @@ async def test_claimed_updates_same_cid_row(pg_session_factory) -> None:
 
 
 async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
-    acct = "wp_failed"
+    acct = _ACCOUNT_FAILED
 
     class _Inner:
         async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
@@ -149,7 +153,7 @@ async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
 
 
 async def test_crash_mid_flight_leaves_pending(pg_session_factory) -> None:
-    acct = "wp_crash"
+    acct = _ACCOUNT_CRASH
 
     class _RaisingInner:
         async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:

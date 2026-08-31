@@ -43,15 +43,20 @@ def test_paper_with_ws_client_enabled_raises(monkeypatch: pytest.MonkeyPatch) ->
         )
 
 
-def test_bitfinex_live_without_api_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bitfinex_live_builder_does_not_require_env_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
-        build_executor(
-            event_sink=_EventCapture(), phase=Phase.PAPER,
-            strategy=StrategyName.RATE_PERCENTILE,
-            configured_symbols=frozenset({"fUST"}), cell="C-1",
-        )
+    from bfx_funding_bot.modules.execution.bus import DomainEventBus
+
+    spec = build_executor(
+        event_sink=_EventCapture(), phase=Phase.PAPER,
+        strategy=StrategyName.RATE_PERCENTILE,
+        configured_symbols=frozenset({"fUST"}), cell="C-1",
+        http=httpx.AsyncClient(), bus=DomainEventBus(),
+    )
+    assert spec.ws_client_enabled is True
 
 
 def test_bitfinex_live_without_ws_client_raises(monkeypatch: pytest.MonkeyPatch) -> None:

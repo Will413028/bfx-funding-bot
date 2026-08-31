@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import JSON, BigInteger, Index, Integer, Numeric, Text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -20,6 +22,9 @@ class ExecutionDecisionRow(Base):
 
     decision_id: Mapped[str] = mapped_column(Text, primary_key=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     reconcile_id: Mapped[str] = mapped_column(Text, nullable=False)
     cell_id: Mapped[str] = mapped_column(Text, nullable=False)

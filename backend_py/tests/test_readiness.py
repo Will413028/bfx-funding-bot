@@ -35,7 +35,7 @@ class SuccessfulSession:
     async def execute(self, statement: object) -> object:
         self.statements.append(str(statement))
         if "alembic_version" in str(statement):
-            return _VersionResult(["f5b8d0e2f3c4"])
+            return _VersionResult(sorted(deps._expected_alembic_heads()))
         return _VersionResult([1])
 
 

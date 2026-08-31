@@ -18,6 +18,24 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
+
+
+def require_deployment_environment() -> str:
+    """Return an explicit, known data-isolation environment.
+
+    A missing value must never silently select ``prod``.  This helper is used
+    by web/API and operator scripts, which do not pass through marketfeed's
+    stricter ``load_config`` startup validator.
+    """
+    value = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
+    if value not in VALID_DEPLOYMENT_ENVIRONMENTS:
+        valid = ", ".join(sorted(VALID_DEPLOYMENT_ENVIRONMENTS))
+        raise ValueError(
+            f"BFX_DEPLOYMENT_ENV must be explicitly set to one of {valid}"
+        )
+    return value
+
 
 def _strip_pooler_from_host(host: str | None) -> str | None:
     """Neon -pooler endpoint → direct endpoint."""

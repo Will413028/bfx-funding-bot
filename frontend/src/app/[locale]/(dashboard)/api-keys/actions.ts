@@ -1,6 +1,7 @@
 "use server";
 
 import { headers } from "next/headers";
+import { accountScopedPath } from "@/lib/api-client";
 import { auth, getOperatorMfaSessionAccess } from "@/lib/auth";
 import type { ApiKey } from "@/types";
 
@@ -12,6 +13,7 @@ const API_URL = process.env.API_URL as string;
  * /api/proxy hop. The web-API envelope-encrypts it before persisting.
  */
 export async function createApiKeyAction(input: {
+  exchangeAccountId: string;
   label: string;
   apiKey: string;
   apiSecret: string;
@@ -42,14 +44,21 @@ export async function createApiKeyAction(input: {
     throw new Error("authTokenUnavailable");
   }
 
-  const res = await fetch(new URL("/api/v1/api-keys", API_URL).toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const { exchangeAccountId, ...payload } = input;
+  const res = await fetch(
+    new URL(
+      `/api/v1${accountScopedPath(exchangeAccountId, "/credentials")}`,
+      API_URL,
+    ).toString(),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(input),
-  });
+  );
 
   const text = await res.text();
   if (!res.ok) {

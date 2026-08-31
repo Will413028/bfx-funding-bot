@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ApiKeysSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
 import { Button } from "@/components/ui/button";
+import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { ApiKeyCard } from "@/features/api-keys/components/api-key-card";
 import { CreateApiKeyDialog } from "@/features/api-keys/components/create-apikey-dialog";
 import {
@@ -19,10 +20,16 @@ import type { CreateApiKeyInput } from "@/lib/validations";
 export default function ApiKeysPage() {
   const t = useTranslations("apiKeys");
   const [createOpen, setCreateOpen] = useState(false);
-  const { data: apiKeys, isLoading, isError, refetch } = useApiKeys();
-  const createMutation = useCreateApiKey();
-  const deleteMutation = useDeleteApiKey();
-  const verifyMutation = useVerifyApiKey();
+  const account = useSelectedExchangeAccountId();
+  const {
+    data: apiKeys,
+    isLoading,
+    isError,
+    refetch,
+  } = useApiKeys(account.exchangeAccountId);
+  const createMutation = useCreateApiKey(account.exchangeAccountId);
+  const deleteMutation = useDeleteApiKey(account.exchangeAccountId);
+  const verifyMutation = useVerifyApiKey(account.exchangeAccountId);
 
   function handleCreate(data: CreateApiKeyInput) {
     createMutation.mutate(data, {
@@ -30,11 +37,11 @@ export default function ApiKeysPage() {
     });
   }
 
-  if (isLoading) {
+  if (account.isLoading || isLoading) {
     return <ApiKeysSkeleton />;
   }
 
-  if (isError) {
+  if (account.isError || isError || !account.exchangeAccountId) {
     return <QueryError message={t("loadFailed")} onRetry={refetch} />;
   }
 

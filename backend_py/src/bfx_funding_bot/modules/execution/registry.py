@@ -91,10 +91,6 @@ def build_executor(
 
     # Live invariants
     if executor_kind == "bitfinex_live":
-        if not os.environ.get("BFX_API_KEY") or not os.environ.get("BFX_API_SECRET"):
-            raise ExecutorConfigError(
-                "BFX_EXECUTOR=bitfinex_live requires BFX_API_KEY and BFX_API_SECRET"
-            )
         if not ws_client_enabled:
             raise ExecutorConfigError(
                 "BFX_EXECUTOR=bitfinex_live without BFX_WS_CLIENT_ENABLED=true "
