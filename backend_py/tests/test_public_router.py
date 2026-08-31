@@ -5,6 +5,7 @@ serialize absolute-$ fields (capital_days / gross_interest_usdt /
 net_interest_usdt) — see docs/superpowers/specs/2026-07-19-borrowrate-proof-page-csv.md.
 """
 from decimal import Decimal
+from uuid import UUID
 
 import pytest_asyncio
 from fastapi import FastAPI
@@ -21,6 +22,7 @@ from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
 WEEK_1 = 1_782_691_200_000  # 2026-06-29 UTC Monday
 WEEK_2 = WEEK_1 + 604_800_000
+PUBLIC_ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 
 # Field names that must NEVER appear anywhere in a public response body —
 # raw dollar/capital figures leak Will's personal capital scale and would
@@ -43,7 +45,8 @@ def _attribution_row(
     baseline_util: str | None,
 ) -> AttributionWeeklyRow:
     return AttributionWeeklyRow(
-        deployment_environment=env, account_id=account, cell=cell,
+        deployment_environment=env, account_id=account,
+        exchange_account_id=PUBLIC_ACCOUNT_ID, cell=cell,
         week_start_ms=week, week_end_ms=week + 604_800_000, n_fills=2,
         gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal(net),
         capital_days=Decimal(capital_days), realized_apr_net_pct=Decimal("6.205"),
@@ -63,7 +66,8 @@ def _candle(symbol: str, mts: int, close: float) -> FundingCandleRow:
 
 
 @pytest_asyncio.fixture
-async def app_client(sqlite_engine):
+async def app_client(sqlite_engine, monkeypatch):
+    monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(PUBLIC_ACCOUNT_ID))
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -117,6 +121,22 @@ def test_proof_summary_requires_no_auth(app_client):
     assert resp.status_code == 200
 
 
+def test_proof_summary_requires_explicit_public_account(sqlite_engine, monkeypatch):
+    monkeypatch.delenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", raising=False)
+    app = FastAPI()
+    app.include_router(build_public_router())
+    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
+
+    async def _override_session():
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_session
+    response = TestClient(app).get("/api/v1/public/proof-summary")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "public_account_not_configured"
+
+
 def test_proof_summary_has_cache_control(app_client):
     resp = app_client.get("/api/v1/public/proof-summary")
     assert resp.headers["cache-control"] == "public, max-age=3600"
@@ -167,8 +187,9 @@ def test_proof_summary_never_leaks_absolute_dollar_fields(app_client):
 
 
 @pytest_asyncio.fixture
-async def empty_app_client(sqlite_engine):
+async def empty_app_client(sqlite_engine, monkeypatch):
     """A brand-new deployment with zero attribution_weekly rows."""
+    monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(PUBLIC_ACCOUNT_ID))
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)

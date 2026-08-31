@@ -8,6 +8,8 @@ import { usePositions } from "../use-positions";
 
 vi.mock("@/lib/api-client", () => ({
   apiClient: { get: vi.fn() },
+  accountScopedPath: (id: string, path: string) =>
+    `/exchange-accounts/${id}${path}`,
 }));
 
 const POSITIONS: Position[] = [
@@ -30,13 +32,18 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("usePositions", () => {
-  it("fetches GET /positions and exposes the unwrapped list", async () => {
+  it("fetches the explicit account positions path", async () => {
     vi.mocked(apiClient.get).mockResolvedValueOnce(POSITIONS);
 
-    const { result } = renderHook(() => usePositions(), { wrapper });
+    const { result } = renderHook(
+      () => usePositions("550e8400-e29b-41d4-a716-446655440000"),
+      { wrapper },
+    );
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(apiClient.get).toHaveBeenCalledWith("/positions");
+    expect(apiClient.get).toHaveBeenCalledWith(
+      "/exchange-accounts/550e8400-e29b-41d4-a716-446655440000/positions",
+    );
     expect(result.current.data).toEqual(POSITIONS);
   });
 });

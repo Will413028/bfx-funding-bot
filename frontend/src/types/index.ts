@@ -26,10 +26,14 @@ export interface User {
 
 export interface ApiKey {
   id: string;
+  exchangeAccountId: string;
   label: string;
   apiKey: string;
   apiSecret: string; // always "****" (masked by backend)
-  exchangeStatus: string; // "verified" | "unverified" | "failed"
+  /** Account credential status: verified, unverified, failed, or retired. */
+  status: string;
+  /** Legacy response field kept only while the contract migration is staged. */
+  exchangeStatus?: string;
   lastVerifyError?: string | null; // reason the last verify failed (when exchangeStatus is "failed")
   createdAt: string;
   fundingBalance?: {
@@ -37,6 +41,14 @@ export interface ApiKey {
     balance: number;
     available: number;
   };
+}
+
+export interface ExchangeAccount {
+  exchangeAccountId: string;
+  venue: string;
+  label: string;
+  lifecycleStatus: "active" | "halted";
+  role: "owner" | "operator" | "viewer";
 }
 
 export interface VerifyResult {
@@ -76,8 +88,10 @@ export interface StrategyConfig {
 
 export interface UserConfig {
   id: string;
-  userId: string;
+  exchangeAccountId: string;
   config: StrategyConfig;
+  revision: number;
+  source: string;
   createdAt: string;
   updatedAt: string;
 }

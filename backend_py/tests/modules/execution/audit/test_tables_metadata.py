@@ -8,6 +8,7 @@ def test_execution_decision_table_is_registered_with_audit_columns() -> None:
     expected_columns = {
         "decision_id",
         "account_id",
+        "exchange_account_id",
         "deployment_environment",
         "reconcile_id",
         "cell_id",

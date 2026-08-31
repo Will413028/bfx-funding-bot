@@ -45,7 +45,7 @@ export function ApiKeyCard({
   const tc = useTranslations("common");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const statusKey =
-    (apiKey.exchangeStatus as keyof typeof statusConfig) ?? "unverified";
+    (apiKey.status as keyof typeof statusConfig) ?? "unverified";
   const status = statusConfig[statusKey] ?? statusConfig.unverified;
   const maskedKey = `${apiKey.apiKey.slice(0, 8)}...`;
 
@@ -62,7 +62,7 @@ export function ApiKeyCard({
           </Badge>
         </div>
 
-        {apiKey.exchangeStatus === "failed" && apiKey.lastVerifyError && (
+        {apiKey.status === "failed" && apiKey.lastVerifyError && (
           <p
             data-testid="verify-error-reason"
             className="mt-3 rounded-lg bg-rose-500/5 px-3 py-2 text-xs text-rose-400"
@@ -71,7 +71,7 @@ export function ApiKeyCard({
           </p>
         )}
 
-        {apiKey.exchangeStatus === "verified" && apiKey.fundingBalance && (
+        {apiKey.status === "verified" && apiKey.fundingBalance && (
           <div className="mt-3 rounded-lg bg-white/[0.02] px-3 py-2">
             <p className="text-xs text-zinc-400">{t("fundingBalance")}</p>
             <p className="font-medium tabular-nums text-foreground">

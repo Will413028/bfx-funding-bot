@@ -171,17 +171,22 @@ async def verify_account_credential(
     )
     if row is None:
         return None
-    secret = decrypt_secret_with_aad(
-        Envelope(
-            secret_ciphertext=row.secret_ciphertext,
-            secret_nonce=row.secret_nonce,
-            wrapped_dek=row.wrapped_dek,
-            dek_nonce=row.dek_nonce,
-            key_version=row.key_version,
-        ),
-        aad=account_id_canonical(exchange_account_id),
-        kek=kek,
-    )
+    try:
+        secret = decrypt_secret_with_aad(
+            Envelope(
+                secret_ciphertext=row.secret_ciphertext,
+                secret_nonce=row.secret_nonce,
+                wrapped_dek=row.wrapped_dek,
+                dek_nonce=row.dek_nonce,
+                key_version=row.key_version,
+            ),
+            aad=account_id_canonical(exchange_account_id),
+            kek=kek,
+        )
+    except InvalidTag as exc:
+        # Wrong/rotated KEK or ciphertext corruption must be a clean vault
+        # boundary, never an unhandled 500 from the HTTP handler.
+        raise VaultKeyMismatchError(str(key_id)) from exc
     ctx = AccountContext(
         account_id=str(exchange_account_id),
         credentials=Credentials(api_key=row.api_key, api_secret=secret),

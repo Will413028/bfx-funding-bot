@@ -38,7 +38,12 @@ describe("createApiKeyAction", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+      createApiKeyAction({
+        exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
+        label: "x",
+        apiKey: "P",
+        apiSecret: "SEC",
+      }),
     ).rejects.toThrow("authTokenUnavailable");
     expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
     expect(getTokenMock).not.toHaveBeenCalled();
@@ -52,10 +57,11 @@ describe("createApiKeyAction", () => {
           JSON.stringify({
             data: {
               id: "1",
+              exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
               label: "main",
               apiKey: "PUB",
               apiSecret: "****",
-              exchangeStatus: "unverified",
+              status: "unverified",
               createdAt: "x",
             },
           }),
@@ -65,6 +71,7 @@ describe("createApiKeyAction", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await createApiKeyAction({
+      exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
       label: "main",
       apiKey: "PUB",
       apiSecret: "SEC",
@@ -72,7 +79,9 @@ describe("createApiKeyAction", () => {
 
     expect(result.apiKey).toBe("PUB");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/api/v1/api-keys");
+    expect(String(url)).toContain(
+      "/api/v1/exchange-accounts/550e8400-e29b-41d4-a716-446655440000/credentials",
+    );
     expect((init as RequestInit).method).toBe("POST");
     expect((init as RequestInit).body).toContain("SEC"); // plaintext only in server fetch body
     // biome-ignore lint/suspicious/noExplicitAny: test-only header access
@@ -85,7 +94,12 @@ describe("createApiKeyAction", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+      createApiKeyAction({
+        exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
+        label: "x",
+        apiKey: "P",
+        apiSecret: "SEC",
+      }),
     ).rejects.toThrow("authTokenUnavailable");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -96,7 +110,12 @@ describe("createApiKeyAction", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "SEC" }),
+      createApiKeyAction({
+        exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
+        label: "x",
+        apiKey: "P",
+        apiSecret: "SEC",
+      }),
     ).rejects.toThrow("authTokenUnavailable");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -112,7 +131,12 @@ describe("createApiKeyAction", () => {
       ),
     );
     await expect(
-      createApiKeyAction({ label: "x", apiKey: "P", apiSecret: "S" }),
+      createApiKeyAction({
+        exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
+        label: "x",
+        apiKey: "P",
+        apiSecret: "S",
+      }),
     ).rejects.toThrow("key_already_exists");
   });
 });

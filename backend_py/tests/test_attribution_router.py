@@ -1,4 +1,5 @@
 from decimal import Decimal
+from uuid import UUID
 
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException
@@ -8,10 +9,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401  # registers ORM
 from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
+
+_ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+_WEEKLY_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/attribution/weekly"
 
 
 def _row(
@@ -21,7 +27,8 @@ def _row(
     account: str = "default",
 ) -> AttributionWeeklyRow:
     return AttributionWeeklyRow(
-        deployment_environment=env, account_id=account, cell=cell,
+        deployment_environment=env, account_id=account,
+        exchange_account_id=_ACCOUNT_ID, cell=cell,
         week_start_ms=week, week_end_ms=week + 604_800_000, n_fills=2,
         gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal("0.17"),
         capital_days=Decimal("1000"), realized_apr_net_pct=Decimal("6.205"),
@@ -37,6 +44,21 @@ async def app_client(sqlite_engine):
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
     async with factory() as s:
+        s.add(
+            ExchangeAccount(
+                id=_ACCOUNT_ID,
+                venue="bitfinex",
+                label="Primary",
+                lifecycle_status="active",
+            )
+        )
+        await s.flush()
+        await grant_membership(
+            s,
+            exchange_account_id=_ACCOUNT_ID,
+            user_id="user_abc",
+            role="owner",
+        )
         s.add(_row())
         s.add(_row(cell="fUST_a30"))
         # different realm — must never leak into the default-realm response
@@ -64,7 +86,7 @@ async def app_client(sqlite_engine):
 
 
 def test_weekly_returns_rows_camel_case(app_client):
-    resp = app_client.get("/api/v1/attribution/weekly")
+    resp = app_client.get(_WEEKLY_PATH)
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert len(data) == 2
@@ -83,7 +105,7 @@ def test_weekly_returns_rows_camel_case(app_client):
 
 
 def test_weekly_cell_filter(app_client):
-    resp = app_client.get("/api/v1/attribution/weekly", params={"cell": "fUST_a30"})
+    resp = app_client.get(_WEEKLY_PATH, params={"cell": "fUST_a30"})
     assert [d["cell"] for d in resp.json()["data"]] == ["fUST_a30"]
 
 
@@ -91,7 +113,7 @@ def test_weekly_excludes_other_realm(app_client):
     """Rows from a different deployment_environment/account_id must never
     leak into the default-realm response — otherwise the FE weekly chart
     (Task 7) would plot duplicate points per cell/week."""
-    resp = app_client.get("/api/v1/attribution/weekly")
+    resp = app_client.get(_WEEKLY_PATH)
     data = resp.json()["data"]
     assert len(data) == 2
     assert all(d["cell"] in ("fUST_a30", "fUST_p2") for d in data)
@@ -117,11 +139,11 @@ def test_weekly_rejects_non_operator_after_skipping_router_rate_limit(app_client
     app_client.app.dependency_overrides[require_user] = _permissive_user
     app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
 
-    assert app_client.get("/api/v1/attribution/weekly").status_code == 403
+    assert app_client.get(_WEEKLY_PATH).status_code == 403
 
 
 def test_weekly_requires_auth(sqlite_engine):
     app = FastAPI()
     app.include_router(build_attribution_router())
     client = TestClient(app)
-    assert client.get("/api/v1/attribution/weekly").status_code in (401, 403)
+    assert client.get(_WEEKLY_PATH).status_code in (401, 403)

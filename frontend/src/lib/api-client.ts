@@ -24,6 +24,21 @@ function getBaseUrl(): string {
   return "/api/proxy";
 }
 
+const UUID_PATH_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Build a private API path from the only accepted account identity. */
+export function accountScopedPath(
+  exchangeAccountId: string,
+  resourcePath: `/${string}`,
+): string {
+  const canonical = exchangeAccountId.trim().toLowerCase();
+  if (!UUID_PATH_RE.test(canonical)) {
+    throw new Error("exchangeAccountId must be a canonical UUID");
+  }
+  return `/exchange-accounts/${canonical}${resourcePath}`;
+}
+
 // ── Request Options ──
 
 interface RequestOptions {
@@ -186,4 +201,4 @@ async function del<T = void>(
   return response.data;
 }
 
-export const apiClient = { get, getList, post, put, del };
+export const apiClient = { get, getList, post, put, del, accountScopedPath };

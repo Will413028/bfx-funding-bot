@@ -46,7 +46,11 @@ describe("apiClient.get", () => {
 
     const { apiClient, ApiError } = await loadApiClient();
 
-    await expect(apiClient.get("/positions")).rejects.toMatchObject({
+    await expect(
+      apiClient.get(
+        "/exchange-accounts/550e8400-e29b-41d4-a716-446655440000/positions",
+      ),
+    ).rejects.toMatchObject({
       status: 403,
       code: "mfa_required",
     } satisfies Partial<InstanceType<typeof ApiError>>);
@@ -96,6 +100,22 @@ describe("apiClient.get", () => {
 
     const { apiClient, ApiError } = await loadApiClient();
     await expect(apiClient.get("/broken")).rejects.toThrow(ApiError);
+  });
+});
+
+describe("accountScopedPath", () => {
+  it("canonicalizes a UUID and appends only a relative resource path", async () => {
+    const { accountScopedPath } = await loadApiClient();
+    expect(
+      accountScopedPath("550E8400-E29B-41D4-A716-446655440000", "/positions"),
+    ).toBe("/exchange-accounts/550e8400-e29b-41d4-a716-446655440000/positions");
+  });
+
+  it("rejects a legacy realm or implicit default scope", async () => {
+    const { accountScopedPath } = await loadApiClient();
+    expect(() => accountScopedPath("default", "/positions")).toThrow(
+      "canonical UUID",
+    );
   });
 });
 

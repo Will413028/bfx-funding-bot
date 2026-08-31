@@ -6,10 +6,11 @@ import { ApiKeyCard } from "../api-key-card";
 function makeKey(overrides: Partial<ApiKey> = {}): ApiKey {
   return {
     id: "1",
+    exchangeAccountId: "550e8400-e29b-41d4-a716-446655440000",
     label: "main",
     apiKey: "PUBKEY12345",
     apiSecret: "****",
-    exchangeStatus: "verified",
+    status: "verified",
     createdAt: "2026-01-01",
     ...overrides,
   };
@@ -24,7 +25,7 @@ describe("ApiKeyCard", () => {
     render(
       <ApiKeyCard
         apiKey={makeKey({
-          exchangeStatus: "failed",
+          status: "failed",
           lastVerifyError: "withdraw permission is enabled",
         })}
         onVerify={noop}
@@ -41,7 +42,7 @@ describe("ApiKeyCard", () => {
   it("does not render a reason when failed but no lastVerifyError", () => {
     render(
       <ApiKeyCard
-        apiKey={makeKey({ exchangeStatus: "failed", lastVerifyError: null })}
+        apiKey={makeKey({ status: "failed", lastVerifyError: null })}
         onVerify={noop}
         onDelete={noop}
         isVerifying={false}
@@ -56,7 +57,7 @@ describe("ApiKeyCard", () => {
     render(
       <ApiKeyCard
         apiKey={makeKey({
-          exchangeStatus: "verified",
+          status: "verified",
           lastVerifyError: "old failure",
         })}
         onVerify={noop}
