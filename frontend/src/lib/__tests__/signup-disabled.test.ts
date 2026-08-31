@@ -1,4 +1,12 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APIError } from "better-auth";
@@ -11,12 +19,37 @@ const frontendRoot = resolve(
   "../../..",
 );
 
+const excludedSourceDirectories = new Set([
+  ".next",
+  "__generated__",
+  "__tests__",
+  "generated",
+  "node_modules",
+]);
+
 function sourceFiles(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const path = join(root, entry.name);
-    if (entry.isDirectory()) return sourceFiles(path);
-    return /\.(ts|tsx)$/.test(entry.name) ? [path] : [];
+    if (entry.isDirectory()) {
+      return excludedSourceDirectories.has(entry.name) ? [] : sourceFiles(path);
+    }
+    return /\.(ts|tsx)$/.test(entry.name) &&
+      !/\.(test|spec)\.(ts|tsx)$/.test(entry.name)
+      ? [path]
+      : [];
   });
+}
+
+const forbiddenSignupSurfaceReferences = [
+  "/register",
+  "register-form",
+  "registerAction",
+];
+
+function forbiddenSignupReferences(source: string): string[] {
+  return forbiddenSignupSurfaceReferences.filter((reference) =>
+    source.includes(reference),
+  );
 }
 
 describe("self-service signup containment", () => {
@@ -50,7 +83,36 @@ describe("self-service signup containment", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("has no register route, component, link, or middleware surface", () => {
+  it("detects every forbidden signup reference in a temporary live-source fixture", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "signup-surface-"));
+    const fixturePath = join(fixtureRoot, "live-surface.tsx");
+    writeFileSync(
+      fixturePath,
+      [
+        'import RegisterForm from "@/features/auth/components/register-form";',
+        'import { registerAction } from "@/app/actions";',
+        'const registerPath = "/register";',
+        "void RegisterForm;",
+        "void registerAction;",
+        "void registerPath;",
+      ].join("\n"),
+    );
+
+    try {
+      const [fixtureFile] = sourceFiles(fixtureRoot);
+      expect(fixtureFile).toBeDefined();
+      if (!fixtureFile) return;
+
+      const fixtureSource = readFileSync(fixtureFile, "utf8");
+      expect(forbiddenSignupReferences(fixtureSource)).toEqual(
+        forbiddenSignupSurfaceReferences,
+      );
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("has no register route, component, link, import, or action surface", () => {
     const registerPage = join(
       frontendRoot,
       "src/app/[locale]/(auth)/register/page.tsx",
@@ -63,16 +125,12 @@ describe("self-service signup containment", () => {
     expect(existsSync(registerPage)).toBe(false);
     expect(existsSync(registerForm)).toBe(false);
 
-    const surfaces = [
-      ...sourceFiles(join(frontendRoot, "src/app/[locale]")),
-      ...sourceFiles(join(frontendRoot, "src/features/auth")),
-      join(frontendRoot, "middleware.ts"),
-    ];
+    const surfaces = sourceFiles(join(frontendRoot, "src"));
+    expect(surfaces).not.toContain(fileURLToPath(import.meta.url));
 
     for (const path of surfaces) {
       const source = readFileSync(path, "utf8");
-      expect(source, path).not.toContain("/register");
-      expect(source, path).not.toContain("register-form");
+      expect(forbiddenSignupReferences(source), path).toEqual([]);
     }
   });
 });
