@@ -5,10 +5,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.tables  # side-effect: registers ORM models for Base.metadata.create_all
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401  # side-effect: registers ORM models
-from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.api.config import build_config_router
 from bfx_funding_bot.modules.api.deps import get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 
 _VALID = {
     "currency": "USD",
@@ -92,8 +93,15 @@ def test_non_operator_is_rejected_by_every_config_route(app_client):
     async def _reject_non_operator():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
 
+    async def _permissive_user():
+        return Principal(user_id="user_abc", email="will@example.com", role="operator")
+
+    async def _skip_rate_limit():
+        return None
+
     app_client.app.dependency_overrides[require_operator] = _reject_non_operator
-    headers = {"Authorization": "Bearer ignored"}
+    app_client.app.dependency_overrides[require_user] = _permissive_user
+    app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
     requests = (
         ("get", "/api/v1/configs", {}),
         ("put", "/api/v1/configs", {"json": _VALID}),
@@ -101,7 +109,7 @@ def test_non_operator_is_rejected_by_every_config_route(app_client):
     )
 
     for method, path, kwargs in requests:
-        response = getattr(app_client, method)(path, headers=headers, **kwargs)
+        response = getattr(app_client, method)(path, **kwargs)
         assert response.status_code == 403, path
 
 

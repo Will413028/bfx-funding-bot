@@ -10,12 +10,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import bfx_funding_bot.modules.accounts.tables  # registers APIKey in Base.metadata
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
 from bfx_funding_bot.core import auth
-from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.core.auth import Principal, require_operator, require_user
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.deps import get_bitfinex_auth_rest, get_session
+from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 
 _KEK_B64 = base64.b64encode(bytes(range(32))).decode()
 
@@ -250,16 +251,24 @@ def test_non_operator_is_rejected_by_every_api_key_route(app_client):
     async def _reject_non_operator():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="operator_required")
 
+    async def _permissive_user():
+        return Principal(user_id="user_abc", email="will@example.com", role="operator")
+
+    async def _skip_rate_limit():
+        return None
+
     app_client.app.dependency_overrides[require_operator] = _reject_non_operator
-    headers = {"Authorization": "Bearer ignored"}
+    app_client.app.dependency_overrides[require_user] = _permissive_user
+    app_client.app.dependency_overrides[shared_rate_limit_dependency()] = _skip_rate_limit
     requests = (
         ("get", "/api/v1/api-keys", {}),
         ("post", "/api/v1/api-keys", {"json": {"label": "a", "apiKey": "P", "apiSecret": "S"}}),
+        ("post", f"/api/v1/api-keys/{uuid.uuid4()}/verify", {}),
         ("delete", f"/api/v1/api-keys/{uuid.uuid4()}", {}),
     )
 
     for method, path, kwargs in requests:
-        response = getattr(app_client, method)(path, headers=headers, **kwargs)
+        response = getattr(app_client, method)(path, **kwargs)
         assert response.status_code == 403, path
 
 
