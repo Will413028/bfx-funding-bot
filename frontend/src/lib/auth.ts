@@ -1,6 +1,7 @@
-import { passkey } from "@better-auth/passkey";
+import { type PasskeyOptions, passkey } from "@better-auth/passkey";
 import { APIError, betterAuth } from "better-auth";
 import { createAuthMiddleware } from "better-auth/api";
+import { createCookieGetter } from "better-auth/cookies";
 import { nextCookies } from "better-auth/next-js";
 import { admin, jwt, twoFactor } from "better-auth/plugins";
 import Redis from "ioredis";
@@ -33,6 +34,81 @@ function getRedis(): Redis {
   globalForAuth._bfxAuthRedis ??= new Redis(process.env.REDIS_URL!);
   return globalForAuth._bfxAuthRedis;
 }
+
+const MFA_VERIFIED_PREFIX = "bfx:mfa-verified:";
+const TWO_FACTOR_VERIFICATION_PATHS = new Set([
+  "/two-factor/verify-totp",
+  "/two-factor/verify-otp",
+  "/two-factor/verify-backup-code",
+]);
+
+interface MfaMarkerStorage {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, ttlSeconds: number): Promise<void>;
+}
+
+const redisMfaMarkerStorage: MfaMarkerStorage = {
+  get: async (key) => await getRedis().get(key),
+  set: async (key, value, ttlSeconds) => {
+    await getRedis().set(key, value, "EX", ttlSeconds);
+  },
+};
+
+type PasskeyAfterVerification = NonNullable<
+  NonNullable<PasskeyOptions["authentication"]>["afterVerification"]
+>;
+
+function createMfaVerificationHandlers(
+  storage: MfaMarkerStorage = redisMfaMarkerStorage,
+) {
+  const userVerifiedPasskeyContexts = new WeakSet<object>();
+
+  const passkeyAfterVerification: PasskeyAfterVerification = async ({
+    ctx,
+    verification,
+  }) => {
+    if (verification.authenticationInfo.userVerified === true) {
+      userVerifiedPasskeyContexts.add(ctx.context);
+    }
+  };
+
+  const authAfter = createAuthMiddleware(async (ctx) => {
+    const isTwoFactorVerification = TWO_FACTOR_VERIFICATION_PATHS.has(ctx.path);
+    const isUserVerifiedPasskey =
+      ctx.path === "/passkey/verify-authentication" &&
+      userVerifiedPasskeyContexts.delete(ctx.context);
+    if (!isTwoFactorVerification && !isUserVerifiedPasskey) return;
+
+    const session = ctx.context.newSession?.session;
+    if (!session) return;
+
+    const ttlSeconds = Math.floor(
+      (session.expiresAt.getTime() - Date.now()) / 1000,
+    );
+    if (ttlSeconds <= 0) return;
+
+    await storage.set(
+      `${MFA_VERIFIED_PREFIX}${session.token}`,
+      "1",
+      ttlSeconds,
+    );
+  });
+
+  return { authAfter, passkeyAfterVerification };
+}
+
+const mfaVerification = createMfaVerificationHandlers();
+
+export async function isMfaVerifiedSession(
+  sessionToken: string,
+  storage: MfaMarkerStorage = redisMfaMarkerStorage,
+): Promise<boolean> {
+  return (await storage.get(`${MFA_VERIFIED_PREFIX}${sessionToken}`)) === "1";
+}
+
+export type OperatorMfaSessionAccess =
+  | { allowed: true }
+  | { allowed: false; error: "mfa_required" | "operator_required" };
 
 export const rejectSelfServiceSignup = createAuthMiddleware(async (ctx) => {
   if (ctx.path === "/sign-up/email") {
@@ -91,6 +167,7 @@ export const auth = betterAuth({
 
   hooks: {
     before: rejectSelfServiceSignup,
+    after: mfaVerification.authAfter,
   },
 
   plugins: [
@@ -102,6 +179,9 @@ export const auth = betterAuth({
       rpName: "BFX Funding Bot",
       // biome-ignore lint/style/noNonNullAssertion: required server env, validated in lib/env.ts.
       origin: process.env.BETTER_AUTH_URL!,
+      authentication: {
+        afterVerification: mfaVerification.passkeyAfterVerification,
+      },
     }),
     jwt({
       jwt: {
@@ -125,3 +205,53 @@ export const auth = betterAuth({
     nextCookies(),
   ],
 });
+
+function hasCookie(requestHeaders: Headers, name: string): boolean {
+  return (
+    requestHeaders
+      .get("cookie")
+      ?.split(";")
+      .some((cookie) => cookie.trim().startsWith(`${name}=`)) ?? false
+  );
+}
+
+/**
+ * Authorizes an execution-capable request from server-owned session state.
+ * A user enrollment flag is deliberately not considered proof of the current
+ * session's MFA challenge; only the marker keyed by its exact session token is.
+ */
+export async function getOperatorMfaSessionAccess(
+  requestHeaders: Headers,
+  operatorUserId: string,
+): Promise<OperatorMfaSessionAccess> {
+  let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
+  try {
+    session = await auth.api.getSession({ headers: requestHeaders });
+  } catch {
+    session = null;
+  }
+
+  if (!session) {
+    const pendingMfaCookie = createCookieGetter(auth.options)("two_factor");
+    return {
+      allowed: false,
+      error: hasCookie(requestHeaders, pendingMfaCookie.name)
+        ? "mfa_required"
+        : "operator_required",
+    };
+  }
+
+  if (session.user.id !== operatorUserId) {
+    return { allowed: false, error: "operator_required" };
+  }
+
+  try {
+    if (await isMfaVerifiedSession(session.session.token)) {
+      return { allowed: true };
+    }
+  } catch {
+    // Redis marker lookup is part of the authorization decision: unavailable
+    // storage must never turn into an execution-capable request.
+  }
+  return { allowed: false, error: "mfa_required" };
+}

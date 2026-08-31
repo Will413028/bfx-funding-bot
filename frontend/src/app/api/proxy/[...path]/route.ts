@@ -1,6 +1,6 @@
 import { headers } from "next/headers";
 import { type NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { auth, getOperatorMfaSessionAccess } from "@/lib/auth";
 
 // eslint-disable-next-line -- server-only, validated by env.ts at startup
 const API_URL = process.env.API_URL as string;
@@ -29,24 +29,12 @@ async function proxyRequest(
   }
 
   const requestHeaders = await headers();
-  let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
-  try {
-    session = await auth.api.getSession({ headers: requestHeaders });
-  } catch {
-    session = null;
-  }
-
-  if (session?.user.id !== operatorUserId) {
-    return NextResponse.json({ error: "operator_required" }, { status: 403 });
-  }
-
-  // Better Auth 1.6.14 does not expose a `twoFactorVerified` session field.
-  // Its two-factor plugin deletes the sign-in session for an enrolled user and
-  // creates the usable session only after server-side verification succeeds.
-  // A returned session plus this server-owned user flag is therefore the typed
-  // post-MFA boundary; client-provided state is never consulted.
-  if (session.user.twoFactorEnabled !== true) {
-    return NextResponse.json({ error: "mfa_required" }, { status: 403 });
+  const access = await getOperatorMfaSessionAccess(
+    requestHeaders,
+    operatorUserId,
+  );
+  if (!access.allowed) {
+    return NextResponse.json({ error: access.error }, { status: 403 });
   }
 
   // Mint a short-lived EdDSA JWT for the current session (browser never holds it).

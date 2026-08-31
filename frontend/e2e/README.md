@@ -2,7 +2,7 @@
 
 ```bash
 pnpm test:e2e          # runs everything Playwright can run with the FE alone
-E2E_FULL_STACK=1 pnpm test:e2e   # also runs the full happy-path test
+E2E_FULL_STACK=1 pnpm test:e2e   # also checks direct signup containment
 ```
 
 ## Two tiers of tests
@@ -11,15 +11,15 @@ E2E_FULL_STACK=1 pnpm test:e2e   # also runs the full happy-path test
 |------|-------|--------|
 | `smoke.spec.ts` | FE dev server only | no |
 | `auth.spec.ts` → protected-route redirect | FE dev server only | no |
-| `auth.spec.ts` → sign-up happy path | **full stack** (see below) | yes — `E2E_FULL_STACK` |
+| `auth.spec.ts` → direct email signup denial | **full stack** (see below) | yes — `E2E_FULL_STACK` |
 
 The redirect test exercises the `getSessionCookie` middleware guard and runs
-without any backend. The happy-path test signs a user up, lands on
-`/en/overview`, and asserts an authenticated `/api/proxy/...` GET returns 200 —
-so it needs the entire auth chain wired up. It is skipped unless
-`E2E_FULL_STACK` is set.
+without any backend. The full-stack test sends a direct request to
+`/api/auth/sign-up/email` and asserts the server hook rejects it with
+`403 signup_disabled`; it needs the auth database and Redis dependencies wired
+up. It is skipped unless `E2E_FULL_STACK` is set.
 
-## Running the full happy-path test
+## Running the full signup-containment test
 
 `E2E_FULL_STACK=1 pnpm test:e2e`
 
@@ -74,5 +74,5 @@ API_URL=http://localhost:8000                 # the standalone web-API
 Then start the Next dev server (`pnpm dev`) and run
 `E2E_FULL_STACK=1 pnpm test:e2e`.
 
-> The protected-route redirect test runs without the backend; only the
-> sign-up happy-path test is gated behind `E2E_FULL_STACK`.
+> The protected-route redirect test runs without the backend; only the direct
+> signup-containment test is gated behind `E2E_FULL_STACK`.

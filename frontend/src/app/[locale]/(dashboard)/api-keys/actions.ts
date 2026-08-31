@@ -1,7 +1,7 @@
 "use server";
 
 import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
+import { auth, getOperatorMfaSessionAccess } from "@/lib/auth";
 import type { ApiKey } from "@/types";
 
 const API_URL = process.env.API_URL as string;
@@ -16,12 +16,23 @@ export async function createApiKeyAction(input: {
   apiKey: string;
   apiSecret: string;
 }): Promise<ApiKey> {
-  // Mint the bearer token BEFORE issuing the secret-bearing request. If the
-  // token is unavailable (getToken throws or returns none) we MUST fail fast
-  // and never transmit the plaintext apiSecret on an unauthenticated request.
+  // Validate the server-owned per-session MFA marker before minting a JWT or
+  // sending the plaintext secret directly to the backend.
+  const requestHeaders = await headers();
+  const operatorUserId = process.env.BFX_OPERATOR_USER_ID?.trim();
+  if (!operatorUserId) throw new Error("authTokenUnavailable");
+
+  const access = await getOperatorMfaSessionAccess(
+    requestHeaders,
+    operatorUserId,
+  );
+  if (!access.allowed) throw new Error("authTokenUnavailable");
+
+  // Mint the bearer token only after MFA authorization succeeds. If token
+  // minting fails, never transmit the plaintext apiSecret unauthenticated.
   let token: string | undefined;
   try {
-    const authRes = await auth.api.getToken({ headers: await headers() });
+    const authRes = await auth.api.getToken({ headers: requestHeaders });
     token = authRes?.token;
   } catch {
     token = undefined;

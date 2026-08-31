@@ -88,11 +88,10 @@ describe("execution proxy MFA boundary", () => {
   });
 
   it("rejects an unverified operator before minting or forwarding a JWT", async () => {
-    const getSession = vi.fn().mockResolvedValue({
-      session: { id: "session-before-enrollment" },
-      user: { id: "operator-1", twoFactorEnabled: false },
-    });
     const getToken = vi.fn();
+    const getOperatorMfaSessionAccess = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, error: "mfa_required" });
     const backendFetch = vi.fn();
     vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
     vi.stubGlobal("fetch", backendFetch);
@@ -100,7 +99,8 @@ describe("execution proxy MFA boundary", () => {
       headers: vi.fn(async () => new Headers()),
     }));
     vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getSession, getToken } },
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
     }));
 
     const { GET } = await import("../../app/api/proxy/[...path]/route");
@@ -111,22 +111,28 @@ describe("execution proxy MFA boundary", () => {
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: "mfa_required" });
-    expect(getSession).toHaveBeenCalledOnce();
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
     expect(getToken).not.toHaveBeenCalled();
     expect(backendFetch).not.toHaveBeenCalled();
   });
 
   it("fails closed while Better Auth withholds the pre-MFA session", async () => {
-    const getSession = vi.fn().mockResolvedValue(null);
     const getToken = vi.fn();
+    const getOperatorMfaSessionAccess = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, error: "mfa_required" });
     const backendFetch = vi.fn();
     vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
     vi.stubGlobal("fetch", backendFetch);
     vi.doMock("next/headers", () => ({
-      headers: vi.fn(async () => new Headers()),
+      headers: vi.fn(
+        async () =>
+          new Headers({ cookie: "better-auth.two_factor=signed-pending-mfa" }),
+      ),
     }));
     vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getSession, getToken } },
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
     }));
 
     const { GET } = await import("../../app/api/proxy/[...path]/route");
@@ -137,18 +143,18 @@ describe("execution proxy MFA boundary", () => {
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({
-      error: "operator_required",
+      error: "mfa_required",
     });
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
     expect(getToken).not.toHaveBeenCalled();
     expect(backendFetch).not.toHaveBeenCalled();
   });
 
   it("allows a post-MFA operator session while keeping the JWT server-side", async () => {
-    const getSession = vi.fn().mockResolvedValue({
-      session: { id: "session-created-after-mfa" },
-      user: { id: "operator-1", twoFactorEnabled: true },
-    });
     const getToken = vi.fn().mockResolvedValue({ token: "backend-jwt" });
+    const getOperatorMfaSessionAccess = vi.fn().mockResolvedValue({
+      allowed: true,
+    });
     const backendFetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ data: { status: "ok" } }), {
         status: 200,
@@ -161,7 +167,8 @@ describe("execution proxy MFA boundary", () => {
       headers: vi.fn(async () => new Headers()),
     }));
     vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getSession, getToken } },
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
     }));
 
     const { GET } = await import("../../app/api/proxy/[...path]/route");
@@ -172,6 +179,7 @@ describe("execution proxy MFA boundary", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ data: { status: "ok" } });
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
     expect(getToken).toHaveBeenCalledOnce();
     expect(backendFetch).toHaveBeenCalledOnce();
     const forwarded = backendFetch.mock.calls[0]?.[1] as RequestInit;
@@ -182,8 +190,8 @@ describe("execution proxy MFA boundary", () => {
   });
 
   it("fails closed before reading a session when no operator is configured", async () => {
-    const getSession = vi.fn();
     const getToken = vi.fn();
+    const getOperatorMfaSessionAccess = vi.fn();
     const backendFetch = vi.fn();
     vi.stubEnv("BFX_OPERATOR_USER_ID", "");
     vi.stubGlobal("fetch", backendFetch);
@@ -191,7 +199,8 @@ describe("execution proxy MFA boundary", () => {
       headers: vi.fn(async () => new Headers()),
     }));
     vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getSession, getToken } },
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
     }));
 
     const { GET } = await import("../../app/api/proxy/[...path]/route");
@@ -204,17 +213,16 @@ describe("execution proxy MFA boundary", () => {
     await expect(response.json()).resolves.toEqual({
       error: "auth_not_configured",
     });
-    expect(getSession).not.toHaveBeenCalled();
+    expect(getOperatorMfaSessionAccess).not.toHaveBeenCalled();
     expect(getToken).not.toHaveBeenCalled();
     expect(backendFetch).not.toHaveBeenCalled();
   });
 
   it("rejects a verified session that does not belong to the operator", async () => {
-    const getSession = vi.fn().mockResolvedValue({
-      session: { id: "other-post-mfa-session" },
-      user: { id: "other-user", twoFactorEnabled: true },
-    });
     const getToken = vi.fn().mockResolvedValue({ token: "backend-jwt" });
+    const getOperatorMfaSessionAccess = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, error: "operator_required" });
     const backendFetch = vi
       .fn()
       .mockResolvedValue(new Response("{}", { status: 200 }));
@@ -224,7 +232,8 @@ describe("execution proxy MFA boundary", () => {
       headers: vi.fn(async () => new Headers()),
     }));
     vi.doMock("@/lib/auth", () => ({
-      auth: { api: { getSession, getToken } },
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
     }));
 
     const { GET } = await import("../../app/api/proxy/[...path]/route");
@@ -237,6 +246,36 @@ describe("execution proxy MFA boundary", () => {
     await expect(response.json()).resolves.toEqual({
       error: "operator_required",
     });
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
+    expect(getToken).not.toHaveBeenCalled();
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an MFA marker bound to a different session token", async () => {
+    const getToken = vi.fn();
+    const getOperatorMfaSessionAccess = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, error: "mfa_required" });
+    const backendFetch = vi.fn();
+    vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
+    vi.stubGlobal("fetch", backendFetch);
+    vi.doMock("next/headers", () => ({
+      headers: vi.fn(async () => new Headers()),
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
+    }));
+
+    const { GET } = await import("../../app/api/proxy/[...path]/route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/proxy/config"),
+      { params: Promise.resolve({ path: ["config"] }) },
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "mfa_required" });
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
     expect(getToken).not.toHaveBeenCalled();
     expect(backendFetch).not.toHaveBeenCalled();
   });
