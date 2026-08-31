@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 
+MAX_READINESS_TIMEOUT_SECONDS = 10.0
+
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     factory = getattr(request.app.state, "session_factory", None)
@@ -33,12 +35,14 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 def _readiness_timeout_seconds() -> float:
-    """Return a finite positive readiness timeout from optional configuration."""
+    """Return a finite, positive, bounded readiness timeout from configuration."""
     try:
         timeout_seconds = float(os.environ.get("BFX_READINESS_TIMEOUT_SECONDS", "2.0"))
     except ValueError:
         return 2.0
-    return timeout_seconds if math.isfinite(timeout_seconds) and timeout_seconds > 0 else 2.0
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        return 2.0
+    return min(timeout_seconds, MAX_READINESS_TIMEOUT_SECONDS)
 
 
 async def database_is_ready(request: Request) -> bool:

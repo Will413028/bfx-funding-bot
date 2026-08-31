@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
 from bfx_funding_bot.main import app
+from bfx_funding_bot.modules.api.deps import _readiness_timeout_seconds
 
 
 class SuccessfulSession:
@@ -40,6 +41,14 @@ class RaisingSession(SuccessfulSession):
 
     async def execute(self, statement: object) -> Never:
         self.statement = str(statement)
+        raise self._error
+
+
+class RaisingFactory:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def __call__(self) -> Never:
         raise self._error
 
 
@@ -92,6 +101,18 @@ def test_ready_hides_expected_database_errors(error: Exception) -> None:
     assert client.get("/health").status_code == 200
 
 
+@pytest.mark.parametrize("error", [SQLAlchemyError(), TimeoutError(), OSError()])
+def test_ready_hides_expected_session_factory_errors(error: Exception) -> None:
+    app.state.session_factory = RaisingFactory(error)
+    client = TestClient(app)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "checks": {"database": "failed"}}
+    assert client.get("/health").status_code == 200
+
+
 @pytest.mark.parametrize("timeout", ["not-a-number", "nan", "inf", "0", "-1"])
 def test_ready_uses_default_timeout_for_invalid_timeout_configuration(
     monkeypatch: pytest.MonkeyPatch, timeout: str
@@ -105,3 +126,11 @@ def test_ready_uses_default_timeout_for_invalid_timeout_configuration(
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "checks": {"database": "ok"}}
+
+
+def test_readiness_timeout_is_capped_at_ten_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BFX_READINESS_TIMEOUT_SECONDS", "1000000")
+
+    assert _readiness_timeout_seconds() == 10.0
