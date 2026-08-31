@@ -32,6 +32,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 from bfx_funding_bot.modules.accounts.provisioning import ensure_user_profile
 from bfx_funding_bot.modules.accounts.tables import (
     APIKey,
+    ExchangeAccount,
     ExchangeAccountCredential,
     ExchangeAccountMembership,
 )
@@ -121,6 +122,8 @@ async def load_account_credentials(
                 ExchangeAccountCredential.exchange_account_id == exchange_account_id,
                 ExchangeAccountCredential.venue == "bitfinex",
                 ExchangeAccountCredential.lifecycle_status == "active",
+                ExchangeAccountCredential.verified_at.is_not(None),
+                ExchangeAccountCredential.last_verify_error.is_(None),
             )
             .limit(2)
         )
@@ -227,6 +230,12 @@ async def verify_account_credential(
     )
     if row is None:
         return None
+    # Revoked and retired rows are terminal audit records.  Verification must
+    # never resurrect one into the sole active slot; rotation creates a new
+    # pending row instead.  Returning ``None`` lets the account-scoped route
+    # use its normal non-enumerating 404 response.
+    if row.lifecycle_status in {"revoked", "retired"}:
+        return None
     try:
         secret = decrypt_secret_with_aad(
             Envelope(
@@ -254,10 +263,13 @@ async def verify_account_credential(
         if e.status_code == 0 or e.status_code == 429 or e.status_code >= 500:
             raise
         row.lifecycle_status = "revoked"
+        row.verified_at = None
         row.last_verify_error = "invalid_credentials"
         await session.flush()
         return row
     if not perms.can("funding", write=True):
+        row.lifecycle_status = "pending"
+        row.verified_at = None
         row.last_verify_error = "funding_write_required"
     else:
         offending = [
@@ -265,14 +277,38 @@ async def verify_account_credential(
             if write and scope not in _ALLOWED_WRITE_SCOPES
         ]
         if offending:
+            row.lifecycle_status = "pending"
+            row.verified_at = None
             row.last_verify_error = (
                 "withdraw_must_be_disabled"
                 if "withdraw" in offending
                 else f"unexpected_write_scope:{offending[0]}"
             )
         else:
-            row.last_verify_error = None
-            row.verified_at = datetime.now(UTC)
+            # Serialize promotion for one account.  The partial unique index is
+            # the final race-proof guard, while this lock lets us return a
+            # deterministic domain result instead of a late IntegrityError.
+            await session.scalar(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.id == exchange_account_id)
+                .with_for_update()
+            )
+            competing = await session.scalar(
+                select(ExchangeAccountCredential).where(
+                    ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+                    ExchangeAccountCredential.venue == row.venue,
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    ExchangeAccountCredential.id != row.id,
+                )
+            )
+            if competing is not None:
+                row.lifecycle_status = "pending"
+                row.verified_at = None
+                row.last_verify_error = "active_credential_exists"
+            else:
+                row.lifecycle_status = "active"
+                row.last_verify_error = None
+                row.verified_at = datetime.now(UTC)
     await session.flush()
     return row
 

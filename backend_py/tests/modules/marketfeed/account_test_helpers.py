@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -51,6 +52,7 @@ async def seed_exchange_account(engine: AsyncEngine) -> None:
                 dek_nonce=envelope.dek_nonce,
                 key_version=envelope.key_version,
                 lifecycle_status="active",
+                verified_at=datetime.now(UTC),
             )
         )
 

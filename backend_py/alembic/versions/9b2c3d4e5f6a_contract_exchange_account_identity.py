@@ -45,6 +45,59 @@ _MONEY_TABLES: tuple[str, ...] = (
 _ACCOUNT_SCOPED_TABLES: tuple[str, ...] = (*_MONEY_TABLES, "api_keys", "user_configs")
 _LEGACY_ZERO_TABLES: tuple[str, ...] = ("users", "executions", "billing_records")
 
+# Every key whose legacy text realm is replaced by the UUID owner must be
+# checked before DDL.  The optional predicate mirrors the partial unique
+# indexes below; NULL values are intentionally excluded because PostgreSQL's
+# unique indexes permit more than one NULL.
+_IDENTITY_KEY_GROUPS: dict[str, tuple[str, tuple[str, ...], str | None]] = {
+    "event_log.dedup": (
+        "event_log",
+        (
+            "exchange_account_id",
+            "deployment_environment",
+            "event_type",
+            "venue_offer_id",
+            "venue_seq",
+        ),
+        "venue_offer_id IS NOT NULL AND venue_seq IS NOT NULL",
+    ),
+    "offer_claims.primary_key": (
+        "offer_claims",
+        ("exchange_account_id", "deployment_environment", "cid"),
+        None,
+    ),
+    "offer_claims.venue_offer_id": (
+        "offer_claims",
+        ("exchange_account_id", "deployment_environment", "venue_offer_id"),
+        "venue_offer_id IS NOT NULL",
+    ),
+    "offer_claims.execution_decision_id": (
+        "offer_claims",
+        ("exchange_account_id", "deployment_environment", "execution_decision_id"),
+        "execution_decision_id IS NOT NULL",
+    ),
+    "position_state.primary_key": (
+        "position_state",
+        ("exchange_account_id", "deployment_environment", "symbol"),
+        None,
+    ),
+    "nav_peak.primary_key": (
+        "nav_peak",
+        ("exchange_account_id", "deployment_environment", "symbol"),
+        None,
+    ),
+    "attribution_weekly.primary_key": (
+        "attribution_weekly",
+        ("deployment_environment", "exchange_account_id", "cell", "week_start_ms"),
+        None,
+    ),
+    "config_regime.primary_key": (
+        "config_regime",
+        ("deployment_environment", "exchange_account_id", "recorded_at_ms"),
+        None,
+    ),
+}
+
 
 def _count(bind: sa.Connection, statement: str) -> int:
     return int(bind.execute(sa.text(statement)).scalar_one() or 0)
@@ -69,6 +122,8 @@ def _format_preflight_errors(
     unmapped_realms: Iterable[str],
     orphan_rows: dict[str, int],
     nonzero_legacy_tables: dict[str, int],
+    identity_collisions: dict[str, tuple[str, ...]] | None = None,
+    invalid_active_credentials: int = 0,
 ) -> str:
     """Render deterministic, operator-actionable contract blockers.
 
@@ -97,9 +152,50 @@ def _format_preflight_errors(
                 for name in sorted(nonzero_legacy_tables)
             )
         )
+    if identity_collisions:
+        sections.append(
+            "UUID key collisions: "
+            + "; ".join(
+                f"{name}=[{', '.join(identity_collisions[name])}]"
+                for name in sorted(identity_collisions)
+            )
+        )
+    if invalid_active_credentials:
+        sections.append(
+            "active credentials lack successful verification: "
+            f"count={invalid_active_credentials}"
+        )
     if not sections:
         return ""
     return "contract migration blocked: " + "; ".join(sections)
+
+
+def _identity_key_collisions(bind: sa.Connection) -> dict[str, tuple[str, ...]]:
+    """Return deterministic samples of rows that would collide after rekeying."""
+    collisions: dict[str, tuple[str, ...]] = {}
+    for name, (table_name, columns, predicate) in _IDENTITY_KEY_GROUPS.items():
+        column_sql = ", ".join(columns)
+        predicates = ["exchange_account_id IS NOT NULL"]
+        if predicate:
+            predicates.append(predicate)
+        where_sql = " WHERE " + " AND ".join(predicates)
+        rows = bind.execute(
+            sa.text(
+                f"SELECT {column_sql}, count(*) AS duplicate_count "
+                f"FROM {table_name}{where_sql} "
+                f"GROUP BY {column_sql} "
+                "HAVING count(*) > 1 "
+                f"ORDER BY {column_sql} LIMIT 20"
+            )
+        )
+        samples: list[str] = []
+        for row in rows:
+            values = [f"{column}={row[index]!s}" for index, column in enumerate(columns)]
+            values.append(f"count={row[len(columns)]}")
+            samples.append(",".join(values))
+        if samples:
+            collisions[name] = tuple(samples)
+    return collisions
 
 
 def _assert_contract_preconditions(bind: sa.Connection) -> None:
@@ -140,12 +236,21 @@ def _assert_contract_preconditions(bind: sa.Connection) -> None:
         for table_name in _LEGACY_ZERO_TABLES
         if (count := _count(bind, f"SELECT count(*) FROM {table_name}"))
     }
+    invalid_active_credentials = _count(
+        bind,
+        "SELECT count(*) FROM exchange_account_credentials "
+        "WHERE lifecycle_status = 'active' "
+        "AND (verified_at IS NULL OR last_verify_error IS NOT NULL)",
+    )
+    identity_collisions = _identity_key_collisions(bind)
 
     message = _format_preflight_errors(
         null_rows=null_rows,
         unmapped_realms=unmapped_realms,
         orphan_rows=orphan_rows,
         nonzero_legacy_tables=nonzero_legacy_tables,
+        identity_collisions=identity_collisions,
+        invalid_active_credentials=invalid_active_credentials,
     )
     if message:
         raise RuntimeError(message)
@@ -159,6 +264,36 @@ def _set_uuid_not_null() -> None:
             existing_type=postgresql.UUID(as_uuid=True),
             nullable=False,
         )
+
+
+def _harden_credential_lifecycle() -> None:
+    op.drop_constraint(
+        "ck_exchange_account_credentials_lifecycle_status",
+        "exchange_account_credentials",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_exchange_account_credentials_active_verified",
+        "exchange_account_credentials",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_exchange_account_credentials_lifecycle_status",
+        "exchange_account_credentials",
+        "lifecycle_status IN ('pending', 'active', 'revoked', 'retired')",
+    )
+    op.create_check_constraint(
+        "ck_exchange_account_credentials_active_verified",
+        "exchange_account_credentials",
+        "lifecycle_status <> 'active' OR "
+        "(verified_at IS NOT NULL AND last_verify_error IS NULL)",
+    )
+    op.alter_column(
+        "exchange_account_credentials",
+        "lifecycle_status",
+        existing_type=sa.Text(),
+        server_default=sa.text("'pending'"),
+    )
 
 
 def _add_restrictive_foreign_keys() -> None:
@@ -270,6 +405,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     _assert_contract_preconditions(bind)
     _set_uuid_not_null()
+    _harden_credential_lifecycle()
     _add_restrictive_foreign_keys()
     _replace_account_indexes_and_keys()
 

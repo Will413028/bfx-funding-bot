@@ -13,7 +13,9 @@ draft、API 與 daemon 使用同一個 account identity。本文件只定義人�
 - encrypted offsite backup 已完成，並在隔離資料庫 restore 成功；restore 後的
   row count、event head/hash 與 venue snapshot 都已保存 evidence。
 - `cutover_identity.py --dry-run`、`--apply`、`--verify` 全部成功，且沒有
-  `unmapped_rows`、duplicate active credential 或 NULL UUID。
+  `unmapped_rows`、duplicate active credential、invalid active credential、UUID
+  collision 或 NULL UUID；verify 必須使用同一份 immutable evidence 並完成
+  Bitfinex permission check。
 - `9b2c3d4e5f6a` contract migration 成功；其 preflight 會拒絕任何 NULL UUID、
   orphan FK、未映射 realm，或 `users`/`executions`/`billing_records` 非零資料。
 - replay、membership/auth boundary、fresh full-account venue reconcile 通過，
@@ -56,8 +58,12 @@ restore：
 ```bash
 git rev-parse HEAD > release-evidence/release-sha.txt
 cd backend_py
-uv run alembic check
+uv run alembic current
 ```
+
+此時 database 尚未套用 identity schema；不要在 additive revision 前把
+`alembic check` 當成通過條件，否則它會正確地報出待套用的 identity operations。
+`alembic check` 固定放在 contract migration 完成後的 Step 6。
 
 隔離資料庫上的 event evidence 至少包含：每個 account/environment 的 count、
 最高 `event_seq`、`cutover_identity.py` preflight 回傳的 `event_head`/`event_hash`。
@@ -89,7 +95,7 @@ gate，而 contract 必須等 application backfill verify 後才可執行：
 ```bash
 cd ~/bfx/backend_py
 uv run alembic upgrade 8a1b2c3d4e5f
-uv run alembic check
+uv run alembic current
 ```
 
 ### 5. Dry-run → apply → verify identity data cutover
@@ -111,6 +117,7 @@ uv run python scripts/cutover_identity.py --manifest "$MANIFEST" --apply --dry-r
 uv run python scripts/cutover_identity.py --manifest "$MANIFEST" --apply \
   | tee ../release-evidence/identity-apply.json
 uv run python scripts/cutover_identity.py --manifest "$MANIFEST" --verify \
+  --evidence ../release-evidence/identity-dry-run.json --verify-permissions \
   | tee ../release-evidence/identity-verify.json
 ```
 
@@ -133,6 +140,40 @@ uv run alembic check
 成功結果包括 UUID `NOT NULL`、`exchange_accounts` 的 `ON DELETE RESTRICT` FK、
 以 UUID 重建的 primary/unique indexes，以及只在 zero-row gate 後刪除三個 legacy
 scaffold tables。contract revision 是 forward-only。
+
+### 6a. 套用 webapi least-privilege grants
+
+contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
+能讀 projection、account/membership，並管理自己的 credential/config draft；不得
+寫入 event store、position、offer 或其他 execution tables。不要把這些 grant 放進
+Alembic，避免 role 不存在時讓 migration 失敗：
+
+```sql
+GRANT USAGE ON SCHEMA public TO bfx_webapi;
+GRANT SELECT ON TABLE
+  public.user_profiles,
+  public.exchange_accounts,
+  public.exchange_account_memberships,
+  public.position_state,
+  public.offer_claims,
+  public.event_log,
+  public.attribution_weekly,
+  public.funding_candles
+TO bfx_webapi;
+GRANT INSERT ON TABLE public.user_profiles TO bfx_webapi;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.exchange_account_credentials TO bfx_webapi;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bfx_webapi;
+
+-- Run as the role owner and retain the output as release evidence.
+SET ROLE bfx_webapi;
+SELECT has_table_privilege(current_user, 'public.position_state', 'SELECT') AS can_read_position,
+       has_table_privilege(current_user, 'public.event_log', 'INSERT') AS can_write_event,
+       has_table_privilege(current_user, 'public.exchange_account_credentials', 'UPDATE') AS can_update_credentials;
+RESET ROLE;
+```
+
+預期結果為 `can_read_position=t`、`can_write_event=f`、
+`can_update_credentials=t`；任何其他 privilege 都停止 release，先修正 role。
 
 ### 7. Replay、auth boundary 與一帳號 canary gate
 

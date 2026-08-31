@@ -8,7 +8,8 @@ belong.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, cast
+from datetime import datetime
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -23,7 +24,7 @@ from bfx_funding_bot.modules.accounts.tables import (
 
 AccountRole = Literal["owner", "operator", "viewer"]
 AccountLifecycleStatus = Literal["active", "halted", "retired"]
-CredentialLifecycleStatus = Literal["active", "revoked", "retired"]
+CredentialLifecycleStatus = Literal["pending", "active", "revoked", "retired"]
 
 
 class AccountDomainError(Exception):
@@ -74,6 +75,30 @@ def account_id_uuid_or_none(value: UUID | str) -> UUID | None:
         return None
 
 
+def account_scope_clause(
+    session: AsyncSession,
+    *,
+    account_id: UUID | str,
+    exchange_account_column: Any,
+    legacy_account_column: Any,
+) -> Any:
+    """Build the owner predicate for a post-cutover account-scoped query.
+
+    PostgreSQL production queries are UUID-only.  The SQLite branch exists
+    solely for the repository's historical synthetic-realm unit fixtures,
+    which intentionally do not run the PostgreSQL contract migration.  It is
+    never reachable for a canonical daemon account and is not a production
+    dual-read fallback.
+    """
+    exchange_account_id = account_id_uuid_or_none(account_id)
+    if exchange_account_id is not None:
+        return exchange_account_column == exchange_account_id
+    bind = getattr(session, "bind", None)
+    if bind is None or bind.dialect.name == "sqlite":
+        return legacy_account_column == str(account_id)
+    raise ValueError("production account scope must be a canonical ExchangeAccount UUID")
+
+
 def validate_membership_role(value: str) -> AccountRole:
     """Validate and narrow a membership role to the closed domain set."""
     if value not in {"owner", "operator", "viewer"}:
@@ -90,7 +115,7 @@ def validate_account_lifecycle_status(value: str) -> AccountLifecycleStatus:
 
 def validate_credential_lifecycle_status(value: str) -> CredentialLifecycleStatus:
     """Validate and narrow a credential lifecycle status."""
-    if value not in {"active", "revoked", "retired"}:
+    if value not in {"pending", "active", "revoked", "retired"}:
         raise ValueError(f"credential lifecycle status is invalid: {value!r}")
     return cast(CredentialLifecycleStatus, value)
 
@@ -185,10 +210,22 @@ async def create_exchange_account_credential(
     wrapped_dek: bytes,
     dek_nonce: bytes,
     key_version: int,
-    lifecycle_status: str = "active",
+    lifecycle_status: str = "pending",
+    verified_at: datetime | None = None,
+    last_verify_error: str | None = None,
 ) -> ExchangeAccountCredential:
-    """Insert an account credential while enforcing active-key uniqueness."""
+    """Insert an account credential while enforcing active-key uniqueness.
+
+    New credentials are always pending until the exchange permission check has
+    succeeded.  The optional verification fields exist only for an explicitly
+    verified import; an active row without that evidence is rejected here and
+    by the database check constraint.
+    """
     typed_status = validate_credential_lifecycle_status(lifecycle_status)
+    if typed_status == "active" and (
+        verified_at is None or last_verify_error is not None
+    ):
+        raise ValueError("active credential requires successful verification")
     await get_exchange_account(
         session, exchange_account_id=exchange_account_id, for_command=True
     )
@@ -213,6 +250,8 @@ async def create_exchange_account_credential(
         dek_nonce=dek_nonce,
         key_version=key_version,
         lifecycle_status=typed_status,
+        verified_at=verified_at,
+        last_verify_error=last_verify_error,
     )
     session.add(row)
     await session.flush()
@@ -272,6 +311,7 @@ __all__ = [
     "MembershipDenied",
     "account_id_canonical",
     "account_id_uuid_or_none",
+    "account_scope_clause",
     "create_exchange_account_credential",
     "ensure_account_active",
     "get_exchange_account",

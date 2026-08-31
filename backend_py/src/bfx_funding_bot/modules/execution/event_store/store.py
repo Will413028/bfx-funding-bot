@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    account_id_uuid_or_none,
+    account_scope_clause,
+)
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_stored_event,
     event_type_of,
@@ -120,7 +123,12 @@ class PostgresEventStore:
         stmt = (
             select(EventLogRow.event_seq)
             .where(
-                EventLogRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=EventLogRow.exchange_account_id,
+                    legacy_account_column=EventLogRow.account_id,
+                ),
                 EventLogRow.deployment_environment == self._env,
                 EventLogRow.event_type == event_type,
                 EventLogRow.venue_offer_id == venue_offer_id,
@@ -224,7 +232,12 @@ class PostgresEventStore:
             identity_terms.append(OfferClaimRow.execution_decision_id == execution_decision_id)
         matches = (await session.execute(
             select(OfferClaimRow).where(
-                OfferClaimRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=OfferClaimRow.exchange_account_id,
+                    legacy_account_column=OfferClaimRow.account_id,
+                ),
                 OfferClaimRow.deployment_environment == self._env,
                 or_(*identity_terms),
             ),
@@ -254,15 +267,40 @@ class PostgresEventStore:
             raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: amount")
 
         changed = inserted or existing.state != state.value
-        if existing.execution_decision_id is None and execution_decision_id is not None:
-            existing.execution_decision_id = execution_decision_id
+        next_execution_decision_id = existing.execution_decision_id
+        if next_execution_decision_id is None and execution_decision_id is not None:
+            next_execution_decision_id = execution_decision_id
             changed = True
-        if existing.venue_offer_id is None and venue_offer_id is not None:
-            existing.venue_offer_id = venue_offer_id
+        next_venue_offer_id = existing.venue_offer_id
+        if next_venue_offer_id is None and venue_offer_id is not None:
+            next_venue_offer_id = venue_offer_id
             changed = True
         if changed:
-            existing.state = state.value
-            existing.last_updated_ms = last_updated_ms
+            if existing.exchange_account_id is None:
+                # SQLite historical synthetic fixtures use a NULL UUID owner
+                # while production rows are UUID-keyed.  Core UPDATE avoids
+                # asking SQLAlchemy to flush a legacy object whose final ORM
+                # primary key is intentionally incomplete.
+                session.expunge(existing)
+                await session.execute(
+                    update(OfferClaimRow)
+                    .where(
+                        OfferClaimRow.account_id == account_id,
+                        OfferClaimRow.deployment_environment == self._env,
+                        OfferClaimRow.cid == cid,
+                    )
+                    .values(
+                        state=state.value,
+                        last_updated_ms=last_updated_ms,
+                        execution_decision_id=next_execution_decision_id,
+                        venue_offer_id=next_venue_offer_id,
+                    )
+                )
+            else:
+                existing.execution_decision_id = next_execution_decision_id
+                existing.venue_offer_id = next_venue_offer_id
+                existing.state = state.value
+                existing.last_updated_ms = last_updated_ms
         return changed
 
     async def _project_position_state(
@@ -280,13 +318,19 @@ class PostgresEventStore:
         ps = (
             await session.execute(
                 select(PositionStateRow).where(
-                    PositionStateRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=PositionStateRow.exchange_account_id,
+                        legacy_account_column=PositionStateRow.account_id,
+                    ),
                     PositionStateRow.deployment_environment == self._env,
                     PositionStateRow.symbol == symbol,
                 )
             )
         ).scalar_one_or_none()
-        if ps is None:
+        is_new = ps is None
+        if is_new:
             ps = PositionStateRow(
                 account_id=account_id,
                 exchange_account_id=account_id_uuid_or_none(account_id),
@@ -298,8 +342,7 @@ class PostgresEventStore:
                 last_event_seq=0,
             )
             session.add(ps)
-        elif ps.exchange_account_id is None:
-            ps.exchange_account_id = account_id_uuid_or_none(account_id)
+        assert ps is not None
         reserved = Decimal(str(ps.reserved))
         realized = Decimal(str(ps.realized))
         if etype == "RESERVATION_CLAIMED":
@@ -310,10 +353,26 @@ class PostgresEventStore:
             realized += size
         elif etype == "RESERVATION_RELEASED":
             reserved -= min(reserved, size)
-        ps.reserved = reserved
-        ps.realized = realized
-        ps.last_updated_ms = occurred_at_ms
-        ps.last_event_seq = event_seq
+        if not is_new and ps.exchange_account_id is None:
+            await session.execute(
+                update(PositionStateRow)
+                .where(
+                    PositionStateRow.account_id == account_id,
+                    PositionStateRow.deployment_environment == self._env,
+                    PositionStateRow.symbol == symbol,
+                )
+                .values(
+                    reserved=reserved,
+                    realized=realized,
+                    last_updated_ms=occurred_at_ms,
+                    last_event_seq=event_seq,
+                )
+            )
+        else:
+            ps.reserved = reserved
+            ps.realized = realized
+            ps.last_updated_ms = occurred_at_ms
+            ps.last_event_seq = event_seq
 
     async def set_position_snapshot(
         self,
@@ -342,7 +401,12 @@ class PostgresEventStore:
         fence: int = (
             await session.execute(
                 select(func.coalesce(func.max(EventLogRow.event_seq), 0)).where(
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == self._env,
                 )
             )
@@ -351,7 +415,12 @@ class PostgresEventStore:
         ps = (
             await session.execute(
                 select(PositionStateRow).where(
-                    PositionStateRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=PositionStateRow.exchange_account_id,
+                        legacy_account_column=PositionStateRow.account_id,
+                    ),
                     PositionStateRow.deployment_environment == self._env,
                     PositionStateRow.symbol == symbol,
                 )
@@ -359,7 +428,8 @@ class PostgresEventStore:
         ).scalar_one_or_none()
         prior_reserved = Decimal(str(ps.reserved)) if ps is not None else Decimal("0")
         prior_realized = Decimal(str(ps.realized)) if ps is not None else Decimal("0")
-        if ps is None:
+        is_new = ps is None
+        if is_new:
             ps = PositionStateRow(
                 account_id=account_id,
                 exchange_account_id=account_id_uuid_or_none(account_id),
@@ -371,14 +441,31 @@ class PostgresEventStore:
                 last_event_seq=0,
             )
             session.add(ps)
-        elif ps.exchange_account_id is None:
-            ps.exchange_account_id = account_id_uuid_or_none(account_id)
-        ps.reserved = reserved_usdt
-        ps.realized = realized_usdt
-        ps.last_updated_ms = occurred_at_ms
-        ps.last_event_seq = fence
-        ps.last_reconciled_at = occurred_at_ms
-        ps.n_credits = n_credits
+        assert ps is not None
+        if not is_new and ps.exchange_account_id is None:
+            await session.execute(
+                update(PositionStateRow)
+                .where(
+                    PositionStateRow.account_id == account_id,
+                    PositionStateRow.deployment_environment == self._env,
+                    PositionStateRow.symbol == symbol,
+                )
+                .values(
+                    reserved=reserved_usdt,
+                    realized=realized_usdt,
+                    last_updated_ms=occurred_at_ms,
+                    last_event_seq=fence,
+                    last_reconciled_at=occurred_at_ms,
+                    n_credits=n_credits,
+                )
+            )
+        else:
+            ps.reserved = reserved_usdt
+            ps.realized = realized_usdt
+            ps.last_updated_ms = occurred_at_ms
+            ps.last_event_seq = fence
+            ps.last_reconciled_at = occurred_at_ms
+            ps.n_credits = n_credits
 
         session.add(ReconcileObservationRow(
             account_id=account_id,
@@ -409,17 +496,32 @@ class PostgresEventStore:
         with event_seq > fence. Falls back to genesis fold if no checkpoint.
         """
         await session.execute(delete(OfferClaimRow).where(
-            OfferClaimRow.account_id == account_id,
+            account_scope_clause(
+                session,
+                account_id=account_id,
+                exchange_account_column=OfferClaimRow.exchange_account_id,
+                legacy_account_column=OfferClaimRow.account_id,
+            ),
             OfferClaimRow.deployment_environment == deployment_environment))
         await session.execute(delete(PositionStateRow).where(
-            PositionStateRow.account_id == account_id,
+            account_scope_clause(
+                session,
+                account_id=account_id,
+                exchange_account_column=PositionStateRow.exchange_account_id,
+                legacy_account_column=PositionStateRow.account_id,
+            ),
             PositionStateRow.deployment_environment == deployment_environment,
             PositionStateRow.symbol == symbol))
         await session.flush()
 
         rows = (await session.execute(
             select(EventLogRow).where(
-                EventLogRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=EventLogRow.exchange_account_id,
+                    legacy_account_column=EventLogRow.account_id,
+                ),
                 EventLogRow.deployment_environment == deployment_environment,
             ).order_by(EventLogRow.event_seq.asc())
         )).scalars().all()
@@ -433,7 +535,12 @@ class PostgresEventStore:
         # (reconcile_observation.symbol) so fUST/fUSD rebuild from their own base.
         checkpoint = (await session.execute(
             select(ReconcileObservationRow).where(
-                ReconcileObservationRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=ReconcileObservationRow.exchange_account_id,
+                    legacy_account_column=ReconcileObservationRow.account_id,
+                ),
                 ReconcileObservationRow.deployment_environment == deployment_environment,
                 ReconcileObservationRow.symbol == symbol,
             ).order_by(ReconcileObservationRow.id.desc()).limit(1)

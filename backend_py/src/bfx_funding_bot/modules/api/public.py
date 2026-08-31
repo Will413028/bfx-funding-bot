@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.schemas import (
     PublicProofSummaryResponse,
@@ -128,7 +129,13 @@ def build_public_router() -> APIRouter:
     ) -> dict[str, object]:
         response.headers["Cache-Control"] = _CACHE_CONTROL
         account_id = _public_exchange_account_id()
-        deployment_environment = os.environ.get("BFX_DEPLOYMENT_ENV", "prod").strip() or "prod"
+        try:
+            deployment_environment = require_deployment_environment()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="deployment_environment_not_configured",
+            ) from exc
         stmt = (
             select(AttributionWeeklyRow)
             .where(

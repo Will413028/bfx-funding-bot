@@ -101,7 +101,8 @@ async def factory(sqlite_engine):
 
 
 @pytest_asyncio.fixture
-async def app_client(factory):
+async def app_client(factory, monkeypatch):
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     app = FastAPI()
     app.include_router(build_projections_router())
 

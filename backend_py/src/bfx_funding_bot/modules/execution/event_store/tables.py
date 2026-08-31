@@ -94,7 +94,7 @@ class OfferClaimRow(Base):
     last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        PrimaryKeyConstraint("account_id", "deployment_environment", "cid"),
+        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "cid"),
         Index("idx_offer_claims_voi", "venue_offer_id"),
         Index(
             "uq_offer_claims_venue_offer_id",
@@ -109,6 +109,17 @@ class OfferClaimRow(Base):
             unique=True,
             postgresql_where=text("execution_decision_id IS NOT NULL"),
             sqlite_where=text("execution_decision_id IS NOT NULL"),
+        ),
+        # Only historical SQLite fixtures can have a NULL UUID owner.  The
+        # production contract migration removes this compatibility surface;
+        # keeping the fixture-only uniqueness prevents synthetic tests from
+        # creating duplicate projections while the ORM models the final PK.
+        Index(
+            "uq_offer_claims_legacy_fixture_identity",
+            "account_id", "deployment_environment", "cid",
+            unique=True,
+            sqlite_where=text("exchange_account_id IS NULL"),
+            info={"identity_legacy_fixture": True},
         ),
     )
 
@@ -142,7 +153,7 @@ class PositionStateRow(Base):
     n_credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
-        PrimaryKeyConstraint("account_id", "deployment_environment", "symbol"),
+        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
     )
 
 

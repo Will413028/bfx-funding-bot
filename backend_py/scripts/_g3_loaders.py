@@ -19,7 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
-from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.settings import Settings, require_deployment_environment
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.backtest.oos_profitability import bootstrap_ci, paired_active_returns
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -97,7 +98,12 @@ async def _load_observed_realized(
     stmt = (
         select(PositionStateRow)
         .where(
-            PositionStateRow.account_id == account_id,
+            account_scope_clause(
+                session,
+                account_id=account_id,
+                exchange_account_column=PositionStateRow.exchange_account_id,
+                legacy_account_column=PositionStateRow.account_id,
+            ),
             PositionStateRow.deployment_environment == deployment_env,
             PositionStateRow.symbol == symbol,
         )
@@ -133,7 +139,13 @@ async def build_verdict_from_neon(
         from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
 
         account_id = account_id_canonical(raw_account_id)
-    deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
+    if session_factory is None:
+        deployment_env = require_deployment_environment()
+    else:
+        # The in-memory unit harness intentionally supplies synthetic legacy
+        # rows and no process environment; production always takes the branch
+        # above and requires an explicit validated value.
+        deployment_env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
 
     engine = None
     if session_factory is None:
@@ -147,7 +159,12 @@ async def build_verdict_from_neon(
             fill_stmt = (
                 select(EventLogRow)
                 .where(
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == deployment_env,
                     EventLogRow.event_type == _FILL_TYPE,
                 )
@@ -159,7 +176,12 @@ async def build_verdict_from_neon(
             release_stmt = (
                 select(EventLogRow)
                 .where(
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == deployment_env,
                     EventLogRow.event_type == _RELEASE_TYPE,
                 )
@@ -255,7 +277,12 @@ async def build_verdict_from_neon(
             # Early borrower returns otherwise double-count re-lent principal in
             # open_principal_at (2026-07-19 anchor divergence root cause).
             close_stmt = select(EventLogRow).where(
-                EventLogRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=EventLogRow.exchange_account_id,
+                    legacy_account_column=EventLogRow.account_id,
+                ),
                 EventLogRow.deployment_environment == deployment_env,
                 EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
             )

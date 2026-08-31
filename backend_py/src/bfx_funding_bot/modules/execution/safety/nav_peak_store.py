@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    account_id_uuid_or_none,
+    account_scope_clause,
+)
 from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow
 
 
@@ -32,7 +35,12 @@ class NavPeakStore:
             rows = (
                 await session.execute(
                     select(NavPeakRow).where(
-                        NavPeakRow.account_id == self._account_id,
+                        account_scope_clause(
+                            session,
+                            account_id=self._account_id,
+                            exchange_account_column=NavPeakRow.exchange_account_id,
+                            legacy_account_column=NavPeakRow.account_id,
+                        ),
                         NavPeakRow.deployment_environment == self._env,
                     )
                 )
@@ -41,14 +49,43 @@ class NavPeakStore:
 
     async def save(self, symbol: str, peak: Decimal, updated_at_ms: int) -> None:
         async with self._sf() as session:
-            await session.merge(
-                NavPeakRow(
-                    account_id=self._account_id,
-                    exchange_account_id=account_id_uuid_or_none(self._account_id),
-                    deployment_environment=self._env,
-                    symbol=symbol,
-                    peak=peak,
-                    updated_at_ms=updated_at_ms,
+            row = (
+                await session.execute(
+                    select(NavPeakRow).where(
+                        account_scope_clause(
+                            session,
+                            account_id=self._account_id,
+                            exchange_account_column=NavPeakRow.exchange_account_id,
+                            legacy_account_column=NavPeakRow.account_id,
+                        ),
+                        NavPeakRow.deployment_environment == self._env,
+                        NavPeakRow.symbol == symbol,
+                    )
                 )
-            )
+            ).scalar_one_or_none()
+            if row is None:
+                session.add(
+                    NavPeakRow(
+                        account_id=self._account_id,
+                        exchange_account_id=account_id_uuid_or_none(self._account_id),
+                        deployment_environment=self._env,
+                        symbol=symbol,
+                        peak=peak,
+                        updated_at_ms=updated_at_ms,
+                    )
+                )
+            else:
+                if row.exchange_account_id is None:
+                    await session.execute(
+                        update(NavPeakRow)
+                        .where(
+                            NavPeakRow.account_id == self._account_id,
+                            NavPeakRow.deployment_environment == self._env,
+                            NavPeakRow.symbol == symbol,
+                        )
+                        .values(peak=peak, updated_at_ms=updated_at_ms)
+                    )
+                else:
+                    row.peak = peak
+                    row.updated_at_ms = updated_at_ms
             await session.commit()

@@ -15,8 +15,11 @@ from typing import Any
 from sqlalchemy import select
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
-from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
+from bfx_funding_bot.core.settings import Settings, require_deployment_environment
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    account_id_canonical,
+    account_scope_clause,
+)
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.live_validation.execution_quality import (
     ClaimEvent,
@@ -46,7 +49,7 @@ async def _amain() -> int:
     if not raw_account_id:
         raise RuntimeError("BFX_EXCHANGE_ACCOUNT_ID is required")
     account_id = account_id_canonical(raw_account_id)
-    env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
+    env = require_deployment_environment()
     try:
         async with sf() as session:
             def _events(event_type: str) -> Any:
@@ -54,7 +57,12 @@ async def _amain() -> int:
                     select(EventLogRow)
                     .where(
                         EventLogRow.event_type == event_type,
-                        EventLogRow.account_id == account_id,
+                        account_scope_clause(
+                            session,
+                            account_id=account_id,
+                            exchange_account_column=EventLogRow.exchange_account_id,
+                            legacy_account_column=EventLogRow.account_id,
+                        ),
                         EventLogRow.deployment_environment == env,
                         EventLogRow.cid.is_not(None),
                     )
@@ -65,7 +73,12 @@ async def _amain() -> int:
             regime_rows = (
                 await session.execute(
                     select(ConfigRegimeRow).where(
-                        ConfigRegimeRow.account_id == account_id,
+                        account_scope_clause(
+                            session,
+                            account_id=account_id,
+                            exchange_account_column=ConfigRegimeRow.exchange_account_id,
+                            legacy_account_column=ConfigRegimeRow.account_id,
+                        ),
                         ConfigRegimeRow.deployment_environment == env,
                     ).order_by(ConfigRegimeRow.recorded_at_ms)
                 )

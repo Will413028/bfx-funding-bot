@@ -21,6 +21,38 @@ const noop = vi.fn();
 afterEach(() => cleanup());
 
 describe("ApiKeyCard", () => {
+  it("labels a newly created credential as pending verification", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({ status: "pending" })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(screen.getByText("Pending verification").textContent).toContain(
+      "Pending verification",
+    );
+  });
+
+  it("does not offer verification for terminal credential states", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({ status: "retired" })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Verify" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
   it("surfaces lastVerifyError reason when status is failed", () => {
     render(
       <ApiKeyCard
@@ -37,6 +69,25 @@ describe("ApiKeyCard", () => {
 
     const reason = screen.getByTestId("verify-error-reason");
     expect(reason.textContent).toContain("withdraw permission is enabled");
+  });
+
+  it("surfaces a permission error while a credential remains pending", () => {
+    render(
+      <ApiKeyCard
+        apiKey={makeKey({
+          status: "pending",
+          lastVerifyError: "funding write permission required",
+        })}
+        onVerify={noop}
+        onDelete={noop}
+        isVerifying={false}
+        isDeleting={false}
+      />,
+    );
+
+    expect(screen.getByTestId("verify-error-reason").textContent).toContain(
+      "funding write permission required",
+    );
   });
 
   it("does not render a reason when failed but no lastVerifyError", () => {

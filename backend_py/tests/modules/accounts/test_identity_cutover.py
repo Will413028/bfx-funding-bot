@@ -16,6 +16,7 @@ from bfx_funding_bot.core.crypto import (
     encrypt_secret,
 )
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.modules.accounts.config_service import (
     get_account_config_draft,
     upsert_account_config_draft_for_user,
@@ -26,6 +27,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 )
 from bfx_funding_bot.modules.accounts.identity_cutover import (
     CutoverManifestError,
+    CutoverVerificationError,
     IdentityCutover,
     IdentityManifest,
 )
@@ -34,6 +36,7 @@ from bfx_funding_bot.modules.accounts.tables import (
     APIKey,
     ExchangeAccount,
     ExchangeAccountCredential,
+    LegacyAccountRealmMap,
     User,
     UserConfig,
 )
@@ -71,6 +74,32 @@ def _manifest(*, realm_key: str = "default") -> IdentityManifest:
                     "user_ids": ["operator-1"],
                     "memberships": {"operator-1": "owner"},
                 }
+            ],
+        }
+    )
+
+
+def _multi_account_manifest() -> IdentityManifest:
+    return IdentityManifest.from_dict(
+        {
+            "version": 1,
+            "accounts": [
+                {
+                    "exchange_account_id": str(_ACCOUNT_ID),
+                    "venue": "bitfinex",
+                    "label": "Primary",
+                    "legacy_realms": ["default"],
+                    "user_ids": ["operator-1"],
+                    "memberships": {"operator-1": "owner"},
+                },
+                {
+                    "exchange_account_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+                    "venue": "bitfinex",
+                    "label": "Secondary",
+                    "legacy_realms": ["secondary"],
+                    "user_ids": ["operator-1"],
+                    "memberships": {"operator-1": "operator"},
+                },
             ],
         }
     )
@@ -138,6 +167,52 @@ async def test_dry_run_does_not_write_and_apply_is_idempotent(session: AsyncSess
     assert counts_after_first == counts_after_second == (1, 1, 1)
 
 
+def test_manifest_supports_one_user_memberships_on_multiple_accounts() -> None:
+    manifest = _multi_account_manifest()
+    assert len(manifest.accounts) == 2
+    assert manifest.user_to_accounts["operator-1"] == (
+        _ACCOUNT_ID,
+        UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+    )
+
+
+def test_manifest_rejects_partial_membership_declaration() -> None:
+    with pytest.raises(CutoverManifestError, match="every user_id must have a membership"):
+        IdentityManifest.from_dict(
+            {
+                "version": 1,
+                "accounts": [
+                    {
+                        "exchange_account_id": str(_ACCOUNT_ID),
+                        "venue": "bitfinex",
+                        "label": "Primary",
+                        "legacy_realms": ["default"],
+                        "user_ids": ["owner", "operator"],
+                        "memberships": {"owner": "owner"},
+                    }
+                ],
+            }
+        )
+
+
+def test_manifest_derives_user_ids_from_memberships() -> None:
+    manifest = IdentityManifest.from_dict(
+        {
+            "version": 1,
+            "accounts": [
+                {
+                    "exchange_account_id": str(_ACCOUNT_ID),
+                    "venue": "bitfinex",
+                    "label": "Primary",
+                    "legacy_realms": ["default"],
+                    "memberships": {"operator-1": "owner"},
+                }
+            ],
+        }
+    )
+    assert manifest.accounts[0].user_ids == ("operator-1",)
+
+
 @pytest.mark.asyncio
 async def test_wrong_manifest_fails_before_any_write(session: AsyncSession) -> None:
     await _seed_legacy_rows(session)
@@ -149,6 +224,165 @@ async def test_wrong_manifest_fails_before_any_write(session: AsyncSession) -> N
     row = await session.scalar(select(EventLogRow))
     assert row is not None
     assert row.exchange_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_config_conflict_blocks_cutover_before_writes(session: AsyncSession) -> None:
+    session.add_all(
+        [
+            UserConfig(user_id="operator-1", config={"period_days": 2}),
+            UserConfig(user_id="operator-2", config={"period_days": 7}),
+        ]
+    )
+    await session.flush()
+    manifest = IdentityManifest.from_dict(
+        {
+            "version": 1,
+            "accounts": [
+                {
+                    "exchange_account_id": str(_ACCOUNT_ID),
+                    "venue": "bitfinex",
+                    "label": "Primary",
+                    "legacy_realms": ["default"],
+                    "user_ids": ["operator-1", "operator-2"],
+                    "memberships": {"operator-1": "owner", "operator-2": "operator"},
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(CutoverManifestError, match="config conflicts"):
+        await IdentityCutover(kek=_KEK).apply(session, manifest)
+
+    assert await session.scalar(select(func.count()).select_from(ExchangeAccount)) == 0
+
+
+@pytest.mark.asyncio
+async def test_identical_multi_user_configs_deduplicate_to_one_account_draft(
+    session: AsyncSession,
+) -> None:
+    session.add_all(
+        [
+            UserConfig(user_id="operator-1", config={"period_days": 2}),
+            UserConfig(user_id="operator-2", config={"period_days": 2}),
+        ]
+    )
+    await session.flush()
+    manifest = IdentityManifest.from_dict(
+        {
+            "version": 1,
+            "accounts": [
+                {
+                    "exchange_account_id": str(_ACCOUNT_ID),
+                    "venue": "bitfinex",
+                    "label": "Primary",
+                    "legacy_realms": ["default"],
+                    "user_ids": ["operator-1", "operator-2"],
+                    "memberships": {
+                        "operator-1": "owner",
+                        "operator-2": "operator",
+                    },
+                }
+            ],
+        }
+    )
+
+    await IdentityCutover(kek=_KEK).apply(session, manifest)
+    await session.commit()
+
+    assert await session.scalar(select(func.count()).select_from(AccountConfigDraft)) == 1
+    report = await IdentityCutover(kek=_KEK).verify(session, manifest)
+    assert report.migrated_configs == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_unverified_legacy_credentials_stage_as_pending(
+    session: AsyncSession,
+) -> None:
+    first = encrypt_secret("secret-1", user_id="operator-1", kek=_KEK)
+    second = encrypt_secret("secret-2", user_id="operator-2", kek=_KEK)
+    session.add_all(
+        [
+            APIKey(
+                user_id="operator-1",
+                label="one",
+                api_key="PUB1",
+                secret_ciphertext=first.secret_ciphertext,
+                secret_nonce=first.secret_nonce,
+                wrapped_dek=first.wrapped_dek,
+                dek_nonce=first.dek_nonce,
+                key_version=first.key_version,
+            ),
+            APIKey(
+                user_id="operator-2",
+                label="two",
+                api_key="PUB2",
+                secret_ciphertext=second.secret_ciphertext,
+                secret_nonce=second.secret_nonce,
+                wrapped_dek=second.wrapped_dek,
+                dek_nonce=second.dek_nonce,
+                key_version=second.key_version,
+            ),
+        ]
+    )
+    await session.flush()
+    manifest = IdentityManifest.from_dict(
+        {
+            "version": 1,
+            "accounts": [
+                {
+                    "exchange_account_id": str(_ACCOUNT_ID),
+                    "venue": "bitfinex",
+                    "label": "Primary",
+                    "legacy_realms": ["default"],
+                    "user_ids": ["operator-1", "operator-2"],
+                    "memberships": {
+                        "operator-1": "owner",
+                        "operator-2": "operator",
+                    },
+                }
+            ],
+        }
+    )
+
+    await IdentityCutover(kek=_KEK).apply(session, manifest)
+    await session.commit()
+
+    statuses = list(
+        await session.scalars(
+            select(ExchangeAccountCredential.lifecycle_status).order_by(
+                ExchangeAccountCredential.id
+            )
+        )
+    )
+    assert statuses == ["pending", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_manifest_sha_change_is_rejected_for_existing_realm_map(
+    session: AsyncSession,
+) -> None:
+    manifest = _manifest()
+    session.add(
+        ExchangeAccount(
+            id=_ACCOUNT_ID,
+            venue="bitfinex",
+            label="Primary",
+            lifecycle_status="active",
+        )
+    )
+    session.add(
+        LegacyAccountRealmMap(
+            realm_key="default",
+            exchange_account_id=_ACCOUNT_ID,
+            source="identity-manifest",
+            manifest_sha256="different-manifest-sha",
+        )
+    )
+    await session.flush()
+
+    with pytest.raises(CutoverManifestError, match="manifest SHA mismatch"):
+        await IdentityCutover(kek=_KEK).apply(session, manifest)
 
 
 @pytest.mark.asyncio
@@ -197,6 +431,123 @@ async def test_credentials_are_reencrypted_with_account_aad(session: AsyncSessio
         converted, aad=str(_ACCOUNT_ID), kek=_KEK
     ) == "legacy-secret"
     assert legacy.exchange_account_id == _ACCOUNT_ID
+
+
+@pytest.mark.asyncio
+async def test_unverified_legacy_credential_is_migrated_pending(session: AsyncSession) -> None:
+    await _seed_legacy_rows(session)
+
+    await IdentityCutover(kek=_KEK).apply(session, _manifest())
+    await session.commit()
+
+    target = await session.scalar(select(ExchangeAccountCredential))
+    assert target is not None
+    assert target.lifecycle_status == "pending"
+    assert target.verified_at is None
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_ciphertext_still_bound_to_legacy_user_aad(
+    session: AsyncSession,
+) -> None:
+    await _seed_legacy_rows(session)
+    manifest = _manifest()
+    cutover = IdentityCutover(kek=_KEK)
+    await cutover.apply(session, manifest)
+    await session.commit()
+
+    legacy = await session.scalar(select(APIKey).where(APIKey.user_id == "operator-1"))
+    assert legacy is not None
+    old_envelope = encrypt_secret("still-legacy", user_id="operator-1", kek=_KEK)
+    legacy.secret_ciphertext = old_envelope.secret_ciphertext
+    legacy.secret_nonce = old_envelope.secret_nonce
+    legacy.wrapped_dek = old_envelope.wrapped_dek
+    legacy.dek_nonce = old_envelope.dek_nonce
+    legacy.key_version = old_envelope.key_version
+    await session.flush()
+
+    with pytest.raises(CutoverVerificationError, match="old user AAD"):
+        await cutover.verify(session, manifest)
+
+
+@pytest.mark.asyncio
+async def test_verify_requires_matching_preflight_evidence(session: AsyncSession) -> None:
+    await _seed_legacy_rows(session)
+    manifest = _manifest()
+    cutover = IdentityCutover(kek=_KEK)
+    preflight = await cutover.preflight(session, manifest)
+    await cutover.apply(session, manifest)
+    await session.commit()
+
+    with pytest.raises(CutoverVerificationError, match="event hash mismatch"):
+        await cutover.verify(
+            session,
+            manifest,
+            expected_report={
+                "manifest_sha256": manifest.sha256,
+                "event_head": preflight.event_head,
+                "event_hash": "wrong-hash",
+                "legacy_realm_counts": preflight.legacy_realm_counts,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_source_target_count_mismatch(session: AsyncSession) -> None:
+    await _seed_legacy_rows(session)
+    manifest = _manifest()
+    cutover = IdentityCutover(kek=_KEK)
+    await cutover.apply(session, manifest)
+    target = await session.scalar(select(AccountConfigDraft))
+    assert target is not None
+    await session.delete(target)
+    await session.commit()
+
+    with pytest.raises(CutoverVerificationError, match="source/target count mismatch"):
+        await cutover.verify(session, manifest)
+
+
+class _PermissionClient:
+    def __init__(self, permissions: KeyPermissions) -> None:
+        self.permissions = permissions
+        self.account_ids: list[str] = []
+
+    async def get_key_permissions(self, *, ctx) -> KeyPermissions:
+        self.account_ids.append(ctx.account_id)
+        return self.permissions
+
+
+@pytest.mark.asyncio
+async def test_verify_permission_gate_checks_all_nonretired_credentials(
+    session: AsyncSession,
+) -> None:
+    await _seed_legacy_rows(session)
+    manifest = _manifest()
+    cutover = IdentityCutover(kek=_KEK)
+    await cutover.apply(session, manifest)
+    await session.commit()
+
+    client = _PermissionClient(
+        KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, False)})
+    )
+    report = await cutover.verify(session, manifest, permissions_client=client)
+    assert report.permissions_verified is True
+    assert client.account_ids == [str(_ACCOUNT_ID)]
+
+
+@pytest.mark.asyncio
+async def test_verify_permission_gate_rejects_unsafe_write_scope(session: AsyncSession) -> None:
+    await _seed_legacy_rows(session)
+    manifest = _manifest()
+    cutover = IdentityCutover(kek=_KEK)
+    await cutover.apply(session, manifest)
+    await session.commit()
+
+    client = _PermissionClient(
+        KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, True)})
+    )
+    with pytest.raises(CutoverVerificationError, match="unsafe write scopes"):
+        await cutover.verify(session, manifest, permissions_client=client)
 
 
 @pytest.mark.asyncio

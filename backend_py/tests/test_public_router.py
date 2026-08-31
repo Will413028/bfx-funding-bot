@@ -68,6 +68,7 @@ def _candle(symbol: str, mts: int, close: float) -> FundingCandleRow:
 @pytest_asyncio.fixture
 async def app_client(sqlite_engine, monkeypatch):
     monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(PUBLIC_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -137,6 +138,25 @@ def test_proof_summary_requires_explicit_public_account(sqlite_engine, monkeypat
     assert response.json()["detail"] == "public_account_not_configured"
 
 
+def test_proof_summary_requires_explicit_deployment_environment(
+    sqlite_engine, monkeypatch
+):
+    monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(PUBLIC_ACCOUNT_ID))
+    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
+    app = FastAPI()
+    app.include_router(build_public_router())
+    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
+
+    async def _override_session():
+        async with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = _override_session
+    response = TestClient(app).get("/api/v1/public/proof-summary")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "deployment_environment_not_configured"
+
+
 def test_proof_summary_has_cache_control(app_client):
     resp = app_client.get("/api/v1/public/proof-summary")
     assert resp.headers["cache-control"] == "public, max-age=3600"
@@ -190,6 +210,7 @@ def test_proof_summary_never_leaks_absolute_dollar_fields(app_client):
 async def empty_app_client(sqlite_engine, monkeypatch):
     """A brand-new deployment with zero attribution_weekly rows."""
     monkeypatch.setenv("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", str(PUBLIC_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)

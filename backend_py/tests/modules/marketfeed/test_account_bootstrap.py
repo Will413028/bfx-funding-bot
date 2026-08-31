@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
@@ -74,6 +76,7 @@ async def _seed_account(
                     dek_nonce=envelope.dek_nonce,
                     key_version=envelope.key_version,
                     lifecycle_status="active",
+                    verified_at=datetime.now(UTC),
                 )
             )
         if draft:
@@ -155,6 +158,33 @@ async def test_bootstrap_fails_closed_for_unusable_account(
 
     async with session_factory() as session:
         with pytest.raises(ConfigurationError, match=message):
+            await load_account_bootstrap(
+                session,
+                deployment_environment="ci",
+                allocation_cap_usdt=Decimal("500"),
+            )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_fails_closed_for_pending_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed_account(session_factory)
+    monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_VAULT_KEK", _KEK_B64)
+
+    async with session_factory() as session:
+        credential = await session.scalar(
+            select(ExchangeAccountCredential)
+        )
+        assert credential is not None
+        credential.lifecycle_status = "pending"
+        credential.verified_at = None
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(ConfigurationError, match="active Bitfinex credential"):
             await load_account_bootstrap(
                 session,
                 deployment_environment="ci",

@@ -40,6 +40,7 @@ class _FakeClient:
 @pytest_asyncio.fixture
 async def app_client(sqlite_engine, monkeypatch):
     monkeypatch.setenv("BFX_VAULT_KEK", _KEK_B64)
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -95,7 +96,7 @@ def test_create_then_list_masks_secret(app_client):
     body = r.json()["data"]
     assert body["apiKey"] == "PUB"
     assert body["apiSecret"] == "****"
-    assert body["status"] == "unverified"
+    assert body["status"] == "pending"
 
     r2 = app_client.get(_KEYS_PATH)
     assert r2.status_code == 200
@@ -104,10 +105,14 @@ def test_create_then_list_masks_secret(app_client):
     assert items[0]["apiSecret"] == "****"
 
 
-def test_duplicate_returns_409(app_client):
-    app_client.post(_KEYS_PATH, json={"label": "a", "apiKey": "P", "apiSecret": "S"})
+def test_pending_rotation_allows_multiple_keys_but_keeps_new_key_pending(app_client):
+    created = app_client.post(
+        _KEYS_PATH, json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    assert app_client.post(f"{_KEYS_PATH}/{created['id']}/verify").status_code == 200
     r = app_client.post(_KEYS_PATH, json={"label": "b", "apiKey": "P2", "apiSecret": "S2"})
-    assert r.status_code == 409
+    assert r.status_code == 201
+    assert r.json()["data"]["status"] == "pending"
 
 
 def test_verify_marks_verified(app_client):
@@ -122,7 +127,7 @@ def test_verify_withdraw_enabled_fails(app_client):
     app_client._fake._perms = KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, True)})
     r = app_client.post(f"{_KEYS_PATH}/{created['id']}/verify")
     assert r.status_code == 200
-    assert r.json()["data"]["status"] == "failed"
+    assert r.json()["data"]["status"] == "pending"
     assert r.json()["data"]["error"] == "withdraw_must_be_disabled"
 
 
@@ -150,7 +155,7 @@ def test_verify_other_write_scope_fails_closed(app_client):
     })
     r = app_client.post(f"{_KEYS_PATH}/{created['id']}/verify")
     assert r.status_code == 200
-    assert r.json()["data"]["status"] == "failed"
+    assert r.json()["data"]["status"] == "pending"
     assert r.json()["data"]["error"].startswith("unexpected_write_scope")
 
 
@@ -239,7 +244,7 @@ def test_list_exposes_last_verify_error(app_client):
     app_client._fake._perms = KeyPermissions(scopes={"funding": (True, True), "withdraw": (False, True)})
     app_client.post(f"{_KEYS_PATH}/{created['id']}/verify")
     items = app_client.get(_KEYS_PATH).json()["data"]
-    assert items[0]["status"] == "failed"
+    assert items[0]["status"] == "pending"
     assert items[0]["lastVerifyError"] == "withdraw_must_be_disabled"
 
 
@@ -266,6 +271,17 @@ def test_delete(app_client):
     r = app_client.delete(f"{_KEYS_PATH}/{created['id']}")
     assert r.status_code == 204
     assert app_client.get(_KEYS_PATH).json()["data"][0]["status"] == "retired"
+
+
+def test_retired_credential_cannot_be_verified_again(app_client):
+    created = app_client.post(
+        _KEYS_PATH, json={"label": "a", "apiKey": "P", "apiSecret": "S"}
+    ).json()["data"]
+    assert app_client.delete(f"{_KEYS_PATH}/{created['id']}").status_code == 204
+
+    response = app_client.post(f"{_KEYS_PATH}/{created['id']}/verify")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "not_found"
 
 
 def test_non_operator_is_rejected_by_every_api_key_route(app_client):

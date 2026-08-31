@@ -139,7 +139,7 @@ def upgrade() -> None:
             "lifecycle_status",
             sa.Text(),
             nullable=False,
-            server_default=sa.text("'active'"),
+            server_default=sa.text("'pending'"),
         ),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_verify_error", sa.Text(), nullable=True),
@@ -156,8 +156,13 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.CheckConstraint(
-            "lifecycle_status IN ('active', 'revoked', 'retired')",
+            "lifecycle_status IN ('pending', 'active', 'revoked', 'retired')",
             name="ck_exchange_account_credentials_lifecycle_status",
+        ),
+        sa.CheckConstraint(
+            "lifecycle_status <> 'active' OR "
+            "(verified_at IS NOT NULL AND last_verify_error IS NULL)",
+            name="ck_exchange_account_credentials_active_verified",
         ),
         sa.ForeignKeyConstraint(
             ["exchange_account_id"],

@@ -28,7 +28,8 @@ _VALID = {
 
 
 @pytest_asyncio.fixture
-async def app_client(sqlite_engine):
+async def app_client(sqlite_engine, monkeypatch):
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)

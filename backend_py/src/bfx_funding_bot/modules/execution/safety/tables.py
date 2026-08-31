@@ -37,7 +37,7 @@ class NavPeakRow(Base):
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        PrimaryKeyConstraint("account_id", "deployment_environment", "symbol"),
+        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
     )
 
 

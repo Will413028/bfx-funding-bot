@@ -22,10 +22,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
-from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.settings import Settings, require_deployment_environment
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_canonical,
     account_id_uuid_or_none,
+    account_scope_clause,
 )
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
@@ -90,7 +91,12 @@ async def load_and_compute(
                 select(EventLogRow)
                 .where(
                     EventLogRow.event_type == _FILL_TYPE,
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == deployment_environment,
                 )
                 .order_by(EventLogRow.occurred_at_ms)
@@ -100,7 +106,12 @@ async def load_and_compute(
             await session.execute(
                 select(EventLogRow).where(
                     EventLogRow.event_type == _RELEASE_TYPE,
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == deployment_environment,
                 )
             )
@@ -109,7 +120,12 @@ async def load_and_compute(
             await session.execute(
                 select(EventLogRow).where(
                     EventLogRow.event_type == _CREDIT_CLOSE_TYPE,
-                    EventLogRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
                     EventLogRow.deployment_environment == deployment_environment,
                 )
             )
@@ -118,7 +134,12 @@ async def load_and_compute(
             await session.execute(
                 select(DiagnosticsRow).where(
                     DiagnosticsRow.kind == _DECISION_KIND,
-                    DiagnosticsRow.account_id == account_id,
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=DiagnosticsRow.exchange_account_id,
+                        legacy_account_column=DiagnosticsRow.account_id,
+                    ),
                     DiagnosticsRow.deployment_environment == deployment_environment,
                 )
             )
@@ -247,12 +268,21 @@ async def persist_rows(
     async with session_factory() as session:
         await session.execute(
             delete(AttributionWeeklyRow).where(
-                AttributionWeeklyRow.account_id == account_id,
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=AttributionWeeklyRow.exchange_account_id,
+                    legacy_account_column=AttributionWeeklyRow.account_id,
+                ),
                 AttributionWeeklyRow.deployment_environment == deployment_environment,
             )
         )
-        session.add_all([
-            AttributionWeeklyRow(
+        # Insert one row at a time.  SQLite's insertmanyvalues RETURNING path
+        # cannot correlate nullable transitional composite-PK rows; production
+        # PostgreSQL is still a single transaction and the weekly result set is
+        # small enough that this avoids a fixture-only ORM identity failure.
+        for r in rows:
+            session.add(AttributionWeeklyRow(
                 deployment_environment=deployment_environment,
                 account_id=account_id,
                 exchange_account_id=account_id_uuid_or_none(account_id),
@@ -267,9 +297,8 @@ async def persist_rows(
                 baseline_close_apr_net_pct=r.baseline_close_apr_net_pct,
                 baseline_frr_apr_net_pct=r.baseline_frr_apr_net_pct,
                 baseline_frr_util_apr_net_pct=r.baseline_frr_util_apr_net_pct,
-            )
-            for r in rows
-        ])
+            ))
+            await session.flush()
         await session.commit()
     return len(rows)
 
@@ -282,7 +311,7 @@ async def _amain() -> int:
     if not raw_account_id:
         raise RuntimeError("BFX_EXCHANGE_ACCOUNT_ID is required")
     account_id = account_id_canonical(raw_account_id)
-    env = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
+    env = require_deployment_environment()
     try:
         rows = await load_and_compute(
             sf, account_id=account_id, deployment_environment=env,

@@ -85,7 +85,6 @@ def include_object(
     table = getattr(object_, "table", None)
     schema = getattr(table, "schema", None) or "public"
     table_name = getattr(table, "name", None)
-    del compare_to
     # ``exchange_account_id`` is nullable in ORM metadata solely so the
     # SQLite unit fixtures can continue to construct historical synthetic
     # realms.  PostgreSQL's forward-only Halt 1 contract migration owns the
@@ -98,8 +97,14 @@ def include_object(
     ):
         # Ignore the database-only NOT NULL/FK contract once the column is
         # reflected, but keep metadata-only columns visible so an old database
-        # still reports the required additive migration as drift.
+        # still reports the required additive migration as drift.  Alembic
+        # invokes this hook for both sides of a matched column; ``compare_to``
+        # is non-None on the metadata side of a nullable-only difference.
+        if compare_to is not None:
+            return False
         return not reflected
+    if type_ == "index" and getattr(object_, "info", {}).get("identity_legacy_fixture"):
+        return False
     # These scaffold models remain importable by the pre-cutover application
     # migration, but their public tables are deliberately dropped at the
     # contract boundary.  They are not part of the post-cutover metadata

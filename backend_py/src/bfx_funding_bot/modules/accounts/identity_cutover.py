@@ -11,9 +11,11 @@ import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from decimal import Decimal
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid5
 
+from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +26,8 @@ from bfx_funding_bot.core.crypto import (
     decrypt_secret_with_aad,
     encrypt_secret_with_aad,
 )
+from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountRole,
     account_id_canonical,
@@ -49,6 +53,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
     ReconcileObservationRow,
 )
+from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow, TradingHaltRow
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow, ConfigRegimeRow
 
@@ -69,6 +74,73 @@ _LEGACY_ZERO_ROW_MODELS: tuple[tuple[str, type[Any]], ...] = (
     ("executions", Execution),
     ("billing_records", BillingRecord),
 )
+_ALLOWED_WRITE_SCOPES = {"funding"}
+
+# This is intentionally kept in application code as well as the contract
+# migration.  ``verify`` must prove that the same UUID-keyed uniqueness
+# constraints the DDL is about to create are already safe.
+_IDENTITY_KEY_GROUPS: tuple[
+    tuple[str, type[Any], tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        "event_log.dedup",
+        EventLogRow,
+        (
+            "exchange_account_id",
+            "deployment_environment",
+            "event_type",
+            "venue_offer_id",
+            "venue_seq",
+        ),
+        ("venue_offer_id", "venue_seq"),
+    ),
+    (
+        "offer_claims.primary_key",
+        OfferClaimRow,
+        ("exchange_account_id", "deployment_environment", "cid"),
+        (),
+    ),
+    (
+        "offer_claims.venue_offer_id",
+        OfferClaimRow,
+        ("exchange_account_id", "deployment_environment", "venue_offer_id"),
+        ("venue_offer_id",),
+    ),
+    (
+        "offer_claims.execution_decision_id",
+        OfferClaimRow,
+        ("exchange_account_id", "deployment_environment", "execution_decision_id"),
+        ("execution_decision_id",),
+    ),
+    (
+        "position_state.primary_key",
+        PositionStateRow,
+        ("exchange_account_id", "deployment_environment", "symbol"),
+        (),
+    ),
+    (
+        "nav_peak.primary_key",
+        NavPeakRow,
+        ("exchange_account_id", "deployment_environment", "symbol"),
+        (),
+    ),
+    (
+        "attribution_weekly.primary_key",
+        AttributionWeeklyRow,
+        ("deployment_environment", "exchange_account_id", "cell", "week_start_ms"),
+        (),
+    ),
+    (
+        "config_regime.primary_key",
+        ConfigRegimeRow,
+        ("deployment_environment", "exchange_account_id", "recorded_at_ms"),
+        (),
+    ),
+)
+
+
+class _PermissionsClient(Protocol):
+    async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions: ...
 
 
 class IdentityCutoverError(RuntimeError):
@@ -115,7 +187,6 @@ class IdentityManifest:
         accounts: list[AccountMapping] = []
         seen_account_ids: set[UUID] = set()
         seen_realms: set[str] = set()
-        seen_users: set[str] = set()
         for raw in raw_accounts:
             if not isinstance(raw, Mapping):
                 raise CutoverManifestError("each account mapping must be an object")
@@ -145,11 +216,12 @@ class IdentityManifest:
                     raise CutoverManifestError(f"legacy realm appears more than once: {realm}")
                 seen_realms.add(realm)
 
-            user_ids = _string_tuple(raw.get("user_ids", ()), "user_ids")
-            for user_id in user_ids:
-                if user_id in seen_users:
-                    raise CutoverManifestError(f"user appears more than once: {user_id}")
-                seen_users.add(user_id)
+            raw_user_ids = raw.get("user_ids")
+            user_ids = (
+                _string_tuple(raw_user_ids, "user_ids")
+                if raw_user_ids is not None
+                else ()
+            )
 
             raw_memberships = raw.get("memberships", {})
             if not isinstance(raw_memberships, Mapping):
@@ -158,13 +230,18 @@ class IdentityManifest:
             for user_id, raw_role in raw_memberships.items():
                 if not isinstance(user_id, str) or not isinstance(raw_role, str):
                     raise CutoverManifestError("membership user and role must be strings")
-                if user_id not in user_ids:
+                if user_ids and user_id not in user_ids:
                     raise CutoverManifestError(
                         f"membership user {user_id!r} is absent from user_ids"
                     )
                 memberships.append((user_id, validate_membership_role(raw_role)))
-            if user_ids and not memberships:
-                memberships.append((user_ids[0], "owner"))
+            membership_user_ids = {user_id for user_id, _role in memberships}
+            if not user_ids:
+                user_ids = tuple(sorted(membership_user_ids))
+            if set(user_ids) != membership_user_ids:
+                raise CutoverManifestError(
+                    f"every user_id must have a membership for account {account_id}"
+                )
             memberships.sort(key=lambda item: item[0])
             accounts.append(
                 AccountMapping(
@@ -206,10 +283,23 @@ class IdentityManifest:
 
     @property
     def user_to_account(self) -> dict[str, UUID]:
+        """Return only unambiguous mappings for one-row-per-user legacy data."""
         return {
-            user_id: account.exchange_account_id
-            for account in self.accounts
-            for user_id in account.user_ids
+            user_id: account_ids[0]
+            for user_id, account_ids in self.user_to_accounts.items()
+            if len(account_ids) == 1
+        }
+
+    @property
+    def user_to_accounts(self) -> dict[str, tuple[UUID, ...]]:
+        """Return the full membership multimap (a user may own many accounts)."""
+        values: defaultdict[str, list[UUID]] = defaultdict(list)
+        for account in self.accounts:
+            for user_id in account.user_ids:
+                values[user_id].append(account.exchange_account_id)
+        return {
+            user_id: tuple(sorted(account_ids, key=str))
+            for user_id, account_ids in values.items()
         }
 
 
@@ -220,12 +310,16 @@ class CutoverReport:
     legacy_realm_counts: dict[str, int] = field(default_factory=dict)
     unmapped_rows: tuple[str, ...] = ()
     duplicate_active_credentials: tuple[str, ...] = ()
+    invalid_active_credentials: tuple[str, ...] = ()
+    config_conflicts: tuple[str, ...] = ()
+    manifest_sha_conflicts: tuple[str, ...] = ()
     zero_row_legacy_tables: dict[str, bool] = field(default_factory=dict)
     event_head: int | None = None
     event_hash: str = ""
     backfilled_rows: dict[str, int] = field(default_factory=dict)
     migrated_credentials: int = 0
     migrated_configs: int = 0
+    permissions_verified: bool = False
 
 
 def _string_tuple(value: object, field_name: str) -> tuple[str, ...]:
@@ -293,10 +387,14 @@ class IdentityCutover:
         self,
         session: AsyncSession,
         manifest: IdentityManifest | Mapping[str, object],
+        *,
+        expected_report: CutoverReport | Mapping[str, object] | None = None,
+        permissions_client: _PermissionsClient | None = None,
     ) -> CutoverReport:
         normalized = _coerce_manifest(manifest)
         report = await self._preflight(session, normalized)
         self._assert_preflight_ready(report)
+        self._assert_expected_evidence(report, expected_report)
         null_rows: list[str] = []
         for table_name, model in _MONEY_MODELS:
             count = await session.scalar(
@@ -315,21 +413,319 @@ class IdentityCutover:
                 f"exchange_account_id remains NULL in {', '.join(sorted(null_rows))}"
             )
 
-        credentials = list(await session.scalars(select(ExchangeAccountCredential)))
-        for credential in credentials:
-            envelope = Envelope(
-                secret_ciphertext=credential.secret_ciphertext,
-                secret_nonce=credential.secret_nonce,
-                wrapped_dek=credential.wrapped_dek,
-                dek_nonce=credential.dek_nonce,
-                key_version=credential.key_version,
+        count_mismatches = await self._source_target_count_mismatches(session, normalized)
+        if count_mismatches:
+            raise CutoverVerificationError(
+                "source/target count mismatch: " + "; ".join(count_mismatches)
             )
-            decrypt_secret_with_aad(
-                envelope,
+
+        orphan_rows = await self._orphan_exchange_account_ids(session)
+        if orphan_rows:
+            raise CutoverVerificationError(
+                "orphan exchange_account_id: " + "; ".join(orphan_rows)
+            )
+
+        collisions = await self._identity_key_collisions(session)
+        if collisions:
+            raise CutoverVerificationError(
+                "UUID key collisions: "
+                + "; ".join(
+                    f"{name}=[{', '.join(samples)}]"
+                    for name, samples in sorted(collisions.items())
+                )
+            )
+
+        credentials = list(
+            await session.scalars(select(ExchangeAccountCredential).order_by(ExchangeAccountCredential.id))
+        )
+        for credential in credentials:
+            self._decrypt_account_credential(credential)
+
+        legacy_keys = list(
+            await session.scalars(
+                select(APIKey)
+                .where(APIKey.exchange_account_id.is_not(None))
+                .order_by(APIKey.id)
+            )
+        )
+        for row in legacy_keys:
+            try:
+                decrypt_secret(
+                    self._envelope_from_row(row), user_id=row.user_id, kek=self._kek
+                )
+            except InvalidTag:
+                # Successful account-AAD decryption is the required proof that
+                # the legacy user-bound ciphertext can no longer be replayed.
+                continue
+            raise CutoverVerificationError(
+                f"old user AAD still decrypts for api key {row.id}"
+            )
+
+        if permissions_client is not None:
+            await self._verify_credential_permissions(session, credentials, permissions_client)
+            report = replace(report, permissions_verified=True)
+        return report
+
+    @staticmethod
+    def _assert_expected_evidence(
+        report: CutoverReport,
+        expected_report: CutoverReport | Mapping[str, object] | None,
+    ) -> None:
+        """Require verify to consume the immutable preflight evidence file."""
+        if expected_report is None:
+            return
+        if isinstance(expected_report, CutoverReport):
+            def get_value(key: str) -> object:
+                return getattr(expected_report, key)
+        else:
+            required = (
+                "manifest_sha256",
+                "event_head",
+                "event_hash",
+                "legacy_realm_counts",
+            )
+            missing = [key for key in required if key not in expected_report]
+            if missing:
+                raise CutoverVerificationError(
+                    "verification evidence missing: " + ", ".join(missing)
+                )
+            def get_value(key: str) -> object:
+                return expected_report.get(key)
+
+        expected_manifest = get_value("manifest_sha256")
+        if expected_manifest != report.manifest_sha256:
+            raise CutoverVerificationError(
+                f"manifest SHA mismatch: expected {expected_manifest}, "
+                f"observed {report.manifest_sha256}"
+            )
+        expected_head = get_value("event_head")
+        if expected_head != report.event_head:
+            raise CutoverVerificationError(
+                f"event head mismatch: expected {expected_head}, observed {report.event_head}"
+            )
+        expected_hash = get_value("event_hash")
+        if expected_hash != report.event_hash:
+            raise CutoverVerificationError(
+                f"event hash mismatch: expected {expected_hash}, observed {report.event_hash}"
+            )
+        raw_counts = get_value("legacy_realm_counts")
+        if not isinstance(raw_counts, Mapping):
+            raise CutoverVerificationError("verification evidence legacy_realm_counts must be an object")
+        try:
+            expected_counts = {str(key): int(value) for key, value in raw_counts.items()}
+        except (TypeError, ValueError) as exc:
+            raise CutoverVerificationError(
+                "verification evidence legacy_realm_counts must contain integers"
+            ) from exc
+        if expected_counts != report.legacy_realm_counts:
+            raise CutoverVerificationError(
+                "legacy realm count mismatch: "
+                f"expected {expected_counts}, observed {report.legacy_realm_counts}"
+            )
+
+    @staticmethod
+    async def _source_target_count_mismatches(
+        session: AsyncSession, manifest: IdentityManifest
+    ) -> tuple[str, ...]:
+        """Compare every migrated source row with its account-owned target."""
+        mismatches: list[str] = []
+        for account in manifest.accounts:
+            account_id = account.exchange_account_id
+            for table_name, model in _MONEY_MODELS:
+                source_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.account_id.in_(account.legacy_realms))
+                    )
+                    or 0
+                )
+                target_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.exchange_account_id == account_id)
+                    )
+                    or 0
+                )
+                if source_count != target_count:
+                    mismatches.append(
+                        f"{table_name}:{account_id}:source={source_count},target={target_count}"
+                    )
+
+            source_key_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(APIKey)
+                    .where(APIKey.user_id.in_(account.user_ids))
+                )
+                or 0
+            )
+            target_key_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ExchangeAccountCredential)
+                    .where(
+                        ExchangeAccountCredential.exchange_account_id == account_id,
+                        ExchangeAccountCredential.venue == "bitfinex",
+                    )
+                )
+                or 0
+            )
+            if source_key_count != target_key_count:
+                mismatches.append(
+                    f"api_keys:{account_id}:source={source_key_count},target={target_key_count}"
+                )
+
+            source_configs = list(
+                await session.scalars(
+                    select(UserConfig.config).where(
+                        UserConfig.user_id.in_(account.user_ids)
+                    )
+                )
+            )
+            # The target is deliberately one draft per account.  Multiple
+            # legacy users may carry the exact same preference; preflight
+            # already rejects divergent configs, so compare presence rather
+            # than raw source row count after deterministic deduplication.
+            source_config_count = 1 if source_configs else 0
+            if len(
+                {
+                    json.dumps(config, sort_keys=True, separators=(",", ":"))
+                    for config in source_configs
+                }
+            ) > 1:
+                mismatches.append(
+                    f"user_configs:{account_id}:source configs diverge"
+                )
+            target_config_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(AccountConfigDraft)
+                    .where(AccountConfigDraft.exchange_account_id == account_id)
+                )
+                or 0
+            )
+            if source_config_count != target_config_count:
+                mismatches.append(
+                    f"user_configs:{account_id}:source={source_config_count},target={target_config_count}"
+                )
+        return tuple(sorted(mismatches))
+
+    @staticmethod
+    async def _orphan_exchange_account_ids(session: AsyncSession) -> tuple[str, ...]:
+        known_ids = set(await session.scalars(select(ExchangeAccount.id)))
+        orphans: set[str] = set()
+        for table_name, model in _MONEY_MODELS:
+            values = await session.scalars(
+                select(model.exchange_account_id)
+                .where(model.exchange_account_id.is_not(None))
+                .distinct()
+            )
+            for value in values:
+                if value not in known_ids:
+                    orphans.add(f"{table_name}:{value}")
+        for table_name, model in (("api_keys", APIKey), ("user_configs", UserConfig)):
+            values = await session.scalars(
+                select(model.exchange_account_id)
+                .where(model.exchange_account_id.is_not(None))
+                .distinct()
+            )
+            for value in values:
+                if value not in known_ids:
+                    orphans.add(f"{table_name}:{value}")
+        return tuple(sorted(orphans))
+
+    @staticmethod
+    async def _identity_key_collisions(
+        session: AsyncSession,
+    ) -> dict[str, tuple[str, ...]]:
+        collisions: dict[str, tuple[str, ...]] = {}
+        for name, model, column_names, non_null_columns in _IDENTITY_KEY_GROUPS:
+            columns = tuple(getattr(model, column_name) for column_name in column_names)
+            predicates = [model.exchange_account_id.is_not(None)]
+            predicates.extend(
+                getattr(model, column_name).is_not(None)
+                for column_name in non_null_columns
+            )
+            result = await session.execute(
+                select(*columns, func.count().label("duplicate_count"))
+                .where(*predicates)
+                .group_by(*columns)
+                .having(func.count() > 1)
+                .order_by(*columns)
+                .limit(20)
+            )
+            samples: list[str] = []
+            for row in result:
+                values = [
+                    f"{column_name}={row[index]!s}"
+                    for index, column_name in enumerate(column_names)
+                ]
+                values.append(f"count={row[len(column_names)]}")
+                samples.append(",".join(values))
+            if samples:
+                collisions[name] = tuple(samples)
+        return collisions
+
+    @staticmethod
+    def _envelope_from_row(row: Any) -> Envelope:
+        return Envelope(
+            secret_ciphertext=row.secret_ciphertext,
+            secret_nonce=row.secret_nonce,
+            wrapped_dek=row.wrapped_dek,
+            dek_nonce=row.dek_nonce,
+            key_version=row.key_version,
+        )
+
+    def _decrypt_account_credential(self, credential: ExchangeAccountCredential) -> str:
+        try:
+            return decrypt_secret_with_aad(
+                self._envelope_from_row(credential),
                 aad=account_id_canonical(credential.exchange_account_id),
                 kek=self._kek,
             )
-        return report
+        except InvalidTag as exc:
+            raise CutoverVerificationError(
+                f"credential {credential.id} cannot decrypt with account UUID AAD"
+            ) from exc
+
+    async def _verify_credential_permissions(
+        self,
+        session: AsyncSession,
+        credentials: Sequence[ExchangeAccountCredential],
+        client: _PermissionsClient,
+    ) -> None:
+        del session  # retained in the signature for parity with vault verification
+        for credential in credentials:
+            if credential.lifecycle_status == "retired":
+                continue
+            secret = self._decrypt_account_credential(credential)
+            context = AccountContext(
+                account_id=account_id_canonical(credential.exchange_account_id),
+                credentials=Credentials(api_key=credential.api_key, api_secret=secret),
+                allocation_cap_usdt=Decimal("0"),
+            )
+            try:
+                permissions = await client.get_key_permissions(ctx=context)
+            except BitfinexAPIError as exc:
+                raise CutoverVerificationError(
+                    f"credential permission verification failed for {credential.id}"
+                ) from exc
+            if not permissions.can("funding", write=True):
+                raise CutoverVerificationError(
+                    f"credential {credential.id} lacks funding write permission"
+                )
+            offending = sorted(
+                scope
+                for scope, (_read, write) in permissions.scopes.items()
+                if write and scope not in _ALLOWED_WRITE_SCOPES
+            )
+            if offending:
+                raise CutoverVerificationError(
+                    f"credential {credential.id} has unsafe write scopes: "
+                    + ",".join(offending)
+                )
 
     async def _preflight(
         self, session: AsyncSession, manifest: IdentityManifest
@@ -352,10 +748,29 @@ class IdentityCutover:
         for table_name, model in user_models:
             values = await session.scalars(select(model.user_id).distinct())
             for user_id in values:
-                if user_id not in manifest.user_to_account:
+                account_ids = manifest.user_to_accounts.get(user_id, ())
+                if not account_ids:
                     unmapped.add(f"{table_name}:user:{user_id}")
+                elif len(account_ids) > 1:
+                    unmapped.add(
+                        f"{table_name}:user:{user_id}:ambiguous-accounts"
+                    )
 
         duplicate_credentials = await self._duplicate_credential_accounts(session, manifest)
+        config_conflicts = await self._config_conflicts(session, manifest)
+        manifest_sha_conflicts = await self._manifest_sha_conflicts(session, manifest)
+        invalid_active_credentials = tuple(sorted(
+            str(row.id)
+            for row in await session.scalars(
+                select(ExchangeAccountCredential).where(
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    (
+                        ExchangeAccountCredential.verified_at.is_(None)
+                        | ExchangeAccountCredential.last_verify_error.is_not(None)
+                    ),
+                )
+            )
+        ))
         zero_row_legacy_tables = {
             table_name: bool(
                 (await session.scalar(select(func.count()).select_from(model))) == 0
@@ -369,6 +784,15 @@ class IdentityCutover:
             {
                 "event_seq": row.event_seq,
                 "account_id": row.account_id,
+                # Include the resolved UUID in the evidence even before the
+                # backfill.  This makes the preflight hash identity-aware and
+                # lets verify prove that the owner did not change in transit.
+                "exchange_account_id": str(
+                    row.exchange_account_id
+                    or realm_to_account.get(row.account_id)
+                )
+                if (row.exchange_account_id or realm_to_account.get(row.account_id))
+                else None,
                 "deployment_environment": row.deployment_environment,
                 "event_type": row.event_type,
                 "cid": row.cid,
@@ -387,17 +811,76 @@ class IdentityCutover:
             legacy_realm_counts=dict(legacy_realm_counts),
             unmapped_rows=tuple(sorted(unmapped)),
             duplicate_active_credentials=tuple(sorted(duplicate_credentials)),
+            invalid_active_credentials=invalid_active_credentials,
+            config_conflicts=config_conflicts,
+            manifest_sha_conflicts=manifest_sha_conflicts,
             zero_row_legacy_tables=zero_row_legacy_tables,
             event_head=events[-1].event_seq if events else None,
             event_hash=hashlib.sha256(encoded_events).hexdigest(),
         )
 
     @staticmethod
+    async def _config_conflicts(
+        session: AsyncSession, manifest: IdentityManifest
+    ) -> tuple[str, ...]:
+        grouped: defaultdict[UUID, list[tuple[str, str]]] = defaultdict(list)
+        rows = await session.scalars(
+            select(UserConfig).where(UserConfig.exchange_account_id.is_(None))
+        )
+        for row in rows:
+            account_id = manifest.user_to_account.get(row.user_id)
+            if account_id is not None:
+                encoded = json.dumps(row.config, sort_keys=True, separators=(",", ":"))
+                grouped[account_id].append((row.user_id, encoded))
+        # A partially completed cutover may already have a target draft.  It
+        # is safe to reuse it only when every legacy source config agrees with
+        # it; otherwise refusing is safer than silently choosing a winner.
+        for account_id in grouped:
+            target = await session.scalar(
+                select(AccountConfigDraft).where(
+                    AccountConfigDraft.exchange_account_id == account_id
+                )
+            )
+            if target is not None:
+                grouped[account_id].append(
+                    ("<account-config-draft>", json.dumps(target.config, sort_keys=True, separators=(",", ":")))
+                )
+        conflicts: list[str] = []
+        for account_id, values in grouped.items():
+            distinct_configs = {encoded for _user_id, encoded in values}
+            if len(distinct_configs) > 1:
+                users = ",".join(sorted(user_id for user_id, _encoded in values))
+                conflicts.append(f"{account_id}:users={users}")
+        return tuple(sorted(conflicts))
+
+    @staticmethod
+    async def _manifest_sha_conflicts(
+        session: AsyncSession, manifest: IdentityManifest
+    ) -> tuple[str, ...]:
+        conflicts: list[str] = []
+        for realm, account_id in sorted(manifest.realm_to_account.items()):
+            mapping = await session.get(LegacyAccountRealmMap, realm)
+            if mapping is None:
+                continue
+            if mapping.exchange_account_id != account_id:
+                conflicts.append(f"{realm}:account-remapped")
+            elif mapping.manifest_sha256 != manifest.sha256:
+                conflicts.append(f"{realm}:manifest-sha-mismatch")
+        return tuple(conflicts)
+
+    @staticmethod
     async def _duplicate_credential_accounts(
         session: AsyncSession, manifest: IdentityManifest
     ) -> set[str]:
         counts: defaultdict[UUID, int] = defaultdict(int)
-        rows = await session.scalars(select(APIKey).where(APIKey.exchange_account_id.is_(None)))
+        rows = await session.scalars(
+            select(APIKey).where(
+                APIKey.exchange_account_id.is_(None),
+                APIKey.exchange_status == "verified",
+                APIKey.verified_at.is_not(None),
+                APIKey.last_verify_error.is_(None),
+            )
+        )
         for row in rows:
             account_id = manifest.user_to_account.get(row.user_id)
             if account_id is not None:
@@ -421,6 +904,19 @@ class IdentityCutover:
             raise CutoverManifestError(
                 "duplicate active credentials for accounts: "
                 + ", ".join(report.duplicate_active_credentials)
+            )
+        if report.invalid_active_credentials:
+            raise CutoverManifestError(
+                "active credentials lack successful verification: "
+                + ", ".join(report.invalid_active_credentials)
+            )
+        if report.config_conflicts:
+            raise CutoverManifestError(
+                "config conflicts for account: " + ", ".join(report.config_conflicts)
+            )
+        if report.manifest_sha_conflicts:
+            raise CutoverManifestError(
+                "manifest SHA mismatch: " + ", ".join(report.manifest_sha_conflicts)
             )
         nonzero_legacy_tables = sorted(
             table_name
@@ -483,6 +979,8 @@ class IdentityCutover:
                     )
                 elif mapping.exchange_account_id != account_mapping.exchange_account_id:
                     raise CutoverManifestError(f"legacy realm remapped: {realm}")
+                elif mapping.manifest_sha256 != manifest.sha256:
+                    raise CutoverManifestError(f"manifest SHA mismatch: {realm}")
         await session.flush()
 
     async def _migrate_credentials(
@@ -514,6 +1012,12 @@ class IdentityCutover:
 
             credential_id = uuid5(account_id, f"legacy-api-key:{row.id}")
             target = await session.get(ExchangeAccountCredential, credential_id)
+            source_verified = (
+                row.exchange_status == "verified"
+                and row.verified_at is not None
+                and row.last_verify_error is None
+            )
+            target_status = "active" if source_verified else "pending"
             if target is None:
                 target = ExchangeAccountCredential(
                     id=credential_id,
@@ -526,11 +1030,18 @@ class IdentityCutover:
                     wrapped_dek=new_envelope.wrapped_dek,
                     dek_nonce=new_envelope.dek_nonce,
                     key_version=new_envelope.key_version,
-                    lifecycle_status="active",
-                    verified_at=row.verified_at,
+                    lifecycle_status=target_status,
+                    verified_at=row.verified_at if source_verified else None,
                     last_verify_error=row.last_verify_error,
                 )
                 session.add(target)
+            elif target.lifecycle_status == "active" and (
+                target.verified_at is None or target.last_verify_error is not None
+            ):
+                # Repair rows created by an interrupted/older cutover image;
+                # never leave an unverifiable credential executable.
+                target.lifecycle_status = "pending"
+                target.verified_at = None
             migrated += 1
         await session.flush()
         return migrated

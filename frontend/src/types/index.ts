@@ -24,16 +24,31 @@ export interface User {
 
 // ── API Key ──
 
+/**
+ * Account credential lifecycle as returned by the account-scoped API.
+ * `unverified` is retained for legacy rows during the staged contract
+ * migration; new credentials start in `pending` and are fail-closed until a
+ * successful permission check promotes them to `verified`.
+ */
+export type ApiKeyStatus =
+  | "pending"
+  | "verified"
+  | "unverified"
+  | "failed"
+  | "revoked"
+  | "retired";
+
 export interface ApiKey {
   id: string;
   exchangeAccountId: string;
   label: string;
   apiKey: string;
   apiSecret: string; // always "****" (masked by backend)
-  /** Account credential status: verified, unverified, failed, or retired. */
-  status: string;
+  /** Account credential lifecycle/verification status. */
+  status: ApiKeyStatus;
   /** Legacy response field kept only while the contract migration is staged. */
   exchangeStatus?: string;
+  verifiedAt?: string | null;
   lastVerifyError?: string | null; // reason the last verify failed (when exchangeStatus is "failed")
   createdAt: string;
   fundingBalance?: {
@@ -52,8 +67,8 @@ export interface ExchangeAccount {
 }
 
 export interface VerifyResult {
-  status: string; // "verified" | "failed"
-  error?: string;
+  status: ApiKeyStatus;
+  error?: string | null;
   fundingBalance?: {
     currency: string;
     balance: number;

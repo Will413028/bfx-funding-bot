@@ -66,7 +66,7 @@ async def _seed_account(
 
 @pytest.mark.asyncio
 async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "canary")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     await _seed_account(session, role="viewer")
 
     context = await require_account_member(
@@ -80,7 +80,25 @@ async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession,
     assert context.user_id == "operator-1"
     assert context.role == "viewer"
     assert context.can_write is False
-    assert context.deployment_environment == "canary"
+    assert context.deployment_environment == "ci"
+
+
+@pytest.mark.asyncio
+async def test_authorized_context_requires_validated_deployment_environment(
+    session: AsyncSession, monkeypatch
+) -> None:
+    await _seed_account(session)
+    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
+
+    with pytest.raises(HTTPException) as error:
+        await require_account_member(
+            exchange_account_id=_ACCOUNT_ID,
+            user=Principal(user_id="operator-1", email="operator@example.com", role="admin"),
+            session=session,
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "deployment_environment_not_configured"
 
 
 @pytest.mark.asyncio
@@ -270,7 +288,7 @@ def test_owner_can_manage_account_credential_and_config(scoped_app: TestClient) 
     credential = created.json()["data"]
     assert credential["exchangeAccountId"] == str(_ACCOUNT_ID)
     assert credential["apiSecret"] == "****"
-    assert credential["status"] == "unverified"
+    assert credential["status"] == "pending"
 
     listed = scoped_app.get(f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/credentials")
     assert listed.status_code == 200

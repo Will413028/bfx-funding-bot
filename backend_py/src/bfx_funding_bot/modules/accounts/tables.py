@@ -109,7 +109,10 @@ class ExchangeAccountMembership(Base):
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
     )
 
     __table_args__ = (
@@ -152,7 +155,7 @@ class ExchangeAccountCredential(Base):
     dek_nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     key_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     lifecycle_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'active'")
+        Text, nullable=False, server_default=text("'pending'")
     )
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -162,13 +165,21 @@ class ExchangeAccountCredential(Base):
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
     )
 
     __table_args__ = (
         CheckConstraint(
-            "lifecycle_status IN ('active', 'revoked', 'retired')",
+            "lifecycle_status IN ('pending', 'active', 'revoked', 'retired')",
             name="ck_exchange_account_credentials_lifecycle_status",
+        ),
+        CheckConstraint(
+            "lifecycle_status <> 'active' OR "
+            "(verified_at IS NOT NULL AND last_verify_error IS NULL)",
+            name="ck_exchange_account_credentials_active_verified",
         ),
         Index(
             "uq_exchange_account_credentials_active_venue",
@@ -216,7 +227,10 @@ class AccountConfigDraft(Base):
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
     )
 
     __table_args__ = (

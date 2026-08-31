@@ -32,6 +32,7 @@ from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
@@ -497,7 +498,12 @@ class BootRecovery:
     async def _load_local_claims(self, session: AsyncSession) -> list[LocalClaim]:
         rows = (await session.execute(
             select(OfferClaimRow).where(
-                OfferClaimRow.account_id == self._ctx.account_id,
+                account_scope_clause(
+                    session,
+                    account_id=self._ctx.account_id,
+                    exchange_account_column=OfferClaimRow.exchange_account_id,
+                    legacy_account_column=OfferClaimRow.account_id,
+                ),
                 OfferClaimRow.deployment_environment == self._env,
             )
         )).scalars().all()

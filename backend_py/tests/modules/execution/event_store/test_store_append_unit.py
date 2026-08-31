@@ -205,6 +205,66 @@ async def test_conflicting_claim_reference_fails_without_mutating_projection(
     assert row.execution_decision_id == "d-original"
 
 
+async def test_post_cutover_projection_reuses_historical_uuid_owned_claim(
+    sqlite_session: AsyncSession,
+) -> None:
+    """New UUID-scoped writes must find rows whose audit realm is legacy text."""
+    await _create_all(sqlite_session)
+    sqlite_session.add(
+        OfferClaimRow(
+            cid=995,
+            account_id="legacy-realm",
+            exchange_account_id=UUID(_CANONICAL_ACCOUNT),
+            deployment_environment="ci",
+            state=RegistryState.CLAIMED.value,
+            venue_offer_id="v995",
+            symbol="fUST",
+            size_usdt=Decimal("8"),
+            signal_correlation_id=str(_SCID),
+            execution_decision_id="d-995",
+            occurred_at_ms=1000,
+            last_updated_ms=1000,
+            last_event_seq=1,
+        )
+    )
+    await sqlite_session.flush()
+
+    await PostgresEventStore(deployment_environment="ci").append(
+        sqlite_session,
+        ReservationReleased(
+            cid=995,
+            venue_offer_id="v995",
+            size_usdt=Decimal("8"),
+            reason="venue_cancel",
+            signal_correlation_id=_SCID,
+            account_id=_CANONICAL_ACCOUNT,
+            is_simulated=True,
+            venue_seq=2,
+            occurred_at_ms=1100,
+            symbol="fUST",
+            reservation_ref=ReservationRef(
+                execution_decision_id="d-995",
+                cid=995,
+                signal_correlation_id=_SCID,
+                venue_offer_id="v995",
+            ),
+        ),
+    )
+    await sqlite_session.flush()
+
+    rows = (
+        await sqlite_session.execute(
+            select(OfferClaimRow).where(
+                OfferClaimRow.exchange_account_id == UUID(_CANONICAL_ACCOUNT),
+                OfferClaimRow.cid == 995,
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].account_id == "legacy-realm"
+    assert rows[0].state == RegistryState.RELEASED.value
+
+
 async def test_same_venue_offer_id_under_different_cid_fails_without_second_projection(
     sqlite_session: AsyncSession,
 ) -> None:
@@ -424,10 +484,15 @@ async def test_rebuild_decodes_persisted_pre_task4_rows_as_explicit_legacy(
         deployment_environment="prod",
         symbol="fUST",
     )
-    projection = await sqlite_session.get(
-        OfferClaimRow,
-        ("historical-acct", "prod", 880),
-    )
+    projection = (
+        await sqlite_session.execute(
+            select(OfferClaimRow).where(
+                OfferClaimRow.account_id == "historical-acct",
+                OfferClaimRow.deployment_environment == "prod",
+                OfferClaimRow.cid == 880,
+            )
+        )
+    ).scalar_one_or_none()
     assert projection is not None
     assert projection.state == "claimed"
     assert projection.venue_offer_id == "legacy-offer-880"

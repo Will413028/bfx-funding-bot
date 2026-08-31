@@ -6,7 +6,6 @@ no process-global account or legacy realm can select a private API response.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -15,6 +14,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.auth import Principal, require_operator
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
     AccountRetired,
@@ -47,13 +47,13 @@ def _not_found() -> HTTPException:
 
 
 def _deployment_environment() -> str:
-    value = os.environ.get("BFX_DEPLOYMENT_ENV", "prod").strip()
-    if not value:
+    try:
+        return require_deployment_environment()
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="deployment_environment_not_configured",
-        )
-    return value
+        ) from exc
 
 
 async def require_account_member(

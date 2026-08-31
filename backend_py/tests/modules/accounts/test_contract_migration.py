@@ -3,6 +3,16 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    OfferClaimRow,
+    PositionStateRow,
+)
+from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow
+from bfx_funding_bot.modules.live_validation.tables import (
+    AttributionWeeklyRow,
+    ConfigRegimeRow,
+)
+
 _MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "alembic"
@@ -48,10 +58,59 @@ def test_preflight_error_message_identifies_every_blocking_category() -> None:
         unmapped_realms={"event_log:legacy"},
         orphan_rows={"diagnostics": 1},
         nonzero_legacy_tables={"users": 3},
+        identity_collisions={
+            "offer_claims.primary_key": ("account/env/cid=one",),
+        },
     )
 
     assert "event_log=2" in message
     assert "event_log:legacy" in message
     assert "diagnostics=1" in message
     assert "users=3" in message
+    assert "offer_claims.primary_key" in message
+    assert "account/env/cid=one" in message
     assert "contract migration blocked" in message
+
+
+def test_contract_declares_uuid_rekey_collision_groups() -> None:
+    migration = _load_migration()
+
+    assert migration._IDENTITY_KEY_GROUPS["offer_claims.primary_key"] == (
+        "offer_claims",
+        ("exchange_account_id", "deployment_environment", "cid"),
+        None,
+    )
+    assert migration._IDENTITY_KEY_GROUPS["config_regime.primary_key"] == (
+        "config_regime",
+        ("deployment_environment", "exchange_account_id", "recorded_at_ms"),
+        None,
+    )
+
+
+def test_runtime_orm_primary_keys_match_post_cutover_uuid_contract() -> None:
+    assert {column.name for column in OfferClaimRow.__table__.primary_key} == {
+        "exchange_account_id",
+        "deployment_environment",
+        "cid",
+    }
+    assert {column.name for column in PositionStateRow.__table__.primary_key} == {
+        "exchange_account_id",
+        "deployment_environment",
+        "symbol",
+    }
+    assert {column.name for column in NavPeakRow.__table__.primary_key} == {
+        "exchange_account_id",
+        "deployment_environment",
+        "symbol",
+    }
+    assert {column.name for column in AttributionWeeklyRow.__table__.primary_key} == {
+        "deployment_environment",
+        "exchange_account_id",
+        "cell",
+        "week_start_ms",
+    }
+    assert {column.name for column in ConfigRegimeRow.__table__.primary_key} == {
+        "deployment_environment",
+        "exchange_account_id",
+        "recorded_at_ms",
+    }

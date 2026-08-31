@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountRetired,
     account_id_canonical,
     account_id_uuid_or_none,
+    account_scope_clause,
     ensure_account_active,
     upsert_account_config_draft,
     validate_membership_role,
@@ -59,6 +60,15 @@ def _credential(account_id: UUID, *, status: str = "active") -> ExchangeAccountC
     )
 
 
+def test_credential_lifecycle_has_pending_state() -> None:
+    from bfx_funding_bot.modules.accounts.exchange_accounts import (
+        CredentialLifecycleStatus,
+    )
+
+    assert CredentialLifecycleStatus is not None
+    assert _credential(uuid4(), status="pending").lifecycle_status == "pending"
+
+
 def test_account_id_is_assigned_once_and_cannot_be_changed(session: AsyncSession) -> None:
     account = _account()
     assert isinstance(account.id, UUID)
@@ -99,12 +109,36 @@ def test_runtime_identity_projection_parses_only_canonical_uuid_realms() -> None
     assert account_id_uuid_or_none("legacy-default") is None
 
 
+def test_production_account_scope_rejects_legacy_realm() -> None:
+    class _PostgresSession:
+        bind = type("_Bind", (), {"dialect": type("_Dialect", (), {"name": "postgresql"})()})()
+
+    with pytest.raises(ValueError, match="canonical ExchangeAccount UUID"):
+        account_scope_clause(
+            _PostgresSession(),  # type: ignore[arg-type]
+            account_id="legacy-default",
+            exchange_account_column=object(),
+            legacy_account_column=object(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_only_one_active_credential_per_account_and_venue(session: AsyncSession) -> None:
     account = _account()
     session.add(account)
     await session.flush()
     session.add_all([_credential(account.id), _credential(account.id)])
+
+    with pytest.raises(IntegrityError):
+        await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_active_credential_requires_successful_verification(session: AsyncSession) -> None:
+    account = _account()
+    session.add(account)
+    await session.flush()
+    session.add(_credential(account.id, status="active"))
 
     with pytest.raises(IntegrityError):
         await session.flush()
