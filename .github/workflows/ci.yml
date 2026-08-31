@@ -113,4 +113,6 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-groups
-      - run: uv run pytest -m integration -q --maxfail=3
+      # Keep third-party live smoke tests out of deterministic CI; run them
+      # explicitly with `uv run pytest -m 'integration and live'`.
+      - run: uv run pytest -m "integration and not live" -q --maxfail=3

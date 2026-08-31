@@ -111,7 +111,7 @@ async def test_claimed_offer_plus_credits_no_double_count(pg_session_factory):
     ($650 reserved) which would happen if a recovery claim hit the ledger via
     bus delta AND PositionReconciled both set reserved.
     """
-    acct = f"it-{uuid.uuid4().hex[:8]}"
+    acct = str(uuid.uuid4())
     ctx = AccountContext(
         account_id=acct,
         credentials=Credentials(api_key="k", api_secret="s"),
