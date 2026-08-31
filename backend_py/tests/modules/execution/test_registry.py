@@ -38,13 +38,14 @@ def test_paper_executor_with_fill_tracker_enabled_raises(
         )
 
 
-def test_bitfinex_live_without_credentials_raises(
+def test_bitfinex_live_builder_requires_runtime_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    # No BFX_API_KEY / BFX_API_SECRET set → should raise
-    with pytest.raises(ExecutorConfigError, match="BFX_API_KEY"):
+    # Credentials are loaded by the account bootstrap, not this factory. The
+    # factory still requires its runtime HTTP/event dependencies.
+    with pytest.raises(ExecutorConfigError, match=r"http \+ bus"):
         build_executor(
             event_sink=_EventCapture(), phase=Phase.PAPER,
             strategy=StrategyName.MEAN_REVERSION,

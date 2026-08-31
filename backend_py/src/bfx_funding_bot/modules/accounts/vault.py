@@ -54,6 +54,10 @@ class VaultKeyMismatchError(Exception):
     """
 
 
+class AccountCredentialNotConfiguredError(Exception):
+    """An account has no unrevoked Bitfinex credential available for boot."""
+
+
 # Scopes allowed to have write=True for a VERIFIED key. Anything else with
 # write=True (withdraw, orders, a renamed dangerous scope, ...) fails closed.
 _ALLOWED_WRITE_SCOPES = {"funding"}
@@ -93,6 +97,58 @@ async def list_account_credentials(
         )
     )
     return list(result)
+
+
+async def load_account_credentials(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    kek: bytes,
+) -> Credentials:
+    """Load and decrypt the sole active Bitfinex credential for an account.
+
+    The daemon uses this boundary at boot. It deliberately returns only the
+    runtime ``Credentials`` value, never an ORM row or a legacy user-owned key,
+    and fails closed when the account is not provisioned exactly once.
+    """
+    await get_exchange_account(
+        session, exchange_account_id=exchange_account_id, for_command=True
+    )
+    rows = list(
+        await session.scalars(
+            select(ExchangeAccountCredential)
+            .where(
+                ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+                ExchangeAccountCredential.venue == "bitfinex",
+                ExchangeAccountCredential.lifecycle_status == "active",
+            )
+            .limit(2)
+        )
+    )
+    if not rows:
+        raise AccountCredentialNotConfiguredError(
+            f"account {exchange_account_id} has no active Bitfinex credential"
+        )
+    if len(rows) != 1:
+        raise AccountCredentialNotConfiguredError(
+            f"account {exchange_account_id} has multiple active Bitfinex credentials"
+        )
+    row = rows[0]
+    try:
+        secret = decrypt_secret_with_aad(
+            Envelope(
+                secret_ciphertext=row.secret_ciphertext,
+                secret_nonce=row.secret_nonce,
+                wrapped_dek=row.wrapped_dek,
+                dek_nonce=row.dek_nonce,
+                key_version=row.key_version,
+            ),
+            aad=account_id_canonical(exchange_account_id),
+            kek=kek,
+        )
+    except InvalidTag as exc:
+        raise VaultKeyMismatchError(str(row.id)) from exc
+    return Credentials(api_key=row.api_key, api_secret=secret)
 
 
 async def create_account_credential(
@@ -335,11 +391,14 @@ async def verify_api_key(
 
 
 __all__ = [
+    "AccountCredentialNotConfiguredError",
     "Envelope",
     "KeyAlreadyExistsError",
     "VaultKeyMismatchError",
     "create_api_key",
     "delete_api_key",
+    "list_account_credentials",
     "list_api_keys",
+    "load_account_credentials",
     "verify_api_key",
 ]

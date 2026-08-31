@@ -33,6 +33,10 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
 )
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
 
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
@@ -61,7 +65,7 @@ def _find_guard(guards: list[GuardRule], guard_cls: type) -> object:
 
 def _reconciled(available: str, ts: int) -> PositionReconciled:
     return PositionReconciled(
-        account_id="default",
+        account_id="550e8400-e29b-41d4-a716-446655440000",
         reserved_usdt=Decimal("0"),
         realized_usdt=Decimal("0"),
         available_usdt=Decimal(available),
@@ -99,7 +103,7 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     db_path = tmp_path / "pnl_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -111,6 +115,7 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -132,7 +137,9 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     assert isinstance(loss_guard.source, ReconcileNavTracker)  # type: ignore[attr-defined]
     assert dd_guard.source is loss_guard.source  # type: ignore[attr-defined]
 
-    ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
+    ctx = AccountContext(
+        "550e8400-e29b-41d4-a716-446655440000", Credentials("k", "s"), Decimal("500")
+    )
     # Before any reconcile: permissive (no NAV history).
     assert (await loss_guard.evaluate(_post(), ctx)).allowed is True
     assert (await dd_guard.evaluate(_post(), ctx)).allowed is True

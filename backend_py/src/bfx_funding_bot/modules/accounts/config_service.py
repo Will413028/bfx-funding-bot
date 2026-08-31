@@ -77,6 +77,22 @@ async def get_account_config_draft(
     return result
 
 
+async def load_account_config_draft(
+    session: AsyncSession, *, exchange_account_id: UUID
+) -> AccountConfigDraft | None:
+    """Load the account-owned draft for daemon bootstrap without user scope.
+
+    A draft is optional because it is operator-facing desired state; the
+    daemon must not silently treat an absent draft as applied configuration.
+    """
+    result: AccountConfigDraft | None = await session.scalar(
+        select(AccountConfigDraft).where(
+            AccountConfigDraft.exchange_account_id == exchange_account_id
+        )
+    )
+    return result
+
+
 async def upsert_account_config_draft_for_user(
     session: AsyncSession,
     *,
@@ -120,6 +136,7 @@ __all__ = [
     "delete_user_config",
     "get_account_config_draft",
     "get_user_config",
+    "load_account_config_draft",
     "upsert_account_config_draft_for_user",
     "upsert_user_config",
 ]

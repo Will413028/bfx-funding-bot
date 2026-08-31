@@ -3,9 +3,10 @@
 All concrete adapters (EchoPaperExecutor, BitfinexLiveExecutor 4.4,
 RestPollingFillTracker, hard/calibrated guards) conform to these.
 
-AccountContext carries credentials + per-account allocation cap; 4.2 always
-account_id='default' (single hardcoded account from env). Phase 5+ SaaS
-extends to per-tenant context loaded from vault.
+AccountContext carries credentials + per-account allocation cap.  The daemon
+constructs it only from the canonical ExchangeAccount UUID (serialized as a
+lowercase hyphenated string for existing event contracts); there is no default
+or process-global realm fallback.
 """
 from __future__ import annotations
 
@@ -38,16 +39,14 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class Credentials:
-    """4.2: loaded from env BFX_API_KEY / BFX_API_SECRET.
-    Phase 5 SaaS: decrypted from vault per-account.
-    """
+    """Runtime Bitfinex credential decrypted from the account vault at boot."""
     api_key: str
     api_secret: str
 
 
 @dataclass(frozen=True, slots=True)
 class AccountContext:
-    """Per-account context. 4.2: hardcoded account_id='default'."""
+    """Per-account context bound to one canonical ExchangeAccount identity."""
     account_id: str
     credentials: Credentials
     allocation_cap_usdt: Decimal

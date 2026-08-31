@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from sqlalchemy import select
@@ -31,10 +31,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
     EXIT_CODE_WRITER_LOCKED,
+    ConfigurationError,
     ExecutorAuthError,
     WriterLockUnacquired,
 )
@@ -56,6 +58,18 @@ from bfx_funding_bot.external.bitfinex.ws import (
     compute_backoff_secs,
 )
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.accounts.config_service import load_account_config_draft
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountNotFound,
+    AccountRetired,
+    account_id_canonical,
+    get_exchange_account,
+)
+from bfx_funding_bot.modules.accounts.vault import (
+    AccountCredentialNotConfiguredError,
+    VaultKeyMismatchError,
+    load_account_credentials,
+)
 from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -207,16 +221,129 @@ class _DaemonAuditContextFactory:
 
 
 def _require_env(name: str) -> str:
-    """Return non-empty env var or raise ValueError with the var name.
+    """Return a required env value, canonicalizing the account UUID.
 
     Matches the pattern in `marketfeed/config.py:load_config` so missing env
-    surfaces as `config_fatal <name> env var required — exit 1` via main()'s
-    ValueError handler, instead of a bare KeyError traceback.
+    surfaces as a stable ``ConfigurationError`` via ``main()`` instead of a
+    bare ``KeyError`` traceback.  The account identity is the one exception to
+    the string contract: it is parsed and returned in canonical UUID form.
     """
     val = os.environ.get(name)
-    if not val:
-        raise ValueError(f"{name} env var required")
-    return val
+    if not val or not val.strip():
+        raise ConfigurationError(f"{name} env var required")
+    value = val.strip()
+    if name == "BFX_EXCHANGE_ACCOUNT_ID":
+        try:
+            return account_id_canonical(value)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"{name} must be a valid UUID"
+            ) from exc
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBootstrap:
+    """Immutable daemon account identity and boot-time runtime material."""
+
+    exchange_account_id: UUID
+    credentials: Credentials
+    deployment_environment: str
+    allocation_cap_usdt: Decimal
+    config_draft: dict[str, object] | None
+    config_revision: int | None
+
+    @property
+    def account_id(self) -> str:
+        """Canonical string used by the pre-contract event APIs."""
+        return account_id_canonical(self.exchange_account_id)
+
+    def to_context(self) -> AccountContext:
+        return AccountContext(
+            account_id=self.account_id,
+            credentials=self.credentials,
+            allocation_cap_usdt=self.allocation_cap_usdt,
+        )
+
+    @staticmethod
+    def reject_legacy_realm(*, phase: Phase) -> None:
+        """Reject the old process-global realm in live/canary boot modes."""
+        legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
+        executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
+        if legacy and (phase is Phase.CANARY or executor == "bitfinex_live"):
+            raise ConfigurationError(
+                "BFX_ACCOUNT_ID is no longer supported; use "
+                "BFX_EXCHANGE_ACCOUNT_ID"
+            )
+
+
+async def load_account_bootstrap(
+    session: AsyncSession,
+    *,
+    deployment_environment: str,
+    allocation_cap_usdt: Decimal,
+    phase: Phase | None = None,
+) -> AccountBootstrap:
+    """Resolve one explicit account and its vault/config material at boot.
+
+    This function is deliberately the sole UUID/env parsing seam.  All daemon
+    services receive the resulting canonical account string from the returned
+    object; no component can silently fall back to a process-global realm.
+    """
+    canonical_id = _require_env("BFX_EXCHANGE_ACCOUNT_ID")
+    exchange_account_id = UUID(canonical_id)
+    if phase is not None:
+        AccountBootstrap.reject_legacy_realm(phase=phase)
+
+    try:
+        account = await get_exchange_account(
+            session,
+            exchange_account_id=exchange_account_id,
+            for_command=True,
+        )
+    except AccountNotFound as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} is not provisioned"
+        ) from exc
+    except AccountRetired as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} must be active for daemon boot"
+        ) from exc
+    if account.lifecycle_status != "active":
+        raise ConfigurationError(
+            f"exchange account {canonical_id} must be active for daemon boot"
+        )
+    try:
+        kek = load_kek()
+        credentials = await load_account_credentials(
+            session, exchange_account_id=exchange_account_id, kek=kek
+        )
+    except AccountCredentialNotConfiguredError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    except VaultKeyMismatchError as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} credential vault cannot be opened"
+        ) from exc
+    except VaultNotConfiguredError as exc:
+        raise ConfigurationError("BFX_VAULT_KEK is required for daemon boot") from exc
+    except Exception as exc:
+        # VaultNotConfiguredError and other crypto/config errors must not leak
+        # an implementation-specific traceback through the boot contract.
+        if isinstance(exc, (ValueError,)):
+            raise ConfigurationError(str(exc)) from exc
+        raise
+
+    draft = await load_account_config_draft(
+        session, exchange_account_id=exchange_account_id
+    )
+    return AccountBootstrap(
+        exchange_account_id=exchange_account_id,
+        credentials=credentials,
+        deployment_environment=deployment_environment,
+        allocation_cap_usdt=allocation_cap_usdt,
+        config_draft=dict(draft.config) if draft is not None else None,
+        config_revision=draft.revision if draft is not None else None,
+    )
 
 
 @dataclass
@@ -236,6 +363,7 @@ class Daemon:
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
     # Phase 4.2 Task 20: execution + safety wiring.
+    account_bootstrap: AccountBootstrap
     executor: ExecutorPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
@@ -803,6 +931,21 @@ async def build_daemon(
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    try:
+        allocation_cap = Decimal(
+            os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
+        )
+    except Exception as exc:
+        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
+    if not allocation_cap.is_finite() or allocation_cap < 0:
+        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
+    async with session_factory() as bootstrap_session:
+        account_bootstrap = await load_account_bootstrap(
+            bootstrap_session,
+            deployment_environment=config.deployment_environment.value,
+            allocation_cap_usdt=allocation_cap,
+            phase=config.phase,
+        )
 
     probe = HealthProbe()
     # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
@@ -897,22 +1040,13 @@ async def build_daemon(
                     lookback=lookback,
                 )
 
-    # ── Phase 4.2 Task 20 wiring ─────────────────────────────────────────
-    # AccountContext: 4.2 single hardcoded account from env. Phase 5+ SaaS
-    # extends to per-tenant context loaded from vault.
-    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
-    credentials = Credentials(
-        api_key=_require_env("BFX_API_KEY"),
-        api_secret=_require_env("BFX_API_SECRET"),
-    )
-    allocation_cap = Decimal(
-        os.environ.get("BFX_ALLOCATION_CAP_USDT", "500"),
-    )
-    account_ctx = AccountContext(
-        account_id=account_id,
-        credentials=credentials,
-        allocation_cap_usdt=allocation_cap,
-    )
+    # ── Halt 1 account bootstrap ────────────────────────────────────────
+    # The immutable UUID, vault credential and optional config draft were
+    # loaded before any venue client or worker was constructed. Every service
+    # below receives this one canonical identity; no env realm is read here.
+    account_id = account_bootstrap.account_id
+    credentials = account_bootstrap.credentials
+    account_ctx = account_bootstrap.to_context()
     # ONE monotonic µs nonce shared by every auth client on this single API key.
     # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
     # independent time-based providers get "nonce: small" rejections — that is
@@ -1556,12 +1690,8 @@ async def build_daemon(
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     if spec.ws_client_enabled:
-        creds = Credentials(
-            api_key=_require_env("BFX_API_KEY"),
-            api_secret=_require_env("BFX_API_SECRET"),
-        )
         auth_ws = BitfinexAuthWSClient(
-            creds=creds,
+            creds=credentials,
             nonce_provider=bfx_nonce,
             on_resync_needed=(
                 periodic_reconcile.request_resync
@@ -1603,6 +1733,7 @@ async def build_daemon(
 
     return Daemon(
         config=config,
+        account_bootstrap=account_bootstrap,
         registry=registry,
         candle_q=candle_q,
         diagnostics=diagnostics,
