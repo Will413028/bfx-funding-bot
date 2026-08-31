@@ -1,4 +1,8 @@
 import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -6,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from bfx_funding_bot.core import auth
 from bfx_funding_bot.core.auth import Principal
-from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.settings import AuthSettings
 
 
 def _credentials(token: str) -> HTTPAuthorizationCredentials:
@@ -78,4 +82,33 @@ def test_production_phase_rejects_non_admin_operator_role(monkeypatch, phase):
     monkeypatch.setenv("BFX_OPERATOR_ROLE", "user")
 
     with pytest.raises(ValueError, match="BFX_OPERATOR_ROLE must be 'admin'"):
-        Settings()
+        AuthSettings()
+
+
+def test_auth_settings_does_not_require_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
+
+    settings = AuthSettings()
+
+    assert settings.operator_user_id == "operator-1"
+    assert settings.operator_role == "admin"
+
+
+def test_main_import_is_db_independent() -> None:
+    environment = os.environ.copy()
+    environment.pop("DATABASE_URL", None)
+    environment.pop("BFX_OPERATOR_USER_ID", None)
+    environment.pop("BETTER_AUTH_JWKS_URL", None)
+    backend_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", "from bfx_funding_bot.main import app; print(app.title)"],
+        cwd=backend_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "bfx-funding-bot"

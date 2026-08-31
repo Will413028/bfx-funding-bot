@@ -13,9 +13,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
-from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.settings import AuthSettings
 
-_settings = Settings()
+_settings = AuthSettings()
 _ISSUER = _settings.better_auth_issuer
 _AUDIENCE = _settings.jwt_audience
 # Module-level client: caches JWKS keys by kid, refetches on unknown kid.
@@ -62,7 +62,7 @@ async def require_operator(
 ) -> Principal:
     """FastAPI dependency that admits only the configured admin operator."""
     principal = _verify(creds.credentials)
-    settings = Settings()
+    settings = AuthSettings()
     if not settings.operator_user_id:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="auth_not_configured")
     if principal.user_id != settings.operator_user_id:

@@ -66,6 +66,8 @@ def _deploy_root(tmp_path: Path) -> Path:
         "DATABASE_URL=postgresql://safe-fake\n"
         "BETTER_AUTH_JWKS_URL=https://example.invalid/jwks\n"
         "BFX_VAULT_KEK=safe-fake\n"
+        "BFX_OPERATOR_USER_ID=operator-1\n"
+        "BFX_OPERATOR_ROLE=admin\n"
     )
     (home / "frontend.env").write_text(
         "NEXT_PUBLIC_APP_URL=https://example.invalid\n"
@@ -76,6 +78,7 @@ def _deploy_root(tmp_path: Path) -> Path:
         "DATABASE_URL=postgresql://safe-fake\n"
         "REDIS_URL=redis://safe-fake\n"
         "PASSKEY_RP_ID=example.invalid\n"
+        "BFX_OPERATOR_USER_ID=operator-1\n"
     )
 
     fake_bin = tmp_path / "fake-bin"
@@ -260,3 +263,48 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
     assert runtime["BFX_CELLS_YAML"] == "/app/configs/cells.canary.yaml"
     assert runtime["BFX_SAFETY_CONFIG"] == "/app/configs/safety.canary.yaml"
     assert len((root / "fake-docker.log").read_text().splitlines()) == 3
+
+
+@pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])
+def test_deploy_script_rejects_missing_backend_operator_auth_before_docker(
+    tmp_path: Path, field: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    webapi = root.parent / "home/bfx/webapi.env"
+    lines = [line for line in webapi.read_text().splitlines() if not line.startswith(field + "=")]
+    webapi.write_text("\n".join(lines) + "\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_non_admin_backend_operator_role_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    webapi = root.parent / "home/bfx/webapi.env"
+    webapi.write_text(webapi.read_text().replace("BFX_OPERATOR_ROLE=admin", "BFX_OPERATOR_ROLE=user"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_ROLE" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_frontend_backend_operator_id_mismatch_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    frontend.write_text(frontend.read_text().replace("BFX_OPERATOR_USER_ID=operator-1", "BFX_OPERATOR_USER_ID=operator-2"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_USER_ID" in result.stdout
+    assert "match" in result.stdout
+    assert not (root / "fake-docker.log").exists()
