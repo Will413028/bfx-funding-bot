@@ -125,8 +125,12 @@ describe("self-service signup containment", () => {
     expect(existsSync(registerPage)).toBe(false);
     expect(existsSync(registerForm)).toBe(false);
 
-    const surfaces = sourceFiles(join(frontendRoot, "src"));
+    const surfaces = [
+      ...sourceFiles(join(frontendRoot, "src")),
+      join(frontendRoot, "middleware.ts"),
+    ];
     expect(surfaces).not.toContain(fileURLToPath(import.meta.url));
+    expect(surfaces).toContain(join(frontendRoot, "middleware.ts"));
 
     for (const path of surfaces) {
       const source = readFileSync(path, "utf8");
