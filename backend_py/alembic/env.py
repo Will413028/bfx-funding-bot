@@ -16,6 +16,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 
 # Side-effect imports: register tables with Base.metadata
+import bfx_funding_bot.modules.accounts.exchange_accounts
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.accounts.user_profile
 import bfx_funding_bot.modules.candles.tables
