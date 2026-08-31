@@ -13,11 +13,28 @@ from cryptography.exceptions import InvalidTag
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.crypto import Envelope, decrypt_secret, encrypt_secret
+from bfx_funding_bot.core.crypto import (
+    Envelope,
+    decrypt_secret,
+    decrypt_secret_with_aad,
+    encrypt_secret,
+    encrypt_secret_with_aad,
+)
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountRetired,
+    MembershipDenied,
+    account_id_canonical,
+    create_exchange_account_credential,
+    get_exchange_account,
+)
 from bfx_funding_bot.modules.accounts.provisioning import ensure_user_profile
-from bfx_funding_bot.modules.accounts.tables import APIKey
+from bfx_funding_bot.modules.accounts.tables import (
+    APIKey,
+    ExchangeAccountCredential,
+    ExchangeAccountMembership,
+)
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 
@@ -40,6 +57,163 @@ class VaultKeyMismatchError(Exception):
 # Scopes allowed to have write=True for a VERIFIED key. Anything else with
 # write=True (withdraw, orders, a renamed dangerous scope, ...) fails closed.
 _ALLOWED_WRITE_SCOPES = {"funding"}
+
+
+async def _require_account_membership(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    write: bool,
+) -> None:
+    account = await get_exchange_account(session, exchange_account_id=exchange_account_id)
+    if account.lifecycle_status == "retired":
+        raise AccountRetired(str(exchange_account_id))
+    membership = await session.scalar(
+        select(ExchangeAccountMembership).where(
+            ExchangeAccountMembership.exchange_account_id == exchange_account_id,
+            ExchangeAccountMembership.user_id == user_id,
+        )
+    )
+    allowed = {"owner", "operator"} if write else {"owner", "operator", "viewer"}
+    if membership is None or membership.role not in allowed:
+        raise MembershipDenied(str(exchange_account_id))
+
+
+async def list_account_credentials(
+    session: AsyncSession, *, exchange_account_id: UUID, user_id: str
+) -> Sequence[ExchangeAccountCredential]:
+    """List credentials only after account membership has been checked."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=False
+    )
+    result = await session.scalars(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id
+        )
+    )
+    return list(result)
+
+
+async def create_account_credential(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    label: str,
+    api_key: str,
+    api_secret: str,
+    kek: bytes,
+) -> ExchangeAccountCredential:
+    """Create a credential encrypted with canonical ExchangeAccount AAD."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    envelope = encrypt_secret_with_aad(
+        api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
+    )
+    return await create_exchange_account_credential(
+        session,
+        exchange_account_id=exchange_account_id,
+        venue="bitfinex",
+        label=label,
+        api_key=api_key,
+        secret_ciphertext=envelope.secret_ciphertext,
+        secret_nonce=envelope.secret_nonce,
+        wrapped_dek=envelope.wrapped_dek,
+        dek_nonce=envelope.dek_nonce,
+        key_version=envelope.key_version,
+    )
+
+
+async def delete_account_credential(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    key_id: UUID,
+) -> bool:
+    """Retire a credential; credential rows are never hard-deleted."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    row = await session.scalar(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.id == key_id,
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+        )
+    )
+    if row is None:
+        return False
+    row.lifecycle_status = "retired"
+    await session.flush()
+    return True
+
+
+async def verify_account_credential(
+    session: AsyncSession,
+    client: _PermissionsClient,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    key_id: UUID,
+    kek: bytes,
+) -> ExchangeAccountCredential | None:
+    """Verify an account credential using account UUID AAD and context."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    row = await session.scalar(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.id == key_id,
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+        )
+    )
+    if row is None:
+        return None
+    secret = decrypt_secret_with_aad(
+        Envelope(
+            secret_ciphertext=row.secret_ciphertext,
+            secret_nonce=row.secret_nonce,
+            wrapped_dek=row.wrapped_dek,
+            dek_nonce=row.dek_nonce,
+            key_version=row.key_version,
+        ),
+        aad=account_id_canonical(exchange_account_id),
+        kek=kek,
+    )
+    ctx = AccountContext(
+        account_id=str(exchange_account_id),
+        credentials=Credentials(api_key=row.api_key, api_secret=secret),
+        allocation_cap_usdt=Decimal("0"),
+    )
+    try:
+        perms = await client.get_key_permissions(ctx=ctx)
+    except BitfinexAPIError as e:
+        if e.status_code == 0 or e.status_code == 429 or e.status_code >= 500:
+            raise
+        row.lifecycle_status = "revoked"
+        row.last_verify_error = "invalid_credentials"
+        await session.flush()
+        return row
+    if not perms.can("funding", write=True):
+        row.last_verify_error = "funding_write_required"
+    else:
+        offending = [
+            scope for scope, (_read, write) in perms.scopes.items()
+            if write and scope not in _ALLOWED_WRITE_SCOPES
+        ]
+        if offending:
+            row.last_verify_error = (
+                "withdraw_must_be_disabled"
+                if "withdraw" in offending
+                else f"unexpected_write_scope:{offending[0]}"
+            )
+        else:
+            row.last_verify_error = None
+            row.verified_at = datetime.now(UTC)
+    await session.flush()
+    return row
 
 
 async def list_api_keys(session: AsyncSession, *, user_id: str) -> Sequence[APIKey]:

@@ -44,13 +44,21 @@ def load_kek() -> bytes:
     return kek
 
 
-def encrypt_secret(plaintext: str, *, user_id: str, kek: bytes) -> Envelope:
-    aad = user_id.encode("utf-8")
+def encrypt_secret_with_aad(plaintext: str, *, aad: str, kek: bytes) -> Envelope:
+    """Encrypt a secret bound to an explicit, non-empty AAD string.
+
+    Callers that use account identity must pass the canonical lowercase UUID
+    string.  Keeping this primitive separate from the legacy ``user_id``
+    wrapper prevents a migration from accidentally preserving user-scoped AAD.
+    """
+    if not aad:
+        raise ValueError("AAD must not be empty")
+    aad_bytes = aad.encode("utf-8")
     dek = os.urandom(_DEK_LEN)
     secret_nonce = os.urandom(_NONCE_LEN)
-    secret_ct = AESGCM(dek).encrypt(secret_nonce, plaintext.encode("utf-8"), aad)
+    secret_ct = AESGCM(dek).encrypt(secret_nonce, plaintext.encode("utf-8"), aad_bytes)
     dek_nonce = os.urandom(_NONCE_LEN)
-    wrapped_dek = AESGCM(kek).encrypt(dek_nonce, dek, aad)
+    wrapped_dek = AESGCM(kek).encrypt(dek_nonce, dek, aad_bytes)
     return Envelope(
         secret_ciphertext=secret_ct,
         secret_nonce=secret_nonce,
@@ -60,8 +68,21 @@ def encrypt_secret(plaintext: str, *, user_id: str, kek: bytes) -> Envelope:
     )
 
 
-def decrypt_secret(env: Envelope, *, user_id: str, kek: bytes) -> str:
-    aad = user_id.encode("utf-8")
-    dek = AESGCM(kek).decrypt(env.dek_nonce, env.wrapped_dek, aad)
-    plaintext = AESGCM(dek).decrypt(env.secret_nonce, env.secret_ciphertext, aad)
+def decrypt_secret_with_aad(env: Envelope, *, aad: str, kek: bytes) -> str:
+    """Decrypt a secret using the exact explicit AAD used at encryption time."""
+    if not aad:
+        raise ValueError("AAD must not be empty")
+    aad_bytes = aad.encode("utf-8")
+    dek = AESGCM(kek).decrypt(env.dek_nonce, env.wrapped_dek, aad_bytes)
+    plaintext = AESGCM(dek).decrypt(env.secret_nonce, env.secret_ciphertext, aad_bytes)
     return plaintext.decode("utf-8")
+
+
+def encrypt_secret(plaintext: str, *, user_id: str, kek: bytes) -> Envelope:
+    """Legacy user-scoped wrapper retained for pre-cutover rows and tests."""
+    return encrypt_secret_with_aad(plaintext, aad=user_id, kek=kek)
+
+
+def decrypt_secret(env: Envelope, *, user_id: str, kek: bytes) -> str:
+    """Legacy user-scoped wrapper retained for pre-cutover rows and tests."""
+    return decrypt_secret_with_aad(env, aad=user_id, kek=kek)

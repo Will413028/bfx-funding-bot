@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import (
     JSON,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -39,6 +41,9 @@ class EventLogRow(Base):
 
     event_seq: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     cid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -69,6 +74,9 @@ class OfferClaimRow(Base):
 
     cid: Mapped[int] = mapped_column(BigInteger, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -113,6 +121,9 @@ class PositionStateRow(Base):
     __tablename__ = "position_state"
 
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     reserved: Mapped[Decimal] = mapped_column(Numeric, nullable=False, server_default=text("0"))
@@ -142,6 +153,9 @@ class ReconcileObservationRow(Base):
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fUST'"))
     reserved_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)

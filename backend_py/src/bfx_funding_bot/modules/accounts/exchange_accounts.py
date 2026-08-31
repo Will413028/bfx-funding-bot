@@ -134,6 +134,29 @@ async def grant_membership(
     return membership
 
 
+async def require_account_membership(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    write: bool = False,
+) -> ExchangeAccountMembership:
+    """Return a membership or fail closed for the requested operation."""
+    account = await get_exchange_account(session, exchange_account_id=exchange_account_id)
+    if account.lifecycle_status == "retired":
+        raise AccountRetired(str(exchange_account_id))
+    membership = await session.scalar(
+        select(ExchangeAccountMembership).where(
+            ExchangeAccountMembership.exchange_account_id == exchange_account_id,
+            ExchangeAccountMembership.user_id == user_id,
+        )
+    )
+    allowed_roles = {"owner", "operator"} if write else {"owner", "operator", "viewer"}
+    if membership is None or membership.role not in allowed_roles:
+        raise MembershipDenied(str(exchange_account_id))
+    return membership
+
+
 async def create_exchange_account_credential(
     session: AsyncSession,
     *,
@@ -236,6 +259,7 @@ __all__ = [
     "ensure_account_active",
     "get_exchange_account",
     "grant_membership",
+    "require_account_membership",
     "upsert_account_config_draft",
     "validate_account_lifecycle_status",
     "validate_credential_lifecycle_status",

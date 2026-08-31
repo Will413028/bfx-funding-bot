@@ -7,6 +7,7 @@ whereas an unreadable trading_halt must stop trading (fail-closed).
 from __future__ import annotations
 
 from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     Text,
 )
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -26,6 +28,9 @@ class NavPeakRow(Base):
     __tablename__ = "nav_peak"
 
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     peak: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
@@ -57,6 +62,9 @@ class TradingHaltRow(Base):
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
     )
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     halted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)

@@ -259,6 +259,9 @@ class APIKey(Base):
         server_default=text("gen_random_uuid()"),  # PG DB-level default (raw SQL inserts)
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     label: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     secret_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
@@ -307,6 +310,9 @@ class UserConfig(Base):
         server_default=text("gen_random_uuid()"),
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     # JSONB on Postgres, generic JSON on sqlite for tests — bare-class variant
     # matches the event_store / diagnostics JSON columns' house style.
     config: Mapped[dict[str, Any]] = mapped_column(
