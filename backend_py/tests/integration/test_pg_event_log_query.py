@@ -13,6 +13,8 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
 )
 
+from .conftest import make_reservation_ref
+
 pytestmark = pytest.mark.integration
 
 _SCID = UUID("22222222-2222-2222-2222-222222222222")
@@ -37,7 +39,9 @@ async def test_query_returns_claimed_and_fill_for_account(pg_session_factory) ->
                 is_simulated=True,
                 venue_seq=1,
                 occurred_at_ms=int(since.timestamp() * 1000) + 1000,
-            symbol="fUST"),
+                symbol="fUST",
+                reservation_ref=make_reservation_ref(5001, _SCID, "vq1"),
+            ),
         )
         await store.append(
             s,
@@ -45,14 +49,16 @@ async def test_query_returns_claimed_and_fill_for_account(pg_session_factory) ->
                 cid=5001,
                 venue_offer_id="vq1",
                 credit_id="cq1",
-                size_usdt=Decimal("4"),
+                size_usdt=Decimal("10"),
                 fill_rate=0.0,
                 signal_correlation_id=_SCID,
                 account_id=acct,
                 is_simulated=True,
                 venue_seq=2,
                 occurred_at_ms=int(since.timestamp() * 1000) + 2000,
-            symbol="fUST"),
+                symbol="fUST",
+                reservation_ref=make_reservation_ref(5001, _SCID, "vq1"),
+            ),
         )
         await s.commit()
 
@@ -89,7 +95,9 @@ async def test_query_scopes_by_account_and_env(pg_session_factory) -> None:
                 is_simulated=True,
                 venue_seq=1,
                 occurred_at_ms=int(since.timestamp() * 1000) + 500,
-            symbol="fUST"),
+                symbol="fUST",
+                reservation_ref=make_reservation_ref(5002, _SCID, "vq2"),
+            ),
         )
         await store.append(
             s,
@@ -103,7 +111,9 @@ async def test_query_scopes_by_account_and_env(pg_session_factory) -> None:
                 is_simulated=True,
                 venue_seq=2,
                 occurred_at_ms=int(since.timestamp() * 1000) + 1000,
-            symbol="fUST"),
+                symbol="fUST",
+                reservation_ref=make_reservation_ref(5002, _SCID, "vq2"),
+            ),
         )
         await s.commit()
 

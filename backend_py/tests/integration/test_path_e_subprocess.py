@@ -43,6 +43,7 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["BFX_CELLS_YAML"] = str(_CELLS_YAML)
     env["BFX_PHASE"] = "paper"
     env["BFX_DEPLOYMENT_ENV"] = "ci"
+    env["BFX_EXECUTION_POLICY"] = "paper"
     env["BFX_API_KEY"] = "test_key"
     env["BFX_API_SECRET"] = "test_secret"
     # Port 0 → kernel-assigned random port; avoids collision when a real

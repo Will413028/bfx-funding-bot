@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -9,6 +10,31 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import StaticPool
+
+
+async def ensure_auth_user(session: AsyncSession, user_id: str) -> None:
+    """Seed the Better Auth principal used by PG integration tests.
+
+    The application profile/vault tables deliberately enforce a DB-level FK to
+    ``auth.user``.  Migration integration tests run in the same session-scoped
+    container, so tests that exercise JIT provisioning must create the external
+    auth principal just as the real Better Auth service would first do.
+    """
+    bind = session.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    exists = await session.scalar(text("SELECT to_regclass('auth.\"user\"')"))
+    if exists is None:
+        return
+    await session.execute(
+        text(
+            'INSERT INTO auth."user" '
+            '("id", "name", "email", "emailVerified", "createdAt", "updatedAt") '
+            'VALUES (:id, :name, :email, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) '
+            'ON CONFLICT ("id") DO NOTHING'
+        ),
+        {"id": user_id, "name": user_id, "email": f"{user_id}@test.invalid"},
+    )
 
 
 @pytest_asyncio.fixture

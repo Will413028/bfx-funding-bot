@@ -19,18 +19,33 @@ from bfx_funding_bot.modules.accounts.vault import (
     list_api_keys,
     verify_api_key,
 )
+from tests.conftest import ensure_auth_user
 
 pytestmark = pytest.mark.integration
 
 _KEK = base64.b64decode(base64.b64encode(bytes(range(32))))
 
 
+async def _create_key(
+    session, *, user_id: str, label: str, api_key: str, api_secret: str,
+):
+    await ensure_auth_user(session, user_id)
+    return await create_api_key(
+        session,
+        user_id=user_id,
+        label=label,
+        api_key=api_key,
+        api_secret=api_secret,
+        kek=_KEK,
+    )
+
+
 @pytest.mark.asyncio
 async def test_create_encrypts_and_provisions(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
-        row = await create_api_key(
+        row = await _create_key(
             s, user_id="u_create", label="main",
-            api_key="PUB", api_secret="my-secret", kek=_KEK,
+            api_key="PUB", api_secret="my-secret",
         )
         rid = row.id
     async with session_scope(pg_session_factory) as s:
@@ -49,17 +64,17 @@ async def test_create_encrypts_and_provisions(pg_session_factory):
 @pytest.mark.asyncio
 async def test_create_duplicate_raises(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
-        await create_api_key(s, user_id="u_dup", label="a", api_key="P", api_secret="s", kek=_KEK)
+        await _create_key(s, user_id="u_dup", label="a", api_key="P", api_secret="s")
     async with session_scope(pg_session_factory) as s:
         with pytest.raises(KeyAlreadyExistsError):
-            await create_api_key(s, user_id="u_dup", label="b", api_key="P2", api_secret="s2", kek=_KEK)
+            await _create_key(s, user_id="u_dup", label="b", api_key="P2", api_secret="s2")
 
 
 @pytest.mark.asyncio
 async def test_list_scoped_to_user(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
-        await create_api_key(s, user_id="u_list_a", label="a", api_key="P", api_secret="s", kek=_KEK)
-        await create_api_key(s, user_id="u_list_b", label="b", api_key="P", api_secret="s", kek=_KEK)
+        await _create_key(s, user_id="u_list_a", label="a", api_key="P", api_secret="s")
+        await _create_key(s, user_id="u_list_b", label="b", api_key="P", api_secret="s")
     async with session_scope(pg_session_factory) as s:
         rows = await list_api_keys(s, user_id="u_list_a")
     assert len(rows) == 1
@@ -69,7 +84,7 @@ async def test_list_scoped_to_user(pg_session_factory):
 @pytest.mark.asyncio
 async def test_delete_returns_false_for_other_user(pg_session_factory):
     async with session_scope(pg_session_factory) as s:
-        row = await create_api_key(s, user_id="u_del", label="a", api_key="P", api_secret="s", kek=_KEK)
+        row = await _create_key(s, user_id="u_del", label="a", api_key="P", api_secret="s")
         rid = row.id
     async with session_scope(pg_session_factory) as s:
         assert await delete_api_key(s, user_id="someone_else", key_id=rid) is False
@@ -106,7 +121,7 @@ def _perms(funding_w=True, withdraw_w=False) -> KeyPermissions:
 
 async def _make_key(factory, user_id="u_v") -> UUID:
     async with session_scope(factory) as s:
-        row = await create_api_key(s, user_id=user_id, label="a", api_key="PUB", api_secret="sec", kek=_KEK)
+        row = await _create_key(s, user_id=user_id, label="a", api_key="PUB", api_secret="sec")
         return row.id
 
 

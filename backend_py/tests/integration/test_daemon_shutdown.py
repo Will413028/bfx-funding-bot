@@ -17,6 +17,7 @@ def _set_daemon_env(monkeypatch, pg_engine) -> None:
     """Set required env vars for build_daemon using testcontainer DB."""
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.setenv("BFX_CELLS_YAML", _CELLS_YAML)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
