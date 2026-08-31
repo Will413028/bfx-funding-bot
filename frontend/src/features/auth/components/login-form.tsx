@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useRouter } from "@/i18n/navigation";
+import { safeCallbackUrl } from "@/lib/safe-callback-url";
 import { type LoginFormInput, loginSchema } from "@/lib/validations";
 
 export function LoginForm() {
@@ -31,6 +32,8 @@ export function LoginForm() {
   async function onSubmit(data: LoginFormInput) {
     setServerError(null);
 
+    const callbackUrl = safeCallbackUrl(searchParams.get("callbackUrl"));
+
     let result: Awaited<ReturnType<typeof login>>;
     try {
       result = await login(data.email, data.password);
@@ -40,7 +43,7 @@ export function LoginForm() {
     }
 
     if (result.twoFactorRequired) {
-      router.push("/two-factor");
+      router.push(`/two-factor?callbackUrl=${encodeURIComponent(callbackUrl)}`);
       return;
     }
 
@@ -49,9 +52,6 @@ export function LoginForm() {
       return;
     }
 
-    const raw = searchParams.get("callbackUrl") || "/overview";
-    const callbackUrl =
-      raw.startsWith("/") && !raw.startsWith("//") ? raw : "/overview";
     router.push(callbackUrl);
     router.refresh();
   }

@@ -83,10 +83,16 @@ for v in NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL API_URL BETTER_AUTH_SEC
   grep -q "^$v=." .env.frontend.runtime || { echo "ERROR: frontend var $v missing/empty in $FRONTEND_SECRETS"; exit 1; }
 done
 require_nonempty_env .env.frontend.runtime BFX_OPERATOR_USER_ID
+require_nonempty_env .env.frontend.runtime BFX_OPERATOR_ROLE
 FRONTEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
 BACKEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.webapi.runtime | tail -1 | cut -d= -f2-)
 [ "$FRONTEND_OPERATOR_ID" = "$BACKEND_OPERATOR_ID" ] || {
   echo "ERROR: frontend and web-API BFX_OPERATOR_USER_ID values must match"
+  exit 1
+}
+FRONTEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
+[ "$FRONTEND_OPERATOR_ROLE" = admin ] || {
+  echo "ERROR: frontend BFX_OPERATOR_ROLE must be admin for operator-only containment"
   exit 1
 }
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.

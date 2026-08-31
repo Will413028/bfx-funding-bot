@@ -341,4 +341,121 @@ describe("execution proxy MFA boundary", () => {
     expect(getToken).not.toHaveBeenCalled();
     expect(backendFetch).not.toHaveBeenCalled();
   });
+
+  it("forwards the exact public CSV route without operator auth or a JWT", async () => {
+    const getOperatorMfaSessionAccess = vi.fn();
+    const backendFetch = vi.fn().mockResolvedValue(
+      new Response("date,close_apr_pct\n", {
+        status: 200,
+        headers: { "Content-Type": "text/csv" },
+      }),
+    );
+    vi.stubEnv("BFX_OPERATOR_USER_ID", "");
+    vi.stubGlobal("fetch", backendFetch);
+    vi.doMock("next/headers", () => ({
+      headers: vi.fn(async () => new Headers()),
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      auth: { api: { getToken: vi.fn() } },
+      getOperatorMfaSessionAccess,
+    }));
+
+    const { GET } = await import("../../app/api/proxy/[...path]/route");
+    const response = await GET(
+      new NextRequest(
+        "http://localhost/api/proxy/public/funding-rates.csv?symbol=fUST",
+      ),
+      { params: Promise.resolve({ path: ["public", "funding-rates.csv"] }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("close_apr_pct");
+    expect(getOperatorMfaSessionAccess).not.toHaveBeenCalled();
+    const forwarded = backendFetch.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(forwarded.headers).has("Authorization")).toBe(false);
+  });
+
+  it("does not turn a public GET allowlist into a write proxy", async () => {
+    const backendFetch = vi.fn();
+    vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
+    vi.stubGlobal("fetch", backendFetch);
+    vi.doMock("next/headers", () => ({
+      headers: vi.fn(async () => new Headers()),
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      auth: { api: { getToken: vi.fn() } },
+      getOperatorMfaSessionAccess: vi.fn(),
+    }));
+
+    const { POST } = await import("../../app/api/proxy/[...path]/route");
+    const response = await POST(
+      new NextRequest("http://localhost/api/proxy/public/funding-rates.csv", {
+        method: "POST",
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["public", "funding-rates.csv"] }) },
+    );
+
+    expect(response.status).toBe(405);
+    await expect(response.json()).resolves.toEqual({
+      error: "method_not_allowed",
+    });
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when token minting is unavailable", async () => {
+    const getToken = vi.fn().mockResolvedValue({ token: undefined });
+    const backendFetch = vi.fn();
+    const getOperatorMfaSessionAccess = vi
+      .fn()
+      .mockResolvedValue({ allowed: true });
+    vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
+    vi.stubGlobal("fetch", backendFetch);
+    vi.doMock("next/headers", () => ({
+      headers: vi.fn(async () => new Headers()),
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      auth: { api: { getToken } },
+      getOperatorMfaSessionAccess,
+    }));
+
+    const { GET } = await import("../../app/api/proxy/[...path]/route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/proxy/config"),
+      { params: Promise.resolve({ path: ["config"] }) },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "auth_token_unavailable",
+    });
+    expect(getOperatorMfaSessionAccess).toHaveBeenCalledOnce();
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a traversal-shaped public path as public", async () => {
+    const getOperatorMfaSessionAccess = vi.fn();
+    const backendFetch = vi.fn();
+    vi.stubEnv("BFX_OPERATOR_USER_ID", "operator-1");
+    vi.stubGlobal("fetch", backendFetch);
+    vi.doMock("next/headers", () => ({
+      headers: vi.fn(async () => new Headers()),
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      auth: { api: { getToken: vi.fn() } },
+      getOperatorMfaSessionAccess,
+    }));
+
+    const { GET } = await import("../../app/api/proxy/[...path]/route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/proxy/public/../config"),
+      { params: Promise.resolve({ path: ["public", "..", "config"] }) },
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "Forbidden" });
+    expect(getOperatorMfaSessionAccess).not.toHaveBeenCalled();
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
 });

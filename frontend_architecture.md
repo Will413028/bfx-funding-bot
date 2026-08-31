@@ -1,7 +1,15 @@
 # Bitfinex 自動放貸 SaaS 平台：前端架構設計文件
 
-> 本文件為 Claude Code 開發前端時的架構參考。
-> 基於 Next.js 16 App Router + next-intl 多語系架構，搭配 Go 後端 REST + WebSocket API。
+> **現行狀態（2026-08-31）**：本文件保留早期 Go/WebSocket SaaS 藍本的細節，
+> 不是目前 runtime contract。現行實作以 `frontend/src`、
+> [`backend_py/ARCHITECTURE.md`](backend_py/ARCHITECTURE.md)、
+> [`docs/runbooks/release-0-operator-containment.md`](docs/runbooks/release-0-operator-containment.md)
+> 與測試為準；下方標示為 historical/deferred 的段落不可直接照抄。
+>
+> Current Release 0 stack：Next.js 16 App Router + next-intl、Better Auth
+> EdDSA JWT（只允許 server-to-server BFF mint）、HttpOnly session cookie、
+> Python FastAPI web-API、PostgreSQL、Redis。Self-service signup 已在 server
+> hook 關閉；目前只有 `/login` 與 `/two-factor` auth pages。
 
 ---
 
@@ -14,16 +22,16 @@
 | 元件工具 | class-variance-authority + tailwind-merge + clsx | 元件 variant 管理 + class 合併（`cn()` 函式） |
 | 圖標 | Lucide React | 開源 SVG icon 庫，搭配 shadcn/ui 使用 |
 | 動畫基礎 | tailwindcss-animate | shadcn/ui 動畫依賴（Tailwind v4 用 `@plugin` 載入） |
-| 全域狀態 | Zustand | 客戶端狀態（UI 開關、主題、WebSocket 連線狀態） |
+| 全域狀態 | Zustand | 客戶端 UI 狀態（API data 不放全域 store） |
 | 伺服器資料 | TanStack Query v5 | API 快取、重新抓取、樂觀更新 |
 | 表單驗證 | React Hook Form + Zod v4 | 高效能表單 + 端到端型別安全驗證 |
 | 語系切換 | next-intl | App Router 原生支援，Server/Client Component 皆可用 |
 | URL 狀態 | nuqs | 帳單查詢、執行記錄過濾同步至 URL |
-| 即時通訊 | 原生 WebSocket | Dashboard 即時推送（放貸狀態、市場數據） |
+| 即時通訊 | Deferred | 目前沒有 browser WebSocket runtime contract；啟用前需獨立 threat model/E2E |
 | 圖表 | Recharts | 利率走勢、收益圖表 |
 | 程式碼品質 | Biome | 格式化 + Lint，唯一 linter（無 ESLint） |
 | 未使用程式碼檢測 | Knip | 找出未使用的檔案、export、依賴、型別 |
-| 部署 | Vercel | Next.js 官方平台，圖片自動優化、Edge Functions、ISR |
+| 部署 | Oracle Cloud VM（Docker Compose） | Frontend standalone + Python web-API + PostgreSQL + Redis；Vercel 僅保留歷史藍本 |
 
 ### 漸進式採用策略
 
@@ -37,7 +45,7 @@
 
 ## 目錄結構
 
-> 本專案採用 next-intl 多語系架構，URL 自動變成 `/en/dashboard`、`/zh-TW/dashboard`。
+> 本專案採用 next-intl 多語系架構，URL 自動變成 `/en/overview`、`/zh-TW/overview`。
 
 ```
 frontend/
@@ -52,9 +60,9 @@ frontend/
 │   │   │   │   ├── page.tsx        #      首頁（產品介紹、功能特色）
 │   │   │   │   ├── pricing/page.tsx#      定價方案
 │   │   │   │   └── layout.tsx      #      含 Header + Footer
-│   │   │   ├── (auth)/             #    路由群組：授權頁面
+│   │   │   ├── (auth)/             #    路由群組：授權頁面（無 self-service signup）
 │   │   │   │   ├── login/page.tsx
-│   │   │   │   ├── register/page.tsx
+│   │   │   │   ├── two-factor/page.tsx
 │   │   │   │   └── layout.tsx      #      極簡置中版面
 │   │   │   └── (dashboard)/        #    路由群組：需登入的主控台
 │   │   │       ├── overview/page.tsx    #  總覽（即時放貸狀態、收益摘要）
@@ -81,8 +89,8 @@ frontend/
 │   │   │       └── layout.tsx           #  側邊欄 + 頂部列
 │   │   ├── global-error.tsx        #    最頂層 Error Boundary
 │   │   └── api/                    #    API Route Handlers（不需語系前綴）
-│   │       ├── proxy/[...path]/route.ts #  同源代理：轉發至 Go 後端（解決跨域 cookie）
-│   │       └── ws-token/route.ts        #  簽發短期 WebSocket 認證 token
+│   │       ├── auth/[...all]/route.ts  # Better Auth；外部 JWT mint/sign/verify 封鎖
+│   │       └── proxy/[...path]/route.ts # BFF：public exact allowlist，其餘 operator+MFA
 │   │
 │   ├── i18n/                        # 2. 國際化設定層 (next-intl)
 │   │   ├── routing.ts              #    defineRouting：locales、defaultLocale
@@ -96,7 +104,7 @@ frontend/
 │   │
 │   ├── features/                    # 4. 功能模組層
 │   │   ├── auth/                   #    登入模組
-│   │   │   ├── components/         #       LoginForm、RegisterForm
+│   │   │   ├── components/         #       LoginForm、TwoFactorForm
 │   │   │   ├── hooks/              #       useLogin、useCurrentUser
 │   │   │   ├── api/                #       auth-api.ts
 │   │   │   ├── types.ts
@@ -111,7 +119,6 @@ frontend/
 │   │
 │   ├── lib/                         # 5. 核心工具層（無狀態純函式）
 │   │   ├── api-client.ts           #    封裝 fetch（走 /api/proxy 同源代理）
-│   │   ├── ws-client.ts            #    WebSocket 連接管理（自動重連、心跳）
 │   │   ├── query-keys.ts           #    TanStack Query Key Factory（集中管理）
 │   │   ├── validations.ts          #    共用 Zod Schema
 │   │   ├── env.ts                  #    環境變數驗證（Zod）
@@ -122,9 +129,8 @@ frontend/
 │   │   ├── use-debounce.ts         #    防抖（搜尋框）
 │   │   └── use-media-query.ts      #    螢幕寬度偵測
 │   │
-│   ├── store/                       # 7. 全域狀態層 (Zustand)
-│   │   ├── use-ui-store.ts         #    側邊欄開關、主題
-│   │   └── use-ws-store.ts         #    WebSocket 連線狀態、最新 MarketSnapshot
+│   ├── store/                       # 7. 全域狀態層（目前只保留必要 UI state）
+│   │   └── use-ui-store.ts         #    側邊欄開關、主題
 │   │
 │   ├── types/                       # 8. 型別定義層
 │   │   └── index.ts                #    User、ApiError、MarketSnapshot、StrategyConfig 等
@@ -171,25 +177,25 @@ frontend/
 ```
 app/[locale]/
 ├── (marketing)/     → /en/, /zh-TW/pricing（Landing + 定價）
-├── (auth)/          → /en/login, /zh-TW/register（極簡置中）
+├── (auth)/          → /en/login, /zh-TW/login, /en/two-factor, /zh-TW/two-factor（極簡置中）
 └── (dashboard)/     → /en/overview, /zh-TW/strategy（側邊欄 + 頂部列）
 ```
 
 | 群組 | 版面 | URL 範例 |
 |------|------|---------|
 | `(marketing)` | Header + Footer | `/en/`、`/zh-TW/pricing` |
-| `(auth)` | 極簡置中 | `/en/login`、`/zh-TW/register` |
+| `(auth)` | 極簡置中 | `/en/login`、`/zh-TW/two-factor` |
 | `(dashboard)` | 側邊欄 + 頂部列 | `/en/overview`、`/zh-TW/strategy` |
 
 ### 2. 三層狀態管理
 
 | 狀態類型 | 工具 | 範例 |
 |----------|------|------|
-| 客戶端全域 | Zustand | UI 開關、主題、WebSocket 連線狀態、最新 MarketSnapshot |
+| 客戶端全域 | Zustand | 僅 UI 開關、主題；API data 由 TanStack Query 管理 |
 | 伺服器資料 | TanStack Query | API Key 列表、策略參數、帳單記錄 |
 | URL 狀態 | nuqs | 執行記錄過濾器、帳單日期範圍、分頁 |
 
-**原則**：不要用 Zustand 存 API 資料（用 TanStack Query），不要用 useState 存搜尋參數（用 nuqs）。WebSocket 推送的即時數據用 Zustand（因為不是 request-response 模式）。
+**原則**：不要用 Zustand 存 API 資料（用 TanStack Query），不要用 useState 存搜尋參數（用 nuqs）。目前沒有已部署的 browser WebSocket contract；即時功能必須先補充獨立 auth/threat model 與 E2E，再加入 store。
 
 ### 3. Server Actions vs API Routes
 
@@ -197,12 +203,17 @@ app/[locale]/
 |------|----------|------|
 | 表單送出（新增 API Key、修改策略） | Server Actions | 自動處理 revalidation |
 | Client Component 資料抓取 | TanStack Query + API Client → `/api/proxy/*` | 同源代理，cookie 自動帶上 |
-| WebSocket 連接 | 原生 WebSocket（`lib/ws-client.ts`） | 先透過 `/api/ws-token` 取得短期 token |
+| 公開資料讀取 | API Route `/api/proxy/public/*` | exact GET allowlist；不附 operator JWT |
+| 私有資料讀寫 | TanStack Query + `lib/api-client.ts` | 同源 BFF；fresh session + per-session MFA marker 後才 mint JWT |
 | Webhook 接收 | API Routes | 外部服務回呼需要固定 URL |
 
 #### Server Action 內的 Auth 驗證
 
 Middleware 保護的是「路由存取」，但 Server Action 可以被直接 POST 呼叫。**在 action 內部獨立驗證身份**：
+
+> 下方 snippet 是早期 JWT-cookie 藍本。現行 `api-keys/actions.ts` 必須使用
+> `getOperatorMfaSessionAccess`，fresh session 與 per-session MFA marker 通過後
+> 才可呼叫 `auth.api.getToken`；任何 plaintext API secret 都不得經 browser proxy。
 
 ```typescript
 // app/[locale]/(dashboard)/api-keys/actions.ts
@@ -234,7 +245,7 @@ export async function createApiKey(
     return { success: false, errors: parsed.error.flatten().fieldErrors };
   }
 
-  // 3. 呼叫 Go 後端 API（Server Action 在 server-side 執行，直接打後端）
+  // 3. 呼叫 Python FastAPI web-API（Server Action 在 server-side 執行）
   const res = await fetch(`${process.env.API_URL}/api/v1/api-keys`, {
     method: "POST",
     headers: {
@@ -259,20 +270,20 @@ export async function createApiKey(
 
 ---
 
-## 與 Go 後端的整合 — 同源代理架構
+## 與 Python FastAPI web-API 的整合 — 同源 BFF 架構
 
 ### 為什麼需要同源代理
 
-前端部署在 Vercel（`app.example.com`），Go 後端在另一台機器（`api.example.com`）。**跨域環境下**：
+Frontend 與 Python FastAPI web-API 可分開部署（例如 VM internal network）。**跨 origin 或 server-side BFF 環境下**：
 
 - HttpOnly cookie 不會被瀏覽器自動帶給不同 origin 的 API
 - 瀏覽器 WebSocket API 不支援自訂 headers（無法手動帶 `Authorization`）
 - 直接暴露後端 URL 給前端有安全風險
 
-**解法**：所有 Client Component 的請求都打前端自己的 `/api/proxy/*`，由 Next.js API Route 在 server-side 讀取 HttpOnly cookie，附上 `Authorization` header 後轉發給 Go 後端。
+**解法**：所有 Client Component 的私有請求都打前端自己的 `/api/proxy/*`，由 Next.js API Route 在 server-side 讀取 HttpOnly session cookie，確認 configured operator 與 per-session MFA marker 後才 mint 短期 EdDSA JWT，附上 `Authorization` header 轉發給 Python web-API。公開 proof/funding 只有 exact GET allowlist 不經此 gate。
 
 ```
-Client Component → /api/proxy/api-keys (同源) → Go 後端 /api/v1/api-keys (server-side)
+Client Component → /api/proxy/api-keys (同源) → Python FastAPI /api/v1/api-keys (server-side)
                    ↑ cookie 自動帶上              ↑ 讀取 cookie，轉為 Bearer token
 ```
 
@@ -391,7 +402,11 @@ function getBaseUrl() {
 
 > **為什麼用同源代理而非 `SameSite: None`**：`SameSite: None` 允許跨域帶 cookie，但會降低 CSRF 防護，且需要後端設定 CORS。同源代理讓前後端從瀏覽器角度看都是同一個 origin，安全性更好。
 
-### WebSocket 認證 — 短期 Token 方案
+### Deferred: WebSocket 認證 — 短期 Token 方案（historical design）
+
+> 目前 repository 沒有 `ws-token` route、`ws-client.ts` 或已部署的 browser
+> WebSocket contract。以下內容只保留作為未來設計草稿；啟用前必須重新做
+> threat model、短期 token audience/expiry、reconnect、rate limit 與 E2E。
 
 瀏覽器 WebSocket API 不支援自訂 headers，無法直接帶 `Authorization`。解法是透過 API Route 簽發短期 token：
 
@@ -478,32 +493,21 @@ export function useDashboardWS() {
 }
 ```
 
-### 前後端 API 對應表
+### Current Release 0 API 對應表
 
-| 前端呼叫路徑 | 代理轉發至 | Method | 說明 |
-|-------------|-----------|--------|------|
-| `/api/proxy/health` | `/api/v1/health` | GET | 偵測後端是否存活 |
-| `/api/proxy/auth/register` | `/api/v1/auth/register` | POST | 建立帳號 |
-| `/api/proxy/auth/login` | `/api/v1/auth/login` | POST | JWT 簽發 → proxy 設定 HttpOnly cookie |
-| `/api/proxy/me` | `/api/v1/me` | GET | 當前使用者資訊 |
-| `/api/proxy/me/password` | `/api/v1/me/password` | PUT | 修改密碼 |
-| `/api/proxy/api-keys` | `/api/v1/api-keys` | GET | 列出已綁定的 Bitfinex API Key |
-| `/api/proxy/api-keys` | `/api/v1/api-keys` | POST | 加密儲存 + 驗證權限 |
-| `/api/proxy/api-keys/:id` | `/api/v1/api-keys/:id` | GET | 查看單筆 API Key |
-| `/api/proxy/api-keys/:id` | `/api/v1/api-keys/:id` | DELETE | 同時停止對應 Worker |
-| `/api/proxy/api-keys/:id/verify` | `/api/v1/api-keys/:id/verify` | POST | 重新驗證 Bitfinex 權限 |
-| `/api/proxy/configs` | `/api/v1/configs` | GET | 當前放貸策略設定 |
-| `/api/proxy/configs` | `/api/v1/configs` | PUT | 熱載入至 Worker |
-| `/api/proxy/configs` | `/api/v1/configs` | DELETE | 刪除策略設定 |
-| `/api/proxy/dashboard` | `/api/v1/dashboard` | GET | 儀表板總覽（wallet + offers + credits + market） |
-| `/api/proxy/earnings` | `/api/v1/earnings` | GET | 收益摘要 |
-| `/api/proxy/executions` | `/api/v1/executions` | GET | 放貸執行歷史（cursor pagination） |
-| `/api/proxy/billing` | `/api/v1/billing` | GET | 帳單記錄（cursor pagination） |
-| `/api/proxy/billing/plan` | `/api/v1/billing/plan` | GET | 當前訂閱方案功能 |
-| `/api/ws-token` | `/api/v1/auth/ws-token` | GET | 簽發短期 WS token |
-| *直連* `WS_URL` | `/api/v1/ws/dashboard?token=xxx` | WebSocket | 即時推送 |
+| 前端呼叫路徑 | 後端 | Method | 邊界 |
+|-------------|------|--------|------|
+| `/api/auth/sign-in/email` | Better Auth | POST | server action；無 self-service signup |
+| `/api/auth/two-factor/verify-totp` | Better Auth | POST | TOTP success 才建立 per-session marker |
+| `/api/auth/token`、`/sign-jwt`、`/verify-jwt` | Better Auth | GET/POST | HTTP catch-all 一律 404；只保留 server API mint |
+| `/api/auth/get-session` | Better Auth | GET/POST | fresh session lookup；不得回 `set-auth-jwt` |
+| `/api/proxy/public/proof-summary` | Python `/api/v1/public/proof-summary` | GET | exact anonymous allowlist |
+| `/api/proxy/public/funding-rates.csv` | Python `/api/v1/public/funding-rates.csv` | GET | exact anonymous allowlist |
+| `/api/proxy/<private-path>` | Python `/api/v1/<private-path>` | GET/POST/PUT/DELETE | operator ID + fresh session + MFA marker；JWT 僅 server-side |
 
-> **登入流程注意**：proxy 收到 Go 後端回傳的 JWT 後，需要在 proxy 層將 token 設定為 HttpOnly cookie 再回傳給前端，而非直接把 token 暴露給 Client。也可以改用 Server Action 處理登入流程。
+> `path` 必須 canonicalize；空 segment、`.`、`..`、slash、backslash、encoded
+> traversal 一律 403。Frontend 與 backend 的 operator ID 必須一致；詳見
+> `docs/runbooks/release-0-operator-containment.md`。
 
 ---
 
@@ -995,6 +999,7 @@ export const { Link, redirect, usePathname, useRouter, getPathname } =
 #### 4. `middleware.ts`
 
 ```typescript
+import { getSessionCookie } from "better-auth/cookies";
 import createMiddleware from "next-intl/middleware";
 import { routing } from "@/i18n/routing";
 import { NextRequest, NextResponse } from "next/server";
@@ -1004,24 +1009,24 @@ const intlMiddleware = createMiddleware(routing);
 const localePrefix = new RegExp(`^/(${routing.locales.join("|")})`);
 
 const protectedPaths = ["/overview", "/api-keys", "/strategy", "/history", "/settings"];
-const authPaths = ["/login", "/register"];
+const authPaths = ["/login"];
 
 export default function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
-  const token = request.cookies.get("auth_token")?.value;
+  const sessionCookie = getSessionCookie(request);
   const isProtected = protectedPaths.some((p) => pathnameWithoutLocale.startsWith(p));
   const isAuthPage = authPaths.some((p) => pathnameWithoutLocale.startsWith(p));
 
-  if (isProtected && !token) {
+  if (isProtected && !sessionCookie) {
     const locale = pathname.match(localePrefix)?.[1] || routing.defaultLocale;
     const loginUrl = new URL(`/${locale}/login`, request.url);
     loginUrl.searchParams.set("callbackUrl", pathnameWithoutLocale);
     return NextResponse.redirect(loginUrl);
   }
 
-  if (isAuthPage && token) {
+  if (isAuthPage && sessionCookie) {
     const locale = pathname.match(localePrefix)?.[1] || routing.defaultLocale;
     return NextResponse.redirect(new URL(`/${locale}/overview`, request.url));
   }
@@ -1447,17 +1452,19 @@ describe("formatAPR", () => {
 
 ### Playwright — E2E 測試（80%）
 
-3-5 個腳本覆蓋使用者主流程：
+目前 E2E 以 operator-only boundary 與 smoke contract 為主；多使用者 SaaS
+流程尚未開放：
 
 | 腳本 | 覆蓋流程 |
 |------|----------|
-| `auth.spec.ts` | 註冊 → 登入 → 登出 → 未登入重導向 |
+| `auth.spec.ts` | signup denial → JWT boundary → 未登入重導向 |
 | `api-keys.spec.ts` | 新增 API Key → 驗證連線 → 刪除 |
 | `strategy.spec.ts` | 修改放貸參數 → 儲存 → 確認生效 |
 | `history.spec.ts` | 查看執行記錄 → 分頁翻頁 → 查看帳單 |
 | `i18n.spec.ts` | 切換語系 (en ↔ zh-TW) → 確認翻譯 |
 
-**E2E 全綠 = 可安心推上 Vercel + Koyeb。**
+**E2E 綠燈只是 release gate 的一部分；仍須通過 migration/readiness、planned
+halt、operator containment runbook 與人工 production evidence。**
 
 ### package.json 測試指令
 
@@ -1474,7 +1481,18 @@ describe("formatAPR", () => {
 
 ---
 
-## Vercel 部署
+## Deployment（Current: Oracle Cloud VM）
+
+Release 0 的實際部署是 `oci-a1` 上的 Docker Compose，包含 Next.js
+standalone、Python FastAPI web-API、VM-local PostgreSQL 與 Redis。部署前必須
+使用 [`scripts/deploy-vm.sh`](scripts/deploy-vm.sh) 的 profile/auth preflight，
+並完成 [operator containment runbook](docs/runbooks/release-0-operator-containment.md)
+中的 planned halt、migration/readiness 與 audit gate。
+
+### Historical: Vercel 部署藍本
+
+下方 Vercel 內容是早期 SaaS blueprint，不是目前 production runbook；不可用
+來替代 VM deploy script 或 Release 0 auth containment gate。
 
 ### 部署流程
 
@@ -1490,7 +1508,7 @@ pnpm build && pnpm start
 在 Vercel Dashboard > Settings > Environment Variables 設定：
 
 - **`NEXT_PUBLIC_*` 變數**：build 時注入，前後端皆可用
-- **Server-only 變數**（`API_URL`、`AUTH_SECRET`）：僅 server-side 可存取，不暴露給前端
+- **Server-only 變數**（`API_URL`、`BETTER_AUTH_SECRET`、`DATABASE_URL`、`REDIS_URL`）：僅 server-side 可存取，不暴露給前端
 - **分環境設定**：可為 Production / Preview / Development 設定不同值
 
 ### Vercel 優勢
@@ -1523,7 +1541,7 @@ async headers() {
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "font-src 'self'",
-            `connect-src 'self' ${process.env.NEXT_PUBLIC_WS_URL}`,  // REST API 走同源代理，只需允許 WS URL
+            "connect-src 'self'",  // REST API 與 Better Auth 都走同源；未來 WS 需另做 threat model
             "frame-ancestors 'none'",
           ].join("; "),
         },
@@ -1538,7 +1556,9 @@ async headers() {
 }
 ```
 
-> **`connect-src`**：必須允許 Go 後端 WebSocket URL，否則 WS 連線會被擋。REST API 走同源代理 `/api/proxy/*`，屬於 `'self'`，不需要額外允許。
+> **`connect-src`**：目前 REST API 與 Better Auth 都走同源 `/api/*`；只有在未來
+> WebSocket contract 通過 threat model/E2E 後，才把特定 origin 加入 CSP，不能
+> 使用 wildcard。
 
 ### `.env.example`
 
@@ -1547,12 +1567,18 @@ async headers() {
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_APP_NAME="BFX Funding Bot"
 
-# Go Backend API
-NEXT_PUBLIC_WS_URL=ws://localhost:8080   # Client-side WebSocket 直連（僅 WS 需要暴露）
-API_URL=http://localhost:8080            # Server-side only（代理 + Server Actions 用，不暴露給前端）
+# Python FastAPI web-API (server-only BFF target)
+API_URL=http://localhost:8000
 
 # Auth
-AUTH_SECRET=your-auth-secret-here
+BETTER_AUTH_URL=http://localhost:3000
+NEXT_PUBLIC_BETTER_AUTH_URL=http://localhost:3000
+BETTER_AUTH_SECRET=your-auth-secret-here
+DATABASE_URL=postgresql://bfx_webauth:PASS@localhost:5432/bfx
+REDIS_URL=redis://localhost:6379
+PASSKEY_RP_ID=localhost
+BFX_OPERATOR_USER_ID=replace-with-better-auth-user-id
+BFX_OPERATOR_ROLE=admin
 
 # Sentry (Phase 3)
 # NEXT_PUBLIC_SENTRY_DSN=
@@ -1571,13 +1597,20 @@ import { z } from "zod";
 const clientEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
   NEXT_PUBLIC_APP_NAME: z.string().min(1),
-  NEXT_PUBLIC_WS_URL: z.string().min(1),   // 僅 WebSocket 需要暴露給 Client
+  NEXT_PUBLIC_SENTRY_DSN: z.string().url().optional(),
+  NEXT_PUBLIC_BETTER_AUTH_URL: z.string().url(),
 });
 
 // Server-side 環境變數（僅 server 可用）
 const serverEnvSchema = clientEnvSchema.extend({
   API_URL: z.string().url(),
-  AUTH_SECRET: z.string().min(1),
+  BETTER_AUTH_SECRET: z.string().min(32),
+  BETTER_AUTH_URL: z.string().url(),
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().min(1),
+  PASSKEY_RP_ID: z.string().min(1),
+  BFX_OPERATOR_USER_ID: z.string().trim().min(1),
+  BFX_OPERATOR_ROLE: z.literal("admin"),
 });
 
 // Client Component 中只驗證 NEXT_PUBLIC_* 變數
@@ -1586,11 +1619,15 @@ export const env = typeof window === "undefined"
   : clientEnvSchema.parse({
       NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
       NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
-      NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
+      NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
+      NEXT_PUBLIC_BETTER_AUTH_URL: process.env.NEXT_PUBLIC_BETTER_AUTH_URL,
     });
 ```
 
-> **Vercel 環境變數**：在 Vercel Dashboard 設定的環境變數會自動注入 `process.env`。Server-only 變數（`API_URL`、`AUTH_SECRET`）不加 `NEXT_PUBLIC_` 前綴，確保不會暴露給前端 bundle。缺少必要變數時，應用啟動就會報錯（fail fast）。
+> **環境變數**：`NEXT_PUBLIC_*` 才允許進 browser bundle；`API_URL`、
+> `BETTER_AUTH_SECRET`、`DATABASE_URL`、`REDIS_URL`、operator ID/role 一律
+> server-only。缺少必要變數時，應用啟動就應 fail fast；auth route/proxy
+> 仍須維持 fail-closed。
 
 ---
 
@@ -1626,4 +1663,6 @@ export const env = typeof window === "undefined"
 
 ### 連線狀態指示器
 
-WebSocket 連線狀態在 Dashboard Layout 的底部或頂部列顯示，讓使用者隨時知道即時數據是否正常推送。
+> Deferred：目前 Dashboard 使用 HTTP/TanStack Query；未來若加入 WebSocket，
+> 連線狀態 UI、token rotation、reconnect backoff 與 server-side authorization
+> 必須隨同新 threat model 與 E2E 一起設計。

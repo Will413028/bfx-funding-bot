@@ -184,6 +184,10 @@ export const auth = betterAuth({
       },
     }),
     jwt({
+      // JWT minting is server-internal only. The HTTP catch-all explicitly
+      // rejects /token, /sign-jwt, and /verify-jwt, while BFF server code uses
+      // auth.api.getToken after the authoritative MFA marker check.
+      disableSettingJwtHeader: true,
       jwt: {
         // Stable issuer + audience the Python backend verifies, PINNED so both are
         // decoupled from the public URL — a deploy/domain change can't break JWT
@@ -226,7 +230,10 @@ export async function getOperatorMfaSessionAccess(
 ): Promise<OperatorMfaSessionAccess> {
   let session: Awaited<ReturnType<typeof auth.api.getSession>> | null = null;
   try {
-    session = await auth.api.getSession({ headers: requestHeaders });
+    session = await auth.api.getSession({
+      headers: requestHeaders,
+      query: { disableCookieCache: true },
+    });
   } catch {
     session = null;
   }

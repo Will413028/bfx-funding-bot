@@ -84,6 +84,14 @@ afterEach(() => {
 });
 
 describe("server-owned MFA session markers", () => {
+  it("does not expose the backend JWT through Better Auth session responses", () => {
+    const jwtPlugin = authModule.auth.options.plugins?.find(
+      (candidate) => candidate.id === "jwt",
+    );
+
+    expect(jwtPlugin?.options?.disableSettingJwtHeader).toBe(true);
+  });
+
   it("marks the new TOTP session with a TTL bounded by session expiry", async () => {
     const context = {
       newSession: newSession(
@@ -205,6 +213,10 @@ describe("server-owned MFA session markers", () => {
       getOperatorMfaSessionAccess(new Headers(), "operator-1"),
     ).resolves.toEqual({ allowed: true });
     expect(getSession).toHaveBeenCalledOnce();
+    expect(getSession).toHaveBeenCalledWith({
+      headers: expect.any(Headers),
+      query: { disableCookieCache: true },
+    });
     expect(redis.get).toHaveBeenCalledWith("bfx:mfa-verified:marked-session");
   });
 

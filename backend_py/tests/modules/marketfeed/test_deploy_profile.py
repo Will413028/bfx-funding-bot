@@ -79,6 +79,7 @@ def _deploy_root(tmp_path: Path) -> Path:
         "REDIS_URL=redis://safe-fake\n"
         "PASSKEY_RP_ID=example.invalid\n"
         "BFX_OPERATOR_USER_ID=operator-1\n"
+        "BFX_OPERATOR_ROLE=admin\n"
     )
 
     fake_bin = tmp_path / "fake-bin"
@@ -307,4 +308,34 @@ def test_deploy_script_rejects_frontend_backend_operator_id_mismatch_before_dock
     assert result.returncode != 0
     assert "BFX_OPERATOR_USER_ID" in result.stdout
     assert "match" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+@pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])
+def test_deploy_script_rejects_missing_frontend_operator_auth_before_docker(
+    tmp_path: Path, field: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    lines = [line for line in frontend.read_text().splitlines() if not line.startswith(field + "=")]
+    frontend.write_text("\n".join(lines) + "\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_non_admin_frontend_operator_role_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    frontend.write_text(frontend.read_text().replace("BFX_OPERATOR_ROLE=admin", "BFX_OPERATOR_ROLE=user"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_ROLE" in result.stdout
     assert not (root / "fake-docker.log").exists()
