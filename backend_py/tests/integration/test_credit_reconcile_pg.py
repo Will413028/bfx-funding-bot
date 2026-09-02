@@ -23,6 +23,7 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
@@ -112,6 +113,11 @@ async def test_claimed_offer_plus_credits_no_double_count(pg_session_factory):
     bus delta AND PositionReconciled both set reserved.
     """
     acct = str(uuid.uuid4())
+    async with pg_session_factory() as seed_session:
+        seed_session.add(
+            ExchangeAccount(id=uuid.UUID(acct), venue="bitfinex", label=f"test-{acct}")
+        )
+        await seed_session.commit()
     ctx = AccountContext(
         account_id=acct,
         credentials=Credentials(api_key="k", api_secret="s"),

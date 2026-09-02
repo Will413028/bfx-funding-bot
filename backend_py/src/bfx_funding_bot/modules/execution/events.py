@@ -15,12 +15,18 @@ Migration: 4.3 legacy rows lack these fields; PG-sourced rows set them from even
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.entities import (
+    VenueCreditObservation,
+    VenueOfferObservation,
+)
 from bfx_funding_bot.modules.execution.event_store.replay import _HistoricalReplayAuthorization
 
 __SCHEMA_VERSION__ = 3
@@ -134,6 +140,96 @@ def _resolve_position_fields(ev: object) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotCoverage:
+    """Evidence that a venue observation covers the complete account scope.
+
+    A snapshot is only authoritative for the dimensions marked complete.  The
+    page counters are retained as audit metadata so an operator can distinguish
+    an empty account from a truncated response.  History coverage is optional
+    for an ordinary reconcile and is used by the UNKNOWN submit matcher.
+    """
+
+    active_offers_complete: bool
+    active_credits_complete: bool
+    wallets_complete: bool
+    offer_history_complete: bool = False
+    active_offer_pages: int = 1
+    active_credit_pages: int = 1
+    wallet_pages: int = 1
+    offer_history_pages: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "active_offer_pages",
+            "active_credit_pages",
+            "wallet_pages",
+            "offer_history_pages",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.active_offers_complete and self.active_offer_pages < 1:
+            raise ValueError("complete active offers require at least one page")
+        if self.active_credits_complete and self.active_credit_pages < 1:
+            raise ValueError("complete active credits require at least one page")
+        if self.wallets_complete and self.wallet_pages < 1:
+            raise ValueError("complete wallets require at least one page")
+        if self.offer_history_complete and self.offer_history_pages < 1:
+            raise ValueError("complete offer history requires at least one page")
+
+
+@dataclass(frozen=True, slots=True)
+class VenueSnapshotObserved:
+    """Immutable full-account venue observation persisted in ``event_log``.
+
+    Network calls finish before this event enters the account writer.  Every
+    active object is carried in normalized form, including symbols not present
+    in strategy configuration; projections therefore cannot silently omit
+    exposure from an unexpected currency.
+    """
+
+    account_id: str
+    environment: str
+    query_started_at_ms: int
+    query_finished_at_ms: int
+    offers: tuple[VenueOfferObservation, ...]
+    credits: tuple[VenueCreditObservation, ...]
+    wallet_available: Mapping[str, Decimal]
+    coverage: SnapshotCoverage
+    occurred_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.account_id:
+            raise ValueError("snapshot account_id must be non-empty")
+        if not self.environment:
+            raise ValueError("snapshot environment must be non-empty")
+        if self.query_finished_at_ms < self.query_started_at_ms:
+            raise ValueError("snapshot query_finished_at_ms precedes query_started_at_ms")
+        object.__setattr__(self, "offers", tuple(self.offers))
+        object.__setattr__(self, "credits", tuple(self.credits))
+        object.__setattr__(
+            self,
+            "wallet_available",
+            MappingProxyType({
+                str(symbol): Decimal(str(amount))
+                for symbol, amount in self.wallet_available.items()
+            }),
+        )
+        if any(amount < 0 for amount in self.wallet_available.values()):
+            raise ValueError("wallet available amounts must be non-negative")
+        if self.occurred_at_ms is None:
+            object.__setattr__(self, "occurred_at_ms", self.query_finished_at_ms)
+
+
+# The target architecture calls the immutable value ``FullAccountSnapshot``
+# while the persisted domain event is ``VENUE_SNAPSHOT_OBSERVED``.  Keeping an
+# alias avoids two subtly different snapshot models and makes the value usable
+# by callers that do not care about the event-type spelling.
+FullAccountSnapshot = VenueSnapshotObserved
+
+
+@dataclass(frozen=True, slots=True)
 class ReservationIntent:
     """A2 write-ahead intent — durable record BEFORE the venue REST submit.
 
@@ -213,6 +309,76 @@ class ReservationFailed:
             requires_venue_offer=False,
         )
         _resolve_amount(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationUnknown:
+    """Ambiguous submit outcome — the venue may already own the offer.
+
+    This is deliberately distinct from ``ReservationFailed``.  The event keeps
+    the intended amount reserved pessimistically until a later full-account
+    observation proves an exact venue match or an operator records a
+    not-accepted resolution.  It is never an instruction to retry the submit.
+    """
+
+    symbol: str  # mandatory, FIRST
+    cid: int
+    signal_correlation_id: UUID
+    account_id: str
+    is_simulated: bool
+    reason: str
+    amount: Decimal | None = None
+    size_usdt: Decimal | None = None
+    venue_seq: int | None = None
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _require_symbol(self)
+        _validate_reservation_ref(self, requires_venue_offer=False)
+        _resolve_amount(self)
+
+
+@dataclass(frozen=True, slots=True)
+class VenueOfferQuarantined:
+    """Active venue offer with no local submission provenance.
+
+    The full object is already present in ``VenueSnapshotObserved`` and its
+    entity projection.  This event is the explicit audit/block breadcrumb; it
+    intentionally carries no synthetic CID or reservation reference and never
+    triggers an automatic cancel.
+    """
+
+    venue_offer_id: str
+    symbol: str
+    amount: Decimal | None = None
+    size_usdt: Decimal | None = None
+    account_id: str = ""
+    is_simulated: bool = False
+    reason: str = "unattributed_active_offer"
+    observed_at_ms: int = 0
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.venue_offer_id:
+            raise TypeError("VenueOfferQuarantined requires venue_offer_id")
+        _require_symbol(self)
+        if not self.account_id:
+            raise TypeError("VenueOfferQuarantined requires account_id")
+        _resolve_amount(self)
+        if self.amount is not None and self.amount < 0:
+            raise ValueError("quarantined offer amount must be non-negative")
+        if self.occurred_at_ms is None:
+            object.__setattr__(self, "occurred_at_ms", self.observed_at_ms)
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,19 +537,17 @@ class CancelRequested:
 
 @dataclass(frozen=True, slots=True)
 class PositionReconciled:
-    """Periodic venue snapshot result — in-process pub/sub signal ONLY.
+    """Derived per-symbol bus signal from a durable full-account observation.
 
-    NOT persisted to event_log. Emitted by BootRecovery / PeriodicReconcile
-    after fetching /funding/offers, /funding/credits and /wallets. Drives the
-    absolute set in PaperPositionLedger.on_position_reconciled(); the
-    store.set_position_snapshot() direct write persists reserved/realized to
-    position_state (available is in-memory only — not persisted).
+    The event is intentionally not an event-log source of truth.  BootRecovery
+    first persists ``VenueSnapshotObserved``; only after that transaction
+    commits does it fan out one signal per symbol to the in-memory ledger and
+    safety/PnL subscribers.  The durable projection is updated by the account
+    writer, never by this bus-only signal.
 
-    One event is fired PER SYMBOL (native units). `symbol` is the offer
-    currency; MANDATORY (Task 11 — no default, never silently "fUSD").
-    reserved/realized/available are the canonical native fields; `*_usdt` are
-    transitional read aliases + back-compat constructor kwargs kept until
-    producers/consumers migrate.
+    `symbol` is the offer currency; MANDATORY (never silently ``fUSD``).
+    reserved/realized/available are canonical native fields; `*_usdt` are
+    transitional read aliases for consumers that have not migrated yet.
 
     reserved  = Σ(active offers in `symbol`)  — venue snapshot, not accumulation.
     realized  = Σ(active credits in `symbol`) — venue snapshot.
@@ -436,6 +600,7 @@ class CancelAcknowledged:
 _HISTORICAL_LIFECYCLE_TYPES: dict[str, type[object]] = {
     "RESERVATION_INTENT": ReservationIntent,
     "RESERVATION_FAILED": ReservationFailed,
+    "SUBMIT_OUTCOME_UNKNOWN": ReservationUnknown,
     "RESERVATION_CLAIMED": ReservationClaimed,
     "ORDER_FILL": OrderFilled,
     "RESERVATION_RELEASED": ReservationReleased,

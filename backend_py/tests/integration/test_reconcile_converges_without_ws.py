@@ -118,7 +118,8 @@ class _StubStore:
         self.appended.append(event)
         return True
 
-    async def set_position_snapshot(self, *_args: Any, **_kwargs: Any) -> SnapshotDrift:
+    async def append_snapshot(self, _session: Any, event: Any) -> SnapshotDrift:
+        self.appended.append(event)
         return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
 
 

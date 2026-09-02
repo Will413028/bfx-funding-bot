@@ -20,7 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
 )
 
-_ACTIVE_CLAIM_STATES = ("pending", "claimed")
+_ACTIVE_CLAIM_STATES = ("pending", "unknown", "claimed")
 _EXECUTIONS_LIMIT_CAP = 200
 
 

@@ -30,6 +30,11 @@ class FundingOfferRow:
     status: str
     rate: float | None     # display/audit only; None on at-market/placeholder rows
     period_days: int | None
+    # Additive normalized fields used by full-account reconciliation.  The
+    # legacy parser contract above remains intact for WS consumers.
+    amount_original: Decimal | None = None
+    offer_type: str | None = None
+    flags: dict[str, Any] | int | None = None
 
 
 def parse_funding_offer_row(o: Any) -> FundingOfferRow:
@@ -45,13 +50,22 @@ def parse_funding_offer_row(o: Any) -> FundingOfferRow:
         raise BitfinexShapeError(f"funding offer row malformed: {o!r}")
     rate = o[14]
     period = o[15]
+    amount = abs(Decimal(str(o[4])))
+    original_raw = o[5]
+    amount_original = (
+        abs(Decimal(str(original_raw))) if original_raw is not None else amount
+    )
+    flags = o[9] if len(o) > 9 else None
     return FundingOfferRow(
         venue_offer_id=str(o[0]),
         symbol=str(o[1]),
         mts_create=int(o[2]),
         mts_update=int(o[3]),
-        amount=abs(Decimal(str(o[4]))),
+        amount=amount,
         status=str(o[10]),
         rate=float(rate) if rate is not None else None,
         period_days=int(period) if period is not None else None,
+        amount_original=amount_original,
+        offer_type=str(o[6]) if o[6] is not None else None,
+        flags=flags if isinstance(flags, (dict, int)) else None,
     )

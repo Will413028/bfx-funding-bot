@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -31,6 +31,18 @@ class ActiveFundingOffer:
     period_days: int
     mts_created: int
     status: str
+    # Full-account reconciliation keeps the venue's original/current amounts
+    # and update metadata.  Defaults preserve the lightweight legacy model used
+    # by existing callers and fixtures.
+    amount_original: Decimal | None = None
+    mts_updated: int | None = None
+    offer_type: str | None = None
+    flags: dict[str, Any] | int | None = None
+
+    @property
+    def amount_remaining(self) -> Decimal:
+        """Canonical full-account name for the venue's current amount."""
+        return self.amount
 
 
 def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
@@ -53,6 +65,10 @@ def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
             period_days=row.period_days if row.period_days is not None else 0,
             mts_created=row.mts_create,
             status=row.status,
+            amount_original=row.amount_original,
+            mts_updated=row.mts_update,
+            offer_type=row.offer_type,
+            flags=row.flags,
         ))
     return out
 
@@ -65,6 +81,9 @@ class ActiveFundingCredit:
     rate: float  # display/audit-only; float precision acceptable
     period_days: int
     status: str
+    mts_created: int | None = None
+    mts_updated: int | None = None
+    flags: dict[str, Any] | int | None = None
 
 
 _CREDIT_MIN_ROW_LEN = 11  # period is at index 10
@@ -94,6 +113,9 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
             status=str(o[7]),
             rate=float(rate) if rate is not None else 0.0,
             period_days=int(period) if period is not None else 0,
+            mts_created=int(o[3]) if o[3] is not None else None,
+            mts_updated=int(o[4]) if o[4] is not None else None,
+            flags=o[6] if isinstance(o[6], (dict, int)) else None,
         ))
     return out
 
@@ -186,7 +208,7 @@ class BitfinexAuthREST:
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
 
     async def fetch_funding_offers_raw(
-        self, *, ctx: AccountContext, symbol: str,
+        self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> Any:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns the raw
         decoded JSON body (list of positional arrays), before parsing.
@@ -198,7 +220,7 @@ class BitfinexAuthREST:
         Raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
         invalid JSON.
         """
-        path = f"{_FUNDING_OFFERS_PATH}/{symbol}"
+        path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
         body_bytes = json.dumps({}).encode("utf-8")
         nonce = self._nonce_provider()
         headers = sign_request(
@@ -225,7 +247,7 @@ class BitfinexAuthREST:
             raise BitfinexShapeError(f"invalid JSON in funding-offers response: {e}") from e
 
     async def get_active_funding_offers(
-        self, *, ctx: AccountContext, symbol: str,
+        self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> list[ActiveFundingOffer]:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
@@ -233,11 +255,11 @@ class BitfinexAuthREST:
         return parse_active_funding_offers(raw)
 
     async def get_active_funding_credits(
-        self, *, ctx: AccountContext, symbol: str,
+        self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> list[ActiveFundingCredit]:
         """POST /v2/auth/r/funding/credits/{symbol} (signed). Returns parsed
         active credits. Raises BitfinexAPIError / BitfinexShapeError."""
-        path = f"{_FUNDING_CREDITS_PATH}/{symbol}"
+        path = _FUNDING_CREDITS_PATH if symbol is None else f"{_FUNDING_CREDITS_PATH}/{symbol}"
         body_bytes = json.dumps({}).encode("utf-8")
         nonce = self._nonce_provider()
         headers = sign_request(
@@ -302,6 +324,49 @@ class BitfinexAuthREST:
              if w.wallet_type == "funding" and w.currency == currency),
             Decimal("0"),
         )
+
+    async def get_funding_available_all(
+        self, *, ctx: AccountContext,
+    ) -> Mapping[str, Decimal]:
+        """Return available funding-wallet balances for every currency.
+
+        The result keys use Bitfinex funding symbols (``fUST``/``fUSD``),
+        matching offers and credits so the observation projector never has to
+        infer a currency from strategy configuration.
+        """
+        path = _WALLETS_PATH
+        body_bytes = json.dumps({}).encode("utf-8")
+        nonce = self._nonce_provider()
+        headers = sign_request(
+            body=body_bytes, nonce=nonce,
+            api_secret=ctx.credentials.api_secret, path=path,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{path}", content=body_bytes, headers=headers,
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise BitfinexAPIError(status_code=0, message=f"transport error: {e}", raw=None) from e
+        if resp.status_code >= 400:
+            raise BitfinexAPIError(
+                status_code=resp.status_code,
+                message=resp.reason_phrase or "http error", raw=resp.text,
+            )
+        try:
+            raw = resp.json()
+        except json.JSONDecodeError as e:
+            raise BitfinexShapeError(f"invalid JSON in wallets response: {e}") from e
+        wallets = parse_wallets(raw)
+        out: dict[str, Decimal] = {}
+        for wallet in wallets:
+            if wallet.wallet_type != "funding":
+                continue
+            symbol = wallet.currency if wallet.currency.startswith("f") else f"f{wallet.currency}"
+            out[symbol] = out.get(symbol, Decimal("0")) + wallet.available
+        return out
 
     async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
         """POST /v2/auth/r/permissions (signed). Returns the key's scope→(read,write)
