@@ -18,12 +18,14 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 import httpx
 
 __all__ = [
+    "SubmissionAttemptPayload",
     "SubmitAcknowledged",
     "SubmitNotSent",
     "SubmitOutcome",
@@ -138,6 +140,87 @@ class SubmitNotSent:
     @property
     def outcome_kind(self) -> SubmitOutcomeKind:
         return self.kind
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionAttemptPayload:
+    """Immutable audit identity for one and only one venue submit attempt."""
+
+    execution_decision_id: str
+    account_id: UUID | str
+    environment: str
+    symbol: str
+    cid: int
+    normalized_payload: Mapping[str, Any]
+    payload_sha256: str | None = None
+    started_at_ms: int = 0
+    completed_at_ms: int | None = None
+    outcome_kind: SubmitOutcomeKind | str | None = None
+    outcome_reason: str | None = None
+    venue_offer_id: str | None = None
+    last_event_seq: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.execution_decision_id.strip():
+            raise ValueError("execution_decision_id must be non-empty")
+        try:
+            canonical_account_id = (
+                self.account_id
+                if isinstance(self.account_id, UUID)
+                else UUID(str(self.account_id))
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("account_id must be a canonical UUID") from exc
+        object.__setattr__(self, "account_id", canonical_account_id)
+        if not self.environment.strip():
+            raise ValueError("environment must be non-empty")
+        if not self.symbol.strip():
+            raise ValueError("symbol must be non-empty")
+        if self.cid < 0:
+            raise ValueError("cid must be non-negative")
+        if self.started_at_ms < 0:
+            raise ValueError("started_at_ms must be non-negative")
+        if self.completed_at_ms is not None and self.completed_at_ms < self.started_at_ms:
+            raise ValueError("completed_at_ms cannot precede started_at_ms")
+        if self.last_event_seq is not None and self.last_event_seq < 0:
+            raise ValueError("last_event_seq must be non-negative")
+
+        normalized = normalize_submit_payload(self.normalized_payload)
+        expected_digest = fingerprint_submit_payload(normalized)
+        if self.payload_sha256 is None:
+            object.__setattr__(self, "payload_sha256", expected_digest)
+        else:
+            supplied_digest = self.payload_sha256.strip().lower()
+            if supplied_digest != expected_digest:
+                raise ValueError("payload_sha256 does not match normalized_payload")
+            object.__setattr__(self, "payload_sha256", supplied_digest)
+        object.__setattr__(self, "normalized_payload", _freeze_value(normalized))
+
+        if self.outcome_kind is not None:
+            try:
+                normalized_kind = SubmitOutcomeKind(self.outcome_kind)
+            except ValueError as exc:
+                raise ValueError(f"unsupported submit outcome kind: {self.outcome_kind!r}") from exc
+            object.__setattr__(self, "outcome_kind", normalized_kind)
+            if normalized_kind is not SubmitOutcomeKind.ACKNOWLEDGED and not self.outcome_reason:
+                raise ValueError(f"{normalized_kind.value} outcome requires outcome_reason")
+        if self.outcome_reason is not None:
+            object.__setattr__(self, "outcome_reason", _require_reason(self.outcome_reason))
+        if self.venue_offer_id is not None:
+            object.__setattr__(self, "venue_offer_id", _require_venue_offer_id(self.venue_offer_id))
+
+    @property
+    def payload_fingerprint(self) -> str:
+        assert self.payload_sha256 is not None
+        return self.payload_sha256
 
 
 type SubmitOutcome = (

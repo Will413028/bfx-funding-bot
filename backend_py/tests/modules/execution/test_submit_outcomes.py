@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from uuid import uuid4
 
 import httpx
 
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmissionAttemptPayload,
     SubmitAcknowledged,
     SubmitNotSent,
     SubmitOutcomeKind,
@@ -175,3 +177,47 @@ def test_legacy_filled_status_remains_a_compatibility_view() -> None:
 
     assert order.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
     assert order.status == "filled"
+
+
+def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> None:
+    account_id = uuid4()
+    payload = {"symbol": "fUST", "amount": Decimal("100.0"), "rate": 0.0001}
+    normalized = normalize_submit_payload(payload)
+    attempt = SubmissionAttemptPayload(
+        execution_decision_id="decision-1",
+        account_id=account_id,
+        environment="ci",
+        symbol="fUST",
+        cid=123,
+        normalized_payload=normalized,
+        payload_sha256=fingerprint_submit_payload(normalized),
+        started_at_ms=100,
+    )
+
+    assert attempt.account_id == account_id
+    assert attempt.payload_sha256 == fingerprint_submit_payload(normalized)
+    assert attempt.normalized_payload["amount"] == "100.0"
+    try:
+        attempt.normalized_payload["new"] = "value"  # type: ignore[index]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("normalized payload must be immutable")
+
+
+def test_submission_attempt_payload_rejects_fingerprint_mismatch() -> None:
+    try:
+        SubmissionAttemptPayload(
+            execution_decision_id="decision-1",
+            account_id=uuid4(),
+            environment="ci",
+            symbol="fUST",
+            cid=123,
+            normalized_payload={"amount": "100.0"},
+            payload_sha256="0" * 64,
+            started_at_ms=100,
+        )
+    except ValueError as exc:
+        assert "payload_sha256" in str(exc)
+    else:
+        raise AssertionError("mismatched payload fingerprint must fail closed")

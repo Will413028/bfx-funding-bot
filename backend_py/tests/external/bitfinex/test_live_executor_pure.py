@@ -1,8 +1,6 @@
 import inspect
 from typing import get_type_hints
 
-import pytest
-
 from bfx_funding_bot.external.bitfinex.live_executor import (
     BitfinexLiveExecutor,
     build_offer_payload,
@@ -10,8 +8,8 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     parse_offer_response,
 )
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 
 
 def test_live_executor_submit_accepts_only_ready_to_submit() -> None:
@@ -90,7 +88,8 @@ def test_parse_offer_response_failed() -> None:
     assert result.venue_offer_id is None
 
 
-def test_parse_offer_response_malformed_raises() -> None:
-    """Per spec §8.2 — malformed = InvariantViolation."""
-    with pytest.raises(InvariantViolation):
-        parse_offer_response({"not": "expected"})  # type: ignore[arg-type]
+def test_parse_offer_response_malformed_is_unknown() -> None:
+    """Per spec §7.1 — malformed response is ambiguous, not rejected."""
+    result = parse_offer_response({"not": "expected"})  # type: ignore[arg-type]
+    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    assert result.status == "unknown"

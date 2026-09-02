@@ -49,7 +49,6 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitNotSent,
     SubmitOutcome,
     SubmitOutcomeUnknown,
-    SubmitRejected,
     classify_submit_response,
     response_digest,
 )
@@ -105,44 +104,31 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     OFFER_ARRAY[0] = OFFER_ID (used as venue_offer_id).
     STATUS = "SUCCESS" / "ERROR" / "FAILURE".
 
-    Caller fills cid (this fn is pure parse).
+    Caller fills cid (this fn is pure parse).  Malformed/unrecognized payloads
+    are returned as UNKNOWN so the submit boundary can persist ambiguity.
     """
     if not isinstance(raw, list) or len(raw) < 7:
-        raise InvariantViolation(
-            f"unexpected Bitfinex offer response shape: type={type(raw).__name__}"
+        outcome: SubmitOutcome = SubmitOutcomeUnknown(
+            reason="malformed_response",
+            transport_started=True,
+            raw_response_digest=response_digest(raw),
         )
-
-    status_field = raw[6]
-    if status_field == "SUCCESS":
-        offer = raw[4]
-        if not isinstance(offer, list) or len(offer) < 1:
-            raise InvariantViolation(
-                "Bitfinex SUCCESS response missing OFFER_ARRAY"
-            )
-        venue_offer_id = str(offer[0])
-        return SubmittedOrder(
-            cid=0,
-            venue_offer_id=venue_offer_id,
-            outcome=SubmitAcknowledged(
-                venue_offer_id=venue_offer_id,
-                raw_response=raw,
-            ),
-            raw_response={"raw": raw},
-        )
-
-    # ERROR / FAILURE
+    else:
+        # The pure parser shares the same classifier as the HTTP shell.  This
+        # prevents an unrecognized status (or a SUCCESS without an ID) from
+        # being mislabelled as a rejection by a direct caller.
+        outcome = classify_submit_response(200, raw, True)
+    venue_offer_id = (
+        outcome.venue_offer_id if isinstance(outcome, SubmitAcknowledged) else None
+    )
     return SubmittedOrder(
         cid=0,
-        venue_offer_id=None,
-        outcome=SubmitRejected(
-            reason=(
-                str(raw[8]).strip()
-                if len(raw) > 8 and raw[8]
-                else "venue_rejected"
-            ),
-            raw_response=raw,
-        ),
-        raw_response={"raw": raw, "error_text": raw[8] if len(raw) > 8 else None},
+        venue_offer_id=venue_offer_id,
+        outcome=outcome,
+        raw_response={
+            "raw": raw,
+            "error_text": raw[8] if isinstance(raw, list) and len(raw) > 8 else None,
+        },
     )
 
 
