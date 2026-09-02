@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -176,7 +176,7 @@ class OrderSubmitPayload(BaseModel):
     offer_amount_usdt: float
     offer_duration_days: int
     is_simulated: bool
-    status: str  # "submitted" / "failed" / "unknown" / "not_sent"
+    status: Literal["submitted", "failed", "unknown", "not_sent"]
     failure_reason: str | None = None
     attempts: int = 1
     retry_total_ms: int | None = None

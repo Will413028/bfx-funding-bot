@@ -66,6 +66,10 @@ def _ctx() -> AccountContext:
     )
 
 
+async def _ignore_unknown(_event: ReservationUnknown) -> None:
+    return None
+
+
 class _RecordingPersister:
     """Records each persist() call as one tuple of events (= one txn)."""
     def __init__(self) -> None:
@@ -130,7 +134,10 @@ async def test_live_submitted_persists_intent_then_claim_only() -> None:
     bus, seen = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "123456", persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=False,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationClaimed]
@@ -143,7 +150,10 @@ async def test_failed_persists_intent_then_failed_no_publish() -> None:
     bus, seen = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("failed", None, persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=False,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationFailed]
@@ -162,11 +172,37 @@ async def test_unknown_persists_distinct_unknown_event_and_does_not_publish() ->
     )
     await ReservationEmittingMiddleware(
         inner, bus=bus, persister=persister, is_simulated=False,
+        uncertainty_handler=_ignore_unknown,
     ).submit(_ready_to_submit(), _ctx())
 
     assert [type(e) for e in persister.txns[1]] == [ReservationUnknown]
     assert persister.txns[1][0].reason == "timeout"
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_notifies_uncertainty_handler_for_symbol_block() -> None:
+    persister = _RecordingPersister()
+    unknown_events: list[ReservationUnknown] = []
+
+    async def mark_unknown(event: ReservationUnknown) -> None:
+        unknown_events.append(event)
+
+    inner = _StubInner(
+        "unknown", None, persister=persister,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+    )
+    await ReservationEmittingMiddleware(
+        inner,
+        bus=DomainEventBus(),
+        persister=persister,
+        is_simulated=False,
+        uncertainty_handler=mark_unknown,
+    ).submit(_ready_to_submit(symbol="fUST"), _ctx())
+
+    assert len(unknown_events) == 1
+    assert unknown_events[0].symbol == "fUST"
+    assert unknown_events[0].reason == "timeout"
 
 
 @pytest.mark.asyncio
@@ -241,6 +277,7 @@ async def test_conflicting_executor_reference_is_rejected_by_identity() -> None:
         await ReservationEmittingMiddleware(
             _ConflictingInner(), bus=DomainEventBus(),
             persister=_RecordingPersister(), is_simulated=False,
+            uncertainty_handler=_ignore_unknown,
         ).submit(_ready_to_submit(), _ctx())
 
 
@@ -297,7 +334,10 @@ async def test_symbol_propagates_from_decision() -> None:
     bus, _ = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "999", persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=False,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(symbol="fUSD"), _ctx())
     assert persister.txns[1][0].symbol == "fUSD"
 
@@ -311,6 +351,7 @@ async def test_reservation_intent_links_execution_decision_id() -> None:
         bus=bus,
         persister=persister,
         is_simulated=False,
+        uncertainty_handler=_ignore_unknown,
     )
 
     await mw.submit(_ready_to_submit(decision_id="d-8"), _ctx(), cid=123)

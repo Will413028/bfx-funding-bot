@@ -121,14 +121,16 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     venue_offer_id = (
         outcome.venue_offer_id if isinstance(outcome, SubmitAcknowledged) else None
     )
+    bounded_response = getattr(outcome, "raw_response", None)
+    if bounded_response is None:
+        bounded_response = {"response_digest": response_digest(raw)}
+        if isinstance(raw, list) and len(raw) > 8 and isinstance(raw[8], str):
+            bounded_response["error_text"] = raw[8][:256]
     return SubmittedOrder(
         cid=0,
         venue_offer_id=venue_offer_id,
         outcome=outcome,
-        raw_response={
-            "raw": raw,
-            "error_text": raw[8] if isinstance(raw, list) and len(raw) > 8 else None,
-        },
+        raw_response=bounded_response,
     )
 
 
@@ -345,7 +347,11 @@ class BitfinexLiveExecutor:
                 cid=cid,
                 reference=reference,
                 outcome=outcome,
-                raw_response={"http_status": status, "body": body},
+                raw_response={
+                    "http_status": status,
+                    "response_digest": response_digest(body),
+                    "body": body,
+                },
             )
         except asyncio.CancelledError as e:
             outcome = classify_submit_response(
@@ -379,7 +385,11 @@ class BitfinexLiveExecutor:
                 cid=cid,
                 reference=reference,
                 outcome=outcome,
-                raw_response={"http_status": resp.status_code, "body": resp.text[:1000]},
+                raw_response={
+                    "http_status": resp.status_code,
+                    "response_digest": response_digest(resp.text[:1000]),
+                    "body": resp.text[:1000],
+                },
             )
         outcome = classify_submit_response(
             resp.status_code,
@@ -390,7 +400,6 @@ class BitfinexLiveExecutor:
             cid=cid,
             reference=reference,
             outcome=outcome,
-            raw_response={"raw": parsed_body},
         )
 
     async def cancel(

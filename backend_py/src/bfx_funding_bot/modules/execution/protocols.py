@@ -92,6 +92,7 @@ class SubmittedOrder:
         outcome: SubmitOutcome | None = None,
         _legacy_status: str | None = None,
     ) -> None:
+        typed_outcome_supplied = outcome is not None
         if outcome is None:
             outcome = _outcome_from_legacy_status(
                 status,
@@ -99,8 +100,24 @@ class SubmittedOrder:
                 raw_response=raw_response,
             )
         else:
-            if status == "failed" and outcome.kind is SubmitOutcomeKind.UNKNOWN:
-                raise ValueError("UNKNOWN outcome cannot use status='failed'")
+            expected_statuses = {
+                SubmitOutcomeKind.ACKNOWLEDGED: {"submitted", "filled"},
+                SubmitOutcomeKind.REJECTED: {"failed"},
+                SubmitOutcomeKind.UNKNOWN: {"unknown"},
+                SubmitOutcomeKind.NOT_SENT: {"not_sent"},
+            }[outcome.kind]
+            if status is not None and status not in expected_statuses:
+                raise ValueError(
+                    f"typed {outcome.kind.value} outcome conflicts with status={status!r}"
+                )
+            if _legacy_status is not None and _legacy_status not in expected_statuses:
+                # ``_legacy_status`` is populated only by dataclasses.replace on
+                # a legacy paper result.  Keeping this check means replacement
+                # cannot silently turn an UNKNOWN into a success-shaped status.
+                raise ValueError(
+                    f"typed {outcome.kind.value} outcome conflicts with "
+                    f"legacy status={_legacy_status!r}"
+                )
             if (
                 isinstance(outcome, SubmitAcknowledged)
                 and venue_offer_id is not None
@@ -109,6 +126,10 @@ class SubmittedOrder:
                 raise ValueError("venue_offer_id conflicts with acknowledged outcome")
             if isinstance(outcome, SubmitAcknowledged) and venue_offer_id is None:
                 venue_offer_id = outcome.venue_offer_id
+            if not isinstance(outcome, SubmitAcknowledged) and venue_offer_id is not None:
+                raise ValueError(
+                    f"{outcome.kind.value} outcome cannot carry venue_offer_id"
+                )
             if raw_response is None and hasattr(outcome, "raw_response"):
                 raw_response = outcome.raw_response
 
@@ -122,7 +143,7 @@ class SubmittedOrder:
         compatibility = (
             _legacy_status
             if _legacy_status is not None
-            else status if status in {"filled", "weird_venue_string"} else None
+            else status if not typed_outcome_supplied and status in {"filled", "weird_venue_string"} else None
         )
         object.__setattr__(self, "_legacy_status", compatibility)
 

@@ -64,6 +64,21 @@ def test_order_submit_unknown_and_not_sent_require_failure_reason() -> None:
         assert payload.status == status
 
 
+def test_order_submit_status_is_closed_vocabulary() -> None:
+    common = {
+        "cid": 1,
+        "offer_id": None,
+        "execution_decision_id": "d-schema",
+        "signal_correlation_id": uuid4(),
+        "offer_rate": 0.0001,
+        "offer_amount_usdt": 100.0,
+        "offer_duration_days": 2,
+        "is_simulated": False,
+    }
+    with pytest.raises(ValidationError, match="status"):
+        OrderSubmitPayload(**common, status="filled")
+
+
 def test_order_submit_payload_requires_execution_decision_id() -> None:
     with pytest.raises(ValidationError, match="execution_decision_id"):
         OrderSubmitPayload(

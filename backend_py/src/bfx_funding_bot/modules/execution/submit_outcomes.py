@@ -109,6 +109,13 @@ class SubmitOutcomeUnknown:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reason", _require_reason(self.reason))
+        if not isinstance(self.transport_started, bool):
+            raise TypeError("transport_started must be a bool")
+        if not self.transport_started:
+            # A pre-transport failure is authoritative NOT_SENT.  Allowing it
+            # to masquerade as UNKNOWN would open an uncertainty record without
+            # any possibility that the venue received the request.
+            raise ValueError("UNKNOWN outcome requires transport_started=True")
         if self.raw_response_digest is not None:
             digest = self.raw_response_digest.strip().lower()
             if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
@@ -147,6 +154,15 @@ def _freeze_value(value: Any) -> Any:
         return MappingProxyType({str(key): _freeze_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _thaw_value(value: Any) -> Any:
+    """Convert the immutable audit representation back to JSON primitives."""
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
     return value
 
 
@@ -210,6 +226,10 @@ class SubmissionAttemptPayload:
             except ValueError as exc:
                 raise ValueError(f"unsupported submit outcome kind: {self.outcome_kind!r}") from exc
             object.__setattr__(self, "outcome_kind", normalized_kind)
+            if normalized_kind is SubmitOutcomeKind.ACKNOWLEDGED and self.venue_offer_id is None:
+                raise ValueError("acknowledged outcome requires venue_offer_id")
+            if normalized_kind is not SubmitOutcomeKind.ACKNOWLEDGED and self.venue_offer_id is not None:
+                raise ValueError("non-acknowledged outcome must not carry venue_offer_id")
             if normalized_kind is not SubmitOutcomeKind.ACKNOWLEDGED and not self.outcome_reason:
                 raise ValueError(f"{normalized_kind.value} outcome requires outcome_reason")
         if self.outcome_reason is not None:
@@ -221,6 +241,34 @@ class SubmissionAttemptPayload:
     def payload_fingerprint(self) -> str:
         assert self.payload_sha256 is not None
         return self.payload_sha256
+
+    def as_storage_dict(self) -> dict[str, Any]:
+        """Return a JSON/JSONB-safe copy for the audit writer.
+
+        The in-memory value stays deeply immutable so callers cannot mutate the
+        fingerprinted identity after construction.  Persistence adapters should
+        use this boundary instead of handing ``MappingProxyType``/tuples to a
+        JSON encoder that may not understand them.
+        """
+        return {
+            "execution_decision_id": self.execution_decision_id,
+            "account_id": str(self.account_id),
+            "environment": self.environment,
+            "symbol": self.symbol,
+            "cid": self.cid,
+            "normalized_payload": _thaw_value(self.normalized_payload),
+            "payload_sha256": self.payload_sha256,
+            "started_at_ms": self.started_at_ms,
+            "completed_at_ms": self.completed_at_ms,
+            "outcome_kind": (
+                self.outcome_kind.value
+                if isinstance(self.outcome_kind, SubmitOutcomeKind)
+                else self.outcome_kind
+            ),
+            "outcome_reason": self.outcome_reason,
+            "venue_offer_id": self.venue_offer_id,
+            "last_event_seq": self.last_event_seq,
+        }
 
 
 type SubmitOutcome = (
@@ -348,6 +396,45 @@ def response_digest(response: Any) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _bounded_response_diagnostic(
+    body: Any,
+    *,
+    status: str,
+    venue_offer_id: str | None = None,
+    reason: str | None = None,
+) -> dict[str, str]:
+    """Keep only bounded, allowlisted response diagnostics.
+
+    The parsed venue body can contain arbitrary text and fields.  It is useful
+    for a short-lived log, but it must never become part of the durable submit
+    attempt/audit envelope.  The digest preserves forensic correlation while the
+    selected fields keep operator-facing diagnostics bounded.
+    """
+    diagnostic: dict[str, str] = {
+        "response_digest": response_digest(body),
+        "status": status,
+    }
+    if venue_offer_id is not None:
+        diagnostic["venue_offer_id"] = venue_offer_id
+    if reason is not None:
+        bounded_reason = _bounded_text(reason)
+        if bounded_reason is not None:
+            diagnostic["reason"] = bounded_reason
+    if isinstance(body, list):
+        request_type = _bounded_text(body[1] if len(body) > 1 else None)
+        if request_type is not None:
+            diagnostic["request_type"] = request_type
+        venue_status = _bounded_text(body[6] if len(body) > 6 else None)
+        if venue_status is not None:
+            diagnostic["venue_status"] = venue_status
+    elif isinstance(body, Mapping):
+        for key in ("code", "CODE", "message", "text", "error"):
+            value = _bounded_text(body.get(key))
+            if value is not None:
+                diagnostic[key.lower()] = value
+    return diagnostic
+
+
 def _unknown(
     reason: str,
     *,
@@ -398,9 +485,23 @@ def classify_submit_response(
     if 200 <= http_status < 300:
         venue_offer_id = _venue_offer_id(parsed_body)
         if venue_offer_id is not None:
-            return SubmitAcknowledged(venue_offer_id=venue_offer_id, raw_response=parsed_body)
+            return SubmitAcknowledged(
+                venue_offer_id=venue_offer_id,
+                raw_response=_bounded_response_diagnostic(
+                    parsed_body,
+                    status="SUCCESS",
+                    venue_offer_id=venue_offer_id,
+                ),
+            )
         if rejection_reason is not None:
-            return SubmitRejected(reason=rejection_reason, raw_response=parsed_body)
+            return SubmitRejected(
+                reason=rejection_reason,
+                raw_response=_bounded_response_diagnostic(
+                    parsed_body,
+                    status="REJECTED",
+                    reason=rejection_reason,
+                ),
+            )
         reason = "malformed_response" if isinstance(parsed_body, list) else "unrecognized_response"
         return _unknown(reason, transport_started=True, parsed_body=parsed_body)
 
@@ -409,6 +510,13 @@ def classify_submit_response(
         and http_status in ALLOWLISTED_4XX_REJECTION_STATUSES
         and rejection_reason is not None
     ):
-        return SubmitRejected(reason=rejection_reason, raw_response=parsed_body)
+        return SubmitRejected(
+            reason=rejection_reason,
+            raw_response=_bounded_response_diagnostic(
+                parsed_body,
+                status=f"HTTP_{http_status}",
+                reason=rejection_reason,
+            ),
+        )
 
     return _unknown("unrecognized_response", transport_started=True, parsed_body=parsed_body)

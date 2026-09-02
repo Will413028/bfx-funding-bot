@@ -7,6 +7,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import httpx
+import pytest
 
 from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
 from bfx_funding_bot.modules.execution.submit_outcomes import (
@@ -19,6 +20,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     classify_submit_response,
     fingerprint_submit_payload,
     normalize_submit_payload,
+    response_digest,
 )
 
 
@@ -46,7 +48,9 @@ def test_success_with_venue_id_is_acknowledged() -> None:
     assert isinstance(outcome, SubmitAcknowledged)
     assert outcome.kind is SubmitOutcomeKind.ACKNOWLEDGED
     assert outcome.venue_offer_id == "42"
-    assert outcome.raw_response == _success_body()
+    assert outcome.raw_response is not None
+    assert outcome.raw_response["response_digest"] == response_digest(_success_body())
+    assert "body" not in outcome.raw_response
 
 
 def test_structured_2xx_error_is_rejected() -> None:
@@ -55,7 +59,10 @@ def test_structured_2xx_error_is_rejected() -> None:
     assert isinstance(outcome, SubmitRejected)
     assert outcome.kind is SubmitOutcomeKind.REJECTED
     assert "Funds insufficient" in outcome.reason
-    assert outcome.raw_response == _error_body()
+    assert outcome.raw_response is not None
+    assert len(str(outcome.raw_response)) < 1_000
+    assert "Funds insufficient" in str(outcome.raw_response)
+    assert _error_body() != outcome.raw_response
 
 
 def test_allowlisted_structured_4xx_is_rejected() -> None:
@@ -167,6 +174,23 @@ def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> No
     assert unknown.status != "failed"
 
 
+def test_typed_outcome_rejects_contradictory_legacy_status() -> None:
+    with pytest.raises(ValueError, match="status"):
+        SubmittedOrder(
+            cid=2,
+            venue_offer_id=None,
+            status="filled",
+            outcome=SubmitOutcomeUnknown("timeout", True),
+        )
+    with pytest.raises(ValueError, match="status"):
+        SubmittedOrder(
+            cid=3,
+            venue_offer_id="42",
+            status="failed",
+            outcome=SubmitAcknowledged("42"),
+        )
+
+
 def test_legacy_filled_status_remains_a_compatibility_view() -> None:
     order = SubmittedOrder(
         cid=3,
@@ -221,3 +245,49 @@ def test_submission_attempt_payload_rejects_fingerprint_mismatch() -> None:
         assert "payload_sha256" in str(exc)
     else:
         raise AssertionError("mismatched payload fingerprint must fail closed")
+
+
+def test_submission_attempt_payload_enforces_outcome_identity_invariants() -> None:
+    common = {
+        "execution_decision_id": "decision-1",
+        "account_id": uuid4(),
+        "environment": "ci",
+        "symbol": "fUST",
+        "cid": 123,
+        "normalized_payload": {"amount": "100.0"},
+        "started_at_ms": 100,
+    }
+    with pytest.raises(ValueError, match="venue_offer_id"):
+        SubmissionAttemptPayload(
+            **common,
+            outcome_kind=SubmitOutcomeKind.ACKNOWLEDGED,
+        )
+    with pytest.raises(ValueError, match="must not carry"):
+        SubmissionAttemptPayload(
+            **common,
+            outcome_kind=SubmitOutcomeKind.REJECTED,
+            outcome_reason="bad request",
+            venue_offer_id="42",
+        )
+    with pytest.raises(ValueError, match="transport_started"):
+        SubmitOutcomeUnknown("ambiguous", False)
+
+
+def test_submission_attempt_payload_exposes_json_safe_storage_shape() -> None:
+    attempt = SubmissionAttemptPayload(
+        execution_decision_id="decision-1",
+        account_id=uuid4(),
+        environment="ci",
+        symbol="fUST",
+        cid=123,
+        normalized_payload={"amount": Decimal("100.0"), "levels": [Decimal("1.2")]},
+        started_at_ms=100,
+        outcome_kind=SubmitOutcomeKind.REJECTED,
+        outcome_reason="bad request",
+    )
+
+    storage = attempt.as_storage_dict()
+    assert storage["account_id"] == str(attempt.account_id)
+    assert storage["normalized_payload"] == {
+        "amount": "100.0", "levels": ["1.2"],
+    }

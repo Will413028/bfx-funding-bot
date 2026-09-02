@@ -79,6 +79,7 @@ class _LedgerProtocol(Protocol):
     def current_exposure(self, symbol: str) -> Decimal: ...
     def reserved_exposure(self, symbol: str) -> Decimal: ...
     def available_balance(self, symbol: str) -> Decimal: ...
+    def is_uncertain(self, symbol: str) -> bool: ...
 
 
 class _SafetyChainProtocol(Protocol):
@@ -223,6 +224,17 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            # A post-transport UNKNOWN is an account/symbol-wide command gate:
+            # even if the residual cap gap is positive, submitting another
+            # offer could duplicate the request that may already exist at the
+            # venue.  Only an explicit reconcile/operator resolution may clear
+            # the ledger's uncertainty bucket.
+            if self._ledger.is_uncertain(symbol):
+                log.error(
+                    "deployment_symbol_blocked_uncertain account=%s symbol=%s",
+                    self._ctx.account_id, symbol,
+                )
+                continue
             # Resolve cap/buffer with the SAME three-tier chain the per-offer
             # guards use (map[symbol] → scalar env-fallback → default), so the
             # reconciler sizes to exactly the cap AllocationCapGuard enforces.
@@ -333,6 +345,17 @@ class DeploymentReconciler:
                 )
 
             for cell_id, amount in fills.items():
+                # The first UNKNOWN in this allocation can open the shared
+                # ledger gate synchronously inside ReservationEmittingMiddleware.
+                # Re-check before every remaining cell so one tick cannot place
+                # a second offer for the same uncertain symbol.
+                if self._ledger.is_uncertain(symbol):
+                    log.error(
+                        "deployment_symbol_blocked_uncertain_after_submit "
+                        "account=%s symbol=%s cell=%s",
+                        self._ctx.account_id, symbol, cell_id,
+                    )
+                    break
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue

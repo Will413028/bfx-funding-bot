@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -58,13 +58,19 @@ class ReservationEmittingMiddleware:
         is_simulated: bool = True,
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
+        uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
     ) -> None:
+        if not is_simulated and uncertainty_handler is None:
+            raise ValueError(
+                "live reservation middleware requires an uncertainty_handler"
+            )
         self._inner = inner
         self._bus = bus
         self._persister = persister
         self._is_simulated = is_simulated
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
+        self._uncertainty_handler = uncertainty_handler
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
@@ -130,12 +136,18 @@ class ReservationEmittingMiddleware:
             # with a distinct pessimistic event.  Treating them as FAILED
             # would permit a duplicate venue offer on the next tick.
             unknown_reason = getattr(result.outcome, "reason", "submit_outcome_unknown")
-            await self._persister.persist(ReservationUnknown(
+            unknown_event = ReservationUnknown(
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
                 reason=unknown_reason, occurred_at_ms=outcome_ms,
                 symbol=decision.symbol, reservation_ref=bound_reference,
-            ))
+            )
+            # This is a direct projection hook rather than a normal domain-bus
+            # publication: UNKNOWN must never look like a venue claim, but the
+            # live symbol gate must open before the next reconcile tick.
+            await self._persister.persist(unknown_event)
+            if self._uncertainty_handler is not None:
+                await self._uncertainty_handler(unknown_event)
         elif result.outcome_kind is SubmitOutcomeKind.NOT_SENT:
             # Local validation happened before transport; it is safe to resolve
             # the intent as capital-neutral and it must not be labelled a venue
