@@ -146,12 +146,19 @@ class PeriodicReconcile:
             result.realized_drift_usdt > _DRIFT_EPSILON
             or result.reserved_drift_usdt > _DRIFT_EPSILON
         )
-        if result.n_released > 0 or result.n_claimed > 0 or drifted:
+        if (
+            result.n_released > 0
+            or result.n_claimed > 0
+            or result.n_matched > 0
+            or result.n_quarantined > 0
+            or drifted
+        ):
             log.warning(
                 "periodic_reconcile_divergence released=%d claimed=%d failed=%d "
-                "realized_drift=%s reserved_drift=%s "
+                "matched=%d quarantined=%d realized_drift=%s reserved_drift=%s "
                 "— WS lifecycle path missed events",
                 result.n_released, result.n_claimed, result.n_failed,
+                result.n_matched, result.n_quarantined,
                 result.realized_drift_usdt, result.reserved_drift_usdt,
             )
             self._divergence_flagged = True
@@ -160,6 +167,8 @@ class PeriodicReconcile:
                 error_message=(
                     f"reconcile drift released={result.n_released} "
                     f"claimed={result.n_claimed} "
+                    f"matched={result.n_matched} "
+                    f"quarantined={result.n_quarantined} "
                     f"realized_drift={result.realized_drift_usdt} "
                     f"reserved_drift={result.reserved_drift_usdt}"
                 ),
