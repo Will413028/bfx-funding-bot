@@ -1279,6 +1279,7 @@ async def build_daemon(
             offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
+            uncertainty_handler=ledger.on_reservation_unknown,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1301,6 +1302,7 @@ async def build_daemon(
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
             action_grace_ms=120_000,
+            uncertainty_handler=ledger.on_reservation_unknown,
         )
 
     fill_tracker: RestPollingFillTracker | None = None
@@ -1362,6 +1364,9 @@ async def build_daemon(
                 bus=bus,
                 persister=persister,
                 is_simulated=spec.is_simulated,
+                uncertainty_handler=(
+                    ledger.on_reservation_unknown if not spec.is_simulated else None
+                ),
             ),
             probe=probe,
         ),

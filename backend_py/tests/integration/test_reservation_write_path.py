@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     OfferClaimRow,
     PositionStateRow,
 )
+from bfx_funding_bot.modules.execution.events import ReservationUnknown
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -65,6 +66,10 @@ def _ready(decision: DecisionPayload, decision_id: str) -> ReadyToSubmit:
     )
 
 
+async def _ignore_unknown(_event: ReservationUnknown) -> None:
+    return None
+
+
 def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> ReservationEmittingMiddleware:
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
@@ -73,7 +78,11 @@ def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> Reserva
         compatibility_mode=True,
     )
     return ReservationEmittingMiddleware(
-        inner, bus=DomainEventBus(), persister=persister, is_simulated=account_simulated,
+        inner,
+        bus=DomainEventBus(),
+        persister=persister,
+        is_simulated=account_simulated,
+        uncertainty_handler=None if account_simulated else _ignore_unknown,
     )
 
 

@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -78,6 +79,7 @@ class _LedgerProtocol(Protocol):
     def current_exposure(self, symbol: str) -> Decimal: ...
     def reserved_exposure(self, symbol: str) -> Decimal: ...
     def available_balance(self, symbol: str) -> Decimal: ...
+    def is_uncertain(self, symbol: str) -> bool: ...
 
 
 class _SafetyChainProtocol(Protocol):
@@ -222,6 +224,17 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            # A post-transport UNKNOWN is an account/symbol-wide command gate:
+            # even if the residual cap gap is positive, submitting another
+            # offer could duplicate the request that may already exist at the
+            # venue.  Only an explicit reconcile/operator resolution may clear
+            # the ledger's uncertainty bucket.
+            if self._ledger.is_uncertain(symbol):
+                log.error(
+                    "deployment_symbol_blocked_uncertain account=%s symbol=%s",
+                    self._ctx.account_id, symbol,
+                )
+                continue
             # Resolve cap/buffer with the SAME three-tier chain the per-offer
             # guards use (map[symbol] → scalar env-fallback → default), so the
             # reconciler sizes to exactly the cap AllocationCapGuard enforces.
@@ -332,6 +345,17 @@ class DeploymentReconciler:
                 )
 
             for cell_id, amount in fills.items():
+                # The first UNKNOWN in this allocation can open the shared
+                # ledger gate synchronously inside ReservationEmittingMiddleware.
+                # Re-check before every remaining cell so one tick cannot place
+                # a second offer for the same uncertain symbol.
+                if self._ledger.is_uncertain(symbol):
+                    log.error(
+                        "deployment_symbol_blocked_uncertain_after_submit "
+                        "account=%s symbol=%s cell=%s",
+                        self._ctx.account_id, symbol, cell_id,
+                    )
+                    break
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue
@@ -477,26 +501,45 @@ class DeploymentReconciler:
                             cell=cell_id, symbol=symbol, amount=amount, reason=repr(exc),
                         )
                     continue
-                # The live executor does NOT raise on a venue reject (e.g. 10001
-                # "not enough balance"): it returns a SubmittedOrder with status
-                # "failed". Only record intent + log success when the offer actually
-                # landed — otherwise we'd track phantom capital + emit a false
-                # deployment_submitted. Next reconcile re-evaluates the gap.
-                if result.status == "failed":
-                    log.warning(
-                        "deployment_submit_rejected cell=%s amount=%s status=%s",
-                        cell_id, amount, result.status,
+                # Only an explicit ACK may advance the in-memory deployment
+                # tracker.  REJECTED/NOT_SENT are capital-neutral; UNKNOWN is
+                # pessimistic and must remain blocked until reconcile evidence
+                # resolves it.  In particular, UNKNOWN must never fall through
+                # the old string-status success branch.
+                if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
+                    log.error(
+                        "deployment_submit_unknown cell=%s amount=%s reason=%s",
+                        cell_id, amount, getattr(result.outcome, "reason", "unknown"),
                     )
                     if self._attempts is not None:
-                        # Recorded as "rejected", never "blocked": the guards
-                        # PASSED and an offer really did leave the process.
-                        self._attempts.record_rejected(
+                        self._attempts.record_error(
                             cell=cell_id, symbol=symbol, amount=amount,
-                            reason=(
-                                str(result.raw_response) if result.raw_response
-                                else "venue_rejected"
-                            ),
+                            reason=getattr(result.outcome, "reason", "submit_outcome_unknown"),
                         )
+                    await self._emit_submit(cell_id, outcome, result, reconcile_id)
+                    continue
+                if result.outcome_kind in {
+                    SubmitOutcomeKind.REJECTED,
+                    SubmitOutcomeKind.NOT_SENT,
+                }:
+                    log.warning(
+                        "deployment_submit_rejected cell=%s amount=%s outcome=%s",
+                        cell_id, amount, result.outcome_kind.value,
+                    )
+                    if self._attempts is not None:
+                        if result.outcome_kind is SubmitOutcomeKind.REJECTED:
+                            # Guards passed and the venue supplied explicit
+                            # rejection evidence; keep this distinct from a
+                            # pre-transport validation failure.
+                            self._attempts.record_rejected(
+                                cell=cell_id, symbol=symbol, amount=amount,
+                                reason=getattr(result.outcome, "reason", "venue_rejected"),
+                            )
+                        else:
+                            self._attempts.record_error(
+                                cell=cell_id, symbol=symbol, amount=amount,
+                                reason="local_pre_transport",
+                            )
                     await self._emit_submit(cell_id, outcome, result, reconcile_id)
                     continue
                 self._tracker.record_deploy(cell_id, amount)
@@ -637,7 +680,8 @@ class DeploymentReconciler:
         # OrderSubmitPayload requires a failure_reason whenever status != submitted.
         failure_reason = (
             None if result.status == "submitted"
-            else (str(result.raw_response) if result.raw_response else "venue_rejected")
+            else getattr(result.outcome, "reason", None)
+            or (str(result.raw_response) if result.raw_response else "submit_outcome_unknown")
         )
         await emit_order_submit(
             event_sink=self._event_sink,
