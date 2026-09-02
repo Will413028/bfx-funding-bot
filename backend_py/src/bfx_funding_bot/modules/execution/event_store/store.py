@@ -13,6 +13,8 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
     account_scope_clause,
 )
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow  # noqa: F401
 from bfx_funding_bot.modules.execution.event_store.entities import (
     is_terminal_credit_status,
     is_terminal_offer_status,
@@ -37,6 +39,14 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmissionAttemptPayload,
+    SubmitOutcomeKind,
+)
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ExecutionUncertaintyRow,
+    SubmissionAttemptRow,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +295,12 @@ class PostgresEventStore:
         if etype in _AUDIT_ONLY_TYPES:
             return
         event_obj: Any = cast(Any, event)
+        await self._project_submission_attempt(
+            session,
+            event,
+            account_id=account_id,
+            event_seq=event_seq,
+        )
         projection_changed = await self._project_offer_claims(
             session, event, account_id, event_seq=event_seq
         )
@@ -298,6 +314,209 @@ class PostgresEventStore:
                 event_obj.occurred_at_ms or 0,
                 symbol=event_obj.symbol,
             )
+        if etype == "SUBMIT_OUTCOME_UNKNOWN":
+            await self._project_submit_uncertainty(
+                session,
+                event,
+                account_id=account_id,
+                event_seq=event_seq,
+            )
+
+    async def _project_submission_attempt(
+        self,
+        session: AsyncSession,
+        event: object,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Project one immutable attempt and its single typed outcome.
+
+        The event row, attempt mutation, offer/position projection, and cursor
+        are owned by the surrounding :class:`AccountEventWriter` transaction.
+        A compatibility stream without a registered ExchangeAccount predates
+        submission attempts and remains event-only.
+        """
+        etype = event_type_of(event)
+        if etype not in {
+            "RESERVATION_INTENT",
+            "RESERVATION_CLAIMED",
+            "RESERVATION_FAILED",
+            "SUBMIT_OUTCOME_UNKNOWN",
+        }:
+            return
+        canonical = account_id_uuid_or_none(account_id)
+        if canonical is None:
+            return
+        registered = await session.scalar(
+            select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+        )
+        if registered is None:
+            return
+
+        event_obj: Any = cast(Any, event)
+        if etype == "RESERVATION_INTENT":
+            attempt = event_obj.submission_attempt
+            if attempt is None:
+                raise OfferClaimIdentityConflictError(
+                    "registered account reservation intent requires submission_attempt"
+                )
+            if not isinstance(attempt, SubmissionAttemptPayload):
+                raise TypeError("submission_attempt must be SubmissionAttemptPayload")
+            storage = attempt.as_storage_dict()
+            if storage["environment"] != self._env:
+                raise OfferClaimIdentityConflictError(
+                    "submission attempt environment conflicts with event store"
+                )
+            existing = await session.scalar(
+                select(SubmissionAttemptRow).where(
+                    SubmissionAttemptRow.execution_decision_id
+                    == attempt.execution_decision_id
+                )
+            )
+            if existing is not None:
+                raise OfferClaimIdentityConflictError(
+                    "execution decision already has a submission attempt"
+                )
+            session.add(
+                SubmissionAttemptRow(
+                    execution_decision_id=attempt.execution_decision_id,
+                    exchange_account_id=canonical,
+                    deployment_environment=attempt.environment,
+                    symbol=attempt.symbol,
+                    cid=attempt.cid,
+                    normalized_payload=storage["normalized_payload"],
+                    payload_sha256=attempt.payload_fingerprint,
+                    started_at_ms=attempt.started_at_ms,
+                    completed_at_ms=None,
+                    outcome_kind=None,
+                    outcome_reason=None,
+                    venue_offer_id=None,
+                    last_event_seq=event_seq,
+                )
+            )
+            await session.flush()
+            return
+
+        reference = event_obj.reservation_ref
+        if reference is None:
+            return
+        attempt_row = await session.scalar(
+            select(SubmissionAttemptRow).where(
+                SubmissionAttemptRow.execution_decision_id
+                == reference.execution_decision_id
+            )
+        )
+        if attempt_row is None:
+            if etype == "SUBMIT_OUTCOME_UNKNOWN":
+                raise OfferClaimIdentityConflictError(
+                    "submit UNKNOWN has no durable submission attempt"
+                )
+            # Existing event-writer consumers may append venue lifecycle facts
+            # which did not originate from the new command boundary.  They do
+            # not manufacture an attempt retroactively; the command gate is the
+            # only producer required to have one.
+            return
+        if (
+            attempt_row.exchange_account_id != canonical
+            or attempt_row.deployment_environment != self._env
+            or attempt_row.symbol != event_obj.symbol
+            or attempt_row.cid != event_obj.cid
+        ):
+            raise OfferClaimIdentityConflictError("submit outcome attempt scope conflicts")
+        if attempt_row.outcome_kind is not None:
+            raise OfferClaimIdentityConflictError(
+                "submission attempt already has a typed outcome"
+            )
+
+        if etype == "RESERVATION_CLAIMED":
+            outcome_kind = SubmitOutcomeKind.ACKNOWLEDGED
+            outcome_reason = None
+            venue_offer_id = event_obj.venue_offer_id
+        elif etype == "SUBMIT_OUTCOME_UNKNOWN":
+            outcome_kind = SubmitOutcomeKind.UNKNOWN
+            outcome_reason = event_obj.reason
+            venue_offer_id = None
+        else:
+            outcome_reason = event_obj.reason
+            outcome_kind = (
+                SubmitOutcomeKind.NOT_SENT
+                if outcome_reason == "local_pre_transport"
+                else SubmitOutcomeKind.REJECTED
+            )
+            venue_offer_id = None
+
+        attempt_row.completed_at_ms = event_obj.occurred_at_ms or 0
+        attempt_row.outcome_kind = outcome_kind.value
+        attempt_row.outcome_reason = outcome_reason
+        attempt_row.venue_offer_id = venue_offer_id
+        attempt_row.last_event_seq = event_seq
+        await session.flush()
+
+    async def _project_submit_uncertainty(
+        self,
+        session: AsyncSession,
+        event: object,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Open the UNKNOWN block atomically with its outcome event."""
+        canonical = account_id_uuid_or_none(account_id)
+        if canonical is None:
+            return
+        registered = await session.scalar(
+            select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+        )
+        if registered is None:
+            return
+        event_obj: Any = cast(Any, event)
+        reference = event_obj.reservation_ref
+        if reference is None:
+            raise OfferClaimIdentityConflictError(
+                "submit uncertainty requires a reservation reference"
+            )
+        attempt = await session.scalar(
+            select(SubmissionAttemptRow).where(
+                SubmissionAttemptRow.execution_decision_id
+                == reference.execution_decision_id
+            )
+        )
+        if attempt is None or attempt.outcome_kind != SubmitOutcomeKind.UNKNOWN.value:
+            raise OfferClaimIdentityConflictError(
+                "submit uncertainty requires an UNKNOWN submission attempt"
+            )
+        existing = await session.scalar(
+            select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.exchange_account_id == canonical,
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == event_obj.symbol,
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        if existing is not None:
+            raise OfferClaimIdentityConflictError(
+                "an open execution uncertainty already exists for this scope"
+            )
+        reason = str(event_obj.reason)[:256]
+        session.add(
+            ExecutionUncertaintyRow(
+                exchange_account_id=canonical,
+                deployment_environment=self._env,
+                symbol=event_obj.symbol,
+                kind="submit_outcome_unknown",
+                correlation_key=f"submission_attempt:{attempt.attempt_id}",
+                intended_amount=Decimal(str(event_obj.amount)),
+                evidence={
+                    "outcome_reason": reason,
+                    "payload_sha256": attempt.payload_sha256,
+                },
+                attempt_id=attempt.attempt_id,
+                venue_offer_id=None,
+                opened_event_seq=event_seq,
+            )
+        )
+        await session.flush()
 
     async def _project_venue_snapshot(
         self,

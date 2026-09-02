@@ -27,6 +27,10 @@ from decimal import Decimal
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.command_gate import (
+    AccountCommandGate,
+    DatabaseOpenUncertaintyReader,
+)
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
 from bfx_funding_bot.modules.execution.events import (
@@ -71,11 +75,37 @@ class ReservationEmittingMiddleware:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
         self._uncertainty_handler = uncertainty_handler
+        self._command_gate: AccountCommandGate | None = None
+        # EventStorePersister owns the production session factory and serialized
+        # AccountEventWriter.  Keep lightweight fake/noop persisters on the
+        # legacy adapter path while routing every real database-backed submit
+        # through the fail-closed account command gate.
+        session_factory = getattr(persister, "_session_factory", None)
+        store = getattr(persister, "_store", None)
+        if session_factory is not None and store is not None:
+            self._command_gate = AccountCommandGate(
+                inner,
+                bus=bus,
+                persister=persister,
+                uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
+                deployment_environment=store.deployment_environment,
+                is_simulated=is_simulated,
+                clock=self._clock,
+                date_provider=self._date_provider,
+                uncertainty_handler=uncertainty_handler,
+            )
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
+        if self._command_gate is not None:
+            return await self._command_gate.submit(
+                ready,
+                ctx,
+                cid=cid,
+                reservation_ref=reservation_ref,
+            )
         # This middleware is the cid authority (A2). Ignore any incoming cid;
         # compute once so INTENT and outcome share the exact same value.
         decision = ready.decision
