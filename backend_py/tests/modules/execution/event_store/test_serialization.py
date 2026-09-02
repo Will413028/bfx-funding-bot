@@ -9,6 +9,7 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_stored_event,
     event_type_of,
     serialize_event,
+    stored_event_identity,
 )
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
@@ -56,7 +57,7 @@ def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)
     payload = serialize_event(event)
     assert isinstance(payload, dict)
-    assert payload["__schema_version__"] == 2
+    assert payload["__schema_version__"] == 3
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
 
@@ -157,6 +158,42 @@ def test_stored_event_uses_durable_exchange_account_identity() -> None:
     restored = deserialize_stored_event(row)
 
     assert restored.account_id == str(_EXCHANGE_ACCOUNT_ID)  # type: ignore[attr-defined]
+
+
+def test_v2_stored_identity_is_derived_without_mutating_payload() -> None:
+    payload = {
+        "cid": 19,
+        "size_usdt": "7.5",
+        "symbol": "fUST",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "legacy-realm",
+        "is_simulated": True,
+        "execution_decision_id": "d-19",
+        "reservation_ref": {
+            "execution_decision_id": "d-19",
+            "cid": 19,
+            "signal_correlation_id": str(_SCID),
+            "venue_offer_id": None,
+        },
+    }
+    row = EventLogRow(
+        event_seq=19,
+        account_id="legacy-realm",
+        deployment_environment="ci",
+        event_type="RESERVATION_INTENT",
+        cid=19,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=payload,
+        occurred_at_ms=1000,
+        schema_version=2,
+    )
+
+    identity = stored_event_identity(row)
+
+    assert identity.source == "derived_v2"
+    assert identity.event_id.version == 5
+    assert "__schema_version__" not in payload
 
 
 @pytest.mark.parametrize("etype,extra", [

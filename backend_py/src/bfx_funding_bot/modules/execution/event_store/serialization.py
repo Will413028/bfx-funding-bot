@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
@@ -39,8 +39,9 @@ _FIELDS: dict[type, list[str]] = {
     for cls in _CLASS_BY_TYPE.values()
 }
 _DECIMAL_FIELDS = {"size_usdt", "amount"}
-_UUID_FIELDS = {"signal_correlation_id"}
+_UUID_FIELDS = {"signal_correlation_id", "event_id"}
 _REF_FIELD = "reservation_ref"
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({2, __SCHEMA_VERSION__})
 _CORRELATION_EVENT_TYPES = frozenset({
     "RESERVATION_INTENT",
     "RESERVATION_CLAIMED",
@@ -48,6 +49,19 @@ _CORRELATION_EVENT_TYPES = frozenset({
     "ORDER_FILL",
     "RESERVATION_RELEASED",
 })
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class StoredEventIdentity:
+    """Stable identity assigned while decoding one persisted event row.
+
+    ``native`` identifies a schema-v3 event carrying its own UUID.  ``derived_v2``
+    is the deterministic UUIDv5 compatibility identity for a historical row;
+    the immutable row is intentionally left untouched.
+    """
+
+    event_id: UUID
+    source: Literal["native", "derived_v2"]
 
 
 def event_type_of(event: object) -> str:
@@ -72,6 +86,10 @@ def serialize_event(event: object) -> dict[str, Any]:
                 "signal_correlation_id": str(value.signal_correlation_id),
                 "venue_offer_id": value.venue_offer_id,
             }
+        elif field in _UUID_FIELDS:
+            # UUID(str(...)) both validates the domain boundary and guarantees
+            # the canonical lower-case textual representation in JSON.
+            out[field] = str(UUID(str(value)))
         elif isinstance(value, (Decimal, UUID)):
             out[field] = str(value)
         else:
@@ -91,24 +109,50 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
     version = payload.get("__schema_version__")
     if version is None:
         raise ValueError("unversioned event payload requires EventStore historical replay")
-    if version != __SCHEMA_VERSION__:
+    if version not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported event schema version: {version!r}")
     payload_event_type = payload.get("__event_type__")
     if payload_event_type != event_type:
         raise ValueError(
             f"event payload type mismatch: expected {event_type}, got {payload_event_type!r}",
         )
-    return _decode_payload(event_type, payload)
+    if version == __SCHEMA_VERSION__:
+        raw_event_id = payload.get("event_id")
+        if raw_event_id is None:
+            raise ValueError("schema-v3 event payload requires event_id")
+        try:
+            UUID(str(raw_event_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("schema-v3 event payload has invalid event_id") from exc
+    return _decode_payload(event_type, payload, schema_version=version)
 
 
 def deserialize_stored_event(row: EventLogRow) -> object:
-    """Decode one persistent event-log row, including genuine legacy rows."""
+    """Decode one persistent event-log row, including genuine legacy rows.
+
+    The returned domain event carries the resolved ``event_id``.  Call
+    :func:`stored_event_identity` when the caller also needs the provenance
+    (native v3 versus deterministic v2 compatibility identity).
+    """
     payload = row.payload
     if not isinstance(payload, dict):
         raise TypeError("stored event payload must be an object")
     if "__schema_version__" in payload:
+        version = payload["__schema_version__"]
         decoded = deserialize_event(row.event_type, payload)
-        return _with_canonical_account_id(decoded, row)
+        if version == __SCHEMA_VERSION__:
+            identity = stored_event_identity(row)
+        else:
+            identity = stored_event_identity(row)
+            _set_event_identity(decoded, identity)
+        decoded = _with_canonical_account_id(decoded, row)
+        if (
+            version == __SCHEMA_VERSION__
+            and row.event_id is not None
+            and row.event_id != identity.event_id
+        ):
+            raise ValueError("stored event_id does not match schema-v3 payload")
+        return decoded
     provenance = HistoricalReplayProvenance.from_stored_event(row)
     authorization = provenance.authorize_legacy_payload(
         event_type=row.event_type,
@@ -119,7 +163,48 @@ def deserialize_stored_event(row: EventLogRow) -> object:
         payload,
         historical_authorization=authorization,
     )
+    _set_event_identity(decoded, stored_event_identity(row))
     return _with_canonical_account_id(decoded, row)
+
+
+def stored_event_identity(row: EventLogRow) -> StoredEventIdentity:
+    """Resolve a stored row's identity without changing its payload or row.
+
+    Schema-v3 rows use their native UUID.  Both versioned-v2 and unversioned
+    historical rows use the immutable row tuple and a stable UUIDv5 namespace.
+    """
+    payload = row.payload
+    if not isinstance(payload, dict):
+        raise TypeError("stored event payload must be an object")
+    version = payload.get("__schema_version__")
+    if version == __SCHEMA_VERSION__:
+        raw_event_id = payload.get("event_id")
+        if raw_event_id is None:
+            raise ValueError("schema-v3 event payload requires event_id")
+        try:
+            event_id = UUID(str(raw_event_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("schema-v3 event payload has invalid event_id") from exc
+        if row.event_id is not None and row.event_id != event_id:
+            raise ValueError("stored event_id does not match schema-v3 payload")
+        return StoredEventIdentity(event_id=event_id, source="native")
+    if version is not None and version not in _SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(f"unsupported event schema version: {version!r}")
+    from bfx_funding_bot.modules.execution.event_store.projector import derive_v2_event_id
+
+    if row.event_seq is None:
+        raise TypeError("historical event identity requires persistent event_seq")
+    return StoredEventIdentity(
+        event_id=derive_v2_event_id(
+            event_seq=row.event_seq,
+            account_id=row.account_id,
+            deployment_environment=row.deployment_environment,
+            event_type=row.event_type,
+            occurred_at_ms=row.occurred_at_ms,
+            payload=payload,
+        ),
+        source="derived_v2",
+    )
 
 
 def _with_canonical_account_id(event: object, row: EventLogRow) -> object:
@@ -128,12 +213,19 @@ def _with_canonical_account_id(event: object, row: EventLogRow) -> object:
         return event
     if not dataclasses.is_dataclass(event) or not hasattr(event, "account_id"):
         return event
-    # ``dataclasses.is_dataclass`` also accepts dataclass classes, so mypy
-    # cannot narrow ``object`` to an instance here.  The attribute guard above
-    # is the runtime boundary; keep the replacement typed as the domain event.
-    return dataclasses.replace(
-        cast(Any, event), account_id=str(row.exchange_account_id)
-    )
+    # Do not call ``dataclasses.replace`` here: a deliberately uncorrelated
+    # historical event cannot pass the modern constructor's reservation-ref
+    # validation again.  The stored row is already the trusted replay boundary.
+    object.__setattr__(event, "account_id", str(row.exchange_account_id))
+    return event
+
+
+def _set_event_identity(event: object, identity: StoredEventIdentity) -> None:
+    if not hasattr(event, "event_id"):
+        return
+    object.__setattr__(event, "event_id", identity.event_id)
+    if identity.source == "derived_v2" and hasattr(event, "schema_version"):
+        object.__setattr__(event, "schema_version", 2)
 
 
 def _decode_payload(
@@ -141,6 +233,7 @@ def _decode_payload(
     payload: dict[str, Any],
     *,
     historical_authorization: _HistoricalReplayAuthorization | None = None,
+    schema_version: int | None = None,
 ) -> object:
     cls = _CLASS_BY_TYPE.get(event_type)
     if cls is None:
@@ -174,7 +267,14 @@ def _decode_payload(
         and "execution_decision_id" not in payload
     ):
         payload = {**payload, "execution_decision_id": None}
-    kwargs: dict[str, Any] = {field: _coerce(field, payload.get(field)) for field in _FIELDS[cls]}
+    kwargs: dict[str, Any] = {}
+    for field in _FIELDS[cls]:
+        # v2 and unversioned rows predate event identity.  Omitting the field
+        # lets the dataclass default generate a temporary value; the stored-row
+        # decoder immediately replaces it with deterministic UUIDv5 identity.
+        if field == "event_id" and payload.get(field) is None:
+            continue
+        kwargs[field] = _coerce(field, payload.get(field))
     if is_historical_legacy:
         assert historical_authorization is not None
         return _construct_historical_legacy_event(
