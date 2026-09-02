@@ -37,6 +37,14 @@ class SnapshotDrift:
     realized_drift: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class StoreAppendResult:
+    """Internal append outcome returned to the account writer."""
+
+    persisted: bool
+    event_seq: int
+
+
 class OfferClaimIdentityConflictError(RuntimeError):
     """A CID projection attempted to change an established reservation identity."""
 
@@ -68,32 +76,75 @@ _CLAIM_STATE_BY_TYPE: dict[str, RegistryState] = {
 
 
 class PostgresEventStore:
-    """Append-only event log + (later tasks) transactional snapshot maintenance."""
+    """Append-only event log plus compatibility projection primitives.
+
+    ``append`` is the public compatibility wrapper.  The serialized writer
+    owns the transaction lock and projection cursor, then calls
+    ``_append_unlocked`` for the actual event/legacy projection work.
+    """
 
     def __init__(self, *, deployment_environment: str) -> None:
         self._env = deployment_environment
 
-    async def append(self, session: AsyncSession, event: object) -> bool:
-        """Append one domain event in the caller's txn. Returns False if deduped (skipped).
+    @property
+    def deployment_environment(self) -> str:
+        """Environment dimension used by all projections in this store."""
+        return self._env
 
-        Caller commits (e.g. via session_scope). Does NOT commit here.
+    async def append(self, session: AsyncSession, event: object) -> bool:
+        """Append through :class:`AccountEventWriter` without committing.
+
+        ``strict_identity=False`` is a deliberately transitional compatibility
+        path for the repository's legacy synthetic realms.  Production rows
+        already have canonical UUID ownership after the Halt 1 migration; new
+        callers should instantiate ``AccountEventWriter`` directly.
         """
+        from bfx_funding_bot.modules.execution.event_store.writer import (
+            AccountEventWriter,
+        )
+
+        writer = AccountEventWriter(
+            store=self,
+            strict_identity=False,
+            allow_missing_account=True,
+        )
+        result = await writer.append(session, event)
+        return result.persisted
+
+    async def _append_unlocked(
+        self, session: AsyncSession, event: object
+    ) -> StoreAppendResult:
+        """Append/project one event after the account lock is held."""
         etype = event_type_of(event)
         # Cast to Any so attribute access works on the dynamically-typed event object.
         _ev: Any = cast(Any, event)
-        account_id: str = _ev.account_id
+        account_id: str = str(_ev.account_id)
         exchange_account_id = account_id_uuid_or_none(account_id)
         venue_offer_id: str | None = getattr(_ev, "venue_offer_id", None)
         venue_seq: int | None = getattr(_ev, "venue_seq", None)
         cid: int | None = getattr(_ev, "cid", None)
         occurred_at_ms: int = _ev.occurred_at_ms or 0
-
-        if etype in _DEDUP_TYPES and await self._already_logged(
-            session, account_id, etype, venue_offer_id, venue_seq
-        ):
-            return False
-
         payload: dict[str, Any] = serialize_event(event)
+
+        existing_seq = None
+        event_id = getattr(_ev, "event_id", None)
+        if event_id is not None:
+            existing = await self._find_event_id_row(
+                session, account_id, event_id
+            )
+            if existing is not None:
+                if existing.event_type != etype or existing.payload != payload:
+                    raise OfferClaimIdentityConflictError(
+                        f"event identity conflict event_id={event_id}"
+                    )
+                return StoreAppendResult(persisted=False, event_seq=existing.event_seq)
+        if etype in _DEDUP_TYPES:
+            existing_seq = await self._find_logged_seq(
+                session, account_id, etype, venue_offer_id, venue_seq
+            )
+        if existing_seq is not None:
+            return StoreAppendResult(persisted=False, event_seq=existing_seq)
+
         row = EventLogRow(
             account_id=account_id,
             exchange_account_id=exchange_account_id,
@@ -109,22 +160,66 @@ class PostgresEventStore:
         )
         session.add(row)
         await session.flush()  # assigns row.event_seq
+        await self._project_event_unlocked(
+            session,
+            event,
+            account_id=account_id,
+            event_seq=row.event_seq,
+        )
+        return StoreAppendResult(persisted=True, event_seq=row.event_seq)
+
+    async def _project_event_unlocked(
+        self,
+        session: AsyncSession,
+        event: object,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Apply one already-persisted event to the compatibility snapshots.
+
+        The account writer uses the same primitive for the current append and
+        for replaying rows that were durable before a projection transaction
+        completed.  Keeping this operation independent from event insertion is
+        what makes the event-log cursor a recoverable projection boundary.
+        """
+        etype = event_type_of(event)
         if etype in _AUDIT_ONLY_TYPES:
-            return True  # log-only: no claims/position projection
-        # Snapshot maintenance (same txn).
-        projection_changed = await self._project_offer_claims(session, event, account_id)
+            return
+        event_obj: Any = cast(Any, event)
+        projection_changed = await self._project_offer_claims(
+            session, event, account_id, event_seq=event_seq
+        )
         if projection_changed:
             await self._project_position_state(
-                session, etype, account_id, getattr(_ev, "amount", None),
-                row.event_seq, occurred_at_ms,
-                symbol=_ev.symbol,
+                session,
+                etype,
+                account_id,
+                getattr(event_obj, "amount", None),
+                event_seq,
+                event_obj.occurred_at_ms or 0,
+                symbol=event_obj.symbol,
             )
-        return True
 
-    async def _already_logged(
+    async def _find_event_id_row(
+        self, session: AsyncSession, account_id: str, event_id: object
+    ) -> EventLogRow | None:
+        stmt = select(EventLogRow).where(
+            account_scope_clause(
+                session,
+                account_id=account_id,
+                exchange_account_column=EventLogRow.exchange_account_id,
+                legacy_account_column=EventLogRow.account_id,
+            ),
+            EventLogRow.deployment_environment == self._env,
+            EventLogRow.event_id == event_id,
+        ).limit(1)
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _find_logged_seq(
         self, session: AsyncSession, account_id: str, event_type: str,
         venue_offer_id: str | None, venue_seq: int | None,
-    ) -> bool:
+    ) -> int | None:
         stmt = (
             select(EventLogRow.event_seq)
             .where(
@@ -141,13 +236,25 @@ class PostgresEventStore:
             )
             .limit(1)
         )
-        return (await session.execute(stmt)).first() is not None
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def _already_logged(
+        self, session: AsyncSession, account_id: str, event_type: str,
+        venue_offer_id: str | None, venue_seq: int | None,
+    ) -> bool:
+        return (
+            await self._find_logged_seq(
+                session, account_id, event_type, venue_offer_id, venue_seq
+            )
+        ) is not None
 
     async def _project_offer_claims(
         self,
         session: AsyncSession,
         event: object,
         account_id: str,
+        *,
+        event_seq: int | None = None,
     ) -> bool:
         """Project event onto the cid-keyed offer_claims snapshot (same txn).
 
@@ -185,6 +292,7 @@ class PostgresEventStore:
             ),
             occurred_at_ms=now_ms,
             last_updated_ms=now_ms,
+            last_event_seq=event_seq or 0,
         )
 
     async def _upsert_claim(
@@ -201,6 +309,7 @@ class PostgresEventStore:
         execution_decision_id: str | None,
         occurred_at_ms: int,
         last_updated_ms: int,
+        last_event_seq: int = 0,
     ) -> bool:
         """Atomically insert then compare every available reservation identity.
 
@@ -221,7 +330,7 @@ class PostgresEventStore:
             "execution_decision_id": execution_decision_id,
             "occurred_at_ms": occurred_at_ms,
             "last_updated_ms": last_updated_ms,
-            "last_event_seq": 0,
+            "last_event_seq": last_event_seq,
         }
         dialect = session.bind.dialect.name if session.bind else "postgresql"
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
@@ -271,7 +380,11 @@ class PostgresEventStore:
         if Decimal(str(existing.size_usdt)) != size_usdt:
             raise OfferClaimIdentityConflictError(f"claim identity conflict cid={cid}: amount")
 
-        changed = inserted or existing.state != state.value
+        changed = (
+            inserted
+            or existing.state != state.value
+            or last_event_seq > existing.last_event_seq
+        )
         next_execution_decision_id = existing.execution_decision_id
         if next_execution_decision_id is None and execution_decision_id is not None:
             next_execution_decision_id = execution_decision_id
@@ -299,6 +412,7 @@ class PostgresEventStore:
                         last_updated_ms=last_updated_ms,
                         execution_decision_id=next_execution_decision_id,
                         venue_offer_id=next_venue_offer_id,
+                        last_event_seq=max(existing.last_event_seq, last_event_seq),
                     )
                 )
             else:
@@ -306,6 +420,7 @@ class PostgresEventStore:
                 existing.venue_offer_id = next_venue_offer_id
                 existing.state = state.value
                 existing.last_updated_ms = last_updated_ms
+                existing.last_event_seq = max(existing.last_event_seq, last_event_seq)
         return changed
 
     async def _project_position_state(
@@ -534,7 +649,9 @@ class PostgresEventStore:
         # offer_claims: full fold.
         for r in rows:
             event = deserialize_stored_event(r)
-            await self._project_offer_claims(session, event, account_id)
+            await self._project_offer_claims(
+                session, event, account_id, event_seq=r.event_seq
+            )
 
         # position_state: checkpoint + tail. The checkpoint base is now per-symbol
         # (reconcile_observation.symbol) so fUST/fUSD rebuild from their own base.

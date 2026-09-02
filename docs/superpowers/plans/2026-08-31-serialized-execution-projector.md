@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Projection transaction 不可包含 HTTP/WebSocket/Bitfinex network call；network result 必須先被 normalize 成 event，再交給 writer。
-- lock key 一律由 canonical ExchangeAccount UUID + deployment environment 經現有 derive_lock_key 產生；不得只鎖 account、只鎖 process 或依 symbol 分鎖。
+- transaction lock key 一律由 canonical ExchangeAccount UUID + deployment environment 經與 daemon WriterLock 相同輸入、但不同 namespace 的 derive_transaction_lock_key 產生；不得只鎖 account、只鎖 process 或依 symbol 分鎖。
 - last_event_seq、projection_heads.last_event_seq 只能由 projector 寫入；任何 API、reconcile 或 ledger callback 不得直接改 position projection。
 - projector 對 FSM invalid transition 必須 rollback 整個 transaction、寫 bounded alert/log，不能 silently coerce 或把 terminal object reopen。
 - rebuild 只讀 event_log、upcaster 與 projector；不得讀既有 projection、wall clock、live venue API 或 mutable config。
@@ -31,6 +31,7 @@
 |---|---|
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/projector.py | pure v3 upcaster, FSM reducer, entity projection and deterministic rebuild |
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py | transaction-owning advisory-lock AccountEventWriter |
+| backend_py/alembic/versions/c2e3f4a5b6c7_seed_projection_heads.py | seed historical projection cursors before replay is enabled |
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/entities.py | normalized venue offer/credit snapshot records |
 | backend_py/tests/modules/execution/event_store/test_projector.py | pure transition/upcaster/rebuild tests |
 | backend_py/tests/modules/execution/event_store/test_account_event_writer.py | transaction and lock unit tests |
@@ -156,35 +157,37 @@ git commit -m "feat: add serialized projector schema"
 - Create: backend_py/tests/modules/execution/event_store/test_account_event_writer.py
 
 **Interfaces:**
-- AccountEventWriter.append(session, event) -> AppendResult executes pg_advisory_xact_lock(lock_key) before append; it does not commit and returns event seq, dedup status and projection head.
+- AccountEventWriter.append(session, event) -> AppendResult executes pg_advisory_xact_lock(transaction_lock_key) before append; it does not commit and returns event seq, dedup status and projection head. The transaction key uses a namespace distinct from the daemon session lock so both guards can be held simultaneously.
 - AccountEventWriter.append_batch(session, events) orders input by domain event time only when the caller explicitly supplies a batch; persisted ordering is always database event_seq, not wall-clock sort.
+- Before appending, the writer replays account/environment event-log rows after `projection_heads.last_event_seq` in ascending `event_seq`, then projects the new row and advances the cursor in the same transaction. A duplicate older event leaves the cursor at its monotonic high-water mark.
+- Revision `c2e3f4a5b6c7` seeds cursors for historical snapshots created before the serialized writer. The writer rejects an Alembic-managed database at an earlier revision; an explicit compatibility mode is available only to direct-create legacy fixtures.
 - projection_heads is updated in the same transaction as event and projections. Lag query uses account/env filtered max(event_seq) minus head.last_event_seq; no global max is used.
 - Existing daemon WriterLock remains the long-lived connection guard; the xact lock is an additional transaction serialization boundary and both must be held for live writes.
 
-- [ ] **Step 1: Write failing lock/rollback tests**
+- [x] **Step 1: Write failing lock/rollback tests**
 
 Cover same-account concurrent append serialization, cross-account non-blocking behavior, projection failure rollback of event and head, dedup behavior, and head lag scoped to account/env.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_account_event_writer.py -q
 
 Expected: FAIL because append has no transaction advisory lock or cursor.
 
-- [ ] **Step 3: Implement writer and projector invocation**
+- [x] **Step 3: Implement writer and projector invocation**
 
-Move _project_offer_claims and _project_position_state behind projector.py; make store.append a compatibility wrapper that requires an account UUID and delegates to AccountEventWriter. Set OfferClaimRow.last_event_seq to the actual inserted event seq.
+Move the event projection primitive behind the writer boundary; keep `store.append` as an explicit compatibility adapter while the production `EventStorePersister` defaults to strict canonical account identity. Set `OfferClaimRow.last_event_seq` to the actual inserted event seq and reject migrated databases until the historical cursor seed is installed.
 
-- [ ] **Step 4: Run unit and PostgreSQL concurrency tests**
+- [x] **Step 4: Run unit and PostgreSQL concurrency tests**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_account_event_writer.py -q && uv run pytest tests/integration/test_serialized_projector_pg.py -m integration -q
 
 Expected: PASS; 100 concurrent writes to one account produce a contiguous ordered head, while two accounts can progress independently.
 
-- [ ] **Step 5: Commit the writer boundary**
+- [x] **Step 5: Commit the writer boundary**
 
 ~~~bash
-git add backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py backend_py/src/bfx_funding_bot/core/writer_lock.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/event_store/persister.py backend_py/tests/modules/execution/event_store/test_account_event_writer.py
+git add backend_py/alembic/versions/c2e3f4a5b6c7_seed_projection_heads.py backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py backend_py/src/bfx_funding_bot/core/writer_lock.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/event_store/persister.py backend_py/tests/modules/execution/event_store/test_account_event_writer.py backend_py/tests/integration/test_serialized_projector_pg.py backend_py/tests/integration/test_writer_lock.py backend_py/tests/modules/execution/event_store/test_persister_dedup.py backend_py/tests/integration/test_boot_recovery_pg.py backend_py/tests/integration/test_daemon_pg_cutover.py backend_py/tests/integration/test_reservation_write_path.py backend_py/tests/external/bitfinex/test_source_persistence.py docs/superpowers/plans/2026-08-31-serialized-execution-projector.md backend_py/ARCHITECTURE.md
 git commit -m "feat: serialize account event projection writes"
 ~~~
 
