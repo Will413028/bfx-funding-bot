@@ -20,7 +20,7 @@ from hashlib import sha256
 from math import isfinite
 from types import MappingProxyType
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import httpx
 
@@ -38,6 +38,8 @@ __all__ = [
     "payload_sha256",
     "response_digest",
 ]
+
+_ATTEMPT_ID_NAMESPACE = UUID("a49b16e1-e2e8-5d7e-bc91-a8cdf80a5783")
 
 
 class SubmitOutcomeKind(StrEnum):
@@ -176,6 +178,7 @@ class SubmissionAttemptPayload:
     symbol: str
     cid: int
     normalized_payload: Mapping[str, Any]
+    attempt_id: UUID | str | None = None
     payload_sha256: str | None = None
     started_at_ms: int = 0
     completed_at_ms: int | None = None
@@ -219,6 +222,32 @@ class SubmissionAttemptPayload:
                 raise ValueError("payload_sha256 does not match normalized_payload")
             object.__setattr__(self, "payload_sha256", supplied_digest)
         object.__setattr__(self, "normalized_payload", _freeze_value(normalized))
+        if self.attempt_id is None:
+            identity = "\x1f".join(
+                (
+                    self.execution_decision_id,
+                    str(canonical_account_id),
+                    self.environment,
+                    self.symbol,
+                    str(self.cid),
+                    expected_digest,
+                )
+            )
+            object.__setattr__(
+                self,
+                "attempt_id",
+                uuid5(_ATTEMPT_ID_NAMESPACE, identity),
+            )
+        else:
+            try:
+                canonical_attempt_id = (
+                    self.attempt_id
+                    if isinstance(self.attempt_id, UUID)
+                    else UUID(str(self.attempt_id))
+                )
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("attempt_id must be a canonical UUID") from exc
+            object.__setattr__(self, "attempt_id", canonical_attempt_id)
 
         if self.outcome_kind is not None:
             try:
@@ -251,6 +280,7 @@ class SubmissionAttemptPayload:
         JSON encoder that may not understand them.
         """
         return {
+            "attempt_id": str(self.attempt_id),
             "execution_decision_id": self.execution_decision_id,
             "account_id": str(self.account_id),
             "environment": self.environment,
