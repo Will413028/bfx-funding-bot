@@ -48,6 +48,10 @@ class _StubAuthRest:
         return Decimal("0")
 
 
+async def _ignore_unknown(_event) -> None:
+    return None
+
+
 def _ctx(account_id):
     return AccountContext(
         account_id=account_id, credentials=Credentials(api_key="k", api_secret="s"),
@@ -71,6 +75,7 @@ def _recovery(offers, store, session_factory, account_id, *, clock=lambda: 5_000
         store=store, session_factory=session_factory, auth_rest=_StubAuthRest(offers),
         account_ctx=_ctx(account_id), deployment_environment=_ENV, bus=DomainEventBus(),
         is_simulated=False, grace_ms=120_000, clock=clock, symbol="fUST",
+        uncertainty_handler=_ignore_unknown,
     )
 
 

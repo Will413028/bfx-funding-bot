@@ -10,12 +10,12 @@ import pytest
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy, GuardResult, ReadyToSubmit
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
 from bfx_funding_bot.modules.execution.events import CancelRequested
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -84,7 +84,7 @@ async def test_submit_returns_submitted_on_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_returns_failed_on_http_error() -> None:
+async def test_submit_returns_unknown_on_http_5xx() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500)
 
@@ -98,7 +98,8 @@ async def test_submit_returns_failed_on_http_error() -> None:
         date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
-    assert result.status == "failed"
+    assert result.status == "unknown"
+    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.venue_offer_id is None
 
 
@@ -120,7 +121,8 @@ async def test_submit_returns_unbound_failure_on_http_200_error() -> None:
 
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
 
-    assert result.status == "failed"
+    assert result.status == "failed"  # compatibility view for explicit rejection
+    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
     assert result.venue_offer_id is None
     assert result.reservation_ref is not None
     assert result.reservation_ref.venue_offer_id is None
@@ -187,8 +189,8 @@ async def test_submit_routes_by_decision_symbol_not_constructor() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_rejects_unconfigured_symbol() -> None:
-    """Task 2: executor must raise InvariantViolation for symbol not in configured set."""
+async def test_submit_marks_unconfigured_symbol_not_sent() -> None:
+    """Local validation cannot be mistaken for a venue rejection."""
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=SUCCESS)
     ))
@@ -198,8 +200,29 @@ async def test_submit_rejects_unconfigured_symbol() -> None:
         configured_symbols=frozenset({"fUST"}),
         nonce_provider=lambda: 1, date_provider=lambda: date(2026, 5, 22),
     )
-    with pytest.raises(InvariantViolation):
-        await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
+    result = await ex.submit(_ready(_make_decision(symbol="fUSD")), _make_ctx())
+    assert result.status == "not_sent"
+    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+    assert isinstance(result.outcome.reason, str)
+
+
+@pytest.mark.asyncio
+async def test_submit_marks_malformed_success_response_unknown() -> None:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, text='{"status":"SUCCESS"}'),
+    ))
+    ex = BitfinexLiveExecutor(
+        http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30",
+        configured_symbols=frozenset({"fUST"}), nonce_provider=lambda: 1,
+        date_provider=lambda: date(2026, 5, 22),
+    )
+
+    result = await ex.submit(_ready(_make_decision()), _make_ctx())
+
+    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    assert result.status == "unknown"
+    assert result.outcome.raw_response_digest is not None
 
 
 @pytest.mark.asyncio
@@ -217,7 +240,8 @@ async def test_submit_failure_captures_venue_response_body() -> None:
         nonce_provider=lambda: 1000, date_provider=lambda: date(2026, 5, 22),
     )
     result = await executor.submit(_ready(_make_decision()), _make_ctx())
-    assert result.status == "failed"
+    assert result.status == "unknown"
+    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.venue_offer_id is None
     assert result.raw_response is not None
     assert "not enough balance" in str(result.raw_response)

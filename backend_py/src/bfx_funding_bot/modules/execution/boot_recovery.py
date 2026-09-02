@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, NamedTuple, Protocol
@@ -276,6 +276,7 @@ class BootRecovery:
         max_attempts: int = 3,
         backoff_base_s: float = 1.0,
         clock: Callable[[], int] | None = None,
+        uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._session_factory = session_factory
@@ -305,6 +306,7 @@ class BootRecovery:
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._clock = clock or (lambda: int(time.time() * 1000))
+        self._uncertainty_handler = uncertainty_handler
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally
@@ -387,6 +389,15 @@ class BootRecovery:
                 n_fail += 1
             elif isinstance(ev, ReservationUnknown):
                 n_unknown += 1
+                if self._uncertainty_handler is None and not self._is_simulated:
+                    # A live recovery that cannot update the local command gate
+                    # must fail closed; returning normally would let the next
+                    # deployment tick submit against an unresolved PENDING.
+                    raise RuntimeError(
+                        "live recovery requires an uncertainty_handler"
+                    )
+                if self._uncertainty_handler is not None:
+                    await self._uncertainty_handler(ev)
             elif isinstance(ev, VenueOfferQuarantined):
                 n_quarantined += 1
         log.info(

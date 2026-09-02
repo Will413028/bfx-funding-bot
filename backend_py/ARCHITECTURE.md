@@ -213,7 +213,7 @@ sequenceDiagram
         AD-->>EG: committed decision id
         EG->>EX: submit(ReadyToSubmit)（READY only）
         EX->>ST: txn1 ReservationIntent(PENDING) → REST → txn2 ReservationClaimed(+OrderFilled)
-        DR->>DR: tracker.record_deploy(cell_id, amount)  (僅成交/submitted 才記)
+        DR->>DR: tracker.record_deploy(cell_id, amount)  (僅 acknowledged 才記)
     end
     PR->>PR: record heartbeat("periodic_reconcile")
 ```
@@ -276,7 +276,7 @@ sequenceDiagram
 
 7c. **Execution eligibility（fail-closed）**：snapshot 必須已完成 initial snapshot、在 `BFX_BOOK_MAX_AGE_SECONDS` 內、sequence/checksum valid（或完成 REST reconcile）、symbol 相符、存在 exact period level，且該 side 的絕對 depth 足以覆蓋 amount。任一條件不足，或 model/safety/audit 不可用，皆產生 `BlockedExecution`／`NoRecommendation` 並不送單；不得重用 signal quote、ticker 值或 linear estimate。`book_guarded` 以 exact-period book 價格送單；`optimizer_shadow` 只記錄候選與評分，仍送 book-guarded rate；`optimizer_live` 僅在 empirical evidence、fee 與其餘依賴全部有效時才可選擇 optimizer rate。
 
-7d. **Audit ordering**：每個 allocation candidate 先 append 一筆不可變 `execution_decisions`（`ready`、`blocked` 或 `no_recommendation`）。只有 READY audit commit 成功，才建立 `ReadyToSubmit` 並交給 executor；audit 失敗一律 block。成功送出的 `ReservationIntent` 帶相同 `decision_id`，但 execution audit 不是 ledger projection，也不改變 capital state。executor 對 venue reject（如 10001）回 `status="failed"` 而非 raise，故 reconciler 僅 submitted 才 `tracker.record_deploy`（否則記 `deployment_submit_rejected`、不記 phantom intent）。
+7d. **Audit ordering**：每個 allocation candidate 先 append 一筆不可變 `execution_decisions`（`ready`、`blocked` 或 `no_recommendation`）。只有 READY audit commit 成功，才建立 `ReadyToSubmit` 並交給 executor；audit 失敗一律 block。成功送出的 `ReservationIntent` 帶相同 `decision_id`，但 execution audit 不是 ledger projection，也不改變 capital state。executor 的 closed outcome vocabulary 為 `acknowledged`、`rejected`、`unknown`、`not_sent`；只有 `acknowledged` 才 `tracker.record_deploy`，`unknown` 開啟 symbol-level uncertainty gate，`rejected`/`not_sent` 保持 capital-neutral。
 
 **成交與重部署**
 

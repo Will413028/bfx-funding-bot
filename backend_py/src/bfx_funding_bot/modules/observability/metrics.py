@@ -79,8 +79,9 @@ log = logging.getLogger(__name__)
 
 # Bounded label values for bfx_executor_submits_total — SubmittedOrder.status is
 # a venue-fed string; anything outside the known set becomes "other" so a venue
-# quirk can never explode timeseries cardinality.
-_KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "filled", "failed"})
+# quirk can never explode timeseries cardinality.  UNKNOWN/NOT_SENT remain
+# first-class labels because collapsing either into FAILED hides safety state.
+_KNOWN_SUBMIT_STATUSES = frozenset({"submitted", "filled", "failed", "unknown", "not_sent"})
 _KNOWN_EXECUTION_OUTCOMES = frozenset({"ready", "blocked", "no_recommendation"})
 _KNOWN_EXECUTION_REASONS = frozenset({"none", *(reason.value for reason in BlockReason)})
 _KNOWN_EXECUTION_POLICIES = frozenset({

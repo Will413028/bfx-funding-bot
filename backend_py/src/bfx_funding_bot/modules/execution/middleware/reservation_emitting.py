@@ -4,7 +4,7 @@ Flow per submit:
   1. compute cid once (capture-once submit_date — INTENT/outcome share it)
   2. txn1: persist ReservationIntent (PENDING) — durable BEFORE venue submit
   3. inner.submit(cid) — the only non-transactional boundary (Bitfinex REST)
-  4. txn2: persist outcome (CLAIMED[+ORDER_FILL] | RESERVATION_FAILED)
+  4. txn2: persist typed outcome (CLAIMED[+ORDER_FILL] | FAILED | UNKNOWN)
   5. bus.publish CLAIMED[+FILL] for in-memory projections (ledger/registry) +
      diagnostics. INTENT/FAILED are NOT published (no in-memory subscriber).
 
@@ -12,14 +12,15 @@ Each persist() is its own txn (EventStorePersister) so a txn is never held
 across the REST call. A crash between txn1 and txn2 leaves a durable PENDING
 claim, resolved at boot (3a-recovery).
 
-I3-EM: status="failed" -> persist FAILED, no bus publish.
+I3-EM: typed REJECTED/NOT_SENT -> persist FAILED; UNKNOWN gets a distinct
+ReservationUnknown event and is never retried or published as a claim.
 I4-EM: bus.publish raise -> swallow + log (persistence already committed).
 """
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -33,12 +34,14 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationFailed,
     ReservationIntent,
+    ReservationUnknown,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     ExecutorPort,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 
 log = logging.getLogger(__name__)
 
@@ -55,13 +58,19 @@ class ReservationEmittingMiddleware:
         is_simulated: bool = True,
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
+        uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
     ) -> None:
+        if not is_simulated and uncertainty_handler is None:
+            raise ValueError(
+                "live reservation middleware requires an uncertainty_handler"
+            )
         self._inner = inner
         self._bus = bus
         self._persister = persister
         self._is_simulated = is_simulated
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
+        self._uncertainty_handler = uncertainty_handler
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
@@ -122,7 +131,34 @@ class ReservationEmittingMiddleware:
             bound_reference = reference.bind_venue_offer(result.venue_offer_id)
         result = replace(result, reservation_ref=bound_reference)
 
-        if result.status in ("submitted", "filled"):
+        if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
+            # Ambiguous transport outcomes must close the write-ahead intent
+            # with a distinct pessimistic event.  Treating them as FAILED
+            # would permit a duplicate venue offer on the next tick.
+            unknown_reason = getattr(result.outcome, "reason", "submit_outcome_unknown")
+            unknown_event = ReservationUnknown(
+                cid=cid, size_usdt=size, signal_correlation_id=scid,
+                account_id=ctx.account_id, is_simulated=self._is_simulated,
+                reason=unknown_reason, occurred_at_ms=outcome_ms,
+                symbol=decision.symbol, reservation_ref=bound_reference,
+            )
+            # This is a direct projection hook rather than a normal domain-bus
+            # publication: UNKNOWN must never look like a venue claim, but the
+            # live symbol gate must open before the next reconcile tick.
+            await self._persister.persist(unknown_event)
+            if self._uncertainty_handler is not None:
+                await self._uncertainty_handler(unknown_event)
+        elif result.outcome_kind is SubmitOutcomeKind.NOT_SENT:
+            # Local validation happened before transport; it is safe to resolve
+            # the intent as capital-neutral and it must not be labelled a venue
+            # rejection.
+            await self._persister.persist(ReservationFailed(
+                cid=cid, size_usdt=size, signal_correlation_id=scid,
+                account_id=ctx.account_id, is_simulated=self._is_simulated,
+                reason="local_pre_transport", occurred_at_ms=outcome_ms,
+                symbol=decision.symbol, reservation_ref=bound_reference,
+            ))
+        elif result.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED:
             claimed = ReservationClaimed(
                 cid=cid, venue_offer_id=result.venue_offer_id or "",
                 size_usdt=size, signal_correlation_id=scid,
@@ -148,12 +184,12 @@ class ReservationEmittingMiddleware:
             await self._safe_publish(claimed)
             if filled is not None:
                 await self._safe_publish(filled)
-        elif result.status == "failed":
+        elif result.outcome_kind is SubmitOutcomeKind.REJECTED:
             # txn2: FAILED — reserved untouched
             await self._persister.persist(ReservationFailed(
                 cid=cid, size_usdt=size, signal_correlation_id=scid,
                 account_id=ctx.account_id, is_simulated=self._is_simulated,
-                reason="submit_failed", occurred_at_ms=outcome_ms,
+                reason=getattr(result.outcome, "reason", "submit_failed"),
                 symbol=decision.symbol, reservation_ref=bound_reference,
             ))
         return result

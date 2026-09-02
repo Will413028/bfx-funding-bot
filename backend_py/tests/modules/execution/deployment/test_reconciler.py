@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -73,6 +74,7 @@ class _FakeLedger:
         available_by_symbol: dict[str, Decimal] | None = None,
         exposures: dict[str, Decimal] | None = None,
         reserved_by_symbol: dict[str, Decimal] | None = None,
+        uncertain_symbols: set[str] | None = None,
     ) -> None:
         self._e = exposure
         # Default: reserved == exposure (all capital is reserved / open offers).
@@ -85,6 +87,9 @@ class _FakeLedger:
         # symbol is absent these fall back to the scalar (single-symbol parity).
         self._exposures = exposures or {}
         self._reserved_by_symbol = reserved_by_symbol or {}
+        self._uncertain_symbols = (
+            uncertain_symbols if uncertain_symbols is not None else set()
+        )
 
     def current_exposure(self, symbol: str) -> Decimal:
         if symbol in self._exposures:
@@ -103,6 +108,9 @@ class _FakeLedger:
         if symbol in self._available_by_symbol:
             return self._available_by_symbol[symbol]
         return self._available
+
+    def is_uncertain(self, symbol: str) -> bool:
+        return symbol in self._uncertain_symbols
 
 
 class _FakeSafety:
@@ -358,7 +366,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            fill_model_provider: _FillModelProvider | None = None,
            optimizer_fee_rate: Decimal | None = None,
            optimizer_horizon_h: int | None = None,
-           rate_optimizer: RateOptimizer | None = None):
+           rate_optimizer: RateOptimizer | None = None,
+           uncertain_symbols: set[str] | None = None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -378,7 +387,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     if optimizer_horizon_h is not None:
         optimizer_kwargs["optimizer_horizon_h"] = optimizer_horizon_h
     rec = DeploymentReconciler(
-        store=store, tracker=tracker, ledger=_FakeLedger(exposure, available=available),
+        store=store, tracker=tracker,
+        ledger=_FakeLedger(exposure, available=available, uncertain_symbols=uncertain_symbols),
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
@@ -424,6 +434,56 @@ def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
             quotes=[_post_quote("fUST_a30")],
             execution_policy=ExecutionPolicy.PAPER,
         )
+
+
+async def test_unknown_symbol_is_fail_closed_and_never_resubmitted(caplog) -> None:
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("0"),
+        quotes=[_post_quote("fUST_a30")],
+        uncertain_symbols={"fUST"},
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await rec.deploy()
+
+    assert executor.submitted == []
+    assert "uncertain" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
+    uncertain_symbols: set[str] = set()
+
+    class _UnknownThenAck(_FakeExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+            self.calls += 1
+            self.ready_submissions.append(decision)
+            self.submitted.append(decision.decision)
+            if self.calls == 1:
+                uncertain_symbols.add("fUST")
+                return SubmittedOrder(
+                    cid=1,
+                    venue_offer_id=None,
+                    outcome=SubmitOutcomeUnknown("timeout", True),
+                )
+            return SubmittedOrder(
+                cid=1, venue_offer_id="unexpected", status="submitted", raw_response=None,
+            )
+
+    executor = _UnknownThenAck()
+    rec, _executor, _tracker, _safety = _build(
+        exposure=D("0"),
+        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+        executor=executor,
+        uncertain_symbols=uncertain_symbols,
+    )
+
+    await rec.deploy()
+
+    assert executor.calls == 1
 
 
 async def test_book_failure_never_submits_original_quote():
@@ -778,6 +838,16 @@ class _RejectingExecutor:
         return SubmittedOrder(cid=1, venue_offer_id=None, status="failed", raw_response=None)
 
 
+class _UnknownExecutor:
+    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        return SubmittedOrder(
+            cid=1,
+            venue_offer_id=None,
+            outcome=SubmitOutcomeUnknown("timeout", True),
+            raw_response=None,
+        )
+
+
 async def test_venue_rejected_submit_not_recorded_as_deployed():
     # status="failed" (venue reject, no exception) must NOT record intent and
     # must NOT count as a deployment_submitted success.
@@ -787,6 +857,25 @@ async def test_venue_rejected_submit_not_recorded_as_deployed():
     await rec.deploy()
     assert len(ex.submitted) == 1            # attempted once
     assert tracker.deployed("fUST_a30") == D("0")  # but not recorded as deployed
+
+
+async def test_ambiguous_submit_not_recorded_as_deployed_or_success():
+    sink = _CapturingSink()
+    rec, _ex, tracker, _ = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_a30")],
+        executor=_UnknownExecutor(),
+        event_sink=sink,
+    )
+
+    await rec.deploy()
+
+    assert tracker.deployed("fUST_a30") == D("0")
+    submits = [e for e in sink.events if e["event_type"] == EventType.ORDER_SUBMIT.value]
+    assert len(submits) == 1
+    assert submits[0]["payload"]["status"] == "unknown"
+    assert submits[0]["payload"]["failure_reason"] == "timeout"
+    assert sink.execution_events == []
 
 
 # ---------------------------------------------------------------------------

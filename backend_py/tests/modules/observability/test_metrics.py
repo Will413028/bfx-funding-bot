@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
@@ -290,6 +291,24 @@ async def test_submit_middleware_unknown_status_bounded_to_other() -> None:
     await mw.submit(_ready(), _ctx())
     assert m.registry.get_sample_value(
         "bfx_executor_submits_total", {"status": "other"},
+    ) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_submit_middleware_keeps_unknown_as_first_class_metric() -> None:
+    m = DaemonMetrics()
+    order = SubmittedOrder(
+        cid=2,
+        venue_offer_id=None,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+        raw_response=None,
+    )
+    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
+
+    await mw.submit(_ready(), _ctx())
+
+    assert m.registry.get_sample_value(
+        "bfx_executor_submits_total", {"status": "unknown"},
     ) == 1.0
 
 
