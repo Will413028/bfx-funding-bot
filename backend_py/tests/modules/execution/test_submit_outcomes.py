@@ -1,0 +1,177 @@
+"""Deterministic contracts for ambiguous venue submit outcomes."""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+import httpx
+
+from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitNotSent,
+    SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+    classify_submit_response,
+    fingerprint_submit_payload,
+    normalize_submit_payload,
+)
+
+
+def _success_body(venue_offer_id: int = 42) -> list[object]:
+    return [
+        1716383500000,
+        "fon-req",
+        None,
+        None,
+        [venue_offer_id, "fUST", 0, 0, 100.0, 0, "REQ"],
+        None,
+        "SUCCESS",
+        None,
+        "Submitting",
+    ]
+
+
+def _error_body(text: str = "Funds insufficient") -> list[object]:
+    return [1716383500000, "fon-req", None, None, None, None, "ERROR", None, text]
+
+
+def test_success_with_venue_id_is_acknowledged() -> None:
+    outcome = classify_submit_response(200, _success_body(), True, None)
+
+    assert isinstance(outcome, SubmitAcknowledged)
+    assert outcome.kind is SubmitOutcomeKind.ACKNOWLEDGED
+    assert outcome.venue_offer_id == "42"
+    assert outcome.raw_response == _success_body()
+
+
+def test_structured_2xx_error_is_rejected() -> None:
+    outcome = classify_submit_response(200, _error_body(), True, None)
+
+    assert isinstance(outcome, SubmitRejected)
+    assert outcome.kind is SubmitOutcomeKind.REJECTED
+    assert "Funds insufficient" in outcome.reason
+    assert outcome.raw_response == _error_body()
+
+
+def test_allowlisted_structured_4xx_is_rejected() -> None:
+    outcome = classify_submit_response(422, _error_body("invalid period"), True, None)
+
+    assert isinstance(outcome, SubmitRejected)
+    assert outcome.kind is SubmitOutcomeKind.REJECTED
+
+
+def test_unstructured_4xx_is_unknown() -> None:
+    outcome = classify_submit_response(422, "request failed", True, None)
+
+    assert isinstance(outcome, SubmitOutcomeUnknown)
+    assert outcome.kind is SubmitOutcomeKind.UNKNOWN
+    assert outcome.transport_started is True
+
+
+def test_local_validation_before_transport_is_not_sent() -> None:
+    outcome = classify_submit_response(
+        None,
+        None,
+        False,
+        ValueError("symbol is not configured"),
+    )
+
+    assert isinstance(outcome, SubmitNotSent)
+    assert outcome.kind is SubmitOutcomeKind.NOT_SENT
+
+
+def test_timeout_connection_reset_5xx_and_cancel_after_start_are_unknown() -> None:
+    timeout = classify_submit_response(
+        None, None, True, httpx.ReadTimeout("timed out")
+    )
+    reset = classify_submit_response(
+        None, None, True, httpx.ConnectError("connection reset")
+    )
+    server_error = classify_submit_response(503, _error_body(), True, None)
+    cancelled = classify_submit_response(
+        None, None, True, asyncio.CancelledError()
+    )
+
+    assert all(
+        isinstance(item, SubmitOutcomeUnknown)
+        for item in (timeout, reset, server_error, cancelled)
+    )
+    assert timeout.reason == "timeout"
+    assert reset.reason == "connection_error"
+    assert server_error.reason == "http_5xx"
+    assert cancelled.reason == "cancelled_after_start"
+
+
+def test_malformed_or_unrecognized_response_defaults_to_unknown_with_digest() -> None:
+    outcome = classify_submit_response(200, {"unexpected": object()}, True, None)
+
+    assert isinstance(outcome, SubmitOutcomeUnknown)
+    assert outcome.reason == "unrecognized_response"
+    assert outcome.raw_response_digest is not None
+    assert len(outcome.raw_response_digest) == 64
+
+
+def test_payload_normalization_is_fixed_point_and_order_independent() -> None:
+    left = normalize_submit_payload(
+        {
+            "rate": 5.531e-05,
+            "amount": Decimal("150.00"),
+            "flags": {"raw": 0},
+            "nested": [Decimal("2.50"), 1.0],
+        }
+    )
+    right = normalize_submit_payload(
+        {
+            "nested": [Decimal("2.50"), 1.0],
+            "flags": {"raw": 0},
+            "amount": "150.00",
+            "rate": "0.00005531",
+        }
+    )
+
+    assert left == right
+    assert left["rate"] == "0.00005531"
+    assert left["amount"] == "150.00"
+    assert fingerprint_submit_payload(left) == fingerprint_submit_payload(right)
+
+
+def test_payload_fingerprint_changes_when_economic_field_changes() -> None:
+    base = {"symbol": "fUST", "amount": "150.0", "rate": "0.0001", "period": 2}
+
+    assert fingerprint_submit_payload(base) != fingerprint_submit_payload({**base, "period": 3})
+
+
+def test_submitted_order_derives_compatibility_status_from_typed_outcome() -> None:
+    acknowledged = SubmittedOrder(
+        cid=1,
+        venue_offer_id="42",
+        outcome=SubmitAcknowledged("42"),
+        raw_response=None,
+    )
+    unknown = SubmittedOrder(
+        cid=2,
+        venue_offer_id=None,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+        raw_response=None,
+    )
+
+    assert acknowledged.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
+    assert acknowledged.status == "submitted"
+    assert unknown.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    assert unknown.status == "unknown"
+    assert unknown.status != "failed"
+
+
+def test_legacy_filled_status_remains_a_compatibility_view() -> None:
+    order = SubmittedOrder(
+        cid=3,
+        venue_offer_id="paper_3",
+        status="filled",
+        raw_response=None,
+    )
+
+    assert order.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
+    assert order.status == "filled"

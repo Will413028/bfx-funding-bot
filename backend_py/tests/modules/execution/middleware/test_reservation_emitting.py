@@ -19,6 +19,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationFailed,
     ReservationIntent,
+    ReservationUnknown,
 )
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
@@ -29,6 +30,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -76,10 +78,12 @@ class _RecordingPersister:
 
 class _StubInner:
     """Echoes the injected cid back in the SubmittedOrder (A2 contract)."""
-    def __init__(self, status: str, voi: str | None, *, persister: _RecordingPersister | None = None) -> None:
+    def __init__(self, status: str, voi: str | None, *, persister: _RecordingPersister | None = None,
+                 outcome: SubmitOutcomeUnknown | None = None) -> None:
         self._status = status
         self._voi = voi
         self._persister = persister
+        self._outcome = outcome
         self.persist_calls_at_submit: int | None = None
         self.cid_seen: int | None = None
 
@@ -88,7 +92,13 @@ class _StubInner:
         self.cid_seen = cid
         if self._persister is not None:
             self.persist_calls_at_submit = len(self._persister.txns)
-        return SubmittedOrder(cid=cid or 0, venue_offer_id=self._voi, status=self._status, raw_response=None)
+        return SubmittedOrder(
+            cid=cid or 0,
+            venue_offer_id=self._voi,
+            status=self._status,
+            raw_response=None,
+            outcome=self._outcome,
+        )
 
 
 def _bus_capture() -> tuple[DomainEventBus, list[object]]:
@@ -137,6 +147,25 @@ async def test_failed_persists_intent_then_failed_no_publish() -> None:
     await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationFailed]
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_persists_distinct_unknown_event_and_does_not_publish() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner(
+        "unknown",
+        None,
+        persister=persister,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+    )
+    await ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=False,
+    ).submit(_ready_to_submit(), _ctx())
+
+    assert [type(e) for e in persister.txns[1]] == [ReservationUnknown]
+    assert persister.txns[1][0].reason == "timeout"
     assert seen == []
 
 

@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -778,6 +779,16 @@ class _RejectingExecutor:
         return SubmittedOrder(cid=1, venue_offer_id=None, status="failed", raw_response=None)
 
 
+class _UnknownExecutor:
+    async def submit(self, decision, ctx, *, cid=None) -> SubmittedOrder:
+        return SubmittedOrder(
+            cid=1,
+            venue_offer_id=None,
+            outcome=SubmitOutcomeUnknown("timeout", True),
+            raw_response=None,
+        )
+
+
 async def test_venue_rejected_submit_not_recorded_as_deployed():
     # status="failed" (venue reject, no exception) must NOT record intent and
     # must NOT count as a deployment_submitted success.
@@ -787,6 +798,25 @@ async def test_venue_rejected_submit_not_recorded_as_deployed():
     await rec.deploy()
     assert len(ex.submitted) == 1            # attempted once
     assert tracker.deployed("fUST_a30") == D("0")  # but not recorded as deployed
+
+
+async def test_ambiguous_submit_not_recorded_as_deployed_or_success():
+    sink = _CapturingSink()
+    rec, _ex, tracker, _ = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_a30")],
+        executor=_UnknownExecutor(),
+        event_sink=sink,
+    )
+
+    await rec.deploy()
+
+    assert tracker.deployed("fUST_a30") == D("0")
+    submits = [e for e in sink.events if e["event_type"] == EventType.ORDER_SUBMIT.value]
+    assert len(submits) == 1
+    assert submits[0]["payload"]["status"] == "unknown"
+    assert submits[0]["payload"]["failure_reason"] == "timeout"
+    assert sink.execution_events == []
 
 
 # ---------------------------------------------------------------------------

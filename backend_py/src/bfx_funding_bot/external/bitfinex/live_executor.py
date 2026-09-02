@@ -4,16 +4,16 @@ Pure fns (build_offer_payload, parse_offer_response) + I/O shell (Task 14).
 
 Per spec §6.3:
   - submit returns status="submitted" (NOT "filled") — WS foc EXECUTED fills later
-  - submit failure → status="failed", venue_offer_id=None
+  - explicit venue rejection → typed SubmitRejected; transport ambiguity → typed UNKNOWN
   - cancel publishes CancelRequested event (no in-memory _pending_cancels dict)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Any, Literal, Protocol
@@ -43,6 +43,15 @@ from bfx_funding_bot.modules.execution.retry import (
     classify_httpx_exception,
     classify_httpx_response,
     transient_retry,
+)
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitNotSent,
+    SubmitOutcome,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+    classify_submit_response,
+    response_digest,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
@@ -114,7 +123,10 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
         return SubmittedOrder(
             cid=0,
             venue_offer_id=venue_offer_id,
-            status="submitted",
+            outcome=SubmitAcknowledged(
+                venue_offer_id=venue_offer_id,
+                raw_response=raw,
+            ),
             raw_response={"raw": raw},
         )
 
@@ -122,7 +134,14 @@ def parse_offer_response(raw: Any) -> SubmittedOrder:
     return SubmittedOrder(
         cid=0,
         venue_offer_id=None,
-        status="failed",
+        outcome=SubmitRejected(
+            reason=(
+                str(raw[8]).strip()
+                if len(raw) > 8 and raw[8]
+                else "venue_rejected"
+            ),
+            raw_response=raw,
+        ),
         raw_response={"raw": raw, "error_text": raw[8] if len(raw) > 8 else None},
     )
 
@@ -160,11 +179,51 @@ class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
 
+def _response_json_or_text(response: httpx.Response) -> tuple[Any, str]:
+    """Read bounded response diagnostics without letting malformed JSON escape."""
+    text = response.text[:1000]
+    try:
+        return response.json(), text
+    except (TypeError, ValueError):
+        return text, text
+
+
+def _order_from_outcome(
+    *,
+    cid: int,
+    reference: ReservationRef,
+    outcome: SubmitOutcome,
+    raw_response: Any | None = None,
+) -> SubmittedOrder:
+    venue_offer_id = (
+        outcome.venue_offer_id
+        if isinstance(outcome, SubmitAcknowledged)
+        else None
+    )
+    bound_reference = (
+        reference.bind_venue_offer(venue_offer_id)
+        if venue_offer_id is not None
+        else reference
+    )
+    return SubmittedOrder(
+        cid=cid,
+        venue_offer_id=venue_offer_id,
+        outcome=outcome,
+        raw_response=(
+            raw_response
+            if raw_response is not None
+            else getattr(outcome, "raw_response", None)
+        ),
+        reservation_ref=bound_reference,
+    )
+
+
 class BitfinexLiveExecutor:
     """Bitfinex REST funding offer executor.
 
-    Pure REST — no WS, no Registry dependency. submit returns status="submitted";
-    WS foc EXECUTED (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
+    Pure REST — no WS, no Registry dependency. An acknowledged submit returns
+    typed ``SubmitAcknowledged`` (compatibility status="submitted"); WS foc
+    EXECUTED (handled by BitfinexLiveWSDispatcher) publishes OrderFilled later.
 
     cancel publishes CancelRequested event (first-class) — replaces former
     _pending_cancels dict pattern.
@@ -200,11 +259,6 @@ class BitfinexLiveExecutor:
         reservation_ref: ReservationRef | None = None,
     ) -> SubmittedOrder:
         decision = ready.decision
-        if not decision.symbol or decision.symbol not in self._configured_symbols:
-            raise InvariantViolation(
-                f"submit rejected: decision.symbol={decision.symbol!r} not in "
-                f"configured set {sorted(self._configured_symbols)}"
-            )
         # cid centralized by ReservationEmittingMiddleware (A2); direct callers
         # fall back to deterministic generation (CC2 capture-once date).
         if cid is None:
@@ -221,23 +275,62 @@ class BitfinexLiveExecutor:
             or reference.venue_offer_id is not None
         ):
             raise InvariantViolation("reservation_ref conflicts with ReadyToSubmit request")
-        payload = build_offer_payload(
-            symbol=decision.symbol,
-            amount_usdt=decision.offer_amount_usdt or 0.0,
-            rate=decision.offer_rate or 0.0,
-            period_days=decision.offer_duration_days or 2,
-        )
-        body_bytes = json.dumps(payload).encode("utf-8")
 
-        nonce = self._nonce_provider()
-        headers = sign_request(
-            body=body_bytes, nonce=nonce,
-            api_secret=ctx.credentials.api_secret,
-            path=_OFFER_SUBMIT_PATH,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
+        if not decision.symbol:
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=SubmitNotSent("symbol_missing"),
+            )
+        if decision.symbol not in self._configured_symbols:
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=SubmitNotSent("symbol_not_configured"),
+            )
+        amount = decision.offer_amount_usdt
+        rate = decision.offer_rate
+        period = decision.offer_duration_days
+        if (
+            amount is None
+            or amount <= 0
+            or rate is None
+            or rate <= 0
+            or period is None
+            or period <= 0
+        ):
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=SubmitNotSent("invalid_submit_payload"),
+            )
 
+        try:
+            payload = build_offer_payload(
+                symbol=decision.symbol,
+                amount_usdt=amount,
+                rate=rate,
+                period_days=period,
+            )
+            body_bytes = json.dumps(payload).encode("utf-8")
+            nonce = self._nonce_provider()
+            headers = sign_request(
+                body=body_bytes, nonce=nonce,
+                api_secret=ctx.credentials.api_secret,
+                path=_OFFER_SUBMIT_PATH,
+            )
+            headers["bfx-apikey"] = ctx.credentials.api_key
+            headers["Content-Type"] = "application/json"
+        except Exception:
+            # No request has been started, so this is a durable NOT_SENT result;
+            # the command gate may safely resolve the pre-transport intent.
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=SubmitNotSent("local_validation_failed"),
+            )
+
+        transport_started = True
         try:
             resp = await self._http.post(
                 f"{self._base_url}/{_OFFER_SUBMIT_PATH}",
@@ -254,24 +347,64 @@ class BitfinexLiveExecutor:
                 "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s body=%s",
                 status, payload["symbol"], payload["rate"], payload["amount"], body,
             )
-            return SubmittedOrder(
-                cid=cid, venue_offer_id=None, status="failed",
-                raw_response={"http_status": status, "body": body}, reservation_ref=reference,
+            parsed_body: Any = None
+            if e.response is not None:
+                parsed_body, _ = _response_json_or_text(e.response)
+            outcome = classify_submit_response(
+                status,
+                parsed_body,
+                transport_started,
             )
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=outcome,
+                raw_response={"http_status": status, "body": body},
+            )
+        except asyncio.CancelledError as e:
+            outcome = classify_submit_response(
+                None, None, transport_started, e,
+            )
+            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
         except httpx.HTTPError as e:
-            log.warning("bitfinex_submit_network_error symbol=%s err=%r", decision.symbol, e)
-            return SubmittedOrder(cid=cid, venue_offer_id=None, status="failed", raw_response=None, reservation_ref=reference)
+            log.warning("bitfinex_submit_network_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
+            outcome = classify_submit_response(
+                None, None, transport_started, e,
+            )
+            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
+        except Exception as e:
+            # A response parser/shape error after the request is sent is also
+            # UNKNOWN.  Never let it fall through to the old FAILED branch.
+            log.warning("bitfinex_submit_response_error symbol=%s err_type=%s", decision.symbol, type(e).__name__)
+            outcome = classify_submit_response(
+                None, None, transport_started, e,
+            )
+            return _order_from_outcome(cid=cid, reference=reference, outcome=outcome)
 
-        parsed = parse_offer_response(resp.json())
-        if parsed.venue_offer_id is None:
-            # Bitfinex uses HTTP 200 for some venue rejections.  It is not an
-            # acknowledgement, so preserve the unbound internal reference for
-            # ReservationEmittingMiddleware's FAILED lifecycle path.
-            return replace(parsed, cid=cid, reservation_ref=reference)
-        return replace(
-            parsed,
+        try:
+            parsed_body = resp.json()
+        except (TypeError, ValueError):
+            outcome = SubmitOutcomeUnknown(
+                reason="malformed_response",
+                transport_started=True,
+                raw_response_digest=response_digest(resp.text[:1000]),
+            )
+            return _order_from_outcome(
+                cid=cid,
+                reference=reference,
+                outcome=outcome,
+                raw_response={"http_status": resp.status_code, "body": resp.text[:1000]},
+            )
+        outcome = classify_submit_response(
+            resp.status_code,
+            parsed_body,
+            transport_started,
+        )
+        return _order_from_outcome(
             cid=cid,
-            reservation_ref=reference.bind_venue_offer(parsed.venue_offer_id),
+            reference=reference,
+            outcome=outcome,
+            raw_response={"raw": parsed_body},
         )
 
     async def cancel(

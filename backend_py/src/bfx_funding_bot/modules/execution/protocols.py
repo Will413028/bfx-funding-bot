@@ -21,6 +21,15 @@ from bfx_funding_bot.modules.execution.contracts import (
     ReadyToSubmit,
     ReservationRef,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitNotSent,
+    SubmitOutcome,
+    SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
+    SubmitRejected,
+    response_digest,
+)
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
 __all__ = [
@@ -32,6 +41,8 @@ __all__ = [
     "GuardResult",
     "GuardRule",
     "ReadyToSubmit",
+    "SubmitOutcome",
+    "SubmitOutcomeKind",
     "SubmittedOrder",
     "WriterLockHandle",
 ]
@@ -52,13 +63,112 @@ class AccountContext:
     allocation_cap_usdt: Decimal
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class SubmittedOrder:
+    """Result envelope with a typed outcome and a legacy status read view.
+
+    New adapters should pass ``outcome``.  ``status=`` remains accepted for
+    paper/legacy adapters during the staged migration, but is converted into a
+    typed outcome at construction time.  In particular, an UNKNOWN outcome can
+    only expose ``status == "unknown"``; it is never silently collapsed into
+    the old ``"failed"`` value.
+    """
+
     cid: int
-    venue_offer_id: str | None     # paper: "paper_<uuid12>"; real: str(int) from venue; None on failed submit
-    status: str                    # "submitted" / "failed" / "filled" (paper synchronous)
-    raw_response: dict[str, Any] | None    # debug audit; None for paper
-    reservation_ref: ReservationRef | None = None
+    venue_offer_id: str | None
+    outcome: SubmitOutcome
+    raw_response: Any | None
+    reservation_ref: ReservationRef | None
+    _legacy_status: str | None
+
+    def __init__(
+        self,
+        cid: int,
+        venue_offer_id: str | None,
+        status: str | None = None,
+        raw_response: Any | None = None,
+        reservation_ref: ReservationRef | None = None,
+        *,
+        outcome: SubmitOutcome | None = None,
+        _legacy_status: str | None = None,
+    ) -> None:
+        if outcome is None:
+            outcome = _outcome_from_legacy_status(
+                status,
+                venue_offer_id=venue_offer_id,
+                raw_response=raw_response,
+            )
+        else:
+            if status == "failed" and outcome.kind is SubmitOutcomeKind.UNKNOWN:
+                raise ValueError("UNKNOWN outcome cannot use status='failed'")
+            if (
+                isinstance(outcome, SubmitAcknowledged)
+                and venue_offer_id is not None
+                and venue_offer_id != outcome.venue_offer_id
+            ):
+                raise ValueError("venue_offer_id conflicts with acknowledged outcome")
+            if isinstance(outcome, SubmitAcknowledged) and venue_offer_id is None:
+                venue_offer_id = outcome.venue_offer_id
+            if raw_response is None and hasattr(outcome, "raw_response"):
+                raw_response = outcome.raw_response
+
+        object.__setattr__(self, "cid", cid)
+        object.__setattr__(self, "venue_offer_id", venue_offer_id)
+        object.__setattr__(self, "outcome", outcome)
+        object.__setattr__(self, "raw_response", raw_response)
+        object.__setattr__(self, "reservation_ref", reservation_ref)
+        # ``filled`` is a paper-only compatibility value; all real submit
+        # outcomes derive to submitted/failed/unknown/not_sent below.
+        compatibility = (
+            _legacy_status
+            if _legacy_status is not None
+            else status if status in {"filled", "weird_venue_string"} else None
+        )
+        object.__setattr__(self, "_legacy_status", compatibility)
+
+    @property
+    def outcome_kind(self) -> SubmitOutcomeKind:
+        return self.outcome.kind
+
+    @property
+    def status(self) -> str:
+        if self._legacy_status is not None:
+            return self._legacy_status
+        return {
+            SubmitOutcomeKind.ACKNOWLEDGED: "submitted",
+            SubmitOutcomeKind.REJECTED: "failed",
+            SubmitOutcomeKind.UNKNOWN: "unknown",
+            SubmitOutcomeKind.NOT_SENT: "not_sent",
+        }[self.outcome_kind]
+
+
+def _outcome_from_legacy_status(
+    status: str | None,
+    *,
+    venue_offer_id: str | None,
+    raw_response: Any | None,
+) -> SubmitOutcome:
+    """Upcast pre-typed executor values without losing ambiguity semantics."""
+    if status in {"submitted", "filled"} and venue_offer_id is not None:
+        return SubmitAcknowledged(venue_offer_id=venue_offer_id, raw_response=raw_response)
+    if status == "failed":
+        return SubmitRejected(reason="legacy_submit_failed", raw_response=raw_response)
+    if status == "not_sent":
+        return SubmitNotSent(reason="legacy_not_sent")
+    if status == "unknown":
+        return SubmitOutcomeUnknown(
+            reason="legacy_unknown",
+            transport_started=True,
+            raw_response_digest=(response_digest(raw_response) if raw_response is not None else None),
+        )
+    # Unknown legacy status values are themselves ambiguous.  Preserve the
+    # string only for observability compatibility, while exposing UNKNOWN to
+    # new control-flow code.
+    return SubmitOutcomeUnknown(
+        reason="legacy_unrecognized_status",
+        transport_started=True,
+        raw_response_digest=(response_digest(raw_response) if raw_response is not None else None),
+    )
 
 
 class GuardRule(Protocol):

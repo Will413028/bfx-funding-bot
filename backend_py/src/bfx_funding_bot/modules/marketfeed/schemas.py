@@ -169,14 +169,14 @@ class HealthCheckPayload(BaseModel):
 class OrderSubmitPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cid: int
-    offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None on failed submit
+    offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None when no venue id exists
     execution_decision_id: str = Field(..., min_length=1)
     signal_correlation_id: UUID
     offer_rate: float
     offer_amount_usdt: float
     offer_duration_days: int
     is_simulated: bool
-    status: str  # "submitted" / "failed"
+    status: str  # "submitted" / "failed" / "unknown" / "not_sent"
     failure_reason: str | None = None
     attempts: int = 1
     retry_total_ms: int | None = None
@@ -185,8 +185,8 @@ class OrderSubmitPayload(BaseModel):
     def _check_failed(self) -> OrderSubmitPayload:
         if not self.execution_decision_id.strip():
             raise ValueError("execution_decision_id must be non-empty")
-        if self.status == "failed" and not self.failure_reason:
-            raise ValueError("status=failed requires failure_reason")
+        if self.status in {"failed", "unknown", "not_sent"} and not self.failure_reason:
+            raise ValueError(f"status={self.status} requires failure_reason")
         return self
 
 
