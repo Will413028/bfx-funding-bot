@@ -8,9 +8,14 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import case, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    PositionStateRow,
+    VenueOfferStateRow,
+)
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
@@ -129,8 +134,27 @@ class UncertaintyService:
         if opened_event_seq < 0:
             raise ValueError("opened_event_seq must be non-negative")
         stored_evidence = _bounded_evidence(evidence)
+        linked_venue_offer_id = self._validate_venue_link(
+            kind=typed_kind,
+            venue_offer_id=venue_offer_id,
+        )
 
         async with self._session_factory() as session:
+            # PostgreSQL serializes all opens which share this safety projection,
+            # including different uncertainty kinds. SQLite accepts FOR UPDATE as
+            # a no-op, while the unique-conflict recovery below remains correct.
+            position = await session.scalar(
+                select(PositionStateRow)
+                .where(
+                    PositionStateRow.exchange_account_id == exchange_account_id,
+                    PositionStateRow.deployment_environment == environment,
+                    PositionStateRow.symbol == scoped_symbol,
+                )
+                .with_for_update()
+            )
+            if position is None:
+                raise ValueError("position state is required before opening an uncertainty")
+
             existing = await session.scalar(
                 select(ExecutionUncertaintyRow)
                 .where(
@@ -143,6 +167,19 @@ class UncertaintyService:
                 .with_for_update()
             )
             if existing is not None:
+                self._require_same_uncertainty(
+                    existing,
+                    exchange_account_id=exchange_account_id,
+                    deployment_environment=environment,
+                    symbol=scoped_symbol,
+                    kind=typed_kind,
+                    correlation_key=correlation,
+                    intended_amount=amount,
+                    evidence=stored_evidence,
+                    opened_event_seq=opened_event_seq,
+                    attempt_id=attempt_id,
+                    venue_offer_id=linked_venue_offer_id,
+                )
                 return existing
 
             scope_open = await session.scalar(
@@ -169,6 +206,14 @@ class UncertaintyService:
                 await self._require_attempt_scope(
                     session,
                     attempt_id=attempt_id,
+                    exchange_account_id=exchange_account_id,
+                    deployment_environment=environment,
+                    symbol=scoped_symbol,
+                )
+            if linked_venue_offer_id is not None:
+                await self._require_venue_offer_scope(
+                    session,
+                    venue_offer_id=linked_venue_offer_id,
                     exchange_account_id=exchange_account_id,
                     deployment_environment=environment,
                     symbol=scoped_symbol,
@@ -201,12 +246,46 @@ class UncertaintyService:
                 intended_amount=amount,
                 evidence=stored_evidence,
                 attempt_id=attempt_id,
-                venue_offer_id=venue_offer_id,
+                venue_offer_id=linked_venue_offer_id,
                 opened_event_seq=opened_event_seq,
             )
             session.add(row)
-            await session.commit()
-            return row
+            try:
+                await session.commit()
+            except IntegrityError:
+                # A SQLite/no-lock race (or an independent PostgreSQL writer)
+                # can win after our position lock. Roll back the atomic reserve,
+                # then treat an exact correlation winner as an idempotent replay.
+                await session.rollback()
+                winner = await session.scalar(
+                    select(ExecutionUncertaintyRow)
+                    .where(
+                        ExecutionUncertaintyRow.exchange_account_id == exchange_account_id,
+                        ExecutionUncertaintyRow.deployment_environment == environment,
+                        ExecutionUncertaintyRow.symbol == scoped_symbol,
+                        ExecutionUncertaintyRow.kind == typed_kind.value,
+                        ExecutionUncertaintyRow.correlation_key == correlation,
+                    )
+                    .with_for_update()
+                )
+                if winner is None:
+                    raise
+                self._require_same_uncertainty(
+                    winner,
+                    exchange_account_id=exchange_account_id,
+                    deployment_environment=environment,
+                    symbol=scoped_symbol,
+                    kind=typed_kind,
+                    correlation_key=correlation,
+                    intended_amount=amount,
+                    evidence=stored_evidence,
+                    opened_event_seq=opened_event_seq,
+                    attempt_id=attempt_id,
+                    venue_offer_id=linked_venue_offer_id,
+                )
+                return winner
+            else:
+                return row
 
     async def resolve(
         self,
@@ -216,6 +295,7 @@ class UncertaintyService:
         symbol: str,
         kind: UncertaintyKind | str,
         reconcile_event_seq: int,
+        resolution_event_seq: int,
         resolved_by_operator_id: str,
         resolution_reason: str,
         evidence: dict[str, Any],
@@ -228,6 +308,8 @@ class UncertaintyService:
         reason = _nonempty(resolution_reason, field="resolution_reason")
         if reconcile_event_seq < 0:
             raise ValueError("reconcile_event_seq must be non-negative")
+        if resolution_event_seq < 0:
+            raise ValueError("resolution_event_seq must be non-negative")
         resolution_evidence = _bounded_evidence(evidence)
 
         async with self._session_factory() as session:
@@ -254,6 +336,16 @@ class UncertaintyService:
             )
             if reconcile_event.event_type != _RECONCILE_EVENT_TYPE:
                 raise ValueError("fresh reconcile event is required for resolution")
+            if resolution_event_seq <= reconcile_event_seq:
+                raise ValueError("resolution event must follow fresh reconcile evidence")
+            resolution_event = await self._require_event(
+                session,
+                event_seq=resolution_event_seq,
+                exchange_account_id=exchange_account_id,
+                deployment_environment=environment,
+            )
+            if resolution_event.event_type == _RECONCILE_EVENT_TYPE:
+                raise ValueError("resolution event must not be a venue snapshot")
             released = await session.execute(
                 update(PositionStateRow)
                 .where(
@@ -266,8 +358,8 @@ class UncertaintyService:
                     uncertain_amount=PositionStateRow.uncertain_amount - row.intended_amount,
                     last_event_seq=case(
                         (
-                            PositionStateRow.last_event_seq < reconcile_event_seq,
-                            reconcile_event_seq,
+                            PositionStateRow.last_event_seq < resolution_event_seq,
+                            resolution_event_seq,
                         ),
                         else_=PositionStateRow.last_event_seq,
                     ),
@@ -278,11 +370,12 @@ class UncertaintyService:
                 raise ValueError("uncertain projection cannot become negative")
 
             row.state = "resolved"
-            row.resolved_event_seq = reconcile_event_seq
+            row.reconcile_event_seq = reconcile_event_seq
+            row.resolved_event_seq = resolution_event_seq
             row.resolved_by_operator_id = operator_id
             row.resolution_reason = reason
             row.resolution_evidence = resolution_evidence
-            row.resolved_at = reconcile_event.recorded_at
+            row.resolved_at = resolution_event.recorded_at
             await session.commit()
             return row
 
@@ -309,6 +402,47 @@ class UncertaintyService:
             raise ValueError("execution decision already has a different immutable attempt")
 
     @staticmethod
+    def _require_same_uncertainty(
+        row: ExecutionUncertaintyRow,
+        *,
+        exchange_account_id: UUID,
+        deployment_environment: str,
+        symbol: str,
+        kind: UncertaintyKind,
+        correlation_key: str,
+        intended_amount: Decimal,
+        evidence: dict[str, Any],
+        opened_event_seq: int,
+        attempt_id: UUID | None,
+        venue_offer_id: str | None,
+    ) -> None:
+        if (
+            row.exchange_account_id != exchange_account_id
+            or row.deployment_environment != deployment_environment
+            or row.symbol != symbol
+            or row.kind != kind.value
+            or row.correlation_key != correlation_key
+            or row.intended_amount != intended_amount
+            or row.evidence != evidence
+            or row.opened_event_seq != opened_event_seq
+            or row.attempt_id != attempt_id
+            or row.venue_offer_id != venue_offer_id
+        ):
+            raise ValueError("correlation key already has a different immutable uncertainty")
+
+    @staticmethod
+    def _validate_venue_link(
+        *, kind: UncertaintyKind, venue_offer_id: str | None
+    ) -> str | None:
+        if kind is UncertaintyKind.UNATTRIBUTED_VENUE_OFFER:
+            if venue_offer_id is None:
+                raise ValueError("unattributed venue offer requires venue_offer_id")
+            return _nonempty(venue_offer_id, field="venue_offer_id")
+        if venue_offer_id is not None:
+            raise ValueError(f"{kind.value} must not carry venue_offer_id")
+        return None
+
+    @staticmethod
     async def _require_attempt_scope(
         session: AsyncSession,
         *,
@@ -326,6 +460,24 @@ class UncertaintyService:
             or attempt.symbol != symbol
         ):
             raise ValueError("linked submission attempt does not match uncertainty scope")
+
+    @staticmethod
+    async def _require_venue_offer_scope(
+        session: AsyncSession,
+        *,
+        venue_offer_id: str,
+        exchange_account_id: UUID,
+        deployment_environment: str,
+        symbol: str,
+    ) -> None:
+        venue_offer = await session.get(
+            VenueOfferStateRow,
+            (exchange_account_id, deployment_environment, venue_offer_id),
+        )
+        if venue_offer is None:
+            raise ValueError("linked venue offer does not exist")
+        if venue_offer.symbol != symbol:
+            raise ValueError("linked venue offer does not match uncertainty scope")
 
     @staticmethod
     async def _require_event(

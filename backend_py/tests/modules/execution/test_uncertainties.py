@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     PositionStateRow,
+    VenueOfferStateRow,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
@@ -56,8 +58,14 @@ async def session_factory(sqlite_engine) -> async_sessionmaker[AsyncSession]:
             )
         )
         session.add_all(
-            [_event(seq=10, event_type="SUBMIT_OUTCOME_UNKNOWN"), _event(seq=11)]
+            [
+                _event(seq=10, event_type="SUBMIT_OUTCOME_UNKNOWN"),
+                _event(seq=11),
+                _event(seq=12, event_type="UNCERTAINTY_RESOLVED"),
+                _event(seq=13),
+            ]
         )
+        session.add_all([_decision("decision-1"), _venue_offer("9001"), _venue_offer("9002")])
         await session.commit()
     return factory
 
@@ -71,6 +79,50 @@ def _event(seq: int, event_type: str = "VENUE_SNAPSHOT_OBSERVED") -> EventLogRow
         event_type=event_type,
         payload={},
         occurred_at_ms=seq,
+    )
+
+
+def _decision(decision_id: str) -> ExecutionDecisionRow:
+    return ExecutionDecisionRow(
+        decision_id=decision_id,
+        account_id=str(ACCOUNT_ID),
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment=ENVIRONMENT,
+        reconcile_id="reconcile-1",
+        cell_id="cell-1",
+        symbol=SYMBOL,
+        signal_correlation_id="signal-1",
+        outcome="ready",
+        signal_rate=Decimal("0.01"),
+        applied_rate=Decimal("0.01"),
+        amount_usdt=Decimal("12.50"),
+        duration_days=2,
+        model_evidence={},
+        safety_result={},
+        execution_policy="standard",
+        service_version="test",
+        config_hash="config",
+        occurred_at_ms=1,
+        recorded_at_ms=1,
+    )
+
+
+def _venue_offer(venue_offer_id: str) -> VenueOfferStateRow:
+    return VenueOfferStateRow(
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment=ENVIRONMENT,
+        venue_offer_id=venue_offer_id,
+        symbol=SYMBOL,
+        amount_original=Decimal("4"),
+        amount_remaining=Decimal("4"),
+        rate=Decimal("0.01"),
+        period_days=2,
+        status="active",
+        flags={},
+        mts_created=1,
+        mts_updated=1,
+        first_seen_event_seq=10,
+        last_seen_event_seq=10,
     )
 
 
@@ -178,6 +230,109 @@ async def test_open_or_get_is_idempotent_and_reserves_amount_only_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        {"intended_amount": Decimal("13")},
+        {"evidence": {"reason": "connection_reset"}},
+        {"opened_event_seq": 11},
+        {"attempt_id": None},
+    ],
+    ids=["amount", "evidence", "opened-event", "attempt-link"],
+)
+async def test_open_or_get_rejects_conflicting_same_correlation_replay(
+    session_factory: async_sessionmaker[AsyncSession], conflict
+) -> None:
+    """A correlation replay is idempotent only when every opening fact matches."""
+    service = UncertaintyService(session_factory)
+    attempt = await service.record_attempt(_attempt_payload())
+    opening = {
+        "exchange_account_id": ACCOUNT_ID,
+        "deployment_environment": ENVIRONMENT,
+        "symbol": SYMBOL,
+        "kind": UncertaintyKind.SUBMIT_OUTCOME_UNKNOWN,
+        "correlation_key": "attempt:conflicting-replay",
+        "intended_amount": Decimal("12.50"),
+        "evidence": {"reason": "transport_timeout"},
+        "opened_event_seq": 10,
+        "attempt_id": attempt.attempt_id,
+    }
+    await service.open_or_get(**opening)
+
+    with pytest.raises(ValueError, match="different immutable uncertainty"):
+        await service.open_or_get(**(opening | conflict))
+
+
+@pytest.mark.asyncio
+async def test_open_or_get_rejects_conflicting_venue_link_replay(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An orphan correlation may not be rebound to a different venue object."""
+    service = UncertaintyService(session_factory)
+    opening = {
+        "exchange_account_id": ACCOUNT_ID,
+        "deployment_environment": ENVIRONMENT,
+        "symbol": SYMBOL,
+        "kind": UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+        "correlation_key": "venue:conflicting-replay",
+        "intended_amount": Decimal("4"),
+        "evidence": {"venue_offer_id": "9001"},
+        "opened_event_seq": 10,
+        "venue_offer_id": "9001",
+    }
+    await service.open_or_get(**opening)
+
+    with pytest.raises(ValueError, match="different immutable uncertainty"):
+        await service.open_or_get(**(opening | {"venue_offer_id": "9002"}))
+
+
+@pytest.mark.asyncio
+async def test_same_correlation_unique_conflict_returns_winner_and_one_reserve(
+    session_factory: async_sessionmaker[AsyncSession], sqlite_engine
+) -> None:
+    """The losing same-correlation insert rolls back its reserve and replays."""
+
+    class UniqueConflictSession(AsyncSession):
+        async def scalar(self, statement, *args, **kwargs):
+            froms = statement.get_final_froms()
+            if (
+                any(item.name == "execution_uncertainties" for item in froms)
+                and getattr(self, "forced_empty_uncertainty_reads", 0) < 2
+            ):
+                self.forced_empty_uncertainty_reads = (
+                    getattr(self, "forced_empty_uncertainty_reads", 0) + 1
+                )
+                return None
+            return await super().scalar(statement, *args, **kwargs)
+
+    concurrent_factory = async_sessionmaker(
+        sqlite_engine, expire_on_commit=False, class_=UniqueConflictSession
+    )
+    service = UncertaintyService(concurrent_factory)
+    opening = {
+        "exchange_account_id": ACCOUNT_ID,
+        "deployment_environment": ENVIRONMENT,
+        "symbol": SYMBOL,
+        "kind": UncertaintyKind.UNSUPPORTED_VENUE_EXPOSURE,
+        "correlation_key": "unsupported:concurrent-1",
+        "intended_amount": Decimal("4"),
+        "evidence": {"symbol": "fTEST"},
+        "opened_event_seq": 10,
+    }
+
+    first = await UncertaintyService(session_factory).open_or_get(**opening)
+    replay = await service.open_or_get(**opening)
+
+    assert replay.uncertainty_id == first.uncertainty_id
+    async with session_factory() as session:
+        position = await session.get(
+            PositionStateRow, (ACCOUNT_ID, ENVIRONMENT, SYMBOL)
+        )
+    assert position is not None
+    assert position.uncertain_amount == Decimal("4")
+
+
+@pytest.mark.asyncio
 async def test_distinct_open_kinds_cannot_lose_a_pessimistic_reserve(
     session_factory: async_sessionmaker[AsyncSession], sqlite_engine
 ) -> None:
@@ -224,8 +379,9 @@ async def test_distinct_open_kinds_cannot_lose_a_pessimistic_reserve(
             kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
             correlation_key="venue:concurrent-1",
             intended_amount=Decimal("6"),
-            evidence={"venue_offer_id": "concurrent-1"},
+            evidence={"venue_offer_id": "9001"},
             opened_event_seq=10,
+            venue_offer_id="9001",
         ),
     )
 
@@ -276,6 +432,43 @@ async def test_open_or_get_rejects_negative_amount_and_unknown_kind(
 
 
 @pytest.mark.asyncio
+async def test_open_or_get_enforces_kind_specific_venue_links(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only an unattributed offer may carry the matching venue-object link."""
+    service = UncertaintyService(session_factory)
+    common = {
+        "exchange_account_id": ACCOUNT_ID,
+        "deployment_environment": ENVIRONMENT,
+        "symbol": SYMBOL,
+        "intended_amount": Decimal("1"),
+        "evidence": {},
+        "opened_event_seq": 10,
+    }
+
+    with pytest.raises(ValueError, match="requires venue_offer_id"):
+        await service.open_or_get(
+            **common,
+            kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+            correlation_key="venue:missing",
+        )
+    with pytest.raises(ValueError, match="must not carry venue_offer_id"):
+        await service.open_or_get(
+            **common,
+            kind=UncertaintyKind.SUBMIT_OUTCOME_UNKNOWN,
+            correlation_key="attempt:linked",
+            venue_offer_id="9001",
+        )
+    with pytest.raises(ValueError, match="must not carry venue_offer_id"):
+        await service.open_or_get(
+            **common,
+            kind=UncertaintyKind.UNSUPPORTED_VENUE_EXPOSURE,
+            correlation_key="unsupported:linked",
+            venue_offer_id="9001",
+        )
+
+
+@pytest.mark.asyncio
 async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -300,6 +493,7 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
             symbol=SYMBOL,
             kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
             reconcile_event_seq=10,
+            resolution_event_seq=12,
             resolved_by_operator_id="operator-1",
             resolution_reason="accepted_manual_offer",
             evidence={"decision": "manual"},
@@ -311,6 +505,7 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
             symbol=SYMBOL,
             kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
             reconcile_event_seq=11,
+            resolution_event_seq=12,
             resolved_by_operator_id="",
             resolution_reason="accepted_manual_offer",
             evidence={"decision": "manual"},
@@ -322,6 +517,7 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
             symbol="fUSD",
             kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
             reconcile_event_seq=11,
+            resolution_event_seq=12,
             resolved_by_operator_id="operator-1",
             resolution_reason="accepted_manual_offer",
             evidence={"decision": "manual"},
@@ -333,6 +529,7 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
         symbol=SYMBOL,
         kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
         reconcile_event_seq=11,
+        resolution_event_seq=12,
         resolved_by_operator_id="operator-1",
         resolution_reason="accepted_manual_offer",
         evidence={"decision": "manual"},
@@ -341,12 +538,48 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
     assert resolved.uncertainty_id == opened.uncertainty_id
     assert resolved.state == "resolved"
     assert resolved.resolved_by_operator_id == "operator-1"
+    assert resolved.reconcile_event_seq == 11
+    assert resolved.resolved_event_seq == 12
     async with session_factory() as session:
         position = await session.get(
             PositionStateRow, (ACCOUNT_ID, ENVIRONMENT, SYMBOL)
         )
     assert position is not None
     assert position.uncertain_amount == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_resolve_requires_a_later_non_snapshot_resolution_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Snapshot evidence and the later operator resolution are distinct facts."""
+    service = UncertaintyService(session_factory)
+    await service.open_or_get(
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment=ENVIRONMENT,
+        symbol=SYMBOL,
+        kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+        correlation_key="venue:resolution-event",
+        intended_amount=Decimal("4"),
+        evidence={"venue_offer_id": "9001"},
+        opened_event_seq=10,
+        venue_offer_id="9001",
+    )
+    common = {
+        "exchange_account_id": ACCOUNT_ID,
+        "deployment_environment": ENVIRONMENT,
+        "symbol": SYMBOL,
+        "kind": UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+        "reconcile_event_seq": 11,
+        "resolved_by_operator_id": "operator-1",
+        "resolution_reason": "accepted_manual_offer",
+        "evidence": {"decision": "manual"},
+    }
+
+    with pytest.raises(ValueError, match="must follow fresh reconcile"):
+        await service.resolve(**common, resolution_event_seq=11)
+    with pytest.raises(ValueError, match="must not be a venue snapshot"):
+        await service.resolve(**common, resolution_event_seq=13)
 
 
 def test_submission_attempt_unique_decision_and_open_scope_indexes_are_declared() -> None:
@@ -357,3 +590,15 @@ def test_submission_attempt_unique_decision_and_open_scope_indexes_are_declared(
         for index in Base.metadata.tables["execution_uncertainties"].indexes
     }
     assert "uq_execution_uncertainties_open_scope" in index_names
+    attempt_fk_targets = {fk.target_fullname for fk in SubmissionAttemptRow.__table__.foreign_keys}
+    assert "execution_decisions.decision_id" in attempt_fk_targets
+    venue_fk = next(
+        constraint
+        for constraint in Base.metadata.tables["execution_uncertainties"].foreign_key_constraints
+        if constraint.name == "fk_execution_uncertainties_venue_offer"
+    )
+    assert [column.name for column in venue_fk.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "venue_offer_id",
+    ]

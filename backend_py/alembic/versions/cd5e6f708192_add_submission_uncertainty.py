@@ -68,6 +68,12 @@ def upgrade() -> None:
             name="ck_submission_attempts_outcome_kind",
         ),
         sa.ForeignKeyConstraint(
+            ["execution_decision_id"],
+            ["execution_decisions.decision_id"],
+            name="fk_submission_attempts_execution_decision",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
             ["exchange_account_id"],
             ["exchange_accounts.id"],
             name="fk_submission_attempts_account",
@@ -105,6 +111,7 @@ def upgrade() -> None:
         sa.Column("attempt_id", _UUID, nullable=True),
         sa.Column("venue_offer_id", sa.Text(), nullable=True),
         sa.Column("opened_event_seq", sa.BigInteger(), nullable=False),
+        sa.Column("reconcile_event_seq", sa.BigInteger(), nullable=True),
         sa.Column("resolved_event_seq", sa.BigInteger(), nullable=True),
         sa.Column("resolved_by_operator_id", sa.Text(), nullable=True),
         sa.Column("resolution_reason", sa.Text(), nullable=True),
@@ -130,13 +137,24 @@ def upgrade() -> None:
             name="ck_execution_uncertainties_intended_amount_nonnegative",
         ),
         sa.CheckConstraint(
-            "(state = 'open' AND resolved_event_seq IS NULL "
+            "(state = 'open' AND reconcile_event_seq IS NULL AND resolved_event_seq IS NULL "
             "AND resolved_by_operator_id IS NULL AND resolution_reason IS NULL "
             "AND resolution_evidence IS NULL AND resolved_at IS NULL) OR "
-            "(state = 'resolved' AND resolved_event_seq IS NOT NULL "
+            "(state = 'resolved' AND reconcile_event_seq IS NOT NULL AND resolved_event_seq IS NOT NULL "
             "AND resolved_by_operator_id IS NOT NULL AND resolution_reason IS NOT NULL "
             "AND resolution_evidence IS NOT NULL AND resolved_at IS NOT NULL)",
             name="ck_execution_uncertainties_resolution_shape",
+        ),
+        sa.CheckConstraint(
+            "state = 'open' OR (opened_event_seq < reconcile_event_seq "
+            "AND reconcile_event_seq < resolved_event_seq)",
+            name="ck_execution_uncertainties_resolution_event_order",
+        ),
+        sa.CheckConstraint(
+            "(kind = 'unattributed_venue_offer' AND venue_offer_id IS NOT NULL) OR "
+            "(kind IN ('submit_outcome_unknown', 'unsupported_venue_exposure') "
+            "AND venue_offer_id IS NULL)",
+            name="ck_execution_uncertainties_venue_link_kind",
         ),
         sa.ForeignKeyConstraint(
             ["exchange_account_id"],
@@ -157,9 +175,25 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
+            ["reconcile_event_seq"],
+            ["event_log.event_seq"],
+            name="fk_execution_uncertainties_reconcile_event",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
             ["resolved_event_seq"],
             ["event_log.event_seq"],
             name="fk_execution_uncertainties_resolved_event",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["exchange_account_id", "deployment_environment", "venue_offer_id"],
+            [
+                "venue_offer_state.exchange_account_id",
+                "venue_offer_state.deployment_environment",
+                "venue_offer_state.venue_offer_id",
+            ],
+            name="fk_execution_uncertainties_venue_offer",
             ondelete="RESTRICT",
         ),
     )
