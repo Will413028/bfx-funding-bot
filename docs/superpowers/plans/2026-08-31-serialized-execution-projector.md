@@ -73,9 +73,9 @@
 
 **Interfaces:**
 - Every new event constructor accepts event_id: UUID (default generated at creation), canonical UUID account_id: str, and schema_version=3; serialization always emits event_id as lowercase string.
-- StoredEventIdentity(event_id: UUID, source: Literal["native","derived_v2"]) is returned by deserialize_stored_event; v2 rows derive UUIDv5 from namespace bfx-funding-bot/event-log/v2 plus immutable tuple (event_seq,account_id,env,event_type,occurred_at_ms,payload_json).
-- EventLogRow.event_id is nullable for historical rows and required by a check for schema_version 3; partial unique index covers (account_id, deployment_environment, event_id) where event_id is not null.
-- PositionStateRow replaces direct reserved mutation with offered_amount, lent_amount, available_amount, uncertain_amount, last_venue_snapshot_at; migration backfills the new fields and drops the old reserved/realized projection columns after the account-observation tests pass.
+- StoredEventIdentity(event_id: UUID, source: Literal["native","derived_v2"]) is exposed by stored_event_identity(row); v2 rows derive UUIDv5 from namespace bfx-funding-bot/event-log/v2 plus immutable tuple (event_seq,account_id,env,event_type,occurred_at_ms,payload_json).
+- EventLogRow.event_id is nullable for historical rows and required by a check for schema_version 3; the canonical partial unique index covers (exchange_account_id, deployment_environment, event_id), with a transitional legacy-account companion index for SQLite/fixture rows.
+- PositionStateRow adds offered_amount, lent_amount, available_amount, uncertain_amount, last_venue_snapshot_at; the additive migration backfills them while the legacy reserved/realized columns remain read-compatible. After the Task 3/4 writer and account-observation cutover, a dedicated contract migration drops the old columns.
 - VenueOfferStateRow primary key is (exchange_account_id, deployment_environment, venue_offer_id) and stores symbol, amount_original, amount_remaining, rate, period, status, first/last seen event seq, terminal flag.
 - VenueCreditStateRow primary key is (exchange_account_id, deployment_environment, credit_id) and stores symbol, amount, rate, period, status, first/last seen event seq.
 
@@ -117,7 +117,7 @@ git commit -m "feat: add schema v3 event identity contract"
 **Interfaces:**
 - Revision bc4d5e6f7081 has down_revision = "9b2c3d4e5f6a"; creates projection_heads with primary key (exchange_account_id, deployment_environment, projection_name) and projector_version, and the two entity tables.
 - It adds nullable event_id/schema_version columns and the partial unique index, then backfills historical event IDs only through the application upcaster during replay; it never rewrites immutable payloads.
-- It adds position numeric columns with zero defaults, backfills them from the canonical observation/entity state, verifies no nulls, then drops the obsolete direct-mutation reserved/realized projection columns; all account FKs use ON DELETE RESTRICT.
+- It adds position numeric columns with zero defaults and backfills them from the current canonical-compatible state. It intentionally retains reserved/realized until the Task 3/4 writer and full-account observation cutover; a follow-up contract migration drops those obsolete direct-mutation columns. All account FKs use ON DELETE RESTRICT.
 
 - [ ] **Step 1: Write failing metadata/integration tests**
 
@@ -131,7 +131,7 @@ Expected: FAIL because migration and metadata are absent.
 
 - [ ] **Step 3: Implement Alembic migration**
 
-Use transaction-safe DDL and register every mapped table. Keep event history append-only; no migration step may update payload JSON or delete event rows.
+Use transaction-safe additive DDL and register every mapped table. Keep event history append-only; no migration step may update payload JSON or delete event rows. Do not drop reserved/realized until the writer no longer writes them and the full-account observation tests prove the new buckets are authoritative.
 
 - [ ] **Step 4: Verify Alembic drift**
 
@@ -218,6 +218,8 @@ Expected: FAIL because reconcile still writes per-symbol snapshots and direct mu
 - [ ] **Step 3: Implement normalized full-account observation flow**
 
 Keep all venue calls outside DB transactions; after query completion build one immutable snapshot event. Project offer/credit entities with object-level upsert and terminal monotonicity. Include all active offers/credits even when symbol is absent from configuration.
+
+The same cutover owns the contract migration that drops `position_state.reserved` and `position_state.realized` after a verified backfill and a zero-legacy-writer architecture check.
 
 - [ ] **Step 4: Run focused recovery/reconcile tests**
 

@@ -4,6 +4,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     OfferClaimRow,
     PositionStateRow,
+    ProjectionHeadRow,
     VenueCreditStateRow,
     VenueOfferStateRow,
 )
@@ -16,6 +17,7 @@ def test_event_store_tables_registered() -> None:
     assert "offer_claims" in tables
     assert "position_state" in tables
     assert "reconcile_observation" in tables
+    assert "projection_heads" in tables
 
 
 def test_event_log_columns() -> None:
@@ -76,6 +78,20 @@ def test_entity_tables_have_account_scoped_identity() -> None:
         "deployment_environment",
         "credit_id",
     ]
+    for table in (VenueOfferStateRow.__table__, VenueCreditStateRow.__table__):
+        assert table.columns["flags"].server_default is not None
+        assert table.columns["is_terminal"].server_default is not None
+
+
+def test_projection_head_is_account_environment_projection_scoped() -> None:
+    assert [c.name for c in ProjectionHeadRow.__table__.primary_key.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "projection_name",
+    ]
+    foreign_keys = list(ProjectionHeadRow.__table__.foreign_keys)
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0].ondelete == "RESTRICT"
 
 
 def test_position_state_pk_is_uuid_env_symbol() -> None:

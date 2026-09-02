@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -220,7 +221,9 @@ class VenueOfferStateRow(Base):
     __tablename__ = "venue_offer_state"
 
     exchange_account_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=False
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT", name="fk_venue_offer_state_account"),
+        nullable=False,
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -232,7 +235,9 @@ class VenueOfferStateRow(Base):
     # explicit ``period_days`` domain name to Python callers.
     period_days: Mapped[int | None] = mapped_column("period", Integer, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    flags: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False, default=dict)
+    flags: Mapped[dict[str, Any]] = mapped_column(
+        _JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
     mts_created: Mapped[int] = mapped_column(BigInteger, nullable=False)
     mts_updated: Mapped[int] = mapped_column(BigInteger, nullable=False)
     cid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -240,7 +245,9 @@ class VenueOfferStateRow(Base):
     signal_correlation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_seen_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    is_terminal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_terminal: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -259,7 +266,9 @@ class VenueCreditStateRow(Base):
     __tablename__ = "venue_credit_state"
 
     exchange_account_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), nullable=False
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT", name="fk_venue_credit_state_account"),
+        nullable=False,
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     credit_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -268,12 +277,16 @@ class VenueCreditStateRow(Base):
     rate: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     period_days: Mapped[int | None] = mapped_column("period", Integer, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    flags: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False, default=dict)
+    flags: Mapped[dict[str, Any]] = mapped_column(
+        _JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
     mts_created: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mts_updated: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     first_seen_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     last_seen_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    is_terminal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_terminal: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -282,6 +295,31 @@ class VenueCreditStateRow(Base):
         Index(
             "idx_venue_credit_state_account_status",
             "exchange_account_id", "deployment_environment", "status",
+        ),
+    )
+
+
+class ProjectionHeadRow(Base):
+    """Cursor for one deterministic projector and account/environment stream."""
+
+    __tablename__ = "projection_heads"
+
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT", name="fk_projection_heads_account"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    projection_name: Mapped[str] = mapped_column(Text, nullable=False)
+    last_event_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    projector_version: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_NOW
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "exchange_account_id", "deployment_environment", "projection_name"
         ),
     )
 
