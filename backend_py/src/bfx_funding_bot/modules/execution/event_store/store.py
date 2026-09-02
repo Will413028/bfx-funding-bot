@@ -24,7 +24,10 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
     ReconcileObservationRow,
 )
-from bfx_funding_bot.modules.execution.events import DEFAULT_RECONCILE_SYMBOL
+from bfx_funding_bot.modules.execution.events import (
+    __SCHEMA_VERSION__,
+    DEFAULT_RECONCILE_SYMBOL,
+)
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 
@@ -99,6 +102,8 @@ class PostgresEventStore:
             cid=cid,
             venue_offer_id=venue_offer_id,
             venue_seq=venue_seq,
+            event_id=getattr(_ev, "event_id", None),
+            schema_version=getattr(_ev, "schema_version", __SCHEMA_VERSION__),
             payload=payload,
             occurred_at_ms=occurred_at_ms,
         )
