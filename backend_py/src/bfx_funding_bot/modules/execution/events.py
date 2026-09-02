@@ -4,7 +4,7 @@ Distinct from `modules/marketfeed/schemas.py` Pydantic payload models:
 - Domain events (這檔) = in-process bus payload, frozen dataclass
 - *Payload models (schemas.py)   = event payload serialization (persisted via event_log)
 
-Schema version 2 (Phase 4.4a):
+Schema version 3 (serialized execution projector):
   - Added bitemporal Optional fields: occurred_at_ms, recorded_at_ms
   - Added monotonic Optional event_seq (bus attach)
   - Added venue-issued idempotency Optional venue_seq (WS SEQ on WS-sourced events;
@@ -18,12 +18,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.replay import _HistoricalReplayAuthorization
 
-__SCHEMA_VERSION__ = 2
+__SCHEMA_VERSION__ = 3
 
 # Schema-evolution upcast value: each of the 5 reserve events gained a mandatory
 # `symbol` after early event_log rows were written (the 4 position events in
@@ -160,6 +160,8 @@ class ReservationIntent:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
     def __post_init__(self) -> None:
         _require_symbol(self)
         if self.execution_decision_id is None:
@@ -202,6 +204,8 @@ class ReservationFailed:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
     def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
@@ -237,6 +241,8 @@ class ReservationClaimed:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
     def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
@@ -272,6 +278,8 @@ class OrderFilled:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
     def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
@@ -303,6 +311,8 @@ class ReservationReleased:
     recorded_at_ms: int | None = None
     reservation_ref: ReservationRef | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
     def __post_init__(self) -> None:
         _require_symbol(self)
         _validate_reservation_ref(
@@ -334,6 +344,8 @@ class CreditClosed:
     event_seq: int | None = None
     occurred_at_ms: int | None = None  # close time (venue mts_update)
     recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_symbol(self)
@@ -353,6 +365,8 @@ class CancelRequested:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +400,8 @@ class PositionReconciled:
     reserved_usdt: Decimal | None = None  # transitional alias of reserved
     realized_usdt: Decimal | None = None  # transitional alias of realized
     available_usdt: Decimal | None = None  # transitional alias of available
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _resolve_position_fields(self)
@@ -413,6 +429,8 @@ class CancelAcknowledged:
     event_seq: int | None = None
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
 
 
 _HISTORICAL_LIFECYCLE_TYPES: dict[str, type[object]] = {
@@ -447,6 +465,11 @@ def _construct_historical_legacy_event(
     event = object.__new__(cls)
     for name, value in kwargs.items():
         object.__setattr__(event, name, value)
+    # ``object.__new__`` bypasses dataclass defaults.  Seed the identity fields
+    # before the stored-row decoder replaces the temporary UUID with the
+    # deterministic historical identity.
+    object.__setattr__(event, "event_id", uuid4())
+    object.__setattr__(event, "schema_version", 2)
     object.__setattr__(event, "is_legacy_uncorrelated", True)
     _require_symbol(event)
     _resolve_amount(event)

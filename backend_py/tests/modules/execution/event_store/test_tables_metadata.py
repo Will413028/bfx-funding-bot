@@ -1,6 +1,13 @@
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401  (register)
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    OfferClaimRow,
+    PositionStateRow,
+    ProjectionHeadRow,
+    VenueCreditStateRow,
+    VenueOfferStateRow,
+)
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 
@@ -10,6 +17,7 @@ def test_event_store_tables_registered() -> None:
     assert "offer_claims" in tables
     assert "position_state" in tables
     assert "reconcile_observation" in tables
+    assert "projection_heads" in tables
 
 
 def test_event_log_columns() -> None:
@@ -19,6 +27,71 @@ def test_event_log_columns() -> None:
                  "payload", "occurred_at_ms", "recorded_at"):
         assert name in cols, name
     assert cols["event_seq"].primary_key is True
+
+
+def test_event_log_v3_identity_constraint() -> None:
+    table = EventLogRow.__table__
+    cols = table.columns
+    assert cols["event_id"].nullable is True
+    assert cols["schema_version"].nullable is False
+    assert any(
+        constraint.name == "ck_event_log_v3_event_id"
+        for constraint in table.constraints
+    )
+    identity_index = next(
+        index for index in table.indexes if index.name == "uq_event_log_event_id"
+    )
+    assert identity_index.unique is True
+    assert [column.name for column in identity_index.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "event_id",
+    ]
+    legacy_identity_index = next(
+        index for index in table.indexes if index.name == "uq_event_log_legacy_event_id"
+    )
+    assert [column.name for column in legacy_identity_index.columns] == [
+        "account_id",
+        "deployment_environment",
+        "event_id",
+    ]
+
+
+def test_position_state_exposes_v3_exposure_buckets() -> None:
+    assert {
+        "offered_amount",
+        "lent_amount",
+        "available_amount",
+        "uncertain_amount",
+        "last_venue_snapshot_at",
+    } <= set(PositionStateRow.__table__.columns.keys())
+
+
+def test_entity_tables_have_account_scoped_identity() -> None:
+    assert [c.name for c in VenueOfferStateRow.__table__.primary_key.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "venue_offer_id",
+    ]
+    assert [c.name for c in VenueCreditStateRow.__table__.primary_key.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "credit_id",
+    ]
+    for table in (VenueOfferStateRow.__table__, VenueCreditStateRow.__table__):
+        assert table.columns["flags"].server_default is not None
+        assert table.columns["is_terminal"].server_default is not None
+
+
+def test_projection_head_is_account_environment_projection_scoped() -> None:
+    assert [c.name for c in ProjectionHeadRow.__table__.primary_key.columns] == [
+        "exchange_account_id",
+        "deployment_environment",
+        "projection_name",
+    ]
+    foreign_keys = list(ProjectionHeadRow.__table__.foreign_keys)
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0].ondelete == "RESTRICT"
 
 
 def test_position_state_pk_is_uuid_env_symbol() -> None:
