@@ -100,7 +100,11 @@ async def test_orphan_at_venue_fails_closed_without_audited_reference(pg_session
 async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000022"
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     await persister.persist(ReservationIntent(
         cid=7, execution_decision_id="d-recovery-7", size_usdt=Decimal("60"), symbol="fUST", signal_correlation_id=uuid4(),
         account_id=acct, is_simulated=False, occurred_at_ms=1_000,
@@ -116,7 +120,11 @@ async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
 async def test_missing_from_venue_releases(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000023"
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     scid = uuid4()
     await persister.persist(
         ReservationIntent(cid=42, execution_decision_id="d-recovery-42", size_usdt=Decimal("80"), symbol="fUST",
@@ -141,7 +149,11 @@ async def test_missing_from_venue_releases(pg_session_factory):
 async def test_recovery_is_idempotent(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000024"
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     scid = uuid4()
     await persister.persist(ReservationClaimed(
         cid=77, venue_offer_id="777", size_usdt=Decimal("250"),
