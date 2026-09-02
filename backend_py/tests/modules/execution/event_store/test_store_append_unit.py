@@ -54,7 +54,8 @@ def _claimed(seq: int) -> ReservationClaimed:
 async def test_append_inserts_event_row(sqlite_session: AsyncSession) -> None:
     await _create_all(sqlite_session)
     store = PostgresEventStore(deployment_environment="ci")
-    await store.append(sqlite_session, _claimed(1))
+    event = _claimed(1)
+    await store.append(sqlite_session, event)
     await sqlite_session.flush()
     rows = (await sqlite_session.execute(select(EventLogRow))).scalars().all()
     assert len(rows) == 1
@@ -62,6 +63,8 @@ async def test_append_inserts_event_row(sqlite_session: AsyncSession) -> None:
     assert rows[0].cid == 101
     assert rows[0].deployment_environment == "ci"
     assert rows[0].payload["size_usdt"] == "5"
+    assert rows[0].event_id == event.event_id
+    assert rows[0].schema_version == 3
 
 
 async def test_claim_then_release_updates_offer_claims(sqlite_session: AsyncSession) -> None:
