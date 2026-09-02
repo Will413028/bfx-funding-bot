@@ -221,3 +221,36 @@ async def test_append_batch_orders_by_domain_time_and_advances_head(
         )
     ).scalars().all()
     assert [row.cid for row in rows] == [5, 4]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision", ["c2e3f4a5b6c7", "cd5e6f708192"])
+async def test_projector_migration_readiness_accepts_seeded_revisions(
+    sqlite_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+) -> None:
+    writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=_ENV))
+
+    async def current_revision(_session: AsyncSession) -> tuple[str, ...]:
+        return (revision,)
+
+    monkeypatch.setattr(writer, "_database_migration_revisions", current_revision)
+
+    await writer._assert_projector_migration_ready(sqlite_session)
+
+
+@pytest.mark.asyncio
+async def test_projector_migration_readiness_rejects_pre_seed_revision(
+    sqlite_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=_ENV))
+
+    async def intermediate_revision(_session: AsyncSession) -> tuple[str, ...]:
+        return ("bc4d5e6f7081",)
+
+    monkeypatch.setattr(writer, "_database_migration_revisions", intermediate_revision)
+
+    with pytest.raises(ValueError, match="cursor migration incomplete"):
+        await writer._assert_projector_migration_ready(sqlite_session)
