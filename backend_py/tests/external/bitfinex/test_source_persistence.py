@@ -62,7 +62,11 @@ def _registry_with_claim(voi, cid, scid, size, account_id=_ACC):
 @pytest.mark.asyncio
 async def test_ws_foc_executed_orderfilled_persisted_before_publish(pg_session_factory):
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     scid = uuid4()
     # seed a CLAIMED row so the offer is reserved (reserved=100)
     await persister.persist(
@@ -132,7 +136,11 @@ class _OneTickHttp:
 @pytest.mark.asyncio
 async def test_fill_tracker_release_persisted_before_publish(pg_session_factory):
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     scid = uuid4()
     await persister.persist(
         ReservationIntent(cid=11, execution_decision_id="d-source-11", size_usdt=Decimal("100"), symbol="fUSD",
@@ -185,7 +193,11 @@ class _FlakyPersister:
 async def test_fill_tracker_release_retried_after_persist_failure(pg_session_factory):
     acc = "00000000-0000-0000-0000-000000000013"
     store = PostgresEventStore(deployment_environment=_ENV)
-    real = EventStorePersister(store=store, session_factory=pg_session_factory)
+    real = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     scid = uuid4()
     await real.persist(
         ReservationIntent(cid=12, execution_decision_id="d-source-12", size_usdt=Decimal("70"), symbol="fUSD",

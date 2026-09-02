@@ -67,7 +67,11 @@ def _ready(decision: DecisionPayload, decision_id: str) -> ReadyToSubmit:
 
 def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> ReservationEmittingMiddleware:
     store = PostgresEventStore(deployment_environment=_ENV)
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
     return ReservationEmittingMiddleware(
         inner, bus=DomainEventBus(), persister=persister, is_simulated=account_simulated,
     )

@@ -24,7 +24,11 @@ _SCID = UUID("11111111-1111-1111-1111-111111111111")
 
 async def test_sink_then_from_snapshot_roundtrip(pg_session_factory) -> None:
     store = PostgresEventStore(deployment_environment="ci")
-    persister = EventStorePersister(store=store, session_factory=pg_session_factory)
+    persister = EventStorePersister(
+        store=store,
+        session_factory=pg_session_factory,
+        compatibility_mode=True,
+    )
 
     await persister.persist(ReservationClaimed(
         cid=7, venue_offer_id="v7", size_usdt=Decimal("12"), signal_correlation_id=_SCID,
