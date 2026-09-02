@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-_REVISION = "c2e3f4a5b6c7"
+_REVISION = "cd5e6f708192"
 _ENV = "ci"
 
 
