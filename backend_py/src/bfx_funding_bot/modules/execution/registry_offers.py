@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 
 class RegistryState(Enum):
     PENDING = "pending"   # A2 write-ahead intent — durable, voi unknown
+    UNKNOWN = "unknown"   # submit may have reached venue; quarantine until reconcile
     CLAIMED = "claimed"
     RELEASED = "released"
     FAILED = "failed"     # A2 submit-failed terminal

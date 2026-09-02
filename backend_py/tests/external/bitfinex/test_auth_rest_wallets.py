@@ -113,3 +113,18 @@ async def test_get_funding_available_raises_on_http_error():
         client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
         with pytest.raises(BitfinexAPIError):
             await client.get_funding_available(ctx=_ctx(), currency="UST")
+
+
+@pytest.mark.asyncio
+async def test_get_funding_available_all_returns_funding_symbols():
+    rows = [
+        _wallet_row(wallet_type="funding", currency="UST", available=147.5),
+        _wallet_row(wallet_type="funding", currency="USD", available=50.0),
+        _wallet_row(wallet_type="exchange", currency="BTC", available=999.0),
+    ]
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=rows))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        available = await client.get_funding_available_all(ctx=_ctx())
+
+    assert available == {"fUST": Decimal("147.5"), "fUSD": Decimal("50.0")}

@@ -35,6 +35,8 @@ def test_parse_happy_path():
             venue_offer_id="12345", symbol="fUSD", amount=Decimal("100.0"),
             rate=0.00031, period_days=2, mts_created=1_700_000_000_000,
             status="ACTIVE",
+            amount_original=Decimal("100.0"),
+            mts_updated=1_700_000_000_000,
         )
     ]
 
@@ -97,14 +99,18 @@ async def test_get_active_funding_offers_raises_on_http_error():
 
 
 @pytest.mark.asyncio
-async def test_get_active_funding_offers_requires_symbol():
-    """fail-loud: symbol is a required kwarg (no silent fUSD default) so a
-    forgotten symbol raises instead of silently querying/lending fUSD."""
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[]))
+async def test_get_active_funding_offers_without_symbol_fetches_all_currencies():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
         client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
-        with pytest.raises(TypeError):
-            await client.get_active_funding_offers(ctx=_ctx())  # type: ignore[call-arg]
+        assert await client.get_active_funding_offers(ctx=_ctx()) == []
+    assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/offers"
 
 
 @pytest.mark.asyncio

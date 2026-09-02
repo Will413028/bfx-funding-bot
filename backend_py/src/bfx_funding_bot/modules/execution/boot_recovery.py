@@ -5,35 +5,38 @@ the PG event_log + snapshot is the SoT for our intent + accounting. Bitfinex
 funding offers carry NO client cid (submit drops it, response lacks it), so we
 reconcile by venue_offer_id -- the only stable shared key.
 
-  - orphan  (venue has voi, local has no CLAIMED row)  -> ReservationClaimed
+  - orphan  (venue has voi, local has no CLAIMED row)  -> VenueOfferQuarantined
   - missing (local CLAIMED, venue no longer has voi)   -> ReservationReleased
-  - stale PENDING (write-ahead intent, unresolvable)   -> ReservationFailed
+  - stale PENDING (write-ahead intent, outcome unknown) -> ReservationUnknown
 
-PENDING can't be matched to the venue (no cid round-trip), so it converges to
-FAILED after reconcile -- capital-neutral, because the actual offer (if the
-submit reached the venue) is captured independently by orphan-claim.
+PENDING cannot be treated as rejection just because an active snapshot is empty.
+It remains UNKNOWN until a fresh full-account/history observation or an
+operator resolution proves what happened.  An unattributed venue offer is
+counted and quarantined without a synthetic local identity or auto-cancel.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, NamedTuple, Protocol
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
-from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.entities import (
+    VenueCreditObservation,
+    VenueOfferObservation,
+)
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import (
@@ -41,13 +44,32 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationFailed,
     ReservationReleased,
+    ReservationUnknown,
+    SnapshotCoverage,
+    VenueOfferQuarantined,
+    VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 
 log = logging.getLogger(__name__)
 
-RecoveryAction = ReservationClaimed | ReservationReleased | ReservationFailed
+RecoveryAction = (
+    ReservationClaimed
+    | ReservationReleased
+    | ReservationFailed
+    | ReservationUnknown
+    | VenueOfferQuarantined
+)
+
+
+def _normalize_flags(value: Mapping[str, Any] | int | None) -> Mapping[str, Any]:
+    """Keep Bitfinex's scalar bitfield instead of silently dropping metadata."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value is None:
+        return {}
+    return {"raw": value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +84,9 @@ class ReconcileResult:
     reserved_drift_usdt: Decimal = Decimal("0")
     realized_drift_usdt: Decimal = Decimal("0")
     venue_offers: tuple[ActiveFundingOffer, ...] = ()
+    n_unknown: int = 0
+    n_quarantined: int = 0
+    snapshot_event_seq: int | None = None
 
 
 class _SymbolSnapshot(NamedTuple):
@@ -71,11 +96,6 @@ class _SymbolSnapshot(NamedTuple):
     available: Decimal
     reserved: Decimal
     realized: Decimal
-
-
-# Fixed namespace for deterministic synthetic correlation ids on reconciled
-# orphans (offers with no originating local signal).
-_RECOVERY_SCID_NS = UUID("3a000000-0000-4000-8000-000000000001")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,29 +112,6 @@ class LocalClaim:
 
 class RecoveryCorrelationError(RuntimeError):
     """Recovery cannot safely emit a lifecycle event without audited identity."""
-
-
-def synth_orphan_cid(venue_offer_id: str) -> int:
-    """Synthetic cid for a reconciled orphan claim, in the NEGATIVE namespace.
-
-    Real cids (generate_cid) are blake2b masked by BITFINEX_CID_MAX -> always
-    positive, so negating guarantees zero collision with a client-submitted
-    intent. Synthetic cids are never sent to the venue (orphans are reconciled,
-    not submitted); a negative cid in event_log marks "no originating intent".
-    Numeric voi (the normal case) is negated directly so re-running reconcile
-    upserts the same offer_claims row; non-numeric voi falls back to a hashed
-    value, also negated.
-    """
-    try:
-        return -int(venue_offer_id)
-    except ValueError:
-        digest = hashlib.blake2b(venue_offer_id.encode(), digest_size=8).digest()
-        return -(int.from_bytes(digest, "big") & BITFINEX_CID_MAX)
-
-
-def synth_orphan_scid(venue_offer_id: str) -> UUID:
-    """Deterministic correlation id for a reconciled orphan (no local signal)."""
-    return uuid5(_RECOVERY_SCID_NS, venue_offer_id)
 
 
 def compute_recovery_actions(
@@ -141,15 +138,24 @@ def compute_recovery_actions(
     }
     actions: list[RecoveryAction] = []
 
-    # orphan: venue has it, local CLAIMED set doesn't -> claim (reserved += size)
+    # orphan: venue has it, local CLAIMED set doesn't -> quarantine.  The full
+    # snapshot already persists/counts the object; fabricating a CID or
+    # ReservationRef would create false provenance and make a later rebuild
+    # impossible to audit.
     for voi, offer in venue_by_voi.items():
         if voi in claimed_by_voi:
             continue
         if (now_ms - offer.mts_created) < action_grace_ms:
             continue  # too fresh — local claim may still be committing
-        raise RecoveryCorrelationError(
-            f"unresolved recovery orphan voi={voi}: no audited reservation reference",
-        )
+        actions.append(VenueOfferQuarantined(
+            venue_offer_id=voi,
+            symbol=offer.symbol,
+            amount=offer.amount,
+            account_id=account_id,
+            is_simulated=is_simulated,
+            observed_at_ms=now_ms,
+            reason="unattributed_active_offer",
+        ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
     for voi, claim in claimed_by_voi.items():
@@ -173,7 +179,9 @@ def compute_recovery_actions(
             reservation_ref=claim.reservation_ref,
         ))
 
-    # stale PENDING (crash-mid-flight, unmatchable) -> FAILED (capital-neutral)
+    # stale PENDING (crash-mid-flight, outcome unknown) -> UNKNOWN.  Absence
+    # from the active snapshot is not evidence of rejection; the next full
+    # observation/history pass must resolve the uncertainty.
     for c in local_claims:
         if c.state == RegistryState.PENDING and (now_ms - c.occurred_at_ms) >= grace_ms:
             if c.symbol not in configured_symbols:
@@ -184,7 +192,7 @@ def compute_recovery_actions(
                 raise RecoveryCorrelationError(
                     f"unresolved recovery pending cid={c.cid}: missing reservation reference",
                 )
-            actions.append(ReservationFailed(
+            actions.append(ReservationUnknown(
                 cid=c.cid, size_usdt=c.size_usdt,
                 signal_correlation_id=c.signal_correlation_id,
                 account_id=account_id, is_simulated=is_simulated,
@@ -204,13 +212,13 @@ def _is_transient_status(status_code: int) -> bool:
 
 class _ActiveOffersQuery(Protocol):
     async def get_active_funding_offers(
-        self, *, ctx: AccountContext, symbol: str,
+        self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> list[ActiveFundingOffer]: ...
 
 
 class _ActiveCreditsQuery(Protocol):
     async def get_active_funding_credits(
-        self, *, ctx: AccountContext, symbol: str,
+        self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> list[ActiveFundingCredit]: ...
 
 
@@ -218,6 +226,10 @@ class _WalletsQuery(Protocol):
     async def get_funding_available(
         self, *, ctx: AccountContext, currency: str,
     ) -> Decimal: ...
+
+    async def get_funding_available_all(
+        self, *, ctx: AccountContext,
+    ) -> Mapping[str, Decimal]: ...
 
 
 class _AuthRestQuery(_ActiveOffersQuery, _ActiveCreditsQuery, _WalletsQuery, Protocol):
@@ -236,14 +248,14 @@ class _FsmSink(Protocol):
 
 
 class BootRecovery:
-    """Boot orchestration: venue reconcile + resolve crash-mid-flight PENDING.
+    """Boot orchestration: full-account venue reconcile + crash recovery.
 
-    Runs once at the start of Daemon.run(), live only. Fetches venue offers
-    (with retry -> fail-safe), then persists corrections in ONE txn (no REST
-    call held inside the txn). After commit, publishes CLAIMED/RELEASED to the
-    bus for in-memory projections (FAILED is not published -- no subscriber,
-    reserved untouched). Idempotent across boots: terminal states are excluded
-    from the next boot's diff.
+    Runs once at the start of Daemon.run(), live only. Fetches all venue offers,
+    credits and funding-wallet balances (with retry -> fail-safe), then persists
+    recovery events plus one immutable observation in ONE txn (no REST call held
+    inside the txn). After commit, publishes derived PositionReconciled signals
+    and routes only correlated CLAIMED/RELEASED lifecycle events to the registry.
+    UNKNOWN and orphan quarantine are durable states, never automatic retries.
     """
 
     def __init__(
@@ -295,72 +307,58 @@ class BootRecovery:
         self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def run(self) -> ReconcileResult:
-        # Per-symbol reconcile: each configured currency is an independent wallet
-        # (native units), so offers/credits/available are queried per symbol and a
-        # PositionReconciled is published per symbol. The FSM recovery diff
-        # (orphan-claim / missing-release of offer_claims) stays GLOBAL: venue_offer_id
-        # is globally unique on Bitfinex, so we union venue offers across symbols before
-        # diffing local claims — otherwise a claim for symbol B would look
-        # "missing_from_venue" while reconciling symbol A and be spuriously released.
-        # Each claim carries its own symbol (offer_claims.symbol), so releases/fails are
-        # stamped per-claim (fail-loud if a claim's symbol is not configured).
-        # ReconcileResult aggregates across symbols (the PeriodicReconcile
-        # divergence/drift logic is per-tick, not per-symbol).
-        now_ms = self._clock()
-        per_symbol: list[_SymbolSnapshot] = []
-        all_offers: list[ActiveFundingOffer] = []
-        for symbol in self._symbols:
-            offers = await self._fetch_offers(symbol)
-            credits = await self._fetch_credits(symbol)
-            available = await self._fetch_available(symbol)
-            per_symbol.append(_SymbolSnapshot(
-                symbol=symbol,
-                offers=offers,
-                credits=credits,
-                available=available,
-                reserved=sum((o.amount for o in offers), Decimal("0")),
-                realized=sum((c.amount for c in credits), Decimal("0")),
-            ))
-            all_offers.extend(offers)
-
-        agg_reserved = Decimal("0")
-        agg_realized = Decimal("0")
-        agg_available = Decimal("0")
-        agg_n_credits = 0
-        agg_reserved_drift = Decimal("0")
-        agg_realized_drift = Decimal("0")
+        # A reconcile is one account observation.  The venue calls intentionally
+        # happen before opening the database transaction, so the event writer
+        # sees a coherent immutable result and never holds a lock over network IO.
+        query_started_at_ms = self._clock()
+        all_offers = await self._fetch_offers(None)
+        all_credits = await self._fetch_credits(None)
+        wallet_available = await self._fetch_available_all()
+        query_finished_at_ms = self._clock()
+        per_symbol = self._group_snapshot(
+            offers=all_offers,
+            credits=all_credits,
+            wallet_available=wallet_available,
+        )
+        snapshot_event = VenueSnapshotObserved(
+            account_id=self._ctx.account_id,
+            environment=self._env,
+            query_started_at_ms=query_started_at_ms,
+            query_finished_at_ms=query_finished_at_ms,
+            offers=tuple(self._offer_observation(o) for o in all_offers),
+            credits=tuple(self._credit_observation(c) for c in all_credits),
+            wallet_available=wallet_available,
+            coverage=SnapshotCoverage(
+                active_offers_complete=True,
+                active_credits_complete=True,
+                wallets_complete=True,
+                active_offer_pages=1,
+                active_credit_pages=1,
+                wallet_pages=1,
+            ),
+            occurred_at_ms=query_finished_at_ms,
+        )
 
         async with session_scope(self._session_factory) as session:
             local_claims = await self._load_local_claims(session)
-            # GLOBAL FSM diff against the union of all symbols' venue offers
-            # (venue_offer_id is globally unique). Releases/fails now use each
-            # claim's own symbol (offer_claims.symbol); fail-loud if a claim's
-            # symbol is not configured.
             actions = compute_recovery_actions(
                 venue_offers=all_offers, local_claims=local_claims,
                 account_id=self._ctx.account_id, is_simulated=self._is_simulated,
-                now_ms=now_ms, grace_ms=self._grace_ms,
+                now_ms=query_finished_at_ms, grace_ms=self._grace_ms,
                 action_grace_ms=self._action_grace_ms,
                 configured_symbols=frozenset(self._symbols),
             )
             for ev in actions:
                 await self._store.append(session, ev)
-            # Per-symbol absolute position snapshot (single-writer per symbol).
-            for snap in per_symbol:
-                drift = await self._store.set_position_snapshot(
-                    session,
-                    account_id=self._ctx.account_id,
-                    symbol=snap.symbol,
-                    reserved_usdt=snap.reserved,
-                    realized_usdt=snap.realized,
-                    n_offers=len(snap.offers),
-                    n_credits=len(snap.credits),
-                    occurred_at_ms=now_ms,
-                )
-                agg_reserved_drift += drift.reserved_drift
-                agg_realized_drift += drift.realized_drift
+            snapshot_drift = await self._append_snapshot_event(session, snapshot_event)
 
-        # Publish one PositionReconciled per symbol AFTER durable commit.
+        # Publish derived per-symbol signals only after the immutable observation
+        # and all recovery events have committed.  Unknown venue symbols are
+        # included, while deployment remains scoped to configured symbols.
+        agg_reserved = Decimal("0")
+        agg_realized = Decimal("0")
+        agg_available = Decimal("0")
+        agg_n_credits = 0
         for snap in per_symbol:
             await self._safe_publish(PositionReconciled(
                 account_id=self._ctx.account_id,
@@ -370,14 +368,14 @@ class BootRecovery:
                 available=snap.available,
                 n_offers=len(snap.offers),
                 n_credits=len(snap.credits),
-                occurred_at_ms=now_ms,
+                occurred_at_ms=query_finished_at_ms,
             ))
             agg_reserved += snap.reserved
             agg_realized += snap.realized
             agg_available += snap.available
             agg_n_credits += len(snap.credits)
 
-        n_claim = n_release = n_fail = 0
+        n_claim = n_release = n_fail = n_unknown = n_quarantined = 0
         for ev in actions:
             if isinstance(ev, ReservationClaimed):
                 n_claim += 1
@@ -387,25 +385,100 @@ class BootRecovery:
                 await self._route_fsm(ev)
             elif isinstance(ev, ReservationFailed):
                 n_fail += 1
+            elif isinstance(ev, ReservationUnknown):
+                n_unknown += 1
+            elif isinstance(ev, VenueOfferQuarantined):
+                n_quarantined += 1
         log.info(
             "reconcile_complete symbols=%d venue_offers=%d "
             "reserved=%.2f realized=%.2f available=%.2f "
-            "orphans_claimed=%d released=%d pending_failed=%d",
-            len(self._symbols), len(all_offers),
+            "claims=%d released=%d failed=%d unknown=%d quarantined=%d",
+            len(per_symbol), len(all_offers),
             float(agg_reserved), float(agg_realized), float(agg_available),
-            n_claim, n_release, n_fail,
+            n_claim, n_release, n_fail, n_unknown, n_quarantined,
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
             reserved_usdt=agg_reserved, realized_usdt=agg_realized,
             available_usdt=agg_available,
             n_credits=agg_n_credits,
-            reserved_drift_usdt=agg_reserved_drift,
-            realized_drift_usdt=agg_realized_drift,
+            reserved_drift_usdt=snapshot_drift.reserved_drift,
+            realized_drift_usdt=snapshot_drift.realized_drift,
             venue_offers=tuple(all_offers),
+            n_unknown=n_unknown,
+            n_quarantined=n_quarantined,
+            snapshot_event_seq=snapshot_drift.event_seq,
         )
 
-    async def _fetch_offers(self, symbol: str) -> list[ActiveFundingOffer]:
+    def _group_snapshot(
+        self,
+        *,
+        offers: list[ActiveFundingOffer],
+        credits: list[ActiveFundingCredit],
+        wallet_available: Mapping[str, Decimal],
+    ) -> list[_SymbolSnapshot]:
+        symbols = (
+            set(self._symbols)
+            | {offer.symbol for offer in offers}
+            | {credit.symbol for credit in credits}
+            | set(wallet_available)
+        )
+        return [
+            _SymbolSnapshot(
+                symbol=symbol,
+                offers=[offer for offer in offers if offer.symbol == symbol],
+                credits=[credit for credit in credits if credit.symbol == symbol],
+                available=wallet_available.get(symbol, Decimal("0")),
+                reserved=sum(
+                    (offer.amount for offer in offers if offer.symbol == symbol),
+                    Decimal("0"),
+                ),
+                realized=sum(
+                    (credit.amount for credit in credits if credit.symbol == symbol),
+                    Decimal("0"),
+                ),
+            )
+            for symbol in sorted(symbols)
+        ]
+
+    @staticmethod
+    def _offer_observation(offer: ActiveFundingOffer) -> VenueOfferObservation:
+        return VenueOfferObservation(
+            venue_offer_id=offer.venue_offer_id,
+            symbol=offer.symbol,
+            amount_original=offer.amount_original or offer.amount,
+            amount_remaining=offer.amount,
+            rate=Decimal(str(offer.rate)) if offer.rate is not None else None,
+            period_days=offer.period_days,
+            status=offer.status,
+            mts_created=offer.mts_created,
+            mts_updated=offer.mts_updated or offer.mts_created,
+            flags=_normalize_flags(offer.flags),
+        )
+
+    @staticmethod
+    def _credit_observation(credit: ActiveFundingCredit) -> VenueCreditObservation:
+        return VenueCreditObservation(
+            credit_id=credit.credit_id,
+            symbol=credit.symbol,
+            amount=credit.amount,
+            rate=Decimal(str(credit.rate)) if credit.rate is not None else None,
+            period_days=credit.period_days,
+            status=credit.status,
+            mts_created=credit.mts_created,
+            mts_updated=credit.mts_updated,
+            flags=_normalize_flags(credit.flags),
+        )
+
+    async def _append_snapshot_event(
+        self,
+        session: AsyncSession,
+        event: VenueSnapshotObserved,
+    ) -> Any:
+        """Append the immutable observation through the canonical store API."""
+        return await self._store.append_snapshot(session, event)
+
+    async def _fetch_offers(self, symbol: str | None) -> list[ActiveFundingOffer]:
         """Fetch venue offers with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too. Either way
         the daemon fails to start (fail-safe: never trade without venue truth)."""
@@ -434,7 +507,7 @@ class BootRecovery:
         assert last_exc is not None
         raise last_exc
 
-    async def _fetch_credits(self, symbol: str) -> list[ActiveFundingCredit]:
+    async def _fetch_credits(self, symbol: str | None) -> list[ActiveFundingCredit]:
         """Fetch venue credits with bounded retry on TRANSIENT failures only.
         4xx re-raises immediately; transient exhaustion re-raises too.
         Fail-fast: never trade without knowing realized exposure."""
@@ -460,6 +533,44 @@ class BootRecovery:
                     )
                     await asyncio.sleep(backoff)
         log.error("boot_recovery_credits_unreachable after %d attempts — failing startup", self._max_attempts)
+        assert last_exc is not None
+        raise last_exc
+
+    async def _fetch_available_all(self) -> Mapping[str, Decimal]:
+        """Fetch every funding-wallet balance with bounded transient retry."""
+        query_all = getattr(self._auth_rest, "get_funding_available_all", None)
+        if query_all is None:
+            # Compatibility for older adapters: this is only a fallback, while
+            # the production BitfinexAuthREST implementation always exposes the
+            # account-wide endpoint.
+            values: dict[str, Decimal] = {}
+            for symbol in self._symbols:
+                values[symbol] = await self._fetch_available(symbol)
+            return values
+
+        last_exc: BitfinexAPIError | None = None
+        for attempt in range(self._max_attempts):
+            try:
+                result = await query_all(ctx=self._ctx)
+                return {
+                    str(symbol): Decimal(str(amount))
+                    for symbol, amount in result.items()
+                }
+            except BitfinexAPIError as e:
+                if not _is_transient_status(e.status_code):
+                    log.error(
+                        "boot_recovery_wallets_fetch_fatal status=%d — failing reconcile",
+                        e.status_code,
+                    )
+                    raise
+                last_exc = e
+                if attempt + 1 < self._max_attempts:
+                    backoff = self._backoff_base_s * (2 ** attempt)
+                    log.warning(
+                        "boot_recovery_wallets_fetch_transient attempt=%d/%d status=%d backoff=%.1fs",
+                        attempt + 1, self._max_attempts, e.status_code, backoff,
+                    )
+                    await asyncio.sleep(backoff)
         assert last_exc is not None
         raise last_exc
 

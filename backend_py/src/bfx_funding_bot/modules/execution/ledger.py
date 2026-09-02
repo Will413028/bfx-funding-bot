@@ -85,8 +85,17 @@ class PaperPositionLedger:
             )
         ).scalars().all()
         for row in rows:
-            ledger._reserved[row.symbol] = Decimal(str(row.reserved))
-            ledger._realized[row.symbol] = Decimal(str(row.realized))
+            # Canonical v3 buckets are authoritative.  The fallback only
+            # serves pre-observation SQLite fixtures whose additive migration
+            # columns are still zero while legacy values are seeded directly.
+            offered = Decimal(str(row.offered_amount))
+            lent = Decimal(str(row.lent_amount))
+            if offered == 0 and Decimal(str(row.reserved)) != 0:
+                offered = Decimal(str(row.reserved))
+            if lent == 0 and Decimal(str(row.realized)) != 0:
+                lent = Decimal(str(row.realized))
+            ledger._reserved[row.symbol] = offered
+            ledger._realized[row.symbol] = lent
         return ledger
 
     # ---------- live update handlers (DomainEventBus subscribers) ----------
@@ -213,4 +222,3 @@ class PaperPositionLedger:
         return sum(self._reserved.values(), Decimal("0")) + sum(
             self._realized.values(), Decimal("0")
         )
-
