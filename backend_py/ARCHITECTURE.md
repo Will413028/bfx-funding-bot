@@ -192,10 +192,11 @@ sequenceDiagram
     PR->>BR: run()
     BR->>BFX: GET /funding/offers + /funding/credits
     BFX-->>BR: venue snapshot
-    BR->>BR: compute_recovery_actions (orphan→CLAIMED, missing→RELEASED, stale PENDING→FAILED)
-    BR->>ST: append(events) + set_position_snapshot(reserved, realized) [1 txn]
-    ST->>ST: write reconcile_observation checkpoint (event_seq_fence, n_credits)
-    BR-->>LED: PositionReconciled → 絕對覆寫 (reserved, realized)
+    BR->>BR: full-account REST snapshot（不套 symbol filter）
+    BR->>BR: compute_recovery_actions (orphan→QUARANTINED, missing→RELEASED, stale PENDING→UNKNOWN)
+    BR->>ST: append(recovery events + VENUE_SNAPSHOT_OBSERVED) [1 txn]
+    ST->>ST: upsert venue_offer/credit_state + position buckets + reconcile_observation
+    BR-->>LED: derived PositionReconciled → 絕對覆寫 (reserved, realized)
     PR->>PR: 比對 drift → 有變化即 RECONCILE DEGRADED + WARN
     PR->>DR: deploy()
     DR->>LED: reserved_exposure()
@@ -239,7 +240,7 @@ sequenceDiagram
     WS-->>PR: request_resync("ws_fill")  (debounce min 10s)
 
     Note over PR: 正確性骨幹 (REST, 每 90s)
-    PR->>ST: set_position_snapshot(reserved, realized)  — 絕對覆寫
+    PR->>ST: append VENUE_SNAPSHOT_OBSERVED（full-account）— 絕對覆寫
     ST-->>BUS: PositionReconciled
     BUS->>LED: on_position_reconciled → 絕對 set (吸收 WS 漏接的 delta)
 ```
@@ -304,25 +305,26 @@ sequenceDiagram
 
 ## 5. Event Model & Source-of-Truth
 
-`event_log` 是不可變、append-only 的財務 SoT（PK `event_seq` BigInteger auto-increment，無 UPDATE/DELETE）。所有 ledger 狀態都是它的投影；pre-trade eligibility 則另存於同樣 append-only、但不影響 ledger 的 `execution_decisions`。每筆 execution event 必須經 `AccountEventWriter`：先取得 `(exchange_account_id, deployment_environment)` transaction advisory lock，再依 `projection_heads.last_event_seq` replay 缺口、投影目前事件並在同一 transaction 推進 cursor；任何投影錯誤都 rollback event、snapshot 與 cursor。
+`event_log` 是不可變、append-only 的財務 SoT（PK `event_seq` BigInteger auto-increment，無 UPDATE/DELETE）。所有 ledger 狀態都是它的投影；pre-trade eligibility 則另存於同樣 append-only、但不影響 ledger 的 `execution_decisions`。每筆 execution event（含 `VENUE_SNAPSHOT_OBSERVED`）必須經 `AccountEventWriter`：先取得 `(exchange_account_id, deployment_environment)` transaction advisory lock，再依 `projection_heads.last_event_seq` replay 缺口、投影目前事件並在同一 transaction 推進 cursor；任何投影錯誤都 rollback event、snapshot 與 cursor。
 
-**Domain events（frozen dataclass）**：`ReservationIntent`（write-ahead，PENDING，不上 bus）、`ReservationClaimed`（reserved += size）、`OrderFilled`（reserved → realized）、`ReservationReleased`（cancel/expire/missing）、`ReservationFailed`（terminal，capital-neutral，不上 bus）、`CancelRequested` / `CancelAcknowledged`（audit-only）、`PositionReconciled`（bus-only，絕對覆寫）。每個 event 帶 `occurred_at_ms`（domain 時間）、`recorded_at`（wall-clock）、`event_seq`、`venue_seq`（WS dedup 用）。
+**Domain events（frozen dataclass）**：`ReservationIntent`（write-ahead，PENDING，不上 bus）、`ReservationClaimed`（reserved += size）、`OrderFilled`（reserved → realized）、`ReservationReleased`（cancel/expire/missing）、`ReservationFailed`（terminal，capital-neutral，不上 bus）、`ReservationUnknown`（ambiguous submit，pessimistic uncertain exposure）、`VenueOfferQuarantined`（無 provenance 的 active offer，絕不 synthetic CID/自動 cancel）、`VenueSnapshotObserved`（full-account REST truth）、`CancelRequested` / `CancelAcknowledged`（audit-only）、`PositionReconciled`（由 snapshot 導出的 bus signal，絕對覆寫）。每個 event 帶 `occurred_at_ms`（domain 時間）、`recorded_at`（wall-clock）、`event_seq`、`venue_seq`（WS dedup 用）。
 
 **核心表與角色**
 
 | 表 | 角色 |
 |---|---|
-| `event_log` | SoT，append-only。dedup unique index gate `ORDER_FILL` / `RESERVATION_RELEASED`（key 含 `venue_offer_id` + `venue_seq`）。 |
+| `event_log` | SoT，append-only。dedup unique index gate `ORDER_FILL` / `RESERVATION_RELEASED`；`VENUE_OFFER_QUARANTINED` 另以 account/env/venue object 應用層冪等。 |
 | `projection_heads` | 每個 account/environment/projector 的單調 high-water mark；記錄 `last_event_seq`、`projector_version` 與更新時間，供缺口 replay 與 account-local lag。 |
-| `position_state` | ledger 投影（singleton per account+env）：`reserved_usdt`、`realized_usdt`、`last_event_seq`（high-water mark）、`last_reconciled_at`、`n_credits`。每次 `append()` 同 txn 內更新。 |
-| `offer_claims` | FSM 快照，PK `(exchange_account_id, deployment_environment, cid)`：state ∈ {PENDING, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 account UUID 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
-| `reconcile_observation` | 不可變 checkpoint：venue 快照 + `event_seq_fence`（快照當下 max event_seq）+ `n_offers` / `n_credits`。rebuild 的 base state。 |
+| `position_state` | ledger 投影（每 account/env/symbol）：`offered_amount`、`lent_amount`、`available_amount`、`uncertain_amount`、`last_venue_snapshot_at`、`last_event_seq`。`reserved`/`realized` 僅為 staged migration 相容欄位。 |
+| `offer_claims` | FSM 快照，PK `(exchange_account_id, deployment_environment, cid)`：state ∈ {PENDING, UNKNOWN, CLAIMED, RELEASED, FAILED}。投影先以原子 `INSERT ... ON CONFLICT DO NOTHING` 讓 DB 仲裁首寫者，再按 account UUID 以 CID／非空 venue offer id／非空 execution decision id 重讀唯一 canonical row。完整 identity 相同才視為冪等並推進 FSM；多筆命中或任何既有 identity 不符皆 fail closed，絕不覆寫 established identity。 |
+| `venue_offer_state` / `venue_credit_state` | 以 venue object ID 為 key 的 normalized full-account entity projection；complete snapshot 缺席的舊 active object 轉 `absent` terminal，terminal 狀態單調且不受舊 snapshot 重開。 |
+| `reconcile_observation` | 由 `VENUE_SNAPSHOT_OBSERVED` 導出的不可變 checkpoint：每 symbol 的 venue totals + `event_seq_fence` + counts。 |
 | `execution_decisions` | 每筆 allocation candidate 的 durable eligibility audit：decision/reconcile/account/realm/cell/symbol/correlation、`ready`/`blocked`/`no_recommendation`、stable reason/dependency、signal/applied rate、amount/period、exact-period book evidence、model evidence、safety/policy、config/service hash 與 timestamps。READY 必須在 submit 前 commit。 |
 | `diagnostics` | **非 SoT** forensic 軌跡（DECISION / SAFETY_TRIGGER / CANCEL_AUDIT），best-effort 寫入（失敗不擋交易），prunable 30–90d。 |
 
-**Dedup（雙層）**：`AccountEventWriter` 以 native `event_id`（歷史 v2 則由 immutable row 推導）做 account-scoped identity，再以 venue tuple 作 `ORDER_FILL` / `RESERVATION_RELEASED` domain backstop；`PostgresEventStore.append()` 及 `EventStorePersister.persist()` 傳播 dedup status。WS dispatcher 對 deduped（重連重送、同 `venue_seq`）的事件 skip publish，維持「persist 失敗就不 publish」不變式。`PaperPositionLedger` 額外有 in-memory `_processed_fills` / `_processed_releases` 防呆。
+**Dedup（雙層）**：`AccountEventWriter` 以 native `event_id`（歷史 v2 則由 immutable row 推導）做 account-scoped identity，再以 venue tuple 作 `ORDER_FILL` / `RESERVATION_RELEASED` domain backstop；quarantine breadcrumb 以 account/env/venue object key 做應用層 dedup。`PostgresEventStore.append()` 及 `EventStorePersister.persist()` 傳播 dedup status。WS dispatcher 對 deduped（重連重送、同 `venue_seq`）的事件 skip publish，維持「persist 失敗就不 publish」不變式。`PaperPositionLedger` 額外有 in-memory `_processed_fills` / `_processed_releases` 防呆。
 
-**Checkpoint ⊕ tail rebuild**：`rebuild_snapshot_from_log()` 若無 checkpoint 則 seed `(0,0,0)` 重放全部；若有 checkpoint 則 seed 自最新 checkpoint，**只重放 `event_seq > fence` 的尾段**（不重複計）。fence 單調遞增，rebuild 對同一 checkpoint idempotent。
+**Deterministic rebuild**：`rebuild_snapshot_from_log(account_id, environment)` 對含 `VENUE_SNAPSHOT_OBSERVED` 的 stream 從空 projection 依 `event_seq` 重放 immutable event；舊 stream 則沿用 checkpoint ⊕ tail 相容路徑。所有 venue object、position bucket、quarantine/unknown breadcrumb 均可由 event log 重建，不能讀 live API 或當前 projection 值作為輸入。
 
 **Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/canary/CI 而無 cross-account 或 cross-environment 污染。
 
@@ -369,15 +371,16 @@ event_log              (SoT, append-only)
   UNIQUE dedup(exchange_account_id, deployment_environment,
                event_type, venue_offer_id, venue_seq)
 
-position_state         (ledger 投影, singleton per account+env)
+position_state         (ledger 投影, per account+env+symbol)
   PK (exchange_account_id, deployment_environment, symbol)
-  reserved_usdt, realized_usdt,
+  offered_amount, lent_amount, available_amount, uncertain_amount,
+  reserved/realized (staged compatibility aliases),
   last_updated_ms, last_event_seq,
   last_reconciled_at, n_credits
 
 offer_claims           (FSM 快照, per-offer)
   PK (exchange_account_id, deployment_environment, cid)
-  state{PENDING|CLAIMED|RELEASED|FAILED}, venue_offer_id,
+  state{PENDING|UNKNOWN|CLAIMED|RELEASED|FAILED}, venue_offer_id,
   size_usdt, signal_correlation_id, execution_decision_id,
   occurred_at_ms, last_updated_ms, last_event_seq
   UNIQUE partial (exchange_account_id, deployment_environment, venue_offer_id)
@@ -390,6 +393,11 @@ reconcile_observation  (checkpoint, append-only audit)
   exchange_account_id, legacy account_id (audit only), deployment_environment,
   reserved_usdt, realized_usdt, n_offers, n_credits,
   observed_at_ms, event_seq_fence, recorded_at
+
+venue_offer_state / venue_credit_state (normalized venue object projections)
+  PK (exchange_account_id, deployment_environment, venue object id)
+  terminal state is monotonic; complete observations close absent objects;
+  partial coverage preserves the prior bucket rather than writing a false zero
 
 execution_decisions    (append-only pre-trade audit；非 ledger projection)
   decision_id, reconcile_id, exchange_account_id, deployment_environment,
@@ -480,16 +488,18 @@ credential vault 解密。public read model 另以明確的
 
 ## 9. Key Invariants
 
-- **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。只有 `ReservationClaimed`（executor 或 recovery orphan-claim）會增加 reserved。
-- **I-VTA venue 即真相**：`BootRecovery.run()` 抓 REST offers + credits，產生 orphan-claim / missing-offer / stale-pending 修正，並以 `PositionReconciled` 絕對覆寫 ledger。WS 是延遲最佳化；90s 迴圈保證收斂。
+- **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。所有 exposure mutation 由 account event writer 序列化；snapshot 絕對設定 `offered/lent`，lifecycle event 只做有序增量。
+- **I-VTA venue 即真相**：`BootRecovery.run()` 以不帶 symbol filter 的 REST offers + credits + wallets 建立 `VENUE_SNAPSHOT_OBSERVED`；orphan 只 quarantine、missing 釋放、stale PENDING 進 UNKNOWN，並以衍生 `PositionReconciled` 絕對覆寫 ledger。WS 是延遲最佳化；90s 迴圈保證收斂。
 - **I-R/R reserved/realized 分離**：`tracker.reconcile_to_total` 只用 `reserved_exposure`，不含 realized（避免 venue→cell attribution 灌爆 per-cell 意圖）。gap 仍以 `current_exposure = reserved + realized` 對 cap 計算。
 - **I-AC allocation cap**：`(reserved + realized) + amount ≤ cap`；恰好 at-cap 放行，over-cap 擋；`reconcile_to_total` 對超過 `cap_per_cell` 做 hard clamp。
 - **gap ≤ target**：`allocate_gap` 總分配 ≤ gap，全域 cap 永不超過；低於 153 的 dust 丟棄。
 - **I-CC concentration**：每 cell ≤ `max(concentration_pct * cap, cap / n_active_cells)`（≥2 active cells 等同 70%；僅 1 active cell 時可達 100% cap——該情況下 cap 本就不提供分散效果，屬刻意 relax，見 commit `0d29fc8`）；跨 tick 漂移於下個 90s reconcile 自我修正。（注意：reserved-only rescale 後，集中度上限僅對 pending 資本生效，不含已成交 realized；2-cell 同幣別下無害，multi-cell scale-up 需 cid 完整歸屬。）
-- **I-WAI write-ahead intent**：txn1 寫 `ReservationIntent`(PENDING) → REST（唯一非事務邊界）→ txn2 寫 outcome；crash 於中間留 PENDING，boot 時老者判 FAILED。txn 永不跨 REST call。
+- **I-WAI write-ahead intent**：txn1 寫 `ReservationIntent`(PENDING) → REST（唯一非事務邊界）→ txn2 寫 typed outcome；crash 於中間留 PENDING，boot 時進 UNKNOWN，不得盲目重送。txn 永不跨 REST call。
 - **I-IDEM idempotency**：`ORDER_FILL` / `RESERVATION_RELEASED` 以 dedup key 去重；`OfferRegistry.transition()` 純函式、原子套用、重送安全。
 - **I-ES event sourcing SoT**：`event_log` append-only；snapshots 皆可由 log 重算；bus publish 為 best-effort，recovery 一律走 event_log。
 - **I-EW serialized projection**：所有 live execution append 先持有 account/environment transaction advisory lock；cursor 之後的 event-log 缺口按 `event_seq` replay，event、entity snapshots 與 `projection_heads` 同 transaction commit，舊事件 dedup 不得令 cursor 倒退。Alembic-managed DB 未完成 cursor seed 時 fail closed。
+- **I-UA ambiguous submit**：timeout、connection reset、5xx、malformed response 或 restart 後未完成 intent 一律 `ReservationUnknown`；不自動 retry。UNKNOWN 的 intended amount 進 `uncertain_amount`，只由 fresh full-account evidence/明確 operator resolution 移除。
+- **I-OQ orphan quarantine**：active venue offer 無本地 provenance 時保存完整 object、計入 `offered_amount` 並寫 `VenueOfferQuarantined`；不合成 CID/reference、不指派 strategy、不自動 cancel，其他 symbol 繼續對帳。
 - **I-CI candle 不可變**：進入 `strategy.observe()` 的 candle 必須 `is_final=true`，且定稿後其值永不改變——`upsert_candles` 的 UPDATE arm 帶 `where is_final = false`，對已定稿列無論來源（WS 重送、REST 回補）皆為 no-op，差異改寫進 `funding_candle_revisions`。封存有兩條互補路徑：(a) **寫入即判定**——`mts` 早於 `now` 所屬期者落地就是 final（REST backfill 寫的全是已結算歷史，若落地為未定稿，final-only 讀取會看不到，`fetch_and_store` 的寫後讀回也會回空）；(b) **期轉換時補封**——`CandleWriter` 見到同 series 更晚的 mts 就封存前一根，處理「寫入時還開著、之後才過期」的那根。都不是等固定秒數。**兩個讀取函數必須同規則**：`get_up_to` 與 `get_candles_in_range` 皆預設 `final_only=True`——只改前者時，warmup（走後者）會吸進形成中的 candle 而 replay 不會，兩臂差一次 `observe()` 就是 `ema_span=24` 下約 0.7% 的 EMA 位移。理由：決定性重放要求輸入不可變；輸入可變時 live 增量狀態與 replay 重建必然分歧，而 `LendDecision.rate` 直接取 `candle.close`，失真值會成為實際掛單利率（2026-07-27 實測 23/132 slot 被事後改寫、最大 -35.3%，掛單價偏離達 +54.6%）。
 - **submit 成功才記 intent**：executor 對 venue reject 回 `status="failed"`（非 raise）；reconciler 僅 `status != "failed"` 才 `record_deploy`。
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。

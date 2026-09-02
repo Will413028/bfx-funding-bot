@@ -7,20 +7,21 @@ Isolation: the testcontainer is session-scoped for startup cost, while the
 IDs still use canonical UUID strings so the runtime path matches production.
 """
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
-    RecoveryCorrelationError,
 )
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
     OfferClaimRow,
     PositionStateRow,
 )
@@ -54,6 +55,17 @@ def _ctx(account_id):
     )
 
 
+async def _seed_account(session_factory, account_id: str) -> None:
+    """Create the canonical owner required by normalized venue projections."""
+    async with session_factory() as session:
+        session.add(
+            ExchangeAccount(
+                id=UUID(account_id), venue="bitfinex", label=f"test-{account_id}"
+            )
+        )
+        await session.commit()
+
+
 def _recovery(offers, store, session_factory, account_id, *, clock=lambda: 5_000_000):
     return BootRecovery(
         store=store, session_factory=session_factory, auth_rest=_StubAuthRest(offers),
@@ -85,20 +97,34 @@ async def _reserved(session_factory, account_id) -> Decimal:
 
 
 @pytest.mark.asyncio
-async def test_orphan_at_venue_fails_closed_without_audited_reference(pg_session_factory):
+async def test_orphan_at_venue_is_quarantined_without_audited_reference(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000021"
+    await _seed_account(pg_session_factory, acct)
     store = PostgresEventStore(deployment_environment=_ENV)
     offers = [ActiveFundingOffer("777", "fUST", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await _recovery(offers, store, pg_session_factory, acct).run()
+    result = await _recovery(offers, store, pg_session_factory, acct).run()
 
+    assert result.n_quarantined == 1
     assert await _claims(pg_session_factory, acct) == []
-    assert await _reserved(pg_session_factory, acct) == Decimal("0")
+    # Quarantine preserves the venue truth in the canonical snapshot without
+    # fabricating a local CID/reservation reference.
+    assert await _reserved(pg_session_factory, acct) == Decimal("250")
+    async with pg_session_factory() as session:
+        event_types = (
+            await session.execute(
+                select(EventLogRow.event_type).where(
+                    EventLogRow.exchange_account_id == UUID(acct),
+                    EventLogRow.deployment_environment == _ENV,
+                )
+            )
+        ).scalars().all()
+    assert "VENUE_OFFER_QUARANTINED" in event_types
 
 
 @pytest.mark.asyncio
-async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
+async def test_crash_mid_flight_pending_converges_unknown(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000022"
+    await _seed_account(pg_session_factory, acct)
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
         store=store,
@@ -109,16 +135,18 @@ async def test_crash_mid_flight_pending_converges_failed(pg_session_factory):
         cid=7, execution_decision_id="d-recovery-7", size_usdt=Decimal("60"), symbol="fUST", signal_correlation_id=uuid4(),
         account_id=acct, is_simulated=False, occurred_at_ms=1_000,
     ))
-    await _recovery([], store, pg_session_factory, acct).run()
+    result = await _recovery([], store, pg_session_factory, acct).run()
 
     claims = await _claims(pg_session_factory, acct)
-    assert len(claims) == 1 and claims[0].state == "failed"
+    assert result.n_unknown == 1
+    assert len(claims) == 1 and claims[0].state == "unknown"
     assert await _reserved(pg_session_factory, acct) == Decimal("0")
 
 
 @pytest.mark.asyncio
 async def test_missing_from_venue_releases(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000023"
+    await _seed_account(pg_session_factory, acct)
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
         store=store,
@@ -148,6 +176,7 @@ async def test_missing_from_venue_releases(pg_session_factory):
 @pytest.mark.asyncio
 async def test_recovery_is_idempotent(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000024"
+    await _seed_account(pg_session_factory, acct)
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
         store=store,

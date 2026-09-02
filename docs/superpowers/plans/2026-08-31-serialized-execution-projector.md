@@ -208,33 +208,33 @@ git commit -m "feat: serialize account event projection writes"
 - VENUE_SNAPSHOT_OBSERVED projects entity rows and absolute position fields in one account transaction; it also appends immutable reconcile_observation audit data. set_position_snapshot() is deleted and no caller may directly mutate PositionStateRow.
 - rebuild_snapshot_from_log(account_id, environment) creates empty projections, upcasts every event in event_seq order, applies observations and domain events, and verifies resulting head equals max account event seq.
 
-- [ ] **Step 1: Write failing full-account and rebuild tests**
+- [x] **Step 1: Write failing full-account and rebuild tests**
 
 Assert no symbol filter is sent for full reconcile, unknown symbols are persisted, snapshot coverage metadata is required, direct set_position_snapshot import fails, and rebuilding two event-order permutations yields identical projections.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_full_account_snapshot.py tests/modules/execution/test_periodic_reconcile.py -q
 
 Expected: FAIL because reconcile still writes per-symbol snapshots and direct mutation exists.
 
-- [ ] **Step 3: Implement normalized full-account observation flow**
+- [x] **Step 3: Implement normalized full-account observation flow**
 
 Keep all venue calls outside DB transactions; after query completion build one immutable snapshot event. Project offer/credit entities with object-level upsert and terminal monotonicity. Include all active offers/credits even when symbol is absent from configuration.
 
 The same cutover owns the contract migration that drops `position_state.reserved` and `position_state.realized` after a verified backfill and a zero-legacy-writer architecture check.
 
-- [ ] **Step 4: Run focused recovery/reconcile tests**
+- [x] **Step 4: Run focused recovery/reconcile tests**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_full_account_snapshot.py tests/modules/execution/test_periodic_reconcile.py tests/modules/execution/test_position_reconciled.py -q
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit full-account reconciliation**
+- [x] **Step 5: Commit full-account reconciliation**
 
 ~~~bash
-git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/src/bfx_funding_bot/modules/execution/boot_recovery.py backend_py/src/bfx_funding_bot/modules/execution/periodic_reconcile.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/ledger.py backend_py/tests/modules/execution/event_store/test_set_position_snapshot.py backend_py/tests/modules/execution/event_store/test_full_account_snapshot.py
-git commit -m "refactor: project full account venue observations"
+git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/src/bfx_funding_bot/modules/execution/boot_recovery.py backend_py/src/bfx_funding_bot/modules/execution/event_store/entities.py backend_py/src/bfx_funding_bot/modules/execution/event_store/serialization.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/events.py backend_py/src/bfx_funding_bot/modules/execution/ledger.py backend_py/tests/modules/execution/event_store/test_full_account_snapshot.py
+git commit -m "♻️ Refactor: project full account venue observations"
 ~~~
 
 ## Task 5: Expose projection health and deterministic replay

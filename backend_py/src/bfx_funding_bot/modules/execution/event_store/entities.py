@@ -172,6 +172,7 @@ class VenueCreditObservation:
 
 
 _TERMINAL_OFFER_STATUSES = frozenset({
+    "absent",
     "cancelled",
     "canceled",
     "closed",

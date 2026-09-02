@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
+from bfx_funding_bot.modules.execution.event_store.entities import (
+    VenueCreditObservation,
+    VenueOfferObservation,
+)
 from bfx_funding_bot.modules.execution.event_store.replay import (
     HistoricalReplayProvenance,
     _HistoricalReplayAuthorization,
@@ -20,6 +25,10 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationFailed,
     ReservationIntent,
     ReservationReleased,
+    ReservationUnknown,
+    SnapshotCoverage,
+    VenueOfferQuarantined,
+    VenueSnapshotObserved,
     _construct_historical_legacy_event,
 )
 
@@ -31,6 +40,9 @@ _TYPE_BY_CLASS: dict[type, str] = {
     OrderFilled: "ORDER_FILL",
     ReservationReleased: "RESERVATION_RELEASED",
     CreditClosed: "CREDIT_CLOSED",
+    ReservationUnknown: "SUBMIT_OUTCOME_UNKNOWN",
+    VenueOfferQuarantined: "VENUE_OFFER_QUARANTINED",
+    VenueSnapshotObserved: "VENUE_SNAPSHOT_OBSERVED",
 }
 _CLASS_BY_TYPE: dict[str, type] = {v: k for k, v in _TYPE_BY_CLASS.items()}
 
@@ -46,6 +58,7 @@ _CORRELATION_EVENT_TYPES = frozenset({
     "RESERVATION_INTENT",
     "RESERVATION_CLAIMED",
     "RESERVATION_FAILED",
+    "SUBMIT_OUTCOME_UNKNOWN",
     "ORDER_FILL",
     "RESERVATION_RELEASED",
 })
@@ -78,22 +91,7 @@ def serialize_event(event: object) -> dict[str, Any]:
         raise ValueError("historical replay events cannot be serialized as current events")
     out: dict[str, Any] = {}
     for field in _FIELDS[type(event)]:
-        value = getattr(event, field)
-        if isinstance(value, ReservationRef):
-            out[field] = {
-                "execution_decision_id": value.execution_decision_id,
-                "cid": value.cid,
-                "signal_correlation_id": str(value.signal_correlation_id),
-                "venue_offer_id": value.venue_offer_id,
-            }
-        elif field in _UUID_FIELDS:
-            # UUID(str(...)) both validates the domain boundary and guarantees
-            # the canonical lower-case textual representation in JSON.
-            out[field] = str(UUID(str(value)))
-        elif isinstance(value, (Decimal, UUID)):
-            out[field] = str(value)
-        else:
-            out[field] = value
+        out[field] = _encode_value(getattr(event, field))
     out["__event_type__"] = etype
     out["__schema_version__"] = __SCHEMA_VERSION__
     return out
@@ -302,7 +300,36 @@ def _decode_payload(
         # decoder immediately replaces it with deterministic UUIDv5 identity.
         if field == "event_id" and schema_version != __SCHEMA_VERSION__:
             continue
-        kwargs[field] = _coerce(field, payload.get(field))
+        raw = payload.get(field)
+        if cls is VenueSnapshotObserved:
+            if field == "offers":
+                if not isinstance(raw, list):
+                    raise TypeError("snapshot offers must be an array")
+                kwargs[field] = tuple(
+                    _decode_nested(VenueOfferObservation, value) for value in raw
+                )
+                continue
+            if field == "credits":
+                if not isinstance(raw, list):
+                    raise TypeError("snapshot credits must be an array")
+                kwargs[field] = tuple(
+                    _decode_nested(VenueCreditObservation, value) for value in raw
+                )
+                continue
+            if field == "wallet_available":
+                if not isinstance(raw, dict):
+                    raise TypeError("snapshot wallet_available must be an object")
+                kwargs[field] = {
+                    str(symbol): Decimal(str(amount))
+                    for symbol, amount in raw.items()
+                }
+                continue
+            if field == "coverage":
+                if not isinstance(raw, dict):
+                    raise TypeError("snapshot coverage must be an object")
+                kwargs[field] = SnapshotCoverage(**raw)
+                continue
+        kwargs[field] = _coerce(field, raw)
     if is_historical_legacy:
         assert historical_authorization is not None
         return _construct_historical_legacy_event(
@@ -333,3 +360,45 @@ def _coerce(field: str, raw: Any) -> Any:
             venue_offer_id=raw.get("venue_offer_id"),
         )
     return raw
+
+
+def _encode_value(value: Any) -> Any:
+    """Encode nested immutable snapshot values without leaking Python types."""
+    if isinstance(value, ReservationRef):
+        return {
+            "execution_decision_id": value.execution_decision_id,
+            "cid": value.cid,
+            "signal_correlation_id": str(value.signal_correlation_id),
+            "venue_offer_id": value.venue_offer_id,
+        }
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _encode_value(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+            if field.init
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _encode_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_encode_value(item) for item in value]
+    return value
+
+
+def _decode_nested(cls: type[Any], raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        raise TypeError(f"{cls.__name__} must be an object")
+    kwargs: dict[str, Any] = {}
+    for field in dataclasses.fields(cls):
+        if not field.init:
+            continue
+        value = raw.get(field.name)
+        if field.name in {"amount", "amount_original", "amount_remaining", "rate"}:
+            value = Decimal(str(value)) if value is not None else None
+        elif field.name == "signal_correlation_id" and value is not None:
+            value = UUID(str(value))
+        kwargs[field.name] = value
+    return cls(**kwargs)
