@@ -20,6 +20,13 @@ def _decimal(value: Decimal | int | float | str) -> Decimal:
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
+def _validate_offer_amounts(amount_original: Decimal, amount_remaining: Decimal) -> None:
+    if amount_original < 0 or amount_remaining < 0:
+        raise ValueError("offer amounts must be non-negative")
+    if amount_remaining > amount_original:
+        raise ValueError("amount_remaining exceeds amount_original")
+
+
 def _freeze_metadata(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if value is None:
         return MappingProxyType({})
@@ -62,6 +69,7 @@ class VenueOfferState:
         object.__setattr__(self, "amount_remaining", _decimal(self.amount_remaining))
         if self.rate is not None:
             object.__setattr__(self, "rate", _decimal(self.rate))
+        _validate_offer_amounts(self.amount_original, self.amount_remaining)
         normalized_status = _normalize_status(self.status)
         object.__setattr__(self, "status", normalized_status)
         if self.is_terminal is None:
@@ -92,6 +100,8 @@ class VenueCreditState:
         if not self.symbol:
             raise ValueError("symbol must be non-empty")
         object.__setattr__(self, "amount", _decimal(self.amount))
+        if self.amount < 0:
+            raise ValueError("credit amount must be non-negative")
         if self.rate is not None:
             object.__setattr__(self, "rate", _decimal(self.rate))
         normalized_status = _normalize_status(self.status)
@@ -120,8 +130,13 @@ class VenueOfferObservation:
     flags: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not self.venue_offer_id:
+            raise ValueError("venue_offer_id must be non-empty")
+        if not self.symbol:
+            raise ValueError("symbol must be non-empty")
         object.__setattr__(self, "amount_original", _decimal(self.amount_original))
         object.__setattr__(self, "amount_remaining", _decimal(self.amount_remaining))
+        _validate_offer_amounts(self.amount_original, self.amount_remaining)
         if self.rate is not None:
             object.__setattr__(self, "rate", _decimal(self.rate))
         object.__setattr__(self, "status", _normalize_status(self.status))
@@ -143,7 +158,13 @@ class VenueCreditObservation:
     flags: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not self.credit_id:
+            raise ValueError("credit_id must be non-empty")
+        if not self.symbol:
+            raise ValueError("symbol must be non-empty")
         object.__setattr__(self, "amount", _decimal(self.amount))
+        if self.amount < 0:
+            raise ValueError("credit amount must be non-negative")
         if self.rate is not None:
             object.__setattr__(self, "rate", _decimal(self.rate))
         object.__setattr__(self, "status", _normalize_status(self.status))
@@ -157,6 +178,8 @@ _TERMINAL_OFFER_STATUSES = frozenset({
     "expired",
     "failed",
     "filled",
+    "executed",
+    "done",
     "released",
     "quarantined",
 })

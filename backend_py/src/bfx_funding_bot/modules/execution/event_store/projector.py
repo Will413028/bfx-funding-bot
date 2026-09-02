@@ -153,6 +153,10 @@ def apply_offer_transition(
             raise InvalidVenueOfferTransition(
                 "amount_original and amount_remaining are required for a new offer"
             )
+        if mts_updated < 0:
+            raise InvalidVenueOfferTransition("mts_updated must be non-negative")
+        if mts_created is not None and mts_created < 0:
+            raise InvalidVenueOfferTransition("mts_created must be non-negative")
         return VenueOfferState(
             venue_offer_id=venue_offer_id,
             symbol=symbol,
@@ -179,6 +183,10 @@ def apply_offer_transition(
         raise InvalidVenueOfferTransition("venue offer identity changed")
     if symbol is not None and symbol != previous.symbol:
         raise InvalidVenueOfferTransition("venue offer symbol changed")
+    if mts_updated < previous.mts_updated:
+        raise InvalidVenueOfferTransition(
+            f"mts_updated {mts_updated} precedes last seen {previous.mts_updated}"
+        )
 
     if event_seq == previous.last_seen_event_seq:
         # Same stream position is a duplicate only when it describes the same
@@ -186,8 +194,32 @@ def apply_offer_transition(
         # broken event identity or an ordering bug.
         if next_status != previous.status:
             raise InvalidVenueOfferTransition("conflicting duplicate event_seq")
+        if mts_updated != previous.mts_updated:
+            raise InvalidVenueOfferTransition("conflicting duplicate mts_updated")
         if amount_remaining is not None and _decimal(amount_remaining) != previous.amount_remaining:
             raise InvalidVenueOfferTransition("conflicting duplicate amount_remaining")
+        if amount_original is not None and _decimal(amount_original) != previous.amount_original:
+            raise InvalidVenueOfferTransition("conflicting duplicate amount_original")
+        if rate is not None and (previous.rate is None or _decimal(rate) != previous.rate):
+            raise InvalidVenueOfferTransition("conflicting duplicate rate")
+        if period_days is not None and period_days != previous.period_days:
+            raise InvalidVenueOfferTransition("conflicting duplicate period")
+        if mts_created is not None and mts_created != previous.mts_created:
+            raise InvalidVenueOfferTransition("conflicting duplicate mts_created")
+        if cid is not None and cid != previous.cid:
+            raise InvalidVenueOfferTransition("conflicting duplicate cid")
+        if (
+            execution_decision_id is not None
+            and execution_decision_id != previous.execution_decision_id
+        ):
+            raise InvalidVenueOfferTransition("conflicting duplicate decision id")
+        if (
+            signal_correlation_id is not None
+            and signal_correlation_id != previous.signal_correlation_id
+        ):
+            raise InvalidVenueOfferTransition("conflicting duplicate signal correlation")
+        if flags is not None and dict(flags) != dict(previous.flags):
+            raise InvalidVenueOfferTransition("conflicting duplicate flags")
         return previous
 
     if previous.is_terminal:
@@ -196,8 +228,30 @@ def apply_offer_transition(
                 f"terminal offer {previous.venue_offer_id} cannot transition "
                 f"from {previous.status!r} to {next_status!r}"
             )
+        if amount_original is not None and _decimal(amount_original) != previous.amount_original:
+            raise InvalidVenueOfferTransition("conflicting terminal amount_original")
+        if rate is not None and (previous.rate is None or _decimal(rate) != previous.rate):
+            raise InvalidVenueOfferTransition("conflicting terminal rate")
+        if period_days is not None and period_days != previous.period_days:
+            raise InvalidVenueOfferTransition("conflicting terminal period")
+        if cid is not None and cid != previous.cid:
+            raise InvalidVenueOfferTransition("conflicting terminal cid")
+        if (
+            execution_decision_id is not None
+            and execution_decision_id != previous.execution_decision_id
+        ):
+            raise InvalidVenueOfferTransition("conflicting terminal decision id")
+        if (
+            signal_correlation_id is not None
+            and signal_correlation_id != previous.signal_correlation_id
+        ):
+            raise InvalidVenueOfferTransition("conflicting terminal signal correlation")
+        if flags is not None and dict(flags) != dict(previous.flags):
+            raise InvalidVenueOfferTransition("conflicting terminal flags")
         # A duplicate terminal observation may advance the stream fence while
         # retaining the terminal object.  This is safe and replay-deterministic.
+        if amount_remaining is not None and _decimal(amount_remaining) != previous.amount_remaining:
+            raise InvalidVenueOfferTransition("conflicting terminal amount_remaining")
         return replace(
             previous,
             last_seen_event_seq=event_seq,

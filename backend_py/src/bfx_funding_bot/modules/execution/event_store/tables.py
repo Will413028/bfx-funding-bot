@@ -80,6 +80,22 @@ class EventLogRow(Base):
             postgresql_where=text("event_id IS NOT NULL"),
             sqlite_where=text("event_id IS NOT NULL"),
         ),
+        # Transitional SQLite/legacy-realm rows have no UUID owner yet.  This
+        # narrow companion index still prevents the same legacy account/env
+        # from accepting two native event IDs; production writers reject such
+        # rows before they reach the canonical UUID index above.
+        Index(
+            "uq_event_log_legacy_event_id",
+            "account_id", "deployment_environment", "event_id",
+            unique=True,
+            postgresql_where=text(
+                "event_id IS NOT NULL AND exchange_account_id IS NULL"
+            ),
+            sqlite_where=text(
+                "event_id IS NOT NULL AND exchange_account_id IS NULL"
+            ),
+            info={"identity_legacy_fixture": True},
+        ),
         Index(
             "uq_event_log_dedup",
             "exchange_account_id", "deployment_environment", "event_type", "venue_offer_id", "venue_seq",

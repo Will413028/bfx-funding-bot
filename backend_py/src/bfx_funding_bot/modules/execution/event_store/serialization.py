@@ -124,7 +124,10 @@ def deserialize_event(event_type: str, payload: dict[str, Any]) -> object:
             UUID(str(raw_event_id))
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("schema-v3 event payload has invalid event_id") from exc
-    return _decode_payload(event_type, payload, schema_version=version)
+    decoded = _decode_payload(event_type, payload, schema_version=version)
+    if version == 2 and hasattr(decoded, "schema_version"):
+        object.__setattr__(decoded, "schema_version", 2)
+    return decoded
 
 
 def deserialize_stored_event(row: EventLogRow) -> object:
@@ -137,20 +140,22 @@ def deserialize_stored_event(row: EventLogRow) -> object:
     payload = row.payload
     if not isinstance(payload, dict):
         raise TypeError("stored event payload must be an object")
-    if "__schema_version__" in payload:
-        version = payload["__schema_version__"]
+    version = payload.get("__schema_version__")
+    _validate_stored_schema_version(row, version)
+    if version is not None:
+        if version not in _SUPPORTED_SCHEMA_VERSIONS:
+            raise ValueError(f"unsupported event schema version: {version!r}")
+        payload_event_type = payload.get("__event_type__")
+        if payload_event_type != row.event_type:
+            raise ValueError(
+                "stored event payload type mismatch: "
+                f"expected {row.event_type}, got {payload_event_type!r}"
+            )
+    if version == __SCHEMA_VERSION__:
         decoded = deserialize_event(row.event_type, payload)
-        if version == __SCHEMA_VERSION__:
-            identity = stored_event_identity(row)
-        else:
-            identity = stored_event_identity(row)
-            _set_event_identity(decoded, identity)
+        identity = stored_event_identity(row)
         decoded = _with_canonical_account_id(decoded, row)
-        if (
-            version == __SCHEMA_VERSION__
-            and row.event_id is not None
-            and row.event_id != identity.event_id
-        ):
+        if row.event_id is not None and row.event_id != identity.event_id:
             raise ValueError("stored event_id does not match schema-v3 payload")
         return decoded
     provenance = HistoricalReplayProvenance.from_stored_event(row)
@@ -162,6 +167,7 @@ def deserialize_stored_event(row: EventLogRow) -> object:
         row.event_type,
         payload,
         historical_authorization=authorization,
+        schema_version=version,
     )
     _set_event_identity(decoded, stored_event_identity(row))
     return _with_canonical_account_id(decoded, row)
@@ -177,6 +183,7 @@ def stored_event_identity(row: EventLogRow) -> StoredEventIdentity:
     if not isinstance(payload, dict):
         raise TypeError("stored event payload must be an object")
     version = payload.get("__schema_version__")
+    _validate_stored_schema_version(row, version)
     if version == __SCHEMA_VERSION__:
         raw_event_id = payload.get("event_id")
         if raw_event_id is None:
@@ -205,6 +212,27 @@ def stored_event_identity(row: EventLogRow) -> StoredEventIdentity:
         ),
         source="derived_v2",
     )
+
+
+def _validate_stored_schema_version(row: EventLogRow, payload_version: Any) -> None:
+    """Reject a row whose metadata and immutable payload disagree.
+
+    ``schema_version`` was added after historical rows already existed, so a
+    transient ORM object may expose ``None`` before its server default is
+    loaded.  Persistent rows always carry 2 or 3 and must agree exactly with
+    the payload marker; an unversioned historical payload is equivalent to v2.
+    """
+    row_version = getattr(row, "schema_version", None)
+    if row_version is None:
+        return
+    if row_version not in _SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(f"unsupported stored event schema version: {row_version!r}")
+    expected = 2 if payload_version is None else payload_version
+    if row_version != expected:
+        raise ValueError(
+            "stored event schema_version does not match payload: "
+            f"row={row_version!r}, payload={payload_version!r}"
+        )
 
 
 def _with_canonical_account_id(event: object, row: EventLogRow) -> object:
@@ -272,7 +300,7 @@ def _decode_payload(
         # v2 and unversioned rows predate event identity.  Omitting the field
         # lets the dataclass default generate a temporary value; the stored-row
         # decoder immediately replaces it with deterministic UUIDv5 identity.
-        if field == "event_id" and payload.get(field) is None:
+        if field == "event_id" and schema_version != __SCHEMA_VERSION__:
             continue
         kwargs[field] = _coerce(field, payload.get(field))
     if is_historical_legacy:

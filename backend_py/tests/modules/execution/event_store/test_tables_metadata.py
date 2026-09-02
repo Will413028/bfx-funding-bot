@@ -45,6 +45,14 @@ def test_event_log_v3_identity_constraint() -> None:
         "deployment_environment",
         "event_id",
     ]
+    legacy_identity_index = next(
+        index for index in table.indexes if index.name == "uq_event_log_legacy_event_id"
+    )
+    assert [column.name for column in legacy_identity_index.columns] == [
+        "account_id",
+        "deployment_environment",
+        "event_id",
+    ]
 
 
 def test_position_state_exposes_v3_exposure_buckets() -> None:

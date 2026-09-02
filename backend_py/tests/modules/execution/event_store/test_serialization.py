@@ -2,7 +2,9 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
@@ -194,6 +196,65 @@ def test_v2_stored_identity_is_derived_without_mutating_payload() -> None:
     assert identity.source == "derived_v2"
     assert identity.event_id.version == 5
     assert "__schema_version__" not in payload
+
+
+@pytest.mark.asyncio
+async def test_versioned_v2_stored_event_uses_historical_upcaster(
+    sqlite_session: AsyncSession,
+) -> None:
+    bind = sqlite_session.bind
+    assert bind is not None
+    async with bind.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    payload = {
+        "__event_type__": "RESERVATION_INTENT",
+        "__schema_version__": 2,
+        "cid": 20,
+        "size_usdt": "7.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "historical-realm",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+    }
+    row = EventLogRow(
+        account_id="historical-realm",
+        deployment_environment="ci",
+        event_type="RESERVATION_INTENT",
+        cid=20,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=payload,
+        occurred_at_ms=1000,
+        schema_version=2,
+    )
+    sqlite_session.add(row)
+    await sqlite_session.flush()
+
+    decoded = deserialize_stored_event(row)
+
+    assert decoded.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    assert decoded.symbol == "fUST"  # type: ignore[attr-defined]
+    assert decoded.event_id == stored_event_identity(row).event_id  # type: ignore[attr-defined]
+    assert row.payload == payload
+
+
+def test_stored_schema_version_mismatch_is_rejected() -> None:
+    event = _claimed()
+    row = EventLogRow(
+        event_seq=20,
+        account_id="acct",
+        deployment_environment="ci",
+        event_type=event_type_of(event),
+        cid=event.cid,
+        venue_offer_id=event.venue_offer_id,
+        venue_seq=event.venue_seq,
+        payload=serialize_event(event),
+        occurred_at_ms=event.occurred_at_ms or 0,
+        schema_version=2,
+    )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        stored_event_identity(row)
 
 
 @pytest.mark.parametrize("etype,extra", [

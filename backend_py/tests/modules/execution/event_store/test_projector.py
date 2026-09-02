@@ -139,6 +139,75 @@ def test_terminal_offer_cannot_reopen() -> None:
         apply_offer_transition(terminal, status="active", event_seq=9, mts_updated=3000)
 
 
+def test_duplicate_offer_event_must_match_all_state_fields() -> None:
+    active = apply_offer_transition(
+        None,
+        venue_offer_id="offer-8",
+        symbol="fUST",
+        amount_original=Decimal("12.50"),
+        amount_remaining=Decimal("12.50"),
+        rate=Decimal("0.0002"),
+        period_days=2,
+        status="active",
+        event_seq=4,
+        mts_created=1000,
+        mts_updated=1000,
+    )
+
+    with pytest.raises(InvalidVenueOfferTransition, match="duplicate amount_original"):
+        apply_offer_transition(
+            active,
+            status="active",
+            event_seq=4,
+            mts_updated=1000,
+            amount_original=Decimal("13.50"),
+        )
+
+
+def test_offer_event_time_cannot_move_backwards() -> None:
+    active = apply_offer_transition(
+        None,
+        venue_offer_id="offer-9",
+        symbol="fUST",
+        amount_original=Decimal("12.50"),
+        amount_remaining=Decimal("12.50"),
+        status="active",
+        event_seq=4,
+        mts_created=1000,
+        mts_updated=2000,
+    )
+
+    with pytest.raises(InvalidVenueOfferTransition, match="mts_updated"):
+        apply_offer_transition(
+            active,
+            status="active",
+            event_seq=5,
+            mts_updated=1999,
+        )
+
+
+@pytest.mark.parametrize(
+    ("amount_original", "amount_remaining"),
+    [(Decimal("-1"), Decimal("0")), (Decimal("1"), Decimal("2"))],
+)
+def test_new_offer_rejects_invalid_amount_buckets(
+    amount_original: Decimal,
+    amount_remaining: Decimal,
+) -> None:
+    with pytest.raises(ValueError, match="amount"):
+        apply_offer_transition(
+            None,
+            venue_offer_id="offer-invalid",
+            symbol="fUST",
+            amount_original=amount_original,
+            amount_remaining=amount_remaining,
+            status="active",
+            event_seq=1,
+            mts_created=1000,
+            mts_updated=1000,
+        )
+
+
 def test_gross_exposure_uses_decimal_buckets() -> None:
     assert gross_exposure(
         offered_amount=Decimal("10.10"),
