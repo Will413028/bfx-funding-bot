@@ -302,6 +302,44 @@ async def test_run_returns_reconcile_result_for_orphan_claim():
 
 
 @pytest.mark.asyncio
+async def test_run_routes_unknown_to_symbol_gate_handler() -> None:
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRest([])
+    seen: list[ReservationUnknown] = []
+
+    async def mark_unknown(event: ReservationUnknown) -> None:
+        seen.append(event)
+
+    rec = _full_boot_recovery(
+        auth,
+        store,
+        _StubSessionFactory(),
+        bus,
+        symbol="fUST",
+        grace_ms=0,
+        uncertainty_handler=mark_unknown,
+    )
+
+    async def stale_pending(_session) -> list[LocalClaim]:
+        return [_claim(
+            cid=88,
+            voi=None,
+            state=RegistryState.PENDING,
+            size="125",
+            occurred=_NOW - 1,
+            symbol="fUST",
+        )]
+
+    rec._load_local_claims = stale_pending  # type: ignore[method-assign]
+    result = await rec.run()
+
+    assert result.n_unknown == 1
+    assert seen and seen[0].cid == 88
+    assert seen[0].symbol == "fUST"
+
+
+@pytest.mark.asyncio
 async def test_run_accepts_and_threads_action_grace_ms():
     """action_grace_ms=120_000 with a freshly-created offer → n_claimed=0 (grace skips it)."""
     fresh_offer = ActiveFundingOffer(
