@@ -28,6 +28,7 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueOfferObservation,
 )
 from bfx_funding_bot.modules.execution.event_store.replay import _HistoricalReplayAuthorization
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 
 __SCHEMA_VERSION__ = 3
 
@@ -249,6 +250,7 @@ class ReservationIntent:
     is_simulated: bool
     execution_decision_id: str | None
     reservation_ref: ReservationRef | None = None
+    submission_attempt: SubmissionAttemptPayload | Mapping[str, Any] | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
     amount: Decimal | None = None
     size_usdt: Decimal | None = None  # transitional alias; mapped to amount
@@ -272,6 +274,28 @@ class ReservationIntent:
                 ))
             elif self.reservation_ref.execution_decision_id != self.execution_decision_id:
                 raise TypeError("ReservationIntent reservation_ref decision id conflicts")
+        attempt = self.submission_attempt
+        if isinstance(attempt, Mapping):
+            attempt = SubmissionAttemptPayload(**dict(attempt))
+            object.__setattr__(self, "submission_attempt", attempt)
+        elif attempt is not None and not isinstance(attempt, SubmissionAttemptPayload):
+            raise TypeError("ReservationIntent submission_attempt has invalid type")
+        if attempt is not None:
+            if (
+                attempt.execution_decision_id != self.execution_decision_id
+                or str(attempt.account_id) != self.account_id
+                or attempt.symbol != self.symbol
+                or attempt.cid != self.cid
+            ):
+                raise TypeError("ReservationIntent submission_attempt identity conflicts")
+            if (
+                attempt.completed_at_ms is not None
+                or attempt.outcome_kind is not None
+                or attempt.outcome_reason is not None
+                or attempt.venue_offer_id is not None
+                or attempt.last_event_seq is not None
+            ):
+                raise TypeError("ReservationIntent requires a pending submission_attempt")
         _validate_reservation_ref(
             self,
             requires_venue_offer=False,

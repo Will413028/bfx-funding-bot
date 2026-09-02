@@ -1367,6 +1367,7 @@ async def build_daemon(
                 uncertainty_handler=(
                     ledger.on_reservation_unknown if not spec.is_simulated else None
                 ),
+                safety_evaluator=safety_chain,
             ),
             probe=probe,
         ),

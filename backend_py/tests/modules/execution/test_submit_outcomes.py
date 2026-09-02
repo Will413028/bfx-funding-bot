@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -324,7 +324,25 @@ def test_submission_attempt_payload_exposes_json_safe_storage_shape() -> None:
     )
 
     storage = attempt.as_storage_dict()
+    assert storage["attempt_id"] == str(attempt.attempt_id)
     assert storage["account_id"] == str(attempt.account_id)
     assert storage["normalized_payload"] == {
         "amount": "100.0", "levels": ["1.2"],
     }
+
+
+def test_submission_attempt_missing_identity_uses_deterministic_legacy_fallback() -> None:
+    common = {
+        "execution_decision_id": "decision-legacy",
+        "account_id": UUID("5f598835-95c6-446e-8252-df3caeef5b9b"),
+        "environment": "ci",
+        "symbol": "fUST",
+        "cid": 123,
+        "normalized_payload": {"amount": "100.0", "type": "LIMIT"},
+        "started_at_ms": 100,
+    }
+
+    first = SubmissionAttemptPayload(**common)
+    second = SubmissionAttemptPayload(**common)
+
+    assert first.attempt_id == second.attempt_id
