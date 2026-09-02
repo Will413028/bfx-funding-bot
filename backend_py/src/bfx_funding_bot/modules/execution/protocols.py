@@ -110,10 +110,19 @@ class SubmittedOrder:
                 raise ValueError(
                     f"typed {outcome.kind.value} outcome conflicts with status={status!r}"
                 )
-            if _legacy_status is not None and _legacy_status not in expected_statuses:
+            replace_legacy_statuses = (
+                {"weird_venue_string"}
+                if outcome.kind is SubmitOutcomeKind.UNKNOWN
+                else set()
+            )
+            if (
+                _legacy_status is not None
+                and _legacy_status not in expected_statuses | replace_legacy_statuses
+            ):
                 # ``_legacy_status`` is populated only by dataclasses.replace on
-                # a legacy paper result.  Keeping this check means replacement
-                # cannot silently turn an UNKNOWN into a success-shaped status.
+                # a legacy result.  Preserve the historical diagnostic string
+                # during replacement, while still rejecting success-shaped
+                # values on an UNKNOWN outcome.
                 raise ValueError(
                     f"typed {outcome.kind.value} outcome conflicts with "
                     f"legacy status={_legacy_status!r}"

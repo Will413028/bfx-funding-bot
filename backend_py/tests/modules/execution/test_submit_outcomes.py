@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 from uuid import uuid4
 
@@ -223,6 +224,20 @@ def test_non_acknowledged_legacy_status_cannot_carry_venue_id() -> None:
             status="unknown",
             raw_response=None,
         )
+
+
+def test_legacy_unknown_status_survives_dataclass_replacement() -> None:
+    legacy = SubmittedOrder(
+        cid=6,
+        venue_offer_id=None,
+        status="weird_venue_string",
+        raw_response=None,
+    )
+
+    replaced = replace(legacy, reservation_ref=None)
+
+    assert replaced.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    assert replaced.status == "weird_venue_string"
 
 
 def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> None:
