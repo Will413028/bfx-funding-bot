@@ -1,6 +1,8 @@
 """Durable submission-attempt and uncertainty projection contracts."""
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from decimal import Decimal
 from uuid import UUID
 
@@ -23,9 +25,7 @@ from bfx_funding_bot.modules.execution.uncertainties import (
     UncertaintyKind,
     UncertaintyService,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import (
-    SubmissionAttemptRow,
-)
+from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 
 ACCOUNT_ID = UUID("d1a4f3d7-8d6d-4b6a-a5c5-91e1d0eecab1")
 ENVIRONMENT = "ci"
@@ -117,6 +117,36 @@ async def test_record_attempt_persists_immutable_payload_digest_once_per_decisio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed_payload",
+    [
+        lambda payload: replace(payload, started_at_ms=99),
+        lambda payload: replace(payload, completed_at_ms=102),
+        lambda payload: replace(payload, outcome_reason="connection_reset"),
+        lambda payload: replace(payload, last_event_seq=11),
+        lambda payload: replace(
+            payload,
+            outcome_kind=SubmitOutcomeKind.ACKNOWLEDGED,
+            outcome_reason=None,
+            venue_offer_id="9001",
+        ),
+    ],
+    ids=["started", "completed", "reason", "event-seq", "outcome-and-venue"],
+)
+async def test_record_attempt_rejects_changed_immutable_storage_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+    changed_payload,
+) -> None:
+    """A decision replay may not rewrite any audited attempt metadata."""
+    service = UncertaintyService(session_factory)
+    original = _attempt_payload()
+    await service.record_attempt(original)
+
+    with pytest.raises(ValueError, match="different immutable attempt"):
+        await service.record_attempt(changed_payload(original))
+
+
+@pytest.mark.asyncio
 async def test_open_or_get_is_idempotent_and_reserves_amount_only_once(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -145,6 +175,67 @@ async def test_open_or_get_is_idempotent_and_reserves_amount_only_once(
         )
     assert position is not None
     assert position.uncertain_amount == Decimal("12.50")
+
+
+@pytest.mark.asyncio
+async def test_distinct_open_kinds_cannot_lose_a_pessimistic_reserve(
+    session_factory: async_sessionmaker[AsyncSession], sqlite_engine
+) -> None:
+    """Concurrent kinds share one atomic account/environment/symbol reserve."""
+    atomic_update_barrier = asyncio.Barrier(2)
+    position_update_count = 0
+
+    class CommitBarrierSession(AsyncSession):
+        async def get(self, entity, ident, **kwargs):
+            if entity is PositionStateRow:
+                raise AssertionError("opening a reserve must not use read-modify-write")
+            return await super().get(entity, ident, **kwargs)
+
+        async def execute(self, statement, *args, **kwargs):
+            nonlocal position_update_count
+            if (
+                getattr(statement, "is_update", False)
+                and statement.table.name == PositionStateRow.__tablename__
+            ):
+                position_update_count += 1
+                await atomic_update_barrier.wait()
+            return await super().execute(statement, *args, **kwargs)
+
+    concurrent_factory = async_sessionmaker(
+        sqlite_engine, expire_on_commit=False, class_=CommitBarrierSession
+    )
+    service = UncertaintyService(concurrent_factory)
+
+    await asyncio.gather(
+        service.open_or_get(
+            exchange_account_id=ACCOUNT_ID,
+            deployment_environment=ENVIRONMENT,
+            symbol=SYMBOL,
+            kind=UncertaintyKind.SUBMIT_OUTCOME_UNKNOWN,
+            correlation_key="attempt:concurrent-1",
+            intended_amount=Decimal("4"),
+            evidence={"reason": "timeout"},
+            opened_event_seq=10,
+        ),
+        service.open_or_get(
+            exchange_account_id=ACCOUNT_ID,
+            deployment_environment=ENVIRONMENT,
+            symbol=SYMBOL,
+            kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+            correlation_key="venue:concurrent-1",
+            intended_amount=Decimal("6"),
+            evidence={"venue_offer_id": "concurrent-1"},
+            opened_event_seq=10,
+        ),
+    )
+
+    assert position_update_count == 2
+    async with session_factory() as session:
+        position = await session.get(
+            PositionStateRow, (ACCOUNT_ID, ENVIRONMENT, SYMBOL)
+        )
+    assert position is not None
+    assert position.uncertain_amount == Decimal("10")
 
 
 @pytest.mark.asyncio

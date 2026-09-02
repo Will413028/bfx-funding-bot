@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
@@ -173,10 +173,23 @@ class UncertaintyService:
                     deployment_environment=environment,
                     symbol=scoped_symbol,
                 )
-            position = await session.get(
-                PositionStateRow, (exchange_account_id, environment, scoped_symbol)
+            reserved = await session.execute(
+                update(PositionStateRow)
+                .where(
+                    PositionStateRow.exchange_account_id == exchange_account_id,
+                    PositionStateRow.deployment_environment == environment,
+                    PositionStateRow.symbol == scoped_symbol,
+                )
+                .values(
+                    uncertain_amount=PositionStateRow.uncertain_amount + amount,
+                    last_event_seq=case(
+                        (PositionStateRow.last_event_seq < opened_event_seq, opened_event_seq),
+                        else_=PositionStateRow.last_event_seq,
+                    ),
+                )
+                .returning(PositionStateRow.exchange_account_id)
             )
-            if position is None:
+            if reserved.scalar_one_or_none() is None:
                 raise ValueError("position state is required before opening an uncertainty")
 
             row = ExecutionUncertaintyRow(
@@ -191,8 +204,6 @@ class UncertaintyService:
                 venue_offer_id=venue_offer_id,
                 opened_event_seq=opened_event_seq,
             )
-            position.uncertain_amount = Decimal(str(position.uncertain_amount)) + amount
-            position.last_event_seq = max(position.last_event_seq, opened_event_seq)
             session.add(row)
             await session.commit()
             return row
@@ -243,15 +254,27 @@ class UncertaintyService:
             )
             if reconcile_event.event_type != _RECONCILE_EVENT_TYPE:
                 raise ValueError("fresh reconcile event is required for resolution")
-            position = await session.get(
-                PositionStateRow, (exchange_account_id, environment, scoped_symbol)
+            released = await session.execute(
+                update(PositionStateRow)
+                .where(
+                    PositionStateRow.exchange_account_id == exchange_account_id,
+                    PositionStateRow.deployment_environment == environment,
+                    PositionStateRow.symbol == scoped_symbol,
+                    PositionStateRow.uncertain_amount >= row.intended_amount,
+                )
+                .values(
+                    uncertain_amount=PositionStateRow.uncertain_amount - row.intended_amount,
+                    last_event_seq=case(
+                        (
+                            PositionStateRow.last_event_seq < reconcile_event_seq,
+                            reconcile_event_seq,
+                        ),
+                        else_=PositionStateRow.last_event_seq,
+                    ),
+                )
+                .returning(PositionStateRow.exchange_account_id)
             )
-            if position is None:
-                raise ValueError("position state is required before resolving an uncertainty")
-            projected_amount = Decimal(str(position.uncertain_amount)) - Decimal(
-                str(row.intended_amount)
-            )
-            if projected_amount < 0:
+            if released.scalar_one_or_none() is None:
                 raise ValueError("uncertain projection cannot become negative")
 
             row.state = "resolved"
@@ -260,8 +283,6 @@ class UncertaintyService:
             row.resolution_reason = reason
             row.resolution_evidence = resolution_evidence
             row.resolved_at = reconcile_event.recorded_at
-            position.uncertain_amount = projected_amount
-            position.last_event_seq = max(position.last_event_seq, reconcile_event_seq)
             await session.commit()
             return row
 
@@ -269,12 +290,21 @@ class UncertaintyService:
     def _require_same_attempt(
         row: SubmissionAttemptRow, payload: SubmissionAttemptPayload
     ) -> None:
+        storage = payload.as_storage_dict()
         if (
-            row.exchange_account_id != payload.account_id
-            or row.deployment_environment != payload.environment
-            or row.symbol != payload.symbol
-            or row.cid != payload.cid
-            or row.payload_sha256 != payload.payload_fingerprint
+            row.execution_decision_id != storage["execution_decision_id"]
+            or str(row.exchange_account_id) != storage["account_id"]
+            or row.deployment_environment != storage["environment"]
+            or row.symbol != storage["symbol"]
+            or row.cid != storage["cid"]
+            or row.normalized_payload != storage["normalized_payload"]
+            or row.payload_sha256 != storage["payload_sha256"]
+            or row.started_at_ms != storage["started_at_ms"]
+            or row.completed_at_ms != storage["completed_at_ms"]
+            or row.outcome_kind != storage["outcome_kind"]
+            or row.outcome_reason != storage["outcome_reason"]
+            or row.venue_offer_id != storage["venue_offer_id"]
+            or row.last_event_seq != storage["last_event_seq"]
         ):
             raise ValueError("execution decision already has a different immutable attempt")
 
