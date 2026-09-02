@@ -549,6 +549,52 @@ async def test_resolve_requires_exact_scope_fresh_reconcile_and_operator_id(
 
 
 @pytest.mark.asyncio
+async def test_resolve_locks_position_before_uncertainty(
+    session_factory: async_sessionmaker[AsyncSession], sqlite_engine
+) -> None:
+    """Open and resolve take the shared reserve lock before an uncertainty lock."""
+    await UncertaintyService(session_factory).open_or_get(
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment=ENVIRONMENT,
+        symbol=SYMBOL,
+        kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+        correlation_key="venue:lock-order",
+        intended_amount=Decimal("4"),
+        evidence={"venue_offer_id": "9001"},
+        opened_event_seq=10,
+        venue_offer_id="9001",
+    )
+    lock_order: list[str] = []
+
+    class LockOrderSession(AsyncSession):
+        async def scalar(self, statement, *args, **kwargs):
+            table_names = [item.name for item in statement.get_final_froms()]
+            if table_names == [PositionStateRow.__tablename__]:
+                lock_order.append(PositionStateRow.__tablename__)
+            elif table_names == ["execution_uncertainties"]:
+                lock_order.append("execution_uncertainties")
+            return await super().scalar(statement, *args, **kwargs)
+
+    factory = async_sessionmaker(
+        sqlite_engine, expire_on_commit=False, class_=LockOrderSession
+    )
+    resolved = await UncertaintyService(factory).resolve(
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment=ENVIRONMENT,
+        symbol=SYMBOL,
+        kind=UncertaintyKind.UNATTRIBUTED_VENUE_OFFER,
+        reconcile_event_seq=11,
+        resolution_event_seq=12,
+        resolved_by_operator_id="operator-1",
+        resolution_reason="accepted_manual_offer",
+        evidence={"decision": "manual"},
+    )
+
+    assert resolved.state == "resolved"
+    assert lock_order[:2] == [PositionStateRow.__tablename__, "execution_uncertainties"]
+
+
+@pytest.mark.asyncio
 async def test_resolve_requires_a_later_non_snapshot_resolution_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

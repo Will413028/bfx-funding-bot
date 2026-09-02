@@ -313,6 +313,22 @@ class UncertaintyService:
         resolution_evidence = _bounded_evidence(evidence)
 
         async with self._session_factory() as session:
+            # Match open_or_get's lock order. The shared position projection is
+            # always locked before the narrower uncertainty row so concurrent
+            # open/resolve operations cannot form a PostgreSQL lock cycle.
+            position = await session.scalar(
+                select(PositionStateRow)
+                .where(
+                    PositionStateRow.exchange_account_id == exchange_account_id,
+                    PositionStateRow.deployment_environment == environment,
+                    PositionStateRow.symbol == scoped_symbol,
+                )
+                .with_for_update()
+            )
+            if position is None:
+                # Preserve the exact-scope resolution contract: a missing
+                # projection cannot represent an open uncertainty in this scope.
+                raise ValueError("no open uncertainty exists for this exact scope")
             row = await session.scalar(
                 select(ExecutionUncertaintyRow)
                 .where(
