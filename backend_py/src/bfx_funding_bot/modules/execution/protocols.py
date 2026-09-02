@@ -143,7 +143,17 @@ class SubmittedOrder:
         compatibility = (
             _legacy_status
             if _legacy_status is not None
-            else status if not typed_outcome_supplied and status in {"filled", "weird_venue_string"} else None
+            else (
+                status
+                if (
+                    not typed_outcome_supplied
+                    and (
+                        status == "weird_venue_string"
+                        or (status == "filled" and isinstance(outcome, SubmitAcknowledged))
+                    )
+                )
+                else None
+            )
         )
         object.__setattr__(self, "_legacy_status", compatibility)
 

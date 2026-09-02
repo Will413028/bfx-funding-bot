@@ -203,6 +203,18 @@ def test_legacy_filled_status_remains_a_compatibility_view() -> None:
     assert order.status == "filled"
 
 
+def test_legacy_filled_without_venue_id_fails_closed_to_unknown() -> None:
+    order = SubmittedOrder(
+        cid=4,
+        venue_offer_id=None,
+        status="filled",
+        raw_response=None,
+    )
+
+    assert order.outcome_kind is SubmitOutcomeKind.UNKNOWN
+    assert order.status == "unknown"
+
+
 def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> None:
     account_id = uuid4()
     payload = {"symbol": "fUST", "amount": Decimal("100.0"), "rate": 0.0001}
