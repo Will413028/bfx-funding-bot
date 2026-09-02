@@ -215,6 +215,16 @@ def test_legacy_filled_without_venue_id_fails_closed_to_unknown() -> None:
     assert order.status == "unknown"
 
 
+def test_non_acknowledged_legacy_status_cannot_carry_venue_id() -> None:
+    with pytest.raises(ValueError, match="venue_offer_id"):
+        SubmittedOrder(
+            cid=5,
+            venue_offer_id="42",
+            status="unknown",
+            raw_response=None,
+        )
+
+
 def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> None:
     account_id = uuid4()
     payload = {"symbol": "fUST", "amount": Decimal("100.0"), "rate": 0.0001}

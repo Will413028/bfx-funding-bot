@@ -126,12 +126,13 @@ class SubmittedOrder:
                 raise ValueError("venue_offer_id conflicts with acknowledged outcome")
             if isinstance(outcome, SubmitAcknowledged) and venue_offer_id is None:
                 venue_offer_id = outcome.venue_offer_id
-            if not isinstance(outcome, SubmitAcknowledged) and venue_offer_id is not None:
-                raise ValueError(
-                    f"{outcome.kind.value} outcome cannot carry venue_offer_id"
-                )
             if raw_response is None and hasattr(outcome, "raw_response"):
                 raw_response = outcome.raw_response
+
+        if not isinstance(outcome, SubmitAcknowledged) and venue_offer_id is not None:
+            raise ValueError(
+                f"{outcome.kind.value} outcome cannot carry venue_offer_id"
+            )
 
         object.__setattr__(self, "cid", cid)
         object.__setattr__(self, "venue_offer_id", venue_offer_id)
