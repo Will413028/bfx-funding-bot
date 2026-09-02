@@ -93,6 +93,7 @@ class UncertaintyService:
                 self._require_same_attempt(existing, payload)
                 return existing
             row = SubmissionAttemptRow(
+                attempt_id=payload.attempt_id,
                 execution_decision_id=payload.execution_decision_id,
                 exchange_account_id=payload.account_id,
                 deployment_environment=payload.environment,
@@ -401,7 +402,8 @@ class UncertaintyService:
     ) -> None:
         storage = payload.as_storage_dict()
         if (
-            row.execution_decision_id != storage["execution_decision_id"]
+            str(row.attempt_id) != storage["attempt_id"]
+            or row.execution_decision_id != storage["execution_decision_id"]
             or str(row.exchange_account_id) != storage["account_id"]
             or row.deployment_environment != storage["environment"]
             or row.symbol != storage["symbol"]

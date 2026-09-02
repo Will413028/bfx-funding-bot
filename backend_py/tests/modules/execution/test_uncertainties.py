@@ -154,6 +154,7 @@ async def test_record_attempt_persists_immutable_payload_digest_once_per_decisio
     same = await service.record_attempt(payload)
 
     assert same.attempt_id == first.attempt_id
+    assert first.attempt_id == payload.attempt_id
     assert first.payload_sha256 == payload.payload_fingerprint
     assert dict(first.normalized_payload) == {"amount": "12.50", "type": "LIMIT"}
 

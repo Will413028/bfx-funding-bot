@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
+from uuid import UUID, uuid5
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -14,7 +15,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_scope_clause,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow  # noqa: F401
+from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.event_store.entities import (
     is_terminal_credit_status,
     is_terminal_offer_status,
@@ -47,6 +48,8 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+
+_SUBMIT_UNCERTAINTY_NAMESPACE = UUID("d158ef54-c1dd-54e4-a9e9-9a670c938f73")
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,11 +361,30 @@ class PostgresEventStore:
         if etype == "RESERVATION_INTENT":
             attempt = event_obj.submission_attempt
             if attempt is None:
-                raise OfferClaimIdentityConflictError(
-                    "registered account reservation intent requires submission_attempt"
-                )
+                # Historical PENDING intents predate submission_attempts. They
+                # remain recoverable and must converge to UNKNOWN, never retry.
+                return
             if not isinstance(attempt, SubmissionAttemptPayload):
                 raise TypeError("submission_attempt must be SubmissionAttemptPayload")
+            decision_row = await session.get(
+                ExecutionDecisionRow,
+                attempt.execution_decision_id,
+            )
+            if decision_row is None:
+                raise OfferClaimIdentityConflictError(
+                    "submission attempt has no execution decision"
+                )
+            if (
+                decision_row.exchange_account_id != canonical
+                or account_id_uuid_or_none(decision_row.account_id) != canonical
+                or decision_row.deployment_environment != self._env
+                or decision_row.symbol != event_obj.symbol
+                or decision_row.signal_correlation_id
+                != str(event_obj.signal_correlation_id)
+            ):
+                raise OfferClaimIdentityConflictError(
+                    "submission attempt execution decision scope conflicts"
+                )
             storage = attempt.as_storage_dict()
             if storage["environment"] != self._env:
                 raise OfferClaimIdentityConflictError(
@@ -380,6 +402,7 @@ class PostgresEventStore:
                 )
             session.add(
                 SubmissionAttemptRow(
+                    attempt_id=attempt.attempt_id,
                     execution_decision_id=attempt.execution_decision_id,
                     exchange_account_id=canonical,
                     deployment_environment=attempt.environment,
@@ -408,10 +431,6 @@ class PostgresEventStore:
             )
         )
         if attempt_row is None:
-            if etype == "SUBMIT_OUTCOME_UNKNOWN":
-                raise OfferClaimIdentityConflictError(
-                    "submit UNKNOWN has no durable submission attempt"
-                )
             # Existing event-writer consumers may append venue lifecycle facts
             # which did not originate from the new command boundary.  They do
             # not manufacture an attempt retroactively; the command gate is the
@@ -482,7 +501,10 @@ class PostgresEventStore:
                 == reference.execution_decision_id
             )
         )
-        if attempt is None or attempt.outcome_kind != SubmitOutcomeKind.UNKNOWN.value:
+        if (
+            attempt is not None
+            and attempt.outcome_kind != SubmitOutcomeKind.UNKNOWN.value
+        ):
             raise OfferClaimIdentityConflictError(
                 "submit uncertainty requires an UNKNOWN submission attempt"
             )
@@ -499,19 +521,30 @@ class PostgresEventStore:
                 "an open execution uncertainty already exists for this scope"
             )
         reason = str(event_obj.reason)[:256]
+        if attempt is None:
+            correlation_key = f"legacy_submit_unknown:{event_obj.event_id}"
+        else:
+            correlation_key = f"submission_attempt:{attempt.attempt_id}"
+        uncertainty_id = uuid5(
+            _SUBMIT_UNCERTAINTY_NAMESPACE,
+            str(event_obj.event_id),
+        )
         session.add(
             ExecutionUncertaintyRow(
+                uncertainty_id=uncertainty_id,
                 exchange_account_id=canonical,
                 deployment_environment=self._env,
                 symbol=event_obj.symbol,
                 kind="submit_outcome_unknown",
-                correlation_key=f"submission_attempt:{attempt.attempt_id}",
+                correlation_key=correlation_key,
                 intended_amount=Decimal(str(event_obj.amount)),
                 evidence={
                     "outcome_reason": reason,
-                    "payload_sha256": attempt.payload_sha256,
+                    "payload_sha256": (
+                        attempt.payload_sha256 if attempt is not None else None
+                    ),
                 },
-                attempt_id=attempt.attempt_id,
+                attempt_id=attempt.attempt_id if attempt is not None else None,
                 venue_offer_id=None,
                 opened_event_seq=event_seq,
             )
@@ -1293,6 +1326,16 @@ class PostgresEventStore:
     ) -> None:
         """Replay all event types into clean account-scoped projections."""
         scope_tables = (
+            (
+                ExecutionUncertaintyRow,
+                ExecutionUncertaintyRow.exchange_account_id,
+                None,
+            ),
+            (
+                SubmissionAttemptRow,
+                SubmissionAttemptRow.exchange_account_id,
+                None,
+            ),
             (OfferClaimRow, OfferClaimRow.exchange_account_id, OfferClaimRow.account_id),
             (PositionStateRow, PositionStateRow.exchange_account_id, PositionStateRow.account_id),
             (VenueOfferStateRow, VenueOfferStateRow.exchange_account_id, None),

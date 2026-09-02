@@ -70,6 +70,14 @@ async def _ignore_unknown(_event: ReservationUnknown) -> None:
     return None
 
 
+class _AllowSafety:
+    async def evaluate(
+        self, decision: DecisionPayload, context: AccountContext,
+    ) -> GuardResult:
+        del decision, context
+        return GuardResult(allowed=True, guard_name="integration-test")
+
+
 def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> ReservationEmittingMiddleware:
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
@@ -83,6 +91,7 @@ def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> Reserva
         persister=persister,
         is_simulated=account_simulated,
         uncertainty_handler=None if account_simulated else _ignore_unknown,
+        safety_evaluator=_AllowSafety(),
     )
 
 

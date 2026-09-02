@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,6 +42,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitOutcomeKind,
+    SubmitOutcomeUnknown,
     normalize_submit_payload,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
@@ -54,6 +55,10 @@ class CommandGateBlocked(RuntimeError):  # noqa: N818 - domain state, not a fail
     """The money command cannot safely proceed before creating an intent."""
 
 
+class _OutcomeIdentityMismatchError(RuntimeError):
+    """A venue result cannot safely be attributed to the intended command."""
+
+
 class OpenUncertaintyReader(Protocol):
     async def has_open(
         self,
@@ -62,6 +67,16 @@ class OpenUncertaintyReader(Protocol):
         deployment_environment: str,
         symbol: str,
     ) -> bool: ...
+
+
+class AuthoritativeSafetyEvaluator(Protocol):
+    """Re-evaluate the complete safety chain at the locked money boundary."""
+
+    async def evaluate(
+        self,
+        decision: DecisionPayload,
+        context: AccountContext,
+    ) -> GuardResult: ...
 
 
 class DatabaseOpenUncertaintyReader:
@@ -100,6 +115,7 @@ class AccountCommandGate:
         bus: DomainEventBus,
         persister: EventPersister,
         uncertainty_reader: OpenUncertaintyReader,
+        safety_evaluator: AuthoritativeSafetyEvaluator,
         deployment_environment: str,
         is_simulated: bool = True,
         clock: Callable[[], int] | None = None,
@@ -112,6 +128,7 @@ class AccountCommandGate:
         self._bus = bus
         self._persister = persister
         self._uncertainty_reader = uncertainty_reader
+        self._safety_evaluator = safety_evaluator
         self._deployment_environment = deployment_environment
         self._is_simulated = is_simulated
         self._clock = clock or (lambda: int(time.time() * 1000))
@@ -158,9 +175,10 @@ class AccountCommandGate:
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
             await self.check(ready, context)
-            if not ready.safety.allowed:
+            safety = await self._safety_evaluator.evaluate(ready.decision, context)
+            if not safety.allowed:
                 raise CommandGateBlocked(
-                    ready.safety.reason or f"guard blocked: {ready.safety.guard_name}"
+                    safety.reason or f"guard blocked: {safety.guard_name}"
                 )
             return await self._submit_locked(
                 ready,
@@ -188,6 +206,7 @@ class AccountCommandGate:
         size = Decimal(str(decision.offer_amount_usdt or 0.0))
         intent_ms = self._clock()
         attempt = SubmissionAttemptPayload(
+            attempt_id=uuid4(),
             execution_decision_id=ready.decision_id,
             account_id=account_id,
             environment=self._deployment_environment,
@@ -218,10 +237,23 @@ class AccountCommandGate:
                 cid=cid,
                 reservation_ref=reference,
             )
-            result = _bind_result(result, reference=reference)
         except BaseException:
             self._latch(decision.symbol, canonical_account, "submit ended without durable outcome")
             raise
+        try:
+            result = _bind_result(result, reference=reference)
+        except _OutcomeIdentityMismatchError:
+            # Transport completed, but the response cannot authoritatively be
+            # assigned to this intent. Persist the only safe typed outcome.
+            result = SubmittedOrder(
+                cid=reference.cid,
+                venue_offer_id=None,
+                outcome=SubmitOutcomeUnknown(
+                    reason="executor_result_identity_mismatch",
+                    transport_started=True,
+                ),
+                reservation_ref=reference,
+            )
 
         outcome_ms = self._clock()
         try:
@@ -370,22 +402,30 @@ def _bind_result(
     *,
     reference: ReservationRef,
 ) -> SubmittedOrder:
+    if result.cid != reference.cid:
+        raise _OutcomeIdentityMismatchError("executor returned a conflicting cid")
     returned = result.reservation_ref
     if returned is not None and (
         returned.execution_decision_id != reference.execution_decision_id
         or returned.cid != reference.cid
         or returned.signal_correlation_id != reference.signal_correlation_id
     ):
-        raise RuntimeError("executor returned a reservation reference identity conflict")
+        raise _OutcomeIdentityMismatchError(
+            "executor returned a reservation reference identity conflict"
+        )
     if (
         returned is not None
         and returned.venue_offer_id is not None
         and returned.venue_offer_id != result.venue_offer_id
     ):
-        raise RuntimeError("executor returned a reservation reference venue conflict")
+        raise _OutcomeIdentityMismatchError(
+            "executor returned a reservation reference venue conflict"
+        )
     if result.venue_offer_id is None:
         if returned is not None and returned.venue_offer_id is not None:
-            raise RuntimeError("executor bound a venue id for a failed submit")
+            raise _OutcomeIdentityMismatchError(
+                "executor bound a venue id for a failed submit"
+            )
         bound = reference
     else:
         bound = reference.bind_venue_offer(result.venue_offer_id)

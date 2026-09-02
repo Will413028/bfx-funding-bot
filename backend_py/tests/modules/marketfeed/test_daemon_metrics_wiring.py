@@ -24,6 +24,10 @@ from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from bfx_funding_bot.modules.execution.middleware import (
+    HeartbeatMiddleware,
+    ReservationEmittingMiddleware,
+)
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,
@@ -175,6 +179,16 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     # wrapper; PeriodicReconcile itself is untouched.
     assert daemon.periodic_reconcile is not None
     assert isinstance(daemon.periodic_reconcile._recovery, TimedReconcileRecovery)
+    deployment = daemon.periodic_reconcile._deployment
+    assert deployment is not None
+    metrics_executor = deployment._executor
+    assert isinstance(metrics_executor, MetricsSubmitMiddleware)
+    heartbeat = metrics_executor._inner
+    assert isinstance(heartbeat, HeartbeatMiddleware)
+    reservation = heartbeat._inner
+    assert isinstance(reservation, ReservationEmittingMiddleware)
+    assert reservation._command_gate is not None
+    assert reservation._command_gate._safety_evaluator is daemon.safety_chain
 
     # WS dispatcher queue saturation gauges bound to the live dispatcher.
     assert daemon.ws_dispatcher is not None

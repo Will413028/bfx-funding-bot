@@ -29,10 +29,14 @@ from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
+    AuthoritativeSafetyEvaluator,
     DatabaseOpenUncertaintyReader,
 )
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
-from bfx_funding_bot.modules.execution.event_store.persister import EventPersister
+from bfx_funding_bot.modules.execution.event_store.persister import (
+    CommandGatePersistence,
+    EventPersister,
+)
 from bfx_funding_bot.modules.execution.events import (
     OrderFilled,
     ReservationClaimed,
@@ -63,6 +67,7 @@ class ReservationEmittingMiddleware:
         clock: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
+        safety_evaluator: AuthoritativeSafetyEvaluator | None = None,
     ) -> None:
         if not is_simulated and uncertainty_handler is None:
             raise ValueError(
@@ -76,19 +81,26 @@ class ReservationEmittingMiddleware:
         self._date_provider = date_provider or (lambda: datetime.now(UTC).date())
         self._uncertainty_handler = uncertainty_handler
         self._command_gate: AccountCommandGate | None = None
-        # EventStorePersister owns the production session factory and serialized
-        # AccountEventWriter.  Keep lightweight fake/noop persisters on the
-        # legacy adapter path while routing every real database-backed submit
-        # through the fail-closed account command gate.
-        session_factory = getattr(persister, "_session_factory", None)
-        store = getattr(persister, "_store", None)
-        if session_factory is not None and store is not None:
+        capability = getattr(persister, "command_gate_persistence", None)
+        if capability is not None and not isinstance(capability, CommandGatePersistence):
+            raise TypeError("invalid durable command-gate capability")
+        if not is_simulated and capability is None:
+            raise ValueError("live middleware requires durable command-gate persistence")
+        if not is_simulated and safety_evaluator is None:
+            raise ValueError("live middleware requires authoritative safety evaluator")
+        # Simulated unit adapters may intentionally retain the legacy path.
+        # Every production persister with an injected safety chain uses the
+        # serialized command boundary, including paper/shadow daemon modes.
+        if capability is not None and safety_evaluator is not None:
             self._command_gate = AccountCommandGate(
                 inner,
                 bus=bus,
                 persister=persister,
-                uncertainty_reader=DatabaseOpenUncertaintyReader(session_factory),
-                deployment_environment=store.deployment_environment,
+                uncertainty_reader=DatabaseOpenUncertaintyReader(
+                    capability.session_factory
+                ),
+                safety_evaluator=safety_evaluator,
+                deployment_environment=capability.store.deployment_environment,
                 is_simulated=is_simulated,
                 clock=self._clock,
                 date_provider=self._date_provider,
