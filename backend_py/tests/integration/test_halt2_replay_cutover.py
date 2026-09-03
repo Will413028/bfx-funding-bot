@@ -206,7 +206,11 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
             "--config-artifact <reviewed-config-artifact-path> "
             "--cells <reviewed-canary-cells-path>",
         ),
-        ("cd ..", "BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary"),
+        (
+            "cd backend_py",
+            "cd ..",
+            "BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary",
+        ),
         (
             "cd backend_py",
             "uv run pytest -m \"not integration\" -q",
@@ -224,6 +228,7 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
         ),
     )
     assert "sets/asserts the durable `trading_halt`" in canary
+    assert "Start a separate shell session at the repository root" in canary
     evidence_blocks = _fenced_blocks(canary, "json")
     assert len(evidence_blocks) == 1
     evidence = json.loads(evidence_blocks[0])
