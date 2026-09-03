@@ -181,6 +181,48 @@ export interface ExecutionEventsResponse {
   pagination: ExecutionEventsPagination;
 }
 
+// ── Execution uncertainties (operator resolution) ──
+
+export type UncertaintyKind =
+  | "submit_outcome_unknown"
+  | "unattributed_venue_offer"
+  | "unsupported_venue_exposure";
+
+export type UncertaintyState = "open" | "resolved";
+
+/** Deliberately bounded values exposed by the backend operator DTO. */
+export interface UncertaintyEvidenceSummary {
+  outcomeReason?: string | null;
+  observedAtMs?: number | null;
+  candidateCount?: number | null;
+  venueOfferId?: string | null;
+  status?: string | null;
+  coverage?: Record<string, boolean>;
+}
+
+export interface UncertaintyBlockedScope {
+  exchangeAccountId: string;
+  environment: string;
+  symbol: string;
+}
+
+/** Account/environment/symbol-scoped execution block. */
+export interface Uncertainty {
+  uncertaintyId: string;
+  kind: UncertaintyKind;
+  symbol: string;
+  /** Decimal string (venue-native intended amount). */
+  intendedAmount: string;
+  state: UncertaintyState;
+  openedEventSeq: number;
+  reconcileEventSeq: number | null;
+  resolvedEventSeq: number | null;
+  evidenceSummary: UncertaintyEvidenceSummary;
+  blockedScope: UncertaintyBlockedScope;
+  resolvedByOperatorId?: string | null;
+  resolutionReason?: string | null;
+}
+
 // ── Attribution ──
 
 export interface WeeklyAttributionPoint {

@@ -13,6 +13,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from uuid import uuid4
 
 from bfx_funding_bot.modules.execution.emit import emit_safety_trigger
 from bfx_funding_bot.modules.execution.protocols import (
@@ -22,6 +23,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
+    DecisionOutcome,
     DecisionPayload,
     Phase,
     StrategyName,
@@ -99,6 +101,47 @@ class SafetyGuardChain:
                     await self._emit_block(result, decision)
                     return result
             return GuardResult(allowed=True, guard_name="<chain>")
+        finally:
+            self.probe.record_heartbeat("safety_chain")
+
+    async def evaluate_before_sizing(
+        self, symbol: str, ctx: AccountContext,
+    ) -> GuardResult:
+        """Run account/symbol uncertainty checks at the sizing boundary.
+
+        ``DeploymentReconciler`` computes an economic gap before it can build a
+        full POST decision.  Calling :meth:`evaluate` only after that math made
+        an open UNKNOWN exposure observable too late: the allocator had already
+        treated the symbol as deployable.  This deliberately evaluates only
+        the uncertainty guard with a zero-size probe decision, so allocation,
+        buying-power and calibrated guards remain on their normal per-offer
+        path while no economic sizing occurs for an uncertain symbol.
+        """
+        pre_sizing_guards = [
+            guard for guard in self.guards if guard.name == "uncertainty"
+        ]
+        if not pre_sizing_guards:
+            return GuardResult(allowed=True, guard_name="<pre_sizing>")
+        decision = DecisionPayload(
+            decision_outcome=DecisionOutcome.POST,
+            signal_correlation_id=uuid4(),
+            offer_rate=0.0,
+            offer_amount_usdt=0.0,
+            offer_duration_days=0,
+            symbol=symbol,
+        )
+        try:
+            for guard in pre_sizing_guards:
+                result, is_internal_error = await self._evaluate_one(
+                    guard, decision, ctx,
+                )
+                if is_internal_error:
+                    await self._emit_internal_error(result, decision)
+                    return result
+                if not result.allowed:
+                    await self._emit_block(result, decision)
+                    return result
+            return GuardResult(allowed=True, guard_name="<pre_sizing>")
         finally:
             self.probe.record_heartbeat("safety_chain")
 

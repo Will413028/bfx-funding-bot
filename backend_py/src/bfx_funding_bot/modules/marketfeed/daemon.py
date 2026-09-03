@@ -132,8 +132,10 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
     BuyingPowerGuard,
+    DatabaseUncertaintyReader,
     HeartbeatGuard,
     ManualKillGuard,
+    UncertaintyGuard,
     WriterLockGuard,
 )
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
@@ -1172,6 +1174,14 @@ async def build_daemon(
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
         guards.append(ManualKillGuard(halt_store=halt_store))
+    # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
+    # must be read before the reconciler computes an economic gap.  It is not
+    # configurable off in canary/live because an unreadable projection fails
+    # closed inside the guard.
+    guards.append(UncertaintyGuard(
+        reader=DatabaseUncertaintyReader(session_factory),
+        deployment_environment=env_str,
+    ))
     if hg.auth_health.enabled:
         guards.append(AuthHealthGuard(probe=probe))
     if hg.heartbeat.enabled:

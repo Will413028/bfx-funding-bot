@@ -28,6 +28,9 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationUnknown,
     SnapshotCoverage,
     SubmitMatchedToVenueOffer,
+    UncertaintyBoundToVenueOffer,
+    UncertaintyManuallyResolved,
+    UncertaintyMarkedNotAccepted,
     VenueOfferQuarantined,
     VenueSnapshotObserved,
     _construct_historical_legacy_event,
@@ -44,6 +47,9 @@ _TYPE_BY_CLASS: dict[type, str] = {
     ReservationUnknown: "SUBMIT_OUTCOME_UNKNOWN",
     VenueOfferQuarantined: "VENUE_OFFER_QUARANTINED",
     SubmitMatchedToVenueOffer: "SUBMIT_MATCHED_TO_VENUE_OFFER",
+    UncertaintyBoundToVenueOffer: "UNCERTAINTY_BOUND_TO_VENUE_OFFER",
+    UncertaintyMarkedNotAccepted: "UNCERTAINTY_MARKED_NOT_ACCEPTED",
+    UncertaintyManuallyResolved: "UNCERTAINTY_MANUALLY_RESOLVED",
     VenueSnapshotObserved: "VENUE_SNAPSHOT_OBSERVED",
 }
 _CLASS_BY_TYPE: dict[str, type] = {v: k for k, v in _TYPE_BY_CLASS.items()}
@@ -53,7 +59,7 @@ _FIELDS: dict[type, list[str]] = {
     for cls in _CLASS_BY_TYPE.values()
 }
 _DECIMAL_FIELDS = {"size_usdt", "amount"}
-_UUID_FIELDS = {"signal_correlation_id", "event_id"}
+_UUID_FIELDS = {"signal_correlation_id", "event_id", "uncertainty_id"}
 _REF_FIELD = "reservation_ref"
 _SUPPORTED_SCHEMA_VERSIONS = frozenset({2, __SCHEMA_VERSION__})
 _CORRELATION_EVENT_TYPES = frozenset({

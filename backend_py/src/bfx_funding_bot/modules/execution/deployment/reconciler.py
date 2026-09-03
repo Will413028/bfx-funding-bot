@@ -224,6 +224,26 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            # Uncertainty is a sizing-boundary invariant, not merely a
+            # per-offer safety check.  The chain's explicit pre-sizing hook is
+            # optional for compatibility with small test adapters and older
+            # paper implementations; the durable ledger check below remains a
+            # second fail-closed line of defence.
+            evaluate_before_sizing = getattr(
+                self._safety, "evaluate_before_sizing", None,
+            )
+            if evaluate_before_sizing is not None:
+                pre_sizing_result = await evaluate_before_sizing(symbol, self._ctx)
+                if not pre_sizing_result.allowed:
+                    log.error(
+                        "deployment_symbol_blocked_uncertain_pre_sizing "
+                        "account=%s symbol=%s guard=%s reason=%s",
+                        self._ctx.account_id,
+                        symbol,
+                        pre_sizing_result.guard_name,
+                        pre_sizing_result.reason,
+                    )
+                    continue
             # A post-transport UNKNOWN is an account/symbol-wide command gate:
             # even if the residual cap gap is positive, submitting another
             # offer could duplicate the request that may already exist at the
