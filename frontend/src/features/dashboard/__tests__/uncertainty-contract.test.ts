@@ -62,7 +62,9 @@ describe("uncertainty contract", () => {
     );
 
     expect(
-      screen.getByRole("region", { name: /uncertainty status is unavailable/i }),
+      screen.getByRole("region", {
+        name: /uncertainty status is unavailable/i,
+      }),
     ).toBeDefined();
   });
 });
