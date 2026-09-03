@@ -326,14 +326,18 @@ class BitfinexLiveExecutor:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            # Capture the venue response body — Bitfinex returns the real error
-            # (e.g. "funding: not enough balance", bad rate format) in the body
-            # even on HTTP 500. Log payload symbol/rate/amount (never headers/keys).
+            # A failed response can contain an upstream echo of credentials or
+            # other sensitive data.  Keep only its digest for correlation; the
+            # typed classifier still receives the parsed body in-process.
             body = e.response.text[:1000] if e.response is not None else ""
             status = e.response.status_code if e.response is not None else None
             log.warning(
-                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s body=%s",
-                status, payload["symbol"], payload["rate"], payload["amount"], body,
+                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s response_digest=%s",
+                status,
+                payload["symbol"],
+                payload["rate"],
+                payload["amount"],
+                response_digest(body),
             )
             parsed_body: Any = None
             if e.response is not None:
@@ -350,7 +354,6 @@ class BitfinexLiveExecutor:
                 raw_response={
                     "http_status": status,
                     "response_digest": response_digest(body),
-                    "body": body,
                 },
             )
         except asyncio.CancelledError as e:
@@ -388,7 +391,6 @@ class BitfinexLiveExecutor:
                 raw_response={
                     "http_status": resp.status_code,
                     "response_digest": response_digest(resp.text[:1000]),
-                    "body": resp.text[:1000],
                 },
             )
         outcome = classify_submit_response(
