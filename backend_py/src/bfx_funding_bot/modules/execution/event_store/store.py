@@ -616,9 +616,15 @@ class PostgresEventStore:
             )
         )
         if venue_offer is None:
-            # Historical/unit compatibility: a standalone quarantine breadcrumb
-            # predating normalized venue snapshots remains event-only.  The
-            # production BootRecovery path always appends its snapshot first.
+            registered = await session.scalar(
+                select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+            )
+            if registered is not None:
+                raise OfferClaimIdentityConflictError(
+                    "orphan quarantine requires a prior snapshot venue observation"
+                )
+            # Explicit legacy compatibility: pre-registry synthetic fixtures may
+            # replay their event-only breadcrumb, but a production account cannot.
             return
         if any(
             value is not None
@@ -843,7 +849,9 @@ class PostgresEventStore:
         # object can never be reopened by a later active observation, and a
         # stale venue timestamp cannot overwrite a newer object state.
         all_offer_observations = {
-            offer.venue_offer_id: offer for offer in event.offer_history
+            offer.venue_offer_id: offer
+            for offer in event.offer_history
+            if is_terminal_offer_status(offer.status)
         }
         all_offer_observations.update({
             offer.venue_offer_id: offer for offer in event.offers

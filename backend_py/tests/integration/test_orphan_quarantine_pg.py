@@ -20,13 +20,17 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
     VenueOfferStateRow,
 )
+from bfx_funding_bot.modules.execution.event_store.writer import ProjectionWriteError
 from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     SnapshotCoverage,
+    VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.marketfeed.schemas import HealthStatus, HealthTarget
 
 pytestmark = pytest.mark.integration
 
@@ -74,6 +78,22 @@ class _Bus:
 
     async def publish(self, event: object) -> None:
         self.events.append(event)
+
+
+class _Probe:
+    def __init__(self) -> None:
+        self.updates: list[tuple[HealthTarget, HealthStatus, dict[str, object]]] = []
+
+    def record_heartbeat(self, _sub_task: str) -> None:
+        return None
+
+    def update(
+        self,
+        target: HealthTarget,
+        status: HealthStatus,
+        **fields: object,
+    ) -> None:
+        self.updates.append((target, status, fields))
 
 
 async def _seed_account_and_known_claim(pg_session_factory) -> None:
@@ -263,3 +283,66 @@ async def test_multiple_orphans_in_one_symbol_aggregate_into_one_bounded_uncerta
     assert position is not None
     assert position.offered_amount == Decimal("10")
     assert position.uncertain_amount == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_unchanged_orphan_only_degrades_first_periodic_run(pg_session_factory):
+    await _seed_account_and_known_claim(pg_session_factory)
+    recovery = _recovery(
+        pg_session_factory,
+        _Auth([_offer("known", "fUST", "40"), _offer("orphan", "fXYZ", "7")]),
+    )
+    probe = _Probe()
+    periodic = PeriodicReconcile(
+        recovery=recovery,
+        probe=probe,
+        interval_s=90,
+    )
+
+    await periodic._tick()
+    await periodic._tick()
+
+    reconcile_statuses = [
+        status
+        for target, status, _fields in probe.updates
+        if target == HealthTarget.RECONCILE
+    ]
+    async with pg_session_factory() as session:
+        quarantine_events = (
+            await session.execute(
+                select(EventLogRow).where(
+                    EventLogRow.event_type == "VENUE_OFFER_QUARANTINED"
+                )
+            )
+        ).scalars().all()
+    assert reconcile_statuses == [HealthStatus.DEGRADED, HealthStatus.HEALTHY]
+    assert len(quarantine_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_registered_account_standalone_quarantine_rolls_back(pg_session_factory):
+    async with pg_session_factory() as session:
+        session.add(ExchangeAccount(id=_ACCOUNT, venue="bitfinex", label="standalone"))
+        await session.commit()
+    persister = EventStorePersister(
+        store=PostgresEventStore(deployment_environment=_ENV),
+        session_factory=pg_session_factory,
+    )
+    event = VenueOfferQuarantined(
+        venue_offer_id="not-observed",
+        symbol="fUST",
+        amount=Decimal("5"),
+        account_id=str(_ACCOUNT),
+        observed_at_ms=2_000,
+    )
+
+    with pytest.raises(ProjectionWriteError, match="snapshot venue observation"):
+        await persister.persist(event)
+
+    async with pg_session_factory() as session:
+        event_count = len((await session.execute(select(EventLogRow))).scalars().all())
+        uncertainty_count = len(
+            (await session.execute(select(ExecutionUncertaintyRow))).scalars().all()
+        )
+    assert event_count == 0
+    assert uncertainty_count == 0

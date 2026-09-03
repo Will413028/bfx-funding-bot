@@ -37,6 +37,7 @@ def test_parse_happy_path():
             status="ACTIVE",
             amount_original=Decimal("100.0"),
             mts_updated=1_700_000_000_000,
+            rate_decimal=Decimal("0.00031"),
         )
     ]
 

@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
     VenueOfferObservation,
+    is_terminal_offer_status,
 )
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
@@ -148,18 +149,13 @@ def _offer_matches_attempt_identity(
     *,
     observed_end_ms: int,
 ) -> bool:
-    try:
-        observed_rate = Decimal(str(offer.rate))
-    except (InvalidOperation, TypeError, ValueError):
-        return False
-    if not observed_rate.is_finite():
-        return False
     original = offer.amount_original if offer.amount_original is not None else offer.amount
     return (
         offer.symbol == attempt.symbol
         and original == attempt.amount
         and offer.rate_observed
-        and observed_rate == attempt.rate
+        and offer.rate_decimal is not None
+        and offer.rate_decimal == attempt.rate
         and offer.period_days == attempt.period_days
         and attempt.started_at_ms <= offer.mts_created <= observed_end_ms
         and offer.offer_type is not None
@@ -565,13 +561,21 @@ class BootRecovery:
                     in (matched_offer_ids | possible_active_match_ids)
                 )
             ]
+            persisted_remaining_actions: list[RecoveryAction] = []
             for remaining_action in remaining_actions:
-                await self._store.append(session, remaining_action)
+                append_result = await self._store.append(session, remaining_action)
+                was_persisted = (
+                    append_result
+                    if isinstance(append_result, bool)
+                    else getattr(append_result, "persisted", True)
+                )
+                if was_persisted:
+                    persisted_remaining_actions.append(remaining_action)
 
         persisted_actions: list[RecoveryAction | SubmitMatchedToVenueOffer] = [
             *unknown_actions,
             *matched_events,
-            *remaining_actions,
+            *persisted_remaining_actions,
         ]
 
         # Publish derived per-symbol signals only after the immutable observation
@@ -682,7 +686,11 @@ class BootRecovery:
             symbol=offer.symbol,
             amount_original=offer.amount_original or offer.amount,
             amount_remaining=offer.amount,
-            rate=Decimal(str(offer.rate)) if offer.rate is not None else None,
+            rate=(
+                offer.rate_decimal
+                if offer.rate_decimal is not None
+                else Decimal(str(offer.rate)) if offer.rate is not None else None
+            ),
             period_days=offer.period_days,
             status=offer.status,
             mts_created=offer.mts_created,
@@ -767,8 +775,39 @@ class BootRecovery:
                 end_ms=end_ms,
                 symbol=None,
             )
-            return cast(FundingOfferHistory, result)
-        except (BitfinexAPIError, BitfinexShapeError, ValueError, TypeError) as exc:
+            raw_history = cast(FundingOfferHistory, result)
+            offers = tuple(raw_history.offers)
+            raw_coverage = raw_history.coverage
+            coverage = FundingOfferHistoryCoverage(
+                requested_start_ms=raw_coverage.requested_start_ms,
+                requested_end_ms=raw_coverage.requested_end_ms,
+                oldest_mts_created=raw_coverage.oldest_mts_created,
+                newest_mts_created=raw_coverage.newest_mts_created,
+                pages=raw_coverage.pages,
+                complete=raw_coverage.complete,
+            )
+            if any(not is_terminal_offer_status(offer.status) for offer in offers):
+                log.warning("offer_history_evidence_incomplete non_terminal_status")
+                return FundingOfferHistory(
+                    offers=(),
+                    coverage=FundingOfferHistoryCoverage(
+                        requested_start_ms=coverage.requested_start_ms,
+                        requested_end_ms=coverage.requested_end_ms,
+                        oldest_mts_created=coverage.oldest_mts_created,
+                        newest_mts_created=coverage.newest_mts_created,
+                        pages=coverage.pages,
+                        complete=False,
+                    ),
+                )
+            return FundingOfferHistory(offers=offers, coverage=coverage)
+        except (
+            ArithmeticError,
+            AttributeError,
+            BitfinexAPIError,
+            BitfinexShapeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             log.warning("offer_history_evidence_incomplete err=%r", exc)
             return FundingOfferHistory(
                 offers=(),

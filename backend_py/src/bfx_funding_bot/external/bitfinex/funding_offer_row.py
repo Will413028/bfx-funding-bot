@@ -35,37 +35,49 @@ class FundingOfferRow:
     amount_original: Decimal | None = None
     offer_type: str | None = None
     flags: dict[str, Any] | int | None = None
+    rate_decimal: Decimal | None = None
 
 
 def parse_funding_offer_row(o: Any) -> FundingOfferRow:
     """Parse one funding-offer positional array.
 
-    Wrong shape (non-list / too short) raises ``BitfinexShapeError``. A malformed
-    *value* in a strict correctness field (id/symbol/status/amount/mts) surfaces
-    as the underlying coercion error (``TypeError``/``ValueError``/``InvalidOperation``)
-    — same as the REST parser; the WS caller catches all of these. ``rate``/``period``
-    are display-only and None-guarded (absent on at-market/placeholder rows).
+    Wrong shape or malformed numeric values raise ``BitfinexShapeError``.
+    ``rate_decimal`` preserves the exact wire identity for reconciliation while
+    ``rate`` remains the legacy display value used by existing WS callers.
     """
     if not isinstance(o, list) or len(o) < _MIN_ROW_LEN:
         raise BitfinexShapeError(f"funding offer row malformed: {o!r}")
-    rate = o[14]
-    period = o[15]
-    amount = abs(Decimal(str(o[4])))
-    original_raw = o[5]
-    amount_original = (
-        abs(Decimal(str(original_raw))) if original_raw is not None else amount
-    )
+    try:
+        rate = o[14]
+        period = o[15]
+        amount = abs(Decimal(str(o[4])))
+        original_raw = o[5]
+        amount_original = (
+            abs(Decimal(str(original_raw))) if original_raw is not None else amount
+        )
+        rate_decimal = Decimal(str(rate)) if rate is not None else None
+        if not amount.is_finite() or not amount_original.is_finite() or (
+            rate_decimal is not None and not rate_decimal.is_finite()
+        ):
+            raise ValueError("funding offer numeric values must be finite")
+        mts_create = int(o[2])
+        mts_update = int(o[3])
+        rate_float = float(rate_decimal) if rate_decimal is not None else None
+        period_days = int(period) if period is not None else None
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise BitfinexShapeError(f"funding offer row has invalid values: {o!r}") from exc
     flags = o[9] if len(o) > 9 else None
     return FundingOfferRow(
         venue_offer_id=str(o[0]),
         symbol=str(o[1]),
-        mts_create=int(o[2]),
-        mts_update=int(o[3]),
+        mts_create=mts_create,
+        mts_update=mts_update,
         amount=amount,
         status=str(o[10]),
-        rate=float(rate) if rate is not None else None,
-        period_days=int(period) if period is not None else None,
+        rate=rate_float,
+        period_days=period_days,
         amount_original=amount_original,
         offer_type=str(o[6]) if o[6] is not None else None,
         flags=flags if isinstance(flags, (dict, int)) else None,
+        rate_decimal=rate_decimal,
     )

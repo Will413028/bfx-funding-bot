@@ -39,6 +39,7 @@ class ActiveFundingOffer:
     offer_type: str | None = None
     flags: dict[str, Any] | int | None = None
     rate_observed: bool = True
+    rate_decimal: Decimal | None = None
 
     @property
     def amount_remaining(self) -> Decimal:
@@ -89,6 +90,7 @@ def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
             offer_type=row.offer_type,
             flags=row.flags,
             rate_observed=row.rate is not None,
+            rate_decimal=row.rate_decimal,
         ))
     return out
 

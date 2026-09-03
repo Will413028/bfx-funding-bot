@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -11,15 +11,29 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer, BitfinexAuthREST
+from bfx_funding_bot.external.bitfinex.auth_rest import (
+    ActiveFundingOffer,
+    BitfinexAuthREST,
+    parse_active_funding_offers,
+)
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
+from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
-from bfx_funding_bot.modules.execution.events import ReservationIntent, ReservationUnknown
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    PositionStateRow,
+    VenueOfferStateRow,
+)
+from bfx_funding_bot.modules.execution.events import (
+    ReservationIntent,
+    ReservationUnknown,
+    SnapshotCoverage,
+    VenueSnapshotObserved,
+)
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
@@ -119,6 +133,7 @@ def _offer(
         status=status,
         offer_type=offer_type,
         flags=flags,
+        rate_decimal=Decimal(str(rate)) if rate is not None else None,
     )
 
 
@@ -231,7 +246,7 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
     await _seed_attempt(pg_session_factory, unknown=False)
     accepted = _offer("venue-accepted")
     history = _History(
-        (accepted,), _Coverage(1_000, 5_000, 1_500, 1_500, 1, True)
+        (), _Coverage(1_000, 5_000, None, None, 1, True)
     )
     auth = _Auth(active=(accepted, _offer("unknown-symbol", symbol="fXYZ", amount="3")), history=history)
     bus = _Bus()
@@ -285,6 +300,30 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
         ).scalar_one()
     assert rebuilt_attempt.venue_offer_id == "venue-accepted"
     assert rebuilt_uncertainty.state == "resolved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parse_error", [InvalidOperation(), OverflowError("wire integer")])
+async def test_history_numeric_parse_failure_still_moves_pending_to_unknown(
+    pg_session_factory,
+    parse_error,
+):
+    """History value failures are incomplete evidence, not recovery aborts."""
+    await _seed_attempt(pg_session_factory, unknown=False)
+
+    result = await _recovery(
+        pg_session_factory,
+        _Auth(history=parse_error),
+    ).run()
+
+    async with pg_session_factory() as session:
+        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
+        uncertainty = (await session.execute(select(ExecutionUncertaintyRow))).scalar_one()
+    assert attempt.outcome_kind == "unknown"
+    assert attempt.venue_offer_id is None
+    assert uncertainty.state == "open"
+    assert result.n_unknown == 1
+    assert result.n_matched == 0
 
 
 @pytest.mark.asyncio
@@ -368,6 +407,109 @@ async def test_zero_multiple_or_incomplete_evidence_stays_unknown_and_other_symb
     assert any(getattr(event, "symbol", None) == "fUSD" for event in bus.events)
 
 
+@pytest.mark.asyncio
+async def test_nonterminal_history_is_incomplete_and_not_projected_as_exposure(
+    pg_session_factory,
+):
+    await _seed_attempt(pg_session_factory, unknown=True)
+    history_only_active = _offer("history-active", status="ACTIVE")
+
+    result = await _recovery(
+        pg_session_factory,
+        _Auth(
+            history=_History(
+                (history_only_active,),
+                _Coverage(1_000, 5_000, 1_500, 1_500, 1, True),
+            )
+        ),
+    ).run()
+
+    async with pg_session_factory() as session:
+        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
+        snapshot = (
+            await session.execute(
+                select(EventLogRow)
+                .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+                .order_by(EventLogRow.event_seq.desc())
+            )
+        ).scalars().first()
+        venue_offer = await session.scalar(
+            select(VenueOfferStateRow).where(
+                VenueOfferStateRow.venue_offer_id == "history-active"
+            )
+        )
+        position = await session.scalar(
+            select(PositionStateRow).where(PositionStateRow.symbol == "fUST")
+        )
+    assert attempt.outcome_kind == "unknown"
+    assert result.n_matched == 0
+    assert snapshot is not None
+    assert snapshot.payload["coverage"]["offer_history_complete"] is False
+    assert snapshot.payload["offer_history"] == []
+    assert venue_offer is None
+    assert position is not None
+    assert position.offered_amount == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_projector_never_treats_unknown_history_status_as_current(
+    pg_session_factory,
+):
+    async with pg_session_factory() as session:
+        session.add(ExchangeAccount(id=_ACCOUNT, venue="bitfinex", label="history"))
+        await session.commit()
+    snapshot = VenueSnapshotObserved(
+        account_id=str(_ACCOUNT),
+        environment=_ENV,
+        query_started_at_ms=4_000,
+        query_finished_at_ms=5_000,
+        offers=(),
+        credits=(),
+        wallet_available={"fUST": Decimal("100")},
+        coverage=SnapshotCoverage(
+            active_offers_complete=True,
+            active_credits_complete=True,
+            wallets_complete=True,
+            offer_history_complete=False,
+            offer_history_pages=1,
+            offer_history_start_ms=1_000,
+            offer_history_end_ms=5_000,
+        ),
+        offer_history=(
+            VenueOfferObservation(
+                venue_offer_id="history-mystery",
+                symbol="fUST",
+                amount_original=Decimal("9"),
+                amount_remaining=Decimal("9"),
+                rate=Decimal("0.00031"),
+                period_days=2,
+                status="MYSTERY",
+                mts_created=1_500,
+                mts_updated=1_500,
+            ),
+        ),
+    )
+    async with pg_session_factory() as session:
+        await PostgresEventStore(deployment_environment=_ENV).append_snapshot(
+            session,
+            snapshot,
+        )
+        await session.commit()
+
+    async with pg_session_factory() as session:
+        venue_offer = await session.scalar(
+            select(VenueOfferStateRow).where(
+                VenueOfferStateRow.venue_offer_id == "history-mystery"
+            )
+        )
+        position = await session.scalar(
+            select(PositionStateRow).where(PositionStateRow.symbol == "fUST")
+        )
+    assert venue_offer is None
+    assert position is not None
+    assert position.offered_amount == Decimal("0")
+
+
 def _wire_offer(offer_id: int, mts_created: int) -> list[object | None]:
     row: list[object | None] = [None] * 21
     row[0] = offer_id
@@ -382,6 +524,32 @@ def _wire_offer(offer_id: int, mts_created: int) -> list[object | None]:
     row[14] = 0.00031
     row[15] = 2
     return row
+
+
+@pytest.mark.asyncio
+async def test_wire_rate_precision_mismatch_does_not_match_unknown_attempt(
+    pg_session_factory,
+):
+    await _seed_attempt(pg_session_factory, unknown=True)
+    row = _wire_offer(7, 1_500)
+    row[14] = "0.0003100000000000000001"
+    candidate = parse_active_funding_offers([row])[0]
+
+    result = await _recovery(
+        pg_session_factory,
+        _Auth(
+            history=_History(
+                (candidate,),
+                _Coverage(1_000, 5_000, 1_500, 1_500, 1, True),
+            )
+        ),
+    ).run()
+
+    async with pg_session_factory() as session:
+        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
+    assert attempt.outcome_kind == "unknown"
+    assert attempt.venue_offer_id is None
+    assert result.n_matched == 0
 
 
 @pytest.mark.asyncio
