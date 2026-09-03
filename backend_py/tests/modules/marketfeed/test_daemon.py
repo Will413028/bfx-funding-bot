@@ -14,6 +14,7 @@ from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 from tests.modules.marketfeed.account_test_helpers import (
+    TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
     seed_exchange_account,
 )
@@ -264,6 +265,7 @@ def _valid_canary_evidence():
         reconcile_observed_at_ms=(1_000_100, 1_000_200),
         projection_hash="a" * 64,
         venue_db_exposure_diff_usdt=Decimal("0"),
+        full_account_snapshot_complete=True,
         stop_reason=None,
     )
 
@@ -274,7 +276,7 @@ def _ready_canary_state():
     return CanaryReadiness(
         open_uncertainty_count=0,
         projector_lag=0,
-        snapshot_symbols=frozenset({"fUST"}),
+        full_account_snapshot_complete=True,
         reconcile_fences=(101, 102),
         reconcile_observed_at_ms=(1_000_100, 1_000_200),
         observed_at_ms=1_000_250,
@@ -341,7 +343,7 @@ async def _submit_only_after_canary_startup_gate(
         ),
         (
             lambda evidence: evidence,
-            lambda state: replace(state, snapshot_symbols=frozenset()),
+            lambda state: replace(state, full_account_snapshot_complete=False),
             "venue_snapshot_coverage_incomplete",
         ),
         (
@@ -445,3 +447,131 @@ async def test_canary_scope_or_cap_expansion_prevents_venue_submission(
         )
 
     assert venue.calls == 0
+
+
+async def test_canary_readiness_requires_two_complete_account_snapshot_events(
+    tmp_path: Path,
+) -> None:
+    """A symbol checkpoint cannot substitute for two complete account snapshots."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+    from bfx_funding_bot.modules.marketfeed.daemon import collect_canary_readiness
+
+    db_path = tmp_path / "canary_snapshot_coverage.db"
+    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = PostgresEventStore(deployment_environment="prod")
+    async with factory.begin() as session:
+        for timestamp, complete in ((1_000_100, False), (1_000_200, True)):
+            await store.append_snapshot(
+                session,
+                VenueSnapshotObserved(
+                    account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
+                    environment="prod",
+                    query_started_at_ms=timestamp - 10,
+                    query_finished_at_ms=timestamp,
+                    offers=(),
+                    credits=(),
+                    wallet_available={"fUST": Decimal("0")},
+                    coverage=SnapshotCoverage(
+                        active_offers_complete=complete,
+                        active_credits_complete=True,
+                        wallets_complete=True,
+                    ),
+                ),
+            )
+    async with factory() as session:
+        readiness = await collect_canary_readiness(
+            session,
+            account_id=TEST_EXCHANGE_ACCOUNT_ID,
+            environment="prod",
+            now_ms=1_000_250,
+        )
+    await engine.dispose()
+
+    assert readiness.full_account_snapshot_complete is False
+
+
+async def test_live_build_blocks_missing_halt2_evidence_before_executor_construction(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """The real daemon boot boundary must stop before a live executor exists."""
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryStartupBlocked, build_daemon
+
+    cells = tmp_path / "one-cell.yaml"
+    cells.write_text("""
+cells:
+  - strategy: mean_reversion
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.42, ema_span: 24}
+""")
+    safety = tmp_path / "one-cell-safety.yaml"
+    safety.write_text("""
+hard_guards:
+  manual_kill: {enabled: true}
+  auth_health: {enabled: true}
+  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
+  allocation_cap: {enabled: true, caps: {fUST: 150}, default_cap: 0}
+  buying_power: {enabled: true, buffers: {fUST: 3}, default_buffer: 0}
+calibrated_guards:
+  realized_loss_24h: {enabled: true, threshold_pct: 5}
+  drawdown_from_peak: {enabled: true, threshold_pct: 10}
+  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
+""")
+    db_path = tmp_path / "live-gate.db"
+    monkeypatch.setenv("BFX_PHASE", "canary")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
+    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
+    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
+    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety))
+    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
+    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "150")
+    monkeypatch.setenv("BFX_CANARY_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_CANARY_ENVIRONMENT", "prod")
+    monkeypatch.setenv("BFX_CANARY_SYMBOL", "fUST")
+    monkeypatch.setenv("BFX_CANARY_CELL", "fUST_a30")
+    monkeypatch.setenv("BFX_CANARY_STRATEGY", "mean_reversion")
+    monkeypatch.setenv("BFX_CANARY_AMOUNT_USDT", "150")
+    monkeypatch.setenv("BFX_CANARY_CAP_USDT", "150")
+    monkeypatch.setenv("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS", "300")
+    monkeypatch.setenv("BFX_CANARY_EVIDENCE_REPORT", str(tmp_path / "forged.json"))
+    monkeypatch.delenv("BFX_HALT2_EVIDENCE_REPORT", raising=False)
+    configure_account_env(monkeypatch)
+    monkeypatch.setenv("BFX_API_KEY", "test_key")
+    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
+    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
+    await engine.dispose()
+    httpx_mock.add_response(
+        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+        method="GET", status_code=200, json=[], is_reusable=True, is_optional=True,
+    )
+    constructed = False
+
+    def should_not_construct_executor(*_args, **_kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("live executor construction must be unreachable")
+
+    monkeypatch.setattr("bfx_funding_bot.modules.marketfeed.daemon.build_executor", should_not_construct_executor)
+    with pytest.raises(CanaryStartupBlocked, match="canary_evidence_unavailable"):
+        await build_daemon(cells_yaml_path=cells, skip_ws=True)
+
+    assert constructed is False

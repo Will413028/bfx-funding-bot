@@ -92,11 +92,11 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
+from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_stored_event
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     ProjectionHeadRow,
-    ReconcileObservationRow,
 )
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -106,6 +106,7 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
+    VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
@@ -359,6 +360,7 @@ class CanaryEvidence:
     reconcile_observed_at_ms: tuple[int, ...]
     projection_hash: str
     venue_db_exposure_diff_usdt: Decimal
+    full_account_snapshot_complete: bool
     stop_reason: str | None
 
     @classmethod
@@ -386,10 +388,13 @@ class CanaryEvidence:
             raise CanaryStartupBlocked("invalid_canary_evidence") from exc
         venue_offer_id = value["venue_offer_id"]
         stop_reason = value["stop_reason"]
+        full_account_snapshot_complete = value["full_account_snapshot_complete"]
         if venue_offer_id is not None and not isinstance(venue_offer_id, str):
             raise CanaryStartupBlocked("invalid_canary_venue_offer_id")
         if stop_reason is not None and not isinstance(stop_reason, str):
             raise CanaryStartupBlocked("invalid_canary_stop_reason")
+        if not isinstance(full_account_snapshot_complete, bool):
+            raise CanaryStartupBlocked("invalid_canary_snapshot_coverage")
         return cls(
             account_id=str(value["account_id"]),
             environment=str(value["environment"]),
@@ -406,6 +411,7 @@ class CanaryEvidence:
             reconcile_observed_at_ms=observed,
             projection_hash=str(value["projection_hash"]),
             venue_db_exposure_diff_usdt=exposure_diff,
+            full_account_snapshot_complete=full_account_snapshot_complete,
             stop_reason=stop_reason,
         )
 
@@ -414,7 +420,7 @@ class CanaryEvidence:
 class CanaryReadiness:
     open_uncertainty_count: int
     projector_lag: int
-    snapshot_symbols: frozenset[str]
+    full_account_snapshot_complete: bool
     reconcile_fences: tuple[int, ...]
     reconcile_observed_at_ms: tuple[int, ...]
     observed_at_ms: int
@@ -482,7 +488,7 @@ def assert_canary_startup(
         reasons.append("open_execution_uncertainty")
     if readiness.projector_lag:
         reasons.append("projector_lag")
-    if readiness.snapshot_symbols != frozenset({profile.symbol}):
+    if not evidence.full_account_snapshot_complete or not readiness.full_account_snapshot_complete:
         reasons.append("venue_snapshot_coverage_incomplete")
     if (
         readiness.reconcile_fences != evidence.reconcile_fences
@@ -548,18 +554,41 @@ async def collect_canary_readiness(
         )
         or 0
     )
-    observations = list(
+    snapshot_rows = list(
         await session.scalars(
-            select(ReconcileObservationRow)
+            select(EventLogRow)
             .where(
-                ReconcileObservationRow.exchange_account_id == account_id,
-                ReconcileObservationRow.deployment_environment == environment,
+                EventLogRow.exchange_account_id == account_id,
+                EventLogRow.deployment_environment == environment,
+                EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
             )
-            .order_by(ReconcileObservationRow.id.desc())
+            .order_by(EventLogRow.event_seq.desc())
             .limit(2)
         )
     )
-    observations.reverse()
+    snapshot_rows.reverse()
+    snapshots: list[VenueSnapshotObserved] = []
+    for row in snapshot_rows:
+        try:
+            event = deserialize_stored_event(row)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(event, VenueSnapshotObserved)
+            and event.account_id == str(account_id)
+            and event.environment == environment
+        ):
+            snapshots.append(event)
+    complete_snapshot_coverage = (
+        len(snapshot_rows) == 2
+        and len(snapshots) == 2
+        and all(
+            event.coverage.active_offers_complete
+            and event.coverage.active_credits_complete
+            and event.coverage.wallets_complete
+            for event in snapshots
+        )
+    )
     halted = await session.scalar(
         select(TradingHaltRow.halted)
         .where(
@@ -572,9 +601,9 @@ async def collect_canary_readiness(
     return CanaryReadiness(
         open_uncertainty_count=open_uncertainty_count,
         projector_lag=max(0, projector_lag),
-        snapshot_symbols=frozenset(row.symbol for row in observations),
-        reconcile_fences=tuple(row.event_seq_fence for row in observations),
-        reconcile_observed_at_ms=tuple(row.observed_at_ms for row in observations),
+        full_account_snapshot_complete=complete_snapshot_coverage,
+        reconcile_fences=tuple(int(row.event_seq) for row in snapshot_rows if row.event_seq),
+        reconcile_observed_at_ms=tuple(event.query_finished_at_ms for event in snapshots),
         observed_at_ms=now_ms,
         persistent_halt=halted is True,
     )
@@ -1395,8 +1424,8 @@ async def build_daemon(
 
     # This is deliberately before build_executor() and before any live recovery
     # loop is constructed.  The existing AccountCommandGate remains the only
-    # route to submit; this gate merely refuses to start that route without the
-    # bounded, account-local evidence produced by run_canary_preflight.py.
+    # route to submit; this gate invokes the same read-only verifier as
+    # run_canary_preflight.py rather than trusting a structurally valid report.
     if (
         config.phase is Phase.CANARY
         and os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
@@ -1406,23 +1435,36 @@ async def build_daemon(
             raise CanaryStartupBlocked("canary_identity_or_environment_mismatch")
         evidence_path = os.environ.get("BFX_CANARY_EVIDENCE_REPORT", "").strip()
         evidence = load_canary_evidence(Path(evidence_path)) if evidence_path else None
+        halt2_evidence_path = os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "").strip()
+        if not halt2_evidence_path:
+            raise CanaryStartupBlocked("missing_halt2_evidence")
+        image_digest = os.environ.get("BFX_EXPECTED_IMAGE_DIGEST", "").strip()
+        projector_version = os.environ.get("BFX_PROJECTOR_VERSION", "").strip()
+        if not image_digest or not projector_version:
+            raise CanaryStartupBlocked("missing_halt2_runtime_identity")
+        # Local imports keep the production package free of a module-cycle with
+        # the operator CLI while making its one verifier authoritative here too.
+        from scripts.halt2_cutover import _load_evidence
+        from scripts.run_canary_preflight import verify_canary_preflight
+
+        halt2_evidence = _load_evidence(Path(halt2_evidence_path))
         async with session_factory() as canary_session:
-            readiness = await collect_canary_readiness(
-                canary_session,
-                account_id=profile.account_id,
-                environment=profile.environment,
+            await verify_canary_preflight(
+                session=canary_session,
+                profile=profile,
+                halt2_evidence=halt2_evidence,
+                config_artifact=safety_cfg_path,
+                image_digest=image_digest,
+                projector_version=projector_version,
+                environ=os.environ,
+                evidence=evidence,
+                configured_cells=tuple(
+                    (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
+                ),
+                configured_caps=hg.allocation_cap.caps,
+                allocation_cap_usdt=allocation_cap,
                 now_ms=now_ms_utc(),
             )
-        assert_canary_startup(
-            profile=profile,
-            evidence=evidence,
-            readiness=readiness,
-            configured_cells=tuple(
-                (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
-            ),
-            configured_caps=hg.allocation_cap.caps,
-            allocation_cap_usdt=allocation_cap,
-        )
 
     # L2 loss-limiter source: account NAV (available + reserved + realized)
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary

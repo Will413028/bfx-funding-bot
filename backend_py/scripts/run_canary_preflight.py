@@ -11,12 +11,14 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Sequence
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
@@ -34,12 +36,20 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
 )
 from bfx_funding_bot.modules.marketfeed.scheduler import now_ms_utc
 
-try:  # ``python scripts/...`` has scripts/ rather than its parent on sys.path.
-    from scripts.halt2_cutover import Halt2Evidence, _artifact_hashes, _load_evidence
-    from scripts.verify_projection_replay import replay_event_log
-except ModuleNotFoundError:  # pragma: no cover - exercised by the operator CLI.
-    from halt2_cutover import Halt2Evidence, _artifact_hashes, _load_evidence
-    from verify_projection_replay import replay_event_log
+# Direct ``python scripts/...`` execution otherwise exposes scripts/ rather
+# than its parent package. This only resolves local source imports; it does not
+# affect evidence inputs or runtime configuration.
+if __package__ in {None, ""}:  # pragma: no cover - operator CLI path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.halt2_cutover import (
+    Halt2Evidence,
+    _artifact_hashes,
+    _load_evidence,
+    collect_preflight_report,
+    verify_preflight,
+)
+from scripts.verify_projection_replay import replay_event_log
 
 EXIT_SUCCESS = 0
 EXIT_PRECONDITION_FAILED = 2
@@ -88,43 +98,106 @@ async def _run(args: argparse.Namespace) -> CanaryEvidence:
         or halt2_evidence.deployment_environment != profile.environment
     ):
         raise CanaryStartupBlocked("halt2_identity_or_environment_mismatch")
-    _require_halt2_artifacts(halt2_evidence, args.config_artifact)
     evidence = load_canary_evidence(args.evidence)
     engine = make_engine(Settings())
     factory = make_session_factory(engine)
     try:
         async with factory() as session:
-            rows = list(
-                await session.scalars(
-                    select(EventLogRow)
-                    .where(
-                        EventLogRow.exchange_account_id == profile.account_id,
-                        EventLogRow.deployment_environment == profile.environment,
-                    )
-                    .order_by(EventLogRow.event_seq.asc())
-                )
-            )
-            if evidence.projection_hash != _projection_hash(rows, profile=profile):
-                raise CanaryStartupBlocked("projection_hash_mismatch")
-            readiness = await collect_canary_readiness(
-                session,
-                account_id=profile.account_id,
-                environment=profile.environment,
+            await verify_canary_preflight(
+                session=session,
+                profile=profile,
+                halt2_evidence=halt2_evidence,
+                config_artifact=args.config_artifact,
+                image_digest=args.environ.get("BFX_EXPECTED_IMAGE_DIGEST", ""),
+                projector_version=args.environ.get("BFX_PROJECTOR_VERSION", ""),
+                environ=args.environ,
+                evidence=evidence,
+                configured_cells=tuple(
+                    (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
+                ),
+                configured_caps=safety_config.hard_guards.allocation_cap.caps,
+                allocation_cap_usdt=allocation_cap_usdt,
                 now_ms=now_ms_utc(),
             )
-        assert_canary_startup(
-            profile=profile,
-            evidence=evidence,
-            readiness=readiness,
-            configured_cells=tuple(
-                (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
-            ),
-            configured_caps=safety_config.hard_guards.allocation_cap.caps,
-            allocation_cap_usdt=allocation_cap_usdt,
-        )
         return evidence
     finally:
         await engine.dispose()
+
+
+async def verify_canary_preflight(
+    *,
+    session: AsyncSession,
+    profile: CanaryProfile,
+    halt2_evidence: Halt2Evidence,
+    config_artifact: Path,
+    image_digest: str,
+    projector_version: str,
+    environ: Mapping[str, str],
+    evidence: CanaryEvidence | None,
+    configured_cells: tuple[tuple[str, str, str], ...],
+    configured_caps: Mapping[str, Decimal],
+    allocation_cap_usdt: Decimal,
+    now_ms: int,
+) -> None:
+    """One shared, read-only authority for CLI and daemon canary admission."""
+    if (
+        halt2_evidence.exchange_account_id != str(profile.account_id)
+        or halt2_evidence.deployment_environment != profile.environment
+    ):
+        raise CanaryStartupBlocked("halt2_identity_or_environment_mismatch")
+    _require_halt2_artifacts(halt2_evidence, config_artifact)
+    report = await collect_preflight_report(
+        session,
+        account_id=profile.account_id,
+        environment=profile.environment,
+        artifact_hashes=_artifact_hashes(halt2_evidence, config_artifact=config_artifact),
+        image_digest=image_digest,
+        projector_version=projector_version,
+    )
+    halt2_result = verify_preflight(report, halt2_evidence, environ=environ)
+    if halt2_result.stop_reasons:
+        raise CanaryStartupBlocked("halt2_preflight:" + ",".join(halt2_result.stop_reasons))
+    if evidence is None:
+        assert_canary_startup(
+            profile=profile,
+            evidence=None,
+            readiness=await collect_canary_readiness(
+                session,
+                account_id=profile.account_id,
+                environment=profile.environment,
+                now_ms=now_ms,
+            ),
+            configured_cells=configured_cells,
+            configured_caps=configured_caps,
+            allocation_cap_usdt=allocation_cap_usdt,
+        )
+        return
+    rows = list(
+        await session.scalars(
+            select(EventLogRow)
+            .where(
+                EventLogRow.exchange_account_id == profile.account_id,
+                EventLogRow.deployment_environment == profile.environment,
+            )
+            .order_by(EventLogRow.event_seq.asc())
+        )
+    )
+    if evidence.projection_hash != _projection_hash(rows, profile=profile):
+        raise CanaryStartupBlocked("projection_hash_mismatch")
+    readiness = await collect_canary_readiness(
+        session,
+        account_id=profile.account_id,
+        environment=profile.environment,
+        now_ms=now_ms,
+    )
+    assert_canary_startup(
+        profile=profile,
+        evidence=evidence,
+        readiness=readiness,
+        configured_cells=configured_cells,
+        configured_caps=configured_caps,
+        allocation_cap_usdt=allocation_cap_usdt,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
