@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.projector import derive_v2_event_id
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
@@ -134,6 +135,35 @@ async def test_replay_uses_empty_temporary_projection_and_old_runtime_is_diagnos
     assert report.diagnostic_diff["position_state"]["old_hash"] != (
         report.diagnostic_diff["position_state"]["replayed_hash"]
     )
+
+
+@pytest.mark.asyncio
+async def test_replay_is_independent_of_runtime_execution_decision_audit_state(
+    pg_session_factory,
+) -> None:
+    """Looking up a mutated live decision would make replay non-deterministic."""
+    await _seed_attempt(pg_session_factory, unknown=False)
+
+    async with pg_session_factory() as session:
+        first = await replay_one_account(
+            session, account_id=_PENDING_ACCOUNT, environment=_ENV,
+            projector_version="execution-state-v1",
+        )
+
+    async with pg_session_factory() as session:
+        decision = await session.get(ExecutionDecisionRow, "decision-unknown")
+        assert decision is not None
+        decision.symbol = "fUSD"
+        await session.commit()
+
+    async with pg_session_factory() as session:
+        second = await replay_one_account(
+            session, account_id=_PENDING_ACCOUNT, environment=_ENV,
+            projector_version="execution-state-v1",
+        )
+
+    assert second.row_counts == first.row_counts
+    assert second.content_hashes == first.content_hashes
 
 
 def test_replay_derives_historical_v2_uuid_and_accepts_global_sequence_gaps() -> None:

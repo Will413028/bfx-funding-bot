@@ -189,7 +189,10 @@ async def _replay_into_empty_temporary_projection(
                 ],
             )
         await replay_session.flush()
-        await projector_type(deployment_environment=environment).rebuild_snapshot_from_log(
+        await projector_type(
+            deployment_environment=environment,
+            event_only_replay=True,
+        ).rebuild_snapshot_from_log(
             replay_session,
             account_id=str(account_id),
             deployment_environment=environment,
