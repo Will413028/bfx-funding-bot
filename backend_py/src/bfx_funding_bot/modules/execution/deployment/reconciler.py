@@ -227,11 +227,12 @@ class DeploymentReconciler:
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
-            # paper implementations; the durable ledger check below remains a
-            # second fail-closed line of defence.
+            # paper implementations.  When present it is the durable authority;
+            # the process-local ledger remains the fallback for legacy adapters.
             evaluate_before_sizing = getattr(
                 self._safety, "evaluate_before_sizing", None,
             )
+            authoritative_uncertainty_guard = evaluate_before_sizing is not None
             if evaluate_before_sizing is not None:
                 pre_sizing_result = await evaluate_before_sizing(symbol, self._ctx)
                 if not pre_sizing_result.allowed:
@@ -244,12 +245,23 @@ class DeploymentReconciler:
                         pre_sizing_result.reason,
                     )
                     continue
+                # PostgreSQL is authoritative on the live money path.  A
+                # resolved uncertainty may leave the paper ledger's process-
+                # local counter stale because the API writer runs elsewhere.
+                # Once the durable pre-sizing guard allows, converge that
+                # compatibility cache before continuing this daemon tick.
+                uncertain_exposure = getattr(self._ledger, "uncertain_exposure", None)
+                clear_uncertainty = getattr(self._ledger, "clear_uncertainty", None)
+                if uncertain_exposure is not None and clear_uncertainty is not None:
+                    stale_amount = uncertain_exposure(symbol)
+                    if stale_amount > 0:
+                        clear_uncertainty(symbol, stale_amount)
             # A post-transport UNKNOWN is an account/symbol-wide command gate:
             # even if the residual cap gap is positive, submitting another
             # offer could duplicate the request that may already exist at the
-            # venue.  Only an explicit reconcile/operator resolution may clear
-            # the ledger's uncertainty bucket.
-            if self._ledger.is_uncertain(symbol):
+            # venue.  Legacy adapters without the database pre-sizing hook use
+            # the local ledger as their fail-closed authority.
+            if not authoritative_uncertainty_guard and self._ledger.is_uncertain(symbol):
                 log.error(
                     "deployment_symbol_blocked_uncertain account=%s symbol=%s",
                     self._ctx.account_id, symbol,
@@ -365,11 +377,13 @@ class DeploymentReconciler:
                 )
 
             for cell_id, amount in fills.items():
-                # The first UNKNOWN in this allocation can open the shared
-                # ledger gate synchronously inside ReservationEmittingMiddleware.
-                # Re-check before every remaining cell so one tick cannot place
-                # a second offer for the same uncertain symbol.
-                if self._ledger.is_uncertain(symbol):
+                # Legacy adapters re-check their local gate.  DB-backed chains
+                # instead re-evaluate their uncertainty guard below for each
+                # offer, which catches an UNKNOWN opened by the prior submit.
+                if (
+                    not authoritative_uncertainty_guard
+                    and self._ledger.is_uncertain(symbol)
+                ):
                     log.error(
                         "deployment_symbol_blocked_uncertain_after_submit "
                         "account=%s symbol=%s cell=%s",

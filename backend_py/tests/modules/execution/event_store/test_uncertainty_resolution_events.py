@@ -19,7 +19,10 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     OfferClaimRow,
 )
-from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
+from bfx_funding_bot.modules.execution.event_store.writer import (
+    AccountEventWriter,
+    ProjectionWriteError,
+)
 from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
@@ -63,8 +66,10 @@ def _snapshot(*, finished: int, offer: bool = False, history: bool = True) -> Ve
             rate=Decimal("0.001"),
             period_days=2,
             status="active",
-            mts_created=finished,
+            mts_created=2,
             mts_updated=finished,
+            offer_type="LIMIT",
+            flags={"raw": 0},
         ),
     ) if offer else ()
     return VenueSnapshotObserved(
@@ -117,6 +122,7 @@ def _attempt() -> SubmissionAttemptPayload:
             "amount": "100",
             "rate": "0.001",
             "period": 2,
+            "flags": 0,
         },
         started_at_ms=1,
     )
@@ -192,7 +198,7 @@ async def test_bind_resolution_projects_attempt_claim_and_replays(
     async with factory() as session:
         store = PostgresEventStore(deployment_environment=ENV)
         reconcile = await store.append_snapshot(
-            session, _snapshot(finished=4, offer=True)
+            session, _snapshot(finished=5, offer=True)
         )
         del reconcile
         latest = await session.scalar(
@@ -214,8 +220,14 @@ async def test_bind_resolution_projects_attempt_claim_and_replays(
                 reconcile_event_seq=latest,
                 resolved_by_operator_id="operator-1",
                 resolution_reason="confirmed exact venue offer",
-                resolution_evidence={"candidate_count": 1},
-                occurred_at_ms=5,
+                resolution_evidence={
+                    "reconcile_event_seq": latest,
+                    "query_started_at_ms": 4,
+                    "query_finished_at_ms": 5,
+                    "candidate_count": 1,
+                    "venue_offer_id": "venue-1",
+                },
+                occurred_at_ms=6,
             ),
         )
         await session.commit()
@@ -234,7 +246,7 @@ async def test_bind_resolution_projects_attempt_claim_and_replays(
     # visible before that resolution, not against the stream's eventual tail.
     async with factory() as session:
         await PostgresEventStore(deployment_environment=ENV).append_snapshot(
-            session, _snapshot(finished=6, offer=True)
+            session, _snapshot(finished=7, offer=True)
         )
         await session.commit()
 
@@ -264,7 +276,7 @@ async def test_mark_not_accepted_requires_zero_candidates_and_replays(
     uncertainty_id = await _open_unknown(factory)
     async with factory() as session:
         store = PostgresEventStore(deployment_environment=ENV)
-        await store.append_snapshot(session, _snapshot(finished=4, offer=False))
+        await store.append_snapshot(session, _snapshot(finished=5, offer=False))
         latest = await session.scalar(
             select(EventLogRow.event_seq)
             .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
@@ -283,9 +295,14 @@ async def test_mark_not_accepted_requires_zero_candidates_and_replays(
                 reconcile_event_seq=latest,
                 resolved_by_operator_id="operator-1",
                 resolution_reason="complete history had zero candidates",
-                resolution_evidence={"candidate_count": 0},
+                resolution_evidence={
+                    "reconcile_event_seq": latest,
+                    "query_started_at_ms": 4,
+                    "query_finished_at_ms": 5,
+                    "candidate_count": 0,
+                },
                 candidate_count=0,
-                occurred_at_ms=5,
+                occurred_at_ms=6,
             ),
         )
         await session.commit()
@@ -344,7 +361,11 @@ async def test_manual_resolution_is_event_only(
                 reconcile_event_seq=latest,
                 resolved_by_operator_id="operator-1",
                 resolution_reason="operator accepted the quarantined offer",
-                resolution_evidence={"decision": "accept"},
+                resolution_evidence={
+                    "reconcile_event_seq": latest,
+                    "query_started_at_ms": 3,
+                    "query_finished_at_ms": 4,
+                },
                 occurred_at_ms=5,
             ),
         )
@@ -355,3 +376,245 @@ async def test_manual_resolution_is_event_only(
         assert (await session.scalar(select(EventLogRow).where(
             EventLogRow.event_type == "UNCERTAINTY_MANUALLY_RESOLVED",
         ))) is not None
+
+
+@pytest.mark.asyncio
+async def test_projector_recomputes_nonzero_candidates_and_rejects_forged_zero(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(session, _snapshot(finished=5, offer=True))
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert latest is not None
+
+        with pytest.raises(ProjectionWriteError, match="zero exact candidates"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=latest,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="forged zero",
+                    resolution_evidence={"candidate_count": 0},
+                    candidate_count=0,
+                    occurred_at_ms=6,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_bind_when_snapshot_money_identity_differs(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    mismatched = VenueOfferObservation(
+        venue_offer_id="venue-1",
+        symbol="fUST",
+        amount_original=Decimal("100"),
+        amount_remaining=Decimal("100"),
+        rate=Decimal("0.002"),
+        period_days=2,
+        status="active",
+        mts_created=2,
+        mts_updated=5,
+        offer_type="LIMIT",
+        flags={"raw": 0},
+    )
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(
+            session,
+            VenueSnapshotObserved(
+                account_id=str(ACCOUNT),
+                environment=ENV,
+                query_started_at_ms=4,
+                query_finished_at_ms=5,
+                offers=(mismatched,),
+                credits=(),
+                wallet_available={"fUST": Decimal("500")},
+                coverage=_coverage(),
+            ),
+        )
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert latest is not None
+
+        with pytest.raises(ProjectionWriteError, match="one exact immutable candidate"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyBoundToVenueOffer(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    venue_offer_id="venue-1",
+                    reconcile_event_seq=latest,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="forged identity",
+                    resolution_evidence={"candidate_count": 1},
+                    occurred_at_ms=6,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_forged_bound_venue_status(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(session, _snapshot(finished=5, offer=True))
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert latest is not None
+
+        with pytest.raises(ProjectionWriteError, match="candidate and status"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyBoundToVenueOffer(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    venue_offer_id="venue-1",
+                    reconcile_event_seq=latest,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="forged status",
+                    resolution_evidence={
+                        "reconcile_event_seq": latest,
+                        "query_started_at_ms": 4,
+                        "query_finished_at_ms": 5,
+                        "candidate_count": 1,
+                        "venue_offer_id": "venue-1",
+                    },
+                    venue_status="executed",
+                    occurred_at_ms=6,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_manual_resolution_for_submit_unknown(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(session, _snapshot(finished=5))
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert latest is not None
+
+        with pytest.raises(ProjectionWriteError, match="manual resolution"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyManuallyResolved(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=latest,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="escape hatch",
+                    resolution_evidence={},
+                    occurred_at_ms=6,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_overlap_fence_even_when_resolution_bypasses_api(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(session, _snapshot(finished=4, history=True))
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert latest is not None
+
+        with pytest.raises(ProjectionWriteError, match="interval is stale"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=latest,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="overlap",
+                    resolution_evidence={"candidate_count": 0},
+                    candidate_count=0,
+                    occurred_at_ms=5,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_latest_appended_delayed_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uncertainty_id = await _open_unknown(factory)
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append_snapshot(session, _snapshot(finished=10, history=True))
+        await store.append_snapshot(session, _snapshot(finished=5, history=True))
+        delayed_seq = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert delayed_seq is not None
+
+        with pytest.raises(ProjectionWriteError, match="did not advance canonical state"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty_id,
+                    account_id=str(ACCOUNT),
+                    environment=ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=delayed_seq,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="delayed response",
+                    resolution_evidence={},
+                    candidate_count=0,
+                    occurred_at_ms=11,
+                ),
+            )

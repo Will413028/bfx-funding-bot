@@ -112,6 +112,13 @@ class _FakeLedger:
     def is_uncertain(self, symbol: str) -> bool:
         return symbol in self._uncertain_symbols
 
+    def uncertain_exposure(self, symbol: str) -> Decimal:
+        return Decimal("1") if symbol in self._uncertain_symbols else Decimal("0")
+
+    def clear_uncertainty(self, symbol: str, amount: Decimal) -> None:
+        if amount > 0:
+            self._uncertain_symbols.discard(symbol)
+
 
 class _FakeSafety:
     def __init__(self, allowed: bool = True) -> None:
@@ -124,6 +131,11 @@ class _FakeSafety:
             allowed=self.allowed, guard_name="fake",
             reason=None if self.allowed else "blocked",
         )
+
+
+class _AuthoritativePreSizingSafety(_FakeSafety):
+    async def evaluate_before_sizing(self, symbol, ctx) -> GuardResult:
+        return GuardResult(allowed=True, guard_name="uncertainty", reason=None)
 
 
 class _FakeExecutor:
@@ -367,7 +379,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            optimizer_fee_rate: Decimal | None = None,
            optimizer_horizon_h: int | None = None,
            rate_optimizer: RateOptimizer | None = None,
-           uncertain_symbols: set[str] | None = None):
+           uncertain_symbols: set[str] | None = None,
+           ledger: _FakeLedger | None = None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -388,7 +401,15 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         optimizer_kwargs["optimizer_horizon_h"] = optimizer_horizon_h
     rec = DeploymentReconciler(
         store=store, tracker=tracker,
-        ledger=_FakeLedger(exposure, available=available, uncertain_symbols=uncertain_symbols),
+        ledger=(
+            ledger
+            if ledger is not None
+            else _FakeLedger(
+                exposure,
+                available=available,
+                uncertain_symbols=uncertain_symbols,
+            )
+        ),
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
         concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
@@ -448,6 +469,21 @@ async def test_unknown_symbol_is_fail_closed_and_never_resubmitted(caplog) -> No
 
     assert executor.submitted == []
     assert "uncertain" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_db_pre_sizing_allow_clears_stale_local_uncertainty() -> None:
+    ledger = _FakeLedger(D("0"), uncertain_symbols={"fUST"})
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("0"),
+        quotes=[_post_quote("fUST_a30")],
+        safety=_AuthoritativePreSizingSafety(),
+        ledger=ledger,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted
+    assert not ledger.is_uncertain("fUST")
 
 
 async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:

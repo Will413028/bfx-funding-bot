@@ -129,6 +129,7 @@ def apply_offer_transition(
     cid: int | None = None,
     execution_decision_id: str | None = None,
     signal_correlation_id: UUID | None = None,
+    offer_type: str | None = None,
     flags: dict[str, Any] | None = None,
 ) -> VenueOfferState:
     """Apply one venue-offer observation/event without mutating prior state.
@@ -172,6 +173,7 @@ def apply_offer_transition(
             cid=cid,
             execution_decision_id=execution_decision_id,
             signal_correlation_id=signal_correlation_id,
+            offer_type=offer_type,
             flags={} if flags is None else flags,
         )
 
@@ -204,6 +206,8 @@ def apply_offer_transition(
             raise InvalidVenueOfferTransition("conflicting duplicate rate")
         if period_days is not None and period_days != previous.period_days:
             raise InvalidVenueOfferTransition("conflicting duplicate period")
+        if offer_type is not None and offer_type != previous.offer_type:
+            raise InvalidVenueOfferTransition("conflicting duplicate offer type")
         if mts_created is not None and mts_created != previous.mts_created:
             raise InvalidVenueOfferTransition("conflicting duplicate mts_created")
         if cid is not None and cid != previous.cid:
@@ -234,6 +238,8 @@ def apply_offer_transition(
             raise InvalidVenueOfferTransition("conflicting terminal rate")
         if period_days is not None and period_days != previous.period_days:
             raise InvalidVenueOfferTransition("conflicting terminal period")
+        if offer_type is not None and offer_type != previous.offer_type:
+            raise InvalidVenueOfferTransition("conflicting terminal offer type")
         if cid is not None and cid != previous.cid:
             raise InvalidVenueOfferTransition("conflicting terminal cid")
         if (
@@ -295,5 +301,6 @@ def apply_offer_transition(
             if signal_correlation_id is None
             else signal_correlation_id
         ),
+        offer_type=previous.offer_type if offer_type is None else offer_type,
         flags=previous.flags if flags is None else flags,
     )

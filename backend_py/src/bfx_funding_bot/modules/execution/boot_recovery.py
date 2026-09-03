@@ -21,8 +21,8 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, NamedTuple, Protocol, cast
+from decimal import Decimal
+from typing import Any, NamedTuple, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -59,7 +59,18 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
-from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ExecutionUncertaintyRow,
+    SubmissionAttemptRow,
+)
+from bfx_funding_bot.modules.execution.unknown_matching import (
+    UnknownSubmitAttempt,
+    attempt_from_row,
+    match_unknown_attempt,
+)
+from bfx_funding_bot.modules.execution.unknown_matching import (
+    offer_matches_attempt_identity as _offer_matches_attempt_identity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -70,99 +81,6 @@ RecoveryAction = (
     | ReservationUnknown
     | VenueOfferQuarantined
 )
-
-
-@dataclass(frozen=True, slots=True)
-class UnknownSubmitAttempt:
-    attempt_id: UUID
-    execution_decision_id: str
-    account_id: str
-    symbol: str
-    cid: int
-    amount: Decimal
-    rate: Decimal
-    period_days: int
-    offer_type: str
-    flags: Mapping[str, Any] | int
-    started_at_ms: int
-    signal_correlation_id: UUID
-    reservation_ref: ReservationRef
-
-
-@dataclass(frozen=True, slots=True)
-class MatchResult:
-    kind: Literal["exact_match", "zero_match", "multiple_match"]
-    offer: ActiveFundingOffer | None = None
-
-
-def match_unknown_attempt(
-    attempt: UnknownSubmitAttempt,
-    active: list[ActiveFundingOffer] | tuple[ActiveFundingOffer, ...],
-    history: list[ActiveFundingOffer] | tuple[ActiveFundingOffer, ...],
-    coverage: FundingOfferHistoryCoverage,
-) -> MatchResult:
-    """Return a venue identity only for one exact, fully bounded candidate."""
-    if (
-        not coverage.complete
-        or coverage.requested_start_ms > attempt.started_at_ms
-        or coverage.requested_end_ms < attempt.started_at_ms
-    ):
-        return MatchResult("zero_match")
-    by_id: dict[str, tuple[ActiveFundingOffer, bool]] = {
-        offer.venue_offer_id: (offer, True) for offer in history
-    }
-    by_id.update({offer.venue_offer_id: (offer, False) for offer in active})
-    candidates: list[ActiveFundingOffer] = []
-    for offer, from_history in by_id.values():
-        history_fence_covers_offer = (
-            not from_history
-            or (
-                coverage.oldest_mts_created is not None
-                and coverage.newest_mts_created is not None
-                and coverage.oldest_mts_created <= offer.mts_created
-                and coverage.newest_mts_created >= offer.mts_created
-            )
-        )
-        if (
-            _offer_matches_attempt_identity(
-                attempt,
-                offer,
-                observed_end_ms=coverage.requested_end_ms,
-            )
-            and history_fence_covers_offer
-        ):
-            candidates.append(offer)
-    if not candidates:
-        return MatchResult("zero_match")
-    if len(candidates) > 1:
-        return MatchResult("multiple_match")
-    return MatchResult("exact_match", candidates[0])
-
-
-def _normalized_match_flags(value: Mapping[str, Any] | int) -> Mapping[str, Any] | int:
-    return dict(value) if isinstance(value, Mapping) else value
-
-
-def _offer_matches_attempt_identity(
-    attempt: UnknownSubmitAttempt,
-    offer: ActiveFundingOffer,
-    *,
-    observed_end_ms: int,
-) -> bool:
-    original = offer.amount_original if offer.amount_original is not None else offer.amount
-    return (
-        offer.symbol == attempt.symbol
-        and original == attempt.amount
-        and offer.rate_observed
-        and offer.rate_decimal is not None
-        and offer.rate_decimal == attempt.rate
-        and offer.period_days == attempt.period_days
-        and attempt.started_at_ms <= offer.mts_created <= observed_end_ms
-        and offer.offer_type is not None
-        and offer.offer_type == attempt.offer_type
-        and offer.flags is not None
-        and _normalized_match_flags(offer.flags) == attempt.flags
-    )
 
 
 def _normalize_flags(value: Mapping[str, Any] | int | None) -> Mapping[str, Any]:
@@ -578,6 +496,23 @@ class BootRecovery:
             *persisted_remaining_actions,
         ]
 
+        # The API may resolve/bind a claim in another process.  Refresh at the
+        # committed reconcile boundary before routing later WS lifecycle events
+        # so an in-memory registry can never remain permanently unaware of the
+        # durable venue identity.
+        refresh_registry = (
+            getattr(self._offer_registry, "refresh_from_snapshot", None)
+            if self._offer_registry is not None
+            else None
+        )
+        if refresh_registry is not None:
+            async with self._session_factory() as refresh_session:
+                await refresh_registry(
+                    refresh_session,
+                    account_id=self._ctx.account_id,
+                    deployment_environment=self._env,
+                )
+
         # Publish derived per-symbol signals only after the immutable observation
         # and all recovery events have committed.  Unknown venue symbols are
         # included, while deployment remains scoped to configured symbols.
@@ -695,6 +630,7 @@ class BootRecovery:
             status=offer.status,
             mts_created=offer.mts_created,
             mts_updated=offer.mts_updated or offer.mts_created,
+            offer_type=offer.offer_type,
             flags=_normalize_flags(offer.flags),
         )
 
@@ -721,16 +657,20 @@ class BootRecovery:
         async with self._session_factory() as session:
             values = (
                 await session.execute(
-                    select(SubmissionAttemptRow.started_at_ms).where(
+                    select(SubmissionAttemptRow.started_at_ms)
+                    .join(
+                        ExecutionUncertaintyRow,
+                        ExecutionUncertaintyRow.attempt_id == SubmissionAttemptRow.attempt_id,
+                    )
+                    .where(
                         SubmissionAttemptRow.exchange_account_id == canonical,
                         SubmissionAttemptRow.deployment_environment == self._env,
-                        (
-                            SubmissionAttemptRow.outcome_kind.is_(None)
-                            | (
-                                SubmissionAttemptRow.outcome_kind
-                                == SubmitOutcomeKind.UNKNOWN.value
-                            )
-                        ),
+                        SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.UNKNOWN.value,
+                        ExecutionUncertaintyRow.exchange_account_id == canonical,
+                        ExecutionUncertaintyRow.deployment_environment == self._env,
+                        ExecutionUncertaintyRow.symbol == SubmissionAttemptRow.symbol,
+                        ExecutionUncertaintyRow.kind == "submit_outcome_unknown",
+                        ExecutionUncertaintyRow.state == "open",
                     )
                 )
             ).scalars().all()
@@ -832,10 +772,20 @@ class BootRecovery:
             return []
         attempts = (
             await session.execute(
-                select(SubmissionAttemptRow).where(
+                select(SubmissionAttemptRow)
+                .join(
+                    ExecutionUncertaintyRow,
+                    ExecutionUncertaintyRow.attempt_id == SubmissionAttemptRow.attempt_id,
+                )
+                .where(
                     SubmissionAttemptRow.exchange_account_id == canonical,
                     SubmissionAttemptRow.deployment_environment == self._env,
                     SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.UNKNOWN.value,
+                    ExecutionUncertaintyRow.exchange_account_id == canonical,
+                    ExecutionUncertaintyRow.deployment_environment == self._env,
+                    ExecutionUncertaintyRow.symbol == SubmissionAttemptRow.symbol,
+                    ExecutionUncertaintyRow.kind == "submit_outcome_unknown",
+                    ExecutionUncertaintyRow.state == "open",
                 )
             )
         ).scalars().all()
@@ -856,50 +806,18 @@ class BootRecovery:
         result: list[UnknownSubmitAttempt] = []
         for attempt in attempts:
             claim = claims_by_decision.get(attempt.execution_decision_id)
-            payload = attempt.normalized_payload
-            if claim is None or not isinstance(payload, dict):
+            if claim is None:
                 continue
             try:
-                amount = Decimal(str(payload["amount"]))
-                rate = Decimal(str(payload["rate"]))
-                period_days = int(payload["period"])
-                offer_type = str(payload["type"])
-                raw_flags = payload["flags"]
-                if not isinstance(raw_flags, (Mapping, int)) or isinstance(raw_flags, bool):
-                    continue
-                flags = _normalized_match_flags(raw_flags)
                 signal_id = UUID(claim.signal_correlation_id)
-            except (InvalidOperation, KeyError, TypeError, ValueError):
+            except (TypeError, ValueError):
                 continue
-            if (
-                not amount.is_finite()
-                or not rate.is_finite()
-                or period_days <= 0
-                or not offer_type
-            ):
+            parsed = attempt_from_row(attempt, signal_correlation_id=signal_id)
+            if parsed is None:
                 continue
-            if amount != Decimal(str(claim.size_usdt)):
+            if parsed.amount != Decimal(str(claim.size_usdt)):
                 continue
-            reference = ReservationRef(
-                execution_decision_id=attempt.execution_decision_id,
-                cid=attempt.cid,
-                signal_correlation_id=signal_id,
-            )
-            result.append(UnknownSubmitAttempt(
-                attempt_id=attempt.attempt_id,
-                execution_decision_id=attempt.execution_decision_id,
-                account_id=str(canonical),
-                symbol=attempt.symbol,
-                cid=attempt.cid,
-                amount=amount,
-                rate=rate,
-                period_days=period_days,
-                offer_type=offer_type,
-                flags=flags,
-                started_at_ms=attempt.started_at_ms,
-                signal_correlation_id=signal_id,
-                reservation_ref=reference,
-            ))
+            result.append(parsed)
         return result
 
     async def _append_snapshot_event(

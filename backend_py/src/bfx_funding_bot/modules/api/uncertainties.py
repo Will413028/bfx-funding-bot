@@ -28,7 +28,7 @@ from bfx_funding_bot.modules.api.account_scope import (
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
 from bfx_funding_bot.modules.execution.event_store.writer import (
     AccountEventWriter,
     ProjectionWriteError,
@@ -38,7 +38,15 @@ from bfx_funding_bot.modules.execution.events import (
     UncertaintyManuallyResolved,
     UncertaintyMarkedNotAccepted,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ExecutionUncertaintyRow,
+    SubmissionAttemptRow,
+)
+from bfx_funding_bot.modules.execution.unknown_matching import (
+    attempt_from_row,
+    deterministic_resolution_evidence,
+    match_attempt_to_snapshot,
+)
 
 _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
@@ -275,6 +283,25 @@ async def _fresh_reconcile(
     )
     if reconcile is None or not isinstance(reconcile.payload, dict):
         raise _http_error("stale_reconcile_fence", status.HTTP_409_CONFLICT)
+    opening = await session.scalar(
+        select(EventLogRow).where(
+            EventLogRow.event_seq == row.opened_event_seq,
+            EventLogRow.exchange_account_id == context.exchange_account_id,
+            EventLogRow.deployment_environment == context.deployment_environment,
+        )
+    )
+    query_started_at_ms = reconcile.payload.get("query_started_at_ms")
+    query_finished_at_ms = reconcile.payload.get("query_finished_at_ms")
+    if (
+        opening is None
+        or not isinstance(query_started_at_ms, int)
+        or isinstance(query_started_at_ms, bool)
+        or not isinstance(query_finished_at_ms, int)
+        or isinstance(query_finished_at_ms, bool)
+        or query_started_at_ms <= opening.occurred_at_ms
+        or query_finished_at_ms < query_started_at_ms
+    ):
+        raise _http_error("stale_reconcile_fence", status.HTTP_409_CONFLICT)
     # A sequence is a fence only if it is the newest snapshot currently known
     # for this exact account/environment.  This closes the race where an
     # operator submits an old complete snapshot after a newer partial read.
@@ -286,6 +313,17 @@ async def _fresh_reconcile(
         )
     )
     if latest_seq != reconcile_event_seq:
+        raise _http_error("stale_reconcile_fence", status.HTTP_409_CONFLICT)
+    latest_projected_snapshot_at = await session.scalar(
+        select(func.max(PositionStateRow.last_venue_snapshot_at)).where(
+            PositionStateRow.exchange_account_id == context.exchange_account_id,
+            PositionStateRow.deployment_environment == context.deployment_environment,
+        )
+    )
+    if (
+        latest_projected_snapshot_at is not None
+        and query_finished_at_ms < latest_projected_snapshot_at
+    ):
         raise _http_error("stale_reconcile_fence", status.HTTP_409_CONFLICT)
     coverage = reconcile.payload.get("coverage")
     if not isinstance(coverage, dict) or not all(
@@ -310,49 +348,33 @@ def _operator_id(context: ExchangeAccountContext, supplied: str | None) -> str:
     return value
 
 
-def _candidate_offers(payload: Mapping[str, Any], *, symbol: str, venue_offer_id: str) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    # The same active object can appear at the boundary of the active and
-    # history queries.  Its venue ID is the identity, so that cross-source
-    # duplicate is one candidate; distinct records with another ID cannot be
-    # bound by this endpoint because the request names one exact ID.
-    seen: set[str] = set()
-    for source in ("offers", "offer_history"):
-        values = payload.get(source, [])
-        if not isinstance(values, list):
-            continue
-        for value in values:
-            if not isinstance(value, dict):
-                continue
-            if str(value.get("venue_offer_id")) != venue_offer_id:
-                continue
-            if value.get("symbol") != symbol:
-                continue
-            if venue_offer_id not in seen:
-                candidates.append(value)
-                seen.add(venue_offer_id)
-    return candidates
-
-
-def _candidate_count(evidence: Mapping[str, Any]) -> int | None:
-    value = evidence.get("candidate_count", evidence.get("candidateCount"))
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None
-
-
-def _resolution_evidence(
-    supplied: Mapping[str, Any], *, reconcile_event_seq: int, candidate_count: int | None = None,
-) -> dict[str, Any]:
+def _validate_request_evidence(
+    supplied: Mapping[str, Any], *, allowed: frozenset[str],
+) -> None:
     evidence = _bounded_evidence(supplied)
-    evidence["reconcile_event_seq"] = reconcile_event_seq
-    if candidate_count is not None:
-        evidence["candidate_count"] = candidate_count
-    return _bounded_evidence(evidence)
+    if not set(evidence).issubset(allowed):
+        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
+async def _load_attempt(
+    session: AsyncSession,
+    *,
+    context: ExchangeAccountContext,
+    row: ExecutionUncertaintyRow,
+) -> SubmissionAttemptRow:
+    if row.kind != "submit_outcome_unknown" or row.attempt_id is None:
+        raise _http_error("resolution_action_not_supported", status.HTTP_409_CONFLICT)
+    attempt = await session.scalar(
+        select(SubmissionAttemptRow).where(
+            SubmissionAttemptRow.attempt_id == row.attempt_id,
+            SubmissionAttemptRow.exchange_account_id == context.exchange_account_id,
+            SubmissionAttemptRow.deployment_environment == context.deployment_environment,
+            SubmissionAttemptRow.symbol == row.symbol,
+        )
+    )
+    if attempt is None or attempt.outcome_kind != "unknown":
+        raise _http_error("submission_attempt_not_resolvable", status.HTTP_409_CONFLICT)
+    return attempt
 
 
 async def _append_resolution(
@@ -421,22 +443,34 @@ def build_uncertainties_router() -> APIRouter:
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
+        _validate_request_evidence(
+            body.evidence,
+            allowed=frozenset({"candidateCount", "candidate_count"}),
+        )
         row = await _load_uncertainty(session, context=context, uncertainty_id=uncertainty_id)
         payload = await _fresh_reconcile(
             session,
             context=context,
             row=row,
             reconcile_event_seq=body.reconcile_event_seq,
-            require_history=False,
+            require_history=True,
         )
-        candidates = _candidate_offers(payload, symbol=row.symbol, venue_offer_id=body.venue_offer_id)
-        if len(candidates) != 1:
+        attempt_row = await _load_attempt(session, context=context, row=row)
+        attempt = attempt_from_row(attempt_row)
+        match = match_attempt_to_snapshot(attempt, payload) if attempt is not None else None
+        if (
+            match is None
+            or match.kind != "exact_match"
+            or match.offer is None
+            or match.offer.venue_offer_id != body.venue_offer_id
+        ):
             raise _http_error("venue_offer_match_not_exact", status.HTTP_409_CONFLICT)
         operator_id = _operator_id(context, body.operator_uuid)
-        evidence = _resolution_evidence(
-            body.evidence,
+        evidence = deterministic_resolution_evidence(
             reconcile_event_seq=body.reconcile_event_seq,
+            payload=payload,
             candidate_count=1,
+            venue_offer_id=body.venue_offer_id,
         )
         event_seq = await _append_resolution(
             session,
@@ -452,7 +486,7 @@ def build_uncertainties_router() -> APIRouter:
                 resolved_by_operator_id=operator_id,
                 resolution_reason=(body.reason or "bind_to_venue_offer").strip(),
                 resolution_evidence=evidence,
-                venue_status=str(candidates[0].get("status") or "active"),
+                venue_status=match.offer.status,
                 occurred_at_ms=int(time.time() * 1000),
             ),
         )
@@ -466,8 +500,12 @@ def build_uncertainties_router() -> APIRouter:
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
+        _validate_request_evidence(
+            body.evidence,
+            allowed=frozenset({"candidateCount", "candidate_count"}),
+        )
         row = await _load_uncertainty(session, context=context, uncertainty_id=uncertainty_id)
-        await _fresh_reconcile(
+        payload = await _fresh_reconcile(
             session,
             context=context,
             row=row,
@@ -476,15 +514,15 @@ def build_uncertainties_router() -> APIRouter:
         )
         if row.kind != "submit_outcome_unknown":
             raise _http_error("resolution_action_not_supported", status.HTTP_409_CONFLICT)
-        count = _candidate_count(body.evidence)
-        if count != 0:
-            raise _http_error("zero_candidate_evidence_required", status.HTTP_409_CONFLICT)
-        # Preserve a caller-supplied evidence object only after its candidate
-        # count has been checked; the event projector repeats this invariant.
+        attempt_row = await _load_attempt(session, context=context, row=row)
+        attempt = attempt_from_row(attempt_row)
+        match = match_attempt_to_snapshot(attempt, payload) if attempt is not None else None
+        if match is None or match.kind != "zero_match":
+            raise _http_error("venue_offer_match_not_zero", status.HTTP_409_CONFLICT)
         operator_id = _operator_id(context, body.operator_uuid)
-        evidence = _resolution_evidence(
-            body.evidence,
+        evidence = deterministic_resolution_evidence(
             reconcile_event_seq=body.reconcile_event_seq,
+            payload=payload,
             candidate_count=0,
         )
         event_seq = await _append_resolution(
@@ -514,8 +552,11 @@ def build_uncertainties_router() -> APIRouter:
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         require_account_write(context)
+        _validate_request_evidence(body.evidence, allowed=frozenset({"decision"}))
         row = await _load_uncertainty(session, context=context, uncertainty_id=uncertainty_id)
-        await _fresh_reconcile(
+        if row.kind not in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
+            raise _http_error("resolution_action_not_supported", status.HTTP_409_CONFLICT)
+        payload = await _fresh_reconcile(
             session,
             context=context,
             row=row,
@@ -523,9 +564,9 @@ def build_uncertainties_router() -> APIRouter:
             require_history=False,
         )
         operator_id = _operator_id(context, body.operator_uuid)
-        evidence = _resolution_evidence(
-            body.evidence,
+        evidence = deterministic_resolution_evidence(
             reconcile_event_seq=body.reconcile_event_seq,
+            payload=payload,
         )
         event_seq = await _append_resolution(
             session,

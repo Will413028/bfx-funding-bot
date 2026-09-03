@@ -53,6 +53,11 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
 )
+from bfx_funding_bot.modules.execution.unknown_matching import (
+    attempt_from_row,
+    deterministic_resolution_evidence,
+    match_attempt_to_snapshot,
+)
 
 _SUBMIT_UNCERTAINTY_NAMESPACE = UUID("d158ef54-c1dd-54e4-a9e9-9a670c938f73")
 _ORPHAN_UNCERTAINTY_NAMESPACE = UUID("b1f89542-a63e-584a-b5bc-cd448ed74f3f")
@@ -683,6 +688,44 @@ class PostgresEventStore:
                 "uncertainty resolution reconcile fence is stale"
             )
         snapshot_payload = reconcile_event.payload
+        opening_event = await session.get(EventLogRow, uncertainty.opened_event_seq)
+        query_started_at_ms = (
+            snapshot_payload.get("query_started_at_ms")
+            if isinstance(snapshot_payload, dict)
+            else None
+        )
+        query_finished_at_ms = (
+            snapshot_payload.get("query_finished_at_ms")
+            if isinstance(snapshot_payload, dict)
+            else None
+        )
+        if (
+            opening_event is None
+            or opening_event.exchange_account_id != canonical
+            or opening_event.deployment_environment != self._env
+            or not isinstance(query_started_at_ms, int)
+            or isinstance(query_started_at_ms, bool)
+            or not isinstance(query_finished_at_ms, int)
+            or isinstance(query_finished_at_ms, bool)
+            or query_started_at_ms <= opening_event.occurred_at_ms
+            or query_finished_at_ms < query_started_at_ms
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution reconcile interval is stale"
+            )
+        latest_projected_snapshot_at = await session.scalar(
+            select(func.max(PositionStateRow.last_venue_snapshot_at)).where(
+                PositionStateRow.exchange_account_id == canonical,
+                PositionStateRow.deployment_environment == self._env,
+            )
+        )
+        if (
+            latest_projected_snapshot_at is not None
+            and query_finished_at_ms < latest_projected_snapshot_at
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution reconcile did not advance canonical state"
+            )
         coverage = (
             snapshot_payload.get("coverage")
             if isinstance(snapshot_payload, dict)
@@ -696,7 +739,50 @@ class PostgresEventStore:
                 "uncertainty resolution requires complete account reconcile coverage"
             )
 
+        if isinstance(event, (UncertaintyBoundToVenueOffer, UncertaintyMarkedNotAccepted)):
+            if uncertainty.kind != "submit_outcome_unknown" or uncertainty.attempt_id is None:
+                raise OfferClaimIdentityConflictError(
+                    "submit resolution requires an UNKNOWN linked attempt"
+                )
+            attempt_row = await session.scalar(
+                select(SubmissionAttemptRow).where(
+                    SubmissionAttemptRow.attempt_id == uncertainty.attempt_id,
+                    SubmissionAttemptRow.exchange_account_id == canonical,
+                    SubmissionAttemptRow.deployment_environment == self._env,
+                    SubmissionAttemptRow.symbol == event_obj.symbol,
+                    SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.UNKNOWN.value,
+                )
+            )
+            attempt = attempt_from_row(attempt_row) if attempt_row is not None else None
+            match = (
+                match_attempt_to_snapshot(attempt, snapshot_payload)
+                if attempt is not None and isinstance(snapshot_payload, dict)
+                else None
+            )
+        else:
+            match = None
+
         if isinstance(event, UncertaintyBoundToVenueOffer):
+            if (
+                match is None
+                or match.kind != "exact_match"
+                or match.offer is None
+                or match.offer.venue_offer_id != event.venue_offer_id
+                or match.offer.status != event.venue_status
+            ):
+                raise OfferClaimIdentityConflictError(
+                    "bind-to-venue requires one exact immutable candidate and status"
+                )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+                candidate_count=1,
+                venue_offer_id=event.venue_offer_id,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "bind-to-venue evidence does not match server observation"
+                )
             await self._apply_bound_uncertainty_resolution(
                 session,
                 event,
@@ -706,11 +792,10 @@ class PostgresEventStore:
                 event_seq=event_seq,
             )
         elif isinstance(event, UncertaintyMarkedNotAccepted):
-            evidence = dict(event.resolution_evidence)
-            candidate_count = evidence.get("candidate_count", evidence.get("candidateCount"))
             if event.kind != "submit_outcome_unknown" or (
                 event.candidate_count != 0
-                or candidate_count not in {None, 0}
+                or match is None
+                or match.kind != "zero_match"
             ):
                 raise OfferClaimIdentityConflictError(
                     "mark-not-accepted requires zero exact candidates"
@@ -719,10 +804,28 @@ class PostgresEventStore:
                 raise OfferClaimIdentityConflictError(
                     "mark-not-accepted requires complete offer-history coverage"
                 )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+                candidate_count=0,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "mark-not-accepted evidence does not match server observation"
+                )
         elif isinstance(event, UncertaintyManuallyResolved):
-            # Manual resolution still requires a fresh full-account fence above;
-            # its explicit reason/evidence are the operator's bounded proof.
-            pass
+            if event.kind not in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution is not valid for submit uncertainty"
+                )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution evidence does not match server observation"
+                )
         else:  # pragma: no cover - guarded by the caller's isinstance tuple
             raise TypeError("unsupported uncertainty resolution event")
 
@@ -1128,6 +1231,7 @@ class PostgresEventStore:
                 offer_state_row.amount_remaining = offer_observation.amount_remaining
                 offer_state_row.rate = offer_observation.rate
                 offer_state_row.period_days = offer_observation.period_days
+                offer_state_row.offer_type = offer_observation.offer_type
                 offer_state_row.status = offer_observation.status
                 offer_state_row.flags = dict(offer_observation.flags)
                 offer_state_row.mts_created = offer_observation.mts_created
@@ -1150,6 +1254,7 @@ class PostgresEventStore:
                 amount_remaining=offer_observation.amount_remaining,
                 rate=offer_observation.rate,
                 period_days=offer_observation.period_days,
+                offer_type=offer_observation.offer_type,
                 status=offer_observation.status,
                 flags=dict(offer_observation.flags),
                 mts_created=offer_observation.mts_created,

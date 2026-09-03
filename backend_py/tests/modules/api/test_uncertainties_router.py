@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationUnknown,
     SnapshotCoverage,
     VenueOfferObservation,
+    VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
@@ -101,6 +102,7 @@ def _attempt() -> SubmissionAttemptPayload:
             "amount": "100",
             "rate": "0.001",
             "period": 2,
+            "flags": 0,
         },
         started_at_ms=1000,
     )
@@ -110,15 +112,19 @@ def _snapshot(
     account_id: UUID,
     *,
     finished_at: int,
+    started_at: int | None = None,
     offers: tuple[VenueOfferObservation, ...] = (),
+    offer_history: tuple[VenueOfferObservation, ...] = (),
     history_complete: bool = True,
 ) -> VenueSnapshotObserved:
+    history_mts = [offer.mts_created for offer in offer_history]
     return VenueSnapshotObserved(
         account_id=str(account_id),
         environment="ci",
-        query_started_at_ms=finished_at - 10,
+        query_started_at_ms=finished_at - 10 if started_at is None else started_at,
         query_finished_at_ms=finished_at,
         offers=offers,
+        offer_history=offer_history,
         credits=(),
         wallet_available={"fUST": Decimal("500")},
         coverage=SnapshotCoverage(
@@ -128,12 +134,23 @@ def _snapshot(
             offer_history_complete=history_complete,
             offer_history_pages=1 if history_complete else 0,
             offer_history_start_ms=finished_at - 1000 if history_complete else None,
-            offer_history_end_ms=finished_at if history_complete else None,
+            offer_history_end_ms=(
+                finished_at - 10 if started_at is None else started_at
+            ) if history_complete else None,
+            offer_history_oldest_mts=min(history_mts) if history_mts else None,
+            offer_history_newest_mts=max(history_mts) if history_mts else None,
         ),
     )
 
 
-async def _append_snapshot(factory, *, finished_at: int, offers=()) -> int:
+async def _append_snapshot(
+    factory,
+    *,
+    finished_at: int,
+    started_at: int | None = None,
+    offers=(),
+    offer_history=(),
+) -> int:
     async with factory() as session:
         store = PostgresEventStore(deployment_environment="ci")
         await store.append_snapshot(
@@ -141,7 +158,9 @@ async def _append_snapshot(factory, *, finished_at: int, offers=()) -> int:
             _snapshot(
                 ACCOUNT_ID,
                 finished_at=finished_at,
+                started_at=started_at,
                 offers=offers,
+                offer_history=offer_history,
             ),
         )
         await session.commit()
@@ -155,6 +174,18 @@ async def _append_snapshot(factory, *, finished_at: int, offers=()) -> int:
             .order_by(EventLogRow.event_seq.desc())
             .limit(1)
         ) or 0
+
+
+async def _latest_resolution_payload(factory) -> dict[str, object]:
+    async with factory() as session:
+        row = await session.scalar(
+            select(EventLogRow)
+            .where(EventLogRow.event_type == "UNCERTAINTY_MARKED_NOT_ACCEPTED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert row is not None
+        return row.payload
 
 
 @pytest_asyncio.fixture
@@ -263,11 +294,87 @@ def test_mark_not_accepted_appends_resolution_event(uncertainty_app) -> None:
             "reconcileEventSeq": reconcile_seq,
             "operatorUuid": "operator-1",
             "reason": "complete history had zero exact candidates",
-            "evidence": {"candidateCount": 0},
+            "evidence": {"candidateCount": 999},
         },
     )
     assert response.status_code == 200, response.text
     assert response.json()["data"]["state"] == "resolved"
+    stored = asyncio.run(_latest_resolution_payload(factory))
+    assert stored["resolution_evidence"] == {
+        "reconcile_event_seq": reconcile_seq,
+        "query_started_at_ms": 1_990,
+        "query_finished_at_ms": 2_000,
+        "candidate_count": 0,
+    }
+
+
+def test_mark_not_accepted_recomputes_candidates_instead_of_trusting_request(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    matching = VenueOfferObservation(
+        venue_offer_id="venue-hidden-by-forged-count",
+        symbol="fUST",
+        amount_original=Decimal("100"),
+        amount_remaining=Decimal("0"),
+        rate=Decimal("0.001"),
+        period_days=2,
+        status="executed",
+        mts_created=1_500,
+        mts_updated=1_500,
+        offer_type="LIMIT",
+        flags={"raw": 0},
+    )
+    reconcile_seq = asyncio.run(
+        _append_snapshot(
+            factory,
+            finished_at=2_000,
+            offer_history=(matching,),
+        )
+    )
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "operatorUuid": "operator-1",
+            "reason": "forged zero",
+            "evidence": {"candidateCount": 0},
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "venue_offer_match_not_zero"
+
+
+def test_mark_not_accepted_fails_closed_for_legacy_offer_missing_type(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    legacy = VenueOfferObservation(
+        venue_offer_id="venue-legacy",
+        symbol="fUST",
+        amount_original=Decimal("100"),
+        amount_remaining=Decimal("0"),
+        rate=Decimal("0.001"),
+        period_days=2,
+        status="executed",
+        mts_created=1_500,
+        mts_updated=1_500,
+        offer_type=None,
+        flags={"raw": 0},
+    )
+    reconcile_seq = asyncio.run(
+        _append_snapshot(factory, finished_at=2_000, offer_history=(legacy,))
+    )
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
+        json={"reconcileEventSeq": reconcile_seq, "evidence": {"candidateCount": 0}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "venue_offer_match_not_zero"
 
 
 def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
@@ -280,8 +387,10 @@ def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
         rate=Decimal("0.001"),
         period_days=2,
         status="active",
-        mts_created=2_000,
-        mts_updated=2_000,
+        mts_created=1_500,
+        mts_updated=1_500,
+        offer_type="LIMIT",
+        flags={"raw": 0},
     )
     reconcile_seq = asyncio.run(
         _append_snapshot(factory, finished_at=2_000, offers=(offer,))
@@ -300,7 +409,101 @@ def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
     assert response.json()["data"]["state"] == "resolved"
 
 
-def test_manual_resolution_appends_resolution_event(uncertainty_app) -> None:
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("amount_original", Decimal("99")),
+        ("rate", Decimal("0.002")),
+        ("period_days", 30),
+        ("offer_type", "FRRDELTA"),
+        ("flags", {"raw": 1}),
+        ("mts_created", 999),
+    ],
+)
+def test_bind_requires_full_immutable_attempt_identity(
+    uncertainty_app,
+    changed_field: str,
+    changed_value: object,
+) -> None:
+    client, factory = uncertainty_app
+    values = {
+        "venue_offer_id": "venue-same-id",
+        "symbol": "fUST",
+        "amount_original": Decimal("100"),
+        "amount_remaining": Decimal("100"),
+        "rate": Decimal("0.001"),
+        "period_days": 2,
+        "status": "active",
+        "mts_created": 1_500,
+        "mts_updated": 1_500,
+        "offer_type": "LIMIT",
+        "flags": {"raw": 0},
+    }
+    values[changed_field] = changed_value
+    if changed_field == "amount_original":
+        values["amount_remaining"] = changed_value
+    offer = VenueOfferObservation(**values)  # type: ignore[arg-type]
+    reconcile_seq = asyncio.run(
+        _append_snapshot(factory, finished_at=2_000, offers=(offer,))
+    )
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/bind-to-venue",  # type: ignore[attr-defined]
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "venueOfferId": "venue-same-id",
+            "operatorUuid": "operator-1",
+            "evidence": {"candidateCount": 1},
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "venue_offer_match_not_exact"
+
+
+def test_bind_rejects_multiple_exact_candidates_even_when_requested_id_exists(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+
+    def offer(venue_offer_id: str) -> VenueOfferObservation:
+        return VenueOfferObservation(
+            venue_offer_id=venue_offer_id,
+            symbol="fUST",
+            amount_original=Decimal("100"),
+            amount_remaining=Decimal("100"),
+            rate=Decimal("0.001"),
+            period_days=2,
+            status="active",
+            mts_created=1_500,
+            mts_updated=1_500,
+            offer_type="LIMIT",
+            flags={"raw": 0},
+        )
+
+    reconcile_seq = asyncio.run(
+        _append_snapshot(
+            factory,
+            finished_at=2_000,
+            offers=(offer("venue-requested"), offer("venue-other")),
+        )
+    )
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/bind-to-venue",  # type: ignore[attr-defined]
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "venueOfferId": "venue-requested",
+            "operatorUuid": "operator-1",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "venue_offer_match_not_exact"
+
+
+def test_submit_unknown_cannot_use_manual_resolution_escape_hatch(
+    uncertainty_app,
+) -> None:
     client, factory = uncertainty_app
     reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
     response = client.post(
@@ -312,8 +515,118 @@ def test_manual_resolution_appends_resolution_event(uncertainty_app) -> None:
             "evidence": {"decision": "not_accepted"},
         },
     )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "resolution_action_not_supported"
+
+
+def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> None:
+    client, factory = uncertainty_app
+    orphan = VenueOfferObservation(
+        venue_offer_id="manual-venue-offer",
+        symbol="fUST",
+        amount_original=Decimal("25"),
+        amount_remaining=Decimal("25"),
+        rate=Decimal("0.001"),
+        period_days=2,
+        status="active",
+        mts_created=1_500,
+        mts_updated=1_500,
+        offer_type="LIMIT",
+        flags={"raw": 0},
+    )
+
+    async def seed_orphan() -> UUID:
+        async with factory() as session:
+            store = PostgresEventStore(deployment_environment="ci")
+            await store.append_snapshot(
+                session,
+                _snapshot(ACCOUNT_ID, finished_at=2_000, offers=(orphan,)),
+            )
+            await store.append(
+                session,
+                VenueOfferQuarantined(
+                    venue_offer_id=orphan.venue_offer_id,
+                    symbol=orphan.symbol,
+                    amount=orphan.amount_remaining,
+                    account_id=str(ACCOUNT_ID),
+                    observed_at_ms=2_001,
+                ),
+            )
+            await session.commit()
+        async with factory() as session:
+            value = await session.scalar(
+                select(ExecutionUncertaintyRow.uncertainty_id).where(
+                    ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
+                    ExecutionUncertaintyRow.state == "open",
+                )
+            )
+            assert value is not None
+            return value
+
+    orphan_uncertainty_id = asyncio.run(seed_orphan())
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=3_000, offers=(orphan,)))
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{orphan_uncertainty_id}/manual-resolution",
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "operatorUuid": "operator-1",
+            "reason": "operator accepted the manual venue offer",
+            "evidence": {"decision": "accept"},
+        },
+    )
+
     assert response.status_code == 200, response.text
     assert response.json()["data"]["state"] == "resolved"
+
+
+def test_resolution_rejects_snapshot_whose_query_overlaps_opening_event(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(
+        _append_snapshot(factory, started_at=1_100, finished_at=1_200)
+    )
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
+        json={"reconcileEventSeq": reconcile_seq, "evidence": {"candidateCount": 0}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale_reconcile_fence"
+
+
+def test_resolution_rejects_latest_appended_snapshot_older_than_projected_authority(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    asyncio.run(_append_snapshot(factory, finished_at=3_000))
+    delayed_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
+        json={"reconcileEventSeq": delayed_seq, "evidence": {"candidateCount": 0}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale_reconcile_fence"
+
+
+def test_resolution_evidence_rejects_unknown_secret_like_fields(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",  # type: ignore[attr-defined]
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "evidence": {"candidateCount": 0, "apiSecret": "must-not-persist"},
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_manual_resolution_requires_reason_and_operator_uuid(uncertainty_app) -> None:
