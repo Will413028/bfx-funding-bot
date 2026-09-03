@@ -12,10 +12,10 @@ import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, TypeGuard
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
@@ -33,6 +33,8 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
     OfferClaimRow,
     PositionStateRow,
+    ProjectionHeadRow,
+    ReconcileObservationRow,
     VenueCreditStateRow,
     VenueOfferStateRow,
 )
@@ -41,10 +43,45 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     AccountEventWriter,
 )
 from bfx_funding_bot.modules.execution.events import VenueOfferQuarantined
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import (
+    ExecutionUncertaintyRow,
+    SubmissionAttemptRow,
+)
 
 EXIT_SUCCESS = 0
 EXIT_VERIFICATION_FAILED = 3
+
+# This is deliberately a registry of implementations, rather than an
+# ``if version`` guard.  A replay report is only meaningful when the operator
+# selected a projector that this binary can actually run.
+_PROJECTOR_IMPLEMENTATIONS: dict[str, type[PostgresEventStore]] = {
+    DEFAULT_PROJECTOR_VERSION: PostgresEventStore,
+}
+
+# Keep temporary relation names static: they are SQL identifiers, never
+# operator input.  PostgreSQL temporary tables shadow only these runtime
+# projections on the isolated connection; the caller's session is untouched.
+_TEMPORARY_PROJECTION_MODELS: tuple[tuple[str, type[object]], ...] = (
+    ("offer_claims", OfferClaimRow),
+    ("position_state", PositionStateRow),
+    ("venue_offer_state", VenueOfferStateRow),
+    ("venue_credit_state", VenueCreditStateRow),
+    ("projection_heads", ProjectionHeadRow),
+    ("reconcile_observation", ReconcileObservationRow),
+    ("submission_attempts", SubmissionAttemptRow),
+    ("execution_uncertainties", ExecutionUncertaintyRow),
+)
+_TEMPORARY_TABLE_NAMES = (
+    "event_log",
+    *(name for name, _ in _TEMPORARY_PROJECTION_MODELS),
+)
+_PROJECTION_REPORT_TABLE_NAMES = tuple(
+    name for name, _ in _TEMPORARY_PROJECTION_MODELS
+)
+_REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_REPORT_TABLE_NAMES)
+_VOLATILE_PROJECTION_COLUMNS = frozenset({
+    "recorded_at", "updated_at", "opened_at", "resolved_at",
+})
 
 
 class ReplayVerificationError(ValueError):
@@ -61,7 +98,129 @@ class ReplayReport:
     row_counts: dict[str, int]
     content_hashes: dict[str, str]
     event_ids: tuple[UUID, ...]
-    diagnostic_row_counts: dict[str, int] | None = None
+    diagnostic_old_row_counts: dict[str, int] | None = None
+    diagnostic_old_content_hashes: dict[str, str] | None = None
+    diagnostic_diff: dict[str, dict[str, int | str | bool]] | None = None
+
+
+def _projector_implementation(projector_version: str) -> type[PostgresEventStore]:
+    try:
+        return _PROJECTOR_IMPLEMENTATIONS[projector_version]
+    except KeyError:
+        raise ReplayVerificationError(
+            f"unsupported projector version: {projector_version!r}"
+        ) from None
+
+
+def _canonical_value(value: object) -> object:
+    """Return a stable projection-hash value without serializing report data."""
+    if isinstance(value, UUID):
+        return str(value)
+    return value
+
+
+def _canonical_projection_row(row: object) -> dict[str, object]:
+    table = row.__table__  # type: ignore[attr-defined]  # SQLAlchemy mapped row.
+    return {
+        row.__mapper__.get_property_by_column(column).key: _canonical_value(  # type: ignore[attr-defined]
+            getattr(row, row.__mapper__.get_property_by_column(column).key)  # type: ignore[attr-defined]
+        )
+        for column in table.columns
+        if column.key not in _VOLATILE_PROJECTION_COLUMNS
+    }
+
+
+async def _projection_evidence(
+    session: AsyncSession, *, account_id: UUID, environment: str,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Hash scoped projection rows without retaining or reporting their contents."""
+    row_counts: dict[str, int] = {}
+    content_hashes: dict[str, str] = {}
+    for name, model in _TEMPORARY_PROJECTION_MODELS:
+        rows = list(await session.scalars(select(model).where(
+            model.exchange_account_id == account_id,  # type: ignore[attr-defined]
+            model.deployment_environment == environment,  # type: ignore[attr-defined]
+        )))
+        canonical_rows = sorted(
+            (_canonical_projection_row(row) for row in rows),
+            key=lambda value: projection_content_hash([value]),
+        )
+        row_counts[name] = len(canonical_rows)
+        content_hashes[name] = projection_content_hash(canonical_rows)
+    return row_counts, content_hashes
+
+
+async def _replay_into_empty_temporary_projection(
+    session: AsyncSession,
+    *,
+    rows: Sequence[EventLogRow],
+    account_id: UUID,
+    environment: str,
+    projector_version: str,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Run the production projector against an event-only temporary schema.
+
+    The connection has no access to runtime projection relations because its
+    temporary tables shadow them.  Only the caller's verified event rows are
+    copied into the temporary ``event_log`` before the normal deserializer and
+    ``rebuild_snapshot_from_log`` projector are invoked.
+    """
+    projector_type = _projector_implementation(projector_version)
+    source_connection = await session.connection()
+    async with (
+        source_connection.engine.connect() as connection,
+        connection.begin(),
+        AsyncSession(bind=connection, expire_on_commit=False) as replay_session,
+    ):
+        for table_name in _TEMPORARY_TABLE_NAMES:
+            await replay_session.execute(text(
+                "CREATE TEMPORARY TABLE "
+                f"{table_name} (LIKE {table_name} INCLUDING ALL) ON COMMIT DROP"
+            ))
+        if rows:
+            await replay_session.execute(
+                insert(EventLogRow),
+                [
+                    {
+                        column.key: getattr(row, column.key)
+                        for column in EventLogRow.__table__.columns
+                    }
+                    for row in rows
+                ],
+            )
+        await replay_session.flush()
+        await projector_type(deployment_environment=environment).rebuild_snapshot_from_log(
+            replay_session,
+            account_id=str(account_id),
+            deployment_environment=environment,
+        )
+        row_counts, content_hashes = await _projection_evidence(
+            replay_session, account_id=account_id, environment=environment,
+        )
+    return row_counts, content_hashes
+
+
+def _diagnostic_diff(
+    *,
+    old_row_counts: dict[str, int],
+    old_content_hashes: dict[str, str],
+    replayed_row_counts: dict[str, int],
+    replayed_content_hashes: dict[str, str],
+) -> dict[str, dict[str, int | str | bool]]:
+    """Produce bounded hash/count evidence; never return runtime row contents."""
+    return {
+        name: {
+            "old_count": old_row_counts[name],
+            "replayed_count": replayed_row_counts[name],
+            "old_hash": old_content_hashes[name],
+            "replayed_hash": replayed_content_hashes[name],
+            "matches": (
+                old_row_counts[name] == replayed_row_counts[name]
+                and old_content_hashes[name] == replayed_content_hashes[name]
+            ),
+        }
+        for name, _ in _TEMPORARY_PROJECTION_MODELS
+    }
 
 
 def replay_event_log(
@@ -81,6 +240,7 @@ def replay_event_log(
     """
     if not projector_version.strip():
         raise ReplayVerificationError("missing projector version")
+    _projector_implementation(projector_version)
     previous_seq: int | None = None
     event_ids: list[UUID] = []
     canonical_rows: list[dict[str, object]] = []
@@ -89,6 +249,8 @@ def replay_event_log(
             raise ReplayVerificationError("event stream scope mismatch")
         if row.event_seq is None:
             raise ReplayVerificationError("event stream has missing event sequence")
+        if row.event_seq <= 0:
+            raise ReplayVerificationError("event stream has non-positive event sequence")
         # ``event_seq`` is global, not account-local.  A scoped replay may
         # legitimately skip rows written by another account/environment; only
         # duplicate or decreasing rows prove that this supplied stream is not
@@ -125,37 +287,11 @@ def replay_event_log(
     )
 
 
-async def _diagnostic_projection_counts(
+async def _diagnostic_projection_evidence(
     session: AsyncSession, *, account_id: UUID, environment: str
-) -> dict[str, int]:
-    statements = {
-        "offer_claims": select(func.count()).select_from(OfferClaimRow).where(
-            OfferClaimRow.exchange_account_id == account_id,
-            OfferClaimRow.deployment_environment == environment,
-        ),
-        "position_state": select(func.count()).select_from(PositionStateRow).where(
-            PositionStateRow.exchange_account_id == account_id,
-            PositionStateRow.deployment_environment == environment,
-        ),
-        "venue_offer_state": select(func.count()).select_from(VenueOfferStateRow).where(
-            VenueOfferStateRow.exchange_account_id == account_id,
-            VenueOfferStateRow.deployment_environment == environment,
-        ),
-        "venue_credit_state": select(func.count()).select_from(VenueCreditStateRow).where(
-            VenueCreditStateRow.exchange_account_id == account_id,
-            VenueCreditStateRow.deployment_environment == environment,
-        ),
-        "execution_uncertainties": select(func.count())
-        .select_from(ExecutionUncertaintyRow)
-        .where(
-            ExecutionUncertaintyRow.exchange_account_id == account_id,
-            ExecutionUncertaintyRow.deployment_environment == environment,
-        ),
-    }
-    return {
-        name: int(await session.scalar(statement) or 0)
-        for name, statement in statements.items()
-    }
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Read the old runtime projection only after event replay succeeds."""
+    return await _projection_evidence(session, account_id=account_id, environment=environment)
 
 
 async def replay_one_account(
@@ -180,9 +316,117 @@ async def replay_one_account(
         rows, account_id=account_id, environment=environment,
         projector_version=projector_version, expected_event_hash=expected_event_hash,
     )
-    return ReplayReport(**{**asdict(report), "diagnostic_row_counts": await _diagnostic_projection_counts(
+    replayed_row_counts, replayed_content_hashes = await _replay_into_empty_temporary_projection(
+        session,
+        rows=rows,
+        account_id=account_id,
+        environment=environment,
+        projector_version=projector_version,
+    )
+    old_row_counts, old_content_hashes = await _diagnostic_projection_evidence(
         session, account_id=account_id, environment=environment,
-    )})
+    )
+    return ReplayReport(
+        **{
+            **asdict(report),
+            "row_counts": {"event_log": len(rows), **replayed_row_counts},
+            "content_hashes": {"event_log": report.event_hash, **replayed_content_hashes},
+            "diagnostic_old_row_counts": old_row_counts,
+            "diagnostic_old_content_hashes": old_content_hashes,
+            "diagnostic_diff": _diagnostic_diff(
+                old_row_counts=old_row_counts,
+                old_content_hashes=old_content_hashes,
+                replayed_row_counts=replayed_row_counts,
+                replayed_content_hashes=replayed_content_hashes,
+            ),
+        }
+    )
+
+
+def render_replay_report(report: ReplayReport) -> dict[str, object]:
+    """Return the bounded operator report, excluding identities and raw rows.
+
+    All emitted values are fixed-size identifiers, counts, hashes, and boolean
+    diff evidence.  Event payloads, old projection content, Authorization
+    headers, API secrets, and raw venue responses are never serialised here.
+    """
+    return {
+        "account_id": report.account_id,
+        "environment": report.environment,
+        "projector_version": report.projector_version,
+        "event_head": report.event_head,
+        "event_hash": report.event_hash,
+        "row_counts": _bounded_counts(report.row_counts, _REPORT_TABLE_NAMES),
+        "content_hashes": _bounded_hashes(report.content_hashes, _REPORT_TABLE_NAMES),
+        "diagnostic_old_row_counts": _bounded_counts(
+            report.diagnostic_old_row_counts or {}, _PROJECTION_REPORT_TABLE_NAMES,
+        ),
+        "diagnostic_old_content_hashes": _bounded_hashes(
+            report.diagnostic_old_content_hashes or {}, _PROJECTION_REPORT_TABLE_NAMES,
+        ),
+        "diagnostic_diff": _bounded_diffs(report.diagnostic_diff or {}),
+    }
+
+
+def _bounded_counts(values: dict[str, int], names: tuple[str, ...]) -> dict[str, int]:
+    """Keep only known tables and non-negative integer counts in operator output."""
+    return {
+        name: value
+        for name in names
+        if isinstance(value := values.get(name), int) and value >= 0
+    }
+
+
+def _is_sha256(value: object) -> TypeGuard[str]:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _bounded_hashes(values: dict[str, str], names: tuple[str, ...]) -> dict[str, str]:
+    """Keep fixed-width hashes only; never promote arbitrary diagnostic data."""
+    bounded: dict[str, str] = {}
+    for name in names:
+        value = values.get(name)
+        if _is_sha256(value):
+            bounded[name] = value
+    return bounded
+
+
+def _bounded_diffs(
+    values: dict[str, dict[str, int | str | bool]],
+) -> dict[str, dict[str, int | str | bool]]:
+    """Whitelist diff fields so malformed reports cannot smuggle raw responses."""
+    bounded: dict[str, dict[str, int | str | bool]] = {}
+    for name in _PROJECTION_REPORT_TABLE_NAMES:
+        value = values.get(name)
+        if value is None:
+            continue
+        old_count = value.get("old_count")
+        replayed_count = value.get("replayed_count")
+        old_hash = value.get("old_hash")
+        replayed_hash = value.get("replayed_hash")
+        matches = value.get("matches")
+        if not (
+            isinstance(old_count, int)
+            and old_count >= 0
+            and isinstance(replayed_count, int)
+            and replayed_count >= 0
+            and _is_sha256(old_hash)
+            and _is_sha256(replayed_hash)
+            and isinstance(matches, bool)
+        ):
+            continue
+        bounded[name] = {
+            "old_count": old_count,
+            "replayed_count": replayed_count,
+            "old_hash": old_hash,
+            "replayed_hash": replayed_hash,
+            "matches": matches,
+        }
+    return bounded
 
 
 async def convert_pending_to_unknown(
@@ -267,7 +511,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 factory, account_id=account_id, environment=args.environment, now_ms=args.now_ms,
             )}
         async with factory() as session:
-            return asdict(await replay_one_account(
+            return render_replay_report(await replay_one_account(
                 session, account_id=account_id, environment=args.environment,
                 projector_version=args.projector_version,
                 expected_event_hash=args.expected_event_hash,
