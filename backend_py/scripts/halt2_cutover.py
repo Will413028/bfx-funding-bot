@@ -1,0 +1,311 @@
+"""Read-only Halt 2 evidence preflight and explicit durable-halt command.
+
+Run from ``backend_py/``.  ``preflight`` is the default and never writes to
+the database or a venue.  Mutating cutover actions remain explicit operator
+commands owned by later Halt 2 tasks; this command only appends a halt when
+``assert-halt`` is selected.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bfx_funding_bot.core.db import make_engine, make_session_factory
+from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+
+EXIT_SUCCESS = 0
+EXIT_PRECONDITION_FAILED = 2
+EXIT_VERIFICATION_FAILED = 3
+
+_LEGACY_ENVIRONMENT_VARIABLES = ("BFX_ACCOUNT_ID",)
+
+
+@dataclass(frozen=True, slots=True)
+class Halt2Evidence:
+    exchange_account_id: str
+    deployment_environment: str
+    backup_evidence_hash: str
+    isolated_restore_evidence_hash: str
+    event_head: int | None
+    event_hash: str
+    config_digest: str
+    image_digest: str
+    projector_version: str
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> Halt2Evidence:
+        required = tuple(field for field in cls.__dataclass_fields__)
+        missing = tuple(name for name in required if name not in value)
+        if missing:
+            raise ValueError("evidence missing: " + ", ".join(missing))
+        return cls(**{name: value[name] for name in required})  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightReport:
+    exchange_account_id: str
+    deployment_environment: str
+    migration_head: str | None
+    schema_heads: tuple[str, ...]
+    backup_evidence_hash: str
+    isolated_restore_evidence_hash: str
+    event_count: int
+    event_head: int | None
+    event_hash: str
+    open_uncertainty_count: int
+    venue_snapshot_fence: int | None
+    config_digest: str
+    image_digest: str
+    persistent_halt: bool
+    stop_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightResult:
+    exit_code: int
+    stop_reasons: tuple[str, ...]
+    report: PreflightReport
+
+
+def _validated_uuid(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValueError("exchange_account_id must be a UUID") from exc
+
+
+def _legacy_reasons(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return tuple(
+        f"legacy_environment_variable:{name}"
+        for name in _LEGACY_ENVIRONMENT_VARIABLES
+        if environ.get(name, "").strip()
+    )
+
+
+def verify_preflight(
+    report: PreflightReport,
+    evidence: Halt2Evidence | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    mutation_probe: Callable[[str], None] | None = None,
+) -> PreflightResult:
+    """Compare immutable evidence with one freshly read report without writes."""
+    del mutation_probe  # Deliberately unused: read-only preflight has no write hook.
+    env = os.environ if environ is None else environ
+    reasons = list(_legacy_reasons(env))
+    if evidence is None:
+        reasons.append("missing_evidence")
+    else:
+        if evidence.exchange_account_id != report.exchange_account_id:
+            reasons.append("exchange_account_id_mismatch")
+        if evidence.deployment_environment != report.deployment_environment:
+            reasons.append("deployment_environment_mismatch")
+        if evidence.backup_evidence_hash != report.backup_evidence_hash:
+            reasons.append("backup_evidence_hash_mismatch")
+        if evidence.isolated_restore_evidence_hash != report.isolated_restore_evidence_hash:
+            reasons.append("isolated_restore_evidence_hash_mismatch")
+        if evidence.event_head != report.event_head:
+            reasons.append("event_head_mismatch")
+        if evidence.event_hash != report.event_hash:
+            reasons.append("event_hash_mismatch")
+        if evidence.config_digest != report.config_digest:
+            reasons.append("config_digest_mismatch")
+        if evidence.image_digest != report.image_digest:
+            reasons.append("image_digest_mismatch")
+        if not evidence.projector_version.strip():
+            reasons.append("missing_projector_version")
+    if report.open_uncertainty_count:
+        reasons.append("open_execution_uncertainty")
+    if not report.persistent_halt:
+        reasons.append("persistent_halt_absent")
+    final_report = replace(report, stop_reasons=tuple(sorted(set(reasons))))
+    return PreflightResult(
+        exit_code=EXIT_SUCCESS if not final_report.stop_reasons else EXIT_PRECONDITION_FAILED,
+        stop_reasons=final_report.stop_reasons,
+        report=final_report,
+    )
+
+
+async def collect_preflight_report(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    environment: str,
+    evidence: Halt2Evidence,
+) -> PreflightReport:
+    """Collect parameterized, account-local observations without mutation."""
+    rows = list(
+        await session.scalars(
+            select(EventLogRow)
+            .where(
+                EventLogRow.exchange_account_id == account_id,
+                EventLogRow.deployment_environment == environment,
+            )
+            .order_by(EventLogRow.event_seq.asc())
+        )
+    )
+    event_payload = [
+        {
+            "event_seq": row.event_seq,
+            "event_id": str(row.event_id) if row.event_id else None,
+            "schema_version": row.schema_version,
+            "event_type": row.event_type,
+            "cid": row.cid,
+            "venue_offer_id": row.venue_offer_id,
+            "venue_seq": row.venue_seq,
+            "payload": row.payload,
+            "occurred_at_ms": row.occurred_at_ms,
+        }
+        for row in rows
+    ]
+    event_hash = hashlib.sha256(
+        json.dumps(event_payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+    open_uncertainty_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ExecutionUncertaintyRow)
+            .where(
+                ExecutionUncertaintyRow.exchange_account_id == account_id,
+                ExecutionUncertaintyRow.deployment_environment == environment,
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        or 0
+    )
+    venue_snapshot_fence = await session.scalar(
+        select(func.max(EventLogRow.event_seq)).where(
+            EventLogRow.exchange_account_id == account_id,
+            EventLogRow.deployment_environment == environment,
+            EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+        )
+    )
+    halted = await session.scalar(
+        select(TradingHaltRow.halted)
+        .where(
+            TradingHaltRow.exchange_account_id == account_id,
+            TradingHaltRow.deployment_environment == environment,
+        )
+        .order_by(TradingHaltRow.id.desc())
+        .limit(1)
+    )
+    schema_heads = tuple(
+        sorted(str(value) for value in (await session.scalars(text("SELECT version_num FROM alembic_version"))))
+    )
+    return PreflightReport(
+        exchange_account_id=str(account_id),
+        deployment_environment=environment,
+        migration_head=_migration_head(),
+        schema_heads=schema_heads,
+        backup_evidence_hash=evidence.backup_evidence_hash,
+        isolated_restore_evidence_hash=evidence.isolated_restore_evidence_hash,
+        event_count=len(rows),
+        event_head=rows[-1].event_seq if rows else None,
+        event_hash=event_hash,
+        open_uncertainty_count=open_uncertainty_count,
+        venue_snapshot_fence=venue_snapshot_fence,
+        config_digest=evidence.config_digest,
+        image_digest=evidence.image_digest,
+        persistent_halt=halted is True,
+        stop_reasons=(),
+    )
+
+
+def _migration_head() -> str | None:
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    heads = ScriptDirectory.from_config(config).get_heads()
+    return ",".join(sorted(heads)) if heads else None
+
+
+def _load_evidence(path: Path) -> Halt2Evidence:
+    with path.open(encoding="utf-8") as handle:
+        raw: Any = json.load(handle)
+    if not isinstance(raw, dict):
+        raise ValueError("evidence must be a JSON object")
+    return Halt2Evidence.from_dict(raw)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", default="preflight", choices=(
+        "preflight", "assert-halt", "replay", "convert-pending", "quarantine", "verify", "release-report",
+    ))
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--environment", required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--operator-id")
+    parser.add_argument("--reason", default="halt2 preflight gate")
+    return parser
+
+
+async def _run(args: argparse.Namespace) -> PreflightResult:
+    account_id = _validated_uuid(args.account_id)
+    evidence = _load_evidence(args.evidence)
+    if evidence.exchange_account_id != str(account_id):
+        raise ValueError("evidence exchange_account_id does not match --account-id")
+    if evidence.deployment_environment != args.environment:
+        raise ValueError("evidence deployment_environment does not match --environment")
+    settings = Settings()
+    engine = make_engine(settings)
+    factory = make_session_factory(engine)
+    try:
+        if args.command == "assert-halt":
+            if not args.operator_id:
+                raise ValueError("assert-halt requires --operator-id")
+            state = await HaltStateStore(
+                factory, account_id=str(account_id), deployment_environment=args.environment
+            ).set_halted(True, reason=args.reason, actor=args.operator_id)
+            report = PreflightReport(
+                exchange_account_id=str(account_id), deployment_environment=args.environment,
+                migration_head=_migration_head(), schema_heads=(),
+                backup_evidence_hash=evidence.backup_evidence_hash,
+                isolated_restore_evidence_hash=evidence.isolated_restore_evidence_hash,
+                event_count=0, event_head=None, event_hash="", open_uncertainty_count=0,
+                venue_snapshot_fence=None, config_digest=evidence.config_digest,
+                image_digest=evidence.image_digest, persistent_halt=state.halted, stop_reasons=(),
+            )
+            return PreflightResult(EXIT_SUCCESS, (), report)
+        if args.command in {"convert-pending", "quarantine"}:
+            raise ValueError(f"{args.command} is an explicit later-task operator command")
+        async with factory() as session:
+            report = await collect_preflight_report(
+                session, account_id=account_id, environment=args.environment, evidence=evidence
+            )
+        return verify_preflight(report, evidence)
+    finally:
+        await engine.dispose()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        result = asyncio.run(_run(args))
+    except ValueError as exc:
+        print(json.dumps({"stop_reasons": [str(exc)]}, sort_keys=True))
+        return EXIT_PRECONDITION_FAILED
+    except Exception:
+        print(json.dumps({"stop_reasons": ["verification_unavailable"]}, sort_keys=True))
+        return EXIT_VERIFICATION_FAILED
+    print(json.dumps(asdict(result.report), sort_keys=True))
+    return result.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
