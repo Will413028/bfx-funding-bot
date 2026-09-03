@@ -24,7 +24,7 @@ chmod 600 .env.runtime
 # Preflight: required vars present.
 need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY BFX_EXCHANGE_ACCOUNT_ID BFX_VAULT_KEK"
 need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
-req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary BFX_PROJECTOR_VERSION BFX_HALT2_EVIDENCE_REPORT"
+req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary BFX_PROJECTOR_VERSION BFX_HALT2_EVIDENCE_REPORT BFX_EXPECTED_IMAGE_DIGEST"
 for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
 done
@@ -147,7 +147,7 @@ if [ "$PHASE" = canary ]; then
   }
   DEPLOYMENT_ENV=$(grep '^BFX_DEPLOYMENT_ENV=' .env.runtime | tail -1 | cut -d= -f2-)
   PROJECTOR_VERSION=$(grep '^BFX_PROJECTOR_VERSION=' .env.runtime | tail -1 | cut -d= -f2-)
-  IMAGE_DIGEST=$(git rev-parse HEAD)
+  EXPECTED_IMAGE_DIGEST=$(grep '^BFX_EXPECTED_IMAGE_DIGEST=' .env.runtime | tail -1 | cut -d= -f2-)
   (
     cd backend_py
     uv run python scripts/halt2_cutover.py preflight \
@@ -155,7 +155,7 @@ if [ "$PHASE" = canary ]; then
       --environment "$DEPLOYMENT_ENV" \
       --evidence "$EVIDENCE_REPORT" \
       --projector-version "$PROJECTOR_VERSION" \
-      --image-digest "$IMAGE_DIGEST" \
+      --image-digest "$EXPECTED_IMAGE_DIGEST" \
       --config-artifact "$ROOT/$SAFETY_HOST"
   ) || {
     echo "ERROR: Halt 2 preflight failed; deployment remains stopped"
@@ -165,6 +165,16 @@ fi
 
 export GIT_SHA="$(git rev-parse --short HEAD)"
 docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA="$GIT_SHA"
+if [ "$PHASE" = canary ]; then
+  ACTUAL_IMAGE_DIGEST=$(docker image inspect --format='{{.Id}}' bfx-bot:local) || {
+    echo "ERROR: unable to inspect built bfx-bot:local image digest"
+    exit 1
+  }
+  [ "$ACTUAL_IMAGE_DIGEST" = "$EXPECTED_IMAGE_DIGEST" ] || {
+    echo "ERROR: built bfx-bot:local image digest mismatch"
+    exit 1
+  }
+fi
 docker compose -f docker-compose.bot.yml up -d --remove-orphans
 echo "deployed phase=$PHASE sha=$GIT_SHA"
 docker compose -f docker-compose.bot.yml ps

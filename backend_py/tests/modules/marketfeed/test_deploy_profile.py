@@ -83,6 +83,7 @@ def _deploy_root(tmp_path: Path) -> Path:
     (home / "bot.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
         "BFX_EXCHANGE_ACCOUNT_ID=550e8400-e29b-41d4-a716-446655440000\n"
+        "BFX_EXPECTED_IMAGE_DIGEST=sha256:expected\n"
         "BFX_VAULT_KEK=safe-fake\n"
     )
     (home / "webapi.env").write_text(
@@ -117,7 +118,8 @@ def _deploy_root(tmp_path: Path) -> Path:
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
+        "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
+        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_DIGEST:-sha256:expected}\"; fi\n",
     )
     _write_executable(
         fake_bin / "uv",
@@ -126,13 +128,16 @@ def _deploy_root(tmp_path: Path) -> Path:
     return root
 
 
-def _run_deploy(root: Path, phase: str, *, confirm: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_deploy(
+    root: Path, phase: str, *, confirm: bool = False, image_digest: str = "sha256:expected"
+) -> subprocess.CompletedProcess[str]:
     fake_bin = root.parent / "fake-bin"
     environment = os.environ | {
         "HOME": str(root.parent / "home"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(root / "fake-docker.log"),
         "FAKE_UV_LOG": str(root / "fake-uv.log"),
+        "FAKE_IMAGE_DIGEST": image_digest,
     }
     if confirm:
         environment["BFX_CANARY_CONFIRM"] = "yes"
@@ -305,19 +310,30 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
         "--projector-version",
         "halt2-v1",
         "--image-digest",
-        "safe-test-sha",
+        "sha256:expected",
         "--config-artifact",
         str(root / "backend_py/configs/safety.canary.yaml"),
     ]
-    assert len((root / "fake-docker.log").read_text().splitlines()) == 3
+    assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        "image inspect --format={{.Id}} bfx-bot:local",
+        "compose -f docker-compose.bot.yml up -d --remove-orphans",
+        "compose -f docker-compose.bot.yml ps",
+    ]
 
 
-@pytest.mark.parametrize("field", ["BFX_PROJECTOR_VERSION", "BFX_HALT2_EVIDENCE_REPORT"])
+@pytest.mark.parametrize(
+    "field", ["BFX_PROJECTOR_VERSION", "BFX_HALT2_EVIDENCE_REPORT", "BFX_EXPECTED_IMAGE_DIGEST"]
+)
 def test_canary_rejects_missing_halt2_runtime_gate_before_docker(tmp_path: Path, field: str) -> None:
     root = _deploy_root(tmp_path)
-    profile = root / "deploy/vm/canary.env"
-    profile.write_text(
-        "\n".join(line for line in profile.read_text().splitlines() if not line.startswith(field + "="))
+    target = (
+        root.parent / "home/bfx/bot.env"
+        if field == "BFX_EXPECTED_IMAGE_DIGEST"
+        else root / "deploy/vm/canary.env"
+    )
+    target.write_text(
+        "\n".join(line for line in target.read_text().splitlines() if not line.startswith(field + "="))
         + "\n"
     )
 
@@ -354,6 +370,19 @@ def test_canary_preflight_failure_blocks_docker(tmp_path: Path) -> None:
     assert "Halt 2 preflight failed" in result.stdout
     assert (root / "fake-uv.log").exists()
     assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_built_image_digest_mismatch_blocks_up(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+
+    result = _run_deploy(root, "canary", confirm=True, image_digest="sha256:wrong")
+
+    assert result.returncode != 0
+    assert "built bfx-bot:local image digest mismatch" in result.stdout
+    assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        "image inspect --format={{.Id}} bfx-bot:local",
+    ]
 
 
 @pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])
