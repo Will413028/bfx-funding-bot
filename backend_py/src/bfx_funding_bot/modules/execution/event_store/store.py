@@ -37,6 +37,8 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 from bfx_funding_bot.modules.execution.events import (
     __SCHEMA_VERSION__,
     DEFAULT_RECONCILE_SYMBOL,
+    SubmitMatchedToVenueOffer,
+    VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
@@ -50,6 +52,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 )
 
 _SUBMIT_UNCERTAINTY_NAMESPACE = UUID("d158ef54-c1dd-54e4-a9e9-9a670c938f73")
+_ORPHAN_UNCERTAINTY_NAMESPACE = UUID("b1f89542-a63e-584a-b5bc-cd448ed74f3f")
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +298,14 @@ class PostgresEventStore:
                 event_seq=event_seq,
             )
             return
+        if isinstance(event, VenueOfferQuarantined):
+            await self._project_orphan_uncertainty(
+                session,
+                event,
+                account_id=account_id,
+                event_seq=event_seq,
+            )
+            return
         if etype in _AUDIT_ONLY_TYPES:
             return
         event_obj: Any = cast(Any, event)
@@ -307,7 +318,7 @@ class PostgresEventStore:
         projection_changed = await self._project_offer_claims(
             session, event, account_id, event_seq=event_seq
         )
-        if projection_changed:
+        if projection_changed and not isinstance(event, SubmitMatchedToVenueOffer):
             await self._project_position_state(
                 session,
                 etype,
@@ -319,6 +330,13 @@ class PostgresEventStore:
             )
         if etype == "SUBMIT_OUTCOME_UNKNOWN":
             await self._project_submit_uncertainty(
+                session,
+                event,
+                account_id=account_id,
+                event_seq=event_seq,
+            )
+        elif isinstance(event, SubmitMatchedToVenueOffer):
+            await self._project_submit_match(
                 session,
                 event,
                 account_id=account_id,
@@ -346,6 +364,7 @@ class PostgresEventStore:
             "RESERVATION_CLAIMED",
             "RESERVATION_FAILED",
             "SUBMIT_OUTCOME_UNKNOWN",
+            "SUBMIT_MATCHED_TO_VENUE_OFFER",
         }:
             return
         canonical = account_id_uuid_or_none(account_id)
@@ -443,12 +462,18 @@ class PostgresEventStore:
             or attempt_row.cid != event_obj.cid
         ):
             raise OfferClaimIdentityConflictError("submit outcome attempt scope conflicts")
-        if attempt_row.outcome_kind is not None:
+        if (
+            attempt_row.outcome_kind is not None
+            and not (
+                etype == "SUBMIT_MATCHED_TO_VENUE_OFFER"
+                and attempt_row.outcome_kind == SubmitOutcomeKind.UNKNOWN.value
+            )
+        ):
             raise OfferClaimIdentityConflictError(
                 "submission attempt already has a typed outcome"
             )
 
-        if etype == "RESERVATION_CLAIMED":
+        if etype in {"RESERVATION_CLAIMED", "SUBMIT_MATCHED_TO_VENUE_OFFER"}:
             outcome_kind = SubmitOutcomeKind.ACKNOWLEDGED
             outcome_reason = None
             venue_offer_id = event_obj.venue_offer_id
@@ -470,6 +495,209 @@ class PostgresEventStore:
         attempt_row.outcome_reason = outcome_reason
         attempt_row.venue_offer_id = venue_offer_id
         attempt_row.last_event_seq = event_seq
+        await session.flush()
+
+    async def _project_submit_match(
+        self,
+        session: AsyncSession,
+        event: SubmitMatchedToVenueOffer,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Resolve one UNKNOWN only from the fresh snapshot named by the event."""
+        canonical = account_id_uuid_or_none(account_id)
+        if canonical is None:
+            raise OfferClaimIdentityConflictError("submit match requires canonical account")
+        reference = event.reservation_ref
+        assert reference is not None
+        reconcile_event = await session.scalar(
+            select(EventLogRow).where(
+                EventLogRow.event_seq == event.reconcile_event_seq,
+                EventLogRow.exchange_account_id == canonical,
+                EventLogRow.deployment_environment == self._env,
+                EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+            )
+        )
+        if reconcile_event is None or event.reconcile_event_seq >= event_seq:
+            raise OfferClaimIdentityConflictError("submit match requires fresh reconcile evidence")
+        attempt = await session.scalar(
+            select(SubmissionAttemptRow).where(
+                SubmissionAttemptRow.execution_decision_id
+                == reference.execution_decision_id,
+                SubmissionAttemptRow.exchange_account_id == canonical,
+                SubmissionAttemptRow.deployment_environment == self._env,
+                SubmissionAttemptRow.symbol == event.symbol,
+            )
+        )
+        if attempt is None or attempt.outcome_kind != SubmitOutcomeKind.ACKNOWLEDGED.value:
+            raise OfferClaimIdentityConflictError("submit match has no resolved attempt")
+        uncertainty = await session.scalar(
+            select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.exchange_account_id == canonical,
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == event.symbol,
+                ExecutionUncertaintyRow.kind == "submit_outcome_unknown",
+                ExecutionUncertaintyRow.attempt_id == attempt.attempt_id,
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        if uncertainty is None:
+            raise OfferClaimIdentityConflictError("submit match has no open uncertainty")
+        position = await session.scalar(
+            select(PositionStateRow).where(
+                PositionStateRow.exchange_account_id == canonical,
+                PositionStateRow.deployment_environment == self._env,
+                PositionStateRow.symbol == event.symbol,
+            )
+        )
+        if position is None or Decimal(str(position.uncertain_amount)) < uncertainty.intended_amount:
+            raise OfferClaimIdentityConflictError("submit uncertainty projection is inconsistent")
+        position.uncertain_amount = Decimal(str(position.uncertain_amount)) - uncertainty.intended_amount
+        position.last_event_seq = max(position.last_event_seq, event_seq)
+
+        venue_offer = await session.scalar(
+            select(VenueOfferStateRow).where(
+                VenueOfferStateRow.exchange_account_id == canonical,
+                VenueOfferStateRow.deployment_environment == self._env,
+                VenueOfferStateRow.venue_offer_id == event.venue_offer_id,
+                VenueOfferStateRow.symbol == event.symbol,
+            )
+        )
+        if venue_offer is None:
+            raise OfferClaimIdentityConflictError("matched venue offer is absent from reconcile")
+        if venue_offer.cid not in {None, event.cid}:
+            raise OfferClaimIdentityConflictError("matched venue offer has conflicting cid")
+        if venue_offer.execution_decision_id not in {
+            None,
+            reference.execution_decision_id,
+        }:
+            raise OfferClaimIdentityConflictError("matched venue offer has conflicting decision")
+        venue_offer.cid = event.cid
+        venue_offer.execution_decision_id = reference.execution_decision_id
+        venue_offer.signal_correlation_id = str(event.signal_correlation_id)
+        venue_offer.last_seen_event_seq = max(venue_offer.last_seen_event_seq, event_seq)
+
+        resolution_row = await session.scalar(
+            select(EventLogRow).where(EventLogRow.event_seq == event_seq)
+        )
+        assert resolution_row is not None
+        uncertainty.state = "resolved"
+        uncertainty.reconcile_event_seq = event.reconcile_event_seq
+        uncertainty.resolved_event_seq = event_seq
+        uncertainty.resolved_by_operator_id = "system:reconcile"
+        uncertainty.resolution_reason = "exact_venue_offer_match"
+        uncertainty.resolution_evidence = {
+            "venue_offer_id": event.venue_offer_id,
+            "venue_status": event.venue_status,
+            "matched_mts_created": event.matched_mts_created,
+        }
+        uncertainty.resolved_at = resolution_row.recorded_at
+        await session.flush()
+
+    async def _project_orphan_uncertainty(
+        self,
+        session: AsyncSession,
+        event: VenueOfferQuarantined,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Count an unattributed active offer without manufacturing provenance."""
+        canonical = account_id_uuid_or_none(account_id)
+        if canonical is None:
+            raise OfferClaimIdentityConflictError("orphan quarantine requires canonical account")
+        venue_offer = await session.scalar(
+            select(VenueOfferStateRow).where(
+                VenueOfferStateRow.exchange_account_id == canonical,
+                VenueOfferStateRow.deployment_environment == self._env,
+                VenueOfferStateRow.venue_offer_id == event.venue_offer_id,
+                VenueOfferStateRow.symbol == event.symbol,
+            )
+        )
+        if venue_offer is None:
+            registered = await session.scalar(
+                select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+            )
+            if registered is not None:
+                raise OfferClaimIdentityConflictError(
+                    "orphan quarantine requires a prior snapshot venue observation"
+                )
+            # Explicit legacy compatibility: pre-registry synthetic fixtures may
+            # replay their event-only breadcrumb, but a production account cannot.
+            return
+        if any(
+            value is not None
+            for value in (
+                venue_offer.cid,
+                venue_offer.execution_decision_id,
+                venue_offer.signal_correlation_id,
+            )
+        ):
+            raise OfferClaimIdentityConflictError("attributed venue offer cannot be quarantined")
+        position = await session.scalar(
+            select(PositionStateRow).where(
+                PositionStateRow.exchange_account_id == canonical,
+                PositionStateRow.deployment_environment == self._env,
+                PositionStateRow.symbol == event.symbol,
+            )
+        )
+        if position is None:
+            raise OfferClaimIdentityConflictError("orphan quarantine requires position state")
+        correlation = f"venue_offer:{event.venue_offer_id}"
+        existing = await session.scalar(
+            select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.exchange_account_id == canonical,
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == event.symbol,
+                ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
+                ExecutionUncertaintyRow.correlation_key == correlation,
+            )
+        )
+        if existing is not None:
+            return
+        amount = Decimal(str(event.amount))
+        position.uncertain_amount = Decimal(str(position.uncertain_amount)) + amount
+        position.last_event_seq = max(position.last_event_seq, event_seq)
+        open_scope = await session.scalar(
+            select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.exchange_account_id == canonical,
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == event.symbol,
+                ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        if open_scope is not None:
+            evidence = dict(open_scope.evidence)
+            venue_offer_ids = list(evidence.get("venue_offer_ids", []))
+            if not venue_offer_ids and open_scope.venue_offer_id is not None:
+                venue_offer_ids.append(open_scope.venue_offer_id)
+            if event.venue_offer_id not in venue_offer_ids:
+                venue_offer_ids.append(event.venue_offer_id)
+            evidence["venue_offer_ids"] = venue_offer_ids
+            open_scope.evidence = evidence
+            open_scope.intended_amount = Decimal(str(open_scope.intended_amount)) + amount
+            await session.flush()
+            return
+        session.add(ExecutionUncertaintyRow(
+            uncertainty_id=uuid5(_ORPHAN_UNCERTAINTY_NAMESPACE, str(event.event_id)),
+            exchange_account_id=canonical,
+            deployment_environment=self._env,
+            symbol=event.symbol,
+            kind="unattributed_venue_offer",
+            correlation_key=correlation,
+            intended_amount=amount,
+            evidence={
+                "venue_offer_id": event.venue_offer_id,
+                "venue_offer_ids": [event.venue_offer_id],
+                "reason": event.reason,
+                "observed_at_ms": event.observed_at_ms,
+            },
+            attempt_id=None,
+            venue_offer_id=event.venue_offer_id,
+            opened_event_seq=event_seq,
+        ))
         await session.flush()
 
     async def _project_submit_uncertainty(
@@ -620,7 +848,15 @@ class PostgresEventStore:
         # Entity projections are keyed by venue identity.  A terminal venue
         # object can never be reopened by a later active observation, and a
         # stale venue timestamp cannot overwrite a newer object state.
-        for offer_observation in event.offers:
+        all_offer_observations = {
+            offer.venue_offer_id: offer
+            for offer in event.offer_history
+            if is_terminal_offer_status(offer.status)
+        }
+        all_offer_observations.update({
+            offer.venue_offer_id: offer for offer in event.offers
+        })
+        for offer_observation in all_offer_observations.values():
             offer_state_row = (
                 await session.execute(
                     select(VenueOfferStateRow).where(
@@ -930,7 +1166,15 @@ class PostgresEventStore:
         row is upserted in place (PENDING -> CLAIMED -> RELEASED/FAILED).
         """
         etype = event_type_of(event)
-        state = _CLAIM_STATE_BY_TYPE.get(etype)
+        state: RegistryState | None
+        if isinstance(event, SubmitMatchedToVenueOffer):
+            state = (
+                RegistryState.RELEASED
+                if is_terminal_offer_status(event.venue_status)
+                else RegistryState.CLAIMED
+            )
+        else:
+            state = _CLAIM_STATE_BY_TYPE.get(etype)
         if state is None:
             return False  # audit-only events (e.g. cancel) are not claim-bearing
         _ev: Any = cast(Any, event)
