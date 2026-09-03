@@ -5,6 +5,8 @@ diagnostic comparison target, never an input to the rebuilt result.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -14,14 +16,20 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.event_store.entities import VenueOfferObservation
 from bfx_funding_bot.modules.execution.event_store.projector import derive_v2_event_id
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, VenueOfferStateRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    PositionStateRow,
+    VenueOfferStateRow,
+)
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from scripts.verify_projection_replay import (
     ReplayVerificationError,
     convert_pending_to_unknown,
     quarantine_orphans_after_replay,
+    render_replay_report,
     replay_event_log,
+    replay_one_account,
 )
 from tests.integration.test_orphan_quarantine_pg import _ACCOUNT as _ORPHAN_ACCOUNT
 from tests.integration.test_orphan_quarantine_pg import _offer as _orphan_offer
@@ -64,9 +72,68 @@ def test_empty_projection_replay_has_stable_hash_and_ignores_old_projection() ->
     first = replay_event_log(rows, account_id=_ACCOUNT, environment=_ENV)
     second = replay_event_log(rows, account_id=_ACCOUNT, environment=_ENV)
 
-    assert first.row_counts == {"event_log": 2}
+    assert first.row_counts["event_log"] == 2
     assert first.content_hashes == second.content_hashes
     assert first.event_head == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_uses_empty_temporary_projection_and_old_runtime_is_diagnostic_only(
+    pg_session_factory,
+) -> None:
+    """Replacing the temporary projector with runtime reads must change this result."""
+    async with pg_session_factory() as session:
+        session.add(ExchangeAccount(id=_ACCOUNT, venue="bitfinex", label="replay-empty"))
+        await session.commit()
+
+    snapshot = VenueSnapshotObserved(
+        account_id=str(_ACCOUNT), environment=_ENV,
+        query_started_at_ms=1_000, query_finished_at_ms=1_001,
+        offers=(
+            VenueOfferObservation(
+                venue_offer_id="temporary-projector-offer", symbol="fUST",
+                amount_original=Decimal("7"), amount_remaining=Decimal("7"),
+                rate=Decimal("0.01"), period_days=2, status="active",
+                mts_created=1_000, mts_updated=1_001,
+            ),
+        ),
+        credits=(), wallet_available={"fUST": Decimal("3")},
+        coverage=SnapshotCoverage(True, True, True),
+    )
+    async with pg_session_factory() as session:
+        await PostgresEventStore(deployment_environment=_ENV).append_snapshot(session, snapshot)
+        await session.commit()
+
+    async with pg_session_factory() as session:
+        runtime_position = await session.scalar(select(PositionStateRow).where(
+            PositionStateRow.exchange_account_id == _ACCOUNT,
+            PositionStateRow.deployment_environment == _ENV,
+        ))
+        assert runtime_position is not None
+        runtime_position.offered_amount = Decimal("999")
+        await session.commit()
+
+    async with pg_session_factory() as session:
+        report = await replay_one_account(
+            session, account_id=_ACCOUNT, environment=_ENV,
+            projector_version="execution-state-v1",
+        )
+
+    async with pg_session_factory() as session:
+        preserved_runtime_amount = await session.scalar(select(PositionStateRow.offered_amount).where(
+            PositionStateRow.exchange_account_id == _ACCOUNT,
+            PositionStateRow.deployment_environment == _ENV,
+        ))
+    assert preserved_runtime_amount == Decimal("999")
+    assert report.row_counts["venue_offer_state"] == 1
+    assert report.row_counts["position_state"] == 1
+    assert report.diagnostic_old_row_counts == {
+        name: count for name, count in report.row_counts.items() if name != "event_log"
+    }
+    assert report.diagnostic_diff["position_state"]["matches"] is False
+    assert report.diagnostic_diff["position_state"]["old_hash"] != (
+        report.diagnostic_diff["position_state"]["replayed_hash"]
+    )
 
 
 def test_replay_derives_historical_v2_uuid_and_accepts_global_sequence_gaps() -> None:
@@ -99,6 +166,41 @@ def test_replay_derives_historical_v2_uuid_and_accepts_global_sequence_gaps() ->
     assert scoped.event_head == 3
     with pytest.raises(ReplayVerificationError, match="sequence ordering"):
         replay_event_log([_row(seq=3), _row(seq=1)], account_id=_ACCOUNT, environment=_ENV)
+    with pytest.raises(ReplayVerificationError, match="positive event sequence"):
+        replay_event_log([_row(seq=0)], account_id=_ACCOUNT, environment=_ENV)
+    missing_sequence = _row(seq=1)
+    missing_sequence.event_seq = None  # type: ignore[assignment]
+    with pytest.raises(ReplayVerificationError, match="missing event sequence"):
+        replay_event_log([missing_sequence], account_id=_ACCOUNT, environment=_ENV)
+
+
+def test_replay_rejects_unsupported_projector_version() -> None:
+    """A typo must not silently select the current projector implementation."""
+    with pytest.raises(ReplayVerificationError, match="unsupported projector version"):
+        replay_event_log(
+            [_row(seq=1)], account_id=_ACCOUNT, environment=_ENV,
+            projector_version="anything-non-empty",
+        )
+
+
+@pytest.mark.asyncio
+async def test_replay_fails_closed_when_a_stored_event_has_no_upcaster(pg_session_factory) -> None:
+    """Ignoring an unknown historical schema would make a partial replay look valid."""
+    async with pg_session_factory() as session:
+        session.add(EventLogRow(
+            account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
+            deployment_environment=_ENV, event_type="CREDIT_CLOSED",
+            payload={"__schema_version__": 1, "__event_type__": "CREDIT_CLOSED"},
+            occurred_at_ms=1_000, schema_version=1,
+        ))
+        await session.commit()
+
+    async with pg_session_factory() as session:
+        with pytest.raises(ReplayVerificationError, match="missing or invalid historical upcaster"):
+            await replay_one_account(
+                session, account_id=_ACCOUNT, environment=_ENV,
+                projector_version="execution-state-v1",
+            )
 
 
 def test_replay_rejects_invalid_identity_and_hash_mismatch() -> None:
@@ -111,6 +213,36 @@ def test_replay_rejects_invalid_identity_and_hash_mismatch() -> None:
         replay_event_log([malformed], account_id=_ACCOUNT, environment=_ENV)
     with pytest.raises(ReplayVerificationError, match="event hash mismatch"):
         replay_event_log([row], account_id=_ACCOUNT, environment=_ENV, expected_event_hash="bad")
+
+
+def test_replay_report_is_bounded_and_never_serializes_raw_event_data() -> None:
+    """Returning event ids or diagnostic payloads could disclose venue credentials."""
+    report = replay_event_log([_row(seq=1)], account_id=_ACCOUNT, environment=_ENV)
+    output = render_replay_report(replace(
+        report,
+        row_counts={**report.row_counts, "Authorization": 999},
+        content_hashes={**report.content_hashes, "Authorization": "raw venue response"},
+        diagnostic_old_row_counts={"Authorization": 999},
+        diagnostic_old_content_hashes={"Authorization": "raw venue response"},
+        diagnostic_diff={
+            "Authorization": {
+                "old_count": 999,
+                "replayed_count": 999,
+                "old_hash": "raw venue response",
+                "replayed_hash": "raw venue response",
+                "matches": True,
+            },
+        },
+    ))
+
+    assert set(output) == {
+        "account_id", "environment", "projector_version", "event_head", "event_hash",
+        "row_counts", "content_hashes", "diagnostic_old_row_counts",
+        "diagnostic_old_content_hashes", "diagnostic_diff",
+    }
+    assert "event_ids" not in output
+    assert "Authorization" not in str(output)
+    assert "raw venue response" not in str(output)
 
 
 @pytest.mark.asyncio
