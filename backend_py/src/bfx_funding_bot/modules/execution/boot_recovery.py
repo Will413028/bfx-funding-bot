@@ -21,21 +21,27 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any, NamedTuple, Protocol
+from decimal import Decimal, InvalidOperation
+from typing import Any, Literal, NamedTuple, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
-from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
-from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.external.bitfinex.auth_rest import (
+    ActiveFundingCredit,
+    ActiveFundingOffer,
+    FundingOfferHistory,
+    FundingOfferHistoryCoverage,
+)
+from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
     VenueOfferObservation,
+    is_terminal_offer_status,
 )
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
@@ -46,11 +52,14 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
     ReservationUnknown,
     SnapshotCoverage,
+    SubmitMatchedToVenueOffer,
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
+from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +70,99 @@ RecoveryAction = (
     | ReservationUnknown
     | VenueOfferQuarantined
 )
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownSubmitAttempt:
+    attempt_id: UUID
+    execution_decision_id: str
+    account_id: str
+    symbol: str
+    cid: int
+    amount: Decimal
+    rate: Decimal
+    period_days: int
+    offer_type: str
+    flags: Mapping[str, Any] | int
+    started_at_ms: int
+    signal_correlation_id: UUID
+    reservation_ref: ReservationRef
+
+
+@dataclass(frozen=True, slots=True)
+class MatchResult:
+    kind: Literal["exact_match", "zero_match", "multiple_match"]
+    offer: ActiveFundingOffer | None = None
+
+
+def match_unknown_attempt(
+    attempt: UnknownSubmitAttempt,
+    active: list[ActiveFundingOffer] | tuple[ActiveFundingOffer, ...],
+    history: list[ActiveFundingOffer] | tuple[ActiveFundingOffer, ...],
+    coverage: FundingOfferHistoryCoverage,
+) -> MatchResult:
+    """Return a venue identity only for one exact, fully bounded candidate."""
+    if (
+        not coverage.complete
+        or coverage.requested_start_ms > attempt.started_at_ms
+        or coverage.requested_end_ms < attempt.started_at_ms
+    ):
+        return MatchResult("zero_match")
+    by_id: dict[str, tuple[ActiveFundingOffer, bool]] = {
+        offer.venue_offer_id: (offer, True) for offer in history
+    }
+    by_id.update({offer.venue_offer_id: (offer, False) for offer in active})
+    candidates: list[ActiveFundingOffer] = []
+    for offer, from_history in by_id.values():
+        history_fence_covers_offer = (
+            not from_history
+            or (
+                coverage.oldest_mts_created is not None
+                and coverage.newest_mts_created is not None
+                and coverage.oldest_mts_created <= offer.mts_created
+                and coverage.newest_mts_created >= offer.mts_created
+            )
+        )
+        if (
+            _offer_matches_attempt_identity(
+                attempt,
+                offer,
+                observed_end_ms=coverage.requested_end_ms,
+            )
+            and history_fence_covers_offer
+        ):
+            candidates.append(offer)
+    if not candidates:
+        return MatchResult("zero_match")
+    if len(candidates) > 1:
+        return MatchResult("multiple_match")
+    return MatchResult("exact_match", candidates[0])
+
+
+def _normalized_match_flags(value: Mapping[str, Any] | int) -> Mapping[str, Any] | int:
+    return dict(value) if isinstance(value, Mapping) else value
+
+
+def _offer_matches_attempt_identity(
+    attempt: UnknownSubmitAttempt,
+    offer: ActiveFundingOffer,
+    *,
+    observed_end_ms: int,
+) -> bool:
+    original = offer.amount_original if offer.amount_original is not None else offer.amount
+    return (
+        offer.symbol == attempt.symbol
+        and original == attempt.amount
+        and offer.rate_observed
+        and offer.rate_decimal is not None
+        and offer.rate_decimal == attempt.rate
+        and offer.period_days == attempt.period_days
+        and attempt.started_at_ms <= offer.mts_created <= observed_end_ms
+        and offer.offer_type is not None
+        and offer.offer_type == attempt.offer_type
+        and offer.flags is not None
+        and _normalized_match_flags(offer.flags) == attempt.flags
+    )
 
 
 def _normalize_flags(value: Mapping[str, Any] | int | None) -> Mapping[str, Any]:
@@ -86,6 +188,7 @@ class ReconcileResult:
     venue_offers: tuple[ActiveFundingOffer, ...] = ()
     n_unknown: int = 0
     n_quarantined: int = 0
+    n_matched: int = 0
     snapshot_event_seq: int | None = None
 
 
@@ -112,6 +215,25 @@ class LocalClaim:
 
 class RecoveryCorrelationError(RuntimeError):
     """Recovery cannot safely emit a lifecycle event without audited identity."""
+
+
+def quarantine_orphan_offer(
+    observation: ActiveFundingOffer,
+    *,
+    account_id: str,
+    is_simulated: bool,
+    observed_at_ms: int,
+) -> VenueOfferQuarantined:
+    """Create an audit-only orphan event without manufacturing provenance."""
+    return VenueOfferQuarantined(
+        venue_offer_id=observation.venue_offer_id,
+        symbol=observation.symbol,
+        amount=observation.amount,
+        account_id=account_id,
+        is_simulated=is_simulated,
+        observed_at_ms=observed_at_ms,
+        reason="unattributed_active_offer",
+    )
 
 
 def compute_recovery_actions(
@@ -147,14 +269,11 @@ def compute_recovery_actions(
             continue
         if (now_ms - offer.mts_created) < action_grace_ms:
             continue  # too fresh — local claim may still be committing
-        actions.append(VenueOfferQuarantined(
-            venue_offer_id=voi,
-            symbol=offer.symbol,
-            amount=offer.amount,
+        actions.append(quarantine_orphan_offer(
+            offer,
             account_id=account_id,
             is_simulated=is_simulated,
             observed_at_ms=now_ms,
-            reason="unattributed_active_offer",
         ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
@@ -232,7 +351,24 @@ class _WalletsQuery(Protocol):
     ) -> Mapping[str, Decimal]: ...
 
 
-class _AuthRestQuery(_ActiveOffersQuery, _ActiveCreditsQuery, _WalletsQuery, Protocol):
+class _OfferHistoryQuery(Protocol):
+    async def get_funding_offer_history(
+        self,
+        *,
+        ctx: AccountContext,
+        start_ms: int,
+        end_ms: int,
+        symbol: str | None = None,
+    ) -> FundingOfferHistory: ...
+
+
+class _AuthRestQuery(
+    _ActiveOffersQuery,
+    _ActiveCreditsQuery,
+    _WalletsQuery,
+    _OfferHistoryQuery,
+    Protocol,
+):
     """Combined protocol: offers + credits + wallet-available queries."""
 
 
@@ -312,10 +448,15 @@ class BootRecovery:
         # A reconcile is one account observation.  The venue calls intentionally
         # happen before opening the database transaction, so the event writer
         # sees a coherent immutable result and never holds a lock over network IO.
+        history_start_ms = await self._load_history_start_ms()
         query_started_at_ms = self._clock()
         all_offers = await self._fetch_offers(None)
         all_credits = await self._fetch_credits(None)
         wallet_available = await self._fetch_available_all()
+        history = await self._fetch_history(
+            start_ms=history_start_ms,
+            end_ms=query_started_at_ms,
+        )
         query_finished_at_ms = self._clock()
         per_symbol = self._group_snapshot(
             offers=all_offers,
@@ -329,6 +470,7 @@ class BootRecovery:
             query_finished_at_ms=query_finished_at_ms,
             offers=tuple(self._offer_observation(o) for o in all_offers),
             credits=tuple(self._credit_observation(c) for c in all_credits),
+            offer_history=tuple(self._offer_observation(o) for o in history.offers),
             wallet_available=wallet_available,
             coverage=SnapshotCoverage(
                 active_offers_complete=True,
@@ -337,6 +479,12 @@ class BootRecovery:
                 active_offer_pages=1,
                 active_credit_pages=1,
                 wallet_pages=1,
+                offer_history_complete=history.coverage.complete,
+                offer_history_pages=history.coverage.pages,
+                offer_history_start_ms=history.coverage.requested_start_ms,
+                offer_history_end_ms=history.coverage.requested_end_ms,
+                offer_history_oldest_mts=history.coverage.oldest_mts_created,
+                offer_history_newest_mts=history.coverage.newest_mts_created,
             ),
             occurred_at_ms=query_finished_at_ms,
         )
@@ -350,9 +498,85 @@ class BootRecovery:
                 action_grace_ms=self._action_grace_ms,
                 configured_symbols=frozenset(self._symbols),
             )
-            for ev in actions:
-                await self._store.append(session, ev)
+            unknown_actions = [ev for ev in actions if isinstance(ev, ReservationUnknown)]
+            for unknown_action in unknown_actions:
+                await self._store.append(session, unknown_action)
             snapshot_drift = await self._append_snapshot_event(session, snapshot_event)
+
+            matched_events: list[SubmitMatchedToVenueOffer] = []
+            matched_offer_ids: set[str] = set()
+            unknown_attempts = (
+                await self._load_unknown_attempts(session)
+                if snapshot_drift.event_seq is not None
+                else []
+            )
+            possible_active_match_ids = {
+                offer.venue_offer_id
+                for attempt in unknown_attempts
+                for offer in all_offers
+                if _offer_matches_attempt_identity(
+                    attempt,
+                    offer,
+                    observed_end_ms=query_started_at_ms,
+                )
+            }
+            for attempt in unknown_attempts:
+                match = match_unknown_attempt(
+                    attempt,
+                    all_offers,
+                    history.offers,
+                    history.coverage,
+                )
+                if match.kind != "exact_match" or match.offer is None:
+                    continue
+                assert snapshot_drift.event_seq is not None
+                offer = match.offer
+                matched_offer_ids.add(offer.venue_offer_id)
+                matched = SubmitMatchedToVenueOffer(
+                    symbol=attempt.symbol,
+                    cid=attempt.cid,
+                    venue_offer_id=offer.venue_offer_id,
+                    signal_correlation_id=attempt.signal_correlation_id,
+                    account_id=attempt.account_id,
+                    is_simulated=self._is_simulated,
+                    venue_status=offer.status,
+                    matched_mts_created=offer.mts_created,
+                    reconcile_event_seq=snapshot_drift.event_seq,
+                    amount=attempt.amount,
+                    reservation_ref=attempt.reservation_ref.bind_venue_offer(
+                        offer.venue_offer_id
+                    ),
+                    occurred_at_ms=query_finished_at_ms,
+                )
+                await self._store.append(session, matched)
+                matched_events.append(matched)
+
+            remaining_actions = [
+                ev
+                for ev in actions
+                if not isinstance(ev, ReservationUnknown)
+                and not (
+                    isinstance(ev, VenueOfferQuarantined)
+                    and ev.venue_offer_id
+                    in (matched_offer_ids | possible_active_match_ids)
+                )
+            ]
+            persisted_remaining_actions: list[RecoveryAction] = []
+            for remaining_action in remaining_actions:
+                append_result = await self._store.append(session, remaining_action)
+                was_persisted = (
+                    append_result
+                    if isinstance(append_result, bool)
+                    else getattr(append_result, "persisted", True)
+                )
+                if was_persisted:
+                    persisted_remaining_actions.append(remaining_action)
+
+        persisted_actions: list[RecoveryAction | SubmitMatchedToVenueOffer] = [
+            *unknown_actions,
+            *matched_events,
+            *persisted_remaining_actions,
+        ]
 
         # Publish derived per-symbol signals only after the immutable observation
         # and all recovery events have committed.  Unknown venue symbols are
@@ -377,17 +601,17 @@ class BootRecovery:
             agg_available += snap.available
             agg_n_credits += len(snap.credits)
 
-        n_claim = n_release = n_fail = n_unknown = n_quarantined = 0
-        for ev in actions:
-            if isinstance(ev, ReservationClaimed):
+        n_claim = n_release = n_fail = n_unknown = n_quarantined = n_matched = 0
+        for persisted_action in persisted_actions:
+            if isinstance(persisted_action, ReservationClaimed):
                 n_claim += 1
-                await self._route_fsm(ev)
-            elif isinstance(ev, ReservationReleased):
+                await self._route_fsm(persisted_action)
+            elif isinstance(persisted_action, ReservationReleased):
                 n_release += 1
-                await self._route_fsm(ev)
-            elif isinstance(ev, ReservationFailed):
+                await self._route_fsm(persisted_action)
+            elif isinstance(persisted_action, ReservationFailed):
                 n_fail += 1
-            elif isinstance(ev, ReservationUnknown):
+            elif isinstance(persisted_action, ReservationUnknown):
                 n_unknown += 1
                 if self._uncertainty_handler is None and not self._is_simulated:
                     # A live recovery that cannot update the local command gate
@@ -397,16 +621,18 @@ class BootRecovery:
                         "live recovery requires an uncertainty_handler"
                     )
                 if self._uncertainty_handler is not None:
-                    await self._uncertainty_handler(ev)
-            elif isinstance(ev, VenueOfferQuarantined):
+                    await self._uncertainty_handler(persisted_action)
+            elif isinstance(persisted_action, VenueOfferQuarantined):
                 n_quarantined += 1
+            elif isinstance(persisted_action, SubmitMatchedToVenueOffer):
+                n_matched += 1
         log.info(
             "reconcile_complete symbols=%d venue_offers=%d "
             "reserved=%.2f realized=%.2f available=%.2f "
-            "claims=%d released=%d failed=%d unknown=%d quarantined=%d",
+            "claims=%d released=%d failed=%d unknown=%d quarantined=%d matched=%d",
             len(per_symbol), len(all_offers),
             float(agg_reserved), float(agg_realized), float(agg_available),
-            n_claim, n_release, n_fail, n_unknown, n_quarantined,
+            n_claim, n_release, n_fail, n_unknown, n_quarantined, n_matched,
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
@@ -418,6 +644,7 @@ class BootRecovery:
             venue_offers=tuple(all_offers),
             n_unknown=n_unknown,
             n_quarantined=n_quarantined,
+            n_matched=n_matched,
             snapshot_event_seq=snapshot_drift.event_seq,
         )
 
@@ -459,7 +686,11 @@ class BootRecovery:
             symbol=offer.symbol,
             amount_original=offer.amount_original or offer.amount,
             amount_remaining=offer.amount,
-            rate=Decimal(str(offer.rate)) if offer.rate is not None else None,
+            rate=(
+                offer.rate_decimal
+                if offer.rate_decimal is not None
+                else Decimal(str(offer.rate)) if offer.rate is not None else None
+            ),
             period_days=offer.period_days,
             status=offer.status,
             mts_created=offer.mts_created,
@@ -480,6 +711,196 @@ class BootRecovery:
             mts_updated=credit.mts_updated,
             flags=_normalize_flags(credit.flags),
         )
+
+    async def _load_history_start_ms(self) -> int | None:
+        """Read the oldest unresolved durable attempt before any venue call."""
+        try:
+            canonical = UUID(self._ctx.account_id)
+        except ValueError:
+            return None
+        async with self._session_factory() as session:
+            values = (
+                await session.execute(
+                    select(SubmissionAttemptRow.started_at_ms).where(
+                        SubmissionAttemptRow.exchange_account_id == canonical,
+                        SubmissionAttemptRow.deployment_environment == self._env,
+                        (
+                            SubmissionAttemptRow.outcome_kind.is_(None)
+                            | (
+                                SubmissionAttemptRow.outcome_kind
+                                == SubmitOutcomeKind.UNKNOWN.value
+                            )
+                        ),
+                    )
+                )
+            ).scalars().all()
+        return min(values) if values else None
+
+    async def _fetch_history(
+        self,
+        *,
+        start_ms: int | None,
+        end_ms: int,
+    ) -> FundingOfferHistory:
+        """History is supplemental evidence: failures remain incomplete/UNKNOWN."""
+        if start_ms is None:
+            return FundingOfferHistory(
+                offers=(),
+                coverage=FundingOfferHistoryCoverage(
+                    requested_start_ms=end_ms,
+                    requested_end_ms=end_ms,
+                    oldest_mts_created=None,
+                    newest_mts_created=None,
+                    pages=0,
+                    complete=False,
+                ),
+            )
+        query = getattr(self._auth_rest, "get_funding_offer_history", None)
+        if query is None:
+            return FundingOfferHistory(
+                offers=(),
+                coverage=FundingOfferHistoryCoverage(
+                    requested_start_ms=start_ms,
+                    requested_end_ms=end_ms,
+                    oldest_mts_created=None,
+                    newest_mts_created=None,
+                    pages=0,
+                    complete=False,
+                ),
+            )
+        try:
+            result = await query(
+                ctx=self._ctx,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                symbol=None,
+            )
+            raw_history = cast(FundingOfferHistory, result)
+            offers = tuple(raw_history.offers)
+            raw_coverage = raw_history.coverage
+            coverage = FundingOfferHistoryCoverage(
+                requested_start_ms=raw_coverage.requested_start_ms,
+                requested_end_ms=raw_coverage.requested_end_ms,
+                oldest_mts_created=raw_coverage.oldest_mts_created,
+                newest_mts_created=raw_coverage.newest_mts_created,
+                pages=raw_coverage.pages,
+                complete=raw_coverage.complete,
+            )
+            if any(not is_terminal_offer_status(offer.status) for offer in offers):
+                log.warning("offer_history_evidence_incomplete non_terminal_status")
+                return FundingOfferHistory(
+                    offers=(),
+                    coverage=FundingOfferHistoryCoverage(
+                        requested_start_ms=coverage.requested_start_ms,
+                        requested_end_ms=coverage.requested_end_ms,
+                        oldest_mts_created=coverage.oldest_mts_created,
+                        newest_mts_created=coverage.newest_mts_created,
+                        pages=coverage.pages,
+                        complete=False,
+                    ),
+                )
+            return FundingOfferHistory(offers=offers, coverage=coverage)
+        except (
+            ArithmeticError,
+            AttributeError,
+            BitfinexAPIError,
+            BitfinexShapeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            log.warning("offer_history_evidence_incomplete err=%r", exc)
+            return FundingOfferHistory(
+                offers=(),
+                coverage=FundingOfferHistoryCoverage(
+                    requested_start_ms=start_ms,
+                    requested_end_ms=end_ms,
+                    oldest_mts_created=None,
+                    newest_mts_created=None,
+                    pages=0,
+                    complete=False,
+                ),
+            )
+
+    async def _load_unknown_attempts(
+        self,
+        session: AsyncSession,
+    ) -> list[UnknownSubmitAttempt]:
+        """Load only typed UNKNOWN attempts with complete audited submit shape."""
+        try:
+            canonical = UUID(self._ctx.account_id)
+        except ValueError:
+            return []
+        attempts = (
+            await session.execute(
+                select(SubmissionAttemptRow).where(
+                    SubmissionAttemptRow.exchange_account_id == canonical,
+                    SubmissionAttemptRow.deployment_environment == self._env,
+                    SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.UNKNOWN.value,
+                )
+            )
+        ).scalars().all()
+        claims = (
+            await session.execute(
+                select(OfferClaimRow).where(
+                    OfferClaimRow.exchange_account_id == canonical,
+                    OfferClaimRow.deployment_environment == self._env,
+                    OfferClaimRow.state == RegistryState.UNKNOWN.value,
+                )
+            )
+        ).scalars().all()
+        claims_by_decision = {
+            claim.execution_decision_id: claim
+            for claim in claims
+            if claim.execution_decision_id is not None
+        }
+        result: list[UnknownSubmitAttempt] = []
+        for attempt in attempts:
+            claim = claims_by_decision.get(attempt.execution_decision_id)
+            payload = attempt.normalized_payload
+            if claim is None or not isinstance(payload, dict):
+                continue
+            try:
+                amount = Decimal(str(payload["amount"]))
+                rate = Decimal(str(payload["rate"]))
+                period_days = int(payload["period"])
+                offer_type = str(payload["type"])
+                raw_flags = payload["flags"]
+                if not isinstance(raw_flags, (Mapping, int)) or isinstance(raw_flags, bool):
+                    continue
+                flags = _normalized_match_flags(raw_flags)
+                signal_id = UUID(claim.signal_correlation_id)
+            except (InvalidOperation, KeyError, TypeError, ValueError):
+                continue
+            if (
+                not amount.is_finite()
+                or not rate.is_finite()
+                or period_days <= 0
+                or not offer_type
+            ):
+                continue
+            if amount != Decimal(str(claim.size_usdt)):
+                continue
+            reference = ReservationRef(
+                execution_decision_id=attempt.execution_decision_id,
+                cid=attempt.cid,
+                signal_correlation_id=signal_id,
+            )
+            result.append(UnknownSubmitAttempt(
+                attempt_id=attempt.attempt_id,
+                execution_decision_id=attempt.execution_decision_id,
+                account_id=str(canonical),
+                symbol=attempt.symbol,
+                cid=attempt.cid,
+                amount=amount,
+                rate=rate,
+                period_days=period_days,
+                offer_type=offer_type,
+                flags=flags,
+                started_at_ms=attempt.started_at_ms,
+                signal_correlation_id=signal_id,
+                reservation_ref=reference,
+            ))
+        return result
 
     async def _append_snapshot_event(
         self,

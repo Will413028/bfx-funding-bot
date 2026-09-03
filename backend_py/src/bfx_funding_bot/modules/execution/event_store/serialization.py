@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
     ReservationUnknown,
     SnapshotCoverage,
+    SubmitMatchedToVenueOffer,
     VenueOfferQuarantined,
     VenueSnapshotObserved,
     _construct_historical_legacy_event,
@@ -42,6 +43,7 @@ _TYPE_BY_CLASS: dict[type, str] = {
     CreditClosed: "CREDIT_CLOSED",
     ReservationUnknown: "SUBMIT_OUTCOME_UNKNOWN",
     VenueOfferQuarantined: "VENUE_OFFER_QUARANTINED",
+    SubmitMatchedToVenueOffer: "SUBMIT_MATCHED_TO_VENUE_OFFER",
     VenueSnapshotObserved: "VENUE_SNAPSHOT_OBSERVED",
 }
 _CLASS_BY_TYPE: dict[str, type] = {v: k for k, v in _TYPE_BY_CLASS.items()}
@@ -59,6 +61,7 @@ _CORRELATION_EVENT_TYPES = frozenset({
     "RESERVATION_CLAIMED",
     "RESERVATION_FAILED",
     "SUBMIT_OUTCOME_UNKNOWN",
+    "SUBMIT_MATCHED_TO_VENUE_OFFER",
     "ORDER_FILL",
     "RESERVATION_RELEASED",
 })
@@ -315,6 +318,16 @@ def _decode_payload(
                 kwargs[field] = tuple(
                     _decode_nested(VenueCreditObservation, value) for value in raw
                 )
+                continue
+            if field == "offer_history":
+                if raw is None:
+                    kwargs[field] = ()
+                elif not isinstance(raw, list):
+                    raise TypeError("snapshot offer_history must be an array")
+                else:
+                    kwargs[field] = tuple(
+                        _decode_nested(VenueOfferObservation, value) for value in raw
+                    )
                 continue
             if field == "wallet_available":
                 if not isinstance(raw, dict):

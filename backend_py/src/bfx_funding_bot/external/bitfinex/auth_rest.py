@@ -27,7 +27,7 @@ class ActiveFundingOffer:
     venue_offer_id: str
     symbol: str
     amount: Decimal     # absolute size (offers are negative-signed at venue)
-    rate: float  # display/audit-only; never used in financial arithmetic (float precision acceptable)
+    rate: float  # matching converts the exact wire value through str -> Decimal
     period_days: int
     mts_created: int
     status: str
@@ -38,11 +38,31 @@ class ActiveFundingOffer:
     mts_updated: int | None = None
     offer_type: str | None = None
     flags: dict[str, Any] | int | None = None
+    rate_observed: bool = True
+    rate_decimal: Decimal | None = None
 
     @property
     def amount_remaining(self) -> Decimal:
         """Canonical full-account name for the venue's current amount."""
         return self.amount
+
+
+@dataclass(frozen=True, slots=True)
+class FundingOfferHistoryCoverage:
+    """Auditable fence for one fully paginated offer-history query."""
+
+    requested_start_ms: int
+    requested_end_ms: int
+    oldest_mts_created: int | None
+    newest_mts_created: int | None
+    pages: int
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FundingOfferHistory:
+    offers: tuple[ActiveFundingOffer, ...]
+    coverage: FundingOfferHistoryCoverage
 
 
 def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
@@ -69,6 +89,8 @@ def parse_active_funding_offers(raw: Any) -> list[ActiveFundingOffer]:
             mts_updated=row.mts_update,
             offer_type=row.offer_type,
             flags=row.flags,
+            rate_observed=row.rate is not None,
+            rate_decimal=row.rate_decimal,
         ))
     return out
 
@@ -207,19 +229,9 @@ class BitfinexAuthREST:
         self._base_url = base_url.rstrip("/")
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
 
-    async def fetch_funding_offers_raw(
+    async def _fetch_funding_offers_response(
         self, *, ctx: AccountContext, symbol: str | None = None,
-    ) -> Any:
-        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns the raw
-        decoded JSON body (list of positional arrays), before parsing.
-
-        Separated from get_active_funding_offers so callers that need the raw
-        wire payload (e.g. the live contract test capturing a fixture) still go
-        through the real HMAC-signed transport.
-
-        Raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
-        invalid JSON.
-        """
+    ) -> httpx.Response:
         path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
         body_bytes = json.dumps({}).encode("utf-8")
         nonce = self._nonce_provider()
@@ -241,6 +253,17 @@ class BitfinexAuthREST:
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
+        return resp
+
+    async def fetch_funding_offers_raw(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+    ) -> Any:
+        """Return the legacy default-decoded positional-array payload.
+
+        This compatibility path intentionally retains JSON's float decoding.
+        Typed reconciliation reads use an exact Decimal decoder instead.
+        """
+        resp = await self._fetch_funding_offers_response(ctx=ctx, symbol=symbol)
         try:
             return resp.json()
         except json.JSONDecodeError as e:
@@ -251,8 +274,125 @@ class BitfinexAuthREST:
     ) -> list[ActiveFundingOffer]:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
-        raw = await self.fetch_funding_offers_raw(ctx=ctx, symbol=symbol)
+        resp = await self._fetch_funding_offers_response(ctx=ctx, symbol=symbol)
+        try:
+            raw = json.loads(resp.content, parse_float=Decimal)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise BitfinexShapeError(
+                f"invalid JSON in funding-offers response: {exc}"
+            ) from exc
         return parse_active_funding_offers(raw)
+
+    async def get_funding_offer_history(
+        self,
+        *,
+        ctx: AccountContext,
+        start_ms: int,
+        end_ms: int,
+        symbol: str | None = None,
+        limit: int = 500,
+        max_pages: int = 20,
+    ) -> FundingOfferHistory:
+        """Fetch the bounded funding-offer history without overstating coverage.
+
+        Bitfinex exposes no cursor for this endpoint.  We page backwards by the
+        oldest returned creation timestamp and only call the result complete
+        when a short/empty page proves exhaustion or a page reaches the
+        requested lower fence.
+        """
+        if start_ms < 0 or end_ms < start_ms:
+            raise ValueError("invalid funding-offer history window")
+        if limit < 1 or limit > 500:
+            raise ValueError("funding-offer history limit must be between 1 and 500")
+        if max_pages < 1:
+            raise ValueError("funding-offer history max_pages must be positive")
+
+        path = (
+            f"{_FUNDING_OFFERS_PATH}/hist"
+            if symbol is None
+            else f"{_FUNDING_OFFERS_PATH}/{symbol}/hist"
+        )
+        cursor_end = end_ms
+        pages = 0
+        complete = False
+        by_id: dict[str, ActiveFundingOffer] = {}
+        prior_oldest: int | None = None
+        for _ in range(max_pages):
+            body_bytes = json.dumps(
+                {"start": start_ms, "end": cursor_end, "limit": limit},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            nonce = self._nonce_provider()
+            headers = sign_request(
+                body=body_bytes,
+                nonce=nonce,
+                api_secret=ctx.credentials.api_secret,
+                path=path,
+            )
+            headers["bfx-apikey"] = ctx.credentials.api_key
+            headers["Content-Type"] = "application/json"
+            try:
+                resp = await self._http.post(
+                    f"{self._base_url}/{path}",
+                    content=body_bytes,
+                    headers=headers,
+                    timeout=30.0,
+                )
+            except httpx.HTTPError as exc:
+                raise BitfinexAPIError(
+                    status_code=0,
+                    message=f"transport error: {exc}",
+                    raw=None,
+                ) from exc
+            if resp.status_code >= 400:
+                raise BitfinexAPIError(
+                    status_code=resp.status_code,
+                    message=resp.reason_phrase or "http error",
+                    raw=resp.text,
+                )
+            try:
+                raw = json.loads(resp.content, parse_float=Decimal)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise BitfinexShapeError(
+                    f"invalid JSON in funding-offer-history response: {exc}"
+                ) from exc
+            page = parse_active_funding_offers(raw)
+            pages += 1
+            if not page:
+                complete = True
+                break
+            for offer in page:
+                by_id.setdefault(offer.venue_offer_id, offer)
+            oldest = min(offer.mts_created for offer in page)
+            if len(page) < limit:
+                complete = True
+                break
+            if oldest <= start_ms:
+                # A full boundary page may have truncated more rows sharing the
+                # same timestamp; without a cursor that cannot be proven complete.
+                break
+            if prior_oldest is not None and oldest >= prior_oldest:
+                break
+            prior_oldest = oldest
+            cursor_end = oldest - 1
+
+        offers = tuple(sorted(by_id.values(), key=lambda offer: offer.mts_created))
+        timestamps = [offer.mts_created for offer in offers]
+        if timestamps and (
+            min(timestamps) < start_ms or max(timestamps) > end_ms
+        ):
+            complete = False
+        return FundingOfferHistory(
+            offers=offers,
+            coverage=FundingOfferHistoryCoverage(
+                requested_start_ms=start_ms,
+                requested_end_ms=end_ms,
+                oldest_mts_created=min(timestamps) if timestamps else None,
+                newest_mts_created=max(timestamps) if timestamps else None,
+                pages=pages,
+                complete=complete,
+            ),
+        )
 
     async def get_active_funding_credits(
         self, *, ctx: AccountContext, symbol: str | None = None,

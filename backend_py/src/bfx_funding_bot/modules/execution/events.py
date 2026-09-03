@@ -158,6 +158,10 @@ class SnapshotCoverage:
     active_credit_pages: int = 1
     wallet_pages: int = 1
     offer_history_pages: int = 0
+    offer_history_start_ms: int | None = None
+    offer_history_end_ms: int | None = None
+    offer_history_oldest_mts: int | None = None
+    offer_history_newest_mts: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -176,6 +180,16 @@ class SnapshotCoverage:
             raise ValueError("complete wallets require at least one page")
         if self.offer_history_complete and self.offer_history_pages < 1:
             raise ValueError("complete offer history requires at least one page")
+        if (
+            self.offer_history_start_ms is not None
+            and self.offer_history_end_ms is not None
+            and self.offer_history_end_ms < self.offer_history_start_ms
+        ):
+            raise ValueError("offer history coverage fence is inverted")
+        if self.offer_history_complete and (
+            self.offer_history_start_ms is None or self.offer_history_end_ms is None
+        ):
+            raise ValueError("complete offer history requires a query fence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +210,7 @@ class VenueSnapshotObserved:
     credits: tuple[VenueCreditObservation, ...]
     wallet_available: Mapping[str, Decimal]
     coverage: SnapshotCoverage
+    offer_history: tuple[VenueOfferObservation, ...] = ()
     occurred_at_ms: int | None = None
     event_id: UUID = field(default_factory=uuid4)
     schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
@@ -209,6 +224,7 @@ class VenueSnapshotObserved:
             raise ValueError("snapshot query_finished_at_ms precedes query_started_at_ms")
         object.__setattr__(self, "offers", tuple(self.offers))
         object.__setattr__(self, "credits", tuple(self.credits))
+        object.__setattr__(self, "offer_history", tuple(self.offer_history))
         object.__setattr__(
             self,
             "wallet_available",
@@ -403,6 +419,39 @@ class VenueOfferQuarantined:
             raise ValueError("quarantined offer amount must be non-negative")
         if self.occurred_at_ms is None:
             object.__setattr__(self, "occurred_at_ms", self.observed_at_ms)
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitMatchedToVenueOffer:
+    """Fresh complete reconcile evidence binds an UNKNOWN attempt to venue ID."""
+
+    symbol: str
+    cid: int
+    venue_offer_id: str
+    signal_correlation_id: UUID
+    account_id: str
+    is_simulated: bool
+    venue_status: str
+    matched_mts_created: int
+    reconcile_event_seq: int
+    amount: Decimal | None = None
+    size_usdt: Decimal | None = None
+    reservation_ref: ReservationRef | None = None
+    is_legacy_uncorrelated: bool = field(default=False, init=False)
+    event_seq: int | None = None
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _require_symbol(self)
+        if not self.venue_offer_id:
+            raise TypeError("SubmitMatchedToVenueOffer requires venue_offer_id")
+        _validate_reservation_ref(self, requires_venue_offer=True)
+        _resolve_amount(self)
+        if self.reconcile_event_seq < 0:
+            raise ValueError("reconcile_event_seq must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,6 +674,7 @@ _HISTORICAL_LIFECYCLE_TYPES: dict[str, type[object]] = {
     "RESERVATION_INTENT": ReservationIntent,
     "RESERVATION_FAILED": ReservationFailed,
     "SUBMIT_OUTCOME_UNKNOWN": ReservationUnknown,
+    "SUBMIT_MATCHED_TO_VENUE_OFFER": SubmitMatchedToVenueOffer,
     "RESERVATION_CLAIMED": ReservationClaimed,
     "ORDER_FILL": OrderFilled,
     "RESERVATION_RELEASED": ReservationReleased,
