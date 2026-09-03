@@ -119,7 +119,10 @@ def _deploy_root(tmp_path: Path) -> Path:
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
     )
-    _write_executable(fake_bin / "uv", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\nexit \"${FAKE_UV_EXIT:-0}\"\n",
+    )
     return root
 
 
@@ -129,6 +132,7 @@ def _run_deploy(root: Path, phase: str, *, confirm: bool = False) -> subprocess.
         "HOME": str(root.parent / "home"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(root / "fake-docker.log"),
+        "FAKE_UV_LOG": str(root / "fake-uv.log"),
     }
     if confirm:
         environment["BFX_CANARY_CONFIRM"] = "yes"
@@ -287,7 +291,69 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
     assert runtime["BFX_EXECUTION_POLICY"] == "book_guarded"
     assert runtime["BFX_CELLS_YAML"] == "/app/configs/cells.canary.yaml"
     assert runtime["BFX_SAFETY_CONFIG"] == "/app/configs/safety.canary.yaml"
+    assert (root / "fake-uv.log").read_text().split() == [
+        "run",
+        "python",
+        "scripts/halt2_cutover.py",
+        "preflight",
+        "--account-id",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "--environment",
+        "prod",
+        "--evidence",
+        str(root.parent / "halt2-canary-evidence.json"),
+        "--projector-version",
+        "halt2-v1",
+        "--image-digest",
+        "safe-test-sha",
+        "--config-artifact",
+        str(root / "backend_py/configs/safety.canary.yaml"),
+    ]
     assert len((root / "fake-docker.log").read_text().splitlines()) == 3
+
+
+@pytest.mark.parametrize("field", ["BFX_PROJECTOR_VERSION", "BFX_HALT2_EVIDENCE_REPORT"])
+def test_canary_rejects_missing_halt2_runtime_gate_before_docker(tmp_path: Path, field: str) -> None:
+    root = _deploy_root(tmp_path)
+    profile = root / "deploy/vm/canary.env"
+    profile.write_text(
+        "\n".join(line for line in profile.read_text().splitlines() if not line.startswith(field + "="))
+        + "\n"
+    )
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_rejects_noncanonical_account_uuid_before_docker(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+    bot_env = root.parent / "home/bfx/bot.env"
+    bot_env.write_text(bot_env.read_text().replace("550e8400-e29b-41d4-a716-446655440000", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"))
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert "BFX_EXCHANGE_ACCOUNT_ID must be a canonical UUID" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_preflight_failure_blocks_docker(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+    fake_bin = root.parent / "fake-bin"
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\nexit 2\n",
+    )
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert "Halt 2 preflight failed" in result.stdout
+    assert (root / "fake-uv.log").exists()
+    assert not (root / "fake-docker.log").exists()
 
 
 @pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])

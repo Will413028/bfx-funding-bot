@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, ProjectionHeadRow
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
@@ -48,6 +48,11 @@ class Halt2Evidence:
     config_digest: str
     image_digest: str
     projector_version: str
+    migration_head: str | None
+    schema_heads: tuple[str, ...]
+    backup_evidence_path: str
+    isolated_restore_evidence_path: str
+    config_artifact_path: str
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> Halt2Evidence:
@@ -55,7 +60,12 @@ class Halt2Evidence:
         missing = tuple(name for name in required if name not in value)
         if missing:
             raise ValueError("evidence missing: " + ", ".join(missing))
-        return cls(**{name: value[name] for name in required})  # type: ignore[arg-type]
+        payload = {name: value[name] for name in required}
+        schema_heads = payload["schema_heads"]
+        if not isinstance(schema_heads, list | tuple) or isinstance(schema_heads, str):
+            raise ValueError("evidence schema_heads must be an array")
+        payload["schema_heads"] = tuple(str(head) for head in schema_heads)
+        return cls(**payload)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +83,7 @@ class PreflightReport:
     venue_snapshot_fence: int | None
     config_digest: str
     image_digest: str
+    projector_version: str | None
     persistent_halt: bool
     stop_reasons: tuple[str, ...]
 
@@ -104,10 +115,8 @@ def verify_preflight(
     evidence: Halt2Evidence | None,
     *,
     environ: Mapping[str, str] | None = None,
-    mutation_probe: Callable[[str], None] | None = None,
 ) -> PreflightResult:
     """Compare immutable evidence with one freshly read report without writes."""
-    del mutation_probe  # Deliberately unused: read-only preflight has no write hook.
     env = os.environ if environ is None else environ
     reasons = list(_legacy_reasons(env))
     if evidence is None:
@@ -129,8 +138,12 @@ def verify_preflight(
             reasons.append("config_digest_mismatch")
         if evidence.image_digest != report.image_digest:
             reasons.append("image_digest_mismatch")
-        if not evidence.projector_version.strip():
-            reasons.append("missing_projector_version")
+        if evidence.migration_head != report.migration_head:
+            reasons.append("migration_head_mismatch")
+        if evidence.schema_heads != report.schema_heads:
+            reasons.append("schema_heads_mismatch")
+        if not evidence.projector_version.strip() or evidence.projector_version != report.projector_version:
+            reasons.append("projector_version_mismatch")
     if report.open_uncertainty_count:
         reasons.append("open_execution_uncertainty")
     if not report.persistent_halt:
@@ -148,7 +161,9 @@ async def collect_preflight_report(
     *,
     account_id: UUID,
     environment: str,
-    evidence: Halt2Evidence,
+    artifact_hashes: Mapping[str, str],
+    image_digest: str,
+    projector_version: str,
 ) -> PreflightReport:
     """Collect parameterized, account-local observations without mutation."""
     rows = list(
@@ -206,6 +221,19 @@ async def collect_preflight_report(
         .order_by(TradingHaltRow.id.desc())
         .limit(1)
     )
+    observed_projector_versions = tuple(
+        sorted(
+            {
+                str(value)
+                for value in await session.scalars(
+                    select(ProjectionHeadRow.projector_version).where(
+                        ProjectionHeadRow.exchange_account_id == account_id,
+                        ProjectionHeadRow.deployment_environment == environment,
+                    )
+                )
+            }
+        )
+    )
     schema_heads = tuple(
         sorted(str(value) for value in (await session.scalars(text("SELECT version_num FROM alembic_version"))))
     )
@@ -214,15 +242,18 @@ async def collect_preflight_report(
         deployment_environment=environment,
         migration_head=_migration_head(),
         schema_heads=schema_heads,
-        backup_evidence_hash=evidence.backup_evidence_hash,
-        isolated_restore_evidence_hash=evidence.isolated_restore_evidence_hash,
+        backup_evidence_hash=artifact_hashes["backup_evidence_hash"],
+        isolated_restore_evidence_hash=artifact_hashes["isolated_restore_evidence_hash"],
         event_count=len(rows),
         event_head=rows[-1].event_seq if rows else None,
         event_hash=event_hash,
         open_uncertainty_count=open_uncertainty_count,
         venue_snapshot_fence=venue_snapshot_fence,
-        config_digest=evidence.config_digest,
-        image_digest=evidence.image_digest,
+        config_digest=artifact_hashes["config_digest"],
+        image_digest=image_digest,
+        projector_version=(
+            projector_version if observed_projector_versions == (projector_version,) else None
+        ),
         persistent_halt=halted is True,
         stop_reasons=(),
     )
@@ -242,6 +273,26 @@ def _load_evidence(path: Path) -> Halt2Evidence:
     return Halt2Evidence.from_dict(raw)
 
 
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(64 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _artifact_hashes(evidence: Halt2Evidence, *, config_artifact: Path) -> dict[str, str]:
+    if Path(evidence.config_artifact_path).resolve() != config_artifact.resolve():
+        raise ValueError("evidence config_artifact_path does not match --config-artifact")
+    return {
+        "backup_evidence_hash": _file_digest(Path(evidence.backup_evidence_path)),
+        "isolated_restore_evidence_hash": _file_digest(
+            Path(evidence.isolated_restore_evidence_path)
+        ),
+        "config_digest": _file_digest(config_artifact),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", default="preflight", choices=(
@@ -250,6 +301,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--environment", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--projector-version", required=True)
+    parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--config-artifact", type=Path)
     parser.add_argument("--operator-id")
     parser.add_argument("--reason", default="halt2 preflight gate")
     return parser
@@ -262,6 +316,8 @@ async def _run(args: argparse.Namespace) -> PreflightResult:
         raise ValueError("evidence exchange_account_id does not match --account-id")
     if evidence.deployment_environment != args.environment:
         raise ValueError("evidence deployment_environment does not match --environment")
+    if args.command in {"replay", "convert-pending", "quarantine", "verify", "release-report"}:
+        raise ValueError(f"{args.command} is an explicit later-task operator command")
     settings = Settings()
     engine = make_engine(settings)
     factory = make_session_factory(engine)
@@ -280,13 +336,20 @@ async def _run(args: argparse.Namespace) -> PreflightResult:
                 event_count=0, event_head=None, event_hash="", open_uncertainty_count=0,
                 venue_snapshot_fence=None, config_digest=evidence.config_digest,
                 image_digest=evidence.image_digest, persistent_halt=state.halted, stop_reasons=(),
+                projector_version=args.projector_version,
             )
             return PreflightResult(EXIT_SUCCESS, (), report)
-        if args.command in {"convert-pending", "quarantine"}:
-            raise ValueError(f"{args.command} is an explicit later-task operator command")
+        if args.config_artifact is None:
+            raise ValueError("preflight requires --config-artifact")
+        artifact_hashes = _artifact_hashes(evidence, config_artifact=args.config_artifact)
         async with factory() as session:
             report = await collect_preflight_report(
-                session, account_id=account_id, environment=args.environment, evidence=evidence
+                session,
+                account_id=account_id,
+                environment=args.environment,
+                artifact_hashes=artifact_hashes,
+                image_digest=args.image_digest,
+                projector_version=args.projector_version,
             )
         return verify_preflight(report, evidence)
     finally:
