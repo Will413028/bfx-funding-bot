@@ -7,6 +7,7 @@ same event stream can be used for a live projection and an empty-schema replay.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
@@ -27,6 +28,7 @@ __all__ = [
     "apply_offer_transition",
     "derive_v2_event_id",
     "gross_exposure",
+    "projection_content_hash",
 ]
 
 
@@ -76,6 +78,14 @@ def derive_v2_event_id(
         ensure_ascii=True,
     )
     return uuid5(V2_EVENT_NAMESPACE, name)
+
+
+def projection_content_hash(rows: list[dict[str, Any]]) -> str:
+    """Hash an empty replay projection using canonical, event-derived content."""
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _decimal(value: Decimal | int | float | str) -> Decimal:
