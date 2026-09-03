@@ -148,9 +148,13 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    diff, insufficient reconcile evidence, and every open uncertainty.
 
 6. **Operator confirmation — deploy only under separately granted authority.**
-   From the repository root, the eventual operator-only deployment command is:
+   Start a separate shell session at the repository root; do not rely on the
+   prior `backend_py` shell. Enter `backend_py` and return explicitly so the
+   root-script CWD transition is auditable. The eventual operator-only
+   deployment command is:
 
    ```bash
+   cd backend_py
    cd ..
    BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary
    ```
