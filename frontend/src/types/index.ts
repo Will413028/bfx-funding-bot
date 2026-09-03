@@ -123,7 +123,10 @@ export type ExecutionEventType =
   | "RESERVATION_FAILED"
   | "ORDER_FILL"
   | "RESERVATION_RELEASED"
-  | "CREDIT_CLOSED";
+  | "CREDIT_CLOSED"
+  | "UNCERTAINTY_BOUND_TO_VENUE_OFFER"
+  | "UNCERTAINTY_MARKED_NOT_ACCEPTED"
+  | "UNCERTAINTY_MANUALLY_RESOLVED";
 
 /** GET /positions — per-symbol position_state ledger projection. */
 export interface Position {
@@ -206,6 +209,16 @@ export interface UncertaintyBlockedScope {
   symbol: string;
 }
 
+/** Latest server-derived evidence that can authorize an operator resolution. */
+export interface UncertaintyResolutionContext {
+  reconcileEventSeq: number | null;
+  queryStartedAtMs: number | null;
+  queryFinishedAtMs: number | null;
+  candidateCount: number | null;
+  candidateVenueOfferIds: string[];
+  unavailableReason: string | null;
+}
+
 /** Account/environment/symbol-scoped execution block. */
 export interface Uncertainty {
   uncertaintyId: string;
@@ -219,6 +232,7 @@ export interface Uncertainty {
   resolvedEventSeq: number | null;
   evidenceSummary: UncertaintyEvidenceSummary;
   blockedScope: UncertaintyBlockedScope;
+  resolutionContext: UncertaintyResolutionContext | null;
   resolvedByOperatorId?: string | null;
   resolutionReason?: string | null;
 }

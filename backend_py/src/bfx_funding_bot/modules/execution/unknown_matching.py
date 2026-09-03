@@ -42,6 +42,7 @@ class UnknownSubmitAttempt:
 class MatchResult:
     kind: Literal["exact_match", "zero_match", "multiple_match", "incomplete"]
     offer: ActiveFundingOffer | None = None
+    candidates: tuple[ActiveFundingOffer, ...] = ()
 
 
 def normalized_match_flags(value: Mapping[str, Any] | int) -> Mapping[str, Any]:
@@ -113,8 +114,8 @@ def match_unknown_attempt(
     if not candidates:
         return MatchResult("zero_match")
     if len(candidates) > 1:
-        return MatchResult("multiple_match")
-    return MatchResult("exact_match", candidates[0])
+        return MatchResult("multiple_match", candidates=tuple(candidates))
+    return MatchResult("exact_match", candidates[0], tuple(candidates))
 
 
 def _immutable_offer_identity(offer: ActiveFundingOffer) -> tuple[object, ...]:

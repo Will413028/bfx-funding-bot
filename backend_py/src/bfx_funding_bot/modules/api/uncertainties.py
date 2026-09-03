@@ -6,6 +6,7 @@ scope and reconcile fence, then delegates to :class:`AccountEventWriter`.
 It must not call ``UncertaintyService.resolve`` because that legacy helper
 updates a projection directly and would make a clean event-log replay diverge.
 """
+
 from __future__ import annotations
 
 import json
@@ -52,11 +53,13 @@ _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
 _MAX_EVIDENCE_BYTES = 16_384
 _RECONCILE_EVENT_TYPE = "VENUE_SNAPSHOT_OBSERVED"
-_SUPPORTED_KINDS = frozenset({
-    "submit_outcome_unknown",
-    "unattributed_venue_offer",
-    "unsupported_venue_exposure",
-})
+_SUPPORTED_KINDS = frozenset(
+    {
+        "submit_outcome_unknown",
+        "unattributed_venue_offer",
+        "unsupported_venue_exposure",
+    }
+)
 _EvidenceValue = str | int | float | bool | None | dict[str, Any] | list[Any]
 
 
@@ -96,6 +99,37 @@ class ManualResolutionRequest(UncertaintyResolutionRequest):
     reason: str = Field(min_length=1, max_length=_MAX_REASON_LENGTH)
 
 
+class UncertaintyResolutionContext(BaseModel):
+    """Server-derived, bounded inputs for one audited operator action."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    reconcile_event_seq: int | None = Field(
+        default=None,
+        serialization_alias="reconcileEventSeq",
+    )
+    query_started_at_ms: int | None = Field(
+        default=None,
+        serialization_alias="queryStartedAtMs",
+    )
+    query_finished_at_ms: int | None = Field(
+        default=None,
+        serialization_alias="queryFinishedAtMs",
+    )
+    candidate_count: int | None = Field(
+        default=None,
+        serialization_alias="candidateCount",
+    )
+    candidate_venue_offer_ids: list[str] = Field(
+        default_factory=list,
+        serialization_alias="candidateVenueOfferIds",
+    )
+    unavailable_reason: str | None = Field(
+        default=None,
+        serialization_alias="unavailableReason",
+    )
+
+
 class UncertaintyResponse(BaseModel):
     """Bounded operator-console uncertainty DTO (never raw event payload)."""
 
@@ -128,6 +162,10 @@ class UncertaintyResponse(BaseModel):
         default=None,
         serialization_alias="resolutionReason",
     )
+    resolution_context: UncertaintyResolutionContext | None = Field(
+        default=None,
+        serialization_alias="resolutionContext",
+    )
 
 
 def _http_error(code: str, http_status: int) -> HTTPException:
@@ -138,13 +176,18 @@ def _bounded_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     """Detach and cap evidence before it becomes an immutable audit value."""
     try:
         encoded = json.dumps(
-            dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            dict(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
         )
         if len(encoded.encode("utf-8")) > _MAX_EVIDENCE_BYTES:
             raise ValueError("evidence too large")
         decoded = json.loads(encoded)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+        raise _http_error(
+            "invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY
+        ) from exc
     if not isinstance(decoded, dict):  # defensive: JSON object was required
         raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY)
     return decoded
@@ -199,7 +242,11 @@ def _evidence_summary(value: Mapping[str, Any] | None) -> dict[str, _EvidenceVal
     return result
 
 
-def _response(row: ExecutionUncertaintyRow) -> dict[str, object]:
+def _response(
+    row: ExecutionUncertaintyRow,
+    *,
+    resolution_context: UncertaintyResolutionContext | None = None,
+) -> dict[str, object]:
     state = row.state
     if state not in {"open", "resolved"}:
         # A future state is not safe to present as executable.  It can still be
@@ -222,7 +269,36 @@ def _response(row: ExecutionUncertaintyRow) -> dict[str, object]:
         },
         resolved_by_operator_id=row.resolved_by_operator_id,
         resolution_reason=row.resolution_reason,
+        resolution_context=resolution_context,
     ).model_dump(by_alias=True)
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _unavailable_context(
+    *,
+    reconcile_event_seq: int | None = None,
+    payload: Mapping[str, Any] | None = None,
+    reason: str,
+    candidate_count: int | None = None,
+    candidate_venue_offer_ids: list[str] | None = None,
+) -> UncertaintyResolutionContext:
+    return UncertaintyResolutionContext(
+        reconcile_event_seq=reconcile_event_seq,
+        query_started_at_ms=_optional_int(
+            payload.get("query_started_at_ms") if payload is not None else None
+        ),
+        query_finished_at_ms=_optional_int(
+            payload.get("query_finished_at_ms") if payload is not None else None
+        ),
+        candidate_count=candidate_count,
+        candidate_venue_offer_ids=candidate_venue_offer_ids or [],
+        unavailable_reason=reason[:256],
+    )
 
 
 async def _load_uncertainty(
@@ -336,6 +412,98 @@ async def _fresh_reconcile(
     return reconcile.payload
 
 
+async def _resolution_context(
+    session: AsyncSession,
+    *,
+    context: ExchangeAccountContext,
+    row: ExecutionUncertaintyRow,
+) -> UncertaintyResolutionContext:
+    """Describe only actions provable from the latest authoritative snapshot."""
+    if row.state != "open":
+        return _unavailable_context(reason="uncertainty_not_open")
+    latest = await session.scalar(
+        select(EventLogRow)
+        .where(
+            EventLogRow.exchange_account_id == context.exchange_account_id,
+            EventLogRow.deployment_environment == context.deployment_environment,
+            EventLogRow.event_type == _RECONCILE_EVENT_TYPE,
+        )
+        .order_by(EventLogRow.event_seq.desc())
+        .limit(1)
+    )
+    if latest is None or not isinstance(latest.payload, dict):
+        return _unavailable_context(reason="fresh_reconcile_required")
+
+    latest_payload = latest.payload
+    try:
+        payload = await _fresh_reconcile(
+            session,
+            context=context,
+            row=row,
+            reconcile_event_seq=latest.event_seq,
+            require_history=row.kind == "submit_outcome_unknown",
+        )
+    except HTTPException as exc:
+        reason = exc.detail if isinstance(exc.detail, str) else "resolution_context_unavailable"
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=latest_payload,
+            reason=reason,
+        )
+
+    base = {
+        "reconcile_event_seq": latest.event_seq,
+        "query_started_at_ms": _optional_int(payload.get("query_started_at_ms")),
+        "query_finished_at_ms": _optional_int(payload.get("query_finished_at_ms")),
+    }
+    if row.kind in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
+        return UncertaintyResolutionContext(**base)
+    if row.kind != "submit_outcome_unknown":
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=payload,
+            reason="unsupported_uncertainty_kind",
+        )
+
+    try:
+        attempt_row = await _load_attempt(session, context=context, row=row)
+    except HTTPException as exc:
+        reason = exc.detail if isinstance(exc.detail, str) else "submission_attempt_not_resolvable"
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=payload,
+            reason=reason,
+        )
+    attempt = attempt_from_row(attempt_row)
+    if attempt is None:
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=payload,
+            reason="submission_attempt_not_resolvable",
+        )
+    match = match_attempt_to_snapshot(attempt, payload)
+    candidate_ids = sorted({offer.venue_offer_id for offer in match.candidates})
+    if match.kind == "incomplete":
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=payload,
+            reason="incomplete_match_evidence",
+        )
+    if match.kind == "multiple_match":
+        return _unavailable_context(
+            reconcile_event_seq=latest.event_seq,
+            payload=payload,
+            reason="multiple_exact_candidates",
+            candidate_count=len(candidate_ids),
+            candidate_venue_offer_ids=candidate_ids,
+        )
+    return UncertaintyResolutionContext(
+        **base,
+        candidate_count=len(candidate_ids),
+        candidate_venue_offer_ids=candidate_ids,
+    )
+
+
 def _operator_id(context: ExchangeAccountContext, supplied: str | None) -> str:
     value = (supplied or context.user_id).strip()
     if not value:
@@ -349,7 +517,9 @@ def _operator_id(context: ExchangeAccountContext, supplied: str | None) -> str:
 
 
 def _validate_request_evidence(
-    supplied: Mapping[str, Any], *, allowed: frozenset[str],
+    supplied: Mapping[str, Any],
+    *,
+    allowed: frozenset[str],
 ) -> None:
     evidence = _bounded_evidence(supplied)
     if not set(evidence).issubset(allowed):
@@ -410,17 +580,35 @@ def build_uncertainties_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
-        stmt = select(ExecutionUncertaintyRow).where(
-            ExecutionUncertaintyRow.exchange_account_id == context.exchange_account_id,
-            ExecutionUncertaintyRow.deployment_environment == context.deployment_environment,
-        ).order_by(ExecutionUncertaintyRow.opened_event_seq.desc()).limit(limit)
+        stmt = (
+            select(ExecutionUncertaintyRow)
+            .where(
+                ExecutionUncertaintyRow.exchange_account_id == context.exchange_account_id,
+                ExecutionUncertaintyRow.deployment_environment == context.deployment_environment,
+            )
+            .order_by(ExecutionUncertaintyRow.opened_event_seq.desc())
+            .limit(limit)
+        )
         if state is not None:
             stmt = stmt.where(ExecutionUncertaintyRow.state == state)
         try:
             rows = (await session.execute(stmt)).scalars().all()
+            responses = [
+                _response(
+                    row,
+                    resolution_context=await _resolution_context(
+                        session,
+                        context=context,
+                        row=row,
+                    ),
+                )
+                for row in rows
+            ]
         except Exception as exc:
-            raise _http_error("uncertainties_unavailable", status.HTTP_503_SERVICE_UNAVAILABLE) from exc
-        return {"data": [_response(row) for row in rows]}
+            raise _http_error(
+                "uncertainties_unavailable", status.HTTP_503_SERVICE_UNAVAILABLE
+            ) from exc
+        return {"data": responses}
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}")
     async def get_account_uncertainty(
@@ -433,9 +621,23 @@ def build_uncertainties_router() -> APIRouter:
             context=context,
             uncertainty_id=uncertainty_id,
         )
-        return {"data": _response(row)}
+        try:
+            resolution_context = await _resolution_context(
+                session,
+                context=context,
+                row=row,
+            )
+        except Exception as exc:
+            raise _http_error(
+                "uncertainties_unavailable", status.HTTP_503_SERVICE_UNAVAILABLE
+            ) from exc
+        return {
+            "data": _response(row, resolution_context=resolution_context),
+        }
 
-    @router.post("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/bind-to-venue")
+    @router.post(
+        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/bind-to-venue"
+    )
     async def bind_to_venue(
         uncertainty_id: UUID,
         body: BindToVenueRequest,
@@ -492,7 +694,9 @@ def build_uncertainties_router() -> APIRouter:
         )
         return {"data": {**_response(row), "resolvedEventSeq": event_seq, "state": "resolved"}}
 
-    @router.post("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/mark-not-accepted")
+    @router.post(
+        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/mark-not-accepted"
+    )
     async def mark_not_accepted(
         uncertainty_id: UUID,
         body: MarkNotAcceptedRequest,
@@ -544,7 +748,9 @@ def build_uncertainties_router() -> APIRouter:
         )
         return {"data": {**_response(row), "resolvedEventSeq": event_seq, "state": "resolved"}}
 
-    @router.post("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/manual-resolution")
+    @router.post(
+        "/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}/manual-resolution"
+    )
     async def manual_resolution(
         uncertainty_id: UUID,
         body: ManualResolutionRequest,

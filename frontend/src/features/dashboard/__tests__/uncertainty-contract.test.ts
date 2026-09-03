@@ -1,8 +1,37 @@
 import { createElement } from "react";
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@/lib/test-utils";
-import type { Uncertainty } from "@/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@/lib/test-utils";
+import type { Uncertainty, UncertaintyResolutionContext } from "@/types";
 import { UncertaintyBanner } from "../components/uncertainty-banner";
+
+const { resolve } = vi.hoisted(() => ({ resolve: vi.fn() }));
+
+vi.mock("../hooks/use-uncertainties", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("../hooks/use-uncertainties")>();
+  return {
+    ...original,
+    useResolveUncertainty: () => ({
+      mutate: resolve,
+      isPending: false,
+      isError: false,
+      error: null,
+    }),
+  };
+});
+
+vi.mock("@/features/settings/hooks/use-user", () => ({
+  useUser: () => ({ data: { id: "operator-1" } }),
+}));
+
+const RESOLUTION_CONTEXT: UncertaintyResolutionContext = {
+  reconcileEventSeq: 12,
+  queryStartedAtMs: 1_790_000_001_000,
+  queryFinishedAtMs: 1_790_000_002_000,
+  candidateCount: 1,
+  candidateVenueOfferIds: ["venue-12"],
+  unavailableReason: null,
+};
 
 const BLOCKED: Uncertainty = {
   uncertaintyId: "u-1",
@@ -22,9 +51,13 @@ const BLOCKED: Uncertainty = {
     environment: "ci",
     symbol: "fUST",
   },
+  resolutionContext: RESOLUTION_CONTEXT,
 };
 
 describe("uncertainty contract", () => {
+  beforeEach(() => resolve.mockReset());
+  afterEach(cleanup);
+
   it("does not render a warning when visible symbols have no open uncertainty", () => {
     render(
       createElement(UncertaintyBanner, {
@@ -66,5 +99,117 @@ describe("uncertainty contract", () => {
         name: /uncertainty status is unavailable/i,
       }),
     ).toBeDefined();
+  });
+
+  it("binds only the exact server-derived venue candidate", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [BLOCKED],
+        visibleSymbols: ["fUST", "fUSD"],
+      }),
+    );
+
+    expect(screen.getByText("venue-12")).toBeDefined();
+    fireEvent.click(
+      screen.getByRole("button", { name: /bind to venue offer/i }),
+    );
+
+    expect(resolve).toHaveBeenCalledWith({
+      uncertaintyId: "u-1",
+      action: "bind-to-venue",
+      reconcileEventSeq: 12,
+      venueOfferId: "venue-12",
+      operatorUuid: "operator-1",
+    });
+  });
+
+  it("requires an explicit click before marking a proven zero-match not accepted", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          {
+            ...BLOCKED,
+            resolutionContext: {
+              ...RESOLUTION_CONTEXT,
+              candidateCount: 0,
+              candidateVenueOfferIds: [],
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(resolve).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: /confirm not accepted/i }),
+    );
+    expect(resolve).toHaveBeenCalledWith({
+      uncertaintyId: "u-1",
+      action: "mark-not-accepted",
+      reconcileEventSeq: 12,
+      operatorUuid: "operator-1",
+    });
+  });
+
+  it("does not expose an action for ambiguous server-derived candidates", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          {
+            ...BLOCKED,
+            resolutionContext: {
+              ...RESOLUTION_CONTEXT,
+              candidateCount: 2,
+              candidateVenueOfferIds: ["venue-12", "venue-13"],
+              unavailableReason: "multiple_exact_candidates",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(screen.getByText(/multiple exact candidates/i)).toBeDefined();
+    expect(
+      screen.queryByRole("button", { name: /bind|not accepted/i }),
+    ).toBeNull();
+  });
+
+  it("records a bounded manual decision and required operator reason", () => {
+    const orphan: Uncertainty = {
+      ...BLOCKED,
+      uncertaintyId: "u-orphan",
+      kind: "unattributed_venue_offer",
+      resolutionContext: {
+        ...RESOLUTION_CONTEXT,
+        candidateCount: null,
+        candidateVenueOfferIds: [],
+      },
+    };
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [orphan],
+      }),
+    );
+
+    const submit = screen.getByRole("button", {
+      name: /record manual resolution/i,
+    });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByLabelText(/decision/i), {
+      target: { value: "closed_at_venue" },
+    });
+    fireEvent.change(screen.getByLabelText(/operator reason/i), {
+      target: { value: "Verified directly in Bitfinex history" },
+    });
+    fireEvent.click(submit);
+
+    expect(resolve).toHaveBeenCalledWith({
+      uncertaintyId: "u-orphan",
+      action: "manual-resolution",
+      reconcileEventSeq: 12,
+      operatorUuid: "operator-1",
+      reason: "Verified directly in Bitfinex history",
+      evidence: { decision: "closed_at_venue" },
+    });
   });
 });
