@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -41,6 +42,114 @@ pytestmark = pytest.mark.integration
 
 _ACCOUNT = UUID("00000000-0000-0000-0000-000000000043")
 _ENV = "ci"
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _assert_in_order(text: str, steps: tuple[str, ...]) -> None:
+    """Require the human runbook's irreversible steps to remain ordered."""
+    cursor = -1
+    for step in steps:
+        next_cursor = text.find(step, cursor + 1)
+        assert next_cursor >= 0, f"missing ordered step: {step}"
+        assert next_cursor > cursor, f"out-of-order step: {step}"
+        cursor = next_cursor
+
+
+def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> None:
+    """Deleting a safety gate, report field, or rollback branch must fail review."""
+    canary = (_REPOSITORY_ROOT / "docs/runbooks/halt-2-projector-canary.md").read_text()
+    rollback = (_REPOSITORY_ROOT / "docs/runbooks/rollback-after-venue-write.md").read_text()
+    architecture = (_REPOSITORY_ROOT / "backend_py/ARCHITECTURE.md").read_text()
+
+    preflight_stop_reasons = (
+        "legacy_environment_variable:BFX_ACCOUNT_ID",
+        "missing_evidence",
+        "exchange_account_id_mismatch",
+        "deployment_environment_mismatch",
+        "backup_evidence_hash_mismatch",
+        "isolated_restore_evidence_hash_mismatch",
+        "event_head_mismatch",
+        "event_hash_mismatch",
+        "config_digest_mismatch",
+        "image_digest_mismatch",
+        "migration_head_mismatch",
+        "schema_heads_mismatch",
+        "projector_version_mismatch",
+        "open_execution_uncertainty",
+        "persistent_halt_absent",
+    )
+    preflight_report_fields = (
+        "exchange_account_id",
+        "deployment_environment",
+        "migration_head",
+        "schema_heads",
+        "backup_evidence_hash",
+        "isolated_restore_evidence_hash",
+        "event_count",
+        "event_head",
+        "event_hash",
+        "open_uncertainty_count",
+        "venue_snapshot_fence",
+        "config_digest",
+        "image_digest",
+        "projector_version",
+        "persistent_halt",
+        "stop_reasons",
+    )
+    canary_report_fields = (
+        "account_id",
+        "environment",
+        "symbol",
+        "cell",
+        "strategy",
+        "amount_usdt",
+        "command_decision_id",
+        "attempt_id",
+        "outcome_kind",
+        "venue_offer_id",
+        "outcome_at_ms",
+        "reconcile_fences",
+        "reconcile_observed_at_ms",
+        "projection_hash",
+        "venue_db_exposure_diff_usdt",
+        "full_account_snapshot_complete",
+        "stop_reason",
+    )
+    for requirement in (*preflight_stop_reasons, *preflight_report_fields, *canary_report_fields):
+        assert requirement in canary, f"missing canary preflight contract: {requirement}"
+
+    _assert_in_order(canary, (
+        "uv run python scripts/halt2_cutover.py assert-halt",
+        "uv run python scripts/halt2_cutover.py preflight",
+        "uv run python scripts/verify_projection_replay.py replay",
+        "uv run python scripts/verify_projection_replay.py convert-pending",
+        "uv run python scripts/verify_projection_replay.py quarantine",
+        "uv run python scripts/run_canary_preflight.py",
+        "./scripts/deploy-vm.sh canary",
+    ))
+    for requirement in (
+        "exit 0", "exit 2", "exit 3", "Operator confirmation",
+        "one account", "one symbol", "one cell", "one minimal command",
+        "two full-account reconcile cycles", "cannot auto-ramp", "Stop / abort",
+        "API auth denial", "direct signup denial", "account-local projection hash",
+        "event-chain replay", "UNKNOWN fault matrix", "orphan quarantine",
+        "fresh venue full-account diff", "persistent halt effectiveness", "no automatic retry",
+        "does not execute production operations", "no remote migration", "no deployment",
+        "no restart", "no resume", "no cap increase", "no Bitfinex write",
+        "API key", "secret", "Authorization", "raw response",
+        "halt2_cutover.py replay", "exit 2", "verify_projection_replay.py",
+    ):
+        assert requirement in canary, f"missing canary safety requirement: {requirement}"
+
+    for requirement in (
+        "Before any venue write", "After any venue write", "image rollback", "halt",
+        "reconcile", "adopt", "manual resolution", "forward-fix", "DB restore",
+        "proof that no later venue mutation occurred", "persistent halt", "no automatic retry",
+        "Operator confirmation", "does not execute production operations",
+    ):
+        assert requirement in rollback, f"missing rollback boundary: {requirement}"
+    assert "Halt 2 clean cutover" in architecture
+    assert "after a venue write" in architecture
 
 
 def _row(*, seq: int, payload: dict[str, object] | None = None) -> EventLogRow:
