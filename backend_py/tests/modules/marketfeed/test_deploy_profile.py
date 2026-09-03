@@ -64,6 +64,14 @@ def _deploy_root(tmp_path: Path) -> Path:
     )
     for profile in ("paper.env", "shadow.env", "shadow-p14.env", "canary.env"):
         shutil.copy2(REPOSITORY_ROOT / "deploy/vm" / profile, root / "deploy/vm" / profile)
+    evidence = tmp_path / "halt2-canary-evidence.json"
+    evidence.write_text("{}\n")
+    canary_profile = root / "deploy/vm/canary.env"
+    canary_profile.write_text(
+        canary_profile.read_text().replace(
+            "/var/lib/bfx/evidence/halt2-canary.json", str(evidence)
+        )
+    )
     for config in ("cells.experimental-p14.yaml", "cells.canary.yaml", "safety.canary.yaml"):
         shutil.copy2(
             REPOSITORY_ROOT / "backend_py/configs" / config,
@@ -111,6 +119,7 @@ def _deploy_root(tmp_path: Path) -> Path:
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
     )
+    _write_executable(fake_bin / "uv", "#!/bin/sh\nexit 0\n")
     return root
 
 
