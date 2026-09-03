@@ -72,8 +72,8 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    ```
 
    Require exit 0. This is the only `halt2_cutover.py` action here that writes:
-   it asserts the existing durable `trading_halt`; it neither resumes nor calls
-   Bitfinex.
+   it sets/asserts the durable `trading_halt` through the existing halt state
+   path; it neither resumes nor calls Bitfinex.
 
 2. **Operator confirmation — read-only evidence is complete.** With the halt
    confirmed, run the read-only preflight.
@@ -151,6 +151,7 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    From the repository root, the eventual operator-only deployment command is:
 
    ```bash
+   cd ..
    BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary
    ```
 
@@ -216,12 +217,25 @@ of the following as passing evidence:
 - The orphan quarantine retains the venue object and blocks the affected scope.
 - A fresh venue full-account diff, persistent halt effectiveness, and no
   automatic retry while any UNKNOWN or other uncertainty remains open.
-- Full local quality gate: `cd backend_py && uv run pytest -m "not integration"
-  -q && uv run pytest tests/integration/test_halt2_replay_cutover.py
-  tests/integration/test_unknown_submit_pg.py
-  tests/integration/test_orphan_quarantine_pg.py -m integration -q && uv run
-  alembic check && uv run mypy src/ && uv run ruff check`; then `cd ../frontend
-  && pnpm test && pnpm lint && pnpm build`.
+- Full local quality gate: begin a new shell session at the repository root so
+  each CWD transition is explicit. Stop at the first nonzero result; do not
+  treat an environment prerequisite as a pass.
+
+  ```bash
+  cd backend_py
+  uv run pytest -m "not integration" -q
+  uv run pytest tests/integration/test_halt2_replay_cutover.py \
+    tests/integration/test_unknown_submit_pg.py \
+    tests/integration/test_orphan_quarantine_pg.py -m integration -q
+  uv run alembic check
+  uv run mypy src/
+  uv run ruff check
+  cd ..
+  cd frontend
+  pnpm test
+  pnpm lint
+  pnpm build
+  ```
 
 The implementation evidence is [Plan 2 gate tests](../../backend_py/tests/scripts/test_halt2_cutover.py),
 [Plan 3 replay/conversion tests](../../backend_py/tests/integration/test_halt2_replay_cutover.py),
