@@ -123,7 +123,10 @@ export type ExecutionEventType =
   | "RESERVATION_FAILED"
   | "ORDER_FILL"
   | "RESERVATION_RELEASED"
-  | "CREDIT_CLOSED";
+  | "CREDIT_CLOSED"
+  | "UNCERTAINTY_BOUND_TO_VENUE_OFFER"
+  | "UNCERTAINTY_MARKED_NOT_ACCEPTED"
+  | "UNCERTAINTY_MANUALLY_RESOLVED";
 
 /** GET /positions — per-symbol position_state ledger projection. */
 export interface Position {
@@ -179,6 +182,59 @@ export interface ExecutionEventsPagination {
 export interface ExecutionEventsResponse {
   data: ExecutionEvent[];
   pagination: ExecutionEventsPagination;
+}
+
+// ── Execution uncertainties (operator resolution) ──
+
+export type UncertaintyKind =
+  | "submit_outcome_unknown"
+  | "unattributed_venue_offer"
+  | "unsupported_venue_exposure";
+
+export type UncertaintyState = "open" | "resolved";
+
+/** Deliberately bounded values exposed by the backend operator DTO. */
+export interface UncertaintyEvidenceSummary {
+  outcomeReason?: string | null;
+  observedAtMs?: number | null;
+  candidateCount?: number | null;
+  venueOfferId?: string | null;
+  status?: string | null;
+  coverage?: Record<string, boolean>;
+}
+
+export interface UncertaintyBlockedScope {
+  exchangeAccountId: string;
+  environment: string;
+  symbol: string;
+}
+
+/** Latest server-derived evidence that can authorize an operator resolution. */
+export interface UncertaintyResolutionContext {
+  reconcileEventSeq: number | null;
+  queryStartedAtMs: number | null;
+  queryFinishedAtMs: number | null;
+  candidateCount: number | null;
+  candidateVenueOfferIds: string[];
+  unavailableReason: string | null;
+}
+
+/** Account/environment/symbol-scoped execution block. */
+export interface Uncertainty {
+  uncertaintyId: string;
+  kind: UncertaintyKind;
+  symbol: string;
+  /** Decimal string (venue-native intended amount). */
+  intendedAmount: string;
+  state: UncertaintyState;
+  openedEventSeq: number;
+  reconcileEventSeq: number | null;
+  resolvedEventSeq: number | null;
+  evidenceSummary: UncertaintyEvidenceSummary;
+  blockedScope: UncertaintyBlockedScope;
+  resolutionContext: UncertaintyResolutionContext | null;
+  resolvedByOperatorId?: string | null;
+  resolutionReason?: string | null;
 }
 
 // ── Attribution ──

@@ -32,6 +32,14 @@ from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptP
 
 __SCHEMA_VERSION__ = 3
 
+ManualUncertaintyResolutionAction = Literal[
+    "accepted_external_exposure",
+    "closed_at_venue",
+]
+MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS: frozenset[
+    ManualUncertaintyResolutionAction
+] = frozenset({"accepted_external_exposure", "closed_at_venue"})
+
 # Schema-evolution upcast value: each of the 5 reserve events gained a mandatory
 # `symbol` after early event_log rows were written (the 4 position events in
 # Phase 2; Intent/Failed in the fUSD-prereq work). Two consumers use it for those
@@ -108,6 +116,25 @@ def _validate_reservation_ref(
         raise TypeError(f"{type(ev).__name__} reservation_ref correlation conflicts")
     if requires_venue_offer and reference.venue_offer_id != typed_event.venue_offer_id:
         raise TypeError(f"{type(ev).__name__} reservation_ref venue offer conflicts")
+
+
+def _validate_resolution_event(ev: object) -> None:
+    """Validate the common immutable audit fields on resolution events."""
+    uncertainty_id = getattr(ev, "uncertainty_id", None)
+    if not isinstance(uncertainty_id, UUID):
+        raise TypeError(f"{type(ev).__name__} requires uncertainty_id UUID")
+    for name in ("account_id", "environment", "symbol", "kind"):
+        if not isinstance(getattr(ev, name, None), str) or not getattr(ev, name).strip():
+            raise TypeError(f"{type(ev).__name__} requires non-empty {name}")
+    reconcile_event_seq = getattr(ev, "reconcile_event_seq", None)
+    if not isinstance(reconcile_event_seq, int) or reconcile_event_seq < 0:
+        raise ValueError(f"{type(ev).__name__} requires non-negative reconcile_event_seq")
+    for name in ("resolved_by_operator_id", "resolution_reason"):
+        if not isinstance(getattr(ev, name, None), str) or not getattr(ev, name).strip():
+            raise TypeError(f"{type(ev).__name__} requires non-empty {name}")
+    evidence = getattr(ev, "resolution_evidence", None)
+    if not isinstance(evidence, Mapping):
+        raise TypeError(f"{type(ev).__name__} resolution_evidence must be an object")
 
 
 def _resolve_position_fields(ev: object) -> None:
@@ -452,6 +479,105 @@ class SubmitMatchedToVenueOffer:
         _resolve_amount(self)
         if self.reconcile_event_seq < 0:
             raise ValueError("reconcile_event_seq must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class UncertaintyBoundToVenueOffer:
+    """Operator resolution binding one UNKNOWN attempt to an exact venue ID.
+
+    This is a resolution fact, not a projection command.  The event writer
+    verifies the referenced fresh snapshot and applies the attribution and
+    uncertainty transition atomically.  Keeping the operator/evidence fields
+    on the event makes the decision reproducible during a clean replay.
+    """
+
+    uncertainty_id: UUID
+    account_id: str
+    environment: str
+    symbol: str
+    kind: str
+    venue_offer_id: str
+    reconcile_event_seq: int
+    resolved_by_operator_id: str
+    resolution_reason: str
+    resolution_evidence: Mapping[str, Any] = field(default_factory=dict)
+    venue_status: str = "active"
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    event_seq: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _validate_resolution_event(self)
+        if not self.venue_offer_id.strip():
+            raise TypeError("UncertaintyBoundToVenueOffer requires venue_offer_id")
+        object.__setattr__(self, "resolution_evidence", dict(self.resolution_evidence))
+
+
+@dataclass(frozen=True, slots=True)
+class UncertaintyMarkedNotAccepted:
+    """Operator resolution confirming an UNKNOWN request was not accepted."""
+
+    uncertainty_id: UUID
+    account_id: str
+    environment: str
+    symbol: str
+    kind: str
+    reconcile_event_seq: int
+    resolved_by_operator_id: str
+    resolution_reason: str
+    resolution_evidence: Mapping[str, Any] = field(default_factory=dict)
+    candidate_count: int = 0
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    event_seq: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _validate_resolution_event(self)
+        if self.candidate_count < 0:
+            raise ValueError("candidate_count must be non-negative")
+        object.__setattr__(self, "resolution_evidence", dict(self.resolution_evidence))
+
+
+@dataclass(frozen=True, slots=True)
+class UncertaintyManuallyResolved:
+    """Operator resolution for an orphan/unsupported exposure or exception."""
+
+    uncertainty_id: UUID
+    account_id: str
+    environment: str
+    symbol: str
+    kind: str
+    reconcile_event_seq: int
+    resolved_by_operator_id: str
+    resolution_reason: str
+    resolution_action: ManualUncertaintyResolutionAction
+    resolution_evidence: Mapping[str, Any] = field(default_factory=dict)
+    occurred_at_ms: int | None = None
+    recorded_at_ms: int | None = None
+    event_seq: int | None = None
+    event_id: UUID = field(default_factory=uuid4)
+    schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _validate_resolution_event(self)
+        if (
+            not isinstance(self.resolution_action, str)
+            or self.resolution_action not in MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS
+        ):
+            raise ValueError("unsupported manual uncertainty resolution_action")
+        object.__setattr__(self, "resolution_evidence", dict(self.resolution_evidence))
+
+
+# Descriptive aliases retained for callers that use the verb from the API
+# action name.  They intentionally point at the same frozen event classes so
+# serialization has one canonical registry entry per durable event type.
+UncertaintyBindToVenueOffer = UncertaintyBoundToVenueOffer
+UncertaintyNotAccepted = UncertaintyMarkedNotAccepted
+ManualUncertaintyResolution = UncertaintyManuallyResolved
 
 
 @dataclass(frozen=True, slots=True)

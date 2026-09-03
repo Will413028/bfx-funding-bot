@@ -58,6 +58,7 @@ class VenueOfferState:
     cid: int | None = None
     execution_decision_id: str | None = None
     signal_correlation_id: UUID | None = None
+    offer_type: str | None = None
     flags: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -127,6 +128,7 @@ class VenueOfferObservation:
     cid: int | None = None
     execution_decision_id: str | None = None
     signal_correlation_id: UUID | None = None
+    offer_type: str | None = None
     flags: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

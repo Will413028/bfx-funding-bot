@@ -9,9 +9,11 @@ import { ExecutionsTable } from "@/features/dashboard/components/executions-tabl
 import { OffersTable } from "@/features/dashboard/components/offers-table";
 import { PositionsCard } from "@/features/dashboard/components/positions-card";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
+import { UncertaintyBanner } from "@/features/dashboard/components/uncertainty-banner";
 import { useExecutionEvents } from "@/features/dashboard/hooks/use-execution-events";
 import { useOffers } from "@/features/dashboard/hooks/use-offers";
 import { usePositions } from "@/features/dashboard/hooks/use-positions";
+import { useUncertainties } from "@/features/dashboard/hooks/use-uncertainties";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
 export default function OverviewPage() {
@@ -22,6 +24,9 @@ export default function OverviewPage() {
   const executions = useExecutionEvents({
     exchangeAccountId: account.exchangeAccountId,
   });
+  // Uncertainty loading/error is intentionally independent from the core
+  // position/offer tables: one blocked symbol must not hide healthy symbols.
+  const uncertainties = useUncertainties(account.exchangeAccountId);
   const { data: apiKeys } = useApiKeys(account.exchangeAccountId);
   const { data: config } = useConfig(account.exchangeAccountId);
 
@@ -62,9 +67,20 @@ export default function OverviewPage() {
   const setupComplete = hasVerifiedKey && hasStrategy;
 
   const events = executions.data.pages.flatMap((p) => p.data);
+  const visibleSymbols = Array.from(
+    new Set([
+      ...positions.data.map((position) => position.symbol),
+      ...offers.data.map((offer) => offer.symbol),
+    ]),
+  );
 
   return (
     <div className="space-y-4">
+      <UncertaintyBanner
+        uncertainties={uncertainties.data ?? []}
+        visibleSymbols={visibleSymbols}
+        isUnavailable={uncertainties.isError}
+      />
       {!setupComplete && (
         <SetupChecklist
           hasVerifiedKey={hasVerifiedKey}

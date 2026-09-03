@@ -18,6 +18,12 @@ const chipActive: Record<ExecutionEventType, string> = {
   ORDER_FILL: "border-emerald-400/40 bg-emerald-400/10 text-emerald-400",
   RESERVATION_RELEASED: "border-zinc-400/40 bg-zinc-400/10 text-zinc-300",
   CREDIT_CLOSED: "border-violet-400/40 bg-violet-400/10 text-violet-400",
+  UNCERTAINTY_BOUND_TO_VENUE_OFFER:
+    "border-sky-400/40 bg-sky-400/10 text-sky-300",
+  UNCERTAINTY_MARKED_NOT_ACCEPTED:
+    "border-orange-400/40 bg-orange-400/10 text-orange-300",
+  UNCERTAINTY_MANUALLY_RESOLVED:
+    "border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-300",
 };
 
 interface EventTypeFilterProps {

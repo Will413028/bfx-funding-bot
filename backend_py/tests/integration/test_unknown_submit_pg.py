@@ -28,10 +28,15 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     PositionStateRow,
     VenueOfferStateRow,
 )
+from bfx_funding_bot.modules.execution.event_store.writer import (
+    AccountEventWriter,
+    ProjectionWriteError,
+)
 from bfx_funding_bot.modules.execution.events import (
     ReservationIntent,
     ReservationUnknown,
     SnapshotCoverage,
+    UncertaintyMarkedNotAccepted,
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
@@ -251,6 +256,11 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
     auth = _Auth(active=(accepted, _offer("unknown-symbol", symbol="fXYZ", amount="3")), history=history)
     bus = _Bus()
 
+    first = await _recovery(pg_session_factory, auth, bus).run()
+    assert first.n_unknown == 1
+    assert first.n_matched == 0
+    assert not any(call.startswith("history:") for call in auth.calls)
+
     result = await _recovery(pg_session_factory, auth, bus).run()
 
     async with pg_session_factory() as session:
@@ -277,7 +287,7 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
     assert attempt.outcome_kind == "acknowledged"
     assert attempt.venue_offer_id == "venue-accepted"
     assert uncertainty.state == "resolved"
-    assert result.n_unknown == 1
+    assert result.n_unknown == 0
     assert result.n_matched == 1
     assert {"fUST", "fUSD", "fXYZ"} <= symbols
     assert any(call.startswith("history:1000:5000") for call in auth.calls)
@@ -300,6 +310,158 @@ async def test_pending_restart_emits_unknown_then_exact_match_and_resolves(pg_se
         ).scalar_one()
     assert rebuilt_attempt.venue_offer_id == "venue-accepted"
     assert rebuilt_uncertainty.state == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_resolved_unknown_attempt_is_excluded_from_future_matcher_history(
+    pg_session_factory,
+):
+    await _seed_attempt(pg_session_factory, unknown=True)
+    initial = await _recovery(pg_session_factory, _Auth()).run()
+    assert initial.snapshot_event_seq is not None
+
+    async with pg_session_factory() as session:
+        uncertainty = (
+            await session.execute(
+                select(ExecutionUncertaintyRow).where(
+                    ExecutionUncertaintyRow.kind == "submit_outcome_unknown"
+                )
+            )
+        ).scalar_one()
+        await AccountEventWriter(
+            store=PostgresEventStore(deployment_environment=_ENV)
+        ).append(
+            session,
+            UncertaintyMarkedNotAccepted(
+                uncertainty_id=uncertainty.uncertainty_id,
+                account_id=str(_ACCOUNT),
+                environment=_ENV,
+                symbol="fUST",
+                kind="submit_outcome_unknown",
+                reconcile_event_seq=initial.snapshot_event_seq,
+                resolved_by_operator_id="operator-1",
+                resolution_reason="complete history had zero candidates",
+                resolution_evidence={
+                    "reconcile_event_seq": initial.snapshot_event_seq,
+                    "query_started_at_ms": 5_000,
+                    "query_finished_at_ms": 5_000,
+                    "candidate_count": 0,
+                },
+                candidate_count=0,
+                occurred_at_ms=6_000,
+            ),
+        )
+        await session.commit()
+
+    auth = _Auth(active=(_offer("late-unrelated-candidate"),))
+    result = await _recovery(pg_session_factory, auth).run()
+
+    async with pg_session_factory() as session:
+        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
+        uncertainty = (
+            await session.execute(
+                select(ExecutionUncertaintyRow).where(
+                    ExecutionUncertaintyRow.kind == "submit_outcome_unknown"
+                )
+            )
+        ).scalar_one()
+    assert attempt.outcome_kind == "unknown"
+    assert uncertainty.state == "resolved"
+    assert result.n_matched == 0
+    assert not any(call.startswith("history:") for call in auth.calls)
+
+
+def _empty_snapshot(*, started: int, finished: int) -> VenueSnapshotObserved:
+    return VenueSnapshotObserved(
+        account_id=str(_ACCOUNT),
+        environment=_ENV,
+        query_started_at_ms=started,
+        query_finished_at_ms=finished,
+        offers=(),
+        credits=(),
+        wallet_available={"fUST": Decimal("100")},
+        coverage=SnapshotCoverage(
+            active_offers_complete=True,
+            active_credits_complete=True,
+            wallets_complete=True,
+            offer_history_complete=True,
+            offer_history_pages=1,
+            offer_history_start_ms=1_000,
+            offer_history_end_ms=started,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pg_resolution_rejects_snapshot_query_overlapping_opening_event(
+    pg_session_factory,
+):
+    await _seed_attempt(pg_session_factory, unknown=True)
+    async with pg_session_factory() as session:
+        store = PostgresEventStore(deployment_environment=_ENV)
+        result = await store.append_snapshot(
+            session,
+            _empty_snapshot(started=1_001, finished=2_000),
+        )
+        uncertainty = (
+            await session.execute(select(ExecutionUncertaintyRow))
+        ).scalar_one()
+        assert result.event_seq is not None
+        with pytest.raises(ProjectionWriteError, match="interval is stale"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty.uncertainty_id,
+                    account_id=str(_ACCOUNT),
+                    environment=_ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=result.event_seq,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="overlap",
+                    resolution_evidence={},
+                    candidate_count=0,
+                    occurred_at_ms=2_001,
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_pg_resolution_rejects_newer_then_late_appended_older_snapshot(
+    pg_session_factory,
+):
+    await _seed_attempt(pg_session_factory, unknown=True)
+    async with pg_session_factory() as session:
+        store = PostgresEventStore(deployment_environment=_ENV)
+        await store.append_snapshot(
+            session,
+            _empty_snapshot(started=2_000, finished=3_000),
+        )
+        delayed = await store.append_snapshot(
+            session,
+            _empty_snapshot(started=1_500, finished=2_500),
+        )
+        uncertainty = (
+            await session.execute(select(ExecutionUncertaintyRow))
+        ).scalar_one()
+        assert delayed.event_seq is not None
+        with pytest.raises(ProjectionWriteError, match="did not advance canonical state"):
+            await AccountEventWriter(store=store).append(
+                session,
+                UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty.uncertainty_id,
+                    account_id=str(_ACCOUNT),
+                    environment=_ENV,
+                    symbol="fUST",
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=delayed.event_seq,
+                    resolved_by_operator_id="operator-1",
+                    resolution_reason="late append",
+                    resolution_evidence={},
+                    candidate_count=0,
+                    occurred_at_ms=3_001,
+                ),
+            )
 
 
 @pytest.mark.asyncio
