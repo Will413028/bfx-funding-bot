@@ -229,19 +229,9 @@ class BitfinexAuthREST:
         self._base_url = base_url.rstrip("/")
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
 
-    async def fetch_funding_offers_raw(
+    async def _fetch_funding_offers_response(
         self, *, ctx: AccountContext, symbol: str | None = None,
-    ) -> Any:
-        """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns the raw
-        decoded JSON body (list of positional arrays), before parsing.
-
-        Separated from get_active_funding_offers so callers that need the raw
-        wire payload (e.g. the live contract test capturing a fixture) still go
-        through the real HMAC-signed transport.
-
-        Raises BitfinexAPIError on transport/HTTP error, BitfinexShapeError on
-        invalid JSON.
-        """
+    ) -> httpx.Response:
         path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
         body_bytes = json.dumps({}).encode("utf-8")
         nonce = self._nonce_provider()
@@ -263,6 +253,17 @@ class BitfinexAuthREST:
                 status_code=resp.status_code,
                 message=resp.reason_phrase or "http error", raw=resp.text,
             )
+        return resp
+
+    async def fetch_funding_offers_raw(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+    ) -> Any:
+        """Return the legacy default-decoded positional-array payload.
+
+        This compatibility path intentionally retains JSON's float decoding.
+        Typed reconciliation reads use an exact Decimal decoder instead.
+        """
+        resp = await self._fetch_funding_offers_response(ctx=ctx, symbol=symbol)
         try:
             return resp.json()
         except json.JSONDecodeError as e:
@@ -273,7 +274,13 @@ class BitfinexAuthREST:
     ) -> list[ActiveFundingOffer]:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
-        raw = await self.fetch_funding_offers_raw(ctx=ctx, symbol=symbol)
+        resp = await self._fetch_funding_offers_response(ctx=ctx, symbol=symbol)
+        try:
+            raw = json.loads(resp.content, parse_float=Decimal)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise BitfinexShapeError(
+                f"invalid JSON in funding-offers response: {exc}"
+            ) from exc
         return parse_active_funding_offers(raw)
 
     async def get_funding_offer_history(
@@ -344,8 +351,8 @@ class BitfinexAuthREST:
                     raw=resp.text,
                 )
             try:
-                raw = resp.json()
-            except json.JSONDecodeError as exc:
+                raw = json.loads(resp.content, parse_float=Decimal)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise BitfinexShapeError(
                     f"invalid JSON in funding-offer-history response: {exc}"
                 ) from exc

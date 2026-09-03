@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import httpx
@@ -26,6 +27,11 @@ def _row(offer_id=12345, symbol="fUSD", mts=1_700_000_000_000, amount=-100.0,
     row[14] = rate
     row[15] = period
     return row
+
+
+def _wire_body_with_rate(rate_literal: str, *, status: str = "ACTIVE") -> bytes:
+    encoded = json.dumps([_row(status=status, rate="__EXACT_RATE__")])
+    return encoded.replace('"__EXACT_RATE__"', rate_literal).encode("ascii")
 
 
 def test_parse_happy_path():
@@ -88,6 +94,51 @@ async def test_get_active_funding_offers_signs_and_parses():
     assert headers["bfx-nonce"] == "111"
     assert "bfx-signature" in headers and len(headers["bfx-signature"]) == 96  # sha384 hexdigest
     assert captured["content"] == b"{}"
+
+
+@pytest.mark.asyncio
+async def test_typed_active_offer_preserves_wire_decimal_while_raw_stays_float():
+    precise_rate = "0.0003100000000000000001"
+    body = _wire_body_with_rate(precise_rate)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=iter((1, 2)).__next__)
+
+        parsed = await client.get_active_funding_offers(ctx=_ctx(), symbol="fUSD")
+        raw = await client.fetch_funding_offers_raw(ctx=_ctx(), symbol="fUSD")
+
+    assert parsed[0].rate_decimal == Decimal(precise_rate)
+    assert isinstance(raw[0][14], float)
+
+
+@pytest.mark.asyncio
+async def test_typed_offer_history_preserves_exact_wire_rate():
+    precise_rate = "0.0003100000000000000001"
+    body = _wire_body_with_rate(precise_rate, status="CANCELED")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        result = await BitfinexAuthREST(
+            http=http,
+            nonce_provider=iter((1,)).__next__,
+        ).get_funding_offer_history(
+            ctx=_ctx(),
+            start_ms=1_699_999_999_000,
+            end_ms=1_700_000_001_000,
+        )
+
+    assert result.offers[0].rate_decimal == Decimal(precise_rate)
 
 
 @pytest.mark.asyncio
