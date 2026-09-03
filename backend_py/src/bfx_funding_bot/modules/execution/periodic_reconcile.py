@@ -73,6 +73,16 @@ class PeriodicReconcile:
         self._resync_event = asyncio.Event()
         self._resync_reason = ""
         self._last_tick_mono = 0.0
+        self._recent_fences: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def recent_fences(self) -> tuple[tuple[int, int], ...]:
+        """The two latest successful reconcile fences for bounded canary evidence.
+
+        This remains diagnostic runtime state only; the preflight authority is
+        the immutable, account-local ``reconcile_observation`` projection.
+        """
+        return self._recent_fences
 
     def request_resync(self, reason: str) -> None:
         """Request one off-interval reconcile. Synchronous and safe to call from a
@@ -136,6 +146,11 @@ class PeriodicReconcile:
             return
 
         self._consecutive_failures = 0
+        if result.snapshot_event_seq is not None:
+            self._recent_fences = (
+                *self._recent_fences[-1:],
+                (result.snapshot_event_seq, int(time.time() * 1000)),
+            )
         if self._tripped_down:
             self._tripped_down = False
             self._probe.update(

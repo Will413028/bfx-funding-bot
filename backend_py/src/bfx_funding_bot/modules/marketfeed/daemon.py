@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -92,6 +93,11 @@ from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentT
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    ProjectionHeadRow,
+    ReconcileObservationRow,
+)
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -140,6 +146,8 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 )
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
+from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
@@ -277,6 +285,299 @@ class AccountBootstrap:
                 "BFX_ACCOUNT_ID is no longer supported; use "
                 "BFX_EXCHANGE_ACCOUNT_ID"
             )
+
+
+class CanaryStartupBlocked(ConfigurationError):  # noqa: N818 - domain block state
+    """The bounded real-money canary has incomplete or contradictory evidence."""
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryProfile:
+    """Boot-immutable, one-command ceiling for a real-money canary."""
+
+    account_id: UUID
+    environment: str
+    symbol: str
+    cell: str
+    strategy: str
+    amount_usdt: Decimal
+    cap_usdt: Decimal
+    max_evidence_age_seconds: int
+
+    @classmethod
+    def from_environ(cls, environ: Mapping[str, str]) -> CanaryProfile:
+        def required(name: str) -> str:
+            value = environ.get(name, "").strip()
+            if not value:
+                raise CanaryStartupBlocked(f"missing_canary_setting:{name}")
+            return value
+
+        try:
+            account_id = UUID(required("BFX_CANARY_ACCOUNT_ID"))
+        except ValueError as exc:
+            raise CanaryStartupBlocked("invalid_canary_account_id") from exc
+        try:
+            amount = Decimal(required("BFX_CANARY_AMOUNT_USDT"))
+            cap = Decimal(required("BFX_CANARY_CAP_USDT"))
+            max_age = int(required("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS"))
+        except (ArithmeticError, ValueError) as exc:
+            raise CanaryStartupBlocked("invalid_canary_numeric_setting") from exc
+        if not amount.is_finite() or not cap.is_finite() or amount <= 0 or cap <= 0:
+            raise CanaryStartupBlocked("invalid_canary_amount_or_cap")
+        if amount > cap:
+            raise CanaryStartupBlocked("canary_amount_exceeds_cap")
+        if max_age <= 0:
+            raise CanaryStartupBlocked("invalid_canary_evidence_age")
+        return cls(
+            account_id=account_id,
+            environment=required("BFX_CANARY_ENVIRONMENT"),
+            symbol=required("BFX_CANARY_SYMBOL"),
+            cell=required("BFX_CANARY_CELL"),
+            strategy=required("BFX_CANARY_STRATEGY"),
+            amount_usdt=amount,
+            cap_usdt=cap,
+            max_evidence_age_seconds=max_age,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryEvidence:
+    """Bounded, redacted result of the one allowed canary command."""
+
+    account_id: str
+    environment: str
+    symbol: str
+    cell: str
+    strategy: str
+    amount_usdt: Decimal
+    command_decision_id: str
+    attempt_id: str
+    outcome_kind: str
+    venue_offer_id: str | None
+    outcome_at_ms: int
+    reconcile_fences: tuple[int, ...]
+    reconcile_observed_at_ms: tuple[int, ...]
+    projection_hash: str
+    venue_db_exposure_diff_usdt: Decimal
+    stop_reason: str | None
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> CanaryEvidence:
+        required = tuple(cls.__dataclass_fields__)
+        missing = tuple(name for name in required if name not in value)
+        if missing:
+            raise CanaryStartupBlocked("canary_evidence_missing:" + ",".join(missing))
+        try:
+            fence_values = value["reconcile_fences"]
+            observed_values = value["reconcile_observed_at_ms"]
+            if (
+                not isinstance(fence_values, list | tuple)
+                or isinstance(fence_values, str)
+                or not isinstance(observed_values, list | tuple)
+                or isinstance(observed_values, str)
+            ):
+                raise TypeError("reconcile evidence must be an array")
+            fences = tuple(int(item) for item in fence_values)
+            observed = tuple(int(item) for item in observed_values)
+            amount = Decimal(str(value["amount_usdt"]))
+            exposure_diff = Decimal(str(value["venue_db_exposure_diff_usdt"]))
+            outcome_at_ms = int(str(value["outcome_at_ms"]))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise CanaryStartupBlocked("invalid_canary_evidence") from exc
+        venue_offer_id = value["venue_offer_id"]
+        stop_reason = value["stop_reason"]
+        if venue_offer_id is not None and not isinstance(venue_offer_id, str):
+            raise CanaryStartupBlocked("invalid_canary_venue_offer_id")
+        if stop_reason is not None and not isinstance(stop_reason, str):
+            raise CanaryStartupBlocked("invalid_canary_stop_reason")
+        return cls(
+            account_id=str(value["account_id"]),
+            environment=str(value["environment"]),
+            symbol=str(value["symbol"]),
+            cell=str(value["cell"]),
+            strategy=str(value["strategy"]),
+            amount_usdt=amount,
+            command_decision_id=str(value["command_decision_id"]),
+            attempt_id=str(value["attempt_id"]),
+            outcome_kind=str(value["outcome_kind"]),
+            venue_offer_id=venue_offer_id,
+            outcome_at_ms=outcome_at_ms,
+            reconcile_fences=fences,
+            reconcile_observed_at_ms=observed,
+            projection_hash=str(value["projection_hash"]),
+            venue_db_exposure_diff_usdt=exposure_diff,
+            stop_reason=stop_reason,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryReadiness:
+    open_uncertainty_count: int
+    projector_lag: int
+    snapshot_symbols: frozenset[str]
+    reconcile_fences: tuple[int, ...]
+    reconcile_observed_at_ms: tuple[int, ...]
+    observed_at_ms: int
+    persistent_halt: bool
+
+
+def _canary_block(reasons: list[str]) -> None:
+    if reasons:
+        raise CanaryStartupBlocked(",".join(sorted(set(reasons))))
+
+
+def assert_canary_startup(
+    *,
+    profile: CanaryProfile,
+    evidence: CanaryEvidence | None,
+    readiness: CanaryReadiness,
+    configured_cells: tuple[tuple[str, str, str], ...],
+    configured_caps: Mapping[str, Decimal],
+    allocation_cap_usdt: Decimal,
+) -> None:
+    """Fail closed before the existing command gate can construct a live executor."""
+    reasons: list[str] = []
+    expected_cell = (profile.strategy, profile.symbol, profile.cell)
+    if configured_cells != (expected_cell,):
+        reasons.append("canary_scope_mismatch")
+    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
+        reasons.append("canary_cap_mismatch")
+    if allocation_cap_usdt != profile.cap_usdt:
+        reasons.append("canary_allocation_cap_mismatch")
+    if evidence is None:
+        reasons.append("missing_canary_evidence")
+        _canary_block(reasons)
+        return
+    if (
+        evidence.account_id != str(profile.account_id)
+        or evidence.environment != profile.environment
+        or evidence.symbol != profile.symbol
+        or evidence.cell != profile.cell
+        or evidence.strategy != profile.strategy
+    ):
+        reasons.append("canary_identity_or_scope_mismatch")
+    if evidence.amount_usdt != profile.amount_usdt or evidence.amount_usdt > profile.cap_usdt:
+        reasons.append("canary_amount_mismatch")
+    if not evidence.command_decision_id.strip() or not evidence.attempt_id.strip():
+        reasons.append("canary_command_identity_missing")
+    if evidence.outcome_kind != "acknowledged" or not evidence.venue_offer_id:
+        reasons.append("canary_outcome_not_acknowledged")
+    if len(evidence.projection_hash) != 64 or any(
+        char not in "0123456789abcdef" for char in evidence.projection_hash
+    ):
+        reasons.append("invalid_projection_hash")
+    if evidence.venue_db_exposure_diff_usdt != 0:
+        reasons.append("venue_db_exposure_diff")
+    if evidence.stop_reason:
+        reasons.append("canary_evidence_stop_reason")
+    if len(evidence.reconcile_fences) != 2 or len(evidence.reconcile_observed_at_ms) != 2:
+        reasons.append("two_reconcile_cycles_required")
+    elif (
+        evidence.reconcile_fences[0] >= evidence.reconcile_fences[1]
+        or evidence.reconcile_observed_at_ms[0] >= evidence.reconcile_observed_at_ms[1]
+        or evidence.reconcile_observed_at_ms[0] <= evidence.outcome_at_ms
+    ):
+        reasons.append("invalid_reconcile_cycle_order")
+    if readiness.open_uncertainty_count:
+        reasons.append("open_execution_uncertainty")
+    if readiness.projector_lag:
+        reasons.append("projector_lag")
+    if readiness.snapshot_symbols != frozenset({profile.symbol}):
+        reasons.append("venue_snapshot_coverage_incomplete")
+    if (
+        readiness.reconcile_fences != evidence.reconcile_fences
+        or readiness.reconcile_observed_at_ms != evidence.reconcile_observed_at_ms
+    ):
+        reasons.append("reconcile_evidence_mismatch")
+    if readiness.observed_at_ms - evidence.outcome_at_ms > profile.max_evidence_age_seconds * 1000:
+        reasons.append("canary_evidence_stale")
+    if not readiness.persistent_halt:
+        reasons.append("persistent_halt_absent")
+    _canary_block(reasons)
+
+
+def load_canary_evidence(path: Path) -> CanaryEvidence:
+    """Load only the bounded evidence fields; raw venue responses are never accepted."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CanaryStartupBlocked("canary_evidence_unavailable") from exc
+    if not isinstance(value, dict):
+        raise CanaryStartupBlocked("invalid_canary_evidence")
+    return CanaryEvidence.from_dict(value)
+
+
+async def collect_canary_readiness(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    environment: str,
+    now_ms: int,
+) -> CanaryReadiness:
+    """Read account-local evidence without calling the venue or mutating projections."""
+    event_head = int(
+        await session.scalar(
+            select(func.max(EventLogRow.event_seq)).where(
+                EventLogRow.exchange_account_id == account_id,
+                EventLogRow.deployment_environment == environment,
+            )
+        )
+        or 0
+    )
+    projection_heads = list(
+        await session.scalars(
+            select(ProjectionHeadRow.last_event_seq).where(
+                ProjectionHeadRow.exchange_account_id == account_id,
+                ProjectionHeadRow.deployment_environment == environment,
+            )
+        )
+    )
+    projector_lag = (
+        event_head - min(projection_heads) if projection_heads else event_head
+    )
+    open_uncertainty_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ExecutionUncertaintyRow)
+            .where(
+                ExecutionUncertaintyRow.exchange_account_id == account_id,
+                ExecutionUncertaintyRow.deployment_environment == environment,
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        or 0
+    )
+    observations = list(
+        await session.scalars(
+            select(ReconcileObservationRow)
+            .where(
+                ReconcileObservationRow.exchange_account_id == account_id,
+                ReconcileObservationRow.deployment_environment == environment,
+            )
+            .order_by(ReconcileObservationRow.id.desc())
+            .limit(2)
+        )
+    )
+    observations.reverse()
+    halted = await session.scalar(
+        select(TradingHaltRow.halted)
+        .where(
+            TradingHaltRow.exchange_account_id == account_id,
+            TradingHaltRow.deployment_environment == environment,
+        )
+        .order_by(TradingHaltRow.id.desc())
+        .limit(1)
+    )
+    return CanaryReadiness(
+        open_uncertainty_count=open_uncertainty_count,
+        projector_lag=max(0, projector_lag),
+        snapshot_symbols=frozenset(row.symbol for row in observations),
+        reconcile_fences=tuple(row.event_seq_fence for row in observations),
+        reconcile_observed_at_ms=tuple(row.observed_at_ms for row in observations),
+        observed_at_ms=now_ms,
+        persistent_halt=halted is True,
+    )
 
 
 async def load_account_bootstrap(
@@ -877,7 +1178,13 @@ class _StubDivergenceSource:
         return 0.0
 
 
-_CANARY_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat", "allocation_cap")
+_CANARY_REQUIRED_HARD = (
+    "manual_kill",
+    "auth_health",
+    "heartbeat",
+    "allocation_cap",
+    "buying_power",
+)
 _CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
@@ -1082,6 +1389,40 @@ async def build_daemon(
         os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
     )
     safety_cfg = load_safety_config(safety_cfg_path)
+    assert_canary_guard_invariant(config.phase, safety_cfg)
+    hg = safety_cfg.hard_guards
+    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+
+    # This is deliberately before build_executor() and before any live recovery
+    # loop is constructed.  The existing AccountCommandGate remains the only
+    # route to submit; this gate merely refuses to start that route without the
+    # bounded, account-local evidence produced by run_canary_preflight.py.
+    if (
+        config.phase is Phase.CANARY
+        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
+    ):
+        profile = CanaryProfile.from_environ(os.environ)
+        if profile.environment != env_str or profile.account_id != account_bootstrap.exchange_account_id:
+            raise CanaryStartupBlocked("canary_identity_or_environment_mismatch")
+        evidence_path = os.environ.get("BFX_CANARY_EVIDENCE_REPORT", "").strip()
+        evidence = load_canary_evidence(Path(evidence_path)) if evidence_path else None
+        async with session_factory() as canary_session:
+            readiness = await collect_canary_readiness(
+                canary_session,
+                account_id=profile.account_id,
+                environment=profile.environment,
+                now_ms=now_ms_utc(),
+            )
+        assert_canary_startup(
+            profile=profile,
+            evidence=evidence,
+            readiness=readiness,
+            configured_cells=tuple(
+                (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
+            ),
+            configured_caps=hg.allocation_cap.caps,
+            allocation_cap_usdt=allocation_cap,
+        )
 
     # L2 loss-limiter source: account NAV (available + reserved + realized)
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
@@ -1118,14 +1459,11 @@ async def build_daemon(
     # operators to disable hard guards in paper/shadow is bounded; 4.4 canary
     # spec will need an additional invariant requiring all hard guards on.
     # Canary (real money) must not boot with a safety guard silently off.
-    assert_canary_guard_invariant(config.phase, safety_cfg)
-    hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
     # Phase 2: every configured currency must have an explicit cap (and >0 under
     # canary) — config-fatal otherwise. Then log the effective cap per symbol so
     # the boot log is the authoritative record of how much real money each
     # currency may deploy.
-    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
     log.info(
         "effective_cap_per_symbol %s",
         # assert_caps_invariant (above) already proved every configured symbol has

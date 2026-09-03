@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
+import pytest
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.execution.events import PositionReconciled
@@ -221,3 +224,224 @@ phase3b_wfo_results_ref: x
         "ledger.realized_exposure('fUST') should reflect PositionReconciled.realized_usdt "
         "after bus.publish — subscription missing or account_id mismatch"
     )
+
+
+_CANARY_ACCOUNT_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def _bounded_canary_profile():
+    """One immutable cell with a 150 USDT ceiling, derived without production helpers."""
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryProfile
+
+    return CanaryProfile(
+        account_id=_CANARY_ACCOUNT_ID,
+        environment="prod",
+        symbol="fUST",
+        cell="fUST_a30",
+        strategy="mean_reversion",
+        amount_usdt=Decimal("150"),
+        cap_usdt=Decimal("150"),
+        max_evidence_age_seconds=300,
+    )
+
+
+def _valid_canary_evidence():
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryEvidence
+
+    return CanaryEvidence(
+        account_id=str(_CANARY_ACCOUNT_ID),
+        environment="prod",
+        symbol="fUST",
+        cell="fUST_a30",
+        strategy="mean_reversion",
+        amount_usdt=Decimal("150"),
+        command_decision_id="decision-1",
+        attempt_id="22222222-2222-2222-2222-222222222222",
+        outcome_kind="acknowledged",
+        venue_offer_id="offer-1",
+        outcome_at_ms=1_000_000,
+        reconcile_fences=(101, 102),
+        reconcile_observed_at_ms=(1_000_100, 1_000_200),
+        projection_hash="a" * 64,
+        venue_db_exposure_diff_usdt=Decimal("0"),
+        stop_reason=None,
+    )
+
+
+def _ready_canary_state():
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryReadiness
+
+    return CanaryReadiness(
+        open_uncertainty_count=0,
+        projector_lag=0,
+        snapshot_symbols=frozenset({"fUST"}),
+        reconcile_fences=(101, 102),
+        reconcile_observed_at_ms=(1_000_100, 1_000_200),
+        observed_at_ms=1_000_250,
+        persistent_halt=True,
+    )
+
+
+class _VenueSubmitter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def submit(self) -> None:
+        self.calls += 1
+
+
+async def _submit_only_after_canary_startup_gate(
+    submit,
+    *,
+    profile,
+    evidence,
+    readiness,
+    configured_cells,
+    configured_caps,
+    allocation_cap_usdt: Decimal,
+) -> None:
+    """The daemon uses this same startup decision before building its live executor."""
+    from bfx_funding_bot.modules.marketfeed.daemon import assert_canary_startup
+
+    assert_canary_startup(
+        profile=profile,
+        evidence=evidence,
+        readiness=readiness,
+        configured_cells=configured_cells,
+        configured_caps=configured_caps,
+        allocation_cap_usdt=allocation_cap_usdt,
+    )
+    await submit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate_evidence", "mutate_readiness", "expected_reason"),
+    [
+        (lambda evidence: None, lambda state: state, "missing_canary_evidence"),
+        (
+            lambda evidence: evidence,
+            lambda state: replace(state, persistent_halt=False),
+            "persistent_halt_absent",
+        ),
+        (
+            lambda evidence: replace(evidence, outcome_at_ms=500_000),
+            lambda state: state,
+            "canary_evidence_stale",
+        ),
+        (
+            lambda evidence: evidence,
+            lambda state: replace(state, projector_lag=1),
+            "projector_lag",
+        ),
+        (
+            lambda evidence: evidence,
+            lambda state: replace(state, open_uncertainty_count=1),
+            "open_execution_uncertainty",
+        ),
+        (
+            lambda evidence: evidence,
+            lambda state: replace(state, snapshot_symbols=frozenset()),
+            "venue_snapshot_coverage_incomplete",
+        ),
+        (
+            lambda evidence: replace(evidence, reconcile_fences=(101,)),
+            lambda state: state,
+            "two_reconcile_cycles_required",
+        ),
+    ],
+)
+async def test_canary_startup_failures_prevent_venue_submission(
+    mutate_evidence,
+    mutate_readiness,
+    expected_reason: str,
+) -> None:
+    """Removing the startup gate must expose a real submit in this harness."""
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryStartupBlocked
+
+    profile = _bounded_canary_profile()
+    baseline_evidence = _valid_canary_evidence()
+    evidence = mutate_evidence(baseline_evidence)
+    readiness = mutate_readiness(_ready_canary_state())
+    venue = _VenueSubmitter()
+
+    with pytest.raises(CanaryStartupBlocked, match=expected_reason):
+        await _submit_only_after_canary_startup_gate(
+            venue.submit,
+            profile=profile,
+            evidence=evidence,
+            readiness=readiness,
+            configured_cells=(("mean_reversion", "fUST", "fUST_a30"),),
+            configured_caps={"fUST": Decimal("150")},
+            allocation_cap_usdt=Decimal("150"),
+        )
+
+    assert venue.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_valid_bounded_canary_allows_exactly_one_submission_after_two_fences() -> None:
+    """The gate must permit one bounded acknowledged outcome, not merely parse it."""
+    venue = _VenueSubmitter()
+    await _submit_only_after_canary_startup_gate(
+        venue.submit,
+        profile=_bounded_canary_profile(),
+        evidence=_valid_canary_evidence(),
+        readiness=_ready_canary_state(),
+        configured_cells=(("mean_reversion", "fUST", "fUST_a30"),),
+        configured_caps={"fUST": Decimal("150")},
+        allocation_cap_usdt=Decimal("150"),
+    )
+
+    assert venue.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured_cells", "configured_caps", "allocation_cap_usdt", "expected_reason"),
+    [
+        (
+            (("mean_reversion", "fUST", "fUST_a30"),),
+            {"fUST": Decimal("151")},
+            Decimal("150"),
+            "canary_cap_mismatch",
+        ),
+        (
+            (
+                ("mean_reversion", "fUST", "fUST_a30"),
+                ("mean_reversion", "fUSD", "fUSD_a30"),
+            ),
+            {"fUST": Decimal("150"), "fUSD": Decimal("150")},
+            Decimal("150"),
+            "canary_scope_mismatch",
+        ),
+        (
+            (("mean_reversion", "fUST", "fUST_a30"),),
+            {"fUST": Decimal("150")},
+            Decimal("151"),
+            "canary_allocation_cap_mismatch",
+        ),
+    ],
+)
+async def test_canary_scope_or_cap_expansion_prevents_venue_submission(
+    configured_cells,
+    configured_caps,
+    allocation_cap_usdt: Decimal,
+    expected_reason: str,
+) -> None:
+    """An extra cell or either cap expansion must not reach the venue."""
+    from bfx_funding_bot.modules.marketfeed.daemon import CanaryStartupBlocked
+
+    venue = _VenueSubmitter()
+    with pytest.raises(CanaryStartupBlocked, match=expected_reason):
+        await _submit_only_after_canary_startup_gate(
+            venue.submit,
+            profile=_bounded_canary_profile(),
+            evidence=_valid_canary_evidence(),
+            readiness=_ready_canary_state(),
+            configured_cells=configured_cells,
+            configured_caps=configured_caps,
+            allocation_cap_usdt=allocation_cap_usdt,
+        )
+
+    assert venue.calls == 0
