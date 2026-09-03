@@ -115,6 +115,18 @@ class FaultEvidence:
     uncertainty_reader_calls: tuple[tuple[UUID, str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MultipleCandidateEvidence:
+    durable_intent_count: int
+    transport_request_count: int
+    retry_count: int
+    match_kind: str
+    candidate_ids: tuple[str, ...]
+    unknown_exposure_usdt: Decimal
+    candidate_exposure_usdt: Decimal
+    unknown_scope: tuple[UUID, str, str]
+
+
 class FakeBitfinexTransport(httpx.AsyncBaseTransport):
     """Records the secret-free request body and models venue-side effects."""
 
@@ -275,7 +287,7 @@ def _unknown_attempt() -> UnknownSubmitAttempt:
     )
 
 
-def _matching_offer(venue_offer_id: str) -> ActiveFundingOffer:
+def _matching_offer(venue_offer_id: str, *, mts_created: int = 1_000) -> ActiveFundingOffer:
     return ActiveFundingOffer(
         venue_offer_id=venue_offer_id,
         symbol="fUST",
@@ -284,7 +296,7 @@ def _matching_offer(venue_offer_id: str) -> ActiveFundingOffer:
         rate=0.0001,
         rate_decimal=Decimal("0.0001"),
         period_days=2,
-        mts_created=1_000,
+        mts_created=mts_created,
         status="ACTIVE",
         offer_type="LIMIT",
         flags=0,
@@ -320,6 +332,94 @@ def _deliver_out_of_order_reconcile() -> tuple[tuple[int, ...], str]:
         )
     deliveries.append(1)
     return tuple(deliveries), projected.status
+
+
+async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
+    """Run UNKNOWN persistence, two-candidate reconcile, then the blocked retry."""
+    environment = "ci"
+    open_scopes: set[tuple[UUID, str, str]] = set()
+    persister = _Persister(open_scopes, environment)
+    reader = _UncertaintyReader(open_scopes)
+    transport = FakeBitfinexTransport(ACCEPT_DROP)
+    async with httpx.AsyncClient(transport=transport) as http:
+        executor = BitfinexLiveExecutor(
+            http=http,
+            event_sink=_EventSink(),
+            bus=DomainEventBus(),
+            phase=Phase.PAPER,
+            strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}),
+            cell="fault-cell",
+            nonce_provider=lambda: 1,
+            date_provider=lambda: date(2026, 9, 3),
+        )
+        gate = AccountCommandGate(
+            executor,
+            bus=DomainEventBus(),
+            persister=persister,
+            uncertainty_reader=reader,
+            safety_evaluator=_SafetyEvaluator(),
+            deployment_environment=environment,
+            is_simulated=False,
+            clock=iter(range(100, 200)).__next__,
+            date_provider=lambda: date(2026, 9, 3),
+        )
+        ready = _ready(decision_id="multiple-candidate")
+        result = await gate.submit(ready, _context())
+        assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
+        intent = next(event for event in persister.events if isinstance(event, ReservationIntent))
+        unknown = next(event for event in persister.events if isinstance(event, ReservationUnknown))
+        assert intent.submission_attempt is not None
+        assert intent.reservation_ref is not None
+        payload = intent.submission_attempt.normalized_payload
+        attempt = UnknownSubmitAttempt(
+            attempt_id=intent.submission_attempt.attempt_id,
+            execution_decision_id=intent.submission_attempt.execution_decision_id,
+            account_id=str(intent.submission_attempt.account_id),
+            symbol=intent.submission_attempt.symbol,
+            cid=intent.submission_attempt.cid,
+            amount=Decimal(str(payload["amount"])),
+            rate=Decimal(str(payload["rate"])),
+            period_days=int(payload["period"]),
+            offer_type=str(payload["type"]),
+            flags=payload["flags"],
+            started_at_ms=intent.submission_attempt.started_at_ms,
+            signal_correlation_id=intent.signal_correlation_id,
+            reservation_ref=intent.reservation_ref,
+        )
+        candidates = (
+            _matching_offer("venue-a", mts_created=attempt.started_at_ms),
+            _matching_offer("venue-b", mts_created=attempt.started_at_ms),
+        )
+        matched = match_unknown_attempt(
+            attempt,
+            candidates,
+            (),
+            FundingOfferHistoryCoverage(
+                requested_start_ms=attempt.started_at_ms,
+                requested_end_ms=attempt.started_at_ms,
+                oldest_mts_created=attempt.started_at_ms,
+                newest_mts_created=attempt.started_at_ms,
+                pages=1,
+                complete=True,
+            ),
+        )
+        request_count_before_retry = transport.request_count
+        with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
+            await gate.submit(_ready(decision_id="multiple-candidate-retry"), _context())
+        retry_count = transport.request_count - request_count_before_retry
+        return MultipleCandidateEvidence(
+            durable_intent_count=sum(
+                isinstance(event, ReservationIntent) for event in persister.events
+            ),
+            transport_request_count=transport.request_count,
+            retry_count=retry_count,
+            match_kind=matched.kind,
+            candidate_ids=tuple(candidate.venue_offer_id for candidate in matched.candidates),
+            unknown_exposure_usdt=unknown.size_usdt,
+            candidate_exposure_usdt=sum(candidate.amount for candidate in matched.candidates),
+            unknown_scope=(UUID(unknown.account_id), environment, unknown.symbol),
+        )
 
 
 async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
@@ -483,25 +583,17 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
 
 @pytest.mark.asyncio
 async def test_multiple_candidate_reconcile_stays_unknown_and_preserves_exposure() -> None:
-    """Two identity candidates are insufficient evidence to reopen deployment."""
-    attempt = _unknown_attempt()
-    candidates = (_matching_offer("venue-a"), _matching_offer("venue-b"))
+    """One durable UNKNOWN remains blocked when reconcile finds two matches."""
+    evidence = await run_multiple_candidate_reconcile()
 
-    result = match_unknown_attempt(
-        attempt,
-        candidates,
-        (),
-        FundingOfferHistoryCoverage(900, 2_000, 1_000, 1_001, 1, True),
-    )
-
-    assert result.kind == "multiple_match"
-    assert {offer.venue_offer_id for offer in result.candidates} == {"venue-a", "venue-b"}
-    assert sum(offer.amount for offer in result.candidates) == Decimal("25.0")
-    evidence = await run_fault_scenario(ACCEPT_DROP)
-    assert evidence.outcome_kind == SubmitOutcomeKind.UNKNOWN.value
-    assert evidence.unknown_exposure_usdt == Decimal("12.5")
-    assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
+    assert evidence.match_kind == "multiple_match"
+    assert evidence.candidate_ids == ("venue-a", "venue-b")
+    assert evidence.durable_intent_count == 1
+    assert evidence.transport_request_count == 1
     assert evidence.retry_count == 0
+    assert evidence.unknown_exposure_usdt == Decimal("12.5")
+    assert evidence.candidate_exposure_usdt == Decimal("25.0")
+    assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
 
 
 def test_out_of_order_reconcile_projection_rejects_stale_delivery() -> None:
