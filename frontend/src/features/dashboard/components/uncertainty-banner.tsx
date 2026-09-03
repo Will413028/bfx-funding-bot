@@ -28,7 +28,7 @@ export function UncertaintyBanner({
     ]),
   );
 
-  if (open.length === 0 && symbols.length === 0 && !isUnavailable) return null;
+  if (open.length === 0 && !isUnavailable) return null;
 
   const bySymbol = new Map<string, Uncertainty[]>();
   for (const uncertainty of open) {

@@ -25,6 +25,17 @@ const BLOCKED: Uncertainty = {
 };
 
 describe("uncertainty contract", () => {
+  it("does not render a warning when visible symbols have no open uncertainty", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [],
+        visibleSymbols: ["fUST", "fUSD"],
+      }),
+    );
+
+    expect(screen.queryByRole("region")).toBeNull();
+  });
+
   it("renders one blocked symbol while leaving unrelated symbols visible", () => {
     render(
       createElement(UncertaintyBanner, {
@@ -39,5 +50,19 @@ describe("uncertainty contract", () => {
     expect(
       screen.queryByRole("button", { name: /retry|resubmit/i }),
     ).toBeNull();
+  });
+
+  it("renders an unavailable warning even when no uncertainty rows are available", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [],
+        visibleSymbols: ["fUST"],
+        isUnavailable: true,
+      }),
+    );
+
+    expect(
+      screen.getByRole("region", { name: /uncertainty status is unavailable/i }),
+    ).toBeDefined();
   });
 });
