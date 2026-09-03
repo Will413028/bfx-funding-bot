@@ -31,6 +31,12 @@ from sqlalchemy.types import JSON, Uuid
 
 from bfx_funding_bot.core.db import Base
 
+# Register the referenced safety table whenever this module is imported.  A
+# number of SQLite metadata fixtures import uncertainty tables directly; the
+# FK is real and must remain visible to SQLAlchemy's create_all as well as
+# Alembic's complete metadata import.
+from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow  # noqa: F401
+
 _JSON = JSON().with_variant(JSONB, "postgresql")
 _UUID = PG_UUID(as_uuid=True).with_variant(Uuid(as_uuid=True), "sqlite")
 _NOW = func.current_timestamp()
@@ -109,6 +115,92 @@ class SubmissionAttemptRow(Base):
             "exchange_account_id",
             "deployment_environment",
             "symbol",
+        ),
+    )
+
+
+class CanaryCommandPermitRow(Base):
+    """One durable permission for one canary command under one halt epoch.
+
+    The halt row is intentionally part of the identity.  A permit can be
+    consumed at most once, and a second permit cannot be issued for the same
+    append-only halt transition even after the first command is complete.
+    """
+
+    __tablename__ = "canary_command_permits"
+
+    permit_id: Mapped[UUID] = mapped_column(
+        _UUID,
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    halt_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("trading_halt.id", ondelete="RESTRICT", name="fk_canary_permits_halt"),
+        nullable=False,
+        unique=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        _UUID,
+        ForeignKey(
+            "exchange_accounts.id",
+            ondelete="RESTRICT",
+            name="fk_canary_permits_account",
+        ),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    cell: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+    operator_id: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'issued'"))
+    issued_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    consumed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    execution_decision_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey(
+            "execution_decisions.decision_id",
+            ondelete="RESTRICT",
+            name="fk_canary_permits_decision",
+        ),
+        nullable=True,
+    )
+    attempt_id: Mapped[UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey(
+            "submission_attempts.attempt_id",
+            ondelete="RESTRICT",
+            name="fk_canary_permits_attempt",
+        ),
+        nullable=True,
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_NOW
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('issued', 'consumed')",
+            name="ck_canary_permits_state",
+        ),
+        CheckConstraint("amount_usdt > 0", name="ck_canary_permits_amount_positive"),
+        CheckConstraint(
+            "issued_at_ms >= 0 AND (consumed_at_ms IS NULL OR consumed_at_ms >= issued_at_ms)",
+            name="ck_canary_permits_timestamps",
+        ),
+        CheckConstraint(
+            "(state = 'issued' AND consumed_at_ms IS NULL) OR "
+            "(state = 'consumed' AND consumed_at_ms IS NOT NULL)",
+            name="ck_canary_permits_state_timestamp",
+        ),
+        Index(
+            "idx_canary_permits_scope",
+            "exchange_account_id",
+            "deployment_environment",
+            "state",
         ),
     )
 

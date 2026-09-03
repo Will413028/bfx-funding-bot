@@ -72,10 +72,17 @@ class FaultScenario:
     """One immutable submit/process fault configuration in the Halt 2 matrix."""
 
     name: str
-    response_mode: Literal["drop", "timeout", "malformed", "5xx", "success", "crash"]
+    response_mode: Literal[
+        "drop", "timeout", "malformed", "malformed_after_side_effect",
+        "5xx", "success", "crash",
+    ]
     transport_started: bool
     side_effect_visible: bool
-    process_crash_at: Literal["after_intent"] | None = None
+    process_crash_at: Literal["after_intent", "during_send"] | None = None
+
+
+class InjectedProcessCrash(BaseException):
+    """Test-only hard process boundary; production has no fault-mode branch."""
 
 
 ACCEPT_DROP = FaultScenario("accept_drop", "drop", True, True)
@@ -83,7 +90,13 @@ REJECT_DROP = FaultScenario("reject_drop", "drop", True, False)
 TIMEOUT_RESET = FaultScenario("timeout_reset", "timeout", True, False)
 MALFORMED = FaultScenario("malformed", "malformed", True, False)
 FIVE_XX_AFTER_SIDE_EFFECT = FaultScenario("5xx_after_side_effect", "5xx", True, True)
+MALFORMED_AFTER_SIDE_EFFECT = FaultScenario(
+    "malformed_after_side_effect", "malformed_after_side_effect", True, True,
+)
 CRASH_AFTER_INTENT = FaultScenario("crash_after_intent", "crash", False, False, "after_intent")
+CRASH_AFTER_SIDE_EFFECT = FaultScenario(
+    "crash_after_side_effect", "crash", True, True, "during_send",
+)
 OUT_OF_ORDER_RECONCILE = FaultScenario("out_of_order_reconcile", "drop", True, True)
 
 FAULT_SCENARIOS = (
@@ -91,8 +104,10 @@ FAULT_SCENARIOS = (
     REJECT_DROP,
     TIMEOUT_RESET,
     MALFORMED,
+    MALFORMED_AFTER_SIDE_EFFECT,
     FIVE_XX_AFTER_SIDE_EFFECT,
     CRASH_AFTER_INTENT,
+    CRASH_AFTER_SIDE_EFFECT,
     OUT_OF_ORDER_RECONCILE,
 )
 
@@ -148,6 +163,8 @@ class FakeBitfinexTransport(httpx.AsyncBaseTransport):
             raise httpx.ReadTimeout("connection reset", request=request)
         if self._scenario.response_mode == "malformed":
             return httpx.Response(200, content=b"not-json", request=request)
+        if self._scenario.response_mode == "malformed_after_side_effect":
+            return httpx.Response(200, content=b"not-json", request=request)
         if self._scenario.response_mode == "5xx":
             return httpx.Response(
                 500,
@@ -156,6 +173,8 @@ class FakeBitfinexTransport(httpx.AsyncBaseTransport):
             )
         if self._scenario.response_mode == "success":
             return httpx.Response(200, json=_success_response(), request=request)
+        if self._scenario.response_mode == "crash":
+            raise InjectedProcessCrash("injected process crash during venue send")
         raise AssertionError(f"unsupported transport mode: {self._scenario.response_mode}")
 
 
@@ -464,8 +483,8 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             outcome_kind = result.outcome_kind.value
             # Full raw response is never valid evidence, even if a venue echoes a secret.
             assert _API_SECRET not in str(result.raw_response)
-        except RuntimeError as exc:
-            assert scenario.process_crash_at == "after_intent"
+        except BaseException as exc:
+            assert scenario.process_crash_at in {"after_intent", "during_send"}
             assert "process crash" in str(exc)
 
         transport_count_before_retry_check = transport.request_count
@@ -563,7 +582,7 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
         assert evidence.uncertainty_state == "open"
         assert evidence.reconcile_delivery_seqs == (2, 1)
         assert evidence.reconcile_final_status == "active"
-    elif scenario.process_crash_at == "after_intent":
+    elif scenario.process_crash_at in {"after_intent", "during_send"}:
         assert evidence.outcome_kind == "crashed"
         assert evidence.uncertainty_state == "pending_recovery"
         assert evidence.event_seqs == (1,)

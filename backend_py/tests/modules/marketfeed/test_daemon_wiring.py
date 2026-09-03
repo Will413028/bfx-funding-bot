@@ -22,6 +22,7 @@ from pytest_httpx import HTTPXMock
 
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
+    configure_canary_wiring_env,
     seed_exchange_account,
 )
 
@@ -142,7 +143,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     db_path = tmp_path / "reconcile_guard.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -220,7 +221,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     db_path = tmp_path / "resync_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -288,7 +289,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     db_path = tmp_path / "integrity_bootstrap.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -457,7 +458,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
     db_path = tmp_path / "smoke_live.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -513,7 +514,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
     db_path = tmp_path / "writer_lock_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_account_env(monkeypatch)
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")

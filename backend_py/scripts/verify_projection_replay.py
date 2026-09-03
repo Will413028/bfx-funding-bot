@@ -11,7 +11,8 @@ import argparse
 import asyncio
 import json
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from typing import Any, TypeGuard
 from uuid import UUID
 
@@ -23,6 +24,11 @@ from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.execution.boot_recovery import (
     convert_pending_to_unknown as _convert_pending_to_unknown,
 )
+from bfx_funding_bot.modules.execution.event_store.canonical import (
+    canonical_event_hash,
+    canonical_event_record,
+)
+from bfx_funding_bot.modules.execution.event_store.entities import is_terminal_offer_status
 from bfx_funding_bot.modules.execution.event_store.projector import projection_content_hash
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_stored_event,
@@ -42,7 +48,12 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     DEFAULT_PROJECTOR_VERSION,
     AccountEventWriter,
 )
-from bfx_funding_bot.modules.execution.events import VenueOfferQuarantined
+from bfx_funding_bot.modules.execution.events import (
+    ReservationClaimed,
+    SubmitMatchedToVenueOffer,
+    VenueOfferQuarantined,
+    VenueSnapshotObserved,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
@@ -101,6 +112,19 @@ class ReplayReport:
     diagnostic_old_row_counts: dict[str, int] | None = None
     diagnostic_old_content_hashes: dict[str, str] | None = None
     diagnostic_diff: dict[str, dict[str, int | str | bool]] | None = None
+    # Internal event-derived exposure facts used by the bounded canary verifier.
+    # They are intentionally omitted from ``render_replay_report``.
+    replayed_offer_exposure_by_symbol: dict[str, Decimal] = field(default_factory=dict)
+    replayed_credit_exposure_by_symbol: dict[str, Decimal] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayedOrphanCandidate:
+    """An active venue offer derived solely from a complete snapshot event."""
+
+    venue_offer_id: str
+    symbol: str
+    amount: Decimal
 
 
 def _projector_implementation(projector_version: str) -> type[PostgresEventStore]:
@@ -132,7 +156,7 @@ def _canonical_projection_row(row: object) -> dict[str, object]:
 
 async def _projection_evidence(
     session: AsyncSession, *, account_id: UUID, environment: str,
-) -> tuple[dict[str, int], dict[str, str]]:
+) -> tuple[dict[str, int], dict[str, str], dict[str, Decimal], dict[str, Decimal]]:
     """Hash scoped projection rows without retaining or reporting their contents."""
     row_counts: dict[str, int] = {}
     content_hashes: dict[str, str] = {}
@@ -147,7 +171,27 @@ async def _projection_evidence(
         )
         row_counts[name] = len(canonical_rows)
         content_hashes[name] = projection_content_hash(canonical_rows)
-    return row_counts, content_hashes
+    offer_exposure: dict[str, Decimal] = {}
+    for offer_row in await session.scalars(select(VenueOfferStateRow).where(
+        VenueOfferStateRow.exchange_account_id == account_id,
+        VenueOfferStateRow.deployment_environment == environment,
+        VenueOfferStateRow.is_terminal.is_(False),
+    )):
+        offer_exposure[offer_row.symbol] = (
+            offer_exposure.get(offer_row.symbol, Decimal("0"))
+            + Decimal(str(offer_row.amount_remaining))
+        )
+    credit_exposure: dict[str, Decimal] = {}
+    for credit_row in await session.scalars(select(VenueCreditStateRow).where(
+        VenueCreditStateRow.exchange_account_id == account_id,
+        VenueCreditStateRow.deployment_environment == environment,
+        VenueCreditStateRow.is_terminal.is_(False),
+    )):
+        credit_exposure[credit_row.symbol] = (
+            credit_exposure.get(credit_row.symbol, Decimal("0"))
+            + Decimal(str(credit_row.amount))
+        )
+    return row_counts, content_hashes, offer_exposure, credit_exposure
 
 
 async def _replay_into_empty_temporary_projection(
@@ -157,7 +201,12 @@ async def _replay_into_empty_temporary_projection(
     account_id: UUID,
     environment: str,
     projector_version: str,
-) -> tuple[dict[str, int], dict[str, str]]:
+) -> tuple[
+    dict[str, int],
+    dict[str, str],
+    dict[str, Decimal],
+    dict[str, Decimal],
+]:
     """Run the production projector against an event-only temporary schema.
 
     The connection has no access to runtime projection relations because its
@@ -197,10 +246,10 @@ async def _replay_into_empty_temporary_projection(
             account_id=str(account_id),
             deployment_environment=environment,
         )
-        row_counts, content_hashes = await _projection_evidence(
+        row_counts, content_hashes, offer_exposure, credit_exposure = await _projection_evidence(
             replay_session, account_id=account_id, environment=environment,
         )
-    return row_counts, content_hashes
+    return row_counts, content_hashes, offer_exposure, credit_exposure
 
 
 def _diagnostic_diff(
@@ -268,14 +317,8 @@ def replay_event_log(
         except (TypeError, ValueError) as exc:
             raise ReplayVerificationError(f"invalid event identity at seq={row.event_seq}: {exc}") from exc
         event_ids.append(identity.event_id)
-        canonical_rows.append({
-            "event_seq": row.event_seq,
-            "event_id": str(identity.event_id),
-            "event_type": row.event_type,
-            "occurred_at_ms": row.occurred_at_ms,
-            "payload": row.payload,
-        })
-    event_hash = projection_content_hash(canonical_rows)
+        canonical_rows.append(canonical_event_record(row))
+    event_hash = canonical_event_hash(rows)
     if expected_event_hash is not None and event_hash != expected_event_hash:
         raise ReplayVerificationError("event hash mismatch")
     return ReplayReport(
@@ -294,7 +337,10 @@ async def _diagnostic_projection_evidence(
     session: AsyncSession, *, account_id: UUID, environment: str
 ) -> tuple[dict[str, int], dict[str, str]]:
     """Read the old runtime projection only after event replay succeeds."""
-    return await _projection_evidence(session, account_id=account_id, environment=environment)
+    row_counts, content_hashes, _, _ = await _projection_evidence(
+        session, account_id=account_id, environment=environment
+    )
+    return row_counts, content_hashes
 
 
 async def replay_one_account(
@@ -319,7 +365,12 @@ async def replay_one_account(
         rows, account_id=account_id, environment=environment,
         projector_version=projector_version, expected_event_hash=expected_event_hash,
     )
-    replayed_row_counts, replayed_content_hashes = await _replay_into_empty_temporary_projection(
+    (
+        replayed_row_counts,
+        replayed_content_hashes,
+        replayed_offer_exposure,
+        replayed_credit_exposure,
+    ) = await _replay_into_empty_temporary_projection(
         session,
         rows=rows,
         account_id=account_id,
@@ -342,6 +393,8 @@ async def replay_one_account(
                 replayed_row_counts=replayed_row_counts,
                 replayed_content_hashes=replayed_content_hashes,
             ),
+            "replayed_offer_exposure_by_symbol": replayed_offer_exposure,
+            "replayed_credit_exposure_by_symbol": replayed_credit_exposure,
         }
     )
 
@@ -443,6 +496,63 @@ async def convert_pending_to_unknown(
         )
 
 
+def _event_derived_orphan_candidates(
+    rows: Sequence[EventLogRow], *, account_id: UUID, environment: str
+) -> tuple[ReplayedOrphanCandidate, ...]:
+    """Find unattributed active offers without consulting runtime projections."""
+    decoded: list[tuple[int, object]] = []
+    for row in rows:
+        if (
+            row.exchange_account_id != account_id
+            or row.deployment_environment != environment
+            or row.event_seq is None
+        ):
+            raise ReplayVerificationError("orphan candidate event scope is invalid")
+        try:
+            decoded.append((row.event_seq, deserialize_stored_event(row)))
+        except (TypeError, ValueError) as exc:
+            raise ReplayVerificationError(
+                f"orphan candidate event is not replayable at seq={row.event_seq}"
+            ) from exc
+
+    snapshots = [
+        (event_seq, event)
+        for event_seq, event in decoded
+        if isinstance(event, VenueSnapshotObserved)
+    ]
+    if not snapshots:
+        raise ReplayVerificationError("orphan quarantine requires a venue snapshot")
+    _snapshot_seq, snapshot = max(snapshots, key=lambda item: item[0])
+    if not (
+        snapshot.coverage.active_offers_complete
+        and snapshot.coverage.active_credits_complete
+        and snapshot.coverage.wallets_complete
+    ):
+        raise ReplayVerificationError(
+            "orphan quarantine requires complete venue snapshot coverage"
+        )
+
+    attributed_offer_ids = {
+        event.venue_offer_id
+        for _event_seq, event in decoded
+        if isinstance(event, (ReservationClaimed, SubmitMatchedToVenueOffer))
+        and event.venue_offer_id
+    }
+    candidates = [
+        ReplayedOrphanCandidate(
+            venue_offer_id=offer.venue_offer_id,
+            symbol=offer.symbol,
+            amount=offer.amount_remaining,
+        )
+        for offer in snapshot.offers
+        if not is_terminal_offer_status(offer.status)
+        and offer.venue_offer_id not in attributed_offer_ids
+        and offer.cid is None
+        and offer.execution_decision_id is None
+    ]
+    return tuple(sorted(candidates, key=lambda item: item.venue_offer_id))
+
+
 async def quarantine_orphans_after_replay(
     session_factory: async_sessionmaker[AsyncSession], *, account_id: UUID,
     environment: str, now_ms: int,
@@ -455,33 +565,45 @@ async def quarantine_orphans_after_replay(
     the persistent halt state.
     """
     async with session_factory() as session, session.begin():
-        offers = list(await session.scalars(select(VenueOfferStateRow).where(
-            VenueOfferStateRow.exchange_account_id == account_id,
-            VenueOfferStateRow.deployment_environment == environment,
-            VenueOfferStateRow.is_terminal.is_(False),
-        ).order_by(VenueOfferStateRow.venue_offer_id.asc())))
-        claimed = set(await session.scalars(select(OfferClaimRow.venue_offer_id).where(
-            OfferClaimRow.exchange_account_id == account_id,
-            OfferClaimRow.deployment_environment == environment,
-            OfferClaimRow.state == "claimed",
-            OfferClaimRow.venue_offer_id.is_not(None),
-        )))
+        writer = AccountEventWriter(
+            store=PostgresEventStore(deployment_environment=environment)
+        )
+        # Hold the same account transaction lock as production event writers
+        # while taking the replay fence and appending quarantine breadcrumbs.
+        await writer.acquire_lock(session, account_id=account_id)
+        rows = list(await session.scalars(select(EventLogRow).where(
+            EventLogRow.exchange_account_id == account_id,
+            EventLogRow.deployment_environment == environment,
+        ).order_by(EventLogRow.event_seq.asc())))
+        replay = replay_event_log(
+            rows, account_id=account_id, environment=environment,
+            projector_version=DEFAULT_PROJECTOR_VERSION,
+        )
+        # Exercise the same empty-projector implementation before any
+        # quarantine event is appended.  Runtime rows are never candidate input.
+        await _replay_into_empty_temporary_projection(
+            session,
+            rows=rows,
+            account_id=account_id,
+            environment=environment,
+            projector_version=replay.projector_version,
+        )
+        candidates = _event_derived_orphan_candidates(
+            rows, account_id=account_id, environment=environment
+        )
         events: list[object] = [
             VenueOfferQuarantined(
-                venue_offer_id=offer.venue_offer_id,
-                symbol=offer.symbol,
-                amount=offer.amount_remaining,
+                venue_offer_id=candidate.venue_offer_id,
+                symbol=candidate.symbol,
+                amount=candidate.amount,
                 account_id=str(account_id),
                 observed_at_ms=now_ms,
             )
-            for offer in offers
-            if offer.venue_offer_id not in claimed
+            for candidate in candidates
         ]
         if not events:
             return 0
-        results = await AccountEventWriter(
-            store=PostgresEventStore(deployment_environment=environment)
-        ).append_batch(session, events)
+        results = await writer.append_batch(session, events)
         return sum(result.persisted for result in results)
 
 

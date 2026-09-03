@@ -29,7 +29,8 @@ immutable evidence where applicable.
 | `migration_head`, `schema_heads` | Expected Alembic/schema heads. |
 | `backup_evidence_hash`, `isolated_restore_evidence_hash` | Hashes prove measured backup and isolated restore evidence. |
 | `event_count`, `event_head`, `event_hash` | Account-local event-chain continuity. |
-| `open_uncertainty_count`, `venue_snapshot_fence` | No unresolved submit and a recorded snapshot fence. |
+| `open_uncertainty_count`, `venue_snapshot_fence`, `venue_snapshot_observed_at_ms`, `venue_snapshot_complete` | No unresolved submit, a fresh full-account snapshot fence, and complete venue coverage. |
+| `preflight_observed_at_ms`, `backup_rpo_seconds`, `restore_rto_seconds` | Preflight freshness plus measured RPO ≤ 300s and RTO ≤ 60s. |
 | `config_digest`, `image_digest`, `projector_version` | Exact immutable build/config/projector inputs. |
 | `persistent_halt`, `stop_reasons` | Halt is durable and every refusal is explicit. |
 
@@ -39,8 +40,12 @@ The following `stop_reasons` are hard gates, not warnings:
 `backup_evidence_hash_mismatch`, `isolated_restore_evidence_hash_mismatch`,
 `event_head_mismatch`, `event_hash_mismatch`, `config_digest_mismatch`,
 `image_digest_mismatch`, `migration_head_mismatch`, `schema_heads_mismatch`,
-`projector_version_mismatch`, `open_execution_uncertainty`, and
-`persistent_halt_absent`.
+`projector_version_mismatch`, `venue_snapshot_fence_absent`,
+`venue_snapshot_timestamp_absent`, `venue_snapshot_coverage_incomplete`,
+`venue_snapshot_stale`, `backup_rpo_unmeasured`, `backup_rpo_exceeded`,
+`restore_rto_unmeasured`, `restore_rto_exceeded`, `open_execution_uncertainty`,
+and `persistent_halt_absent`. Identity, permit, and outcome failures from the
+canary verifier are also hard stops; they are never bypassed by editing JSON.
 
 `halt2_cutover.py` returns exit 0 only when its selected action succeeds, exit
 2 for a precondition failure (including the hard gates above), and exit 3 when
@@ -127,12 +132,47 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    quarantined with its venue object retained. Any resulting open uncertainty
    keeps the persistent halt effective.
 
-5. **Operator confirmation — bounded canary evidence.** A separate approved
-   production procedure may issue exactly one minimal command for one account,
-   one symbol, and one cell/strategy. It must create one durable outcome and
-   then two full-account reconcile cycles. It cannot auto-ramp; no report can
-   increase a cap or expand symbols. After that procedure has written the
-   redacted evidence, verify it read-only:
+5. **Operator confirmation — issue the one-shot permit.** After replay,
+   conversion, and quarantine are accepted, issue exactly one durable permit
+   for one account, one symbol, and one cell/strategy. This writes only the
+   scoped `canary_command_permit` row; it does not resume the scheduler, call
+   Bitfinex, or infer authority from an evidence JSON file. Record the returned
+   UUID as `BFX_CANARY_PERMIT_ID` in the protected canary environment:
+
+   ```bash
+   uv run python scripts/issue_canary_permit.py \
+     --account-id "$BFX_EXCHANGE_ACCOUNT_ID" \
+     --environment "$BFX_DEPLOYMENT_ENV" \
+     --symbol "$BFX_CANARY_SYMBOL" \
+     --cell "$BFX_CANARY_CELL" \
+     --strategy "$BFX_CANARY_STRATEGY" \
+     --amount-usdt "$BFX_CANARY_AMOUNT_USDT" \
+     --operator-id "$BFX_OPERATOR_USER_ID"
+   export BFX_CANARY_PERMIT_ID=<returned-durable-permit-uuid>
+   ```
+
+   Require exit 0. A permit is tied to the current durable halt epoch and is
+   consumed once, committed before the venue boundary. A second issue for the
+   same halt is rejected.
+
+6. **Operator confirmation — bounded canary command and deployment.** Under a
+   separately granted production procedure, the live process admits exactly
+   one minimal command for the permit's account, symbol, and cell. The daemon's
+   pre-command verifier reads the durable permit and fresh readiness facts; it
+   does not consume a post-command JSON report. The one-shot gate consumes the
+   permit immediately before the executor and reasserts the persistent halt in
+   every terminal path. An ACK, rejection, malformed response, timeout, or
+   process crash never authorizes a retry. After the command, it must create
+   one durable outcome and then two full-account reconcile cycles. It cannot auto-ramp; no report can increase a cap or expand symbols. Start a separate shell session at the repository root and deploy only after the separate authority confirmation:
+
+   ```bash
+   cd backend_py
+   cd ..
+   BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary
+   ```
+
+   Require the deployment command's exit 0 and then verify the server-derived,
+   redacted evidence read-only:
 
    ```bash
    uv run python scripts/run_canary_preflight.py \
@@ -142,25 +182,16 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
      --cells <reviewed-canary-cells-path>
    ```
 
-   Require exit 0. The verifier does not resume trading, write a database row,
-   or call Bitfinex. It rejects stale/missing evidence, identity mismatch,
-   incomplete full-account snapshot coverage, nonzero lag, a nonzero exposure
-   diff, insufficient reconcile evidence, and every open uncertainty.
+   Require exit 0. The verifier derives outcome, permit binding, replay hash,
+   and reconcile facts from durable rows and events; it does not resume
+   trading, write a database row, or call Bitfinex. It rejects stale/missing
+   evidence, identity mismatch, incomplete full-account snapshot coverage,
+   nonzero lag, a nonzero exposure diff, insufficient reconcile evidence, and
+   every open uncertainty. A nonzero exit leaves the halt effective.
 
-6. **Operator confirmation — deploy only under separately granted authority.**
-   Start a separate shell session at the repository root; do not rely on the
-   prior `backend_py` shell. Enter `backend_py` and return explicitly so the
-   root-script CWD transition is auditable. The eventual operator-only
-   deployment command is:
-
-   ```bash
-   cd backend_py
-   cd ..
-   BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary
-   ```
-
-   This runbook does not grant that authority, and the coding agent does not
-   run it. A failure leaves deployment stopped; it is never a resume approval.
+   This runbook does not grant deployment authority, and the coding agent does
+   not run it. A failure leaves deployment stopped; it is never a resume
+   approval.
 
 The additional `halt2_cutover.py` reserved names `convert-pending`,
 `quarantine`, `verify`, and `release-report` likewise exit 2 as explicit
@@ -172,9 +203,9 @@ the implemented conversion/quarantine interface above is
 
 The evidence report is redacted and contains exactly bounded facts such as
 `account_id`, `environment`, `symbol`, `cell`, `strategy`, `amount_usdt`,
-`command_decision_id`, `attempt_id`, `outcome_kind`, `venue_offer_id`,
-`outcome_at_ms`, `reconcile_fences`, `reconcile_observed_at_ms`,
-`projection_hash`, `venue_db_exposure_diff_usdt`,
+`permit_id`, `command_decision_id`, `attempt_id`, `outcome_kind`,
+`venue_offer_id`, `outcome_at_ms`, `outcome_event_seq`, `reconcile_fences`,
+`reconcile_observed_at_ms`, `projection_hash`, `venue_db_exposure_diff_usdt`,
 `full_account_snapshot_complete`, and `stop_reason`.
 
 ```json
@@ -185,11 +216,13 @@ The evidence report is redacted and contains exactly bounded facts such as
   "cell": "<approved-cell>",
   "strategy": "<approved-strategy>",
   "amount_usdt": "<minimal-approved-amount>",
+  "permit_id": "<durable-permit-uuid>",
   "command_decision_id": "<redacted-decision-id>",
   "attempt_id": "<uuid>",
   "outcome_kind": "<acknowledged-or-unknown>",
   "venue_offer_id": "<redacted-venue-id-or-null>",
   "outcome_at_ms": 0,
+  "outcome_event_seq": 0,
   "reconcile_fences": [0, 0],
   "reconcile_observed_at_ms": [0, 0],
   "projection_hash": "<sha256>",

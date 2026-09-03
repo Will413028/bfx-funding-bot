@@ -79,6 +79,11 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.canary_permit import (
+    CanaryOneShotGate,
+    CanaryPermitRepository,
+    CanaryPermitScope,
+)
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -351,11 +356,13 @@ class CanaryEvidence:
     cell: str
     strategy: str
     amount_usdt: Decimal
+    permit_id: str
     command_decision_id: str
     attempt_id: str
     outcome_kind: str
     venue_offer_id: str | None
     outcome_at_ms: int
+    outcome_event_seq: int
     reconcile_fences: tuple[int, ...]
     reconcile_observed_at_ms: tuple[int, ...]
     projection_hash: str
@@ -384,6 +391,7 @@ class CanaryEvidence:
             amount = Decimal(str(value["amount_usdt"]))
             exposure_diff = Decimal(str(value["venue_db_exposure_diff_usdt"]))
             outcome_at_ms = int(str(value["outcome_at_ms"]))
+            outcome_event_seq = int(str(value["outcome_event_seq"]))
         except (ArithmeticError, TypeError, ValueError) as exc:
             raise CanaryStartupBlocked("invalid_canary_evidence") from exc
         venue_offer_id = value["venue_offer_id"]
@@ -402,11 +410,13 @@ class CanaryEvidence:
             cell=str(value["cell"]),
             strategy=str(value["strategy"]),
             amount_usdt=amount,
+            permit_id=str(value["permit_id"]),
             command_decision_id=str(value["command_decision_id"]),
             attempt_id=str(value["attempt_id"]),
             outcome_kind=str(value["outcome_kind"]),
             venue_offer_id=venue_offer_id,
             outcome_at_ms=outcome_at_ms,
+            outcome_event_seq=outcome_event_seq,
             reconcile_fences=fences,
             reconcile_observed_at_ms=observed,
             projection_hash=str(value["projection_hash"]),
@@ -466,6 +476,8 @@ def assert_canary_startup(
         reasons.append("canary_amount_mismatch")
     if not evidence.command_decision_id.strip() or not evidence.attempt_id.strip():
         reasons.append("canary_command_identity_missing")
+    if evidence.outcome_event_seq <= 0:
+        reasons.append("canary_outcome_event_missing")
     if evidence.outcome_kind != "acknowledged" or not evidence.venue_offer_id:
         reasons.append("canary_outcome_not_acknowledged")
     if len(evidence.projection_hash) != 64 or any(
@@ -502,6 +514,39 @@ def assert_canary_startup(
     _canary_block(reasons)
 
 
+def assert_canary_pre_command(
+    *,
+    profile: CanaryProfile,
+    readiness: CanaryReadiness,
+    configured_cells: tuple[tuple[str, str, str], ...],
+    configured_caps: Mapping[str, Decimal],
+    allocation_cap_usdt: Decimal,
+) -> None:
+    """Gate the explicit one-shot command before any venue write exists.
+
+    This is intentionally a different contract from ``assert_canary_startup``:
+    a daemon boot must not require a post-command evidence file.  The durable
+    permit and the command runner own the one-shot write boundary; this check
+    only proves that the account is halted, reconciled, and still within scope.
+    """
+    reasons: list[str] = []
+    if configured_cells != ((profile.strategy, profile.symbol, profile.cell),):
+        reasons.append("canary_scope_mismatch")
+    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
+        reasons.append("canary_cap_mismatch")
+    if allocation_cap_usdt != profile.cap_usdt:
+        reasons.append("canary_allocation_cap_mismatch")
+    if readiness.open_uncertainty_count:
+        reasons.append("open_execution_uncertainty")
+    if readiness.projector_lag:
+        reasons.append("projector_lag")
+    if not readiness.full_account_snapshot_complete:
+        reasons.append("venue_snapshot_coverage_incomplete")
+    if not readiness.persistent_halt:
+        reasons.append("persistent_halt_absent")
+    _canary_block(reasons)
+
+
 def load_canary_evidence(path: Path) -> CanaryEvidence:
     """Load only the bounded evidence fields; raw venue responses are never accepted."""
     try:
@@ -520,8 +565,12 @@ async def collect_canary_readiness(
     account_id: UUID,
     environment: str,
     now_ms: int,
+    after_event_seq: int | None = None,
+    minimum_snapshot_count: int = 2,
 ) -> CanaryReadiness:
     """Read account-local evidence without calling the venue or mutating projections."""
+    if minimum_snapshot_count <= 0:
+        raise ValueError("minimum_snapshot_count must be positive")
     event_head = int(
         await session.scalar(
             select(func.max(EventLogRow.event_seq)).where(
@@ -554,16 +603,16 @@ async def collect_canary_readiness(
         )
         or 0
     )
+    snapshot_stmt = select(EventLogRow).where(
+        EventLogRow.exchange_account_id == account_id,
+        EventLogRow.deployment_environment == environment,
+        EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+    )
+    if after_event_seq is not None:
+        snapshot_stmt = snapshot_stmt.where(EventLogRow.event_seq > after_event_seq)
     snapshot_rows = list(
         await session.scalars(
-            select(EventLogRow)
-            .where(
-                EventLogRow.exchange_account_id == account_id,
-                EventLogRow.deployment_environment == environment,
-                EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
-            )
-            .order_by(EventLogRow.event_seq.desc())
-            .limit(2)
+            snapshot_stmt.order_by(EventLogRow.event_seq.desc()).limit(2)
         )
     )
     snapshot_rows.reverse()
@@ -580,7 +629,7 @@ async def collect_canary_readiness(
         ):
             snapshots.append(event)
     complete_snapshot_coverage = (
-        len(snapshot_rows) == 2
+        len(snapshot_rows) >= minimum_snapshot_count
         and len(snapshots) == 2
         and all(
             event.coverage.active_offers_complete
@@ -1426,15 +1475,19 @@ async def build_daemon(
     # loop is constructed.  The existing AccountCommandGate remains the only
     # route to submit; this gate invokes the same read-only verifier as
     # run_canary_preflight.py rather than trusting a structurally valid report.
+    canary_halt_authorization: object | None = None
     if (
         config.phase is Phase.CANARY
         and os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
     ):
         profile = CanaryProfile.from_environ(os.environ)
+        canary_halt_authorization = object()
         if profile.environment != env_str or profile.account_id != account_bootstrap.exchange_account_id:
             raise CanaryStartupBlocked("canary_identity_or_environment_mismatch")
-        evidence_path = os.environ.get("BFX_CANARY_EVIDENCE_REPORT", "").strip()
-        evidence = load_canary_evidence(Path(evidence_path)) if evidence_path else None
+        # A post-command JSON report is never a daemon boot input.  The daemon
+        # admits only the pre-command durable permit/readiness contract; the
+        # report is generated and verified after the venue boundary.
+        evidence = None
         halt2_evidence_path = os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "").strip()
         if not halt2_evidence_path:
             raise CanaryStartupBlocked("missing_halt2_evidence")
@@ -1553,7 +1606,12 @@ async def build_daemon(
 
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
-        guards.append(ManualKillGuard(halt_store=halt_store))
+        guards.append(
+            ManualKillGuard(
+                halt_store=halt_store,
+                canary_halt_authorization=canary_halt_authorization,
+            )
+        )
     # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
     # must be read before the reconciler computes an economic gap.  It is not
     # configurable off in canary/live because an unreadable projection fails
@@ -1747,26 +1805,81 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
-    wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
-        HeartbeatMiddleware(
-            ReservationEmittingMiddleware(
-                executor,
-                bus=bus,
-                persister=persister,
-                is_simulated=spec.is_simulated,
-                uncertainty_handler=(
-                    ledger.on_reservation_unknown if not spec.is_simulated else None
-                ),
-                safety_evaluator=safety_chain,
-            ),
-            probe=probe,
+    reservation_executor: ExecutorPort = ReservationEmittingMiddleware(
+        executor,
+        bus=bus,
+        persister=persister,
+        is_simulated=spec.is_simulated,
+        uncertainty_handler=(
+            ledger.on_reservation_unknown if not spec.is_simulated else None
         ),
+        safety_evaluator=safety_chain,
+    )
+
+    # Halt 2's only live command path is a durable one-shot permit.  The
+    # scheduler remains halted by ManualKillGuard; if a separately approved
+    # READY candidate reaches this executor, the permit is consumed before the
+    # venue call and the persistent halt is reasserted in all terminal paths.
+    if (
+        config.phase is Phase.CANARY
+        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
+        == "bitfinex_live"
+    ):
+        canary_profile = CanaryProfile.from_environ(os.environ)
+        raw_permit_id = os.environ.get("BFX_CANARY_PERMIT_ID", "").strip()
+        try:
+            permit_id = UUID(raw_permit_id)
+        except ValueError as exc:
+            raise CanaryStartupBlocked("invalid_canary_permit_id") from exc
+        canary_scope = CanaryPermitScope(
+            account_id=canary_profile.account_id,
+            environment=canary_profile.environment,
+            symbol=canary_profile.symbol,
+            cell=canary_profile.cell,
+            strategy=canary_profile.strategy,
+            amount_usdt=canary_profile.amount_usdt,
+        )
+        if canary_halt_authorization is None:
+            raise CanaryStartupBlocked("missing_canary_halt_authorization")
+        permit_repository = CanaryPermitRepository(session_factory)
+
+        async def _consume_canary_permit() -> object:
+            return await permit_repository.consume(permit_id, canary_scope)
+
+        async def _record_canary_outcome(decision_id: str) -> object:
+            return await permit_repository.bind_outcome(
+                permit_id,
+                canary_scope,
+                execution_decision_id=decision_id,
+            )
+
+        async def _reassert_canary_halt() -> None:
+            current_halt = await halt_store.current()
+            if current_halt is None or not current_halt.halted:
+                await halt_store.set_halted(
+                    True,
+                    reason="halt2_canary_command_complete",
+                    actor="system:canary-one-shot",
+                )
+
+        reservation_executor = CanaryOneShotGate(
+            reservation_executor,
+            scope=canary_scope,
+            halt_authorization=canary_halt_authorization,
+            consume_permit=_consume_canary_permit,
+            record_outcome=_record_canary_outcome,
+            reassert_halt=_reassert_canary_halt,
+        )
+
+    wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
+        HeartbeatMiddleware(reservation_executor, probe=probe),
         metrics=metrics,
     )
     # OTel span "executor.submit" — enabled-only, stacked OUTSIDE metrics so
     # one span covers the full chain. Transparent: result/exception unchanged.
     if tracing.enabled:
         wrapped_executor = TracingSubmitMiddleware(wrapped_executor, tracing=tracing)
+
 
     # Last-submit-attempt slot read by GET /admin/trading-status. Built
     # unconditionally so the endpoint always has a `started_at` to report;

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -23,6 +24,50 @@ def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the explicit identity and test vault expected by build_daemon."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
     monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
+
+
+def configure_canary_wiring_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    """Provide a test-only canary boot stub for non-preflight wiring tests.
+
+    These tests exercise daemon construction after the shared preflight.  The
+    dedicated Halt 2 tests cover the real verifier; keeping this stub local to
+    test fixtures prevents unrelated wiring tests from needing production
+    evidence files or a durable permit row.
+    """
+    configure_account_env(monkeypatch)
+    monkeypatch.setenv("BFX_CANARY_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
+    monkeypatch.setenv("BFX_CANARY_ENVIRONMENT", "prod")
+    monkeypatch.setenv("BFX_CANARY_SYMBOL", "fUST")
+    monkeypatch.setenv("BFX_CANARY_CELL", "fUST_a30")
+    monkeypatch.setenv("BFX_CANARY_STRATEGY", "rate_percentile")
+    monkeypatch.setenv("BFX_CANARY_AMOUNT_USDT", "150")
+    monkeypatch.setenv("BFX_CANARY_CAP_USDT", "500")
+    monkeypatch.setenv("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS", "300")
+    monkeypatch.setenv(
+        "BFX_CANARY_PERMIT_ID", "33333333-3333-3333-3333-333333333333"
+    )
+    monkeypatch.setenv("BFX_EXPECTED_IMAGE_DIGEST", "sha256:test")
+    monkeypatch.setenv("BFX_PROJECTOR_VERSION", "execution-state-v1")
+    monkeypatch.setenv("BFX_HALT2_EVIDENCE_REPORT", str(tmp_path / "halt2-stub.json"))
+
+    import scripts.halt2_cutover as halt2_cutover
+    import scripts.run_canary_preflight as canary_preflight
+
+    monkeypatch.setattr(
+        halt2_cutover,
+        "_load_evidence",
+        lambda _path: SimpleNamespace(
+            exchange_account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
+            deployment_environment="prod",
+        ),
+    )
+
+    async def _preflight_stub(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(canary_preflight, "verify_canary_preflight", _preflight_stub)
 
 
 async def seed_exchange_account(engine: AsyncEngine) -> None:
@@ -61,5 +106,6 @@ __all__ = [
     "TEST_EXCHANGE_ACCOUNT_ID",
     "TEST_VAULT_KEK_B64",
     "configure_account_env",
+    "configure_canary_wiring_env",
     "seed_exchange_account",
 ]

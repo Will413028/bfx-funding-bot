@@ -308,7 +308,7 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
         "--evidence",
         str(root.parent / "halt2-canary-evidence.json"),
         "--projector-version",
-        "halt2-v1",
+        "execution-state-v1",
         "--image-digest",
         "sha256:expected",
         "--config-artifact",

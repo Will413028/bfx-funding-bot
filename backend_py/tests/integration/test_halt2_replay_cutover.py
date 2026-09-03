@@ -117,6 +117,14 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
         "migration_head_mismatch",
         "schema_heads_mismatch",
         "projector_version_mismatch",
+        "venue_snapshot_fence_absent",
+        "venue_snapshot_timestamp_absent",
+        "venue_snapshot_coverage_incomplete",
+        "venue_snapshot_stale",
+        "backup_rpo_unmeasured",
+        "backup_rpo_exceeded",
+        "restore_rto_unmeasured",
+        "restore_rto_exceeded",
         "open_execution_uncertainty",
         "persistent_halt_absent",
     )
@@ -132,6 +140,11 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
         "event_hash",
         "open_uncertainty_count",
         "venue_snapshot_fence",
+        "venue_snapshot_observed_at_ms",
+        "venue_snapshot_complete",
+        "preflight_observed_at_ms",
+        "backup_rpo_seconds",
+        "restore_rto_seconds",
         "config_digest",
         "image_digest",
         "projector_version",
@@ -145,11 +158,13 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
         "cell",
         "strategy",
         "amount_usdt",
+        "permit_id",
         "command_decision_id",
         "attempt_id",
         "outcome_kind",
         "venue_offer_id",
         "outcome_at_ms",
+        "outcome_event_seq",
         "reconcile_fences",
         "reconcile_observed_at_ms",
         "projection_hash",
@@ -200,16 +215,27 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
             "--now-ms <approved-utc-epoch-milliseconds>",
         ),
         (
-            "uv run python scripts/run_canary_preflight.py "
-            "--evidence \"$BFX_CANARY_EVIDENCE_REPORT\" "
-            "--halt2-evidence \"$BFX_HALT2_EVIDENCE_REPORT\" "
-            "--config-artifact <reviewed-config-artifact-path> "
-            "--cells <reviewed-canary-cells-path>",
+            "uv run python scripts/issue_canary_permit.py "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--symbol \"$BFX_CANARY_SYMBOL\" "
+            "--cell \"$BFX_CANARY_CELL\" "
+            "--strategy \"$BFX_CANARY_STRATEGY\" "
+            "--amount-usdt \"$BFX_CANARY_AMOUNT_USDT\" "
+            "--operator-id \"$BFX_OPERATOR_USER_ID\"",
+            "export BFX_CANARY_PERMIT_ID=<returned-durable-permit-uuid>",
         ),
         (
             "cd backend_py",
             "cd ..",
             "BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary",
+        ),
+        (
+            "uv run python scripts/run_canary_preflight.py "
+            "--evidence \"$BFX_CANARY_EVIDENCE_REPORT\" "
+            "--halt2-evidence \"$BFX_HALT2_EVIDENCE_REPORT\" "
+            "--config-artifact <reviewed-config-artifact-path> "
+            "--cells <reviewed-canary-cells-path>",
         ),
         (
             "cd backend_py",

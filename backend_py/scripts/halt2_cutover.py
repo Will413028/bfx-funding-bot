@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, ProjectionHeadRow
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
@@ -45,6 +47,12 @@ class Halt2Evidence:
     isolated_restore_evidence_hash: str
     event_head: int | None
     event_hash: str
+    venue_snapshot_fence: int | None
+    venue_snapshot_observed_at_ms: int | None
+    venue_snapshot_complete: bool
+    preflight_observed_at_ms: int
+    backup_rpo_seconds: int | None
+    restore_rto_seconds: int | None
     config_digest: str
     image_digest: str
     projector_version: str
@@ -81,6 +89,11 @@ class PreflightReport:
     event_hash: str
     open_uncertainty_count: int
     venue_snapshot_fence: int | None
+    venue_snapshot_observed_at_ms: int | None
+    venue_snapshot_complete: bool
+    preflight_observed_at_ms: int
+    backup_rpo_seconds: int | None
+    restore_rto_seconds: int | None
     config_digest: str
     image_digest: str
     projector_version: str | None
@@ -134,6 +147,18 @@ def verify_preflight(
             reasons.append("event_head_mismatch")
         if evidence.event_hash != report.event_hash:
             reasons.append("event_hash_mismatch")
+        if evidence.venue_snapshot_fence != report.venue_snapshot_fence:
+            reasons.append("venue_snapshot_fence_mismatch")
+        if evidence.venue_snapshot_observed_at_ms != report.venue_snapshot_observed_at_ms:
+            reasons.append("venue_snapshot_timestamp_mismatch")
+        if evidence.venue_snapshot_complete != report.venue_snapshot_complete:
+            reasons.append("venue_snapshot_coverage_mismatch")
+        if evidence.preflight_observed_at_ms > report.preflight_observed_at_ms:
+            reasons.append("preflight_timestamp_mismatch")
+        if evidence.backup_rpo_seconds != report.backup_rpo_seconds:
+            reasons.append("backup_rpo_mismatch")
+        if evidence.restore_rto_seconds != report.restore_rto_seconds:
+            reasons.append("restore_rto_mismatch")
         if evidence.config_digest != report.config_digest:
             reasons.append("config_digest_mismatch")
         if evidence.image_digest != report.image_digest:
@@ -146,6 +171,27 @@ def verify_preflight(
             reasons.append("projector_version_mismatch")
     if report.open_uncertainty_count:
         reasons.append("open_execution_uncertainty")
+    if report.venue_snapshot_fence is None:
+        reasons.append("venue_snapshot_fence_absent")
+    if report.venue_snapshot_observed_at_ms is None:
+        reasons.append("venue_snapshot_timestamp_absent")
+    if not report.venue_snapshot_complete:
+        reasons.append("venue_snapshot_coverage_incomplete")
+    max_snapshot_age_seconds = _max_snapshot_age_seconds(env)
+    if (
+        report.venue_snapshot_observed_at_ms is not None
+        and report.preflight_observed_at_ms - report.venue_snapshot_observed_at_ms
+        > max_snapshot_age_seconds * 1000
+    ):
+        reasons.append("venue_snapshot_stale")
+    if report.backup_rpo_seconds is None:
+        reasons.append("backup_rpo_unmeasured")
+    elif report.backup_rpo_seconds > 300:
+        reasons.append("backup_rpo_exceeded")
+    if report.restore_rto_seconds is None:
+        reasons.append("restore_rto_unmeasured")
+    elif report.restore_rto_seconds > 60:
+        reasons.append("restore_rto_exceeded")
     if not report.persistent_halt:
         reasons.append("persistent_halt_absent")
     final_report = replace(report, stop_reasons=tuple(sorted(set(reasons))))
@@ -161,7 +207,7 @@ async def collect_preflight_report(
     *,
     account_id: UUID,
     environment: str,
-    artifact_hashes: Mapping[str, str],
+    artifact_hashes: Mapping[str, object],
     image_digest: str,
     projector_version: str,
 ) -> PreflightReport:
@@ -176,23 +222,7 @@ async def collect_preflight_report(
             .order_by(EventLogRow.event_seq.asc())
         )
     )
-    event_payload = [
-        {
-            "event_seq": row.event_seq,
-            "event_id": str(row.event_id) if row.event_id else None,
-            "schema_version": row.schema_version,
-            "event_type": row.event_type,
-            "cid": row.cid,
-            "venue_offer_id": row.venue_offer_id,
-            "venue_seq": row.venue_seq,
-            "payload": row.payload,
-            "occurred_at_ms": row.occurred_at_ms,
-        }
-        for row in rows
-    ]
-    event_hash = hashlib.sha256(
-        json.dumps(event_payload, sort_keys=True, separators=(",", ":"), default=str).encode()
-    ).hexdigest()
+    event_hash = canonical_event_hash(rows)
     open_uncertainty_count = int(
         await session.scalar(
             select(func.count())
@@ -205,13 +235,31 @@ async def collect_preflight_report(
         )
         or 0
     )
-    venue_snapshot_fence = await session.scalar(
-        select(func.max(EventLogRow.event_seq)).where(
-            EventLogRow.exchange_account_id == account_id,
-            EventLogRow.deployment_environment == environment,
-            EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
-        )
+    venue_snapshot_fence: int | None = None
+    venue_snapshot_observed_at_ms: int | None = None
+    venue_snapshot_complete = False
+    from bfx_funding_bot.modules.execution.event_store.serialization import (
+        deserialize_stored_event,
     )
+    from bfx_funding_bot.modules.execution.events import VenueSnapshotObserved
+
+    for row in reversed(rows):
+        if row.event_type != "VENUE_SNAPSHOT_OBSERVED":
+            continue
+        try:
+            snapshot = deserialize_stored_event(row)
+        except (TypeError, ValueError):
+            break
+        if not isinstance(snapshot, VenueSnapshotObserved):
+            break
+        venue_snapshot_fence = row.event_seq
+        venue_snapshot_observed_at_ms = snapshot.query_finished_at_ms
+        venue_snapshot_complete = (
+            snapshot.coverage.active_offers_complete
+            and snapshot.coverage.active_credits_complete
+            and snapshot.coverage.wallets_complete
+        )
+        break
     halted = await session.scalar(
         select(TradingHaltRow.halted)
         .where(
@@ -242,14 +290,19 @@ async def collect_preflight_report(
         deployment_environment=environment,
         migration_head=_migration_head(),
         schema_heads=schema_heads,
-        backup_evidence_hash=artifact_hashes["backup_evidence_hash"],
-        isolated_restore_evidence_hash=artifact_hashes["isolated_restore_evidence_hash"],
+        backup_evidence_hash=str(artifact_hashes["backup_evidence_hash"]),
+        isolated_restore_evidence_hash=str(artifact_hashes["isolated_restore_evidence_hash"]),
         event_count=len(rows),
         event_head=rows[-1].event_seq if rows else None,
         event_hash=event_hash,
         open_uncertainty_count=open_uncertainty_count,
         venue_snapshot_fence=venue_snapshot_fence,
-        config_digest=artifact_hashes["config_digest"],
+        venue_snapshot_observed_at_ms=venue_snapshot_observed_at_ms,
+        venue_snapshot_complete=venue_snapshot_complete,
+        preflight_observed_at_ms=int(time.time() * 1000),
+        backup_rpo_seconds=_optional_int(artifact_hashes.get("backup_rpo_seconds")),
+        restore_rto_seconds=_optional_int(artifact_hashes.get("restore_rto_seconds")),
+        config_digest=str(artifact_hashes["config_digest"]),
         image_digest=image_digest,
         projector_version=(
             projector_version if observed_projector_versions == (projector_version,) else None
@@ -281,16 +334,60 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _artifact_hashes(evidence: Halt2Evidence, *, config_artifact: Path) -> dict[str, str]:
+def _artifact_hashes(evidence: Halt2Evidence, *, config_artifact: Path) -> dict[str, object]:
     if Path(evidence.config_artifact_path).resolve() != config_artifact.resolve():
         raise ValueError("evidence config_artifact_path does not match --config-artifact")
+    backup_measurement = _read_dr_measurement(
+        Path(evidence.backup_evidence_path), key="rpo_seconds"
+    )
+    restore_measurement = _read_dr_measurement(
+        Path(evidence.isolated_restore_evidence_path), key="rto_seconds"
+    )
     return {
         "backup_evidence_hash": _file_digest(Path(evidence.backup_evidence_path)),
         "isolated_restore_evidence_hash": _file_digest(
             Path(evidence.isolated_restore_evidence_path)
         ),
         "config_digest": _file_digest(config_artifact),
+        "backup_rpo_seconds": backup_measurement,
+        "restore_rto_seconds": restore_measurement,
     }
+
+
+def _read_dr_measurement(path: Path, *, key: str) -> int:
+    """Read an explicit measured DR result; a file hash alone is not evidence."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{key}_measurement_unavailable") from exc
+    if not isinstance(value, dict) or value.get("measured") is not True:
+        raise ValueError(f"{key}_unmeasured")
+    raw_seconds = value.get(key)
+    if isinstance(raw_seconds, bool) or not isinstance(raw_seconds, (int, str)):
+        raise ValueError(f"{key}_measurement_invalid")
+    try:
+        seconds = int(raw_seconds)
+    except ValueError as exc:
+        raise ValueError(f"{key}_measurement_invalid") from exc
+    if seconds < 0:
+        raise ValueError(f"{key}_measurement_invalid")
+    return seconds
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _max_snapshot_age_seconds(environ: Mapping[str, str]) -> int:
+    raw = environ.get("BFX_HALT2_MAX_SNAPSHOT_AGE_SECONDS", "300").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("invalid_halt2_snapshot_age") from exc
+    if value <= 0:
+        raise ValueError("invalid_halt2_snapshot_age")
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -334,7 +431,13 @@ async def _run(args: argparse.Namespace) -> PreflightResult:
                 backup_evidence_hash=evidence.backup_evidence_hash,
                 isolated_restore_evidence_hash=evidence.isolated_restore_evidence_hash,
                 event_count=0, event_head=None, event_hash="", open_uncertainty_count=0,
-                venue_snapshot_fence=None, config_digest=evidence.config_digest,
+                venue_snapshot_fence=evidence.venue_snapshot_fence,
+                venue_snapshot_observed_at_ms=evidence.venue_snapshot_observed_at_ms,
+                venue_snapshot_complete=evidence.venue_snapshot_complete,
+                preflight_observed_at_ms=evidence.preflight_observed_at_ms,
+                backup_rpo_seconds=evidence.backup_rpo_seconds,
+                restore_rto_seconds=evidence.restore_rto_seconds,
+                config_digest=evidence.config_digest,
                 image_digest=evidence.image_digest, persistent_halt=state.halted, stop_reasons=(),
                 projector_version=args.projector_version,
             )

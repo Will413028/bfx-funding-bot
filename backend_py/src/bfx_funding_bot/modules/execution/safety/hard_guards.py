@@ -60,8 +60,14 @@ class ManualKillGuard:
     name = "manual_kill"
     is_calibrated = False
 
-    def __init__(self, *, halt_store: _HaltStateReader | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        halt_store: _HaltStateReader | None = None,
+        canary_halt_authorization: object | None = None,
+    ) -> None:
         self._halt_store = halt_store
+        self._canary_halt_authorization = canary_halt_authorization
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -83,13 +89,29 @@ class ManualKillGuard:
             )
         # None = no halt decision was ever recorded for this realm. That is not
         # "halted" — otherwise every fresh environment would deadlock on boot.
+        canary_authorized = (
+            self._canary_halt_authorization is not None
+            and ctx.canary_halt_authorization is self._canary_halt_authorization
+        )
         if state is not None and state.halted:
+            if canary_authorized:
+                return GuardResult(
+                    allowed=True,
+                    guard_name=self.name,
+                    reason="persistent halt overridden by consumed canary permit",
+                )
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"persisted halt: {state.reason} "
                     f"(actor={state.actor}, id={state.id})"
                 ),
+            )
+        if canary_authorized:
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason="persistent halt absent during canary command",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 

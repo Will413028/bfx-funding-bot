@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.observability.metrics import (
 )
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
+    configure_canary_wiring_env,
     seed_exchange_account,
 )
 
@@ -165,6 +166,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -185,7 +187,9 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     assert isinstance(metrics_executor, MetricsSubmitMiddleware)
     heartbeat = metrics_executor._inner
     assert isinstance(heartbeat, HeartbeatMiddleware)
-    reservation = heartbeat._inner
+    from bfx_funding_bot.modules.execution.canary_permit import CanaryOneShotGate
+    assert isinstance(heartbeat._inner, CanaryOneShotGate)
+    reservation = heartbeat._inner._inner
     assert isinstance(reservation, ReservationEmittingMiddleware)
     assert reservation._command_gate is not None
     assert reservation._command_gate._safety_evaluator is daemon.safety_chain
