@@ -612,7 +612,7 @@ async def collect_canary_readiness(
         snapshot_stmt = snapshot_stmt.where(EventLogRow.event_seq > after_event_seq)
     snapshot_rows = list(
         await session.scalars(
-            snapshot_stmt.order_by(EventLogRow.event_seq.desc()).limit(2)
+            snapshot_stmt.order_by(EventLogRow.event_seq.desc()).limit(minimum_snapshot_count)
         )
     )
     snapshot_rows.reverse()
@@ -630,7 +630,7 @@ async def collect_canary_readiness(
             snapshots.append(event)
     complete_snapshot_coverage = (
         len(snapshot_rows) >= minimum_snapshot_count
-        and len(snapshots) == 2
+        and len(snapshots) == len(snapshot_rows)
         and all(
             event.coverage.active_offers_complete
             and event.coverage.active_credits_complete
