@@ -24,7 +24,11 @@ if TYPE_CHECKING:
 
 PROJECTION_NAME = "execution_state"
 DEFAULT_PROJECTOR_VERSION = "execution-state-v1"
-_READY_PROJECTOR_MIGRATIONS = frozenset({"c2e3f4a5b6c7", "cd5e6f708192"})
+_READY_PROJECTOR_MIGRATIONS = frozenset({
+    "c2e3f4a5b6c7",
+    "cd5e6f708192",
+    "de6f708192a3",
+})
 
 __all__ = [
     "DEFAULT_PROJECTOR_VERSION",

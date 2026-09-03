@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid5
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +37,11 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 from bfx_funding_bot.modules.execution.events import (
     __SCHEMA_VERSION__,
     DEFAULT_RECONCILE_SYMBOL,
+    MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS,
     SubmitMatchedToVenueOffer,
+    UncertaintyBoundToVenueOffer,
+    UncertaintyManuallyResolved,
+    UncertaintyMarkedNotAccepted,
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
@@ -49,6 +53,11 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
+)
+from bfx_funding_bot.modules.execution.unknown_matching import (
+    attempt_from_row,
+    deterministic_resolution_evidence,
+    match_attempt_to_snapshot,
 )
 
 _SUBMIT_UNCERTAINTY_NAMESPACE = UUID("d158ef54-c1dd-54e4-a9e9-9a670c938f73")
@@ -300,6 +309,21 @@ class PostgresEventStore:
             return
         if isinstance(event, VenueOfferQuarantined):
             await self._project_orphan_uncertainty(
+                session,
+                event,
+                account_id=account_id,
+                event_seq=event_seq,
+            )
+            return
+        if isinstance(
+            event,
+            (
+                UncertaintyBoundToVenueOffer,
+                UncertaintyMarkedNotAccepted,
+                UncertaintyManuallyResolved,
+            ),
+        ):
+            await self._project_uncertainty_resolution(
                 session,
                 event,
                 account_id=account_id,
@@ -595,6 +619,338 @@ class PostgresEventStore:
         uncertainty.resolved_at = resolution_row.recorded_at
         await session.flush()
 
+    async def _project_uncertainty_resolution(
+        self,
+        session: AsyncSession,
+        event: object,
+        *,
+        account_id: str,
+        event_seq: int,
+    ) -> None:
+        """Apply an operator resolution as an append-only event projection.
+
+        The API deliberately never updates ``execution_uncertainties`` itself.
+        This method is the single projection path for bind/not-accepted/manual
+        resolution events and is also used unchanged by clean event-log replay.
+        """
+        canonical = account_id_uuid_or_none(account_id)
+        if canonical is None:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution requires canonical account"
+            )
+        event_obj: Any = cast(Any, event)
+        if str(event_obj.account_id) != str(canonical):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution account scope conflicts"
+            )
+        if event_obj.environment != self._env:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution environment conflicts"
+            )
+        uncertainty = await session.scalar(
+            select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.uncertainty_id == event_obj.uncertainty_id,
+                ExecutionUncertaintyRow.exchange_account_id == canonical,
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == event_obj.symbol,
+                ExecutionUncertaintyRow.kind == event_obj.kind,
+                ExecutionUncertaintyRow.state == "open",
+            ).with_for_update()
+        )
+        if uncertainty is None:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution has no open exact-scope row"
+            )
+        if event_obj.reconcile_event_seq <= uncertainty.opened_event_seq:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution requires a fresh reconcile fence"
+            )
+        reconcile_event = await session.get(EventLogRow, event_obj.reconcile_event_seq)
+        if (
+            reconcile_event is None
+            or reconcile_event.exchange_account_id != canonical
+            or reconcile_event.deployment_environment != self._env
+            or reconcile_event.event_type != "VENUE_SNAPSHOT_OBSERVED"
+            or event_obj.reconcile_event_seq >= event_seq
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution requires a fresh full-account reconcile"
+            )
+        latest_reconcile_seq = await session.scalar(
+            select(func.max(EventLogRow.event_seq)).where(
+                EventLogRow.exchange_account_id == canonical,
+                EventLogRow.deployment_environment == self._env,
+                EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+                EventLogRow.event_seq < event_seq,
+            )
+        )
+        if latest_reconcile_seq != event_obj.reconcile_event_seq:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution reconcile fence is stale"
+            )
+        snapshot_payload = reconcile_event.payload
+        opening_event = await session.get(EventLogRow, uncertainty.opened_event_seq)
+        query_started_at_ms = (
+            snapshot_payload.get("query_started_at_ms")
+            if isinstance(snapshot_payload, dict)
+            else None
+        )
+        query_finished_at_ms = (
+            snapshot_payload.get("query_finished_at_ms")
+            if isinstance(snapshot_payload, dict)
+            else None
+        )
+        if (
+            opening_event is None
+            or opening_event.exchange_account_id != canonical
+            or opening_event.deployment_environment != self._env
+            or not isinstance(query_started_at_ms, int)
+            or isinstance(query_started_at_ms, bool)
+            or not isinstance(query_finished_at_ms, int)
+            or isinstance(query_finished_at_ms, bool)
+            or query_started_at_ms <= opening_event.occurred_at_ms
+            or query_finished_at_ms < query_started_at_ms
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution reconcile interval is stale"
+            )
+        latest_projected_snapshot_at = await session.scalar(
+            select(func.max(PositionStateRow.last_venue_snapshot_at)).where(
+                PositionStateRow.exchange_account_id == canonical,
+                PositionStateRow.deployment_environment == self._env,
+            )
+        )
+        if (
+            latest_projected_snapshot_at is not None
+            and query_finished_at_ms < latest_projected_snapshot_at
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution reconcile did not advance canonical state"
+            )
+        coverage = (
+            snapshot_payload.get("coverage")
+            if isinstance(snapshot_payload, dict)
+            else None
+        )
+        if not isinstance(coverage, dict) or not all(
+            bool(coverage.get(name))
+            for name in ("active_offers_complete", "active_credits_complete", "wallets_complete")
+        ):
+            raise OfferClaimIdentityConflictError(
+                "uncertainty resolution requires complete account reconcile coverage"
+            )
+
+        if isinstance(event, (UncertaintyBoundToVenueOffer, UncertaintyMarkedNotAccepted)):
+            if uncertainty.kind != "submit_outcome_unknown" or uncertainty.attempt_id is None:
+                raise OfferClaimIdentityConflictError(
+                    "submit resolution requires an UNKNOWN linked attempt"
+                )
+            attempt_row = await session.scalar(
+                select(SubmissionAttemptRow).where(
+                    SubmissionAttemptRow.attempt_id == uncertainty.attempt_id,
+                    SubmissionAttemptRow.exchange_account_id == canonical,
+                    SubmissionAttemptRow.deployment_environment == self._env,
+                    SubmissionAttemptRow.symbol == event_obj.symbol,
+                    SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.UNKNOWN.value,
+                )
+            )
+            attempt = attempt_from_row(attempt_row) if attempt_row is not None else None
+            match = (
+                match_attempt_to_snapshot(attempt, snapshot_payload)
+                if attempt is not None and isinstance(snapshot_payload, dict)
+                else None
+            )
+        else:
+            match = None
+
+        if isinstance(event, UncertaintyBoundToVenueOffer):
+            if (
+                match is None
+                or match.kind != "exact_match"
+                or match.offer is None
+                or match.offer.venue_offer_id != event.venue_offer_id
+                or match.offer.status != event.venue_status
+            ):
+                raise OfferClaimIdentityConflictError(
+                    "bind-to-venue requires one exact immutable candidate and status"
+                )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+                candidate_count=1,
+                venue_offer_id=event.venue_offer_id,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "bind-to-venue evidence does not match server observation"
+                )
+            await self._apply_bound_uncertainty_resolution(
+                session,
+                event,
+                uncertainty=uncertainty,
+                canonical=canonical,
+                snapshot_payload=snapshot_payload,
+                event_seq=event_seq,
+            )
+        elif isinstance(event, UncertaintyMarkedNotAccepted):
+            if event.kind != "submit_outcome_unknown" or (
+                event.candidate_count != 0
+                or match is None
+                or match.kind != "zero_match"
+            ):
+                raise OfferClaimIdentityConflictError(
+                    "mark-not-accepted requires zero exact candidates"
+                )
+            if not bool(coverage.get("offer_history_complete")):
+                raise OfferClaimIdentityConflictError(
+                    "mark-not-accepted requires complete offer-history coverage"
+                )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+                candidate_count=0,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "mark-not-accepted evidence does not match server observation"
+                )
+        elif isinstance(event, UncertaintyManuallyResolved):
+            if event.kind not in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution is not valid for submit uncertainty"
+                )
+            if event.resolution_action not in MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution action is not allowlisted"
+                )
+            expected_evidence = deterministic_resolution_evidence(
+                reconcile_event_seq=event.reconcile_event_seq,
+                payload=snapshot_payload,
+            )
+            if dict(event.resolution_evidence) != expected_evidence:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution evidence does not match server observation"
+                )
+        else:  # pragma: no cover - guarded by the caller's isinstance tuple
+            raise TypeError("unsupported uncertainty resolution event")
+
+        amount = Decimal(str(uncertainty.intended_amount))
+        position = await session.scalar(
+            select(PositionStateRow).where(
+                PositionStateRow.exchange_account_id == canonical,
+                PositionStateRow.deployment_environment == self._env,
+                PositionStateRow.symbol == event_obj.symbol,
+            ).with_for_update()
+        )
+        if position is None or Decimal(str(position.uncertain_amount)) < amount:
+            raise OfferClaimIdentityConflictError(
+                "uncertainty projection cannot become negative"
+            )
+        position.uncertain_amount = Decimal(str(position.uncertain_amount)) - amount
+        position.last_event_seq = max(position.last_event_seq, event_seq)
+        uncertainty.state = "resolved"
+        uncertainty.reconcile_event_seq = event_obj.reconcile_event_seq
+        uncertainty.resolved_event_seq = event_seq
+        uncertainty.resolved_by_operator_id = event_obj.resolved_by_operator_id
+        uncertainty.resolution_reason = event_obj.resolution_reason
+        uncertainty.resolution_evidence = dict(event_obj.resolution_evidence)
+        resolution_row = await session.get(EventLogRow, event_seq)
+        if resolution_row is None:  # pragma: no cover - append flushes first
+            raise OfferClaimIdentityConflictError("resolution event row is missing")
+        uncertainty.resolved_at = resolution_row.recorded_at
+        await session.flush()
+
+    async def _apply_bound_uncertainty_resolution(
+        self,
+        session: AsyncSession,
+        event: UncertaintyBoundToVenueOffer,
+        *,
+        uncertainty: ExecutionUncertaintyRow,
+        canonical: UUID,
+        snapshot_payload: dict[str, Any],
+        event_seq: int,
+    ) -> None:
+        """Attach an UNKNOWN attempt to the exact offer seen by the fence."""
+        if event.kind != "submit_outcome_unknown":
+            raise OfferClaimIdentityConflictError(
+                "bind-to-venue only resolves submit outcome uncertainty"
+            )
+        observed_ids: set[str] = set()
+        for key in ("offers", "offer_history"):
+            values = snapshot_payload.get(key, [])
+            if isinstance(values, list):
+                observed_ids.update(
+                    str(value.get("venue_offer_id"))
+                    for value in values
+                    if isinstance(value, dict) and value.get("venue_offer_id") is not None
+                )
+        if event.venue_offer_id not in observed_ids:
+            raise OfferClaimIdentityConflictError(
+                "bound venue offer is absent from the supplied reconcile fence"
+            )
+        evidence = dict(event.resolution_evidence)
+        candidate_count = evidence.get("candidate_count", evidence.get("candidateCount"))
+        if candidate_count is not None and candidate_count != 1:
+            raise OfferClaimIdentityConflictError(
+                "bind-to-venue requires exactly one candidate"
+            )
+        venue_offer = await session.scalar(
+            select(VenueOfferStateRow).where(
+                VenueOfferStateRow.exchange_account_id == canonical,
+                VenueOfferStateRow.deployment_environment == self._env,
+                VenueOfferStateRow.venue_offer_id == event.venue_offer_id,
+                VenueOfferStateRow.symbol == event.symbol,
+            ).with_for_update()
+        )
+        if venue_offer is None:
+            raise OfferClaimIdentityConflictError(
+                "bound venue offer is absent from the reconcile projection"
+            )
+        if venue_offer.cid is not None or venue_offer.execution_decision_id is not None:
+            raise OfferClaimIdentityConflictError(
+                "bound venue offer already has immutable attribution"
+            )
+        if uncertainty.attempt_id is None:
+            raise OfferClaimIdentityConflictError(
+                "bind-to-venue requires a linked submission attempt"
+            )
+        attempt = await session.scalar(
+            select(SubmissionAttemptRow).where(
+                SubmissionAttemptRow.attempt_id == uncertainty.attempt_id,
+                SubmissionAttemptRow.exchange_account_id == canonical,
+                SubmissionAttemptRow.deployment_environment == self._env,
+                SubmissionAttemptRow.symbol == event.symbol,
+            ).with_for_update()
+        )
+        if attempt is None or attempt.outcome_kind != SubmitOutcomeKind.UNKNOWN.value:
+            raise OfferClaimIdentityConflictError(
+                "bind-to-venue requires an UNKNOWN linked submission attempt"
+            )
+        attempt.outcome_kind = SubmitOutcomeKind.ACKNOWLEDGED.value
+        attempt.outcome_reason = None
+        attempt.venue_offer_id = event.venue_offer_id
+        attempt.completed_at_ms = event.occurred_at_ms or 0
+        attempt.last_event_seq = event_seq
+        venue_offer.cid = attempt.cid
+        venue_offer.execution_decision_id = attempt.execution_decision_id
+        venue_offer.last_seen_event_seq = max(venue_offer.last_seen_event_seq, event_seq)
+        claim = await session.scalar(
+            select(OfferClaimRow).where(
+                OfferClaimRow.exchange_account_id == canonical,
+                OfferClaimRow.deployment_environment == self._env,
+                OfferClaimRow.cid == attempt.cid,
+            ).with_for_update()
+        )
+        if claim is not None:
+            claim.venue_offer_id = event.venue_offer_id
+            claim.state = (
+                RegistryState.RELEASED
+                if is_terminal_offer_status(event.venue_status)
+                else RegistryState.CLAIMED
+            ).value
+            claim.last_event_seq = max(claim.last_event_seq, event_seq)
+            claim.last_updated_ms = event.occurred_at_ms or claim.last_updated_ms
+
     async def _project_orphan_uncertainty(
         self,
         session: AsyncSession,
@@ -880,6 +1236,7 @@ class PostgresEventStore:
                 offer_state_row.amount_remaining = offer_observation.amount_remaining
                 offer_state_row.rate = offer_observation.rate
                 offer_state_row.period_days = offer_observation.period_days
+                offer_state_row.offer_type = offer_observation.offer_type
                 offer_state_row.status = offer_observation.status
                 offer_state_row.flags = dict(offer_observation.flags)
                 offer_state_row.mts_created = offer_observation.mts_created
@@ -902,6 +1259,7 @@ class PostgresEventStore:
                 amount_remaining=offer_observation.amount_remaining,
                 rate=offer_observation.rate,
                 period_days=offer_observation.period_days,
+                offer_type=offer_observation.offer_type,
                 status=offer_observation.status,
                 flags=dict(offer_observation.flags),
                 mts_created=offer_observation.mts_created,

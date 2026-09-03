@@ -44,6 +44,17 @@ export const executionKeys = {
     ] as const,
 };
 
+export const uncertaintyKeys = {
+  all: ["uncertainties"] as const,
+  list: (exchangeAccountId: string | undefined, state?: string) =>
+    [
+      ...uncertaintyKeys.all,
+      exchangeAccountId,
+      "list",
+      state ?? "open",
+    ] as const,
+};
+
 export const attributionKeys = {
   all: ["attribution"] as const,
   weekly: (exchangeAccountId: string | undefined) =>

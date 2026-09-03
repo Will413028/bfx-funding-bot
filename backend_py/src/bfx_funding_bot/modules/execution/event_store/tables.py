@@ -234,6 +234,7 @@ class VenueOfferStateRow(Base):
     # Keep the database vocabulary from the Bitfinex API while exposing the
     # explicit ``period_days`` domain name to Python callers.
     period_days: Mapped[int | None] = mapped_column("period", Integer, nullable=True)
+    offer_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     flags: Mapped[dict[str, Any]] = mapped_column(
         _JSON, nullable=False, default=dict, server_default=text("'{}'")

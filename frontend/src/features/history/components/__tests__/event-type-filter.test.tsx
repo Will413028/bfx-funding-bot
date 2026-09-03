@@ -5,7 +5,7 @@ import { EventTypeFilter } from "../event-type-filter";
 afterEach(cleanup);
 
 describe("EventTypeFilter", () => {
-  it("renders the All chip plus all six event types", () => {
+  it("renders the All chip plus lifecycle and uncertainty resolution events", () => {
     const { getByText } = render(
       <EventTypeFilter value={null} onChange={() => {}} />,
     );
@@ -18,6 +18,9 @@ describe("EventTypeFilter", () => {
       "ORDER_FILL",
       "RESERVATION_RELEASED",
       "CREDIT_CLOSED",
+      "UNCERTAINTY_BOUND_TO_VENUE_OFFER",
+      "UNCERTAINTY_MARKED_NOT_ACCEPTED",
+      "UNCERTAINTY_MANUALLY_RESOLVED",
     ]) {
       expect(getByText(type)).toBeDefined();
     }

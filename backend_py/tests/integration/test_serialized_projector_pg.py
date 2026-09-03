@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-_REVISION = "cd5e6f708192"
+_REVISION = "de6f708192a3"
 _ENV = "ci"
 
 
@@ -120,6 +120,10 @@ async def test_serialized_projector_schema_contract(pg_engine, monkeypatch) -> N
                 "uncertain_amount",
                 "last_venue_snapshot_at",
             } <= position_columns
+            offer_columns = {
+                column["name"] for column in inspector.get_columns("venue_offer_state")
+            }
+            assert "offer_type" in offer_columns
 
             for table, identity in (
                 ("venue_offer_state", {"exchange_account_id", "deployment_environment", "venue_offer_id"}),

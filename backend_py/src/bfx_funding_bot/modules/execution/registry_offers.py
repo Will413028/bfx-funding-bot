@@ -29,6 +29,7 @@ Transition rules:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -237,6 +238,7 @@ class OfferRegistry:
     ) -> None:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._snapshot: dict[str, ClaimRecord] = {}
+        self._refresh_lock = asyncio.Lock()
 
     def snapshot(self) -> dict[str, ClaimRecord]:
         """Return immutable view (dict copy)."""
@@ -244,17 +246,18 @@ class OfferRegistry:
 
     async def handle(self, event: Any) -> None:
         """Bus subscriber callback — transition + atomic swap."""
-        now_ms = self._clock()
-        new_snapshot, diags = transition(self._snapshot, event, now_ms)
-        for d in diags:
-            if d.level == "error":
-                raise ReservationCorrelationError(d.message)
-            level_fn = log.info if d.level == "info" else log.warning
-            level_fn(
-                "offer_registry_diag voi=%s msg=%s",
-                d.venue_offer_id, d.message,
-            )
-        self._snapshot = new_snapshot
+        async with self._refresh_lock:
+            now_ms = self._clock()
+            new_snapshot, diags = transition(self._snapshot, event, now_ms)
+            for d in diags:
+                if d.level == "error":
+                    raise ReservationCorrelationError(d.message)
+                level_fn = log.info if d.level == "info" else log.warning
+                level_fn(
+                    "offer_registry_diag voi=%s msg=%s",
+                    d.venue_offer_id, d.message,
+                )
+            self._snapshot = new_snapshot
 
     # ---------- cold-start loader (PostgreSQL snapshot) ----------
 
@@ -268,11 +271,45 @@ class OfferRegistry:
         clock: Callable[[], int] | None = None,
     ) -> OfferRegistry:
         """Load registry from the offer_claims snapshot table (no replay)."""
+        reg = cls(clock=clock)
+        await reg.refresh_from_snapshot(
+            session,
+            account_id=account_id,
+            deployment_environment=deployment_environment,
+        )
+        return reg
+
+    async def refresh_from_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        deployment_environment: str,
+    ) -> None:
+        """Atomically converge to the durable claim projection.
+
+        The lock serializes the database boundary with WS transitions: a WS
+        event either persists before this query and is included, or waits and
+        applies after the refreshed snapshot is installed.
+        """
+        async with self._refresh_lock:
+            await self._refresh_from_snapshot_locked(
+                session,
+                account_id=account_id,
+                deployment_environment=deployment_environment,
+            )
+
+    async def _refresh_from_snapshot_locked(
+        self,
+        session: AsyncSession,
+        *,
+        account_id: str,
+        deployment_environment: str,
+    ) -> None:
         from sqlalchemy import select
 
         from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 
-        reg = cls(clock=clock)
         rows = (
             await session.execute(
                 select(OfferClaimRow).where(
@@ -287,9 +324,10 @@ class OfferRegistry:
                 )
             )
         ).scalars().all()
+        refreshed: dict[str, ClaimRecord] = {}
         for r in rows:
             assert r.venue_offer_id is not None
-            if r.venue_offer_id in reg._snapshot:
+            if r.venue_offer_id in refreshed:
                 raise ReservationCorrelationError(
                     f"ambiguous offer claim rows for voi={r.venue_offer_id}",
                 )
@@ -301,7 +339,7 @@ class OfferRegistry:
                     signal_correlation_id=UUID(r.signal_correlation_id),
                     venue_offer_id=r.venue_offer_id,
                 )
-            reg._snapshot[r.venue_offer_id] = ClaimRecord(
+            refreshed[r.venue_offer_id] = ClaimRecord(
                 venue_offer_id=r.venue_offer_id,
                 cid=r.cid,
                 signal_correlation_id=UUID(r.signal_correlation_id),
@@ -318,7 +356,7 @@ class OfferRegistry:
                 symbol=r.symbol,
                 reservation_ref=reference,
             )
-        return reg
+        self._snapshot = refreshed
 
     def cleanup_terminal(self, older_than_ms: int) -> None:
         """Remove RELEASED records whose last_updated_ms is older than threshold.
