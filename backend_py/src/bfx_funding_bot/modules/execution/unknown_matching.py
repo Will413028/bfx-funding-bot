@@ -73,6 +73,40 @@ def offer_matches_attempt_identity(
     )
 
 
+def _coverage_invariants_hold(coverage: FundingOfferHistoryCoverage) -> bool:
+    start = coverage.requested_start_ms
+    end = coverage.requested_end_ms
+    pages = coverage.pages
+    complete = coverage.complete
+    oldest = coverage.oldest_mts_created
+    newest = coverage.newest_mts_created
+    if (
+        not isinstance(start, int)
+        or isinstance(start, bool)
+        or not isinstance(end, int)
+        or isinstance(end, bool)
+        or start > end
+        or not isinstance(pages, int)
+        or isinstance(pages, bool)
+        or pages < 0
+        or not isinstance(complete, bool)
+        or (complete and pages < 1)
+    ):
+        return False
+    if oldest is not None and (
+        not isinstance(oldest, int) or isinstance(oldest, bool)
+    ):
+        return False
+    if newest is not None and (
+        not isinstance(newest, int) or isinstance(newest, bool)
+    ):
+        return False
+    return not (
+        (oldest is None) != (newest is None)
+        or (oldest is not None and newest is not None and oldest > newest)
+    )
+
+
 def match_unknown_attempt(
     attempt: UnknownSubmitAttempt,
     active: Sequence[ActiveFundingOffer],
@@ -81,7 +115,8 @@ def match_unknown_attempt(
 ) -> MatchResult:
     """Return exact/zero only when the complete history fence proves it."""
     if (
-        not coverage.complete
+        not _coverage_invariants_hold(coverage)
+        or not coverage.complete
         or coverage.requested_start_ms > attempt.started_at_ms
         or coverage.requested_end_ms < attempt.started_at_ms
     ):

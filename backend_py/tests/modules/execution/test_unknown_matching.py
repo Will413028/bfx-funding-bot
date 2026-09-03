@@ -1,12 +1,18 @@
 """Fail-closed contracts for persisted UNKNOWN-attempt matching."""
 
+from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
+import pytest
+
+from bfx_funding_bot.external.bitfinex.auth_rest import FundingOfferHistoryCoverage
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
     match_attempt_to_snapshot,
+    match_unknown_attempt,
 )
 
 
@@ -31,6 +37,63 @@ def _attempt() -> UnknownSubmitAttempt:
             signal_correlation_id=signal_id,
         ),
     )
+
+
+def _coverage() -> FundingOfferHistoryCoverage:
+    return FundingOfferHistoryCoverage(
+        requested_start_ms=900,
+        requested_end_ms=1_990,
+        oldest_mts_created=None,
+        newest_mts_created=None,
+        pages=1,
+        complete=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"pages": 0},
+        {"pages": -1},
+        {"pages": True},
+        {"complete": 1},
+        {"requested_start_ms": True},
+        {"requested_end_ms": 1_990.5},
+        {"requested_start_ms": 2_000, "requested_end_ms": 1_990},
+        {"oldest_mts_created": 1_500},
+        {"newest_mts_created": 1_500},
+        {"oldest_mts_created": 1_600, "newest_mts_created": 1_500},
+        {"oldest_mts_created": True, "newest_mts_created": 1_500},
+    ],
+    ids=[
+        "complete-zero-pages",
+        "negative-pages",
+        "bool-pages",
+        "non-bool-complete",
+        "bool-start",
+        "non-int-end",
+        "inverted-query-fence",
+        "missing-newest",
+        "missing-oldest",
+        "inverted-observed-range",
+        "bool-oldest",
+    ],
+)
+def test_match_unknown_attempt_rejects_malformed_runtime_coverage(
+    changes: dict[str, Any],
+) -> None:
+    """The core matcher must validate coverage even without the raw adapter."""
+    coverage = replace(_coverage(), **changes)
+
+    result = match_unknown_attempt(_attempt(), (), (), coverage)
+
+    assert result.kind == "incomplete"
+
+
+def test_match_unknown_attempt_preserves_valid_empty_history_zero_match() -> None:
+    result = match_unknown_attempt(_attempt(), (), (), _coverage())
+
+    assert result.kind == "zero_match"
 
 
 def test_complete_history_with_zero_pages_is_incomplete() -> None:
