@@ -265,6 +265,9 @@ def match_attempt_to_snapshot(
             or not isinstance(pages, int)
             or isinstance(pages, bool)
             or not isinstance(complete, bool)
+            or pages < 0
+            or (complete and pages < 1)
+            or start > end
         ):
             return MatchResult("incomplete")
         oldest = coverage_value.get("offer_history_oldest_mts")
@@ -273,12 +276,20 @@ def match_attempt_to_snapshot(
             return MatchResult("incomplete")
         if newest is not None and (not isinstance(newest, int) or isinstance(newest, bool)):
             return MatchResult("incomplete")
+        if (oldest is None) != (newest is None) or (
+            oldest is not None and newest is not None and oldest > newest
+        ):
+            return MatchResult("incomplete")
     except KeyError:
         return MatchResult("incomplete")
     query_started_at_ms = payload.get("query_started_at_ms")
+    query_finished_at_ms = payload.get("query_finished_at_ms")
     if (
         not isinstance(query_started_at_ms, int)
         or isinstance(query_started_at_ms, bool)
+        or not isinstance(query_finished_at_ms, int)
+        or isinstance(query_finished_at_ms, bool)
+        or query_finished_at_ms < query_started_at_ms
         or end < query_started_at_ms
     ):
         return MatchResult("incomplete")

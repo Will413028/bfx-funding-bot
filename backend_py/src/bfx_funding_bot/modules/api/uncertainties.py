@@ -3,8 +3,6 @@
 The rows returned by this module are deliberately small, bounded read DTOs.
 Resolution is an append-only domain event: the handler validates the account
 scope and reconcile fence, then delegates to :class:`AccountEventWriter`.
-It must not call ``UncertaintyService.resolve`` because that legacy helper
-updates a projection directly and would make a clean event-log replay diverge.
 """
 
 from __future__ import annotations
@@ -54,6 +52,7 @@ from bfx_funding_bot.modules.execution.unknown_matching import (
 _MAX_LIMIT = 100
 _MAX_REASON_LENGTH = 512
 _MAX_EVIDENCE_BYTES = 16_384
+_MAX_CANDIDATE_VENUE_OFFER_IDS = 16
 _RECONCILE_EVENT_TYPE = "VENUE_SNAPSHOT_OBSERVED"
 _SUPPORTED_KINDS = frozenset(
     {
@@ -125,6 +124,7 @@ class UncertaintyResolutionContext(BaseModel):
     candidate_venue_offer_ids: list[str] = Field(
         default_factory=list,
         serialization_alias="candidateVenueOfferIds",
+        max_length=_MAX_CANDIDATE_VENUE_OFFER_IDS,
     )
     unavailable_reason: str | None = Field(
         default=None,
@@ -485,6 +485,7 @@ async def _resolution_context(
         )
     match = match_attempt_to_snapshot(attempt, payload)
     candidate_ids = sorted({offer.venue_offer_id for offer in match.candidates})
+    bounded_candidate_ids = candidate_ids[:_MAX_CANDIDATE_VENUE_OFFER_IDS]
     if match.kind == "incomplete":
         return _unavailable_context(
             reconcile_event_seq=latest.event_seq,
@@ -497,12 +498,12 @@ async def _resolution_context(
             payload=payload,
             reason="multiple_exact_candidates",
             candidate_count=len(candidate_ids),
-            candidate_venue_offer_ids=candidate_ids,
+            candidate_venue_offer_ids=bounded_candidate_ids,
         )
     return UncertaintyResolutionContext(
         **base,
         candidate_count=len(candidate_ids),
-        candidate_venue_offer_ids=candidate_ids,
+        candidate_venue_offer_ids=bounded_candidate_ids,
     )
 
 

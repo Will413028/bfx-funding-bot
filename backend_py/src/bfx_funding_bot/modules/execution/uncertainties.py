@@ -25,7 +25,6 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 __all__ = ["UncertaintyKind", "UncertaintyService"]
 
 _MAX_EVIDENCE_BYTES = 16_384
-_RECONCILE_EVENT_TYPE = "VENUE_SNAPSHOT_OBSERVED"
 
 
 class UncertaintyKind(StrEnum):
@@ -197,12 +196,13 @@ class UncertaintyService:
             if scope_open is not None:
                 raise ValueError("an open uncertainty already exists for this exact scope")
 
-            await self._require_event(
-                session,
-                event_seq=opened_event_seq,
-                exchange_account_id=exchange_account_id,
-                deployment_environment=environment,
-            )
+            opening_event = await session.get(EventLogRow, opened_event_seq)
+            if (
+                opening_event is None
+                or opening_event.exchange_account_id != exchange_account_id
+                or opening_event.deployment_environment != environment
+            ):
+                raise ValueError("event sequence does not match account/environment scope")
             if attempt_id is not None:
                 await self._require_attempt_scope(
                     session,
@@ -287,114 +287,6 @@ class UncertaintyService:
                 return winner
             else:
                 return row
-
-    async def resolve(
-        self,
-        *,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-        symbol: str,
-        kind: UncertaintyKind | str,
-        reconcile_event_seq: int,
-        resolution_event_seq: int,
-        resolved_by_operator_id: str,
-        resolution_reason: str,
-        evidence: dict[str, Any],
-    ) -> ExecutionUncertaintyRow:
-        """Resolve one exact scope only after fresh, scoped reconcile evidence."""
-        typed_kind = _kind(kind)
-        environment = _nonempty(deployment_environment, field="deployment_environment")
-        scoped_symbol = _nonempty(symbol, field="symbol")
-        operator_id = _nonempty(resolved_by_operator_id, field="operator id")
-        reason = _nonempty(resolution_reason, field="resolution_reason")
-        if reconcile_event_seq < 0:
-            raise ValueError("reconcile_event_seq must be non-negative")
-        if resolution_event_seq < 0:
-            raise ValueError("resolution_event_seq must be non-negative")
-        resolution_evidence = _bounded_evidence(evidence)
-
-        async with self._session_factory() as session:
-            # Match open_or_get's lock order. The shared position projection is
-            # always locked before the narrower uncertainty row so concurrent
-            # open/resolve operations cannot form a PostgreSQL lock cycle.
-            position = await session.scalar(
-                select(PositionStateRow)
-                .where(
-                    PositionStateRow.exchange_account_id == exchange_account_id,
-                    PositionStateRow.deployment_environment == environment,
-                    PositionStateRow.symbol == scoped_symbol,
-                )
-                .with_for_update()
-            )
-            if position is None:
-                # Preserve the exact-scope resolution contract: a missing
-                # projection cannot represent an open uncertainty in this scope.
-                raise ValueError("no open uncertainty exists for this exact scope")
-            row = await session.scalar(
-                select(ExecutionUncertaintyRow)
-                .where(
-                    ExecutionUncertaintyRow.exchange_account_id == exchange_account_id,
-                    ExecutionUncertaintyRow.deployment_environment == environment,
-                    ExecutionUncertaintyRow.symbol == scoped_symbol,
-                    ExecutionUncertaintyRow.kind == typed_kind.value,
-                    ExecutionUncertaintyRow.state == "open",
-                )
-                .with_for_update()
-            )
-            if row is None:
-                raise ValueError("no open uncertainty exists for this exact scope")
-            if reconcile_event_seq <= row.opened_event_seq:
-                raise ValueError("fresh reconcile event is required for resolution")
-            reconcile_event = await self._require_event(
-                session,
-                event_seq=reconcile_event_seq,
-                exchange_account_id=exchange_account_id,
-                deployment_environment=environment,
-            )
-            if reconcile_event.event_type != _RECONCILE_EVENT_TYPE:
-                raise ValueError("fresh reconcile event is required for resolution")
-            if resolution_event_seq <= reconcile_event_seq:
-                raise ValueError("resolution event must follow fresh reconcile evidence")
-            resolution_event = await self._require_event(
-                session,
-                event_seq=resolution_event_seq,
-                exchange_account_id=exchange_account_id,
-                deployment_environment=environment,
-            )
-            if resolution_event.event_type == _RECONCILE_EVENT_TYPE:
-                raise ValueError("resolution event must not be a venue snapshot")
-            released = await session.execute(
-                update(PositionStateRow)
-                .where(
-                    PositionStateRow.exchange_account_id == exchange_account_id,
-                    PositionStateRow.deployment_environment == environment,
-                    PositionStateRow.symbol == scoped_symbol,
-                    PositionStateRow.uncertain_amount >= row.intended_amount,
-                )
-                .values(
-                    uncertain_amount=PositionStateRow.uncertain_amount - row.intended_amount,
-                    last_event_seq=case(
-                        (
-                            PositionStateRow.last_event_seq < resolution_event_seq,
-                            resolution_event_seq,
-                        ),
-                        else_=PositionStateRow.last_event_seq,
-                    ),
-                )
-                .returning(PositionStateRow.exchange_account_id)
-            )
-            if released.scalar_one_or_none() is None:
-                raise ValueError("uncertain projection cannot become negative")
-
-            row.state = "resolved"
-            row.reconcile_event_seq = reconcile_event_seq
-            row.resolved_event_seq = resolution_event_seq
-            row.resolved_by_operator_id = operator_id
-            row.resolution_reason = reason
-            row.resolution_evidence = resolution_evidence
-            row.resolved_at = resolution_event.recorded_at
-            await session.commit()
-            return row
 
     @staticmethod
     def _require_same_attempt(
@@ -496,20 +388,3 @@ class UncertaintyService:
             raise ValueError("linked venue offer does not exist")
         if venue_offer.symbol != symbol:
             raise ValueError("linked venue offer does not match uncertainty scope")
-
-    @staticmethod
-    async def _require_event(
-        session: AsyncSession,
-        *,
-        event_seq: int,
-        exchange_account_id: UUID,
-        deployment_environment: str,
-    ) -> EventLogRow:
-        event = await session.get(EventLogRow, event_seq)
-        if (
-            event is None
-            or event.exchange_account_id != exchange_account_id
-            or event.deployment_environment != deployment_environment
-        ):
-            raise ValueError("event sequence does not match account/environment scope")
-        return event

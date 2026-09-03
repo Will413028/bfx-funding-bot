@@ -2,7 +2,7 @@
 
 These tests intentionally exercise the public router through FastAPI and a real
 SQLite projection.  Venue resolution is represented by the event writer; the
-router must not call the legacy ``UncertaintyService.resolve`` mutation path.
+service exposes no direct projection-resolution mutation path.
 """
 
 from __future__ import annotations
@@ -415,6 +415,47 @@ def test_uncertainty_read_exposes_all_server_derived_ambiguous_candidates(
         "candidateVenueOfferIds": ["venue-a", "venue-b"],
         "unavailableReason": "multiple_exact_candidates",
     }
+
+
+def test_uncertainty_read_bounds_candidate_ids_but_preserves_full_count(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+
+    def matching(index: int) -> VenueOfferObservation:
+        return VenueOfferObservation(
+            venue_offer_id=f"venue-{index:02}",
+            symbol="fUST",
+            amount_original=Decimal("100"),
+            amount_remaining=Decimal("100"),
+            rate=Decimal("0.001"),
+            period_days=2,
+            status="active",
+            mts_created=1_500,
+            mts_updated=1_500,
+            offer_type="LIMIT",
+            flags={"raw": 0},
+        )
+
+    asyncio.run(
+        _append_snapshot(
+            factory,
+            finished_at=2_000,
+            offers=tuple(matching(index) for index in range(20)),
+        )
+    )
+
+    response = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
+    )
+
+    assert response.status_code == 200, response.text
+    context = response.json()["data"]["resolutionContext"]
+    assert context["candidateCount"] == 20
+    assert context["candidateVenueOfferIds"] == [
+        f"venue-{index:02}" for index in range(16)
+    ]
+    assert context["unavailableReason"] == "multiple_exact_candidates"
 
 
 def test_uncertainty_read_fails_closed_when_latest_snapshot_is_not_authoritative(
