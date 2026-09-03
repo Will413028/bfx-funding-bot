@@ -61,6 +61,10 @@ class AccountContext:
     account_id: str
     credentials: Credentials
     allocation_cap_usdt: Decimal
+    # In-process opaque capability used only by the Halt 2 one-shot gate to
+    # authorize its already-consumed permit through the persistent halt guard.
+    # It is never serialized or accepted from an external request.
+    canary_halt_authorization: object | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)

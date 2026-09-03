@@ -29,18 +29,25 @@ is no automatic retry.
 Once a submit may have reached the venue, a database image cannot establish the
 venue's truth. Follow this sequence and do not skip a step:
 
-1. Assert and retain the persistent halt; do not restart into an active state.
+1. Assert and retain the persistent halt. From `backend_py/`, run
+   `uv run python scripts/halt2_cutover.py assert-halt` with the approved
+   account/environment/evidence arguments. Require exit 0; a nonzero exit is
+   a stop and the process must not be restarted into an active state.
 2. Run a fresh full-account reconcile and record the event fence, timestamp,
    account-local projection hash, bounded venue IDs, and venue-vs-DB exposure
    diff.
-3. Adopt an exactly matched venue object only through the audited adopt path;
+3. Inspect the durable `canary_command_permit` and `submission_attempts` rows;
+   a consumed permit is never reset or reused. Adopt an exactly matched venue
+   object only through the audited adopt path;
    zero or multiple candidates remain UNKNOWN.
 4. Use manual resolution only after complete, fresh reconcile evidence proves
    the chosen resolution. Do not retry, silently delete, or synthesize a venue
    reference.
 5. Apply a forward-fix that preserves the append-only event chain and rebuild
-   the projection from events; then repeat reconcile and the final verification
-   gates.
+   the projection from events with `uv run python scripts/verify_projection_replay.py
+   replay ...`; require exit 0, then repeat reconcile and the final verification
+   gates. The replay command is read-only; conversion/quarantine commands are
+   separate explicit writes and each must return exit 0.
 
 **Operator confirmation:** the named operator must sign the classification
 (matched/adopted, still UNKNOWN, orphan quarantined, or manually resolved) and
@@ -75,3 +82,16 @@ The post-write branch returns to the final checks in the [Halt 2 canary
 runbook](halt-2-projector-canary.md): API auth denial, direct signup denial,
 event-chain replay, UNKNOWN fault matrix, orphan quarantine, fresh venue
 full-account diff, persistent halt effectiveness, and no automatic retry.
+
+## Command and rehearsal contract
+
+All commands above run from `backend_py/` unless they explicitly begin with
+`cd backend_py`; `deploy-vm.sh` runs from the repository root. Exit 0 is a
+successful read-only check or explicitly named append-only action; exit 2 is a
+precondition refusal; exit 3 is verification unavailable or failed. Any other
+exit, malformed output, missing durable permit binding, or process crash is a
+stop. Rehearse the same sequence in the `ci` realm with the venue transport
+fault matrix (accepted+drop, rejected+drop, timeout/reset, malformed response,
+5xx-after-side-effect, and crash-during-send) before a production operator
+uses it. The rehearsal must show one durable attempt, no retry, and a retained
+halt for every ambiguous case.

@@ -256,11 +256,13 @@ def _valid_canary_evidence():
         cell="fUST_a30",
         strategy="mean_reversion",
         amount_usdt=Decimal("150"),
+        permit_id="33333333-3333-3333-3333-333333333333",
         command_decision_id="decision-1",
         attempt_id="22222222-2222-2222-2222-222222222222",
         outcome_kind="acknowledged",
         venue_offer_id="offer-1",
         outcome_at_ms=1_000_000,
+        outcome_event_seq=100,
         reconcile_fences=(101, 102),
         reconcile_observed_at_ms=(1_000_100, 1_000_200),
         projection_hash="a" * 64,
@@ -571,7 +573,7 @@ calibrated_guards:
         raise AssertionError("live executor construction must be unreachable")
 
     monkeypatch.setattr("bfx_funding_bot.modules.marketfeed.daemon.build_executor", should_not_construct_executor)
-    with pytest.raises(CanaryStartupBlocked, match="canary_evidence_unavailable"):
+    with pytest.raises(CanaryStartupBlocked, match="missing_halt2_evidence"):
         await build_daemon(cells_yaml_path=cells, skip_ws=True)
 
     assert constructed is False

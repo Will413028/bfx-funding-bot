@@ -15,6 +15,8 @@ from uuid import UUID
 
 import pytest
 
+from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from scripts.halt2_cutover import (
     EXIT_PRECONDITION_FAILED,
     EXIT_SUCCESS,
@@ -27,6 +29,38 @@ from scripts.halt2_cutover import (
 )
 
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
+
+
+def test_preflight_and_replay_use_the_same_nonempty_event_hash_contract() -> None:
+    """A preflight hash must be accepted by the actual empty-projector replay."""
+    from scripts.verify_projection_replay import replay_event_log
+
+    row = EventLogRow(
+        event_seq=7,
+        account_id=str(ACCOUNT_ID),
+        exchange_account_id=ACCOUNT_ID,
+        deployment_environment="canary",
+        event_type="CREDIT_CLOSED",
+        cid=42,
+        venue_offer_id="offer-7",
+        venue_seq=9,
+        event_id=UUID("bf0e94ae-3a03-4810-ae8f-b3c931531ce0"),
+        schema_version=3,
+        payload={
+            "__schema_version__": 3,
+            "__event_type__": "CREDIT_CLOSED",
+            "account_id": str(ACCOUNT_ID),
+            "symbol": "fUST",
+            "amount": "1",
+            "occurred_at_ms": 1007,
+            "event_id": "bf0e94ae-3a03-4810-ae8f-b3c931531ce0",
+        },
+        occurred_at_ms=1007,
+    )
+
+    assert canonical_event_hash([row]) == replay_event_log(
+        [row], account_id=ACCOUNT_ID, environment="canary",
+    ).event_hash
 
 
 def _report(**changes: object) -> PreflightReport:
@@ -42,6 +76,11 @@ def _report(**changes: object) -> PreflightReport:
         event_hash="event-hash",
         open_uncertainty_count=0,
         venue_snapshot_fence=42,
+        venue_snapshot_observed_at_ms=1_000_000,
+        venue_snapshot_complete=True,
+        preflight_observed_at_ms=1_000_250,
+        backup_rpo_seconds=60,
+        restore_rto_seconds=30,
         config_digest="config-hash",
         image_digest="image-hash",
         projector_version="projector-v3",
@@ -59,6 +98,12 @@ def _evidence(**changes: object) -> Halt2Evidence:
         isolated_restore_evidence_hash="restore-hash",
         event_head=42,
         event_hash="event-hash",
+        venue_snapshot_fence=42,
+        venue_snapshot_observed_at_ms=1_000_000,
+        venue_snapshot_complete=True,
+        preflight_observed_at_ms=1_000_250,
+        backup_rpo_seconds=60,
+        restore_rto_seconds=30,
         config_digest="config-hash",
         image_digest="image-hash",
         projector_version="projector-v3",
@@ -107,6 +152,31 @@ def test_preflight_rejects_absent_persistent_halt() -> None:
 
     assert result.exit_code == EXIT_PRECONDITION_FAILED
     assert "persistent_halt_absent" in result.stop_reasons
+
+
+def test_preflight_rejects_unmeasured_dr_and_incomplete_snapshot() -> None:
+    result = verify_preflight(
+        _report(
+            venue_snapshot_fence=None,
+            venue_snapshot_observed_at_ms=None,
+            venue_snapshot_complete=False,
+            backup_rpo_seconds=None,
+            restore_rto_seconds=61,
+        ),
+        _evidence(
+            venue_snapshot_fence=None,
+            venue_snapshot_observed_at_ms=None,
+            venue_snapshot_complete=False,
+            backup_rpo_seconds=None,
+            restore_rto_seconds=61,
+        ),
+    )
+
+    assert result.exit_code == EXIT_PRECONDITION_FAILED
+    assert "venue_snapshot_fence_absent" in result.stop_reasons
+    assert "venue_snapshot_coverage_incomplete" in result.stop_reasons
+    assert "backup_rpo_unmeasured" in result.stop_reasons
+    assert "restore_rto_exceeded" in result.stop_reasons
 
 
 @pytest.mark.parametrize("legacy_name", ["BFX_ACCOUNT_ID"])
