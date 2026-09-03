@@ -123,8 +123,14 @@ class PostgresEventStore:
     ``_append_unlocked`` for the actual event/legacy projection work.
     """
 
-    def __init__(self, *, deployment_environment: str) -> None:
+    def __init__(
+        self, *, deployment_environment: str, event_only_replay: bool = False,
+    ) -> None:
         self._env = deployment_environment
+        # Halt 2's isolated verifier rebuilds from immutable events and must
+        # not consult mutable account/audit rows. Live append/projection keeps
+        # the existing database consistency checks.
+        self._event_only_replay = event_only_replay
 
     @property
     def deployment_environment(self) -> str:
@@ -394,11 +400,12 @@ class PostgresEventStore:
         canonical = account_id_uuid_or_none(account_id)
         if canonical is None:
             return
-        registered = await session.scalar(
-            select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
-        )
-        if registered is None:
-            return
+        if not self._event_only_replay:
+            registered = await session.scalar(
+                select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+            )
+            if registered is None:
+                return
 
         event_obj: Any = cast(Any, event)
         if etype == "RESERVATION_INTENT":
@@ -409,25 +416,37 @@ class PostgresEventStore:
                 return
             if not isinstance(attempt, SubmissionAttemptPayload):
                 raise TypeError("submission_attempt must be SubmissionAttemptPayload")
-            decision_row = await session.get(
-                ExecutionDecisionRow,
-                attempt.execution_decision_id,
-            )
-            if decision_row is None:
-                raise OfferClaimIdentityConflictError(
-                    "submission attempt has no execution decision"
+            if self._event_only_replay:
+                if (
+                    attempt.account_id != canonical
+                    or attempt.environment != self._env
+                    or attempt.symbol != event_obj.symbol
+                    or attempt.cid != event_obj.cid
+                    or attempt.execution_decision_id != event_obj.execution_decision_id
+                ):
+                    raise OfferClaimIdentityConflictError(
+                        "event-only submission attempt scope conflicts"
+                    )
+            else:
+                decision_row = await session.get(
+                    ExecutionDecisionRow,
+                    attempt.execution_decision_id,
                 )
-            if (
-                decision_row.exchange_account_id != canonical
-                or account_id_uuid_or_none(decision_row.account_id) != canonical
-                or decision_row.deployment_environment != self._env
-                or decision_row.symbol != event_obj.symbol
-                or decision_row.signal_correlation_id
-                != str(event_obj.signal_correlation_id)
-            ):
-                raise OfferClaimIdentityConflictError(
-                    "submission attempt execution decision scope conflicts"
-                )
+                if decision_row is None:
+                    raise OfferClaimIdentityConflictError(
+                        "submission attempt has no execution decision"
+                    )
+                if (
+                    decision_row.exchange_account_id != canonical
+                    or account_id_uuid_or_none(decision_row.account_id) != canonical
+                    or decision_row.deployment_environment != self._env
+                    or decision_row.symbol != event_obj.symbol
+                    or decision_row.signal_correlation_id
+                    != str(event_obj.signal_correlation_id)
+                ):
+                    raise OfferClaimIdentityConflictError(
+                        "submission attempt execution decision scope conflicts"
+                    )
             storage = attempt.as_storage_dict()
             if storage["environment"] != self._env:
                 raise OfferClaimIdentityConflictError(
@@ -972,6 +991,10 @@ class PostgresEventStore:
             )
         )
         if venue_offer is None:
+            if self._event_only_replay:
+                raise OfferClaimIdentityConflictError(
+                    "orphan quarantine requires a prior snapshot venue observation"
+                )
             registered = await session.scalar(
                 select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
             )
@@ -1068,11 +1091,12 @@ class PostgresEventStore:
         canonical = account_id_uuid_or_none(account_id)
         if canonical is None:
             return
-        registered = await session.scalar(
-            select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
-        )
-        if registered is None:
-            return
+        if not self._event_only_replay:
+            registered = await session.scalar(
+                select(ExchangeAccount.id).where(ExchangeAccount.id == canonical)
+            )
+            if registered is None:
+                return
         event_obj: Any = cast(Any, event)
         reference = event_obj.reservation_ref
         if reference is None:
