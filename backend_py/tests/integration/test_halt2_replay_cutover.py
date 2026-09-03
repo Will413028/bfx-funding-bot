@@ -5,6 +5,8 @@ diagnostic comparison target, never an input to the rebuilt result.
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -53,6 +55,46 @@ def _assert_in_order(text: str, steps: tuple[str, ...]) -> None:
         assert next_cursor >= 0, f"missing ordered step: {step}"
         assert next_cursor > cursor, f"out-of-order step: {step}"
         cursor = next_cursor
+
+
+def _fenced_blocks(markdown: str, language: str) -> tuple[str, ...]:
+    return tuple(re.findall(
+        rf"^[ \t]*```{language}\n(.*?)^[ \t]*```",
+        markdown,
+        flags=re.MULTILINE | re.DOTALL,
+    ))
+
+
+def _shell_commands(block: str) -> tuple[str, ...]:
+    """Normalize a fenced bash block without executing operator commands."""
+    commands: list[str] = []
+    current = ""
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = f"{current} {stripped}".strip()
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        commands.append(current)
+        current = ""
+    assert not current, f"unterminated shell command: {current}"
+    return tuple(commands)
+
+
+def _markdown_section(markdown: str, heading: str) -> str:
+    match = re.search(
+        rf"^#{{2,3}} {re.escape(heading)}\n(.*?)(?=^#{{2,3}} |\Z)",
+        markdown,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"missing section: {heading}"
+    return match.group(1)
+
+
+def _normalized_markdown(text: str) -> str:
+    return " ".join(text.split())
 
 
 def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> None:
@@ -118,15 +160,80 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
     for requirement in (*preflight_stop_reasons, *preflight_report_fields, *canary_report_fields):
         assert requirement in canary, f"missing canary preflight contract: {requirement}"
 
-    _assert_in_order(canary, (
-        "uv run python scripts/halt2_cutover.py assert-halt",
-        "uv run python scripts/halt2_cutover.py preflight",
-        "uv run python scripts/verify_projection_replay.py replay",
-        "uv run python scripts/verify_projection_replay.py convert-pending",
-        "uv run python scripts/verify_projection_replay.py quarantine",
-        "uv run python scripts/run_canary_preflight.py",
-        "./scripts/deploy-vm.sh canary",
-    ))
+    command_blocks = tuple(_shell_commands(block) for block in _fenced_blocks(canary, "bash"))
+    assert command_blocks == (
+        (
+            "cd backend_py",
+            "uv run python scripts/halt2_cutover.py assert-halt "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--evidence \"$BFX_HALT2_EVIDENCE_REPORT\" "
+            "--projector-version \"$BFX_PROJECTOR_VERSION\" "
+            "--image-digest \"$BFX_EXPECTED_IMAGE_DIGEST\" "
+            "--operator-id \"$BFX_OPERATOR_USER_ID\" "
+            "--reason \"Halt 2 projector cutover\"",
+        ),
+        (
+            "uv run python scripts/halt2_cutover.py preflight "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--evidence \"$BFX_HALT2_EVIDENCE_REPORT\" "
+            "--projector-version \"$BFX_PROJECTOR_VERSION\" "
+            "--image-digest \"$BFX_EXPECTED_IMAGE_DIGEST\" "
+            "--config-artifact <reviewed-config-artifact-path>",
+        ),
+        (
+            "uv run python scripts/verify_projection_replay.py replay "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--projector-version \"$BFX_PROJECTOR_VERSION\" "
+            "--expected-event-hash <event_hash-from-preflight>",
+        ),
+        (
+            "uv run python scripts/verify_projection_replay.py convert-pending "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--now-ms <approved-utc-epoch-milliseconds>",
+            "uv run python scripts/verify_projection_replay.py quarantine "
+            "--account-id \"$BFX_EXCHANGE_ACCOUNT_ID\" "
+            "--environment \"$BFX_DEPLOYMENT_ENV\" "
+            "--now-ms <approved-utc-epoch-milliseconds>",
+        ),
+        (
+            "uv run python scripts/run_canary_preflight.py "
+            "--evidence \"$BFX_CANARY_EVIDENCE_REPORT\" "
+            "--halt2-evidence \"$BFX_HALT2_EVIDENCE_REPORT\" "
+            "--config-artifact <reviewed-config-artifact-path> "
+            "--cells <reviewed-canary-cells-path>",
+        ),
+        ("cd ..", "BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary"),
+        (
+            "cd backend_py",
+            "uv run pytest -m \"not integration\" -q",
+            "uv run pytest tests/integration/test_halt2_replay_cutover.py "
+            "tests/integration/test_unknown_submit_pg.py "
+            "tests/integration/test_orphan_quarantine_pg.py -m integration -q",
+            "uv run alembic check",
+            "uv run mypy src/",
+            "uv run ruff check",
+            "cd ..",
+            "cd frontend",
+            "pnpm test",
+            "pnpm lint",
+            "pnpm build",
+        ),
+    )
+    assert "sets/asserts the durable `trading_halt`" in canary
+    evidence_blocks = _fenced_blocks(canary, "json")
+    assert len(evidence_blocks) == 1
+    evidence = json.loads(evidence_blocks[0])
+    assert set(evidence) == set(canary_report_fields)
+    assert evidence["account_id"] == "<uuid>"
+    assert evidence["attempt_id"] == "<uuid>"
+    assert evidence["venue_offer_id"] == "<redacted-venue-id-or-null>"
+    assert evidence["projection_hash"] == "<sha256>"
+    assert "Authorization" not in json.dumps(evidence, sort_keys=True)
+
     for requirement in (
         "exit 0", "exit 2", "exit 3", "Operator confirmation",
         "one account", "one symbol", "one cell", "one minimal command",
@@ -141,13 +248,26 @@ def test_halt2_runbooks_cover_every_operator_gate_and_rollback_boundary() -> Non
     ):
         assert requirement in canary, f"missing canary safety requirement: {requirement}"
 
-    for requirement in (
-        "Before any venue write", "After any venue write", "image rollback", "halt",
-        "reconcile", "adopt", "manual resolution", "forward-fix", "DB restore",
-        "proof that no later venue mutation occurred", "persistent halt", "no automatic retry",
-        "Operator confirmation", "does not execute production operations",
-    ):
-        assert requirement in rollback, f"missing rollback boundary: {requirement}"
+    before_write = _normalized_markdown(
+        _markdown_section(rollback, "Before any venue write")
+    )
+    assert "no submit request started and no later venue mutation occurred" in before_write
+    assert "immutable image rollback" in before_write
+    assert "Do not treat an image rollback as a resume" in before_write
+    assert "no automatic retry" in before_write
+
+    after_write = _normalized_markdown(_markdown_section(rollback, "After any venue write"))
+    _assert_in_order(after_write, (
+        "persistent halt", "fresh full-account reconcile", "Adopt an exactly matched",
+        "manual resolution", "forward-fix",
+    ))
+    for forbidden_action in ("Do not retry", "silently delete", "synthesize a venue reference"):
+        assert forbidden_action in after_write
+
+    db_restore = _normalized_markdown(_markdown_section(rollback, "Database restore rule"))
+    assert "DB restore is allowed only with proof that no later venue mutation occurred" in db_restore
+    assert "An assumption that a restore point predates a venue write is not proof" in db_restore
+    assert "do not restore the DB" in db_restore
     assert "Halt 2 clean cutover" in architecture
     assert "after a venue write" in architecture
 
