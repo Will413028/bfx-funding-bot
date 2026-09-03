@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -361,6 +361,7 @@ async def test_manual_resolution_is_event_only(
                 reconcile_event_seq=latest,
                 resolved_by_operator_id="operator-1",
                 resolution_reason="operator accepted the quarantined offer",
+                resolution_action="accepted_external_exposure",
                 resolution_evidence={
                     "reconcile_event_seq": latest,
                     "query_started_at_ms": 3,
@@ -376,6 +377,84 @@ async def test_manual_resolution_is_event_only(
         assert (await session.scalar(select(EventLogRow).where(
             EventLogRow.event_type == "UNCERTAINTY_MANUALLY_RESOLVED",
         ))) is not None
+        await store_rebuild(session)
+        await session.commit()
+    async with factory() as session:
+        replayed = await session.get(ExecutionUncertaintyRow, uncertainty_id)
+        assert replayed is not None and replayed.state == "resolved"
+
+
+def test_manual_resolution_event_rejects_non_allowlisted_action() -> None:
+    with pytest.raises(ValueError, match="resolution_action"):
+        UncertaintyManuallyResolved(
+            uncertainty_id=uuid4(),
+            account_id=str(ACCOUNT),
+            environment=ENV,
+            symbol="fUST",
+            kind="unattributed_venue_offer",
+            reconcile_event_seq=4,
+            resolved_by_operator_id="operator-1",
+            resolution_reason="arbitrary action",
+            resolution_action="accept",
+        )
+
+
+@pytest.mark.asyncio
+async def test_projector_rejects_forged_manual_resolution_action(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        await _seed_base(session)
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append(session, _snapshot(finished=1, offer=True))
+        await store.append(
+            session,
+            VenueOfferQuarantined(
+                venue_offer_id="venue-1",
+                symbol="fUST",
+                amount=Decimal("100"),
+                account_id=str(ACCOUNT),
+                observed_at_ms=2,
+            ),
+        )
+        await session.commit()
+    async with factory() as session:
+        uncertainty_id = await session.scalar(
+            select(ExecutionUncertaintyRow.uncertainty_id).where(
+                ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        store = PostgresEventStore(deployment_environment=ENV)
+        await store.append(session, _snapshot(finished=4, offer=True))
+        latest = await session.scalar(
+            select(EventLogRow.event_seq)
+            .where(EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED")
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        assert uncertainty_id is not None and latest is not None
+        event = UncertaintyManuallyResolved(
+            uncertainty_id=uncertainty_id,
+            account_id=str(ACCOUNT),
+            environment=ENV,
+            symbol="fUST",
+            kind="unattributed_venue_offer",
+            reconcile_event_seq=latest,
+            resolved_by_operator_id="operator-1",
+            resolution_reason="forged action",
+            resolution_action="accepted_external_exposure",
+            resolution_evidence={
+                "reconcile_event_seq": latest,
+                "query_started_at_ms": 3,
+                "query_finished_at_ms": 4,
+            },
+            occurred_at_ms=5,
+        )
+        object.__setattr__(event, "resolution_action", "accept")
+
+        with pytest.raises(ProjectionWriteError, match="resolution action"):
+            await AccountEventWriter(store=store).append(session, event)
 
 
 @pytest.mark.asyncio
@@ -541,9 +620,10 @@ async def test_projector_rejects_manual_resolution_for_submit_unknown(
                     symbol="fUST",
                     kind="submit_outcome_unknown",
                     reconcile_event_seq=latest,
-                    resolved_by_operator_id="operator-1",
-                    resolution_reason="escape hatch",
-                    resolution_evidence={},
+                resolved_by_operator_id="operator-1",
+                resolution_reason="escape hatch",
+                resolution_action="closed_at_venue",
+                resolution_evidence={},
                     occurred_at_ms=6,
                 ),
             )

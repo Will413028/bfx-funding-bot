@@ -32,6 +32,14 @@ from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptP
 
 __SCHEMA_VERSION__ = 3
 
+ManualUncertaintyResolutionAction = Literal[
+    "accepted_external_exposure",
+    "closed_at_venue",
+]
+MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS: frozenset[
+    ManualUncertaintyResolutionAction
+] = frozenset({"accepted_external_exposure", "closed_at_venue"})
+
 # Schema-evolution upcast value: each of the 5 reserve events gained a mandatory
 # `symbol` after early event_log rows were written (the 4 position events in
 # Phase 2; Intent/Failed in the fUSD-prereq work). Two consumers use it for those
@@ -546,8 +554,8 @@ class UncertaintyManuallyResolved:
     reconcile_event_seq: int
     resolved_by_operator_id: str
     resolution_reason: str
+    resolution_action: ManualUncertaintyResolutionAction
     resolution_evidence: Mapping[str, Any] = field(default_factory=dict)
-    resolution_action: str = "manual_resolution"
     occurred_at_ms: int | None = None
     recorded_at_ms: int | None = None
     event_seq: int | None = None
@@ -556,8 +564,11 @@ class UncertaintyManuallyResolved:
 
     def __post_init__(self) -> None:
         _validate_resolution_event(self)
-        if not self.resolution_action.strip():
-            raise TypeError("UncertaintyManuallyResolved requires resolution_action")
+        if (
+            not isinstance(self.resolution_action, str)
+            or self.resolution_action not in MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS
+        ):
+            raise ValueError("unsupported manual uncertainty resolution_action")
         object.__setattr__(self, "resolution_evidence", dict(self.resolution_evidence))
 
 

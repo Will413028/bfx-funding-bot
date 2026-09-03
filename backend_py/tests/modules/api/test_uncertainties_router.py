@@ -192,6 +192,35 @@ async def _latest_resolution_payload(factory) -> dict[str, object]:
         return row.payload
 
 
+async def _seed_orphan_uncertainty(factory, offer: VenueOfferObservation) -> UUID:
+    async with factory() as session:
+        store = PostgresEventStore(deployment_environment="ci")
+        await store.append_snapshot(
+            session,
+            _snapshot(ACCOUNT_ID, finished_at=2_000, offers=(offer,)),
+        )
+        await store.append(
+            session,
+            VenueOfferQuarantined(
+                venue_offer_id=offer.venue_offer_id,
+                symbol=offer.symbol,
+                amount=offer.amount_remaining,
+                account_id=str(ACCOUNT_ID),
+                observed_at_ms=2_001,
+            ),
+        )
+        await session.commit()
+    async with factory() as session:
+        value = await session.scalar(
+            select(ExecutionUncertaintyRow.uncertainty_id).where(
+                ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        assert value is not None
+        return value
+
+
 @pytest_asyncio.fixture
 async def uncertainty_app(sqlite_engine, monkeypatch):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -640,6 +669,42 @@ def test_submit_unknown_cannot_use_manual_resolution_escape_hatch(
     assert response.json()["detail"] == "resolution_action_not_supported"
 
 
+def test_manual_resolution_rejects_non_allowlisted_decision(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    orphan = VenueOfferObservation(
+        venue_offer_id="invalid-decision-offer",
+        symbol="fUST",
+        amount_original=Decimal("25"),
+        amount_remaining=Decimal("25"),
+        rate=Decimal("0.001"),
+        period_days=2,
+        status="active",
+        mts_created=1_500,
+        mts_updated=1_500,
+        offer_type="LIMIT",
+        flags={"raw": 0},
+    )
+    uncertainty_id = asyncio.run(_seed_orphan_uncertainty(factory, orphan))
+    reconcile_seq = asyncio.run(
+        _append_snapshot(factory, finished_at=3_000, offers=(orphan,))
+    )
+
+    response = client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{uncertainty_id}/manual-resolution",
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "operatorUuid": "operator-1",
+            "reason": "invalid client decision",
+            "evidence": {"decision": "accept"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid_manual_resolution_decision"
+
+
 def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> None:
     client, factory = uncertainty_app
     orphan = VenueOfferObservation(
@@ -656,35 +721,7 @@ def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> N
         flags={"raw": 0},
     )
 
-    async def seed_orphan() -> UUID:
-        async with factory() as session:
-            store = PostgresEventStore(deployment_environment="ci")
-            await store.append_snapshot(
-                session,
-                _snapshot(ACCOUNT_ID, finished_at=2_000, offers=(orphan,)),
-            )
-            await store.append(
-                session,
-                VenueOfferQuarantined(
-                    venue_offer_id=orphan.venue_offer_id,
-                    symbol=orphan.symbol,
-                    amount=orphan.amount_remaining,
-                    account_id=str(ACCOUNT_ID),
-                    observed_at_ms=2_001,
-                ),
-            )
-            await session.commit()
-        async with factory() as session:
-            value = await session.scalar(
-                select(ExecutionUncertaintyRow.uncertainty_id).where(
-                    ExecutionUncertaintyRow.kind == "unattributed_venue_offer",
-                    ExecutionUncertaintyRow.state == "open",
-                )
-            )
-            assert value is not None
-            return value
-
-    orphan_uncertainty_id = asyncio.run(seed_orphan())
+    orphan_uncertainty_id = asyncio.run(_seed_orphan_uncertainty(factory, orphan))
     reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=3_000, offers=(orphan,)))
     response = client.post(
         f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{orphan_uncertainty_id}/manual-resolution",
@@ -692,12 +729,25 @@ def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> N
             "reconcileEventSeq": reconcile_seq,
             "operatorUuid": "operator-1",
             "reason": "operator accepted the manual venue offer",
-            "evidence": {"decision": "accept"},
+            "evidence": {"decision": "accepted_external_exposure"},
         },
     )
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["state"] == "resolved"
+
+    async def load_resolution_action() -> object:
+        async with factory() as session:
+            event = await session.scalar(
+                select(EventLogRow)
+                .where(EventLogRow.event_type == "UNCERTAINTY_MANUALLY_RESOLVED")
+                .order_by(EventLogRow.event_seq.desc())
+                .limit(1)
+            )
+            assert event is not None
+            return event.payload["resolution_action"]
+
+    assert asyncio.run(load_resolution_action()) == "accepted_external_exposure"
 
 
 def test_resolution_rejects_snapshot_whose_query_overlaps_opening_event(

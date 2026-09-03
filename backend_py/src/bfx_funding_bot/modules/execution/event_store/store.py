@@ -37,6 +37,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
 from bfx_funding_bot.modules.execution.events import (
     __SCHEMA_VERSION__,
     DEFAULT_RECONCILE_SYMBOL,
+    MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS,
     SubmitMatchedToVenueOffer,
     UncertaintyBoundToVenueOffer,
     UncertaintyManuallyResolved,
@@ -817,6 +818,10 @@ class PostgresEventStore:
             if event.kind not in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
                 raise OfferClaimIdentityConflictError(
                     "manual resolution is not valid for submit uncertainty"
+                )
+            if event.resolution_action not in MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS:
+                raise OfferClaimIdentityConflictError(
+                    "manual resolution action is not allowlisted"
                 )
             expected_evidence = deterministic_resolution_evidence(
                 reconcile_event_seq=event.reconcile_event_seq,

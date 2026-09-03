@@ -35,6 +35,8 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     ProjectionWriteError,
 )
 from bfx_funding_bot.modules.execution.events import (
+    MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS,
+    ManualUncertaintyResolutionAction,
     UncertaintyBoundToVenueOffer,
     UncertaintyManuallyResolved,
     UncertaintyMarkedNotAccepted,
@@ -526,6 +528,23 @@ def _validate_request_evidence(
         raise _http_error("invalid_resolution_evidence", status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
+def _manual_resolution_action(
+    supplied: Mapping[str, Any],
+) -> ManualUncertaintyResolutionAction:
+    evidence = _bounded_evidence(supplied)
+    action = evidence.get("decision")
+    if (
+        set(evidence) != {"decision"}
+        or not isinstance(action, str)
+        or action not in MANUAL_UNCERTAINTY_RESOLUTION_ACTIONS
+    ):
+        raise _http_error(
+            "invalid_manual_resolution_decision",
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    return action
+
+
 async def _load_attempt(
     session: AsyncSession,
     *,
@@ -762,6 +781,7 @@ def build_uncertainties_router() -> APIRouter:
         row = await _load_uncertainty(session, context=context, uncertainty_id=uncertainty_id)
         if row.kind not in {"unattributed_venue_offer", "unsupported_venue_exposure"}:
             raise _http_error("resolution_action_not_supported", status.HTTP_409_CONFLICT)
+        resolution_action = _manual_resolution_action(body.evidence)
         payload = await _fresh_reconcile(
             session,
             context=context,
@@ -786,6 +806,7 @@ def build_uncertainties_router() -> APIRouter:
                 reconcile_event_seq=body.reconcile_event_seq,
                 resolved_by_operator_id=operator_id,
                 resolution_reason=body.reason.strip(),
+                resolution_action=resolution_action,
                 resolution_evidence=evidence,
                 occurred_at_ms=int(time.time() * 1000),
             ),
