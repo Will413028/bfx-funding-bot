@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -292,7 +293,14 @@ class AccountCommandGate:
                 occurred_at_ms=occurred_at_ms,
                 symbol=decision.symbol,
                 reservation_ref=reference,
-                reason=_bounded_reason(result.outcome, "submit_outcome_unknown"),
+                reason=_bounded_reason(
+                    result.outcome,
+                    "submit_outcome_unknown",
+                    secrets=(
+                        context.credentials.api_key,
+                        context.credentials.api_secret,
+                    ),
+                ),
             )
             await self._persister.persist(unknown_event)
             if self._uncertainty_handler is not None:
@@ -324,7 +332,14 @@ class AccountCommandGate:
                     occurred_at_ms=occurred_at_ms,
                     symbol=decision.symbol,
                     reservation_ref=reference,
-                    reason=_bounded_reason(result.outcome, "submit_rejected"),
+                    reason=_bounded_reason(
+                        result.outcome,
+                        "submit_rejected",
+                        secrets=(
+                            context.credentials.api_key,
+                            context.credentials.api_secret,
+                        ),
+                    ),
                 )
             )
             return
@@ -456,7 +471,17 @@ def _normalized_venue_payload(decision: DecisionPayload) -> dict[str, object]:
     )
 
 
-def _bounded_reason(outcome: object, fallback: str) -> str:
+def _bounded_reason(
+    outcome: object,
+    fallback: str,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> str:
+    """Keep durable outcome evidence bounded and free of runtime credentials."""
     value = getattr(outcome, "reason", fallback)
     text = str(value).strip() or fallback
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    text = re.sub(r"(?i)authorization\s*[:=]\s*\S+", "authorization=[redacted]", text)
     return text[:256]

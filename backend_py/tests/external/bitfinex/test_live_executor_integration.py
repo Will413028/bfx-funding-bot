@@ -226,9 +226,8 @@ async def test_submit_marks_malformed_success_response_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_failure_captures_venue_response_body() -> None:
-    """Observability: on a venue error, the response body must be captured in
-    raw_response (was discarded as None) so failures are diagnosable."""
+async def test_submit_failure_keeps_only_bounded_response_evidence() -> None:
+    """Venue failures retain correlation evidence without persisting raw bodies."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text='["error",10001,"funding: not enough balance"]')
 
@@ -244,7 +243,9 @@ async def test_submit_failure_captures_venue_response_body() -> None:
     assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
     assert result.venue_offer_id is None
     assert result.raw_response is not None
-    assert "not enough balance" in str(result.raw_response)
+    assert result.raw_response["http_status"] == 500
+    assert len(result.raw_response["response_digest"]) == 64
+    assert "not enough balance" not in str(result.raw_response)
 
 
 @pytest.mark.asyncio
