@@ -34,6 +34,12 @@ def test_deployment_profiles_contain_no_legacy_clamp_flags() -> None:
         assert "BFX_CLAMP_" not in path.read_text()
 
 
+def test_deployment_profiles_use_registered_projector_version() -> None:
+    for profile in ("paper.env", "shadow.env", "canary.env"):
+        env = parse_env_file(REPOSITORY_ROOT / "deploy/vm" / profile)
+        assert env["BFX_PROJECTOR_VERSION"] == "execution-state-v1"
+
+
 @pytest.mark.parametrize("legacy_var", ["BFX_ACCOUNT_ID", "BFX_API_KEY", "BFX_API_SECRET"])
 def test_deploy_script_rejects_legacy_identity_and_env_credentials(
     tmp_path: Path, legacy_var: str

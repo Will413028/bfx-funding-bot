@@ -500,6 +500,51 @@ async def test_canary_readiness_requires_two_complete_account_snapshot_events(
     assert readiness.full_account_snapshot_complete is False
 
 
+async def test_canary_readiness_honors_one_snapshot_pre_command_requirement(
+    tmp_path: Path,
+) -> None:
+    """The pre-command gate may require one fresh complete account snapshot."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+    from bfx_funding_bot.modules.marketfeed.daemon import collect_canary_readiness
+
+    db_path = tmp_path / "canary_one_snapshot_coverage.db"
+    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = PostgresEventStore(deployment_environment="prod")
+    async with factory.begin() as session:
+        await store.append_snapshot(
+            session,
+            VenueSnapshotObserved(
+                account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
+                environment="prod",
+                query_started_at_ms=1_000_090,
+                query_finished_at_ms=1_000_100,
+                offers=(),
+                credits=(),
+                wallet_available={"fUST": Decimal("0")},
+                coverage=SnapshotCoverage(True, True, True),
+            ),
+        )
+    async with factory() as session:
+        readiness = await collect_canary_readiness(
+            session,
+            account_id=TEST_EXCHANGE_ACCOUNT_ID,
+            environment="prod",
+            now_ms=1_000_250,
+            minimum_snapshot_count=1,
+        )
+    await engine.dispose()
+
+    assert readiness.full_account_snapshot_complete is True
+
+
 async def test_live_build_blocks_missing_halt2_evidence_before_executor_construction(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
