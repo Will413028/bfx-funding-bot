@@ -5,7 +5,12 @@ production connection or contacts Bitfinex.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+import hashlib
+import json
+from dataclasses import asdict, replace
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -13,8 +18,11 @@ import pytest
 from scripts.halt2_cutover import (
     EXIT_PRECONDITION_FAILED,
     EXIT_SUCCESS,
+    EXIT_VERIFICATION_FAILED,
     Halt2Evidence,
     PreflightReport,
+    collect_preflight_report,
+    main,
     verify_preflight,
 )
 
@@ -36,6 +44,7 @@ def _report(**changes: object) -> PreflightReport:
         venue_snapshot_fence=42,
         config_digest="config-hash",
         image_digest="image-hash",
+        projector_version="projector-v3",
         persistent_halt=True,
         stop_reasons=(),
     )
@@ -53,6 +62,11 @@ def _evidence(**changes: object) -> Halt2Evidence:
         config_digest="config-hash",
         image_digest="image-hash",
         projector_version="projector-v3",
+        migration_head="halt2-head",
+        schema_heads=("halt2-head",),
+        backup_evidence_path="/evidence/backup.json",
+        isolated_restore_evidence_path="/evidence/restore.json",
+        config_artifact_path="/evidence/config.yaml",
     )
     return replace(evidence, **changes)
 
@@ -104,14 +118,182 @@ def test_preflight_rejects_legacy_environment_variable(legacy_name: str) -> None
 
 
 def test_valid_read_only_report_has_no_mutation_and_passes() -> None:
-    mutations: list[str] = []
     result = verify_preflight(
         _report(),
         _evidence(),
         environ={"BFX_EXCHANGE_ACCOUNT_ID": str(ACCOUNT_ID)},
-        mutation_probe=mutations.append,
     )
 
     assert result.exit_code == EXIT_SUCCESS
     assert result.stop_reasons == ()
-    assert mutations == []
+
+
+@pytest.mark.parametrize(
+    ("report_change", "expected_reason"),
+    [
+        ({"backup_evidence_hash": "observed-backup"}, "backup_evidence_hash_mismatch"),
+        ({"isolated_restore_evidence_hash": "observed-restore"}, "isolated_restore_evidence_hash_mismatch"),
+        ({"config_digest": "observed-config"}, "config_digest_mismatch"),
+        ({"image_digest": "observed-image"}, "image_digest_mismatch"),
+    ],
+)
+def test_preflight_rejects_evidence_not_matching_independent_artifact_or_runtime(
+    report_change: dict[str, object], expected_reason: str
+) -> None:
+    result = verify_preflight(_report(**report_change), _evidence())
+
+    assert result.exit_code == EXIT_PRECONDITION_FAILED
+    assert expected_reason in result.stop_reasons
+
+
+@pytest.mark.parametrize(
+    ("report_change", "expected_reason"),
+    [
+        ({"migration_head": "different-head"}, "migration_head_mismatch"),
+        ({"schema_heads": ("different-head",)}, "schema_heads_mismatch"),
+        ({"projector_version": "different-projector"}, "projector_version_mismatch"),
+    ],
+)
+def test_preflight_rejects_migration_schema_or_projector_drift(
+    report_change: dict[str, object], expected_reason: str
+) -> None:
+    result = verify_preflight(_report(**report_change), _evidence())
+
+    assert result.exit_code == EXIT_PRECONDITION_FAILED
+    assert expected_reason in result.stop_reasons
+
+
+class _ReadOnlySession:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def scalars(self, statement):  # type: ignore[no-untyped-def]
+        self.statements.append(str(statement))
+        return []
+
+    async def scalar(self, statement):  # type: ignore[no-untyped-def]
+        rendered = str(statement)
+        self.statements.append(rendered)
+        if "trading_halt.halted" in rendered:
+            return True
+        return 0 if "count" in rendered else None
+
+
+def test_collect_preflight_uses_only_selects_and_never_mutates_db(monkeypatch) -> None:
+    session = _ReadOnlySession()
+    monkeypatch.setattr("scripts.halt2_cutover._migration_head", lambda: "halt2-head")
+
+    report = asyncio.run(
+        collect_preflight_report(
+            session,  # type: ignore[arg-type]
+            account_id=ACCOUNT_ID,
+            environment="canary",
+            artifact_hashes={
+                "backup_evidence_hash": "backup-hash",
+                "isolated_restore_evidence_hash": "restore-hash",
+                "config_digest": "config-hash",
+            },
+            image_digest="image-hash",
+            projector_version="projector-v3",
+        )
+    )
+
+    assert report.persistent_halt is True
+    assert session.statements
+    assert all(statement.lstrip().upper().startswith("SELECT") for statement in session.statements)
+
+
+def test_main_returns_verification_unavailable_when_db_cannot_connect(monkeypatch, tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(asdict(_evidence())))
+    monkeypatch.setattr("scripts.halt2_cutover.Settings", lambda: object())
+    monkeypatch.setattr("scripts.halt2_cutover.make_engine", lambda _settings: (_ for _ in ()).throw(RuntimeError("db down")))
+
+    assert main(["preflight", "--account-id", str(ACCOUNT_ID), "--environment", "canary", "--evidence", str(evidence_path), "--projector-version", "projector-v3", "--image-digest", "image-hash"]) == EXIT_VERIFICATION_FAILED
+
+
+def test_main_rehashes_artifacts_and_rejects_tampered_backup(monkeypatch, tmp_path: Path) -> None:
+    backup = tmp_path / "backup.json"
+    restore = tmp_path / "restore.json"
+    config = tmp_path / "safety.yaml"
+    backup.write_text("backup-v1")
+    restore.write_text("restore-v1")
+    config.write_text("config-v1")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    evidence = _evidence(
+        backup_evidence_hash=digest(backup),
+        isolated_restore_evidence_hash=digest(restore),
+        config_digest=digest(config),
+        backup_evidence_path=str(backup),
+        isolated_restore_evidence_path=str(restore),
+        config_artifact_path=str(config),
+    )
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(asdict(evidence)))
+    backup.write_text("backup-tampered")
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class _Session:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+    async def collect(_session, **kwargs):  # type: ignore[no-untyped-def]
+        return _report(
+            backup_evidence_hash=kwargs["artifact_hashes"]["backup_evidence_hash"],
+            isolated_restore_evidence_hash=kwargs["artifact_hashes"]["isolated_restore_evidence_hash"],
+            config_digest=kwargs["artifact_hashes"]["config_digest"],
+        )
+
+    monkeypatch.setattr("scripts.halt2_cutover.Settings", lambda: object())
+    monkeypatch.setattr("scripts.halt2_cutover.make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr("scripts.halt2_cutover.make_session_factory", lambda _engine: _Session)
+    monkeypatch.setattr("scripts.halt2_cutover.collect_preflight_report", collect)
+
+    assert main([
+        "preflight", "--account-id", str(ACCOUNT_ID), "--environment", "canary",
+        "--evidence", str(evidence_path), "--projector-version", "projector-v3",
+        "--image-digest", "image-hash", "--config-artifact", str(config),
+    ]) == EXIT_PRECONDITION_FAILED
+
+
+def test_assert_halt_uses_existing_store_only(monkeypatch, tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(asdict(_evidence())))
+    calls: list[tuple[bool, str, str]] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    class _Store:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def set_halted(self, halted: bool, *, reason: str, actor: str):
+            calls.append((halted, reason, actor))
+            return SimpleNamespace(halted=True)
+
+    monkeypatch.setattr("scripts.halt2_cutover.make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr("scripts.halt2_cutover.make_session_factory", lambda _engine: object())
+    monkeypatch.setattr("scripts.halt2_cutover.HaltStateStore", _Store)
+    monkeypatch.setattr("scripts.halt2_cutover.Settings", lambda: object())
+
+    assert main(["assert-halt", "--account-id", str(ACCOUNT_ID), "--environment", "canary", "--evidence", str(evidence_path), "--projector-version", "projector-v3", "--image-digest", "image-hash", "--operator-id", "operator-1", "--reason", "test halt"]) == EXIT_SUCCESS
+    assert calls == [(True, "test halt", "operator-1")]
+
+
+@pytest.mark.parametrize("command", ["replay", "verify", "release-report", "convert-pending", "quarantine"])
+def test_unowned_cutover_commands_are_explicitly_rejected(command: str, tmp_path: Path) -> None:
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(asdict(_evidence())))
+
+    assert main([command, "--account-id", str(ACCOUNT_ID), "--environment", "canary", "--evidence", str(evidence_path), "--projector-version", "projector-v3", "--image-digest", "image-hash"]) == EXIT_PRECONDITION_FAILED

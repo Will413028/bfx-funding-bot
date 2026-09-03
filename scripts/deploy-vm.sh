@@ -35,10 +35,10 @@ for v in BFX_ACCOUNT_ID BFX_API_KEY BFX_API_SECRET; do
   fi
 done
 EXCHANGE_ACCOUNT_ID=$(grep '^BFX_EXCHANGE_ACCOUNT_ID=' .env.runtime | tail -1 | cut -d= -f2-)
-case "$EXCHANGE_ACCOUNT_ID" in
-  ????????-????-????-????-????????????) ;;
-  *) echo "ERROR: BFX_EXCHANGE_ACCOUNT_ID must be a UUID"; exit 1 ;;
-esac
+python3 -c 'from sys import argv; from uuid import UUID; value = argv[1]; assert str(UUID(value)) == value' "$EXCHANGE_ACCOUNT_ID" 2>/dev/null || {
+  echo "ERROR: BFX_EXCHANGE_ACCOUNT_ID must be a canonical UUID"
+  exit 1
+}
 
 EXECUTION_POLICY=$(grep '^BFX_EXECUTION_POLICY=' .env.runtime | tail -1 | cut -d= -f2-)
 case "$PHASE:$EXECUTION_POLICY" in
@@ -84,27 +84,6 @@ BACKEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.webapi.runtime | tail -1
   echo "ERROR: web-API BFX_OPERATOR_ROLE must be admin for operator-only containment"
   exit 1
 }
-
-# An immutable, redacted report must agree with a fresh account-local DB read
-# before a real-money deploy.  The CLI's default preflight is read-only.
-if [ "$PHASE" = canary ]; then
-  EVIDENCE_REPORT=$(grep '^BFX_HALT2_EVIDENCE_REPORT=' .env.runtime | tail -1 | cut -d= -f2-)
-  [ -r "$EVIDENCE_REPORT" ] || {
-    echo "ERROR: Halt 2 evidence report is unreadable: $EVIDENCE_REPORT"
-    exit 1
-  }
-  DEPLOYMENT_ENV=$(grep '^BFX_DEPLOYMENT_ENV=' .env.runtime | tail -1 | cut -d= -f2-)
-  (
-    cd backend_py
-    uv run python scripts/halt2_cutover.py preflight \
-      --account-id "$EXCHANGE_ACCOUNT_ID" \
-      --environment "$DEPLOYMENT_ENV" \
-      --evidence "$EVIDENCE_REPORT"
-  ) || {
-    echo "ERROR: Halt 2 preflight failed; deployment remains stopped"
-    exit 1
-  }
-fi
 
 # --- frontend env (Better Auth FE: scoped bfx_webauth role, VM redis, server-only) ---
 FRONTEND_SECRETS="$HOME/bfx/frontend.env"
@@ -157,6 +136,31 @@ if [ "$PHASE" = canary ]; then
     echo "ERROR: canary deploy needs interactive confirmation; BFX_CANARY_CONFIRM=yes is required" >&2
     exit 1
   fi
+
+  # An immutable, redacted report must agree with fresh account-local DB,
+  # artifact, projector, image, and committed safety-config observations.
+  # This command is read-only and must pass before Docker is reached.
+  EVIDENCE_REPORT=$(grep '^BFX_HALT2_EVIDENCE_REPORT=' .env.runtime | tail -1 | cut -d= -f2-)
+  [ -r "$EVIDENCE_REPORT" ] || {
+    echo "ERROR: Halt 2 evidence report is unreadable: $EVIDENCE_REPORT"
+    exit 1
+  }
+  DEPLOYMENT_ENV=$(grep '^BFX_DEPLOYMENT_ENV=' .env.runtime | tail -1 | cut -d= -f2-)
+  PROJECTOR_VERSION=$(grep '^BFX_PROJECTOR_VERSION=' .env.runtime | tail -1 | cut -d= -f2-)
+  IMAGE_DIGEST=$(git rev-parse HEAD)
+  (
+    cd backend_py
+    uv run python scripts/halt2_cutover.py preflight \
+      --account-id "$EXCHANGE_ACCOUNT_ID" \
+      --environment "$DEPLOYMENT_ENV" \
+      --evidence "$EVIDENCE_REPORT" \
+      --projector-version "$PROJECTOR_VERSION" \
+      --image-digest "$IMAGE_DIGEST" \
+      --config-artifact "$ROOT/$SAFETY_HOST"
+  ) || {
+    echo "ERROR: Halt 2 preflight failed; deployment remains stopped"
+    exit 1
+  }
 fi
 
 export GIT_SHA="$(git rev-parse --short HEAD)"
