@@ -88,6 +88,39 @@ readonly_sql() {
   docker exec bfx-postgres psql -U bfx -d bfx -X -qAt -c "$1" </dev/null 2>&1 || printf '%s\n' 'unavailable'
 }
 
+load_canary_scope() {
+  local scope
+  if ! scope="$(docker exec bfx-bot python -c '
+import os
+from uuid import UUID
+
+account = UUID(os.environ["BFX_EXCHANGE_ACCOUNT_ID"])
+environment = os.environ["BFX_DEPLOYMENT_ENV"]
+if environment not in {"prod", "shadow", "ci"}:
+    raise ValueError("invalid deployment environment")
+print(str(account) + "|" + environment)
+' 2>/dev/null)"; then
+    return 1
+  fi
+  CANARY_ACCOUNT_ID="${scope%%|*}"
+  CANARY_ENVIRONMENT="${scope#*|}"
+}
+
+readonly_canary_sql() {
+  local query="$1"
+  if [[ -z "${CANARY_ACCOUNT_ID:-}" || -z "${CANARY_ENVIRONMENT:-}" ]]; then
+    printf '%s\n' 'unavailable (canary scope unavailable)'
+    return 0
+  fi
+  docker exec bfx-postgres psql -U bfx -d bfx -X -qAt \
+    -v account="$CANARY_ACCOUNT_ID" -v environment="$CANARY_ENVIRONMENT" \
+    -c "$query" </dev/null 2>&1 || printf '%s\n' 'unavailable'
+}
+
+CANARY_ACCOUNT_ID=""
+CANARY_ENVIRONMENT=""
+load_canary_scope || true
+
 {
   echo "===== Read-only VM soak checkpoint @ $(date -u '+%Y-%m-%d %H:%M UTC') ====="
   echo "window=$WINDOW"
@@ -113,6 +146,12 @@ readonly_sql() {
   echo "candles_finalized=$(readonly_sql "SELECT count(*) FROM funding_candles WHERE finalized_at_ms IS NOT NULL")"
   echo "candles_not_final=$(readonly_sql "SELECT count(*) FROM funding_candles WHERE is_final = false")"
   echo "reconcile_observations=$(readonly_sql "SELECT count(*) FROM reconcile_observation")"
+  echo "--- account-local canary evidence SQL ---"
+  echo "canary_scope=${CANARY_ACCOUNT_ID:-unavailable}|${CANARY_ENVIRONMENT:-unavailable}"
+  echo "open_execution_uncertainties=$(readonly_canary_sql "SELECT count(*) FROM execution_uncertainties WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'environment' AND state = 'open'")"
+  echo "projector_lag=$(readonly_canary_sql "SELECT GREATEST(COALESCE((SELECT max(event_seq) FROM event_log WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'environment'), 0) - COALESCE((SELECT min(last_event_seq) FROM projection_heads WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'environment'), 0), 0)")"
+  echo "last_two_reconcile_fences=$(readonly_canary_sql "SELECT event_seq_fence || '@' || observed_at_ms FROM (SELECT event_seq_fence, observed_at_ms FROM reconcile_observation WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'environment' ORDER BY id DESC LIMIT 2) AS latest ORDER BY observed_at_ms ASC")"
+  echo "persistent_halt=$(readonly_canary_sql "SELECT COALESCE((SELECT halted::text FROM trading_halt WHERE exchange_account_id = :'account'::uuid AND deployment_environment = :'environment' ORDER BY id DESC LIMIT 1), 'false')")"
   echo "DONE"
 } > "$REPORT" 2>&1
 
