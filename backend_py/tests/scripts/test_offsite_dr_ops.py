@@ -197,6 +197,7 @@ def test_deploy_preflight_checks_secret_boundary_and_custom_image_labels() -> No
         "bfx-postgres:local",
         "org.opencontainers.image",
         "docker compose -f docker-compose.bot.yml config --quiet",
+        'git -C "$ROOT" ls-files --error-unmatch',
     ):
         assert required in source
     assert "BFX_VAULT_KEK" in source
@@ -208,6 +209,9 @@ def test_deploy_preflight_is_ordered_and_creates_only_non_secret_runtime_dirs() 
         "set -a; . ./.env.frontend.runtime; set +a"
     )
     config_check = source.index('[ -r "$PGBACKREST_CONFIG" ]')
+    tracked_config_check = source.index(
+        'git -C "$ROOT" ls-files --error-unmatch'
+    )
     runtime_install = source.index("install -d", config_check)
     compose_parse = source.index(
         "docker compose -f docker-compose.bot.yml config --quiet"
@@ -220,6 +224,7 @@ def test_deploy_preflight_is_ordered_and_creates_only_non_secret_runtime_dirs() 
     assert (
         environment_checks
         < config_check
+        < tracked_config_check
         < runtime_install
         < compose_parse
         < compose_build
@@ -235,6 +240,20 @@ def test_deploy_preflight_is_ordered_and_creates_only_non_secret_runtime_dirs() 
         assert runtime_dir in source
     assert 'install -d "$PGBACKREST_SECRET_DIR"' not in source
     assert 'mkdir -p "$PGBACKREST_SECRET_DIR"' not in source
+
+
+def test_deploy_preflight_fails_closed_for_untracked_or_modified_config() -> None:
+    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
+    assert (
+        'git -C "$ROOT" ls-files --error-unmatch -- "$PGBACKREST_CONFIG_REL"'
+        in source
+    )
+    assert 'git -C "$ROOT" diff --quiet -- "$PGBACKREST_CONFIG_REL"' in source
+    assert (
+        'git -C "$ROOT" diff --cached --quiet -- "$PGBACKREST_CONFIG_REL"'
+        in source
+    )
+    assert "pgBackRest config must be a clean tracked artifact" in source
 
 
 def test_deploy_preflight_rejects_unsafe_or_placeholder_secret_files_without_leaking() -> None:
