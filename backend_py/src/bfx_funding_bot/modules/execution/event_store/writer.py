@@ -28,6 +28,7 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     "c2e3f4a5b6c7",
     "cd5e6f708192",
     "de6f708192a3",
+    "e7b1c2d3e4f5",
 })
 
 __all__ = [
