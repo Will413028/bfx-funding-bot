@@ -141,6 +141,14 @@ def _deploy_root(tmp_path: Path) -> Path:
         "#!/bin/sh\n"
         "if [ \"$1\" = pull ]; then exit 0; fi\n"
         "if [ \"$1\" = rev-parse ]; then printf '%s\\n' safe-test-sha; exit 0; fi\n"
+        "if [ \"$1\" = -C ] && [ \"$3\" = ls-files ]; then\n"
+        "  [ \"${FAKE_PGBACKREST_CONFIG_STATE:-clean}\" != untracked ]\n"
+        "  exit $?\n"
+        "fi\n"
+        "if [ \"$1\" = -C ] && [ \"$3\" = diff ]; then\n"
+        "  [ \"${FAKE_PGBACKREST_CONFIG_STATE:-clean}\" != dirty ]\n"
+        "  exit $?\n"
+        "fi\n"
         "exit 1\n",
     )
     _write_executable(
@@ -165,7 +173,12 @@ def _deploy_root(tmp_path: Path) -> Path:
 
 
 def _run_deploy(
-    root: Path, phase: str, *, confirm: bool = False, image_digest: str = "sha256:expected"
+    root: Path,
+    phase: str,
+    *,
+    confirm: bool = False,
+    image_digest: str = "sha256:expected",
+    pgbackrest_config_state: str = "clean",
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = root.parent / "fake-bin"
     environment = os.environ | {
@@ -174,6 +187,7 @@ def _run_deploy(
         "FAKE_DOCKER_LOG": str(root / "fake-docker.log"),
         "FAKE_UV_LOG": str(root / "fake-uv.log"),
         "FAKE_IMAGE_DIGEST": image_digest,
+        "FAKE_PGBACKREST_CONFIG_STATE": pgbackrest_config_state,
     }
     if confirm:
         environment["BFX_CANARY_CONFIRM"] = "yes"
@@ -188,6 +202,19 @@ def _run_deploy(
         capture_output=True,
         check=False,
     )
+
+
+@pytest.mark.parametrize("config_state", ["untracked", "dirty"])
+def test_deploy_rejects_non_tracked_pgbackrest_config_before_docker(
+    tmp_path: Path, config_state: str
+) -> None:
+    root = _deploy_root(tmp_path)
+
+    result = _run_deploy(root, "paper", pgbackrest_config_state=config_state)
+
+    assert result.returncode != 0
+    assert "pgBackRest config must be a clean tracked artifact" in result.stderr
+    assert not (root / "fake-docker.log").exists()
 
 
 @pytest.mark.parametrize(

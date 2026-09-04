@@ -164,10 +164,26 @@ if [ "$PHASE" = canary ]; then
 fi
 
 # --- local pgBackRest DR boundary (validation only; no remote operations) ---
-PGBACKREST_CONFIG="$ROOT/deploy/vm/pgbackrest/pgbackrest.conf"
+PGBACKREST_CONFIG_REL="deploy/vm/pgbackrest/pgbackrest.conf"
+PGBACKREST_CONFIG="$ROOT/$PGBACKREST_CONFIG_REL"
 PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
 [ -r "$PGBACKREST_CONFIG" ] || {
   echo "ERROR: missing pgBackRest config" >&2
+  exit 1
+}
+git -C "$ROOT" ls-files --error-unmatch -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+git -C "$ROOT" diff --quiet -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+git -C "$ROOT" diff --cached --quiet -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
   exit 1
 }
 [ -d "$PGBACKREST_SECRET_DIR" ] || {
