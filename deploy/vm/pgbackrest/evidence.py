@@ -180,7 +180,7 @@ def render_backup_evidence(
         _raise("archive_lag_exceeded")
     observed_at_ms, last_archived_at_ms, wal, failed_count = _parse_archiver(archiver_tsv)
     rpo_seconds = (observed_at_ms - last_archived_at_ms + 999) // 1000
-    if rpo_seconds >= rpo_limit_seconds:
+    if rpo_seconds > rpo_limit_seconds:
         _raise("archive_lag_exceeded")
     latest_backup_label = _parse_pgbackrest_info(info_json)
     return {

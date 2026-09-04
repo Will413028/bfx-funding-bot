@@ -108,7 +108,7 @@ def test_backup_evidence_calculates_rpo_and_is_bounded(tmp_path: Path) -> None:
     [
         ("1756961300000\t\t\t0\t", _info_json(), "archive_never_confirmed"),
         (
-            "1756961300000\t1756961000000\twal\t0\t",
+            "1756961300000\t1756960999000\twal\t0\t",
             _info_json(),
             "archive_lag_exceeded",
         ),
@@ -129,6 +129,18 @@ def test_backup_evidence_fails_closed(
             config_path=_config(tmp_path),
             rpo_limit_seconds=300,
         )
+
+
+def test_backup_evidence_accepts_exact_rpo_limit(tmp_path: Path) -> None:
+    result = render_backup_evidence(
+        archiver_tsv="1756961300000\t1756961000000\twal\t0\t",
+        info_json=_info_json(),
+        config_path=_config(tmp_path),
+        rpo_limit_seconds=300,
+    )
+
+    assert result["measured"] is True
+    assert result["rpo_seconds"] == 300
 
 
 def test_archive_failure_is_fatal_only_when_newer_than_success(tmp_path: Path) -> None:
