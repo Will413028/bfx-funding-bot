@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[3]
 COMMANDS_PATH = ROOT / "deploy/vm/pgbackrest/restore_commands.py"
 DRILL_PATH = ROOT / "deploy/vm/pgbackrest/restore_drill.py"
 EVIDENCE_PATH = ROOT / "deploy/vm/pgbackrest/evidence.py"
+ABSOLUTE_COMPOSE_PATH = str(ROOT / "docker-compose.dr.yml")
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -135,6 +137,25 @@ def test_restore_plan_rejects_command_injection_and_noncanonical_account() -> No
         )
 
 
+def test_restore_plan_uses_an_absolute_compose_path_in_every_compose_argv() -> None:
+    plan = build_restore_plan(
+        account_id="3f19d046-5030-494c-9a0a-9573bb890c1f",
+        environment="prod",
+        projector_version="projector-v3",
+        backup_label="20260904031700-F",
+        target_time=None,
+        run_id="20260904T031700Z-a1b2c3d4e5f60718",
+    )
+
+    compose_commands = [
+        command
+        for command in (*plan.run_commands, *plan.cleanup_commands)
+        if command[:2] == ("docker", "compose")
+    ]
+    assert compose_commands
+    assert all(ABSOLUTE_COMPOSE_PATH in command for command in compose_commands)
+
+
 def test_restore_evidence_contains_only_validated_measurements(tmp_path: Path) -> None:
     config = tmp_path / "pgbackrest.conf"
     config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
@@ -178,12 +199,19 @@ def test_restore_evidence_rejects_a_false_projection_diagnostic(tmp_path: Path) 
 
 
 class _FakeRunner:
-    def __init__(self, *, verifier: subprocess.CompletedProcess[str], network_internal: str = "true\n") -> None:
+    def __init__(
+        self,
+        *,
+        verifier: subprocess.CompletedProcess[str],
+        network_internal: str = "true\n",
+        compose_up_status: int = 0,
+    ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.env_text = ""
         self.env_mode: int | None = None
         self.verifier = verifier
         self.network_internal = network_internal
+        self.compose_up_status = compose_up_status
 
     def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
@@ -193,6 +221,8 @@ class _FakeRunner:
             self.env_mode = env_path.stat().st_mode & 0o777
         if command[:3] == ("docker", "network", "inspect"):
             return subprocess.CompletedProcess(command, 0, self.network_internal, "")
+        if "up" in command and "restore-db" in command:
+            return subprocess.CompletedProcess(command, self.compose_up_status, "", "")
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
             return subprocess.CompletedProcess(command, 0, "healthy\n", "")
         if command[:3] == ("docker", "exec", command[2]):
@@ -209,6 +239,7 @@ def _drill(
     fake: _FakeRunner,
     *,
     run_id: str = "20260904T031700Z-a1b2c3d4e5f60718",
+    clock: Callable[[], float] = restore_drill.time.monotonic,
 ) -> RestoreDrill:
     config = tmp_path / "pgbackrest.conf"
     config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
@@ -221,6 +252,7 @@ def _drill(
         output_path=tmp_path / "restore.json",
         run_id_factory=lambda: run_id,
         password_factory=lambda: "DATABASE-PASSWORD-SENTINEL",
+        clock=clock,
     )
 
 
@@ -232,6 +264,124 @@ def _request() -> DrillRequest:
         backup_label="20260904031700-F",
         target_time=None,
     )
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _ImageAndEvidenceAdvancingRunner(_FakeRunner):
+    def __init__(self, clock: _Clock) -> None:
+        super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+        self.clock = clock
+
+    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if command[:4] == ("docker", "image", "inspect", "--format={{index .RepoDigests 0}}"):
+            self.clock.now += 1.25
+        return super().__call__(command)
+
+
+def test_rto_includes_image_and_evidence_validation_before_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    fake = _ImageAndEvidenceAdvancingRunner(clock)
+    drill = _drill(tmp_path, fake, clock=clock)
+    real_renderer = restore_drill.render_restore_evidence
+    render_calls = 0
+
+    def advancing_renderer(**kwargs: object) -> dict[str, object]:
+        nonlocal render_calls
+        if render_calls == 0:
+            clock.now += 1.25
+        render_calls += 1
+        return real_renderer(**kwargs)
+
+    monkeypatch.setattr(restore_drill, "render_restore_evidence", advancing_renderer)
+
+    assert drill.run(_request()) == 0
+
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["measured"] is True
+    assert report["rto_seconds"] == 3
+
+
+class _CleanupObservingRunner(_FakeRunner):
+    def __init__(self, output_path: Path, *, cleanup_status: int = 0) -> None:
+        super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+        self.output_path = output_path
+        self.cleanup_status = cleanup_status
+        self.evidence_present_during_cleanup = False
+
+    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        if "rm" in command:
+            self.evidence_present_during_cleanup = self.output_path.exists()
+            if self.cleanup_status:
+                return subprocess.CompletedProcess(command, self.cleanup_status, "", "")
+        return super().__call__(command)
+
+
+def test_success_evidence_is_persisted_before_cleanup_and_cleanup_failure_preserves_it(tmp_path: Path) -> None:
+    output_path = tmp_path / "restore.json"
+    fake = _CleanupObservingRunner(output_path, cleanup_status=2)
+    drill = RestoreDrill(
+        command_runner=fake,
+        config_path=tmp_path / "pgbackrest.conf",
+        secret_dir=tmp_path / "conf.d",
+        output_path=output_path,
+        run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+    )
+    (tmp_path / "pgbackrest.conf").write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
+    (tmp_path / "conf.d").mkdir()
+
+    assert drill.run(_request()) == 2
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert fake.evidence_present_during_cleanup is True
+    assert report["measured"] is True
+    assert "cleanup_failed" in (tmp_path / "restore.log").read_text(encoding="utf-8")
+
+
+def test_compose_up_failure_still_cleans_the_attempted_container(tmp_path: Path) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        compose_up_status=2,
+    )
+
+    assert _drill(tmp_path, fake).run(_request()) == 2
+
+    cleanup = [command for command in fake.commands if "rm" in command and "restore-db" in command]
+    assert len(cleanup) == 1
+    assert all(
+        argument.startswith("bfx-dr-")
+        for argument in cleanup[0]
+        if argument.startswith("bfx-")
+    )
+
+
+class _HealthTimeoutRunner(_FakeRunner):
+    def __init__(self) -> None:
+        super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+        self.health_timeouts: list[float | None] = []
+
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
+            self.health_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(command, timeout or 0)
+        return super().__call__(command)
+
+
+def test_health_inspect_timeout_uses_remaining_deadline_and_writes_failure(tmp_path: Path) -> None:
+    fake = _HealthTimeoutRunner()
+
+    assert _drill(tmp_path, fake).run(_request()) == 2
+
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["measured"] is False
+    assert report["error_code"] == "restore_command_failed"
+    assert fake.health_timeouts and 0 < fake.health_timeouts[0] <= 600
 
 
 def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tmp_path: Path) -> None:
