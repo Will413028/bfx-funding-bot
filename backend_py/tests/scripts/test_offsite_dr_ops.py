@@ -301,3 +301,35 @@ def test_deploy_requires_exact_task_1_image_labels_after_build() -> None:
         "restore-drill.sh",
     ):
         assert forbidden_script not in source
+
+
+def test_offsite_runbook_contains_ordered_bootstrap_and_restore_controls() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text()
+    ordered = (
+        "Create the private R2 bucket",
+        "Create a bucket-scoped Object Read & Write token",
+        "Create the VM secret fragment",
+        "Build and validate bfx-postgres:local",
+        "stanza-create",
+        "pgbackrest --stanza=bfx check",
+        "backup.sh --type full",
+        "backup.sh --type diff",
+        "Enable the backup and status timers",
+        "Run an isolated restore drill",
+        "Record measured RPO/RTO evidence",
+    )
+    cursor = -1
+    for item in ordered:
+        position = text.find(item, cursor + 1)
+        assert position > cursor, item
+        cursor = position
+    assert "docker volume rm bfx_pgdata" not in text
+    assert "docker compose down -v" not in text
+    assert "Bitfinex" in text
+
+
+def test_architecture_documents_dr_is_not_venue_rollback() -> None:
+    architecture = (ROOT / "backend_py/ARCHITECTURE.md").read_text()
+    assert "pgBackRest" in architecture
+    assert "restore" in architecture.lower()
+    assert "venue rollback" in architecture.lower()
