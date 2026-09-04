@@ -9,6 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
@@ -80,7 +81,11 @@ async def _make_persister(
     bind = sqlite_session.bind
     assert bind is not None
     factory = async_sessionmaker(bind, expire_on_commit=False)  # type: ignore[arg-type]
-    return EventStorePersister(store=store, session_factory=factory), factory
+    return EventStorePersister(
+        store=store,
+        session_factory=factory,
+        compatibility_mode=True,
+    ), factory
 
 
 async def test_persist_new_event_returns_true(sqlite_session: AsyncSession) -> None:
@@ -88,6 +93,19 @@ async def test_persist_new_event_returns_true(sqlite_session: AsyncSession) -> N
     persister, _ = await _make_persister(sqlite_session)
     result = await persister.persist(_fill())
     assert result == [True]
+
+
+async def test_default_persister_requires_canonical_account_registry(
+    sqlite_session: AsyncSession,
+) -> None:
+    """The production persister must not silently accept a synthetic realm."""
+    _, factory = await _make_persister(sqlite_session)
+    persister = EventStorePersister(
+        store=PostgresEventStore(deployment_environment="ci"),
+        session_factory=factory,
+    )
+    with pytest.raises(ValueError, match="canonical ExchangeAccount UUID"):
+        await persister.persist(_fill())
 
 
 async def test_persist_duplicate_event_returns_false(sqlite_session: AsyncSession) -> None:

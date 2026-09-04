@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Projection transaction 不可包含 HTTP/WebSocket/Bitfinex network call；network result 必須先被 normalize 成 event，再交給 writer。
-- lock key 一律由 canonical ExchangeAccount UUID + deployment environment 經現有 derive_lock_key 產生；不得只鎖 account、只鎖 process 或依 symbol 分鎖。
+- transaction lock key 一律由 canonical ExchangeAccount UUID + deployment environment 經與 daemon WriterLock 相同輸入、但不同 namespace 的 derive_transaction_lock_key 產生；不得只鎖 account、只鎖 process 或依 symbol 分鎖。
 - last_event_seq、projection_heads.last_event_seq 只能由 projector 寫入；任何 API、reconcile 或 ledger callback 不得直接改 position projection。
 - projector 對 FSM invalid transition 必須 rollback 整個 transaction、寫 bounded alert/log，不能 silently coerce 或把 terminal object reopen。
 - rebuild 只讀 event_log、upcaster 與 projector；不得讀既有 projection、wall clock、live venue API 或 mutable config。
@@ -31,6 +31,7 @@
 |---|---|
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/projector.py | pure v3 upcaster, FSM reducer, entity projection and deterministic rebuild |
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py | transaction-owning advisory-lock AccountEventWriter |
+| backend_py/alembic/versions/c2e3f4a5b6c7_seed_projection_heads.py | seed historical projection cursors before replay is enabled |
 | backend_py/src/bfx_funding_bot/modules/execution/event_store/entities.py | normalized venue offer/credit snapshot records |
 | backend_py/tests/modules/execution/event_store/test_projector.py | pure transition/upcaster/rebuild tests |
 | backend_py/tests/modules/execution/event_store/test_account_event_writer.py | transaction and lock unit tests |
@@ -73,9 +74,9 @@
 
 **Interfaces:**
 - Every new event constructor accepts event_id: UUID (default generated at creation), canonical UUID account_id: str, and schema_version=3; serialization always emits event_id as lowercase string.
-- StoredEventIdentity(event_id: UUID, source: Literal["native","derived_v2"]) is returned by deserialize_stored_event; v2 rows derive UUIDv5 from namespace bfx-funding-bot/event-log/v2 plus immutable tuple (event_seq,account_id,env,event_type,occurred_at_ms,payload_json).
-- EventLogRow.event_id is nullable for historical rows and required by a check for schema_version 3; partial unique index covers (account_id, deployment_environment, event_id) where event_id is not null.
-- PositionStateRow replaces direct reserved mutation with offered_amount, lent_amount, available_amount, uncertain_amount, last_venue_snapshot_at; migration backfills the new fields and drops the old reserved/realized projection columns after the account-observation tests pass.
+- StoredEventIdentity(event_id: UUID, source: Literal["native","derived_v2"]) is exposed by stored_event_identity(row); v2 rows derive UUIDv5 from namespace bfx-funding-bot/event-log/v2 plus immutable tuple (event_seq,account_id,env,event_type,occurred_at_ms,payload_json).
+- EventLogRow.event_id is nullable for historical rows and required by a check for schema_version 3; the canonical partial unique index covers (exchange_account_id, deployment_environment, event_id), with a transitional legacy-account companion index for SQLite/fixture rows.
+- PositionStateRow adds offered_amount, lent_amount, available_amount, uncertain_amount, last_venue_snapshot_at; the additive migration backfills them while the legacy reserved/realized columns remain read-compatible. After the Task 3/4 writer and account-observation cutover, a dedicated contract migration drops the old columns.
 - VenueOfferStateRow primary key is (exchange_account_id, deployment_environment, venue_offer_id) and stores symbol, amount_original, amount_remaining, rate, period, status, first/last seen event seq, terminal flag.
 - VenueCreditStateRow primary key is (exchange_account_id, deployment_environment, credit_id) and stores symbol, amount, rate, period, status, first/last seen event seq.
 
@@ -117,7 +118,7 @@ git commit -m "feat: add schema v3 event identity contract"
 **Interfaces:**
 - Revision bc4d5e6f7081 has down_revision = "9b2c3d4e5f6a"; creates projection_heads with primary key (exchange_account_id, deployment_environment, projection_name) and projector_version, and the two entity tables.
 - It adds nullable event_id/schema_version columns and the partial unique index, then backfills historical event IDs only through the application upcaster during replay; it never rewrites immutable payloads.
-- It adds position numeric columns with zero defaults, backfills them from the canonical observation/entity state, verifies no nulls, then drops the obsolete direct-mutation reserved/realized projection columns; all account FKs use ON DELETE RESTRICT.
+- It adds position numeric columns with zero defaults and backfills them from the current canonical-compatible state. It intentionally retains reserved/realized until the Task 3/4 writer and full-account observation cutover; a follow-up contract migration drops those obsolete direct-mutation columns. All account FKs use ON DELETE RESTRICT.
 
 - [ ] **Step 1: Write failing metadata/integration tests**
 
@@ -131,7 +132,7 @@ Expected: FAIL because migration and metadata are absent.
 
 - [ ] **Step 3: Implement Alembic migration**
 
-Use transaction-safe DDL and register every mapped table. Keep event history append-only; no migration step may update payload JSON or delete event rows.
+Use transaction-safe additive DDL and register every mapped table. Keep event history append-only; no migration step may update payload JSON or delete event rows. Do not drop reserved/realized until the writer no longer writes them and the full-account observation tests prove the new buckets are authoritative.
 
 - [ ] **Step 4: Verify Alembic drift**
 
@@ -156,35 +157,37 @@ git commit -m "feat: add serialized projector schema"
 - Create: backend_py/tests/modules/execution/event_store/test_account_event_writer.py
 
 **Interfaces:**
-- AccountEventWriter.append(session, event) -> AppendResult executes pg_advisory_xact_lock(lock_key) before append; it does not commit and returns event seq, dedup status and projection head.
+- AccountEventWriter.append(session, event) -> AppendResult executes pg_advisory_xact_lock(transaction_lock_key) before append; it does not commit and returns event seq, dedup status and projection head. The transaction key uses a namespace distinct from the daemon session lock so both guards can be held simultaneously.
 - AccountEventWriter.append_batch(session, events) orders input by domain event time only when the caller explicitly supplies a batch; persisted ordering is always database event_seq, not wall-clock sort.
+- Before appending, the writer replays account/environment event-log rows after `projection_heads.last_event_seq` in ascending `event_seq`, then projects the new row and advances the cursor in the same transaction. A duplicate older event leaves the cursor at its monotonic high-water mark.
+- Revision `c2e3f4a5b6c7` seeds cursors for historical snapshots created before the serialized writer. The writer rejects an Alembic-managed database at an earlier revision; an explicit compatibility mode is available only to direct-create legacy fixtures.
 - projection_heads is updated in the same transaction as event and projections. Lag query uses account/env filtered max(event_seq) minus head.last_event_seq; no global max is used.
 - Existing daemon WriterLock remains the long-lived connection guard; the xact lock is an additional transaction serialization boundary and both must be held for live writes.
 
-- [ ] **Step 1: Write failing lock/rollback tests**
+- [x] **Step 1: Write failing lock/rollback tests**
 
 Cover same-account concurrent append serialization, cross-account non-blocking behavior, projection failure rollback of event and head, dedup behavior, and head lag scoped to account/env.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_account_event_writer.py -q
 
 Expected: FAIL because append has no transaction advisory lock or cursor.
 
-- [ ] **Step 3: Implement writer and projector invocation**
+- [x] **Step 3: Implement writer and projector invocation**
 
-Move _project_offer_claims and _project_position_state behind projector.py; make store.append a compatibility wrapper that requires an account UUID and delegates to AccountEventWriter. Set OfferClaimRow.last_event_seq to the actual inserted event seq.
+Move the event projection primitive behind the writer boundary; keep `store.append` as an explicit compatibility adapter while the production `EventStorePersister` defaults to strict canonical account identity. Set `OfferClaimRow.last_event_seq` to the actual inserted event seq and reject migrated databases until the historical cursor seed is installed.
 
-- [ ] **Step 4: Run unit and PostgreSQL concurrency tests**
+- [x] **Step 4: Run unit and PostgreSQL concurrency tests**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_account_event_writer.py -q && uv run pytest tests/integration/test_serialized_projector_pg.py -m integration -q
 
 Expected: PASS; 100 concurrent writes to one account produce a contiguous ordered head, while two accounts can progress independently.
 
-- [ ] **Step 5: Commit the writer boundary**
+- [x] **Step 5: Commit the writer boundary**
 
 ~~~bash
-git add backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py backend_py/src/bfx_funding_bot/core/writer_lock.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/event_store/persister.py backend_py/tests/modules/execution/event_store/test_account_event_writer.py
+git add backend_py/alembic/versions/c2e3f4a5b6c7_seed_projection_heads.py backend_py/src/bfx_funding_bot/modules/execution/event_store/writer.py backend_py/src/bfx_funding_bot/core/writer_lock.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/event_store/persister.py backend_py/tests/modules/execution/event_store/test_account_event_writer.py backend_py/tests/integration/test_serialized_projector_pg.py backend_py/tests/integration/test_writer_lock.py backend_py/tests/modules/execution/event_store/test_persister_dedup.py backend_py/tests/integration/test_boot_recovery_pg.py backend_py/tests/integration/test_daemon_pg_cutover.py backend_py/tests/integration/test_reservation_write_path.py backend_py/tests/external/bitfinex/test_source_persistence.py docs/superpowers/plans/2026-08-31-serialized-execution-projector.md backend_py/ARCHITECTURE.md
 git commit -m "feat: serialize account event projection writes"
 ~~~
 
@@ -205,31 +208,33 @@ git commit -m "feat: serialize account event projection writes"
 - VENUE_SNAPSHOT_OBSERVED projects entity rows and absolute position fields in one account transaction; it also appends immutable reconcile_observation audit data. set_position_snapshot() is deleted and no caller may directly mutate PositionStateRow.
 - rebuild_snapshot_from_log(account_id, environment) creates empty projections, upcasts every event in event_seq order, applies observations and domain events, and verifies resulting head equals max account event seq.
 
-- [ ] **Step 1: Write failing full-account and rebuild tests**
+- [x] **Step 1: Write failing full-account and rebuild tests**
 
 Assert no symbol filter is sent for full reconcile, unknown symbols are persisted, snapshot coverage metadata is required, direct set_position_snapshot import fails, and rebuilding two event-order permutations yields identical projections.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_full_account_snapshot.py tests/modules/execution/test_periodic_reconcile.py -q
 
 Expected: FAIL because reconcile still writes per-symbol snapshots and direct mutation exists.
 
-- [ ] **Step 3: Implement normalized full-account observation flow**
+- [x] **Step 3: Implement normalized full-account observation flow**
 
 Keep all venue calls outside DB transactions; after query completion build one immutable snapshot event. Project offer/credit entities with object-level upsert and terminal monotonicity. Include all active offers/credits even when symbol is absent from configuration.
 
-- [ ] **Step 4: Run focused recovery/reconcile tests**
+The same cutover owns the contract migration that drops `position_state.reserved` and `position_state.realized` after a verified backfill and a zero-legacy-writer architecture check.
+
+- [x] **Step 4: Run focused recovery/reconcile tests**
 
 Run: cd backend_py && uv run pytest tests/modules/execution/event_store/test_full_account_snapshot.py tests/modules/execution/test_periodic_reconcile.py tests/modules/execution/test_position_reconciled.py -q
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit full-account reconciliation**
+- [x] **Step 5: Commit full-account reconciliation**
 
 ~~~bash
-git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/src/bfx_funding_bot/modules/execution/boot_recovery.py backend_py/src/bfx_funding_bot/modules/execution/periodic_reconcile.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/ledger.py backend_py/tests/modules/execution/event_store/test_set_position_snapshot.py backend_py/tests/modules/execution/event_store/test_full_account_snapshot.py
-git commit -m "refactor: project full account venue observations"
+git add backend_py/src/bfx_funding_bot/external/bitfinex/auth_rest.py backend_py/src/bfx_funding_bot/modules/execution/boot_recovery.py backend_py/src/bfx_funding_bot/modules/execution/event_store/entities.py backend_py/src/bfx_funding_bot/modules/execution/event_store/serialization.py backend_py/src/bfx_funding_bot/modules/execution/event_store/store.py backend_py/src/bfx_funding_bot/modules/execution/events.py backend_py/src/bfx_funding_bot/modules/execution/ledger.py backend_py/tests/modules/execution/event_store/test_full_account_snapshot.py
+git commit -m "♻️ Refactor: project full account venue observations"
 ~~~
 
 ## Task 5: Expose projection health and deterministic replay

@@ -29,6 +29,42 @@ class VerifyResultResponse(BaseModel):
     error: str | None = None
 
 
+class ExchangeAccountResponse(BaseModel):
+    """One account visible to the authenticated operator bootstrap."""
+
+    exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
+    venue: str
+    label: str
+    lifecycle_status: str = Field(serialization_alias="lifecycleStatus")
+    role: str
+
+
+class AccountCredentialResponse(BaseModel):
+    """Masked account-owned credential lifecycle record."""
+
+    id: str
+    exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
+    label: str
+    api_key: str = Field(serialization_alias="apiKey")
+    api_secret: str = Field(default="****", serialization_alias="apiSecret")
+    status: str
+    created_at: str = Field(serialization_alias="createdAt")
+    verified_at: str | None = Field(default=None, serialization_alias="verifiedAt")
+    last_verify_error: str | None = Field(default=None, serialization_alias="lastVerifyError")
+
+
+class AccountConfigDraftResponse(BaseModel):
+    """Explicitly account-scoped, not-yet-applied strategy configuration."""
+
+    id: str
+    exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
+    config: dict[str, object]
+    revision: int
+    source: str
+    created_at: str = Field(serialization_alias="createdAt")
+    updated_at: str = Field(serialization_alias="updatedAt")
+
+
 class Range(BaseModel):
     """A {min, max} bound. min/max must be positive and min <= max. Used for
     amount, rate (daily ratio) and period. Modelled as float to keep zero

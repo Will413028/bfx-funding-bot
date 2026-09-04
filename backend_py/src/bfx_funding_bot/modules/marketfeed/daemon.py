@@ -16,25 +16,28 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
 )
 
+from bfx_funding_bot.core.crypto import VaultNotConfiguredError, load_kek
 from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.core.errors import (
     EXIT_CODE_AUTH_FAILED,
     EXIT_CODE_WRITER_LOCKED,
+    ConfigurationError,
     ExecutorAuthError,
     WriterLockUnacquired,
 )
@@ -56,6 +59,18 @@ from bfx_funding_bot.external.bitfinex.ws import (
     compute_backoff_secs,
 )
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
+from bfx_funding_bot.modules.accounts.config_service import load_account_config_draft
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountNotFound,
+    AccountRetired,
+    account_id_canonical,
+    get_exchange_account,
+)
+from bfx_funding_bot.modules.accounts.vault import (
+    AccountCredentialNotConfiguredError,
+    VaultKeyMismatchError,
+    load_account_credentials,
+)
 from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
 from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
@@ -64,6 +79,11 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.canary_permit import (
+    CanaryOneShotGate,
+    CanaryPermitRepository,
+    CanaryPermitScope,
+)
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -77,7 +97,12 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
+from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_stored_event
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    ProjectionHeadRow,
+)
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -86,6 +111,7 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
+    VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
@@ -118,12 +144,16 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
     BuyingPowerGuard,
+    DatabaseUncertaintyReader,
     HeartbeatGuard,
     ManualKillGuard,
+    UncertaintyGuard,
     WriterLockGuard,
 )
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
+from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
@@ -207,16 +237,494 @@ class _DaemonAuditContextFactory:
 
 
 def _require_env(name: str) -> str:
-    """Return non-empty env var or raise ValueError with the var name.
+    """Return a required env value, canonicalizing the account UUID.
 
     Matches the pattern in `marketfeed/config.py:load_config` so missing env
-    surfaces as `config_fatal <name> env var required — exit 1` via main()'s
-    ValueError handler, instead of a bare KeyError traceback.
+    surfaces as a stable ``ConfigurationError`` via ``main()`` instead of a
+    bare ``KeyError`` traceback.  The account identity is the one exception to
+    the string contract: it is parsed and returned in canonical UUID form.
     """
     val = os.environ.get(name)
-    if not val:
-        raise ValueError(f"{name} env var required")
-    return val
+    if not val or not val.strip():
+        raise ConfigurationError(f"{name} env var required")
+    value = val.strip()
+    if name == "BFX_EXCHANGE_ACCOUNT_ID":
+        try:
+            return account_id_canonical(value)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"{name} must be a valid UUID"
+            ) from exc
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class AccountBootstrap:
+    """Immutable daemon account identity and boot-time runtime material."""
+
+    exchange_account_id: UUID
+    credentials: Credentials
+    deployment_environment: str
+    allocation_cap_usdt: Decimal
+    config_draft: dict[str, object] | None
+    config_revision: int | None
+
+    @property
+    def account_id(self) -> str:
+        """Canonical string used by the pre-contract event APIs."""
+        return account_id_canonical(self.exchange_account_id)
+
+    def to_context(self) -> AccountContext:
+        return AccountContext(
+            account_id=self.account_id,
+            credentials=self.credentials,
+            allocation_cap_usdt=self.allocation_cap_usdt,
+        )
+
+    @staticmethod
+    def reject_legacy_realm(*, phase: Phase) -> None:
+        """Reject the old process-global realm in live/canary boot modes."""
+        legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
+        executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
+        if legacy and (phase is Phase.CANARY or executor == "bitfinex_live"):
+            raise ConfigurationError(
+                "BFX_ACCOUNT_ID is no longer supported; use "
+                "BFX_EXCHANGE_ACCOUNT_ID"
+            )
+
+
+class CanaryStartupBlocked(ConfigurationError):  # noqa: N818 - domain block state
+    """The bounded real-money canary has incomplete or contradictory evidence."""
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryProfile:
+    """Boot-immutable, one-command ceiling for a real-money canary."""
+
+    account_id: UUID
+    environment: str
+    symbol: str
+    cell: str
+    strategy: str
+    amount_usdt: Decimal
+    cap_usdt: Decimal
+    max_evidence_age_seconds: int
+
+    @classmethod
+    def from_environ(cls, environ: Mapping[str, str]) -> CanaryProfile:
+        def required(name: str) -> str:
+            value = environ.get(name, "").strip()
+            if not value:
+                raise CanaryStartupBlocked(f"missing_canary_setting:{name}")
+            return value
+
+        try:
+            account_id = UUID(required("BFX_CANARY_ACCOUNT_ID"))
+        except ValueError as exc:
+            raise CanaryStartupBlocked("invalid_canary_account_id") from exc
+        try:
+            amount = Decimal(required("BFX_CANARY_AMOUNT_USDT"))
+            cap = Decimal(required("BFX_CANARY_CAP_USDT"))
+            max_age = int(required("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS"))
+        except (ArithmeticError, ValueError) as exc:
+            raise CanaryStartupBlocked("invalid_canary_numeric_setting") from exc
+        if not amount.is_finite() or not cap.is_finite() or amount <= 0 or cap <= 0:
+            raise CanaryStartupBlocked("invalid_canary_amount_or_cap")
+        if amount > cap:
+            raise CanaryStartupBlocked("canary_amount_exceeds_cap")
+        if max_age <= 0:
+            raise CanaryStartupBlocked("invalid_canary_evidence_age")
+        return cls(
+            account_id=account_id,
+            environment=required("BFX_CANARY_ENVIRONMENT"),
+            symbol=required("BFX_CANARY_SYMBOL"),
+            cell=required("BFX_CANARY_CELL"),
+            strategy=required("BFX_CANARY_STRATEGY"),
+            amount_usdt=amount,
+            cap_usdt=cap,
+            max_evidence_age_seconds=max_age,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryEvidence:
+    """Bounded, redacted result of the one allowed canary command."""
+
+    account_id: str
+    environment: str
+    symbol: str
+    cell: str
+    strategy: str
+    amount_usdt: Decimal
+    permit_id: str
+    command_decision_id: str
+    attempt_id: str
+    outcome_kind: str
+    venue_offer_id: str | None
+    outcome_at_ms: int
+    outcome_event_seq: int
+    reconcile_fences: tuple[int, ...]
+    reconcile_observed_at_ms: tuple[int, ...]
+    projection_hash: str
+    venue_db_exposure_diff_usdt: Decimal
+    full_account_snapshot_complete: bool
+    stop_reason: str | None
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> CanaryEvidence:
+        required = tuple(cls.__dataclass_fields__)
+        missing = tuple(name for name in required if name not in value)
+        if missing:
+            raise CanaryStartupBlocked("canary_evidence_missing:" + ",".join(missing))
+        try:
+            fence_values = value["reconcile_fences"]
+            observed_values = value["reconcile_observed_at_ms"]
+            if (
+                not isinstance(fence_values, list | tuple)
+                or isinstance(fence_values, str)
+                or not isinstance(observed_values, list | tuple)
+                or isinstance(observed_values, str)
+            ):
+                raise TypeError("reconcile evidence must be an array")
+            fences = tuple(int(item) for item in fence_values)
+            observed = tuple(int(item) for item in observed_values)
+            amount = Decimal(str(value["amount_usdt"]))
+            exposure_diff = Decimal(str(value["venue_db_exposure_diff_usdt"]))
+            outcome_at_ms = int(str(value["outcome_at_ms"]))
+            outcome_event_seq = int(str(value["outcome_event_seq"]))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise CanaryStartupBlocked("invalid_canary_evidence") from exc
+        venue_offer_id = value["venue_offer_id"]
+        stop_reason = value["stop_reason"]
+        full_account_snapshot_complete = value["full_account_snapshot_complete"]
+        if venue_offer_id is not None and not isinstance(venue_offer_id, str):
+            raise CanaryStartupBlocked("invalid_canary_venue_offer_id")
+        if stop_reason is not None and not isinstance(stop_reason, str):
+            raise CanaryStartupBlocked("invalid_canary_stop_reason")
+        if not isinstance(full_account_snapshot_complete, bool):
+            raise CanaryStartupBlocked("invalid_canary_snapshot_coverage")
+        return cls(
+            account_id=str(value["account_id"]),
+            environment=str(value["environment"]),
+            symbol=str(value["symbol"]),
+            cell=str(value["cell"]),
+            strategy=str(value["strategy"]),
+            amount_usdt=amount,
+            permit_id=str(value["permit_id"]),
+            command_decision_id=str(value["command_decision_id"]),
+            attempt_id=str(value["attempt_id"]),
+            outcome_kind=str(value["outcome_kind"]),
+            venue_offer_id=venue_offer_id,
+            outcome_at_ms=outcome_at_ms,
+            outcome_event_seq=outcome_event_seq,
+            reconcile_fences=fences,
+            reconcile_observed_at_ms=observed,
+            projection_hash=str(value["projection_hash"]),
+            venue_db_exposure_diff_usdt=exposure_diff,
+            full_account_snapshot_complete=full_account_snapshot_complete,
+            stop_reason=stop_reason,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryReadiness:
+    open_uncertainty_count: int
+    projector_lag: int
+    full_account_snapshot_complete: bool
+    reconcile_fences: tuple[int, ...]
+    reconcile_observed_at_ms: tuple[int, ...]
+    observed_at_ms: int
+    persistent_halt: bool
+
+
+def _canary_block(reasons: list[str]) -> None:
+    if reasons:
+        raise CanaryStartupBlocked(",".join(sorted(set(reasons))))
+
+
+def assert_canary_startup(
+    *,
+    profile: CanaryProfile,
+    evidence: CanaryEvidence | None,
+    readiness: CanaryReadiness,
+    configured_cells: tuple[tuple[str, str, str], ...],
+    configured_caps: Mapping[str, Decimal],
+    allocation_cap_usdt: Decimal,
+) -> None:
+    """Fail closed before the existing command gate can construct a live executor."""
+    reasons: list[str] = []
+    expected_cell = (profile.strategy, profile.symbol, profile.cell)
+    if configured_cells != (expected_cell,):
+        reasons.append("canary_scope_mismatch")
+    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
+        reasons.append("canary_cap_mismatch")
+    if allocation_cap_usdt != profile.cap_usdt:
+        reasons.append("canary_allocation_cap_mismatch")
+    if evidence is None:
+        reasons.append("missing_canary_evidence")
+        _canary_block(reasons)
+        return
+    if (
+        evidence.account_id != str(profile.account_id)
+        or evidence.environment != profile.environment
+        or evidence.symbol != profile.symbol
+        or evidence.cell != profile.cell
+        or evidence.strategy != profile.strategy
+    ):
+        reasons.append("canary_identity_or_scope_mismatch")
+    if evidence.amount_usdt != profile.amount_usdt or evidence.amount_usdt > profile.cap_usdt:
+        reasons.append("canary_amount_mismatch")
+    if not evidence.command_decision_id.strip() or not evidence.attempt_id.strip():
+        reasons.append("canary_command_identity_missing")
+    if evidence.outcome_event_seq <= 0:
+        reasons.append("canary_outcome_event_missing")
+    if evidence.outcome_kind != "acknowledged" or not evidence.venue_offer_id:
+        reasons.append("canary_outcome_not_acknowledged")
+    if len(evidence.projection_hash) != 64 or any(
+        char not in "0123456789abcdef" for char in evidence.projection_hash
+    ):
+        reasons.append("invalid_projection_hash")
+    if evidence.venue_db_exposure_diff_usdt != 0:
+        reasons.append("venue_db_exposure_diff")
+    if evidence.stop_reason:
+        reasons.append("canary_evidence_stop_reason")
+    if len(evidence.reconcile_fences) != 2 or len(evidence.reconcile_observed_at_ms) != 2:
+        reasons.append("two_reconcile_cycles_required")
+    elif (
+        evidence.reconcile_fences[0] >= evidence.reconcile_fences[1]
+        or evidence.reconcile_observed_at_ms[0] >= evidence.reconcile_observed_at_ms[1]
+        or evidence.reconcile_observed_at_ms[0] <= evidence.outcome_at_ms
+    ):
+        reasons.append("invalid_reconcile_cycle_order")
+    if readiness.open_uncertainty_count:
+        reasons.append("open_execution_uncertainty")
+    if readiness.projector_lag:
+        reasons.append("projector_lag")
+    if not evidence.full_account_snapshot_complete or not readiness.full_account_snapshot_complete:
+        reasons.append("venue_snapshot_coverage_incomplete")
+    if (
+        readiness.reconcile_fences != evidence.reconcile_fences
+        or readiness.reconcile_observed_at_ms != evidence.reconcile_observed_at_ms
+    ):
+        reasons.append("reconcile_evidence_mismatch")
+    if readiness.observed_at_ms - evidence.outcome_at_ms > profile.max_evidence_age_seconds * 1000:
+        reasons.append("canary_evidence_stale")
+    if not readiness.persistent_halt:
+        reasons.append("persistent_halt_absent")
+    _canary_block(reasons)
+
+
+def assert_canary_pre_command(
+    *,
+    profile: CanaryProfile,
+    readiness: CanaryReadiness,
+    configured_cells: tuple[tuple[str, str, str], ...],
+    configured_caps: Mapping[str, Decimal],
+    allocation_cap_usdt: Decimal,
+) -> None:
+    """Gate the explicit one-shot command before any venue write exists.
+
+    This is intentionally a different contract from ``assert_canary_startup``:
+    a daemon boot must not require a post-command evidence file.  The durable
+    permit and the command runner own the one-shot write boundary; this check
+    only proves that the account is halted, reconciled, and still within scope.
+    """
+    reasons: list[str] = []
+    if configured_cells != ((profile.strategy, profile.symbol, profile.cell),):
+        reasons.append("canary_scope_mismatch")
+    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
+        reasons.append("canary_cap_mismatch")
+    if allocation_cap_usdt != profile.cap_usdt:
+        reasons.append("canary_allocation_cap_mismatch")
+    if readiness.open_uncertainty_count:
+        reasons.append("open_execution_uncertainty")
+    if readiness.projector_lag:
+        reasons.append("projector_lag")
+    if not readiness.full_account_snapshot_complete:
+        reasons.append("venue_snapshot_coverage_incomplete")
+    if not readiness.persistent_halt:
+        reasons.append("persistent_halt_absent")
+    _canary_block(reasons)
+
+
+def load_canary_evidence(path: Path) -> CanaryEvidence:
+    """Load only the bounded evidence fields; raw venue responses are never accepted."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CanaryStartupBlocked("canary_evidence_unavailable") from exc
+    if not isinstance(value, dict):
+        raise CanaryStartupBlocked("invalid_canary_evidence")
+    return CanaryEvidence.from_dict(value)
+
+
+async def collect_canary_readiness(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    environment: str,
+    now_ms: int,
+    after_event_seq: int | None = None,
+    minimum_snapshot_count: int = 2,
+) -> CanaryReadiness:
+    """Read account-local evidence without calling the venue or mutating projections."""
+    if minimum_snapshot_count <= 0:
+        raise ValueError("minimum_snapshot_count must be positive")
+    event_head = int(
+        await session.scalar(
+            select(func.max(EventLogRow.event_seq)).where(
+                EventLogRow.exchange_account_id == account_id,
+                EventLogRow.deployment_environment == environment,
+            )
+        )
+        or 0
+    )
+    projection_heads = list(
+        await session.scalars(
+            select(ProjectionHeadRow.last_event_seq).where(
+                ProjectionHeadRow.exchange_account_id == account_id,
+                ProjectionHeadRow.deployment_environment == environment,
+            )
+        )
+    )
+    projector_lag = (
+        event_head - min(projection_heads) if projection_heads else event_head
+    )
+    open_uncertainty_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ExecutionUncertaintyRow)
+            .where(
+                ExecutionUncertaintyRow.exchange_account_id == account_id,
+                ExecutionUncertaintyRow.deployment_environment == environment,
+                ExecutionUncertaintyRow.state == "open",
+            )
+        )
+        or 0
+    )
+    snapshot_stmt = select(EventLogRow).where(
+        EventLogRow.exchange_account_id == account_id,
+        EventLogRow.deployment_environment == environment,
+        EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+    )
+    if after_event_seq is not None:
+        snapshot_stmt = snapshot_stmt.where(EventLogRow.event_seq > after_event_seq)
+    snapshot_rows = list(
+        await session.scalars(
+            snapshot_stmt.order_by(EventLogRow.event_seq.desc()).limit(minimum_snapshot_count)
+        )
+    )
+    snapshot_rows.reverse()
+    snapshots: list[VenueSnapshotObserved] = []
+    for row in snapshot_rows:
+        try:
+            event = deserialize_stored_event(row)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(event, VenueSnapshotObserved)
+            and event.account_id == str(account_id)
+            and event.environment == environment
+        ):
+            snapshots.append(event)
+    complete_snapshot_coverage = (
+        len(snapshot_rows) >= minimum_snapshot_count
+        and len(snapshots) == len(snapshot_rows)
+        and all(
+            event.coverage.active_offers_complete
+            and event.coverage.active_credits_complete
+            and event.coverage.wallets_complete
+            for event in snapshots
+        )
+    )
+    halted = await session.scalar(
+        select(TradingHaltRow.halted)
+        .where(
+            TradingHaltRow.exchange_account_id == account_id,
+            TradingHaltRow.deployment_environment == environment,
+        )
+        .order_by(TradingHaltRow.id.desc())
+        .limit(1)
+    )
+    return CanaryReadiness(
+        open_uncertainty_count=open_uncertainty_count,
+        projector_lag=max(0, projector_lag),
+        full_account_snapshot_complete=complete_snapshot_coverage,
+        reconcile_fences=tuple(int(row.event_seq) for row in snapshot_rows if row.event_seq),
+        reconcile_observed_at_ms=tuple(event.query_finished_at_ms for event in snapshots),
+        observed_at_ms=now_ms,
+        persistent_halt=halted is True,
+    )
+
+
+async def load_account_bootstrap(
+    session: AsyncSession,
+    *,
+    deployment_environment: str,
+    allocation_cap_usdt: Decimal,
+    phase: Phase | None = None,
+) -> AccountBootstrap:
+    """Resolve one explicit account and its vault/config material at boot.
+
+    This function is deliberately the sole UUID/env parsing seam.  All daemon
+    services receive the resulting canonical account string from the returned
+    object; no component can silently fall back to a process-global realm.
+    """
+    canonical_id = _require_env("BFX_EXCHANGE_ACCOUNT_ID")
+    exchange_account_id = UUID(canonical_id)
+    if phase is not None:
+        AccountBootstrap.reject_legacy_realm(phase=phase)
+
+    try:
+        account = await get_exchange_account(
+            session,
+            exchange_account_id=exchange_account_id,
+            for_command=True,
+        )
+    except AccountNotFound as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} is not provisioned"
+        ) from exc
+    except AccountRetired as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} must be active for daemon boot"
+        ) from exc
+    if account.lifecycle_status != "active":
+        raise ConfigurationError(
+            f"exchange account {canonical_id} must be active for daemon boot"
+        )
+    try:
+        kek = load_kek()
+        credentials = await load_account_credentials(
+            session, exchange_account_id=exchange_account_id, kek=kek
+        )
+    except AccountCredentialNotConfiguredError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    except VaultKeyMismatchError as exc:
+        raise ConfigurationError(
+            f"exchange account {canonical_id} credential vault cannot be opened"
+        ) from exc
+    except VaultNotConfiguredError as exc:
+        raise ConfigurationError("BFX_VAULT_KEK is required for daemon boot") from exc
+    except Exception as exc:
+        # VaultNotConfiguredError and other crypto/config errors must not leak
+        # an implementation-specific traceback through the boot contract.
+        if isinstance(exc, (ValueError,)):
+            raise ConfigurationError(str(exc)) from exc
+        raise
+
+    draft = await load_account_config_draft(
+        session, exchange_account_id=exchange_account_id
+    )
+    return AccountBootstrap(
+        exchange_account_id=exchange_account_id,
+        credentials=credentials,
+        deployment_environment=deployment_environment,
+        allocation_cap_usdt=allocation_cap_usdt,
+        config_draft=dict(draft.config) if draft is not None else None,
+        config_revision=draft.revision if draft is not None else None,
+    )
 
 
 @dataclass
@@ -236,6 +744,7 @@ class Daemon:
     bitfinex: BitfinexREST
     session_factory: async_sessionmaker[AsyncSession]
     # Phase 4.2 Task 20: execution + safety wiring.
+    account_bootstrap: AccountBootstrap
     executor: ExecutorPort
     safety_chain: SafetyGuardChain
     account_ctx: AccountContext
@@ -747,7 +1256,13 @@ class _StubDivergenceSource:
         return 0.0
 
 
-_CANARY_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat", "allocation_cap")
+_CANARY_REQUIRED_HARD = (
+    "manual_kill",
+    "auth_health",
+    "heartbeat",
+    "allocation_cap",
+    "buying_power",
+)
 _CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
@@ -803,6 +1318,21 @@ async def build_daemon(
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    try:
+        allocation_cap = Decimal(
+            os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
+        )
+    except Exception as exc:
+        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
+    if not allocation_cap.is_finite() or allocation_cap < 0:
+        raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
+    async with session_factory() as bootstrap_session:
+        account_bootstrap = await load_account_bootstrap(
+            bootstrap_session,
+            deployment_environment=config.deployment_environment.value,
+            allocation_cap_usdt=allocation_cap,
+            phase=config.phase,
+        )
 
     probe = HealthProbe()
     # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
@@ -897,22 +1427,13 @@ async def build_daemon(
                     lookback=lookback,
                 )
 
-    # ── Phase 4.2 Task 20 wiring ─────────────────────────────────────────
-    # AccountContext: 4.2 single hardcoded account from env. Phase 5+ SaaS
-    # extends to per-tenant context loaded from vault.
-    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
-    credentials = Credentials(
-        api_key=_require_env("BFX_API_KEY"),
-        api_secret=_require_env("BFX_API_SECRET"),
-    )
-    allocation_cap = Decimal(
-        os.environ.get("BFX_ALLOCATION_CAP_USDT", "500"),
-    )
-    account_ctx = AccountContext(
-        account_id=account_id,
-        credentials=credentials,
-        allocation_cap_usdt=allocation_cap,
-    )
+    # ── Halt 1 account bootstrap ────────────────────────────────────────
+    # The immutable UUID, vault credential and optional config draft were
+    # loaded before any venue client or worker was constructed. Every service
+    # below receives this one canonical identity; no env realm is read here.
+    account_id = account_bootstrap.account_id
+    credentials = account_bootstrap.credentials
+    account_ctx = account_bootstrap.to_context()
     # ONE monotonic µs nonce shared by every auth client on this single API key.
     # Bitfinex nonces are per-key across REST *and* WS, so mixed scales /
     # independent time-based providers get "nonce: small" rejections — that is
@@ -946,6 +1467,57 @@ async def build_daemon(
         os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
     )
     safety_cfg = load_safety_config(safety_cfg_path)
+    assert_canary_guard_invariant(config.phase, safety_cfg)
+    hg = safety_cfg.hard_guards
+    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+
+    # This is deliberately before build_executor() and before any live recovery
+    # loop is constructed.  The existing AccountCommandGate remains the only
+    # route to submit; this gate invokes the same read-only verifier as
+    # run_canary_preflight.py rather than trusting a structurally valid report.
+    canary_halt_authorization: object | None = None
+    if (
+        config.phase is Phase.CANARY
+        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
+    ):
+        profile = CanaryProfile.from_environ(os.environ)
+        canary_halt_authorization = object()
+        if profile.environment != env_str or profile.account_id != account_bootstrap.exchange_account_id:
+            raise CanaryStartupBlocked("canary_identity_or_environment_mismatch")
+        # A post-command JSON report is never a daemon boot input.  The daemon
+        # admits only the pre-command durable permit/readiness contract; the
+        # report is generated and verified after the venue boundary.
+        evidence = None
+        halt2_evidence_path = os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "").strip()
+        if not halt2_evidence_path:
+            raise CanaryStartupBlocked("missing_halt2_evidence")
+        image_digest = os.environ.get("BFX_EXPECTED_IMAGE_DIGEST", "").strip()
+        projector_version = os.environ.get("BFX_PROJECTOR_VERSION", "").strip()
+        if not image_digest or not projector_version:
+            raise CanaryStartupBlocked("missing_halt2_runtime_identity")
+        # Local imports keep the production package free of a module-cycle with
+        # the operator CLI while making its one verifier authoritative here too.
+        from scripts.halt2_cutover import _load_evidence
+        from scripts.run_canary_preflight import verify_canary_preflight
+
+        halt2_evidence = _load_evidence(Path(halt2_evidence_path))
+        async with session_factory() as canary_session:
+            await verify_canary_preflight(
+                session=canary_session,
+                profile=profile,
+                halt2_evidence=halt2_evidence,
+                config_artifact=safety_cfg_path,
+                image_digest=image_digest,
+                projector_version=projector_version,
+                environ=os.environ,
+                evidence=evidence,
+                configured_cells=tuple(
+                    (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
+                ),
+                configured_caps=hg.allocation_cap.caps,
+                allocation_cap_usdt=allocation_cap,
+                now_ms=now_ms_utc(),
+            )
 
     # L2 loss-limiter source: account NAV (available + reserved + realized)
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
@@ -982,14 +1554,11 @@ async def build_daemon(
     # operators to disable hard guards in paper/shadow is bounded; 4.4 canary
     # spec will need an additional invariant requiring all hard guards on.
     # Canary (real money) must not boot with a safety guard silently off.
-    assert_canary_guard_invariant(config.phase, safety_cfg)
-    hg = safety_cfg.hard_guards
     cg = safety_cfg.calibrated_guards
     # Phase 2: every configured currency must have an explicit cap (and >0 under
     # canary) — config-fatal otherwise. Then log the effective cap per symbol so
     # the boot log is the authoritative record of how much real money each
     # currency may deploy.
-    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
     log.info(
         "effective_cap_per_symbol %s",
         # assert_caps_invariant (above) already proved every configured symbol has
@@ -1037,7 +1606,20 @@ async def build_daemon(
 
     guards: list[GuardRule] = []
     if hg.manual_kill.enabled:
-        guards.append(ManualKillGuard(halt_store=halt_store))
+        guards.append(
+            ManualKillGuard(
+                halt_store=halt_store,
+                canary_halt_authorization=canary_halt_authorization,
+            )
+        )
+    # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
+    # must be read before the reconciler computes an economic gap.  It is not
+    # configurable off in canary/live because an unreadable projection fails
+    # closed inside the guard.
+    guards.append(UncertaintyGuard(
+        reader=DatabaseUncertaintyReader(session_factory),
+        deployment_environment=env_str,
+    ))
     if hg.auth_health.enabled:
         guards.append(AuthHealthGuard(probe=probe))
     if hg.heartbeat.enabled:
@@ -1145,6 +1727,7 @@ async def build_daemon(
             offer_registry=offer_registry,
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
+            uncertainty_handler=ledger.on_reservation_unknown,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1167,6 +1750,7 @@ async def build_daemon(
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
             action_grace_ms=120_000,
+            uncertainty_handler=ledger.on_reservation_unknown,
         )
 
     fill_tracker: RestPollingFillTracker | None = None
@@ -1221,22 +1805,81 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
-    wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
-        HeartbeatMiddleware(
-            ReservationEmittingMiddleware(
-                executor,
-                bus=bus,
-                persister=persister,
-                is_simulated=spec.is_simulated,
-            ),
-            probe=probe,
+    reservation_executor: ExecutorPort = ReservationEmittingMiddleware(
+        executor,
+        bus=bus,
+        persister=persister,
+        is_simulated=spec.is_simulated,
+        uncertainty_handler=(
+            ledger.on_reservation_unknown if not spec.is_simulated else None
         ),
+        safety_evaluator=safety_chain,
+    )
+
+    # Halt 2's only live command path is a durable one-shot permit.  The
+    # scheduler remains halted by ManualKillGuard; if a separately approved
+    # READY candidate reaches this executor, the permit is consumed before the
+    # venue call and the persistent halt is reasserted in all terminal paths.
+    if (
+        config.phase is Phase.CANARY
+        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
+        == "bitfinex_live"
+    ):
+        canary_profile = CanaryProfile.from_environ(os.environ)
+        raw_permit_id = os.environ.get("BFX_CANARY_PERMIT_ID", "").strip()
+        try:
+            permit_id = UUID(raw_permit_id)
+        except ValueError as exc:
+            raise CanaryStartupBlocked("invalid_canary_permit_id") from exc
+        canary_scope = CanaryPermitScope(
+            account_id=canary_profile.account_id,
+            environment=canary_profile.environment,
+            symbol=canary_profile.symbol,
+            cell=canary_profile.cell,
+            strategy=canary_profile.strategy,
+            amount_usdt=canary_profile.amount_usdt,
+        )
+        if canary_halt_authorization is None:
+            raise CanaryStartupBlocked("missing_canary_halt_authorization")
+        permit_repository = CanaryPermitRepository(session_factory)
+
+        async def _consume_canary_permit() -> object:
+            return await permit_repository.consume(permit_id, canary_scope)
+
+        async def _record_canary_outcome(decision_id: str) -> object:
+            return await permit_repository.bind_outcome(
+                permit_id,
+                canary_scope,
+                execution_decision_id=decision_id,
+            )
+
+        async def _reassert_canary_halt() -> None:
+            current_halt = await halt_store.current()
+            if current_halt is None or not current_halt.halted:
+                await halt_store.set_halted(
+                    True,
+                    reason="halt2_canary_command_complete",
+                    actor="system:canary-one-shot",
+                )
+
+        reservation_executor = CanaryOneShotGate(
+            reservation_executor,
+            scope=canary_scope,
+            halt_authorization=canary_halt_authorization,
+            consume_permit=_consume_canary_permit,
+            record_outcome=_record_canary_outcome,
+            reassert_halt=_reassert_canary_halt,
+        )
+
+    wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
+        HeartbeatMiddleware(reservation_executor, probe=probe),
         metrics=metrics,
     )
     # OTel span "executor.submit" — enabled-only, stacked OUTSIDE metrics so
     # one span covers the full chain. Transparent: result/exception unchanged.
     if tracing.enabled:
         wrapped_executor = TracingSubmitMiddleware(wrapped_executor, tracing=tracing)
+
 
     # Last-submit-attempt slot read by GET /admin/trading-status. Built
     # unconditionally so the endpoint always has a `started_at` to report;
@@ -1556,12 +2199,8 @@ async def build_daemon(
     auth_ws: BitfinexAuthWSClient | None = None
     ws_dispatcher: BitfinexLiveWSDispatcher | None = None
     if spec.ws_client_enabled:
-        creds = Credentials(
-            api_key=_require_env("BFX_API_KEY"),
-            api_secret=_require_env("BFX_API_SECRET"),
-        )
         auth_ws = BitfinexAuthWSClient(
-            creds=creds,
+            creds=credentials,
             nonce_provider=bfx_nonce,
             on_resync_needed=(
                 periodic_reconcile.request_resync
@@ -1603,6 +2242,7 @@ async def build_daemon(
 
     return Daemon(
         config=config,
+        account_bootstrap=account_bootstrap,
         registry=registry,
         candle_q=candle_q,
         diagnostics=diagnostics,

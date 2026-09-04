@@ -34,11 +34,14 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, ReconcileResult
+from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+
+from .conftest import make_reservation_ref
 
 # The `domain_chain` fixture (real DomainEventBus + real PaperPositionLedger +
 # real OfferRegistry, fully subscriber-wired) is re-exported from the phase4_4a
@@ -115,6 +118,10 @@ class _StubStore:
         self.appended.append(event)
         return True
 
+    async def append_snapshot(self, _session: Any, event: Any) -> SnapshotDrift:
+        self.appended.append(event)
+        return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
+
 
 class _EmptyAuthRest:
     """Venue snapshot is EMPTY — the offer has disappeared from the venue."""
@@ -123,6 +130,16 @@ class _EmptyAuthRest:
         self, *, ctx: Any, symbol: str = "fUSD",
     ) -> list[Any]:
         return []
+
+    async def get_active_funding_credits(
+        self, *, ctx: Any, symbol: str = "fUSD",
+    ) -> list[Any]:
+        return []
+
+    async def get_funding_available(
+        self, *, ctx: Any, currency: str,
+    ) -> Decimal:
+        return Decimal("0")
 
 
 class _FakeProbe:
@@ -151,7 +168,9 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    symbol="fUST"))
+        symbol="fUST",
+        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
+    ))
 
     # Precondition: exposure MUST be 150 before reconcile, else the test proves nothing.
     assert ledger.current_exposure("fUST") == Decimal("150")
@@ -165,7 +184,8 @@ async def test_periodic_reconcile_converges_ledger_with_ws_dead(
         cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
         state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1,
+        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
+        execution_decision_id=f"reconcile-test-{_CID}",
     )
 
     # 2. REAL BootRecovery: empty venue snapshot + the one local CLAIMED row,
@@ -225,13 +245,16 @@ async def test_reconcile_run_reports_the_release_as_divergence(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    symbol="fUST"))
+        symbol="fUST",
+        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
+    ))
 
     claim_row = OfferClaimRow(
         cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
         state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1,
+        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
+        execution_decision_id=f"reconcile-test-{_CID}",
     )
 
     recovery = BootRecovery(

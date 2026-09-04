@@ -7,15 +7,29 @@ import logging
 from typing import cast
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from bfx_funding_bot.core.db import _prepare_engine_kwargs
 from bfx_funding_bot.core.errors import WriterLockUnacquired
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
 
 log = logging.getLogger(__name__)
 
 _NAMESPACE = "bfx-writer"
+_TRANSACTION_NAMESPACE = "bfx-writer-xact"
+
+
+def _derive_lock_key(namespace: str, account_id: str, env: str) -> int:
+    digest = hashlib.blake2b(
+        f"{namespace}:{account_id}:{env}".encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 def derive_lock_key(account_id: str, env: str) -> int:
@@ -23,10 +37,39 @@ def derive_lock_key(account_id: str, env: str) -> int:
 
     NOTE: never use builtin hash() — it is salted per process (PYTHONHASHSEED).
     """
-    digest = hashlib.blake2b(
-        f"{_NAMESPACE}:{account_id}:{env}".encode(), digest_size=8
-    ).digest()
-    return int.from_bytes(digest, "big", signed=True)
+    return _derive_lock_key(_NAMESPACE, account_id, env)
+
+
+def derive_transaction_lock_key(account_id: str, env: str) -> int:
+    """Derive the transaction-lock key in a namespace distinct from WriterLock.
+
+    The daemon-lifetime lock lives on a dedicated connection.  Reusing its key
+    for ``pg_advisory_xact_lock`` would make every event transaction wait on the
+    daemon's own session lock; a separate namespace composes both guards while
+    preserving the same canonical account/environment identity.
+    """
+    return _derive_lock_key(_TRANSACTION_NAMESPACE, account_id, env)
+
+
+async def acquire_transaction_lock(
+    session: AsyncSession,
+    *,
+    account_id: str,
+    deployment_environment: str,
+) -> int | None:
+    """Acquire the account/environment transaction advisory lock.
+
+    PostgreSQL owns the real serialization boundary.  SQLite has no advisory
+    lock primitive and is intentionally a pure/unit-test fallback; production
+    callers use canonical UUID strings before reaching this helper.
+    """
+    canonical_account_id = account_id_canonical(account_id)
+    bind = session.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return None
+    key = derive_transaction_lock_key(canonical_account_id, deployment_environment)
+    await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+    return key
 
 
 class WriterLock:

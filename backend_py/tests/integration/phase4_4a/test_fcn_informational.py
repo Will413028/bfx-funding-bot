@@ -16,7 +16,7 @@ from bfx_funding_bot.external.bitfinex.auth_ws import FcnEvent
 from bfx_funding_bot.external.bitfinex.ws_dispatcher import BitfinexLiveWSDispatcher
 from bfx_funding_bot.modules.execution.events import OrderFilled, ReservationClaimed
 
-from .conftest import ScriptedWSClient
+from .conftest import ScriptedWSClient, make_reservation_ref
 
 
 class _EventCapture:
@@ -65,7 +65,9 @@ async def test_fcn_before_or_after_claim_produces_no_orderfilled(
         cid=42, venue_offer_id=voi, size_usdt=Decimal("100"),
         signal_correlation_id=sig_id, account_id="default", is_simulated=False,
         occurred_at_ms=550,
-    symbol="fUSD"))
+        symbol="fUSD",
+        reservation_ref=make_reservation_ref(42, sig_id, voi),
+    ))
     await asyncio.sleep(0.7)
 
     stop.set()

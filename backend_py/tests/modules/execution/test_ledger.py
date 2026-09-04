@@ -10,6 +10,7 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
+    ReservationUnknown,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 
@@ -71,6 +72,29 @@ async def test_handler_processes_matching_account_id_unchanged() -> None:
         symbol="fUST", reservation_ref=_ref(1, scid, "x"))
     await ledger.on_reservation_claimed(matching)
     assert ledger.current_exposure("fUST") == Decimal("100")
+
+
+async def test_unknown_submit_opens_symbol_block_and_is_counted_pessimistically() -> None:
+    ledger = PaperPositionLedger(account_id="default")
+    scid = uuid4()
+    event = ReservationUnknown(
+        cid=9,
+        size_usdt=Decimal("100"),
+        signal_correlation_id=scid,
+        account_id="default",
+        is_simulated=False,
+        reason="timeout",
+        symbol="fUST",
+        reservation_ref=_ref(9, scid, "unknown-9"),
+    )
+
+    await ledger.on_reservation_unknown(event)
+    await ledger.on_reservation_unknown(event)  # at-least-once delivery is safe
+
+    assert ledger.uncertain_exposure("fUST") == Decimal("100")
+    assert ledger.current_exposure("fUST") == Decimal("100")
+    assert ledger.is_uncertain("fUST") is True
+    assert ledger.is_uncertain("fUSD") is False
 
 
 async def test_available_balance_default_zero():

@@ -1,7 +1,8 @@
 "use server";
 
 import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
+import { accountScopedPath } from "@/lib/api-client";
+import { auth, getOperatorMfaSessionAccess } from "@/lib/auth";
 import type { ApiKey } from "@/types";
 
 const API_URL = process.env.API_URL as string;
@@ -12,16 +13,28 @@ const API_URL = process.env.API_URL as string;
  * /api/proxy hop. The web-API envelope-encrypts it before persisting.
  */
 export async function createApiKeyAction(input: {
+  exchangeAccountId: string;
   label: string;
   apiKey: string;
   apiSecret: string;
 }): Promise<ApiKey> {
-  // Mint the bearer token BEFORE issuing the secret-bearing request. If the
-  // token is unavailable (getToken throws or returns none) we MUST fail fast
-  // and never transmit the plaintext apiSecret on an unauthenticated request.
+  // Validate the server-owned per-session MFA marker before minting a JWT or
+  // sending the plaintext secret directly to the backend.
+  const requestHeaders = await headers();
+  const operatorUserId = process.env.BFX_OPERATOR_USER_ID?.trim();
+  if (!operatorUserId) throw new Error("authTokenUnavailable");
+
+  const access = await getOperatorMfaSessionAccess(
+    requestHeaders,
+    operatorUserId,
+  );
+  if (!access.allowed) throw new Error("authTokenUnavailable");
+
+  // Mint the bearer token only after MFA authorization succeeds. If token
+  // minting fails, never transmit the plaintext apiSecret unauthenticated.
   let token: string | undefined;
   try {
-    const authRes = await auth.api.getToken({ headers: await headers() });
+    const authRes = await auth.api.getToken({ headers: requestHeaders });
     token = authRes?.token;
   } catch {
     token = undefined;
@@ -31,14 +44,21 @@ export async function createApiKeyAction(input: {
     throw new Error("authTokenUnavailable");
   }
 
-  const res = await fetch(new URL("/api/v1/api-keys", API_URL).toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+  const { exchangeAccountId, ...payload } = input;
+  const res = await fetch(
+    new URL(
+      `/api/v1${accountScopedPath(exchangeAccountId, "/credentials")}`,
+      API_URL,
+    ).toString(),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(input),
-  });
+  );
 
   const text = await res.text();
   if (!res.ok) {

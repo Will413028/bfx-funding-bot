@@ -16,19 +16,20 @@ model — see the explicit "never leaks" tests in tests/test_public_router.py.
 """
 from __future__ import annotations
 
-import logging
 import os
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.schemas import (
     PublicProofSummaryResponse,
@@ -37,11 +38,25 @@ from bfx_funding_bot.modules.api.schemas import (
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 
-log = logging.getLogger(__name__)
-
 _CACHE_CONTROL = "public, max-age=3600"
 _DAYS_PER_YEAR = Decimal("365")
 _HUNDRED = Decimal("100")
+
+
+def _public_exchange_account_id() -> UUID:
+    """Resolve the explicitly configured public proof account.
+
+    The anonymous proof endpoint cannot receive a membership path parameter,
+    but it still must never silently select ``default`` or a legacy realm.
+    """
+    raw = os.environ.get("BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", "").strip()
+    try:
+        return UUID(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="public_account_not_configured",
+        ) from exc
 
 
 def _dec_str(value: Decimal) -> str:
@@ -104,17 +119,8 @@ def _aggregate_weeks(rows: list[AttributionWeeklyRow]) -> list[PublicWeeklyPoint
 
 
 def build_public_router() -> APIRouter:
-    """Public marketing router — no auth, no rate limiter (see module
-    docstring). One process-wide realm filter, same env vars as
-    modules/api/attribution.py, so the public series matches the operator
-    dashboard's default-realm data."""
+    """Public marketing router — no auth and no per-user rate limiter."""
     router = APIRouter(prefix="/api/v1/public", tags=["public"])
-    account_id = os.environ.get("BFX_ACCOUNT_ID", "default")
-    deployment_environment = os.environ.get("BFX_DEPLOYMENT_ENV", "prod")
-    log.info(
-        "public_router filtering realm account_id=%s deployment_environment=%s",
-        account_id, deployment_environment,
-    )
 
     @router.get("/proof-summary")
     async def proof_summary(
@@ -122,10 +128,18 @@ def build_public_router() -> APIRouter:
         session: AsyncSession = Depends(get_session),  # noqa: B008
     ) -> dict[str, object]:
         response.headers["Cache-Control"] = _CACHE_CONTROL
+        account_id = _public_exchange_account_id()
+        try:
+            deployment_environment = require_deployment_environment()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="deployment_environment_not_configured",
+            ) from exc
         stmt = (
             select(AttributionWeeklyRow)
             .where(
-                AttributionWeeklyRow.account_id == account_id,
+                AttributionWeeklyRow.exchange_account_id == account_id,
                 AttributionWeeklyRow.deployment_environment == deployment_environment,
             )
             .order_by(AttributionWeeklyRow.week_start_ms)

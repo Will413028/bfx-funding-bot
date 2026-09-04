@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import (
     JSON,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -42,6 +44,9 @@ class DiagnosticsRow(Base):
 
     id: Mapped[int] = mapped_column(_BIG_PK, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
@@ -51,5 +56,5 @@ class DiagnosticsRow(Base):
     )
 
     __table_args__ = (
-        Index("idx_diagnostics_acct_occurred", "account_id", "occurred_at"),
+        Index("idx_diagnostics_acct_occurred", "exchange_account_id", "occurred_at"),
     )

@@ -24,12 +24,31 @@ export interface User {
 
 // ── API Key ──
 
+/**
+ * Account credential lifecycle as returned by the account-scoped API.
+ * `unverified` is retained for legacy rows during the staged contract
+ * migration; new credentials start in `pending` and are fail-closed until a
+ * successful permission check promotes them to `verified`.
+ */
+export type ApiKeyStatus =
+  | "pending"
+  | "verified"
+  | "unverified"
+  | "failed"
+  | "revoked"
+  | "retired";
+
 export interface ApiKey {
   id: string;
+  exchangeAccountId: string;
   label: string;
   apiKey: string;
   apiSecret: string; // always "****" (masked by backend)
-  exchangeStatus: string; // "verified" | "unverified" | "failed"
+  /** Account credential lifecycle/verification status. */
+  status: ApiKeyStatus;
+  /** Legacy response field kept only while the contract migration is staged. */
+  exchangeStatus?: string;
+  verifiedAt?: string | null;
   lastVerifyError?: string | null; // reason the last verify failed (when exchangeStatus is "failed")
   createdAt: string;
   fundingBalance?: {
@@ -39,9 +58,17 @@ export interface ApiKey {
   };
 }
 
+export interface ExchangeAccount {
+  exchangeAccountId: string;
+  venue: string;
+  label: string;
+  lifecycleStatus: "active" | "halted";
+  role: "owner" | "operator" | "viewer";
+}
+
 export interface VerifyResult {
-  status: string; // "verified" | "failed"
-  error?: string;
+  status: ApiKeyStatus;
+  error?: string | null;
   fundingBalance?: {
     currency: string;
     balance: number;
@@ -76,8 +103,10 @@ export interface StrategyConfig {
 
 export interface UserConfig {
   id: string;
-  userId: string;
+  exchangeAccountId: string;
   config: StrategyConfig;
+  revision: number;
+  source: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -94,7 +123,10 @@ export type ExecutionEventType =
   | "RESERVATION_FAILED"
   | "ORDER_FILL"
   | "RESERVATION_RELEASED"
-  | "CREDIT_CLOSED";
+  | "CREDIT_CLOSED"
+  | "UNCERTAINTY_BOUND_TO_VENUE_OFFER"
+  | "UNCERTAINTY_MARKED_NOT_ACCEPTED"
+  | "UNCERTAINTY_MANUALLY_RESOLVED";
 
 /** GET /positions — per-symbol position_state ledger projection. */
 export interface Position {
@@ -150,6 +182,59 @@ export interface ExecutionEventsPagination {
 export interface ExecutionEventsResponse {
   data: ExecutionEvent[];
   pagination: ExecutionEventsPagination;
+}
+
+// ── Execution uncertainties (operator resolution) ──
+
+export type UncertaintyKind =
+  | "submit_outcome_unknown"
+  | "unattributed_venue_offer"
+  | "unsupported_venue_exposure";
+
+export type UncertaintyState = "open" | "resolved";
+
+/** Deliberately bounded values exposed by the backend operator DTO. */
+export interface UncertaintyEvidenceSummary {
+  outcomeReason?: string | null;
+  observedAtMs?: number | null;
+  candidateCount?: number | null;
+  venueOfferId?: string | null;
+  status?: string | null;
+  coverage?: Record<string, boolean>;
+}
+
+export interface UncertaintyBlockedScope {
+  exchangeAccountId: string;
+  environment: string;
+  symbol: string;
+}
+
+/** Latest server-derived evidence that can authorize an operator resolution. */
+export interface UncertaintyResolutionContext {
+  reconcileEventSeq: number | null;
+  queryStartedAtMs: number | null;
+  queryFinishedAtMs: number | null;
+  candidateCount: number | null;
+  candidateVenueOfferIds: string[];
+  unavailableReason: string | null;
+}
+
+/** Account/environment/symbol-scoped execution block. */
+export interface Uncertainty {
+  uncertaintyId: string;
+  kind: UncertaintyKind;
+  symbol: string;
+  /** Decimal string (venue-native intended amount). */
+  intendedAmount: string;
+  state: UncertaintyState;
+  openedEventSeq: number;
+  reconcileEventSeq: number | null;
+  resolvedEventSeq: number | null;
+  evidenceSummary: UncertaintyEvidenceSummary;
+  blockedScope: UncertaintyBlockedScope;
+  resolutionContext: UncertaintyResolutionContext | null;
+  resolvedByOperatorId?: string | null;
+  resolutionReason?: string | null;
 }
 
 // ── Attribution ──

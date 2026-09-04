@@ -14,6 +14,8 @@ const serverEnvSchema = clientEnvSchema.extend({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().min(1),
   PASSKEY_RP_ID: z.string().min(1),
+  BFX_OPERATOR_USER_ID: z.string().trim().min(1),
+  BFX_OPERATOR_ROLE: z.literal("admin"),
 });
 
 function parseEnv() {
@@ -55,4 +57,7 @@ function parseEnv() {
   return result.data;
 }
 
-export const env = parseEnv();
+// This module is imported for its fail-fast startup side effect by
+// `instrumentation.ts`; keep the parsed object private so it cannot become a
+// second, stale configuration source for application code.
+parseEnv();

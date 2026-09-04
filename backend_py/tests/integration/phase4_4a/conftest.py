@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import UUID
 
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_ws import BfxWSEvent
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
     CancelRequested,
     OrderFilled,
@@ -21,6 +23,22 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
+
+
+def make_reservation_ref(
+    cid: int,
+    signal_correlation_id: UUID,
+    venue_offer_id: str,
+    *,
+    execution_decision_id: str | None = None,
+) -> ReservationRef:
+    """Build the explicit correlation required by live lifecycle events."""
+    return ReservationRef(
+        execution_decision_id=execution_decision_id or f"phase4-4a-test-{cid}",
+        cid=cid,
+        signal_correlation_id=signal_correlation_id,
+        venue_offer_id=venue_offer_id,
+    )
 
 
 class StubEventSink:

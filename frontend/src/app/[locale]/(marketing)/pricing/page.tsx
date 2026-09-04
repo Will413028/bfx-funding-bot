@@ -100,7 +100,7 @@ export default async function PricingPage() {
             </ul>
 
             <Link
-              href="/register"
+              href="/login"
               className={`mt-8 rounded-lg px-4 py-2.5 text-center font-medium text-sm transition-colors active:scale-[0.98] ${
                 plan.recommended
                   ? "bg-white text-zinc-950 hover:bg-zinc-200"

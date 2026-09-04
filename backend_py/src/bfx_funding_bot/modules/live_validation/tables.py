@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, Text, func
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -22,7 +24,10 @@ class AttributionWeeklyRow(Base):
     __tablename__ = "attribution_weekly"
 
     deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, nullable=True
+    )
     cell: Mapped[str] = mapped_column(Text, primary_key=True)
     week_start_ms: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
@@ -53,7 +58,10 @@ class ConfigRegimeRow(Base):
     __tablename__ = "config_regime"
 
     deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, nullable=True
+    )
     recorded_at_ms: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
     )

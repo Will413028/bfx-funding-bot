@@ -80,31 +80,31 @@
 **Interfaces:**
 - ExchangeAccount.id: UUID, venue: str, label: str, lifecycle_status: Literal["active","halted","retired"], created_at, retired_at; ID is immutable and hard delete is not exposed.
 - ExchangeAccountMembership(exchange_account_id: UUID, user_id: str, role: Literal["owner","operator","viewer"]) uses composite primary key and unique (exchange_account_id,user_id).
-- ExchangeAccountCredential.id: UUID, exchange_account_id: UUID, venue: str, label, encrypted envelope fields, key_version, lifecycle_status: Literal["active","revoked","retired"], verification timestamps; at most one active credential per account/venue.
+- ExchangeAccountCredential.id: UUID, exchange_account_id: UUID, venue: str, label, encrypted envelope fields, key_version, lifecycle_status: Literal["pending","active","revoked","retired"], verification timestamps; multiple staged rows are allowed but at most one successfully verified active credential exists per account/venue.
 - AccountConfigDraft.id: UUID, exchange_account_id: UUID, config: dict[str, object], revision: int, source: str, created/updated timestamps; source is user_configs for migrated rows and no daemon reader is exported.
 - account_id_canonical(value: UUID | str) -> str returns lowercase hyphenated UUID and is the only AAD input for new credentials.
 
-- [ ] **Step 1: Write failing model/domain tests**
+- [x] **Step 1: Write failing model/domain tests**
 
 Cover immutable ID assignment, role validation, one active credential invariant, config revision increment, UUID canonical AAD, and retired account rejection for new commands.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/accounts/test_exchange_accounts.py -q
 
 Expected: FAIL because the new ORM rows and services do not exist.
 
-- [ ] **Step 3: Implement rows and pure domain checks**
+- [x] **Step 3: Implement rows and pure domain checks**
 
 Add the rows without removing legacy models. Keep cross-schema FKs migration-owned so sqlite unit fixtures remain usable; service methods must accept AsyncSession and explicit UUID. Raise AccountNotFound, AccountRetired, MembershipDenied, and ActiveCredentialConflict domain errors.
 
-- [ ] **Step 4: Run focused tests, mypy and ruff**
+- [x] **Step 4: Run focused tests, mypy and ruff**
 
 Run: cd backend_py && uv run pytest tests/modules/accounts/test_exchange_accounts.py -q && uv run mypy src/bfx_funding_bot/modules/accounts && uv run ruff check src/bfx_funding_bot/modules/accounts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit the identity domain**
+- [x] **Step 5: Commit the identity domain**
 
 ~~~bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/tables.py backend_py/src/bfx_funding_bot/modules/accounts/exchange_accounts.py backend_py/tests/modules/accounts/test_exchange_accounts.py
@@ -125,27 +125,27 @@ git commit -m "feat: add exchange account identity domain"
 - Add indexes on (exchange_account_id, deployment_environment) and unique constraints only where existing duplicate preflight proves safe; no silent deduplication.
 - Downgrade drops only newly-added objects and is refused when any identity row has dependent data.
 
-- [ ] **Step 1: Write failing migration metadata tests**
+- [x] **Step 1: Write failing migration metadata tests**
 
 Assert table names, UUID column types, no ON DELETE CASCADE on money FKs, revision linkage, and downgrade refusal when dependencies exist.
 
-- [ ] **Step 2: Run migration tests and verify failure**
+- [x] **Step 2: Run migration tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/accounts/test_identity_migration.py tests/integration/test_exchange_account_migration.py -m integration -q
 
 Expected: FAIL because revision and identity metadata are absent.
 
-- [ ] **Step 3: Implement additive Alembic revision**
+- [x] **Step 3: Implement additive Alembic revision**
 
 Use Alembic operations and PostgreSQL UUID types; do not execute credential decrypt/re-encrypt in the revision. Register every new model in alembic/env.py so alembic check sees the same metadata.
 
-- [ ] **Step 4: Verify migration locally**
+- [x] **Step 4: Verify migration locally**
 
 Run: cd backend_py && uv run alembic check && uv run pytest tests/modules/accounts/test_identity_migration.py -q
 
 Expected: PASS; integration test is skipped only when TEST_DATABASE_URL is unavailable.
 
-- [ ] **Step 5: Commit the additive migration**
+- [x] **Step 5: Commit the additive migration**
 
 ~~~bash
 git add backend_py/alembic/versions/8a1b2c3d4e5f_add_exchange_account_identity.py backend_py/alembic/env.py backend_py/tests/modules/accounts/test_identity_migration.py backend_py/tests/integration/test_exchange_account_migration.py
@@ -169,31 +169,31 @@ git commit -m "feat: add exchange account cutover schema"
 - Re-encryption decrypts each legacy api_keys.secret_* using AAD user_id, then encrypts the same secret with AAD str(exchange_account_id); plaintext never enters logs, report JSON, or database columns.
 - Existing user config is explicitly a draft; no applied_version is inferred from its JSON.
 
-- [ ] **Step 1: Write failing idempotency and AAD tests**
+- [x] **Step 1: Write failing idempotency and AAD tests**
 
 Use a fake KEK and two legacy rows to assert dry-run has no writes, apply twice has equal row counts, wrong manifest fails before writes, old AAD decrypts before conversion and fails after conversion, and a partial failed transaction rolls back all UUID backfills.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/accounts/test_identity_cutover.py -q
 
 Expected: FAIL because cutover service and account-scoped vault functions do not exist.
 
-- [ ] **Step 3: Implement cutover as one transaction per phase**
+- [x] **Step 3: Implement cutover as one transaction per phase**
 
 Validate manifest before opening a write transaction; use SELECT FOR UPDATE for legacy rows; flush all target rows; never delete legacy rows in this task. Make apply(dry_run=True) use rollback even when no exception occurs, and emit only aggregate counts/hashes.
 
-- [ ] **Step 4: Move vault/config services to account identity**
+- [x] **Step 4: Move vault/config services to account identity**
 
 Change create/list/delete/verify APIs to accept exchange_account_id and membership-checked caller context. Preserve response masking. AccountContext.account_id is the UUID string from the target row, never a credential row ID.
 
-- [ ] **Step 5: Run focused tests and quality checks**
+- [x] **Step 5: Run focused tests and quality checks**
 
 Run: cd backend_py && uv run pytest tests/modules/accounts/test_identity_cutover.py tests/test_api_key_model.py tests/test_api_keys_router.py tests/test_user_config_model.py -q && uv run mypy src/bfx_funding_bot/modules/accounts src/bfx_funding_bot/core/crypto.py && uv run ruff check src/bfx_funding_bot/modules/accounts src/bfx_funding_bot/core/crypto.py
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the data-migration tooling**
+- [x] **Step 6: Commit the data-migration tooling**
 
 ~~~bash
 git add backend_py/src/bfx_funding_bot/modules/accounts/identity_cutover.py backend_py/scripts/cutover_identity.py backend_py/src/bfx_funding_bot/modules/accounts/vault.py backend_py/src/bfx_funding_bot/modules/accounts/config_service.py backend_py/src/bfx_funding_bot/core/crypto.py backend_py/tests/modules/accounts/test_identity_cutover.py
@@ -217,31 +217,31 @@ git commit -m "feat: add idempotent account identity cutover"
 - Canonical routes are /api/v1/exchange-accounts/{exchange_account_id}/positions, /offers, /executions, /credentials, /config-draft, and /attribution/weekly; old unscoped routes are removed in the contract migration, not aliased.
 - All queries filter exchange_account_id and deployment_environment from the same dependency context; no module-level os.environ.get("BFX_ACCOUNT_ID", "default") remains.
 
-- [ ] **Step 1: Write failing authorization/path tests**
+- [x] **Step 1: Write failing authorization/path tests**
 
 Assert operator without membership gets non-enumerating 404, viewer cannot mutate credential/config, retired account returns 404 for command routes, valid owner can read/write permitted paths, and request without a UUID path never falls back to environment scope.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/api/test_account_scope.py tests/test_api_keys_router.py tests/test_config_router.py tests/test_projections_router.py -q
 
 Expected: FAIL because all routes are still user-scoped or realm-global.
 
-- [ ] **Step 3: Implement dependency and route migration**
+- [x] **Step 3: Implement dependency and route migration**
 
 Use UUID path parameters, dependency-returned context, and parameterized queries. Keep public router unchanged. Return 404 for both nonmembership and nonexistent account. Ensure rate limiting sees the operator principal but does not decide membership.
 
-- [ ] **Step 4: Update frontend callers and query keys**
+- [x] **Step 4: Update frontend callers and query keys**
 
 Add one explicit account selector sourced from the operator bootstrap response; every React Query key includes the UUID. Update hooks/actions and tests to assert exact /exchange-accounts/{id}/... paths; remove any BFX_ACCOUNT_ID query/default logic.
 
-- [ ] **Step 5: Run backend/frontend focused tests**
+- [x] **Step 5: Run backend/frontend focused tests**
 
 Run: cd backend_py && uv run pytest tests/modules/api/test_account_scope.py tests/test_api_keys_router.py tests/test_config_router.py tests/test_projections_router.py -q; then cd frontend && pnpm test -- --runInBand
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit explicit account scope**
+- [x] **Step 6: Commit explicit account scope**
 
 ~~~bash
 git add backend_py/src/bfx_funding_bot/modules/api/account_scope.py backend_py/src/bfx_funding_bot/modules/api/api_keys.py backend_py/src/bfx_funding_bot/modules/api/config.py backend_py/src/bfx_funding_bot/modules/api/projections.py backend_py/src/bfx_funding_bot/modules/api/attribution.py backend_py/src/bfx_funding_bot/modules/api/routers.py backend_py/src/bfx_funding_bot/modules/api/schemas.py backend_py/tests/modules/api/test_account_scope.py frontend/src/lib/api-client.ts frontend/src/lib/query-keys.ts frontend/src/features/api-keys/hooks/use-api-keys.ts frontend/src/features/strategy/hooks/use-config.ts frontend/src/features/dashboard/hooks/use-positions.ts frontend/src/features/dashboard/hooks/use-offers.ts frontend/src/features/dashboard/hooks/use-execution-events.ts frontend/src/features/attribution/hooks/use-weekly-attribution.ts frontend/e2e/smoke.spec.ts
@@ -260,27 +260,27 @@ git commit -m "refactor: require explicit exchange account scope"
 - Daemon startup loads the account row, active credential row, and config draft by UUID, checks lifecycle active, and constructs AccountContext(account_id=str(uuid), ...).
 - Diagnostics, safety stores, event store, ledger, registry and reconcile services all receive the same canonical UUID and deployment environment from this bootstrap object.
 
-- [ ] **Step 1: Write failing bootstrap tests**
+- [x] **Step 1: Write failing bootstrap tests**
 
 Cover missing env, malformed UUID, retired account, absent active credential, and successful context propagation to every constructed service.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/modules/marketfeed/test_account_bootstrap.py -q
 
 Expected: FAIL because daemon still reads BFX_ACCOUNT_ID and constructs credentials directly from env.
 
-- [ ] **Step 3: Implement bootstrap and remove implicit realm reads**
+- [x] **Step 3: Implement bootstrap and remove implicit realm reads**
 
 Load decrypted secret only through the account-scoped vault service. Pass one AccountBootstrap object through constructors; do not duplicate UUID parsing in individual modules.
 
-- [ ] **Step 4: Run daemon-focused quality gates**
+- [x] **Step 4: Run daemon-focused quality gates**
 
 Run: cd backend_py && uv run pytest tests/modules/marketfeed/test_account_bootstrap.py tests/modules/execution -m "not integration" -q && uv run mypy src/bfx_funding_bot/modules/marketfeed/daemon.py src/bfx_funding_bot/modules/execution/protocols.py && uv run ruff check src/bfx_funding_bot/modules/marketfeed/daemon.py src/bfx_funding_bot/modules/execution/protocols.py
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit daemon identity cutover**
+- [x] **Step 5: Commit daemon identity cutover**
 
 ~~~bash
 git add backend_py/src/bfx_funding_bot/modules/marketfeed/daemon.py backend_py/src/bfx_funding_bot/modules/execution/protocols.py backend_py/tests/modules/marketfeed/test_account_bootstrap.py
@@ -299,27 +299,27 @@ git commit -m "refactor: bootstrap daemon from exchange account uuid"
 **Interfaces:**
 - Revision 9b2c3d4e5f6a has down_revision = "8a1b2c3d4e5f"; it refuses to run if any money-table UUID is null, any legacy realm is unmapped, or users/executions/billing_records contain rows.
 - On success it adds NOT NULL and FOREIGN KEY ... ON DELETE RESTRICT, recreates affected composite keys/indexes with UUID, and drops only proven-zero legacy tables; application code removes old unscoped API assumptions before this revision runs.
-- Runbook order is fixed: enumerate realms → freeze writes → backup + isolated restore → event count/head/hash → fresh full-account venue reconcile → persist halt → stop worker → alembic upgrade head → cutover_identity.py --dry-run → apply → verify → contract migration → replay/auth checks → one-account canary gate.
+- Runbook order is fixed: enumerate realms → freeze writes → backup + isolated restore → event count/head/hash → fresh full-account venue reconcile → persist halt → stop worker → `alembic upgrade 8a1b2c3d4e5f` → `cutover_identity.py --dry-run` → apply → verify with immutable evidence + full permission checks → `alembic upgrade head` (9b2c3d4e5f6a contract) → grants/replay/auth checks → one-account canary gate.
 
-- [ ] **Step 1: Write failing contract-migration tests**
+- [x] **Step 1: Write failing contract-migration tests**
 
 Test null UUID, unmapped realm, nonzero legacy table, missing event hash, and valid migration; assert every failure is before destructive DDL and transaction rolls back.
 
-- [ ] **Step 2: Run integration tests and verify failure**
+- [x] **Step 2: Run integration tests and verify failure**
 
 Run: cd backend_py && uv run pytest tests/integration/test_exchange_account_migration.py -m integration -q
 
 Expected: FAIL because contract revision and runbook preconditions are absent.
 
-- [ ] **Step 3: Implement guarded contract revision**
+- [x] **Step 3: Implement guarded contract revision**
 
 Use transaction-safe PostgreSQL DDL; encode preflight checks in the revision and repeat them in the CLI. Do not drop legacy rows or tables when a check fails.
 
-- [ ] **Step 4: Complete documentation and drift checks**
+- [x] **Step 4: Complete documentation and drift checks**
 
 Record identity columns, FK policy, membership roles, AAD rule, API paths, and rollback boundary in backend_py/ARCHITECTURE.md; run cd backend_py && uv run alembic check.
 
-- [ ] **Step 5: Commit Halt 1 artifacts**
+- [x] **Step 5: Commit Halt 1 artifacts**
 
 ~~~bash
 git add backend_py/alembic/versions/9b2c3d4e5f6a_contract_exchange_account_identity.py backend_py/tests/integration/test_exchange_account_migration.py backend_py/ARCHITECTURE.md docs/runbooks/halt-1-exchange-account-cutover.md deploy/vm/identity-realm-map.example.json

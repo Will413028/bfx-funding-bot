@@ -20,6 +20,15 @@ describe("useEventTypeFilter", () => {
     expect(result.current[0]).toBe("ORDER_FILL");
   });
 
+  it("reads an uncertainty resolution event type from the URL", () => {
+    const { result } = renderHook(() => useEventTypeFilter(), {
+      wrapper: withNuqsTestingAdapter({
+        searchParams: "?eventType=UNCERTAINTY_BOUND_TO_VENUE_OFFER",
+      }),
+    });
+    expect(result.current[0]).toBe("UNCERTAINTY_BOUND_TO_VENUE_OFFER");
+  });
+
   it("rejects unknown eventType values as null", () => {
     const { result } = renderHook(() => useEventTypeFilter(), {
       wrapper: withNuqsTestingAdapter({

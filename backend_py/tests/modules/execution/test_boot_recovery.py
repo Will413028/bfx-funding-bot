@@ -1,5 +1,5 @@
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -9,15 +9,13 @@ from bfx_funding_bot.modules.execution.boot_recovery import (
     BootRecovery,
     LocalClaim,
     ReconcileResult,
-    RecoveryCorrelationError,
     compute_recovery_actions,
-    synth_orphan_cid,
-    synth_orphan_scid,
 )
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import (
-    ReservationFailed,
     ReservationReleased,
+    ReservationUnknown,
+    VenueOfferQuarantined,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
@@ -55,8 +53,11 @@ def _actions(venue, local, grace_ms=120_000, now=_NOW):
 
 
 def test_orphan_at_venue_is_claimed():
-    with pytest.raises(RuntimeError, match="unresolved recovery"):
-        _actions([_offer(voi="555", amount="250")], [])
+    acts = _actions([_offer(voi="555", amount="250")], [])
+    assert len(acts) == 1
+    assert isinstance(acts[0], VenueOfferQuarantined)
+    assert acts[0].venue_offer_id == "555"
+    assert acts[0].amount == Decimal("250")
 
 
 def test_local_claimed_missing_from_venue_is_released():
@@ -83,7 +84,7 @@ def test_stale_pending_converges_to_failed():
     acts = _actions([], [claim], grace_ms=120_000)
     assert len(acts) == 1
     ev = acts[0]
-    assert isinstance(ev, ReservationFailed)
+    assert isinstance(ev, ReservationUnknown)
     assert ev.cid == 7 and ev.size_usdt == Decimal("60")
     assert ev.reason == "unresolved_at_boot" and ev.signal_correlation_id == scid
 
@@ -92,23 +93,6 @@ def test_recent_pending_within_grace_is_left_alone():
     claim = _claim(cid=7, voi=None, state=RegistryState.PENDING,
                    occurred=_NOW - 1_000)  # within grace
     assert _actions([], [claim], grace_ms=120_000) == []
-
-
-def test_synth_cid_numeric_voi_is_negated():
-    assert synth_orphan_cid("12345") == -12345
-
-
-def test_synth_cid_nonnumeric_fallback_is_deterministic_and_negative():
-    from bfx_funding_bot.external.bitfinex.cid import BITFINEX_CID_MAX
-    a = synth_orphan_cid("abc-xyz")
-    assert a == synth_orphan_cid("abc-xyz")          # deterministic
-    assert -BITFINEX_CID_MAX <= a < 0                # negative namespace, in range
-
-
-def test_synth_scid_is_deterministic():
-    assert synth_orphan_scid("555") == synth_orphan_scid("555")
-    assert synth_orphan_scid("555") != synth_orphan_scid("556")
-    assert isinstance(synth_orphan_scid("555"), UUID)
 
 
 class _FailingAuthRest:
@@ -181,12 +165,12 @@ def test_action_grace_claims_stale_orphan():
         venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=_NOW - 300_000, status="ACTIVE",
     )
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        compute_recovery_actions(
-            venue_offers=[offer], local_claims=[], account_id=_ACC,
-            is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-            configured_symbols=frozenset({"fUSD", "fUST"}),
-        )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
+        configured_symbols=frozenset({"fUSD", "fUST"}),
+    )
+    assert isinstance(acts[0], VenueOfferQuarantined)
 
 
 def test_action_grace_zero_preserves_boot_behaviour():
@@ -194,39 +178,31 @@ def test_action_grace_zero_preserves_boot_behaviour():
         venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=_NOW - 1, status="ACTIVE",
     )
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        compute_recovery_actions(
-            venue_offers=[offer], local_claims=[], account_id=_ACC,
-            is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-            configured_symbols=frozenset({"fUSD", "fUST"}),
-        )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        configured_symbols=frozenset({"fUSD", "fUST"}),
+    )
+    assert isinstance(acts[0], VenueOfferQuarantined)
 
 
 class _StubStore:
-    """Minimal PostgresEventStore stub — records appended events + snapshot calls, no DB."""
+    """Minimal PostgresEventStore stub — records events, no DB."""
     def __init__(self):
         self.appended: list = []
-        self.snapshot_calls: list[dict] = []
+        self.snapshot_calls: list = []
 
     async def append(self, session, event):
         self.appended.append(event)
         return True
 
-    async def set_position_snapshot(
-        self, session, *, account_id, symbol, reserved_usdt, realized_usdt,
-        n_offers, n_credits, occurred_at_ms,
-    ):
+    async def append_snapshot(self, session, event):
         from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
-        self.snapshot_calls.append({
-            "account_id": account_id,
-            "symbol": symbol,
-            "reserved": reserved_usdt,
-            "realized": realized_usdt,
-            "n_offers": n_offers,
-            "n_credits": n_credits,
-            "occurred_at_ms": occurred_at_ms,
-        })
-        return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("0"))
+        self.snapshot_calls.append(event)
+        await self.append(session, event)
+        return SnapshotDrift(
+            reserved_drift=Decimal("0"), realized_drift=Decimal("0"), event_seq=17
+        )
 
 
 class _StubSession:
@@ -309,7 +285,7 @@ def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
 
 @pytest.mark.asyncio
 async def test_run_returns_reconcile_result_for_orphan_claim():
-    """run() returns ReconcileResult; venue has one orphan offer -> n_claimed=1."""
+    """run() returns a bounded quarantine instead of synthetic claim identity."""
     # _StubSession returns no rows, so local_claims will be []
     # → no release; but we want to test a release scenario.
     # Use action_grace_ms=0 (boot default) with a stale CLAIMED offer absent from venue.
@@ -320,9 +296,47 @@ async def test_run_returns_reconcile_result_for_orphan_claim():
     auth = _StubAuthRest([_offer(voi="999", amount="200")])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    assert any(isinstance(event, VenueOfferQuarantined) for event in store.appended)
+
+
+@pytest.mark.asyncio
+async def test_run_routes_unknown_to_symbol_gate_handler() -> None:
+    store = _StubStore()
+    bus = _StubBus()
+    auth = _StubAuthRest([])
+    seen: list[ReservationUnknown] = []
+
+    async def mark_unknown(event: ReservationUnknown) -> None:
+        seen.append(event)
+
+    rec = _full_boot_recovery(
+        auth,
+        store,
+        _StubSessionFactory(),
+        bus,
+        symbol="fUST",
+        grace_ms=0,
+        uncertainty_handler=mark_unknown,
+    )
+
+    async def stale_pending(_session) -> list[LocalClaim]:
+        return [_claim(
+            cid=88,
+            voi=None,
+            state=RegistryState.PENDING,
+            size="125",
+            occurred=_NOW - 1,
+            symbol="fUST",
+        )]
+
+    rec._load_local_claims = stale_pending  # type: ignore[method-assign]
+    result = await rec.run()
+
+    assert result.n_unknown == 1
+    assert seen and seen[0].cid == 88
+    assert seen[0].symbol == "fUST"
 
 
 @pytest.mark.asyncio
@@ -417,8 +431,7 @@ async def test_run_emits_position_reconciled_with_credit_sum():
     await rec.run()
 
     pr_events = [e for e in bus.published if isinstance(e, PositionReconciled)]
-    assert len(pr_events) == 1
-    pr = pr_events[0]
+    pr = next(e for e in pr_events if e.symbol == "fUST")
     assert pr.realized_usdt == Decimal("450")
     assert pr.reserved_usdt == Decimal("0")
     assert pr.n_credits == 3
@@ -426,21 +439,48 @@ async def test_run_emits_position_reconciled_with_credit_sum():
 
 
 @pytest.mark.asyncio
-async def test_run_calls_set_position_snapshot_with_credit_sum():
-    """run() calls store.set_position_snapshot with absolute venue values."""
+async def test_run_appends_full_account_snapshot_with_credit_sum():
+    """run() appends one immutable observation with absolute venue values."""
     credits = [_credit("1", "300")]
     store = _StubStore()
     bus = _StubBus()
     auth = _StubAuthRestFull(offers=[], credits=credits)
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
-    await rec.run()
+    result = await rec.run()
 
     assert len(store.snapshot_calls) == 1
-    call = store.snapshot_calls[0]
-    assert call["realized"] == Decimal("300")
-    assert call["reserved"] == Decimal("0")
-    assert call["n_credits"] == 1
+    assert result.snapshot_event_seq == 17
+    snapshot = store.snapshot_calls[0]
+    assert sum((credit.amount for credit in snapshot.credits), Decimal("0")) == Decimal("300")
+    assert snapshot.offers == ()
+    assert snapshot.coverage.active_credits_complete is True
+
+
+@pytest.mark.asyncio
+async def test_run_preserves_scalar_venue_flags_in_snapshot() -> None:
+    offer = ActiveFundingOffer(
+        venue_offer_id="flagged",
+        symbol="fUST",
+        amount=Decimal("5"),
+        rate=0.0003,
+        period_days=2,
+        mts_created=1_000_000,
+        status="ACTIVE",
+        flags=7,
+    )
+    store = _StubStore()
+    bus = _StubBus()
+    rec = _full_boot_recovery(
+        _StubAuthRestFull(offers=[offer], credits=[]),
+        store,
+        _StubSessionFactory(),
+        bus,
+    )
+
+    await rec.run()
+
+    assert store.snapshot_calls[0].offers[0].flags == {"raw": 7}
 
 
 @pytest.mark.asyncio
@@ -453,9 +493,10 @@ async def test_run_position_reconciled_includes_offer_reserved():
     auth = _StubAuthRestFull(offers=offers, credits=credits)
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    pr = next(e for e in bus.published if isinstance(e, PositionReconciled) and e.symbol == "fUSD")
+    assert pr.reserved == Decimal("100")
 
 
 @pytest.mark.asyncio
@@ -495,12 +536,12 @@ async def test_run_reconcile_result_includes_credit_dimensions():
 
 @pytest.mark.asyncio
 async def test_run_threads_drift_from_snapshot_into_result():
-    """ReconcileResult carries realized_drift/reserved_drift from set_position_snapshot."""
+    """ReconcileResult carries drift returned by the snapshot event append."""
     from bfx_funding_bot.modules.execution.event_store.store import SnapshotDrift
 
     class _DriftStore(_StubStore):
-        async def set_position_snapshot(self, session, **kw):
-            await super().set_position_snapshot(session, **kw)
+        async def append_snapshot(self, session, event):
+            await super().append_snapshot(session, event)
             return SnapshotDrift(reserved_drift=Decimal("0"), realized_drift=Decimal("150"))
 
     store = _DriftStore()
@@ -536,9 +577,9 @@ async def test_run_routes_recovery_actions_to_registry_not_bus():
     auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, offer_registry=registry)
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    assert registry.handled == []
     assert registry.handled == []
 
 
@@ -550,9 +591,9 @@ async def test_run_falls_back_to_bus_when_no_registry():
     auth = _StubAuthRestFull(offers=[_offer(voi="999", amount="200")], credits=[])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)  # no offer_registry
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    assert not any(isinstance(event, VenueOfferQuarantined) for event in bus.published)
 
 
 # ── Balance-aware cap gate: wallet available in reconcile pass (Task 4) ───────
@@ -571,8 +612,7 @@ async def test_run_populates_available_from_wallets():
     assert result.available_usdt == Decimal("147.5")
     published = [e for e in bus.published if isinstance(e, PositionReconciled)]
     assert published and published[-1].available_usdt == Decimal("147.5")
-    # available is NOT persisted: set_position_snapshot has no available_usdt kwarg.
-    assert "available_usdt" not in store.snapshot_calls[-1]
+    assert store.snapshot_calls[-1].wallet_available == {"fUSD": Decimal("147.5")}
 
 
 @pytest.mark.asyncio
@@ -603,12 +643,13 @@ def test_orphan_claimed_carries_offer_symbol() -> None:
         venue_offer_id="555", symbol="fUST", amount=Decimal("100"),
         rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
     )
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        compute_recovery_actions(
-            venue_offers=[offer], local_claims=[], account_id=_ACC,
-            is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-            configured_symbols=frozenset({"fUST"}),
-        )
+    acts = compute_recovery_actions(
+        venue_offers=[offer], local_claims=[], account_id=_ACC,
+        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
+        configured_symbols=frozenset({"fUST"}),
+    )
+    assert isinstance(acts[0], VenueOfferQuarantined)
+    assert acts[0].symbol == "fUST"
 
 
 def test_missing_claim_released_carries_own_claim_symbol() -> None:
@@ -689,7 +730,7 @@ def _boot_recovery_symbols(auth_rest, store, session_factory, bus, *, symbols, *
 
 @pytest.mark.asyncio
 async def test_single_symbol_list_reproduces_current_event():
-    """One configured symbol → exactly one PositionReconciled, identical natives."""
+    """Full-account reconcile emits configured and observed symbols."""
     offers = [_offer(voi="555", amount="100")]
     credits = [_credit("1", "200")]
     store = _StubStore()
@@ -699,9 +740,10 @@ async def test_single_symbol_list_reproduces_current_event():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST"],
     )
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    published = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert {e.symbol for e in published} == {"fUSD", "fUST"}
 
 
 @pytest.mark.asyncio
@@ -771,10 +813,14 @@ class _StubAuthPerSymbol:
 
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         self.offer_calls.append(symbol)
+        if symbol is None:
+            return [offer for rows in self._offers.values() for offer in rows]
         return self._offers.get(symbol, [])
 
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         self.credit_calls.append(symbol)
+        if symbol is None:
+            return [credit for rows in self._credits.values() for credit in rows]
         return self._credits.get(symbol, [])
 
     async def get_funding_available(self, *, ctx, currency):
@@ -801,14 +847,15 @@ async def test_two_symbols_fire_two_position_reconciled_with_per_symbol_natives(
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 2
+    published = [e for e in bus.published if isinstance(e, PositionReconciled)]
+    assert {e.symbol for e in published} == {"fUSD", "fUST"}
     assert auth.wallet_calls == ["UST", "USD"]
 
 
 @pytest.mark.asyncio
-async def test_two_symbols_write_per_symbol_snapshot_rows():
+async def test_two_symbols_write_one_full_account_snapshot():
     auth = _StubAuthPerSymbol(
         offers_by_sym={"fUST": [_offer_sym("fUST", "1", "100")], "fUSD": []},
         credits_by_sym={"fUST": [], "fUSD": [_credit_sym("fUSD", "c1", "55")]},
@@ -820,9 +867,12 @@ async def test_two_symbols_write_per_symbol_snapshot_rows():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert store.snapshot_calls == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    assert len(store.snapshot_calls) == 1
+    snapshot = store.snapshot_calls[0]
+    assert {offer.symbol for offer in snapshot.offers} == {"fUST"}
+    assert {credit.symbol for credit in snapshot.credits} == {"fUSD"}
 
 
 @pytest.mark.asyncio
@@ -841,9 +891,10 @@ async def test_multi_symbol_result_aggregates_dims():
         auth, store, _StubSessionFactory(), bus, symbols=["fUST", "fUSD"],
     )
 
-    with pytest.raises(RecoveryCorrelationError, match="unresolved recovery orphan"):
-        await rec.run()
-    assert bus.published == []
+    result = await rec.run()
+    assert result.n_quarantined == 1
+    assert result.reserved_usdt == Decimal("100")
+    assert result.realized_usdt == Decimal("230")
 
 
 # --- from_snapshot loads each claim's own symbol (fUSD P2 Task 3) ------------

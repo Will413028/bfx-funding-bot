@@ -22,12 +22,23 @@ cat "$SECRETS" "$PHASE_ENV" > .env.runtime
 chmod 600 .env.runtime
 
 # Preflight: required vars present.
-need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY"
-need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_API_KEY BFX_API_SECRET BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
-req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary"
+need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY BFX_EXCHANGE_ACCOUNT_ID BFX_VAULT_KEK"
+need_canary="BFX_EXECUTOR BFX_WS_CLIENT_ENABLED BFX_ALLOCATION_CAP_USDT BFX_CELLS_YAML BFX_SAFETY_CONFIG"
+req="$need_common"; [ "$PHASE" = canary ] && req="$req $need_canary BFX_PROJECTOR_VERSION BFX_HALT2_EVIDENCE_REPORT BFX_EXPECTED_IMAGE_DIGEST"
 for v in $req; do
   grep -q "^$v=." .env.runtime || { echo "ERROR: required var $v missing/empty for phase $PHASE"; exit 1; }
 done
+for v in BFX_ACCOUNT_ID BFX_API_KEY BFX_API_SECRET; do
+  if grep -q "^$v=" .env.runtime; then
+    echo "ERROR: legacy identity/credential variable $v is not supported; use account-owned vault + BFX_EXCHANGE_ACCOUNT_ID"
+    exit 1
+  fi
+done
+EXCHANGE_ACCOUNT_ID=$(grep '^BFX_EXCHANGE_ACCOUNT_ID=' .env.runtime | tail -1 | cut -d= -f2-)
+python3 -c 'from sys import argv; from uuid import UUID; value = argv[1]; assert str(UUID(value)) == value' "$EXCHANGE_ACCOUNT_ID" 2>/dev/null || {
+  echo "ERROR: BFX_EXCHANGE_ACCOUNT_ID must be a canonical UUID"
+  exit 1
+}
 
 EXECUTION_POLICY=$(grep '^BFX_EXECUTION_POLICY=' .env.runtime | tail -1 | cut -d= -f2-)
 case "$PHASE:$EXECUTION_POLICY" in
@@ -54,9 +65,25 @@ WEBAPI_SECRETS="$HOME/bfx/webapi.env"
 [ -f "$WEBAPI_SECRETS" ] || { echo "ERROR: missing $WEBAPI_SECRETS (chmod 600)"; exit 1; }
 cp "$WEBAPI_SECRETS" .env.webapi.runtime
 chmod 600 .env.webapi.runtime
-for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK; do
+
+require_nonempty_env() {
+  local file="$1" var="$2" value
+  value=$(grep "^${var}=" "$file" | tail -1 | cut -d= -f2- || true)
+  [ -n "${value//[[:space:]]/}" ] || {
+    echo "ERROR: required var $var missing/empty in $file"
+    exit 1
+  }
+}
+
+for v in DATABASE_URL BETTER_AUTH_JWKS_URL BFX_VAULT_KEK BFX_OPERATOR_ROLE; do
   grep -q "^$v=." .env.webapi.runtime || { echo "ERROR: web-API var $v missing/empty in $WEBAPI_SECRETS"; exit 1; }
 done
+require_nonempty_env .env.webapi.runtime BFX_OPERATOR_USER_ID
+BACKEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.webapi.runtime | tail -1 | cut -d= -f2-)
+[ "$BACKEND_OPERATOR_ROLE" = admin ] || {
+  echo "ERROR: web-API BFX_OPERATOR_ROLE must be admin for operator-only containment"
+  exit 1
+}
 
 # --- frontend env (Better Auth FE: scoped bfx_webauth role, VM redis, server-only) ---
 FRONTEND_SECRETS="$HOME/bfx/frontend.env"
@@ -66,6 +93,19 @@ chmod 600 .env.frontend.runtime
 for v in NEXT_PUBLIC_APP_URL NEXT_PUBLIC_BETTER_AUTH_URL API_URL BETTER_AUTH_SECRET BETTER_AUTH_URL DATABASE_URL REDIS_URL PASSKEY_RP_ID; do
   grep -q "^$v=." .env.frontend.runtime || { echo "ERROR: frontend var $v missing/empty in $FRONTEND_SECRETS"; exit 1; }
 done
+require_nonempty_env .env.frontend.runtime BFX_OPERATOR_USER_ID
+require_nonempty_env .env.frontend.runtime BFX_OPERATOR_ROLE
+FRONTEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
+BACKEND_OPERATOR_ID=$(grep '^BFX_OPERATOR_USER_ID=' .env.webapi.runtime | tail -1 | cut -d= -f2-)
+[ "$FRONTEND_OPERATOR_ID" = "$BACKEND_OPERATOR_ID" ] || {
+  echo "ERROR: frontend and web-API BFX_OPERATOR_USER_ID values must match"
+  exit 1
+}
+FRONTEND_OPERATOR_ROLE=$(grep '^BFX_OPERATOR_ROLE=' .env.frontend.runtime | tail -1 | cut -d= -f2-)
+[ "$FRONTEND_OPERATOR_ROLE" = admin ] || {
+  echo "ERROR: frontend BFX_OPERATOR_ROLE must be admin for operator-only containment"
+  exit 1
+}
 # Export NEXT_PUBLIC_* so compose build-args bake the correct public URLs.
 set -a; . ./.env.frontend.runtime; set +a
 
@@ -88,27 +128,53 @@ if [ "$PHASE" = canary ]; then
   echo "  ⚠ the durable halt is a row in trading_halt, NOT visible in this file."
   echo "    check it:  GET /admin/trading-status  ·  POST /admin/dry-evaluate"
   echo "-----------------------------------"
-fi
 
-# Real-money gate.
-if [ "$PHASE" = canary ] && [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
-  # Without this check a non-interactive run (ssh 'cmd', CI, cron) reaches `read`,
-  # gets EOF, and dies via `set -e` printing NOTHING — while .env.runtime has
-  # already been rewritten above. The deploy looks like it worked and the
-  # containers keep running the previous config. Bit us 2026-07-27 pausing the
-  # canary: cap was 0 on disk and still 10000 in the live process.
-  if [ ! -t 0 ]; then
-    echo "ERROR: canary deploy needs interactive confirmation but stdin is not a TTY." >&2
-    echo "       Nothing was deployed; .env.runtime may already be regenerated." >&2
-    echo "       Re-run with BFX_CANARY_CONFIRM=yes to confirm non-interactively." >&2
+  # Canary is real money.  It must be explicit even for an interactive shell;
+  # keep this after the safety summary, but before evidence verification or
+  # docker, so an omitted variable cannot progress toward a deploy.
+  if [ "${BFX_CANARY_CONFIRM:-}" != yes ]; then
+    echo "ERROR: canary deploy needs interactive confirmation; BFX_CANARY_CONFIRM=yes is required" >&2
     exit 1
   fi
-  read -r -p "CANARY = REAL MONEY (per-symbol caps from the safety config; live fUST funded, fUSD dark). Type 'yes' to proceed: " ans
-  [ "$ans" = yes ] || { echo "aborted"; exit 1; }
+
+  # An immutable, redacted report must agree with fresh account-local DB,
+  # artifact, projector, image, and committed safety-config observations.
+  # This command is read-only and must pass before Docker is reached.
+  EVIDENCE_REPORT=$(grep '^BFX_HALT2_EVIDENCE_REPORT=' .env.runtime | tail -1 | cut -d= -f2-)
+  [ -r "$EVIDENCE_REPORT" ] || {
+    echo "ERROR: Halt 2 evidence report is unreadable: $EVIDENCE_REPORT"
+    exit 1
+  }
+  DEPLOYMENT_ENV=$(grep '^BFX_DEPLOYMENT_ENV=' .env.runtime | tail -1 | cut -d= -f2-)
+  PROJECTOR_VERSION=$(grep '^BFX_PROJECTOR_VERSION=' .env.runtime | tail -1 | cut -d= -f2-)
+  EXPECTED_IMAGE_DIGEST=$(grep '^BFX_EXPECTED_IMAGE_DIGEST=' .env.runtime | tail -1 | cut -d= -f2-)
+  (
+    cd backend_py
+    uv run python scripts/halt2_cutover.py preflight \
+      --account-id "$EXCHANGE_ACCOUNT_ID" \
+      --environment "$DEPLOYMENT_ENV" \
+      --evidence "$EVIDENCE_REPORT" \
+      --projector-version "$PROJECTOR_VERSION" \
+      --image-digest "$EXPECTED_IMAGE_DIGEST" \
+      --config-artifact "$ROOT/$SAFETY_HOST"
+  ) || {
+    echo "ERROR: Halt 2 preflight failed; deployment remains stopped"
+    exit 1
+  }
 fi
 
 export GIT_SHA="$(git rev-parse --short HEAD)"
 docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA="$GIT_SHA"
+if [ "$PHASE" = canary ]; then
+  ACTUAL_IMAGE_DIGEST=$(docker image inspect --format='{{.Id}}' bfx-bot:local) || {
+    echo "ERROR: unable to inspect built bfx-bot:local image digest"
+    exit 1
+  }
+  [ "$ACTUAL_IMAGE_DIGEST" = "$EXPECTED_IMAGE_DIGEST" ] || {
+    echo "ERROR: built bfx-bot:local image digest mismatch"
+    exit 1
+  }
+fi
 docker compose -f docker-compose.bot.yml up -d --remove-orphans
 echo "deployed phase=$PHASE sha=$GIT_SHA"
 docker compose -f docker-compose.bot.yml ps

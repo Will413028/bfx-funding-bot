@@ -199,16 +199,19 @@ exit 99
     assert "TOKEN-SENTINEL" not in result.stderr
 
     invocations = [loads(line) for line in calls.read_text().splitlines()]
-    assert len(invocations) == 7  # 1 logs + 1 inspect + 1 bot probe + 4 SQL
+    assert len(invocations) == 8  # 1 logs + 1 inspect + 2 bot probes + 4 SQL
     assert invocations.count(["logs", "--since", "1m", "bfx-bot"]) == 1
     inspect_calls = [argv for argv in invocations if argv and argv[0] == "inspect"]
     assert len(inspect_calls) == 1
     assert len(inspect_calls[0]) == 3 and inspect_calls[0][1].startswith("--format=") and inspect_calls[0][2] == "bfx-bot"
     bot_execs = [argv for argv in invocations if argv[:2] == ["exec", "bfx-bot"]]
-    assert len(bot_execs) == 1
-    assert bot_execs[0][2:4] == ["python", "-c"]
-    assert len(bot_execs[0]) == 6 and bot_execs[0][5] == base_url
-    assert "/healthz" in bot_execs[0][4] and "/readyz" in bot_execs[0][4]
+    assert len(bot_execs) == 2
+    assert all(argv[2:4] == ["python", "-c"] for argv in bot_execs)
+    scope_execs = [argv for argv in bot_execs if len(argv) == 5]
+    probe_execs = [argv for argv in bot_execs if len(argv) == 6]
+    assert len(scope_execs) == 1
+    assert len(probe_execs) == 1 and probe_execs[0][5] == base_url
+    assert "/healthz" in probe_execs[0][4] and "/readyz" in probe_execs[0][4]
     sql_calls = [argv for argv in invocations if argv[:2] == ["exec", "bfx-postgres"]]
     assert len(sql_calls) == 4
     for argv in sql_calls:

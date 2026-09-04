@@ -19,6 +19,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationClaimed,
     ReservationFailed,
     ReservationIntent,
+    ReservationUnknown,
 )
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
@@ -29,6 +30,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -64,6 +66,10 @@ def _ctx() -> AccountContext:
     )
 
 
+async def _ignore_unknown(_event: ReservationUnknown) -> None:
+    return None
+
+
 class _RecordingPersister:
     """Records each persist() call as one tuple of events (= one txn)."""
     def __init__(self) -> None:
@@ -76,10 +82,12 @@ class _RecordingPersister:
 
 class _StubInner:
     """Echoes the injected cid back in the SubmittedOrder (A2 contract)."""
-    def __init__(self, status: str, voi: str | None, *, persister: _RecordingPersister | None = None) -> None:
+    def __init__(self, status: str, voi: str | None, *, persister: _RecordingPersister | None = None,
+                 outcome: SubmitOutcomeUnknown | None = None) -> None:
         self._status = status
         self._voi = voi
         self._persister = persister
+        self._outcome = outcome
         self.persist_calls_at_submit: int | None = None
         self.cid_seen: int | None = None
 
@@ -88,7 +96,13 @@ class _StubInner:
         self.cid_seen = cid
         if self._persister is not None:
             self.persist_calls_at_submit = len(self._persister.txns)
-        return SubmittedOrder(cid=cid or 0, venue_offer_id=self._voi, status=self._status, raw_response=None)
+        return SubmittedOrder(
+            cid=cid or 0,
+            venue_offer_id=self._voi,
+            status=self._status,
+            raw_response=None,
+            outcome=self._outcome,
+        )
 
 
 def _bus_capture() -> tuple[DomainEventBus, list[object]]:
@@ -116,16 +130,19 @@ async def test_paper_filled_persists_intent_then_claim_and_fill() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_submitted_persists_intent_then_claim_only() -> None:
+async def test_simulated_submitted_persists_intent_then_claim_only() -> None:
     bus, seen = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "123456", persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=True,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationClaimed]
     assert [type(e) for e in seen] == [ReservationClaimed]
-    assert persister.txns[1][0].is_simulated is False
+    assert persister.txns[1][0].is_simulated is True
 
 
 @pytest.mark.asyncio
@@ -133,11 +150,59 @@ async def test_failed_persists_intent_then_failed_no_publish() -> None:
     bus, seen = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("failed", None, persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=True,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(), _ctx())
     assert [type(e) for e in persister.txns[0]] == [ReservationIntent]
     assert [type(e) for e in persister.txns[1]] == [ReservationFailed]
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_persists_distinct_unknown_event_and_does_not_publish() -> None:
+    bus, seen = _bus_capture()
+    persister = _RecordingPersister()
+    inner = _StubInner(
+        "unknown",
+        None,
+        persister=persister,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+    )
+    await ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=True,
+        uncertainty_handler=_ignore_unknown,
+    ).submit(_ready_to_submit(), _ctx())
+
+    assert [type(e) for e in persister.txns[1]] == [ReservationUnknown]
+    assert persister.txns[1][0].reason == "timeout"
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_notifies_uncertainty_handler_for_symbol_block() -> None:
+    persister = _RecordingPersister()
+    unknown_events: list[ReservationUnknown] = []
+
+    async def mark_unknown(event: ReservationUnknown) -> None:
+        unknown_events.append(event)
+
+    inner = _StubInner(
+        "unknown", None, persister=persister,
+        outcome=SubmitOutcomeUnknown("timeout", True),
+    )
+    await ReservationEmittingMiddleware(
+        inner,
+        bus=DomainEventBus(),
+        persister=persister,
+        is_simulated=True,
+        uncertainty_handler=mark_unknown,
+    ).submit(_ready_to_submit(symbol="fUST"), _ctx())
+
+    assert len(unknown_events) == 1
+    assert unknown_events[0].symbol == "fUST"
+    assert unknown_events[0].reason == "timeout"
 
 
 @pytest.mark.asyncio
@@ -211,7 +276,8 @@ async def test_conflicting_executor_reference_is_rejected_by_identity() -> None:
     with pytest.raises(RuntimeError, match="identity"):
         await ReservationEmittingMiddleware(
             _ConflictingInner(), bus=DomainEventBus(),
-            persister=_RecordingPersister(), is_simulated=False,
+            persister=_RecordingPersister(), is_simulated=True,
+            uncertainty_handler=_ignore_unknown,
         ).submit(_ready_to_submit(), _ctx())
 
 
@@ -268,7 +334,10 @@ async def test_symbol_propagates_from_decision() -> None:
     bus, _ = _bus_capture()
     persister = _RecordingPersister()
     inner = _StubInner("submitted", "999", persister=persister)
-    mw = ReservationEmittingMiddleware(inner, bus=bus, persister=persister, is_simulated=False)
+    mw = ReservationEmittingMiddleware(
+        inner, bus=bus, persister=persister, is_simulated=True,
+        uncertainty_handler=_ignore_unknown,
+    )
     await mw.submit(_ready_to_submit(symbol="fUSD"), _ctx())
     assert persister.txns[1][0].symbol == "fUSD"
 
@@ -281,7 +350,8 @@ async def test_reservation_intent_links_execution_decision_id() -> None:
         _StubInner("submitted", "123", persister=persister),
         bus=bus,
         persister=persister,
-        is_simulated=False,
+        is_simulated=True,
+        uncertainty_handler=_ignore_unknown,
     )
 
     await mw.submit(_ready_to_submit(decision_id="d-8"), _ctx(), cid=123)
