@@ -2,13 +2,18 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
+    deserialize_stored_event,
     event_type_of,
     serialize_event,
+    stored_event_identity,
 )
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
     CreditClosed,
     OrderFilled,
@@ -21,6 +26,7 @@ from bfx_funding_bot.modules.execution.events import (
 _CID = 123
 _VOI = "venue-1"
 _SCID = UUID("11111111-1111-1111-1111-111111111111")
+_EXCHANGE_ACCOUNT_ID = UUID("22222222-2222-2222-2222-222222222222")
 
 
 def _ref(cid: int = _CID, voi: str | None = _VOI) -> ReservationRef:
@@ -53,7 +59,7 @@ def test_roundtrip(event: object) -> None:
     etype = event_type_of(event)
     payload = serialize_event(event)
     assert isinstance(payload, dict)
-    assert payload["__schema_version__"] == 2
+    assert payload["__schema_version__"] == 3
     restored = deserialize_event(etype, payload)
     assert restored == event  # frozen dataclasses compare by value
 
@@ -125,6 +131,130 @@ def test_public_deserializer_rejects_versioned_lifecycle_without_reservation_ref
 def test_decimal_preserved_as_string() -> None:
     payload = serialize_event(_claimed())
     assert payload["size_usdt"] == "10.5"  # Decimal serialized as str, not float
+
+
+def test_stored_event_uses_durable_exchange_account_identity() -> None:
+    """Replay must trust the row owner, not a legacy payload realm string."""
+    event = ReservationIntent(
+        cid=10,
+        size_usdt=Decimal("7.5"),
+        symbol="fUST",
+        execution_decision_id="d-serialization-10",
+        signal_correlation_id=_SCID,
+        account_id="legacy-realm",
+        is_simulated=True,
+        occurred_at_ms=1000,
+    )
+    row = EventLogRow(
+        account_id="legacy-realm",
+        exchange_account_id=_EXCHANGE_ACCOUNT_ID,
+        deployment_environment="ci",
+        event_type=event_type_of(event),
+        cid=event.cid,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=serialize_event(event),
+        occurred_at_ms=event.occurred_at_ms,
+    )
+
+    restored = deserialize_stored_event(row)
+
+    assert restored.account_id == str(_EXCHANGE_ACCOUNT_ID)  # type: ignore[attr-defined]
+
+
+def test_v2_stored_identity_is_derived_without_mutating_payload() -> None:
+    payload = {
+        "cid": 19,
+        "size_usdt": "7.5",
+        "symbol": "fUST",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "legacy-realm",
+        "is_simulated": True,
+        "execution_decision_id": "d-19",
+        "reservation_ref": {
+            "execution_decision_id": "d-19",
+            "cid": 19,
+            "signal_correlation_id": str(_SCID),
+            "venue_offer_id": None,
+        },
+    }
+    row = EventLogRow(
+        event_seq=19,
+        account_id="legacy-realm",
+        deployment_environment="ci",
+        event_type="RESERVATION_INTENT",
+        cid=19,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=payload,
+        occurred_at_ms=1000,
+        schema_version=2,
+    )
+
+    identity = stored_event_identity(row)
+
+    assert identity.source == "derived_v2"
+    assert identity.event_id.version == 5
+    assert "__schema_version__" not in payload
+
+
+@pytest.mark.asyncio
+async def test_versioned_v2_stored_event_uses_historical_upcaster(
+    sqlite_session: AsyncSession,
+) -> None:
+    bind = sqlite_session.bind
+    assert bind is not None
+    async with bind.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    payload = {
+        "__event_type__": "RESERVATION_INTENT",
+        "__schema_version__": 2,
+        "cid": 20,
+        "size_usdt": "7.5",
+        "signal_correlation_id": str(_SCID),
+        "account_id": "historical-realm",
+        "is_simulated": True,
+        "occurred_at_ms": 1000,
+    }
+    row = EventLogRow(
+        account_id="historical-realm",
+        deployment_environment="ci",
+        event_type="RESERVATION_INTENT",
+        cid=20,
+        venue_offer_id=None,
+        venue_seq=None,
+        payload=payload,
+        occurred_at_ms=1000,
+        schema_version=2,
+    )
+    sqlite_session.add(row)
+    await sqlite_session.flush()
+
+    decoded = deserialize_stored_event(row)
+
+    assert decoded.is_legacy_uncorrelated is True  # type: ignore[attr-defined]
+    assert decoded.symbol == "fUST"  # type: ignore[attr-defined]
+    assert decoded.event_id == stored_event_identity(row).event_id  # type: ignore[attr-defined]
+    assert row.payload == payload
+
+
+def test_stored_schema_version_mismatch_is_rejected() -> None:
+    event = _claimed()
+    row = EventLogRow(
+        event_seq=20,
+        account_id="acct",
+        deployment_environment="ci",
+        event_type=event_type_of(event),
+        cid=event.cid,
+        venue_offer_id=event.venue_offer_id,
+        venue_seq=event.venue_seq,
+        payload=serialize_event(event),
+        occurred_at_ms=event.occurred_at_ms or 0,
+        schema_version=2,
+    )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        stored_event_identity(row)
 
 
 @pytest.mark.parametrize("etype,extra", [

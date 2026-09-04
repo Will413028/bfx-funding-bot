@@ -11,6 +11,10 @@ from pytest_httpx import HTTPXMock
 from bfx_funding_bot.modules.execution.paper import EchoPaperExecutor
 from bfx_funding_bot.modules.execution.registry import ExecutorConfigError
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
 
 
 def _write_cells_yaml(tmp_path: Path) -> Path:
@@ -46,6 +50,7 @@ async def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
 
@@ -63,7 +68,7 @@ async def test_build_daemon_wires_paper_executor_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -76,7 +81,7 @@ async def test_build_daemon_wires_paper_executor_by_default(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
     assert isinstance(daemon.executor, EchoPaperExecutor)
-    assert daemon.account_ctx.account_id == "default"
+    assert daemon.account_ctx.account_id == "550e8400-e29b-41d4-a716-446655440000"
     assert daemon.account_ctx.allocation_cap_usdt == Decimal("500")
     assert isinstance(daemon.safety_chain, SafetyGuardChain)
     assert daemon.fill_tracker is None
@@ -95,7 +100,7 @@ async def test_build_daemon_simulated_excludes_buying_power_guard(
 
     AllocationCapGuard (policy, balance-independent) stays in both paths."""
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -122,7 +127,7 @@ async def test_build_daemon_invalid_executor_combo_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "k")
     monkeypatch.setenv("BFX_API_SECRET", "s")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -187,7 +192,7 @@ async def test_build_daemon_filters_disabled_hard_guards(
     but build_daemon ignored it — 7 guards always constructed regardless of
     yaml. Lock the contract: build_daemon must filter guards by enabled."""
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -240,7 +245,7 @@ async def test_build_daemon_includes_enabled_calibrated_guard(
     """M2: an enabled calibrated guard (with a valid threshold) appears in
     the chain. Pairs with the disabled-default safety.yaml fixture."""
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -294,7 +299,7 @@ async def test_build_daemon_heartbeat_guard_watches_market_data_not_executor(
     executor/safety_chain — watching those self-suppresses trading in quiet
     markets (the 2026-05-26 canary restart bug) and is a reactive mismatch."""
     await _base_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")

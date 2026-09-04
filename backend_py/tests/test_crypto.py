@@ -7,7 +7,9 @@ from bfx_funding_bot.core.crypto import (
     Envelope,
     VaultNotConfiguredError,
     decrypt_secret,
+    decrypt_secret_with_aad,
     encrypt_secret,
+    encrypt_secret_with_aad,
     load_kek,
 )
 
@@ -50,6 +52,16 @@ def test_wrong_user_aad_fails():
     env = encrypt_secret("x", user_id="alice", kek=kek)
     with pytest.raises(InvalidTag):
         decrypt_secret(env, user_id="bob", kek=kek)
+
+
+def test_explicit_aad_round_trip_is_not_user_id_implicit():
+    kek = base64.b64decode(_KEK)
+    env = encrypt_secret_with_aad("x", aad="550e8400-e29b-41d4-a716-446655440000", kek=kek)
+    assert decrypt_secret_with_aad(
+        env, aad="550e8400-e29b-41d4-a716-446655440000", kek=kek
+    ) == "x"
+    with pytest.raises(InvalidTag):
+        decrypt_secret_with_aad(env, aad="operator-1", kek=kek)
 
 
 def test_wrong_kek_fails():

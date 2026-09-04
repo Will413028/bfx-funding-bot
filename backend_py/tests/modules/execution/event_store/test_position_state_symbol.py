@@ -5,8 +5,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.execution.event_store.entities import VenueCreditObservation
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import PositionStateRow
+from bfx_funding_bot.modules.execution.events import (
+    SnapshotCoverage,
+    VenueSnapshotObserved,
+)
+
+_ACCOUNT = "550e8400-e29b-41d4-a716-446655440000"
 
 
 async def _engine_sm():
@@ -61,29 +68,49 @@ async def test_two_symbols_coexist_for_same_account_env():
 @pytest.mark.asyncio
 async def test_project_position_state_isolates_symbols():
     """_project_position_state mutates only the event.symbol bucket; a different
-    symbol's row is untouched. set_position_snapshot seeds each symbol's row."""
+    symbol's row is untouched. A full-account observation seeds both rows."""
     engine, sm = await _engine_sm()
     store = PostgresEventStore(deployment_environment="ci")
     async with sm() as session:
-        # seed two symbols via the snapshot writer
-        await store.set_position_snapshot(
-            session, account_id="a", reserved_usdt=Decimal("0"),
-            realized_usdt=Decimal("100"), n_offers=0, n_credits=1,
-            occurred_at_ms=1, symbol="fUST")
-        await store.set_position_snapshot(
-            session, account_id="a", reserved_usdt=Decimal("0"),
-            realized_usdt=Decimal("200"), n_offers=0, n_credits=1,
-            occurred_at_ms=1, symbol="fUSD")
+        await store.append(session, VenueSnapshotObserved(
+            account_id=_ACCOUNT,
+            environment="ci",
+            query_started_at_ms=0,
+            query_finished_at_ms=1,
+            offers=(),
+            credits=(
+                VenueCreditObservation(
+                    credit_id="c-ust", symbol="fUST", amount=Decimal("100"),
+                    rate=None, period_days=2, status="ACTIVE",
+                ),
+                VenueCreditObservation(
+                    credit_id="c-usd", symbol="fUSD", amount=Decimal("200"),
+                    rate=None, period_days=2, status="ACTIVE",
+                ),
+            ),
+            wallet_available={"fUST": Decimal("0"), "fUSD": Decimal("0")},
+            coverage=SnapshotCoverage(
+                active_offers_complete=True,
+                active_credits_complete=True,
+                wallets_complete=True,
+            ),
+            occurred_at_ms=1,
+        ))
         await session.commit()
 
         # a CLAIMED projection on fUST must not touch fUSD
         await store._project_position_state(
-            session, "RESERVATION_CLAIMED", "a", Decimal("30"),
+            session, "RESERVATION_CLAIMED", _ACCOUNT, Decimal("30"),
             event_seq=10, occurred_at_ms=2, symbol="fUST")
         await session.commit()
 
-        rows = (await session.execute(select(PositionStateRow).where(
-            PositionStateRow.account_id == "a"))).scalars().all()
+        rows = (
+            await session.execute(
+                select(PositionStateRow).where(
+                    PositionStateRow.exchange_account_id.is_not(None)
+                )
+            )
+        ).scalars().all()
     by_symbol = {r.symbol: r for r in rows}
     assert by_symbol["fUST"].reserved == Decimal("30")   # +30 claimed
     assert by_symbol["fUST"].realized == Decimal("100")  # unchanged

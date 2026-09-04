@@ -46,6 +46,39 @@ def test_order_submit_failed_requires_failure_reason() -> None:
         )
 
 
+def test_order_submit_unknown_and_not_sent_require_failure_reason() -> None:
+    common = {
+        "cid": 1,
+        "offer_id": None,
+        "execution_decision_id": "d-schema",
+        "signal_correlation_id": uuid4(),
+        "offer_rate": 0.0001,
+        "offer_amount_usdt": 100.0,
+        "offer_duration_days": 2,
+        "is_simulated": False,
+    }
+    for status in ("unknown", "not_sent"):
+        with pytest.raises(ValidationError, match="failure_reason"):
+            OrderSubmitPayload(**common, status=status)
+        payload = OrderSubmitPayload(**common, status=status, failure_reason="reason")
+        assert payload.status == status
+
+
+def test_order_submit_status_is_closed_vocabulary() -> None:
+    common = {
+        "cid": 1,
+        "offer_id": None,
+        "execution_decision_id": "d-schema",
+        "signal_correlation_id": uuid4(),
+        "offer_rate": 0.0001,
+        "offer_amount_usdt": 100.0,
+        "offer_duration_days": 2,
+        "is_simulated": False,
+    }
+    with pytest.raises(ValidationError, match="status"):
+        OrderSubmitPayload(**common, status="filled")
+
+
 def test_order_submit_payload_requires_execution_decision_id() -> None:
     with pytest.raises(ValidationError, match="execution_decision_id"):
         OrderSubmitPayload(
@@ -104,7 +137,7 @@ def test_health_target_includes_phase42_targets() -> None:
     assert HealthTarget.FILL_TRACKER.value == "fill_tracker"
 
 
-def test_envelope_account_id_default() -> None:
+def test_envelope_does_not_invent_an_account_realm() -> None:
     env = Envelope(
         timestamp="2026-05-21T00:00:00+00:00",
         level=Level.INFO,
@@ -120,7 +153,7 @@ def test_envelope_account_id_default() -> None:
             "budget_seconds": 43200,
         },
     )
-    assert env.account_id == "default"
+    assert env.account_id is None
 
 
 def test_envelope_validates_order_submit_payload() -> None:

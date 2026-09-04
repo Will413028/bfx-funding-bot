@@ -5,6 +5,10 @@ import os
 import pytest
 
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    seed_exchange_account,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -13,10 +17,13 @@ _CELLS_YAML = os.path.abspath(
 )
 
 
-def _set_daemon_env(monkeypatch, pg_engine) -> None:
+async def _set_daemon_env(monkeypatch, pg_engine) -> None:
     """Set required env vars for build_daemon using testcontainer DB."""
+    configure_account_env(monkeypatch)
+    await seed_exchange_account(pg_engine)
     monkeypatch.setenv("BFX_PHASE", "paper")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "paper")
     monkeypatch.setenv("BFX_CELLS_YAML", _CELLS_YAML)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
@@ -37,7 +44,7 @@ async def test_daemon_shutdown_happy_path(monkeypatch, pg_session_factory, pg_en
     Verify the TaskGroup cancel chain completes cleanly (no hung tasks).
     Does NOT assert heartbeat timing because health_check only fires after 30s.
     """
-    _set_daemon_env(monkeypatch, pg_engine)
+    await _set_daemon_env(monkeypatch, pg_engine)
 
     daemon = await build_daemon(skip_ws=True)
     run_task = asyncio.create_task(daemon.run())
@@ -68,7 +75,7 @@ async def test_daemon_shutdown_does_not_hang_on_normal_stop(
     The test verifies happy-path no-hang under normal stop. Hung sub-tasks are
     covered by Koyeb-grade SIGKILL (not unit-tested here).
     """
-    _set_daemon_env(monkeypatch, pg_engine)
+    await _set_daemon_env(monkeypatch, pg_engine)
 
     daemon = await build_daemon(skip_ws=True)
     run_task = asyncio.create_task(daemon.run())
@@ -89,7 +96,7 @@ async def test_daemon_subtask_fatal_escalates(
     """Injected FatalError in one sub-task → TaskGroup cancels all + raises."""
     from bfx_funding_bot.core.errors import FatalError
 
-    _set_daemon_env(monkeypatch, pg_engine)
+    await _set_daemon_env(monkeypatch, pg_engine)
 
     daemon = await build_daemon(skip_ws=True)
 

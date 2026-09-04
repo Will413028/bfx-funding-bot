@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    account_id_uuid_or_none,
+    account_scope_clause,
+)
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
 
 
@@ -59,7 +63,12 @@ class HaltStateStore:
                 await session.execute(
                     select(TradingHaltRow)
                     .where(
-                        TradingHaltRow.account_id == self._account_id,
+                        account_scope_clause(
+                            session,
+                            account_id=self._account_id,
+                            exchange_account_column=TradingHaltRow.exchange_account_id,
+                            legacy_account_column=TradingHaltRow.account_id,
+                        ),
                         TradingHaltRow.deployment_environment == self._env,
                     )
                     .order_by(TradingHaltRow.id.desc())
@@ -74,6 +83,7 @@ class HaltStateStore:
         """Append a transition. Never updates or deletes an existing row."""
         row = TradingHaltRow(
             account_id=self._account_id,
+            exchange_account_id=account_id_uuid_or_none(self._account_id),
             deployment_environment=self._env,
             halted=halted,
             reason=reason,
@@ -91,7 +101,12 @@ class HaltStateStore:
                 await session.execute(
                     select(TradingHaltRow)
                     .where(
-                        TradingHaltRow.account_id == self._account_id,
+                        account_scope_clause(
+                            session,
+                            account_id=self._account_id,
+                            exchange_account_column=TradingHaltRow.exchange_account_id,
+                            legacy_account_column=TradingHaltRow.account_id,
+                        ),
                         TradingHaltRow.deployment_environment == self._env,
                     )
                     .order_by(TradingHaltRow.id.desc())

@@ -1,16 +1,16 @@
 """Integration test — credit-aware reconcile, no double-count.
 
-Proves that BootRecovery with 1 orphan offer ($100) + 3 credits ($450) produces:
+Proves that BootRecovery with 1 claimed offer ($100) + 3 credits ($450) produces:
   ledger.realized_exposure() == $450
   ledger.current_exposure()  == $550  (reserved=$100 + realized=$450)
 
 NOT $650 (which would occur if the orphan ReservationClaimed reached the
 ledger via bus delta AND PositionReconciled both counted it).
 
-Routing invariant under test:
-  - ReservationClaimed for orphan → _route_fsm → offer_registry.handle  (NOT bus)
-  - PositionReconciled           → _safe_publish → bus → ledger.on_position_reconciled
-  => ledger sees the absolute snapshot once; no delta double-count.
+The offer is seeded with its audited reservation reference before recovery.
+Recovery intentionally fails closed for an uncorrelated venue orphan, so the
+test exercises the safe path and verifies that PositionReconciled is the only
+reconcile-time exposure writer.
 
 Run:
   cd backend_py && uv run pytest tests/integration/test_credit_reconcile_pg.py -v -m integration
@@ -23,6 +23,7 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingCredit, ActiveFundingOffer
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.events import (
@@ -33,6 +34,8 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+
+from .conftest import make_reservation_ref
 
 pytestmark = pytest.mark.integration
 
@@ -90,21 +93,31 @@ class _AuthRest:
     ) -> list[ActiveFundingCredit]:
         return self._c
 
+    async def get_funding_available(
+        self, *, ctx: AccountContext, currency: str,
+    ) -> Decimal:
+        return Decimal("0")
+
 
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
-    """1 orphan offer ($100) + 3 credits ($450), real ledger subscribed to both
-    delta handlers AND on_position_reconciled.
+async def test_claimed_offer_plus_credits_no_double_count(pg_session_factory):
+    """1 audited offer ($100) + 3 credits ($450), real ledger subscribed to
+    both delta handlers AND on_position_reconciled.
 
     Exposure must equal venue truth (reserved=$100, realized=$450) — NOT doubled
-    ($650 reserved) which would happen if the orphan claim hit the ledger via bus
-    delta AND PositionReconciled both set reserved.
+    ($650 reserved) which would happen if a recovery claim hit the ledger via
+    bus delta AND PositionReconciled both set reserved.
     """
-    acct = f"it-{uuid.uuid4().hex[:8]}"
+    acct = str(uuid.uuid4())
+    async with pg_session_factory() as seed_session:
+        seed_session.add(
+            ExchangeAccount(id=uuid.UUID(acct), venue="bitfinex", label=f"test-{acct}")
+        )
+        await seed_session.commit()
     ctx = AccountContext(
         account_id=acct,
         credentials=Credentials(api_key="k", api_secret="s"),
@@ -114,8 +127,9 @@ async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
     ledger = PaperPositionLedger(account_id=acct)
 
     bus = _Bus()
-    # Wire all delta handlers — these must NOT fire for the orphan claim because
-    # BootRecovery routes FSM events to offer_registry, not the bus.
+    # Wire all delta handlers.  Recovery must not publish a duplicate claim for
+    # an already-audited offer; PositionReconciled remains the single writer for
+    # the reconcile-time absolute exposure snapshot.
     bus.subscribe(ReservationClaimed, ledger.on_reservation_claimed)
     bus.subscribe(OrderFilled, ledger.on_order_filled)
     bus.subscribe(ReservationReleased, ledger.on_reservation_released)
@@ -124,7 +138,7 @@ async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
 
     registry = _Registry()
 
-    # 1 orphan offer at venue ($100) — no matching local claim in the event store.
+    # 1 offer at venue ($100), with a matching audited local claim.
     offers = [
         ActiveFundingOffer(
             venue_offer_id="555",
@@ -148,6 +162,24 @@ async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
         )
         for i in range(3)
     ]
+
+    scid = uuid.uuid4()
+    async with pg_session_factory() as seed_session:
+        await store.append(
+            seed_session,
+            ReservationClaimed(
+                cid=555,
+                venue_offer_id="555",
+                size_usdt=Decimal("100"),
+                signal_correlation_id=scid,
+                account_id=acct,
+                is_simulated=False,
+                occurred_at_ms=1,
+                symbol="fUST",
+                reservation_ref=make_reservation_ref(555, scid, "555"),
+            ),
+        )
+        await seed_session.commit()
 
     rec = BootRecovery(
         store=store,
@@ -174,7 +206,5 @@ async def test_orphan_offer_plus_credits_no_double_count(pg_session_factory):
         "if $650 the orphan claim was double-applied via both delta bus AND PositionReconciled"
     )
 
-    # The orphan ReservationClaimed was routed to the FSM registry, not the bus.
-    assert any(isinstance(e, ReservationClaimed) for e in registry.handled), (
-        "orphan ReservationClaimed must reach the offer_registry (FSM), not be dropped"
-    )
+    # No recovery FSM action is needed for an already-audited offer.
+    assert registry.handled == []

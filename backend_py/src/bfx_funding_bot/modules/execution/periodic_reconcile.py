@@ -73,6 +73,16 @@ class PeriodicReconcile:
         self._resync_event = asyncio.Event()
         self._resync_reason = ""
         self._last_tick_mono = 0.0
+        self._recent_fences: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def recent_fences(self) -> tuple[tuple[int, int], ...]:
+        """The two latest successful reconcile fences for bounded canary evidence.
+
+        This remains diagnostic runtime state only; the preflight authority is
+        the immutable, account-local ``reconcile_observation`` projection.
+        """
+        return self._recent_fences
 
     def request_resync(self, reason: str) -> None:
         """Request one off-interval reconcile. Synchronous and safe to call from a
@@ -136,6 +146,11 @@ class PeriodicReconcile:
             return
 
         self._consecutive_failures = 0
+        if result.snapshot_event_seq is not None:
+            self._recent_fences = (
+                *self._recent_fences[-1:],
+                (result.snapshot_event_seq, int(time.time() * 1000)),
+            )
         if self._tripped_down:
             self._tripped_down = False
             self._probe.update(
@@ -146,12 +161,19 @@ class PeriodicReconcile:
             result.realized_drift_usdt > _DRIFT_EPSILON
             or result.reserved_drift_usdt > _DRIFT_EPSILON
         )
-        if result.n_released > 0 or result.n_claimed > 0 or drifted:
+        if (
+            result.n_released > 0
+            or result.n_claimed > 0
+            or result.n_matched > 0
+            or result.n_quarantined > 0
+            or drifted
+        ):
             log.warning(
                 "periodic_reconcile_divergence released=%d claimed=%d failed=%d "
-                "realized_drift=%s reserved_drift=%s "
+                "matched=%d quarantined=%d realized_drift=%s reserved_drift=%s "
                 "— WS lifecycle path missed events",
                 result.n_released, result.n_claimed, result.n_failed,
+                result.n_matched, result.n_quarantined,
                 result.realized_drift_usdt, result.reserved_drift_usdt,
             )
             self._divergence_flagged = True
@@ -160,6 +182,8 @@ class PeriodicReconcile:
                 error_message=(
                     f"reconcile drift released={result.n_released} "
                     f"claimed={result.n_claimed} "
+                    f"matched={result.n_matched} "
+                    f"quarantined={result.n_quarantined} "
                     f"realized_drift={result.realized_drift_usdt} "
                     f"reserved_drift={result.reserved_drift_usdt}"
                 ),

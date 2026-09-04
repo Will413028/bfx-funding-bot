@@ -24,11 +24,20 @@ from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from bfx_funding_bot.modules.execution.middleware import (
+    HeartbeatMiddleware,
+    ReservationEmittingMiddleware,
+)
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,
     MetricsSubmitMiddleware,
     TimedReconcileRecovery,
+)
+from tests.modules.marketfeed.account_test_helpers import (
+    configure_account_env,
+    configure_canary_wiring_env,
+    seed_exchange_account,
 )
 
 
@@ -58,7 +67,7 @@ async def _prepare_env(
     db_path = tmp_path / db_name
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
+    configure_account_env(monkeypatch)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
@@ -69,6 +78,7 @@ async def _prepare_env(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(_eng)
     await _eng.dispose()
 
     httpx_mock.add_response(
@@ -156,6 +166,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
+    configure_canary_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -170,6 +181,18 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     # wrapper; PeriodicReconcile itself is untouched.
     assert daemon.periodic_reconcile is not None
     assert isinstance(daemon.periodic_reconcile._recovery, TimedReconcileRecovery)
+    deployment = daemon.periodic_reconcile._deployment
+    assert deployment is not None
+    metrics_executor = deployment._executor
+    assert isinstance(metrics_executor, MetricsSubmitMiddleware)
+    heartbeat = metrics_executor._inner
+    assert isinstance(heartbeat, HeartbeatMiddleware)
+    from bfx_funding_bot.modules.execution.canary_permit import CanaryOneShotGate
+    assert isinstance(heartbeat._inner, CanaryOneShotGate)
+    reservation = heartbeat._inner._inner
+    assert isinstance(reservation, ReservationEmittingMiddleware)
+    assert reservation._command_gate is not None
+    assert reservation._command_gate._safety_evaluator is daemon.safety_chain
 
     # WS dispatcher queue saturation gauges bound to the live dispatcher.
     assert daemon.ws_dispatcher is not None

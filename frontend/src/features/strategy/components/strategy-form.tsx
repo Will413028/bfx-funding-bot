@@ -50,14 +50,18 @@ function toApiPayload(values: StrategyConfigInput): StrategyConfig {
 }
 
 interface StrategyFormProps {
+  exchangeAccountId?: string;
   userConfig: UserConfig | null;
 }
 
-export function StrategyForm({ userConfig }: StrategyFormProps) {
+export function StrategyForm({
+  exchangeAccountId,
+  userConfig,
+}: StrategyFormProps) {
   const t = useTranslations("strategy");
   const tc = useTranslations("common");
-  const saveMutation = useSaveConfig();
-  const resetMutation = useResetConfig();
+  const saveMutation = useSaveConfig(exchangeAccountId);
+  const resetMutation = useResetConfig(exchangeAccountId);
 
   const {
     register,

@@ -13,11 +13,29 @@ from cryptography.exceptions import InvalidTag
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.crypto import Envelope, decrypt_secret, encrypt_secret
+from bfx_funding_bot.core.crypto import (
+    Envelope,
+    decrypt_secret,
+    decrypt_secret_with_aad,
+    encrypt_secret,
+    encrypt_secret_with_aad,
+)
 from bfx_funding_bot.external.bitfinex.auth_rest import KeyPermissions
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError
+from bfx_funding_bot.modules.accounts.exchange_accounts import (
+    AccountRetired,
+    MembershipDenied,
+    account_id_canonical,
+    create_exchange_account_credential,
+    get_exchange_account,
+)
 from bfx_funding_bot.modules.accounts.provisioning import ensure_user_profile
-from bfx_funding_bot.modules.accounts.tables import APIKey
+from bfx_funding_bot.modules.accounts.tables import (
+    APIKey,
+    ExchangeAccount,
+    ExchangeAccountCredential,
+    ExchangeAccountMembership,
+)
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 
 
@@ -37,9 +55,262 @@ class VaultKeyMismatchError(Exception):
     """
 
 
+class AccountCredentialNotConfiguredError(Exception):
+    """An account has no unrevoked Bitfinex credential available for boot."""
+
+
 # Scopes allowed to have write=True for a VERIFIED key. Anything else with
 # write=True (withdraw, orders, a renamed dangerous scope, ...) fails closed.
 _ALLOWED_WRITE_SCOPES = {"funding"}
+
+
+async def _require_account_membership(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    write: bool,
+) -> None:
+    account = await get_exchange_account(session, exchange_account_id=exchange_account_id)
+    if account.lifecycle_status == "retired":
+        raise AccountRetired(str(exchange_account_id))
+    membership = await session.scalar(
+        select(ExchangeAccountMembership).where(
+            ExchangeAccountMembership.exchange_account_id == exchange_account_id,
+            ExchangeAccountMembership.user_id == user_id,
+        )
+    )
+    allowed = {"owner", "operator"} if write else {"owner", "operator", "viewer"}
+    if membership is None or membership.role not in allowed:
+        raise MembershipDenied(str(exchange_account_id))
+
+
+async def list_account_credentials(
+    session: AsyncSession, *, exchange_account_id: UUID, user_id: str
+) -> Sequence[ExchangeAccountCredential]:
+    """List credentials only after account membership has been checked."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=False
+    )
+    result = await session.scalars(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id
+        )
+    )
+    return list(result)
+
+
+async def load_account_credentials(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    kek: bytes,
+) -> Credentials:
+    """Load and decrypt the sole active Bitfinex credential for an account.
+
+    The daemon uses this boundary at boot. It deliberately returns only the
+    runtime ``Credentials`` value, never an ORM row or a legacy user-owned key,
+    and fails closed when the account is not provisioned exactly once.
+    """
+    await get_exchange_account(
+        session, exchange_account_id=exchange_account_id, for_command=True
+    )
+    rows = list(
+        await session.scalars(
+            select(ExchangeAccountCredential)
+            .where(
+                ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+                ExchangeAccountCredential.venue == "bitfinex",
+                ExchangeAccountCredential.lifecycle_status == "active",
+                ExchangeAccountCredential.verified_at.is_not(None),
+                ExchangeAccountCredential.last_verify_error.is_(None),
+            )
+            .limit(2)
+        )
+    )
+    if not rows:
+        raise AccountCredentialNotConfiguredError(
+            f"account {exchange_account_id} has no active Bitfinex credential"
+        )
+    if len(rows) != 1:
+        raise AccountCredentialNotConfiguredError(
+            f"account {exchange_account_id} has multiple active Bitfinex credentials"
+        )
+    row = rows[0]
+    try:
+        secret = decrypt_secret_with_aad(
+            Envelope(
+                secret_ciphertext=row.secret_ciphertext,
+                secret_nonce=row.secret_nonce,
+                wrapped_dek=row.wrapped_dek,
+                dek_nonce=row.dek_nonce,
+                key_version=row.key_version,
+            ),
+            aad=account_id_canonical(exchange_account_id),
+            kek=kek,
+        )
+    except InvalidTag as exc:
+        raise VaultKeyMismatchError(str(row.id)) from exc
+    return Credentials(api_key=row.api_key, api_secret=secret)
+
+
+async def create_account_credential(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    label: str,
+    api_key: str,
+    api_secret: str,
+    kek: bytes,
+) -> ExchangeAccountCredential:
+    """Create a credential encrypted with canonical ExchangeAccount AAD."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    envelope = encrypt_secret_with_aad(
+        api_secret, aad=account_id_canonical(exchange_account_id), kek=kek
+    )
+    return await create_exchange_account_credential(
+        session,
+        exchange_account_id=exchange_account_id,
+        venue="bitfinex",
+        label=label,
+        api_key=api_key,
+        secret_ciphertext=envelope.secret_ciphertext,
+        secret_nonce=envelope.secret_nonce,
+        wrapped_dek=envelope.wrapped_dek,
+        dek_nonce=envelope.dek_nonce,
+        key_version=envelope.key_version,
+    )
+
+
+async def delete_account_credential(
+    session: AsyncSession,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    key_id: UUID,
+) -> bool:
+    """Retire a credential; credential rows are never hard-deleted."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    row = await session.scalar(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.id == key_id,
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+        )
+    )
+    if row is None:
+        return False
+    row.lifecycle_status = "retired"
+    await session.flush()
+    return True
+
+
+async def verify_account_credential(
+    session: AsyncSession,
+    client: _PermissionsClient,
+    *,
+    exchange_account_id: UUID,
+    user_id: str,
+    key_id: UUID,
+    kek: bytes,
+) -> ExchangeAccountCredential | None:
+    """Verify an account credential using account UUID AAD and context."""
+    await _require_account_membership(
+        session, exchange_account_id=exchange_account_id, user_id=user_id, write=True
+    )
+    row = await session.scalar(
+        select(ExchangeAccountCredential).where(
+            ExchangeAccountCredential.id == key_id,
+            ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+        )
+    )
+    if row is None:
+        return None
+    # Revoked and retired rows are terminal audit records.  Verification must
+    # never resurrect one into the sole active slot; rotation creates a new
+    # pending row instead.  Returning ``None`` lets the account-scoped route
+    # use its normal non-enumerating 404 response.
+    if row.lifecycle_status in {"revoked", "retired"}:
+        return None
+    try:
+        secret = decrypt_secret_with_aad(
+            Envelope(
+                secret_ciphertext=row.secret_ciphertext,
+                secret_nonce=row.secret_nonce,
+                wrapped_dek=row.wrapped_dek,
+                dek_nonce=row.dek_nonce,
+                key_version=row.key_version,
+            ),
+            aad=account_id_canonical(exchange_account_id),
+            kek=kek,
+        )
+    except InvalidTag as exc:
+        # Wrong/rotated KEK or ciphertext corruption must be a clean vault
+        # boundary, never an unhandled 500 from the HTTP handler.
+        raise VaultKeyMismatchError(str(key_id)) from exc
+    ctx = AccountContext(
+        account_id=str(exchange_account_id),
+        credentials=Credentials(api_key=row.api_key, api_secret=secret),
+        allocation_cap_usdt=Decimal("0"),
+    )
+    try:
+        perms = await client.get_key_permissions(ctx=ctx)
+    except BitfinexAPIError as e:
+        if e.status_code == 0 or e.status_code == 429 or e.status_code >= 500:
+            raise
+        row.lifecycle_status = "revoked"
+        row.verified_at = None
+        row.last_verify_error = "invalid_credentials"
+        await session.flush()
+        return row
+    if not perms.can("funding", write=True):
+        row.lifecycle_status = "pending"
+        row.verified_at = None
+        row.last_verify_error = "funding_write_required"
+    else:
+        offending = [
+            scope for scope, (_read, write) in perms.scopes.items()
+            if write and scope not in _ALLOWED_WRITE_SCOPES
+        ]
+        if offending:
+            row.lifecycle_status = "pending"
+            row.verified_at = None
+            row.last_verify_error = (
+                "withdraw_must_be_disabled"
+                if "withdraw" in offending
+                else f"unexpected_write_scope:{offending[0]}"
+            )
+        else:
+            # Serialize promotion for one account.  The partial unique index is
+            # the final race-proof guard, while this lock lets us return a
+            # deterministic domain result instead of a late IntegrityError.
+            await session.scalar(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.id == exchange_account_id)
+                .with_for_update()
+            )
+            competing = await session.scalar(
+                select(ExchangeAccountCredential).where(
+                    ExchangeAccountCredential.exchange_account_id == exchange_account_id,
+                    ExchangeAccountCredential.venue == row.venue,
+                    ExchangeAccountCredential.lifecycle_status == "active",
+                    ExchangeAccountCredential.id != row.id,
+                )
+            )
+            if competing is not None:
+                row.lifecycle_status = "pending"
+                row.verified_at = None
+                row.last_verify_error = "active_credential_exists"
+            else:
+                row.lifecycle_status = "active"
+                row.last_verify_error = None
+                row.verified_at = datetime.now(UTC)
+    await session.flush()
+    return row
 
 
 async def list_api_keys(session: AsyncSession, *, user_id: str) -> Sequence[APIKey]:
@@ -156,11 +427,14 @@ async def verify_api_key(
 
 
 __all__ = [
+    "AccountCredentialNotConfiguredError",
     "Envelope",
     "KeyAlreadyExistsError",
     "VaultKeyMismatchError",
     "create_api_key",
     "delete_api_key",
+    "list_account_credentials",
     "list_api_keys",
+    "load_account_credentials",
     "verify_api_key",
 ]

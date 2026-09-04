@@ -3,7 +3,6 @@ import {
   changePasswordSchema,
   createApiKeySchema,
   loginSchema,
-  registerSchema,
   strategyConfigSchema,
 } from "../validations";
 
@@ -28,24 +27,6 @@ describe("loginSchema", () => {
     const result = loginSchema.safeParse({
       email: "a@b.com",
       password: "",
-    });
-    expect(result.success).toBe(false);
-  });
-});
-
-describe("registerSchema", () => {
-  it("accepts valid input", () => {
-    const result = registerSchema.safeParse({
-      email: "a@b.com",
-      password: "12345678",
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects short password", () => {
-    const result = registerSchema.safeParse({
-      email: "a@b.com",
-      password: "1234",
     });
     expect(result.success).toBe(false);
   });

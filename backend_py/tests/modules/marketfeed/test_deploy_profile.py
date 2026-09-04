@@ -34,6 +34,27 @@ def test_deployment_profiles_contain_no_legacy_clamp_flags() -> None:
         assert "BFX_CLAMP_" not in path.read_text()
 
 
+def test_deployment_profiles_use_registered_projector_version() -> None:
+    for profile in ("paper.env", "shadow.env", "canary.env"):
+        env = parse_env_file(REPOSITORY_ROOT / "deploy/vm" / profile)
+        assert env["BFX_PROJECTOR_VERSION"] == "execution-state-v1"
+
+
+@pytest.mark.parametrize("legacy_var", ["BFX_ACCOUNT_ID", "BFX_API_KEY", "BFX_API_SECRET"])
+def test_deploy_script_rejects_legacy_identity_and_env_credentials(
+    tmp_path: Path, legacy_var: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    bot_env = root.parent / "home/bfx/bot.env"
+    bot_env.write_text(bot_env.read_text() + f"{legacy_var}=legacy\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert legacy_var in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(content)
     path.chmod(0o755)
@@ -49,6 +70,14 @@ def _deploy_root(tmp_path: Path) -> Path:
     )
     for profile in ("paper.env", "shadow.env", "shadow-p14.env", "canary.env"):
         shutil.copy2(REPOSITORY_ROOT / "deploy/vm" / profile, root / "deploy/vm" / profile)
+    evidence = tmp_path / "halt2-canary-evidence.json"
+    evidence.write_text("{}\n")
+    canary_profile = root / "deploy/vm/canary.env"
+    canary_profile.write_text(
+        canary_profile.read_text().replace(
+            "/var/lib/bfx/evidence/halt2-canary.json", str(evidence)
+        )
+    )
     for config in ("cells.experimental-p14.yaml", "cells.canary.yaml", "safety.canary.yaml"):
         shutil.copy2(
             REPOSITORY_ROOT / "backend_py/configs" / config,
@@ -59,13 +88,16 @@ def _deploy_root(tmp_path: Path) -> Path:
     home.mkdir(parents=True)
     (home / "bot.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
-        "BFX_API_KEY=safe-fake\n"
-        "BFX_API_SECRET=safe-fake\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=550e8400-e29b-41d4-a716-446655440000\n"
+        "BFX_EXPECTED_IMAGE_DIGEST=sha256:expected\n"
+        "BFX_VAULT_KEK=safe-fake\n"
     )
     (home / "webapi.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
         "BETTER_AUTH_JWKS_URL=https://example.invalid/jwks\n"
         "BFX_VAULT_KEK=safe-fake\n"
+        "BFX_OPERATOR_USER_ID=operator-1\n"
+        "BFX_OPERATOR_ROLE=admin\n"
     )
     (home / "frontend.env").write_text(
         "NEXT_PUBLIC_APP_URL=https://example.invalid\n"
@@ -76,6 +108,8 @@ def _deploy_root(tmp_path: Path) -> Path:
         "DATABASE_URL=postgresql://safe-fake\n"
         "REDIS_URL=redis://safe-fake\n"
         "PASSKEY_RP_ID=example.invalid\n"
+        "BFX_OPERATOR_USER_ID=operator-1\n"
+        "BFX_OPERATOR_ROLE=admin\n"
     )
 
     fake_bin = tmp_path / "fake-bin"
@@ -90,17 +124,26 @@ def _deploy_root(tmp_path: Path) -> Path:
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
+        "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
+        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_DIGEST:-sha256:expected}\"; fi\n",
+    )
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\nexit \"${FAKE_UV_EXIT:-0}\"\n",
     )
     return root
 
 
-def _run_deploy(root: Path, phase: str, *, confirm: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_deploy(
+    root: Path, phase: str, *, confirm: bool = False, image_digest: str = "sha256:expected"
+) -> subprocess.CompletedProcess[str]:
     fake_bin = root.parent / "fake-bin"
     environment = os.environ | {
         "HOME": str(root.parent / "home"),
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(root / "fake-docker.log"),
+        "FAKE_UV_LOG": str(root / "fake-uv.log"),
+        "FAKE_IMAGE_DIGEST": image_digest,
     }
     if confirm:
         environment["BFX_CANARY_CONFIRM"] = "yes"
@@ -259,4 +302,165 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
     assert runtime["BFX_EXECUTION_POLICY"] == "book_guarded"
     assert runtime["BFX_CELLS_YAML"] == "/app/configs/cells.canary.yaml"
     assert runtime["BFX_SAFETY_CONFIG"] == "/app/configs/safety.canary.yaml"
-    assert len((root / "fake-docker.log").read_text().splitlines()) == 3
+    assert (root / "fake-uv.log").read_text().split() == [
+        "run",
+        "python",
+        "scripts/halt2_cutover.py",
+        "preflight",
+        "--account-id",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "--environment",
+        "prod",
+        "--evidence",
+        str(root.parent / "halt2-canary-evidence.json"),
+        "--projector-version",
+        "execution-state-v1",
+        "--image-digest",
+        "sha256:expected",
+        "--config-artifact",
+        str(root / "backend_py/configs/safety.canary.yaml"),
+    ]
+    assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        "image inspect --format={{.Id}} bfx-bot:local",
+        "compose -f docker-compose.bot.yml up -d --remove-orphans",
+        "compose -f docker-compose.bot.yml ps",
+    ]
+
+
+@pytest.mark.parametrize(
+    "field", ["BFX_PROJECTOR_VERSION", "BFX_HALT2_EVIDENCE_REPORT", "BFX_EXPECTED_IMAGE_DIGEST"]
+)
+def test_canary_rejects_missing_halt2_runtime_gate_before_docker(tmp_path: Path, field: str) -> None:
+    root = _deploy_root(tmp_path)
+    target = (
+        root.parent / "home/bfx/bot.env"
+        if field == "BFX_EXPECTED_IMAGE_DIGEST"
+        else root / "deploy/vm/canary.env"
+    )
+    target.write_text(
+        "\n".join(line for line in target.read_text().splitlines() if not line.startswith(field + "="))
+        + "\n"
+    )
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_rejects_noncanonical_account_uuid_before_docker(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+    bot_env = root.parent / "home/bfx/bot.env"
+    bot_env.write_text(bot_env.read_text().replace("550e8400-e29b-41d4-a716-446655440000", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"))
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert "BFX_EXCHANGE_ACCOUNT_ID must be a canonical UUID" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_preflight_failure_blocks_docker(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+    fake_bin = root.parent / "fake-bin"
+    _write_executable(
+        fake_bin / "uv",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\nexit 2\n",
+    )
+
+    result = _run_deploy(root, "canary", confirm=True)
+
+    assert result.returncode != 0
+    assert "Halt 2 preflight failed" in result.stdout
+    assert (root / "fake-uv.log").exists()
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_canary_built_image_digest_mismatch_blocks_up(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+
+    result = _run_deploy(root, "canary", confirm=True, image_digest="sha256:wrong")
+
+    assert result.returncode != 0
+    assert "built bfx-bot:local image digest mismatch" in result.stdout
+    assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        "image inspect --format={{.Id}} bfx-bot:local",
+    ]
+
+
+@pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])
+def test_deploy_script_rejects_missing_backend_operator_auth_before_docker(
+    tmp_path: Path, field: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    webapi = root.parent / "home/bfx/webapi.env"
+    lines = [line for line in webapi.read_text().splitlines() if not line.startswith(field + "=")]
+    webapi.write_text("\n".join(lines) + "\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_non_admin_backend_operator_role_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    webapi = root.parent / "home/bfx/webapi.env"
+    webapi.write_text(webapi.read_text().replace("BFX_OPERATOR_ROLE=admin", "BFX_OPERATOR_ROLE=user"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_ROLE" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_frontend_backend_operator_id_mismatch_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    frontend.write_text(frontend.read_text().replace("BFX_OPERATOR_USER_ID=operator-1", "BFX_OPERATOR_USER_ID=operator-2"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_USER_ID" in result.stdout
+    assert "match" in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+@pytest.mark.parametrize("field", ["BFX_OPERATOR_USER_ID", "BFX_OPERATOR_ROLE"])
+def test_deploy_script_rejects_missing_frontend_operator_auth_before_docker(
+    tmp_path: Path, field: str
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    lines = [line for line in frontend.read_text().splitlines() if not line.startswith(field + "=")]
+    frontend.write_text("\n".join(lines) + "\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert field in result.stdout
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_script_rejects_non_admin_frontend_operator_role_before_docker(
+    tmp_path: Path,
+) -> None:
+    root = _deploy_root(tmp_path)
+    frontend = root.parent / "home/bfx/frontend.env"
+    frontend.write_text(frontend.read_text().replace("BFX_OPERATOR_ROLE=admin", "BFX_OPERATOR_ROLE=user"))
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode != 0
+    assert "BFX_OPERATOR_ROLE" in result.stdout
+    assert not (root / "fake-docker.log").exists()

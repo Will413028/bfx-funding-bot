@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import httpx
@@ -28,6 +29,11 @@ def _row(offer_id=12345, symbol="fUSD", mts=1_700_000_000_000, amount=-100.0,
     return row
 
 
+def _wire_body_with_rate(rate_literal: str, *, status: str = "ACTIVE") -> bytes:
+    encoded = json.dumps([_row(status=status, rate="__EXACT_RATE__")])
+    return encoded.replace('"__EXACT_RATE__"', rate_literal).encode("ascii")
+
+
 def test_parse_happy_path():
     offers = parse_active_funding_offers([_row()])
     assert offers == [
@@ -35,6 +41,9 @@ def test_parse_happy_path():
             venue_offer_id="12345", symbol="fUSD", amount=Decimal("100.0"),
             rate=0.00031, period_days=2, mts_created=1_700_000_000_000,
             status="ACTIVE",
+            amount_original=Decimal("100.0"),
+            mts_updated=1_700_000_000_000,
+            rate_decimal=Decimal("0.00031"),
         )
     ]
 
@@ -88,6 +97,51 @@ async def test_get_active_funding_offers_signs_and_parses():
 
 
 @pytest.mark.asyncio
+async def test_typed_active_offer_preserves_wire_decimal_while_raw_stays_float():
+    precise_rate = "0.0003100000000000000001"
+    body = _wire_body_with_rate(precise_rate)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=iter((1, 2)).__next__)
+
+        parsed = await client.get_active_funding_offers(ctx=_ctx(), symbol="fUSD")
+        raw = await client.fetch_funding_offers_raw(ctx=_ctx(), symbol="fUSD")
+
+    assert parsed[0].rate_decimal == Decimal(precise_rate)
+    assert isinstance(raw[0][14], float)
+
+
+@pytest.mark.asyncio
+async def test_typed_offer_history_preserves_exact_wire_rate():
+    precise_rate = "0.0003100000000000000001"
+    body = _wire_body_with_rate(precise_rate, status="CANCELED")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        result = await BitfinexAuthREST(
+            http=http,
+            nonce_provider=iter((1,)).__next__,
+        ).get_funding_offer_history(
+            ctx=_ctx(),
+            start_ms=1_699_999_999_000,
+            end_ms=1_700_000_001_000,
+        )
+
+    assert result.offers[0].rate_decimal == Decimal(precise_rate)
+
+
+@pytest.mark.asyncio
 async def test_get_active_funding_offers_raises_on_http_error():
     transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
     async with httpx.AsyncClient(transport=transport) as http:
@@ -97,14 +151,18 @@ async def test_get_active_funding_offers_raises_on_http_error():
 
 
 @pytest.mark.asyncio
-async def test_get_active_funding_offers_requires_symbol():
-    """fail-loud: symbol is a required kwarg (no silent fUSD default) so a
-    forgotten symbol raises instead of silently querying/lending fUSD."""
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[]))
+async def test_get_active_funding_offers_without_symbol_fetches_all_currencies():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
         client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
-        with pytest.raises(TypeError):
-            await client.get_active_funding_offers(ctx=_ctx())  # type: ignore[call-arg]
+        assert await client.get_active_funding_offers(ctx=_ctx()) == []
+    assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/offers"
 
 
 @pytest.mark.asyncio

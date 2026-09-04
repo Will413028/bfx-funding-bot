@@ -15,7 +15,7 @@ const protectedPaths = [
 	"/history",
 	"/settings",
 ];
-const authPaths = ["/login", "/register"];
+const authPaths = ["/login"];
 
 const isDev = process.env.NODE_ENV === "development";
 

@@ -6,10 +6,15 @@ allocation cap). Chain short-circuits on first block.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
@@ -17,6 +22,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     WriterLockHandle,
 )
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
+from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
@@ -54,8 +60,14 @@ class ManualKillGuard:
     name = "manual_kill"
     is_calibrated = False
 
-    def __init__(self, *, halt_store: _HaltStateReader | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        halt_store: _HaltStateReader | None = None,
+        canary_halt_authorization: object | None = None,
+    ) -> None:
         self._halt_store = halt_store
+        self._canary_halt_authorization = canary_halt_authorization
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -77,13 +89,29 @@ class ManualKillGuard:
             )
         # None = no halt decision was ever recorded for this realm. That is not
         # "halted" — otherwise every fresh environment would deadlock on boot.
+        canary_authorized = (
+            self._canary_halt_authorization is not None
+            and ctx.canary_halt_authorization is self._canary_halt_authorization
+        )
         if state is not None and state.halted:
+            if canary_authorized:
+                return GuardResult(
+                    allowed=True,
+                    guard_name=self.name,
+                    reason="persistent halt overridden by consumed canary permit",
+                )
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"persisted halt: {state.reason} "
                     f"(actor={state.actor}, id={state.id})"
                 ),
+            )
+        if canary_authorized:
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason="persistent halt absent during canary command",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 
@@ -148,6 +176,155 @@ class HeartbeatGuard:
                     allowed=False, guard_name=self.name,
                     reason=f"sub_task={sub_task} stale {age}s > {self.threshold_seconds}s",
                 )
+        return GuardResult(allowed=True, guard_name=self.name)
+
+
+class UncertaintyReader(Protocol):
+    """Read open uncertainty rows for one exact account/environment/symbol."""
+
+    async def list_open(
+        self,
+        *,
+        exchange_account_id: UUID,
+        deployment_environment: str,
+        symbol: str,
+    ) -> Sequence[object]: ...
+
+
+class DatabaseUncertaintyReader:
+    """Database adapter used by the hard guard and pre-sizing boundary."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def list_open(
+        self,
+        *,
+        exchange_account_id: UUID,
+        deployment_environment: str,
+        symbol: str,
+    ) -> Sequence[object]:
+        async with self._session_factory() as session:
+            return (
+                await session.execute(
+                    select(ExecutionUncertaintyRow).where(
+                        ExecutionUncertaintyRow.exchange_account_id == exchange_account_id,
+                        ExecutionUncertaintyRow.deployment_environment == deployment_environment,
+                        ExecutionUncertaintyRow.symbol == symbol,
+                        ExecutionUncertaintyRow.state == "open",
+                    )
+                )
+            ).scalars().all()
+
+
+class UncertaintyGuard:
+    """Fail-closed hard guard for one exact account/environment/symbol scope.
+
+    Unknown future uncertainty kinds are deliberately treated as blocking.  A
+    reader failure is also a block; the chain can then emit its normal bounded
+    safety trigger without allowing a submit through a missing projection.
+    """
+
+    name = "uncertainty"
+    is_calibrated = False
+    _SUPPORTED_KINDS = frozenset({
+        "submit_outcome_unknown",
+        "unattributed_venue_offer",
+        "unsupported_venue_exposure",
+    })
+
+    def __init__(
+        self,
+        *,
+        reader: UncertaintyReader | Any,
+        deployment_environment: str,
+    ) -> None:
+        if not deployment_environment.strip():
+            raise ValueError("deployment_environment must be non-empty")
+        self._reader = reader
+        self._deployment_environment = deployment_environment
+
+    async def evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> GuardResult:
+        if decision.decision_outcome != DecisionOutcome.POST:
+            return GuardResult(allowed=True, guard_name=self.name)
+        try:
+            account_id = UUID(str(ctx.account_id))
+        except (AttributeError, TypeError, ValueError):
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason="account identity is not canonical — uncertainty guard blocked",
+            )
+        try:
+            list_open = getattr(self._reader, "list_open", None)
+            if list_open is not None:
+                rows = await list_open(
+                    exchange_account_id=account_id,
+                    deployment_environment=self._deployment_environment,
+                    symbol=decision.symbol,
+                )
+            else:
+                # Compatibility with the command-gate reader used by older
+                # adapters; a true result still blocks the exact scope.
+                legacy_reader: Any = self._reader
+                has_open = legacy_reader.has_open
+                is_open = await has_open(
+                    exchange_account_id=account_id,
+                    deployment_environment=self._deployment_environment,
+                    symbol=decision.symbol,
+                )
+                rows = ({"kind": "submit_outcome_unknown"},) if is_open else ()
+        except Exception as exc:
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason=f"uncertainty projection unreadable — failing closed: {exc!r}",
+            )
+        if rows is None:
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason="uncertainty projection returned no result — failing closed",
+            )
+        for row in rows:
+            kind = row.get("kind") if isinstance(row, dict) else getattr(row, "kind", None)
+            row_account = (
+                row.get("exchange_account_id", account_id)
+                if isinstance(row, dict)
+                else getattr(row, "exchange_account_id", account_id)
+            )
+            row_environment = (
+                row.get("deployment_environment", self._deployment_environment)
+                if isinstance(row, dict)
+                else getattr(row, "deployment_environment", self._deployment_environment)
+            )
+            row_symbol = (
+                row.get("symbol", decision.symbol)
+                if isinstance(row, dict)
+                else getattr(row, "symbol", decision.symbol)
+            )
+            if (
+                str(row_account) != str(account_id)
+                or str(row_environment) != self._deployment_environment
+                or str(row_symbol) != decision.symbol
+            ):
+                # The database adapter already applies this exact predicate;
+                # retain the skip here as a defence against a stale/overbroad
+                # adapter so one symbol can never stop an unrelated symbol.
+                continue
+            if kind not in self._SUPPORTED_KINDS:
+                return GuardResult(
+                    allowed=False,
+                    guard_name=self.name,
+                    reason=f"unsupported uncertainty kind {kind!r} — failing closed",
+                )
+            return GuardResult(
+                allowed=False,
+                guard_name=self.name,
+                reason=f"open execution uncertainty kind={kind} symbol={decision.symbol}",
+            )
         return GuardResult(allowed=True, guard_name=self.name)
 
 

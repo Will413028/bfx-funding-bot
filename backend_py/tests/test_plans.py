@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.accounts.user_profile  # noqa: F401
-from bfx_funding_bot.core.auth import Principal, require_user
+from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.accounts.user_profile import UserProfile
 from bfx_funding_bot.modules.api.deps import get_session
@@ -40,7 +40,7 @@ async def make_client(sqlite_engine):
             async with factory() as s:
                 yield s
 
-        app.dependency_overrides[require_user] = _fake_user
+        app.dependency_overrides[require_operator] = _fake_user
         app.dependency_overrides[get_session] = _override_session
         return TestClient(app)
 

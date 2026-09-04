@@ -12,9 +12,29 @@ Two accessors transform it for the two SQLAlchemy drivers we use:
 Both strip the `-pooler` suffix from the host (PgBouncer transaction-mode
 breaks asyncpg prepared statements and alembic transactional DDL).
 """
+import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+VALID_DEPLOYMENT_ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
+
+
+def require_deployment_environment() -> str:
+    """Return an explicit, known data-isolation environment.
+
+    A missing value must never silently select ``prod``.  This helper is used
+    by web/API and operator scripts, which do not pass through marketfeed's
+    stricter ``load_config`` startup validator.
+    """
+    value = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
+    if value not in VALID_DEPLOYMENT_ENVIRONMENTS:
+        valid = ", ".join(sorted(VALID_DEPLOYMENT_ENVIRONMENTS))
+        raise ValueError(
+            f"BFX_DEPLOYMENT_ENV must be explicitly set to one of {valid}"
+        )
+    return value
 
 
 def _strip_pooler_from_host(host: str | None) -> str | None:
@@ -31,17 +51,21 @@ def _strip_pooler_from_host(host: str | None) -> str | None:
     return host
 
 
-class Settings(BaseSettings):
+class AuthSettings(BaseSettings):
+    """Runtime configuration needed by the auth boundary without a database.
+
+    Keeping this model separate from :class:`Settings` lets the web process
+    import its liveness endpoint even when the database URL is absent or
+    malformed.  Database configuration remains required by ``Settings`` and
+    is checked by the startup/readiness path instead of at module import time.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
-
-    database_url: str
-    bitfinex_api_base_url: str = "https://api-pub.bitfinex.com"
-    log_level: str = "INFO"
 
     # SP1 web-API auth (Better Auth JWKS verification)
     better_auth_jwks_url: str = ""        # deploy: https://<app>/api/auth/jwks (real endpoint)
@@ -50,6 +74,24 @@ class Settings(BaseSettings):
     # Override via env BETTER_AUTH_ISSUER only if the FE issuer string ever changes.
     better_auth_issuer: str = "bfx-funding-bot"
     jwt_audience: str = "bfx-funding-backend"
+    operator_user_id: str = Field(default="", validation_alias="BFX_OPERATOR_USER_ID")
+    operator_role: str = Field(default="admin", validation_alias="BFX_OPERATOR_ROLE")
+
+    @model_validator(mode="after")
+    def _validate_production_operator_role(self) -> "AuthSettings":
+        """Production is deliberately locked to the sole admin operator role."""
+        phase = os.environ.get("BFX_PHASE", "").lower()
+        if phase in {"canary", "live"} and self.operator_role != "admin":
+            raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in canary or live")
+        return self
+
+
+class Settings(AuthSettings):
+    """Full application settings, including the required database URL."""
+
+    database_url: str
+    bitfinex_api_base_url: str = "https://api-pub.bitfinex.com"
+    log_level: str = "INFO"
 
     # SP2 vault: the api-key envelope KEK is the env var BFX_VAULT_KEK
     # (base64-encoded 32 bytes), read DIRECTLY from os.environ by

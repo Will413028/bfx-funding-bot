@@ -20,6 +20,11 @@ from pathlib import Path
 import pytest
 
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
+from tests.modules.marketfeed.account_test_helpers import (
+    TEST_EXCHANGE_ACCOUNT_ID,
+    TEST_VAULT_KEK_B64,
+    seed_exchange_account,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -35,6 +40,7 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
 ) -> None:
     assert _HARNESS.exists(), f"harness file not found: {_HARNESS}"
     assert _CELLS_YAML.exists(), f"cells.yaml not found: {_CELLS_YAML}"
+    await seed_exchange_account(pg_engine)
 
     env = os.environ.copy()
     # render_as_string(hide_password=False) — SQLAlchemy URL.__str__ masks
@@ -43,8 +49,11 @@ async def test_path_e_subprocess_exits_with_auth_failed_code(
     env["BFX_CELLS_YAML"] = str(_CELLS_YAML)
     env["BFX_PHASE"] = "paper"
     env["BFX_DEPLOYMENT_ENV"] = "ci"
+    env["BFX_EXECUTION_POLICY"] = "paper"
     env["BFX_API_KEY"] = "test_key"
     env["BFX_API_SECRET"] = "test_secret"
+    env["BFX_EXCHANGE_ACCOUNT_ID"] = str(TEST_EXCHANGE_ACCOUNT_ID)
+    env["BFX_VAULT_KEK"] = TEST_VAULT_KEK_B64
     # Port 0 → kernel-assigned random port; avoids collision when a real
     # bfx daemon is running locally on 8080.
     env["BFX_HEALTHZ_PORT"] = "0"

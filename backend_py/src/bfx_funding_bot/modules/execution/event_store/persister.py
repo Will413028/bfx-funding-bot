@@ -7,16 +7,26 @@ txns => structurally "never hold a txn across a REST call" (spec §13.4).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 
 
 class EventPersister(Protocol):
     async def persist(self, *events: object) -> list[bool]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CommandGatePersistence:
+    """Explicit durable dependencies exposed to the live command boundary."""
+
+    store: PostgresEventStore
+    session_factory: async_sessionmaker[AsyncSession]
 
 
 class EventStorePersister:
@@ -35,18 +45,40 @@ class EventStorePersister:
         *,
         store: PostgresEventStore,
         session_factory: async_sessionmaker[AsyncSession],
+        writer: AccountEventWriter | None = None,
+        compatibility_mode: bool = False,
     ) -> None:
         self._store = store
         self._session_factory = session_factory
+        if writer is not None:
+            self._writer = writer
+        elif compatibility_mode:
+            # Explicitly test/legacy-only. Live callers must use the default
+            # strict writer so an account registry row is required before an
+            # event can be appended.
+            self._writer = AccountEventWriter(
+                store=store,
+                strict_identity=False,
+                allow_missing_account=True,
+            )
+        else:
+            self._writer = AccountEventWriter(store=store)
 
     async def persist(self, *events: object) -> list[bool]:
         """Append events in one txn; return per-event dedup status (True = persisted)."""
         results: list[bool] = []
         async with session_scope(self._session_factory) as session:
             for event in events:
-                persisted = await self._store.append(session, event)
-                results.append(persisted)
+                result = await self._writer.append(session, event)
+                results.append(result.persisted)
         return results
+
+    @property
+    def command_gate_persistence(self) -> CommandGatePersistence:
+        return CommandGatePersistence(
+            store=self._store,
+            session_factory=self._session_factory,
+        )
 
 
 class NoopEventPersister:

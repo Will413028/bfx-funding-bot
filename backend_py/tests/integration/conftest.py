@@ -12,4 +12,5 @@ phase4_4a/) can reuse the same real bus→ledger wiring.
 from .phase4_4a.conftest import (  # noqa: F401
     domain_chain,
     event_sink_stub,
+    make_reservation_ref,
 )

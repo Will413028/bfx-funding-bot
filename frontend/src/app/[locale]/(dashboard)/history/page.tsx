@@ -5,6 +5,7 @@ import { ExecutionEventsTable } from "@/components/shared/execution-events-table
 import { LoadMoreButton } from "@/components/shared/load-more-button";
 import { HistorySkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
+import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { useExecutionEvents } from "@/features/dashboard/hooks/use-execution-events";
 import { EventTypeFilter } from "@/features/history/components/event-type-filter";
 import { useEventTypeFilter } from "@/features/history/hooks/use-event-type-filter";
@@ -14,8 +15,10 @@ const HISTORY_PAGE_SIZE = 50;
 
 export default function HistoryPage() {
   const t = useTranslations("history");
+  const account = useSelectedExchangeAccountId();
   const [eventType, setEventType] = useEventTypeFilter();
   const executions = useExecutionEvents({
+    exchangeAccountId: account.exchangeAccountId,
     eventType: eventType ?? undefined,
     pageSize: HISTORY_PAGE_SIZE,
   });
@@ -29,9 +32,12 @@ export default function HistoryPage() {
         <p className="text-sm text-zinc-500">{t("subtitle")}</p>
       </div>
       <EventTypeFilter value={eventType} onChange={setEventType} />
-      {executions.isLoading ? (
+      {account.isLoading || executions.isLoading ? (
         <HistorySkeleton />
-      ) : executions.isError || !executions.data ? (
+      ) : account.isError ||
+        !account.exchangeAccountId ||
+        executions.isError ||
+        !executions.data ? (
         <QueryError
           message={t("loadFailed")}
           onRetry={() => executions.refetch()}

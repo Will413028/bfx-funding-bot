@@ -26,6 +26,8 @@ from tests.integration.test_reconcile_converges_without_ws import (
     _StubStore,
 )
 
+from .conftest import make_reservation_ref
+
 _NOW = 2_000_000
 _ACCOUNT = "default"
 _ENV = "ci"
@@ -62,14 +64,17 @@ async def test_resync_request_reconciles_off_interval(
         cid=_CID, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=scid, account_id=_ACCOUNT, is_simulated=False,
         occurred_at_ms=_CLAIM_OCCURRED_MS,
-    symbol="fUST"))
+        symbol="fUST",
+        reservation_ref=make_reservation_ref(_CID, scid, _VOI),
+    ))
     assert ledger.current_exposure("fUST") == Decimal("150")
 
     claim_row = OfferClaimRow(
         cid=_CID, account_id=_ACCOUNT, deployment_environment=_ENV,
         state=RegistryState.CLAIMED.value, venue_offer_id=_VOI, size_usdt=_SIZE,
         signal_correlation_id=str(scid), occurred_at_ms=_CLAIM_OCCURRED_MS,
-        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1,
+        last_updated_ms=_CLAIM_OCCURRED_MS, last_event_seq=1, symbol="fUST",
+        execution_decision_id=f"reconcile-test-{_CID}",
     )
     inner = BootRecovery(
         store=_StubStore(),  # type: ignore[arg-type]

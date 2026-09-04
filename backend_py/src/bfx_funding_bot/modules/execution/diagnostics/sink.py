@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_uuid_or_none
 from bfx_funding_bot.modules.execution.diagnostics.tables import DiagnosticsRow
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -91,9 +92,8 @@ class DiagnosticsSink:
                 log.debug("diagnostics_metrics_hook_failed", exc_info=True)
         # account_id is sink-authoritative (mirror deployment_environment=self._env):
         # the real signal-engine decision event dict carries no account_id, so relying
-        # on event.get(..., "default") mis-tagged every decision row "default" while
-        # event_log fills carry the configured BFX_ACCOUNT_ID → per-cell attribution
-        # join (scid→cell via diagnostics) silently failed. The sink knows its account.
+        # on event.get(..., "default") would mis-tag every decision row. The sink
+        # knows its account scope and mirrors the daemon's canonical UUID alias.
         await self._insert(
             kind=kind,
             account_id=self._account_id,
@@ -141,6 +141,7 @@ class DiagnosticsSink:
             async with session_scope(self._sf) as session:
                 session.add(DiagnosticsRow(
                     account_id=account_id,
+                    exchange_account_id=account_id_uuid_or_none(account_id),
                     deployment_environment=self._env,
                     kind=kind.value,
                     payload=payload,

@@ -34,6 +34,12 @@ async def test_from_snapshot_loads_multiple_symbol_rows(session: AsyncSession) -
             reserved=Decimal("3"), realized=Decimal("90"),
             last_updated_ms=1, last_event_seq=1,
         ),
+        PositionStateRow(
+            account_id="default", deployment_environment="prod", symbol="fBTC",
+            reserved=Decimal("0"), realized=Decimal("0"),
+            uncertain_amount=Decimal("75"),
+            last_updated_ms=1, last_event_seq=1,
+        ),
         # different env — must be ignored
         PositionStateRow(
             account_id="default", deployment_environment="shadow", symbol="fUST",
@@ -50,6 +56,9 @@ async def test_from_snapshot_loads_multiple_symbol_rows(session: AsyncSession) -
     assert led.realized_exposure("fUST") == Decimal("440")
     assert led.reserved_exposure("fUSD") == Decimal("3")
     assert led.realized_exposure("fUSD") == Decimal("90")
+    assert led.uncertain_exposure("fBTC") == Decimal("75")
+    assert led.is_uncertain("fBTC") is True
+    assert led.current_exposure("fBTC") == Decimal("75")
     # available is never persisted — 0 until first reconcile
     assert led.available_balance("fUST") == Decimal("0")
 

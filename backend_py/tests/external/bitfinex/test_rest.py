@@ -130,11 +130,12 @@ async def test_get_funding_candles_unexpected_shape_raises_shape_error(
 
 
 @pytest.mark.integration
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_get_funding_candles_against_real_bitfinex() -> None:
     """Pulls last-24h fUST 1h candles from real Bitfinex.
 
-    Skipped by default; run with: `uv run pytest -m integration`.
+    Run manually with: `uv run pytest -m 'integration and live'`.
     """
     import time
 

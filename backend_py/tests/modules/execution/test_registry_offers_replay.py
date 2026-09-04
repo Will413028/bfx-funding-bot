@@ -117,3 +117,50 @@ async def test_snapshot_duplicate_venue_offer_id_fails_closed_as_ambiguous() -> 
         await OfferRegistry.from_snapshot(
             _Session(), account_id="default", deployment_environment="ci",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_refresh_from_snapshot_converges_cross_process_bound_claim() -> None:
+    row = SimpleNamespace(
+        venue_offer_id=None,
+        cid=42,
+        signal_correlation_id=str(uuid4()),
+        size_usdt=Decimal("100"),
+        account_id="default",
+        exchange_account_id=None,
+        state="unknown",
+        occurred_at_ms=1000,
+        last_updated_ms=1000,
+        symbol="fUST",
+        execution_decision_id="d-42",
+    )
+
+    class _Result:
+        def scalars(self) -> "_Result":
+            return self
+
+        def all(self) -> list[SimpleNamespace]:
+            return [] if row.venue_offer_id is None else [row]
+
+    class _Session:
+        async def execute(self, _statement: object) -> _Result:
+            return _Result()
+
+    session = _Session()
+    registry = await OfferRegistry.from_snapshot(
+        session,  # type: ignore[arg-type]
+        account_id="default",
+        deployment_environment="ci",
+    )
+    assert registry.snapshot() == {}
+
+    row.venue_offer_id = "v-bound"
+    row.state = "claimed"
+    row.last_updated_ms = 2000
+    await registry.refresh_from_snapshot(
+        session,  # type: ignore[arg-type]
+        account_id="default",
+        deployment_environment="ci",
+    )
+
+    assert registry.snapshot()["v-bound"].state == RegistryState.CLAIMED

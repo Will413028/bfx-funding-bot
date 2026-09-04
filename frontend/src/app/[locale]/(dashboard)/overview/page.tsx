@@ -3,29 +3,45 @@
 import { useTranslations } from "next-intl";
 import { OverviewSkeleton } from "@/components/shared/page-skeleton";
 import { QueryError } from "@/components/shared/query-error";
+import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
 import { ExecutionsTable } from "@/features/dashboard/components/executions-table";
 import { OffersTable } from "@/features/dashboard/components/offers-table";
 import { PositionsCard } from "@/features/dashboard/components/positions-card";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
+import { UncertaintyBanner } from "@/features/dashboard/components/uncertainty-banner";
 import { useExecutionEvents } from "@/features/dashboard/hooks/use-execution-events";
 import { useOffers } from "@/features/dashboard/hooks/use-offers";
 import { usePositions } from "@/features/dashboard/hooks/use-positions";
+import { useUncertainties } from "@/features/dashboard/hooks/use-uncertainties";
 import { useConfig } from "@/features/strategy/hooks/use-config";
 
 export default function OverviewPage() {
   const t = useTranslations("overview");
-  const positions = usePositions();
-  const offers = useOffers();
-  const executions = useExecutionEvents();
-  const { data: apiKeys } = useApiKeys();
-  const { data: config } = useConfig();
+  const account = useSelectedExchangeAccountId();
+  const positions = usePositions(account.exchangeAccountId);
+  const offers = useOffers(account.exchangeAccountId);
+  const executions = useExecutionEvents({
+    exchangeAccountId: account.exchangeAccountId,
+  });
+  // Uncertainty loading/error is intentionally independent from the core
+  // position/offer tables: one blocked symbol must not hide healthy symbols.
+  const uncertainties = useUncertainties(account.exchangeAccountId);
+  const { data: apiKeys } = useApiKeys(account.exchangeAccountId);
+  const { data: config } = useConfig(account.exchangeAccountId);
 
-  if (positions.isLoading || offers.isLoading || executions.isLoading) {
+  if (
+    account.isLoading ||
+    positions.isLoading ||
+    offers.isLoading ||
+    executions.isLoading
+  ) {
     return <OverviewSkeleton />;
   }
 
   if (
+    account.isError ||
+    !account.exchangeAccountId ||
     positions.isError ||
     offers.isError ||
     executions.isError ||
@@ -46,15 +62,25 @@ export default function OverviewPage() {
   }
 
   const hasVerifiedKey =
-    Array.isArray(apiKeys) &&
-    apiKeys.some((k) => k.exchangeStatus === "verified");
+    Array.isArray(apiKeys) && apiKeys.some((k) => k.status === "verified");
   const hasStrategy = config != null;
   const setupComplete = hasVerifiedKey && hasStrategy;
 
   const events = executions.data.pages.flatMap((p) => p.data);
+  const visibleSymbols = Array.from(
+    new Set([
+      ...positions.data.map((position) => position.symbol),
+      ...offers.data.map((offer) => offer.symbol),
+    ]),
+  );
 
   return (
     <div className="space-y-4">
+      <UncertaintyBanner
+        uncertainties={uncertainties.data ?? []}
+        visibleSymbols={visibleSymbols}
+        isUnavailable={uncertainties.isError}
+      />
       {!setupComplete && (
         <SetupChecklist
           hasVerifiedKey={hasVerifiedKey}

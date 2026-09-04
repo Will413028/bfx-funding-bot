@@ -66,6 +66,8 @@ def test_parse_happy_path():
             rate=0.00031,
             period_days=2,
             status="ACTIVE",
+            mts_created=1_700_000_000_000,
+            mts_updated=1_700_000_001_000,
         )
     ]
 
@@ -147,3 +149,20 @@ async def test_get_active_funding_credits_empty_response():
         client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
         credits = await client.get_active_funding_credits(ctx=_ctx(), symbol="fUST")
     assert credits == []
+
+
+@pytest.mark.asyncio
+async def test_get_active_funding_credits_without_symbol_fetches_all():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[_credit_row()])
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 111)
+        credits = await client.get_active_funding_credits(ctx=_ctx())
+
+    assert len(credits) == 1
+    assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/credits"
