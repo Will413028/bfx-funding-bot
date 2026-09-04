@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""Run a bounded, isolated pgBackRest restore drill without shell execution."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import math
+import os
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from types import ModuleType
+from typing import Callable, Sequence
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parents[2]
+COMPOSE_PATH = ROOT / "docker-compose.dr.yml"
+CONFIG_PATH = SCRIPT_DIR / "pgbackrest.conf"
+DEFAULT_SECRET_DIR = Path.home() / "bfx/pgbackrest/conf.d"
+DEFAULT_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore.json"
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_REPLAY_HASH = re.compile(r"[0-9a-f]{64}")
+_MAX_RTO_SECONDS = 3600
+
+
+def _load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("restore_output_invalid")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_commands = _load_module("_bfx_restore_commands", SCRIPT_DIR / "restore_commands.py")
+_evidence = _load_module("_bfx_restore_evidence", SCRIPT_DIR / "evidence.py")
+RestoreInputError = _commands.RestoreInputError
+RestorePlan = _commands.RestorePlan
+build_restore_plan = _commands.build_restore_plan
+EvidenceError = _evidence.EvidenceError
+render_failure_evidence = _evidence.render_failure_evidence
+render_restore_evidence = _evidence.render_restore_evidence
+
+
+class DrillFailure(ValueError):
+    """A bounded restore failure code suitable for evidence."""
+
+
+@dataclass(frozen=True, slots=True)
+class DrillRequest:
+    account_id: str
+    environment: str
+    projector_version: str
+    backup_label: str
+    target_time: str | None
+
+
+CommandRunner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
+
+
+def _run_command(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def _new_run_id() -> str:
+    return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(8)}"
+
+
+def _new_password() -> str:
+    return secrets.token_hex(24)
+
+
+def _failure(code: str) -> None:
+    raise DrillFailure(code)
+
+
+def _compose_with_env(command: tuple[str, ...], env_path: Path) -> tuple[str, ...]:
+    if command[:2] != ("docker", "compose"):
+        _failure("restore_output_invalid")
+    return (*command[:2], "--env-file", str(env_path), *command[2:])
+
+
+def _generated_resource(name: str) -> bool:
+    return re.fullmatch(r"bfx-dr-[a-z0-9-]+", name) is not None
+
+
+def _validate_plan_resources(plan: RestorePlan) -> None:
+    if not all(
+        _generated_resource(name)
+        for name in (plan.project_name, plan.volume_name, plan.network_name, plan.container_name)
+    ):
+        _failure("restore_output_invalid")
+
+
+def _write_json(path: Path, report: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+            suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(report, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_failure_log(output_path: Path, code: str) -> None:
+    """Keep a bounded diagnostic marker without retaining command output."""
+    log_path = output_path.with_name("restore.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(f"restore drill failed: {code}\n"[:8192], encoding="utf-8")
+    os.chmod(log_path, 0o600)
+
+
+class RestoreDrill:
+    """Execute one isolated restore lifecycle using injectable command execution."""
+
+    def __init__(
+        self,
+        *,
+        command_runner: CommandRunner = _run_command,
+        config_path: Path = CONFIG_PATH,
+        secret_dir: Path = DEFAULT_SECRET_DIR,
+        output_path: Path = DEFAULT_OUTPUT_PATH,
+        run_id_factory: Callable[[], str] = _new_run_id,
+        password_factory: Callable[[], str] = _new_password,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._command_runner = command_runner
+        self._config_path = config_path
+        self._secret_dir = secret_dir
+        self._output_path = output_path
+        self._run_id_factory = run_id_factory
+        self._password_factory = password_factory
+        self._clock = clock
+        self._sleep = sleep
+
+    def _call(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._command_runner(command)
+        except Exception:
+            _failure("restore_command_failed")
+
+    def _require_success(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        completed = self._call(command)
+        if completed.returncode != 0:
+            _failure("restore_command_failed")
+        return completed
+
+    def _validate_prerequisites(self, request: DrillRequest) -> RestorePlan:
+        try:
+            plan = build_restore_plan(
+                account_id=request.account_id,
+                environment=request.environment,
+                projector_version=request.projector_version,
+                backup_label=request.backup_label,
+                target_time=request.target_time,
+                run_id=self._run_id_factory(),
+            )
+        except RestoreInputError:
+            _failure("restore_output_invalid")
+        _validate_plan_resources(plan)
+        if not self._config_path.is_file() or not self._secret_dir.is_dir() or not COMPOSE_PATH.is_file():
+            _failure("restore_output_invalid")
+        return plan
+
+    def _write_env_file(self, plan: RestorePlan) -> Path:
+        password = self._password_factory()
+        database_url = (
+            f"postgresql+asyncpg://dr_restore:{password}@{plan.container_name}:5432/dr_restore"
+        )
+        values = {
+            "DR_PROJECT_NAME": plan.project_name,
+            "DR_VOLUME_NAME": plan.volume_name,
+            "DR_NETWORK_NAME": plan.network_name,
+            "DR_CONTAINER_NAME": plan.container_name,
+            "DR_POSTGRES_USER": "dr_restore",
+            "DR_POSTGRES_PASSWORD": password,
+            "DR_POSTGRES_DB": "dr_restore",
+            "DATABASE_URL": database_url,
+            "BFX_DEPLOYMENT_ENV": plan.environment,
+            "DR_ACCOUNT_ID": plan.account_id,
+            "DR_PROJECTOR_VERSION": plan.projector_version,
+            "DR_TARGET_BACKUP_LABEL": plan.backup_label,
+            "DR_TARGET_TIME": plan.target_time or "",
+            "DR_PGBACKREST_SECRET_DIR": str(self._secret_dir),
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="bfx-dr-", suffix=".env", delete=False,
+        ) as handle:
+            path = Path(handle.name)
+            os.chmod(path, 0o600)
+            for key, value in values.items():
+                handle.write(f"{key}={value}\n")
+        return path
+
+    def _require_internal_network(self, plan: RestorePlan) -> None:
+        completed = self._require_success(
+            ("docker", "network", "inspect", "--format={{.Internal}}", plan.network_name)
+        )
+        if completed.stdout.strip() != "true":
+            _failure("network_not_internal")
+
+    def _wait_for_health(self, plan: RestorePlan) -> None:
+        started = self._clock()
+        while True:
+            completed = self._require_success(
+                ("docker", "inspect", "--format={{.State.Health.Status}}", plan.container_name)
+            )
+            if completed.stdout.strip() == "healthy":
+                return
+            if self._clock() - started >= 600:
+                _failure("restore_command_failed")
+            self._sleep(1)
+
+    def _schema_tsv(self, plan: RestorePlan) -> str:
+        query = (
+            "SELECT current_setting('server_version_num'), "
+            "(SELECT string_agg(version_num, ',' ORDER BY version_num) FROM alembic_version), "
+            "(SELECT count(*) FROM event_log WHERE exchange_account_id = :'account_id'::uuid "
+            "AND deployment_environment = :'environment');"
+        )
+        completed = self._require_success(
+            (
+                "docker", "exec", plan.container_name, "psql", "-X", "-qAt", "-F", "\t",
+                "-v", "ON_ERROR_STOP=1", "-v", f"account_id={plan.account_id}", "-v",
+                f"environment={plan.environment}", "-U", "dr_restore", "-d", "dr_restore", "-c", query,
+            )
+        )
+        return completed.stdout
+
+    def _replay_json(self, command: tuple[str, ...], plan: RestorePlan) -> str:
+        completed = self._require_success(command)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        if len(lines) != 1:
+            _failure("restore_output_invalid")
+        try:
+            payload = json.loads(lines[0])
+        except json.JSONDecodeError:
+            _failure("restore_output_invalid")
+        if not isinstance(payload, dict):
+            _failure("restore_output_invalid")
+        if (
+            payload.get("account_id") != plan.account_id
+            or payload.get("environment") != plan.environment
+            or payload.get("projector_version") != plan.projector_version
+        ):
+            _failure("restore_output_invalid")
+        event_hash = payload.get("event_hash")
+        if not isinstance(event_hash, str) or _REPLAY_HASH.fullmatch(event_hash) is None:
+            _failure("event_hash_invalid")
+        diagnostics = payload.get("diagnostic_diff")
+        if not isinstance(diagnostics, dict) or any(
+            not isinstance(value, dict) or value.get("matches") is not True
+            for value in diagnostics.values()
+        ):
+            _failure("projection_replay_mismatch")
+        return lines[0]
+
+    def _image_digest(self) -> str:
+        completed = self._require_success(
+            ("docker", "image", "inspect", "--format={{index .RepoDigests 0}}", "bfx-postgres:local")
+        )
+        match = _SHA256.search(completed.stdout)
+        if match is None:
+            _failure("restore_output_invalid")
+        return match.group(0)
+
+    def _cleanup(self, plan: RestorePlan, env_path: Path | None, *, container_started: bool,
+                 volume_created: bool, network_created: bool) -> bool:
+        failed = False
+        commands: list[tuple[str, ...]] = []
+        if container_started and env_path is not None:
+            commands.append(_compose_with_env(plan.cleanup_commands[0], env_path))
+        if volume_created:
+            commands.append(plan.cleanup_commands[1])
+        if network_created:
+            commands.append(plan.cleanup_commands[2])
+        for command in commands:
+            try:
+                if self._call(command).returncode != 0:
+                    failed = True
+            except DrillFailure:
+                failed = True
+        return failed
+
+    def run(self, request: DrillRequest) -> int:
+        plan: RestorePlan | None = None
+        env_path: Path | None = None
+        network_created = False
+        volume_created = False
+        container_started = False
+        rto_started: float | None = None
+        failure_code: str | None = None
+        success_report: dict[str, object] | None = None
+        failure_persist_failed = False
+        try:
+            plan = self._validate_prerequisites(request)
+            env_path = self._write_env_file(plan)
+            self._require_success(plan.create_commands[0])
+            network_created = True
+            self._require_internal_network(plan)
+            rto_started = self._clock()
+            self._require_success(plan.create_commands[1])
+            volume_created = True
+            self._require_success(_compose_with_env(plan.run_commands[0], env_path))
+            container_started = True
+            self._wait_for_health(plan)
+            schema_tsv = self._schema_tsv(plan)
+            replay_json = self._replay_json(_compose_with_env(plan.run_commands[1], env_path), plan)
+            elapsed_seconds = math.ceil(self._clock() - rto_started)
+            if elapsed_seconds > _MAX_RTO_SECONDS:
+                _failure("rto_invalid")
+            success_report = render_restore_evidence(
+                schema_tsv=schema_tsv,
+                replay_json=replay_json,
+                target_backup_label=plan.backup_label,
+                elapsed_seconds=elapsed_seconds,
+                config_path=self._config_path,
+                image_digest=self._image_digest(),
+                network_name=plan.network_name,
+                network_internal=True,
+            )
+        except DrillFailure as exc:
+            failure_code = str(exc)
+        except EvidenceError as exc:
+            failure_code = str(exc)
+        except (OSError, ValueError, TypeError):
+            failure_code = "restore_output_invalid"
+        finally:
+            if plan is not None:
+                cleanup_failed = self._cleanup(
+                    plan, env_path, container_started=container_started,
+                    volume_created=volume_created, network_created=network_created,
+                )
+                if cleanup_failed and failure_code is None:
+                    failure_code = "cleanup_failed"
+            if env_path is not None:
+                env_path.unlink(missing_ok=True)
+            if failure_code is not None:
+                try:
+                    report = render_failure_evidence(
+                        kind="restore", error_code=failure_code,
+                        observed_at_ms=time.time_ns() // 1_000_000,
+                    )
+                except EvidenceError:
+                    report = render_failure_evidence(
+                        kind="restore", error_code="restore_output_invalid",
+                        observed_at_ms=time.time_ns() // 1_000_000,
+                    )
+                try:
+                    _write_json(self._output_path, report)
+                    _write_failure_log(self._output_path, str(report["error_code"]))
+                except OSError:
+                    failure_persist_failed = True
+        if failure_code is not None or failure_persist_failed:
+            return 2
+        if success_report is None:
+            return 2
+        try:
+            _write_json(self._output_path, success_report)
+        except OSError:
+            return 2
+        return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--environment", required=True)
+    parser.add_argument("--projector-version", required=True)
+    parser.add_argument("--backup-label", required=True)
+    parser.add_argument("--target-time")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    return RestoreDrill().run(
+        DrillRequest(
+            account_id=args.account_id,
+            environment=args.environment,
+            projector_version=args.projector_version,
+            backup_label=args.backup_label,
+            target_time=args.target_time,
+        )
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
