@@ -440,6 +440,22 @@ snapshot 被 replay double-count。contract revision 會在 DDL 前拒絕 NULL U
 realm、孤兒 FK 或非零 legacy scaffold，且為 forward-only（rollback 使用
 verified backup/PITR + venue reconcile，不使用 downgrade）。
 
+### Offsite DR source of truth
+
+PostgreSQL WAL archive 與 base backup 以 **pgBackRest** 寫入 private Cloudflare
+R2 repository；tracked config 不含 endpoint、bucket、credential 或 cipher
+passphrase。`status.sh`、`preflight.sh` 與 isolated restore drill 只產生 bounded、
+redacted、`measured: true|false` evidence，供 Halt 2 核對 RPO、RTO、event
+head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
+
+Isolated restore 只是在 generated volume 與 internal-only network 上量測
+data integrity；不會還原 production volume，也不是 **venue rollback**。任何
+restore point 之後可能發生的 venue mutation 仍須保持 halt、fresh full-account
+reconcile，再依
+[offsite DR operator runbook](../docs/runbooks/offsite-dr.md) 與
+[venue-write rollback runbook](../docs/runbooks/rollback-after-venue-write.md)
+處理 adopt、manual resolution 與 forward-fix。
+
 ---
 
 ## 8. Phases & Deployment
