@@ -7,6 +7,7 @@ RUN apk add --no-cache \
         build-base \
         bzip2-dev \
         curl \
+        curl-dev \
         lz4-dev \
         meson \
         ninja \
