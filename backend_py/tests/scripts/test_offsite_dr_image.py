@@ -17,6 +17,11 @@ def test_postgres_image_has_the_resolved_digest_and_pgbackrest_checksum() -> Non
     assert re.search(r"^RUN .*pgbackrest.* version", dockerfile, re.MULTILINE)
 
 
+def test_postgres_image_excludes_the_base_musl_loader_from_runtime_apk_packages() -> None:
+    dockerfile = (ROOT / "deploy/vm/postgres/Dockerfile").read_text()
+    assert r"name !~ /^ld-musl-.*\.so\.1$/" in dockerfile
+
+
 def test_tracked_pgbackrest_config_contains_no_secret_options() -> None:
     config = (ROOT / "deploy/vm/pgbackrest/pgbackrest.conf").read_text()
     for option in ("repo1-s3-key=", "repo1-s3-key-secret=", "repo1-cipher-pass="):

@@ -38,7 +38,7 @@ RUN ninja -C pgbackrest-build
 RUN meson test -C pgbackrest-build --suite smoke --print-errorlogs
 RUN install -D -m 0755 pgbackrest-build/src/pgbackrest /out/pgbackrest \
     && ldd /out/pgbackrest \
-        | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) {name = $i; sub(/^.*\//, "", name); sub(/\(.*/, "", name); print name}}' \
+        | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) {name = $i; sub(/^.*\//, "", name); sub(/\(.*/, "", name); if (name !~ /^ld-musl-.*\.so\.1$/) print name}}' \
         | sort -u > /out/runtime-libraries
 
 FROM postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
