@@ -1,0 +1,11 @@
+[Unit]
+Description=Create the scheduled bfx pgBackRest backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=7200
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bfx-funding-bot
+ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/backup.sh --scheduled

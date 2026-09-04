@@ -163,8 +163,111 @@ if [ "$PHASE" = canary ]; then
   }
 fi
 
+# --- local pgBackRest DR boundary (validation only; no remote operations) ---
+PGBACKREST_CONFIG="$ROOT/deploy/vm/pgbackrest/pgbackrest.conf"
+PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
+[ -r "$PGBACKREST_CONFIG" ] || {
+  echo "ERROR: missing pgBackRest config" >&2
+  exit 1
+}
+[ -d "$PGBACKREST_SECRET_DIR" ] || {
+  echo "ERROR: missing pgBackRest secret directory" >&2
+  exit 1
+}
+PGBACKREST_OTHER_ACCESSIBLE_FILE=""
+PGBACKREST_OTHER_ACCESSIBLE_FILE=$(find "$PGBACKREST_SECRET_DIR" -type f -perm -0007 -print -quit) || {
+  echo "ERROR: unable to inspect pgBackRest secret file permissions" >&2
+  exit 1
+}
+if [ -n "$PGBACKREST_OTHER_ACCESSIBLE_FILE" ]; then
+  echo "ERROR: pgBackRest secret file is accessible by other users" >&2
+  exit 1
+fi
+PGBACKREST_SECRET_FILE=""
+PGBACKREST_SECRET_FILE=$(find "$PGBACKREST_SECRET_DIR" -type f -print -quit) || {
+  echo "ERROR: unable to list pgBackRest secret files" >&2
+  exit 1
+}
+if [ -z "$PGBACKREST_SECRET_FILE" ]; then
+  echo "ERROR: missing pgBackRest secret file" >&2
+  exit 1
+fi
+PGBACKREST_EXAMPLE_PATTERN='(<[^>]+>|example|placeholder|change[-_ ]?me|replace[-_ ]?me)'
+if ! find "$PGBACKREST_SECRET_DIR" -type f -exec sh -ceu '
+  marker_pattern="$1"
+  shift
+  for secret_file do
+    [ -r "$secret_file" ] && [ -s "$secret_file" ] || exit 1
+    marker_status=0
+    LC_ALL=C grep -Eiq "$marker_pattern" "$secret_file" || marker_status=$?
+    if [ "$marker_status" -eq 0 ]; then
+      exit 1
+    fi
+    [ "$marker_status" -eq 1 ] || exit 1
+  done
+' sh "$PGBACKREST_EXAMPLE_PATTERN" {} +; then
+  echo "ERROR: empty pgBackRest secret file or example marker detected" >&2
+  exit 1
+fi
+PGBACKREST_SECRET_OPTION_PATTERN='^[[:space:]]*repo1-(s3-key(-secret)?|cipher-pass)[[:space:]]*='
+PGBACKREST_TRACKED_SECRET_STATUS=0
+git grep -q -E "$PGBACKREST_SECRET_OPTION_PATTERN" -- . ':!docs/superpowers/specs/**' \
+  || PGBACKREST_TRACKED_SECRET_STATUS=$?
+if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -eq 0 ]; then
+  echo "ERROR: secret pgBackRest option is tracked" >&2
+  exit 1
+fi
+if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -ne 1 ]; then
+  echo "ERROR: unable to scan tracked pgBackRest options" >&2
+  exit 1
+fi
+
+# The bind-mounted spool/log must be writable by postgres in Alpine (UID/GID 70).
+sudo install -d -m 0750 -o 70 -g 70 \
+  "$HOME/bfx/pgbackrest/spool" \
+  "$HOME/bfx/pgbackrest/log"
+install -d -m 0750 -o "$(id -u)" -g "$(id -g)" "$HOME/bfx/dr-evidence"
+docker compose -f docker-compose.bot.yml config --quiet
+
 export GIT_SHA="$(git rev-parse --short HEAD)"
 docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA="$GIT_SHA"
+
+# Task 1 uses project labels because org.opencontainers.image metadata does not
+# encode the pinned PostgreSQL base digest or pgBackRest source checksum.
+EXPECTED_POSTGRES_BASE_DIGEST="sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+EXPECTED_PGBACKREST_VERSION="2.59.1"
+EXPECTED_PGBACKREST_SOURCE_SHA256="1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d"
+ACTUAL_POSTGRES_BASE_DIGEST=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.postgresql.base-digest" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local base digest label" >&2
+  exit 1
+}
+ACTUAL_PGBACKREST_VERSION=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.pgbackrest.version" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local pgBackRest version label" >&2
+  exit 1
+}
+ACTUAL_PGBACKREST_SOURCE_SHA256=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.pgbackrest.source-sha256" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local pgBackRest source checksum label" >&2
+  exit 1
+}
+[ "$ACTUAL_POSTGRES_BASE_DIGEST" = "$EXPECTED_POSTGRES_BASE_DIGEST" ] || {
+  echo "ERROR: bfx-postgres:local base digest label mismatch" >&2
+  exit 1
+}
+[ "$ACTUAL_PGBACKREST_VERSION" = "$EXPECTED_PGBACKREST_VERSION" ] || {
+  echo "ERROR: bfx-postgres:local pgBackRest version label mismatch" >&2
+  exit 1
+}
+[ "$ACTUAL_PGBACKREST_SOURCE_SHA256" = "$EXPECTED_PGBACKREST_SOURCE_SHA256" ] || {
+  echo "ERROR: bfx-postgres:local pgBackRest source checksum label mismatch" >&2
+  exit 1
+}
+
 if [ "$PHASE" = canary ]; then
   ACTUAL_IMAGE_DIGEST=$(docker image inspect --format='{{.Id}}' bfx-bot:local) || {
     echo "ERROR: unable to inspect built bfx-bot:local image digest"

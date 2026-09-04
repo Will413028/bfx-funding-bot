@@ -64,12 +64,17 @@ def _deploy_root(tmp_path: Path) -> Path:
     root = tmp_path / "vm-repo"
     (root / "scripts").mkdir(parents=True)
     (root / "deploy/vm").mkdir(parents=True)
+    (root / "deploy/vm/pgbackrest").mkdir(parents=True)
     (root / "backend_py/configs").mkdir(parents=True)
     (root / "scripts/deploy-vm.sh").symlink_to(
         REPOSITORY_ROOT / "scripts/deploy-vm.sh"
     )
     for profile in ("paper.env", "shadow.env", "shadow-p14.env", "canary.env"):
         shutil.copy2(REPOSITORY_ROOT / "deploy/vm" / profile, root / "deploy/vm" / profile)
+    shutil.copy2(
+        REPOSITORY_ROOT / "deploy/vm/pgbackrest/pgbackrest.conf",
+        root / "deploy/vm/pgbackrest/pgbackrest.conf",
+    )
     evidence = tmp_path / "halt2-canary-evidence.json"
     evidence.write_text("{}\n")
     canary_profile = root / "deploy/vm/canary.env"
@@ -86,6 +91,23 @@ def _deploy_root(tmp_path: Path) -> Path:
 
     home = tmp_path / "home/bfx"
     home.mkdir(parents=True)
+    secret_dir = home / "pgbackrest/conf.d"
+    secret_dir.mkdir(parents=True)
+    secret_file = secret_dir / "r2.conf"
+    secret_file.write_text(
+        "\n".join(
+            f"{option}=safe-fixture-value"
+            for option in (
+                "repo1-s3-endpoint",
+                "repo1-s3-bucket",
+                "repo1-s3-key",
+                "repo1-s3-key-secret",
+                "repo1-cipher-pass",
+            )
+        )
+        + "\n"
+    )
+    secret_file.chmod(0o600)
     (home / "bot.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
         "BFX_EXCHANGE_ACCOUNT_ID=550e8400-e29b-41d4-a716-446655440000\n"
@@ -125,8 +147,16 @@ def _deploy_root(tmp_path: Path) -> Path:
         fake_bin / "docker",
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n"
-        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf '%s\\n' \"${FAKE_IMAGE_DIGEST:-sha256:expected}\"; fi\n",
+        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
+        "  case \"$*\" in\n"
+        "    *org.bfx.postgresql.base-digest*) printf '%s\\n' sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 ;;\n"
+        "    *org.bfx.pgbackrest.version*) printf '%s\\n' 2.59.1 ;;\n"
+        "    *org.bfx.pgbackrest.source-sha256*) printf '%s\\n' 1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d ;;\n"
+        "    *) printf '%s\\n' \"${FAKE_IMAGE_DIGEST:-sha256:expected}\" ;;\n"
+        "  esac\n"
+        "fi\n",
     )
+    _write_executable(fake_bin / "sudo", "#!/bin/sh\nexit 0\n")
     _write_executable(
         fake_bin / "uv",
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\nexit \"${FAKE_UV_EXIT:-0}\"\n",
@@ -263,7 +293,7 @@ def test_deploy_script_assembles_the_selected_non_canary_profile(
     if phase == "shadow-p14":
         assert runtime["BFX_CELLS_YAML"] == "/app/configs/cells.experimental-p14.yaml"
     assert "deployed phase=" + phase + " sha=safe-test-sha" in result.stdout
-    assert len((root / "fake-docker.log").read_text().splitlines()) == 3
+    assert len((root / "fake-docker.log").read_text().splitlines()) == 7
 
 
 def test_shadow_p14_selected_cells_have_locked_adaptive_parameters() -> None:
@@ -321,7 +351,11 @@ def test_confirmed_canary_uses_canary_profile_and_reaches_only_fake_docker(
         str(root / "backend_py/configs/safety.canary.yaml"),
     ]
     assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml config --quiet",
         "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        'image inspect --format={{ index .Config.Labels "org.bfx.postgresql.base-digest" }} bfx-postgres:local',
+        'image inspect --format={{ index .Config.Labels "org.bfx.pgbackrest.version" }} bfx-postgres:local',
+        'image inspect --format={{ index .Config.Labels "org.bfx.pgbackrest.source-sha256" }} bfx-postgres:local',
         "image inspect --format={{.Id}} bfx-bot:local",
         "compose -f docker-compose.bot.yml up -d --remove-orphans",
         "compose -f docker-compose.bot.yml ps",
@@ -386,7 +420,11 @@ def test_canary_built_image_digest_mismatch_blocks_up(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "built bfx-bot:local image digest mismatch" in result.stdout
     assert (root / "fake-docker.log").read_text().splitlines() == [
+        "compose -f docker-compose.bot.yml config --quiet",
         "compose -f docker-compose.bot.yml build --build-arg GIT_SHA=safe-test-sha",
+        'image inspect --format={{ index .Config.Labels "org.bfx.postgresql.base-digest" }} bfx-postgres:local',
+        'image inspect --format={{ index .Config.Labels "org.bfx.pgbackrest.version" }} bfx-postgres:local',
+        'image inspect --format={{ index .Config.Labels "org.bfx.pgbackrest.source-sha256" }} bfx-postgres:local',
         "image inspect --format={{.Id}} bfx-bot:local",
     ]
 
