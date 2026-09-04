@@ -6,10 +6,19 @@ services:
   # POSTGRES_USER/PASSWORD/DB come from .env.runtime (assembled from ~/bfx/bot.env
   # by deploy-vm.sh); Settings(extra="ignore") makes bot/migrate ignore them.
   postgres:
-    image: postgres:18-alpine
+    build:
+      context: .
+      dockerfile: deploy/vm/postgres/Dockerfile
+    image: bfx-postgres:local
     container_name: bfx-postgres
     restart: unless-stopped
     env_file: .env.runtime
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=bfx archive-push %p
     # Bound to the VM's loopback ONLY — never 0.0.0.0. Reachable from a laptop
     # solely through an SSH tunnel:
     #   ssh -N -L 5433:127.0.0.1:5432 ubuntu@oci-a1
@@ -23,6 +32,11 @@ services:
       # /var/lib/postgresql (NOT /data) or the image refuses to start.
       # See docker-library/postgres#1259.
       - bfx_pgdata:/var/lib/postgresql
+      - ./deploy/vm/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ${HOME}/bfx/pgbackrest/conf.d:/etc/pgbackrest/conf.d:ro
+      - ${HOME}/bfx/pgbackrest/spool:/var/spool/pgbackrest
+      - ${HOME}/bfx/pgbackrest/log:/var/log/pgbackrest
+      - ${HOME}/bfx/dr-evidence:/dr-evidence
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
