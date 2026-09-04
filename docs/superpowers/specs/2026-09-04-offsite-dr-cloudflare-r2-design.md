@@ -2,7 +2,7 @@
 
 **Status:** Proposed — implementation pending spec review
 **Date:** 2026-09-04
-**ADR:** `wiki/projects/bfx-funding-bot/decisions/2026-09-04-offsite-dr-cloudflare-r2.md`
+**Design reference:** Repository-local offsite DR implementation plan
 
 ## Goal
 
