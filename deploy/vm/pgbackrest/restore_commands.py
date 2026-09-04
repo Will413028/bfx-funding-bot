@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID
 
+COMPOSE_PATH = Path(__file__).resolve().parents[3] / "docker-compose.dr.yml"
 _ENVIRONMENTS = frozenset({"prod", "shadow", "ci"})
 _PROJECTOR_VERSION = re.compile(r"[A-Za-z0-9._-]+")
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -87,7 +89,7 @@ def build_restore_plan(
         "--project-name",
         project_name,
         "--file",
-        "docker-compose.dr.yml",
+        str(COMPOSE_PATH),
     )
     return RestorePlan(
         project_name=project_name,
