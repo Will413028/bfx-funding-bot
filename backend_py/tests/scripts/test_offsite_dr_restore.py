@@ -1409,7 +1409,10 @@ def test_command_runner_exception_is_redacted_into_failure_evidence(tmp_path: Pa
     assert "TOKEN-SENTINEL" not in report
 
 
-@pytest.mark.parametrize("invalid", ["placeholder", "extension", "section", "outside-section"])
+@pytest.mark.parametrize(
+    "invalid",
+    ["placeholder", "extension", "section", "outside-section", "bare-cr", "semicolon-comment"],
+)
 def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path, invalid: str) -> None:
     fake = _FakeRunner(
         verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
@@ -1422,6 +1425,14 @@ def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path,
         secret_file.write_text(secret_file.read_text().replace("[global]", "[bfx]"))
     elif invalid == "outside-section":
         secret_file.write_text(secret_file.read_text().replace("[global]\n", ""))
+    elif invalid == "bare-cr":
+        secret_file.write_bytes(secret_file.read_bytes().replace(b"\n", b"\r"))
+    elif invalid == "semicolon-comment":
+        secret_file.write_bytes(
+            secret_file.read_bytes().replace(
+                b"[global]\n", b"; not-a-pgbackrest-comment\n[global]\n"
+            )
+        )
     else:
         secret_file.write_text(secret_file.read_text().replace("opaque-access-key", "<ACCOUNT_ID>"))
     drill = RestoreDrill(

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -94,8 +95,16 @@ def test_secret_validator_rejects_ambiguous_control_characters(tmp_path: Path, c
         validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
 
 
-def test_secret_validator_accepts_exact_options_without_returning_values(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "line_ending",
+    (b"\n", b"\r\n"),
+    ids=("lf", "crlf"),
+)
+def test_secret_validator_accepts_pgbackrest_line_endings_without_returning_values(
+    tmp_path: Path, line_ending: bytes,
+) -> None:
     secret_dir, secret_file = _write_secret_dir(tmp_path)
+    secret_file.write_bytes(_secret_text().encode("utf-8").replace(b"\n", line_ending))
     validator = _secret_validation()
 
     result = validator.validate_secret_dir(
@@ -105,6 +114,27 @@ def test_secret_validator_accepts_exact_options_without_returning_values(tmp_pat
     assert result == (secret_file,)
     assert all(isinstance(path, Path) for path in result)
     assert TOKEN_SENTINEL not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "invalid_bytes",
+    (
+        _secret_text().encode("utf-8").replace(b"\n", b"\r"),
+        _secret_text().replace("# VM-only values", "; not-a-pgbackrest-comment").encode(),
+    ),
+    ids=("bare-cr", "semicolon-comment"),
+)
+def test_secret_validator_rejects_pgbackrest_incompatible_lines(
+    tmp_path: Path, invalid_bytes: bytes,
+) -> None:
+    secret_dir, secret_file = _write_secret_dir(tmp_path)
+    secret_file.write_bytes(invalid_bytes)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+        )
 
 
 @pytest.mark.parametrize(
@@ -742,6 +772,138 @@ def test_services_are_one_shot_and_do_not_call_compose_run_or_autoheal() -> None
     assert "autoheal" not in combined.lower()
     for forbidden in ("restore", "stanza-create", "expire", "resume", "halt"):
         assert forbidden not in combined.lower()
+
+
+def _run_deploy_through_secret_preflight(
+    tmp_path: Path, secret_bytes: bytes,
+) -> subprocess.CompletedProcess[str]:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    for directory in (
+        repo / "scripts",
+        repo / "deploy/vm/pgbackrest",
+        home / "bfx/pgbackrest/conf.d",
+        bin_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(ROOT / "scripts/deploy-vm.sh", repo / "scripts/deploy-vm.sh")
+    shutil.copy2(SECRET_VALIDATION_PATH, repo / "deploy/vm/pgbackrest/secret_validation.py")
+    shutil.copy2(PG_BACKREST_DIR / "pgbackrest.conf", repo / "deploy/vm/pgbackrest/pgbackrest.conf")
+    (repo / "deploy/vm/paper.env").write_text(
+        "BFX_PHASE=paper\nBFX_DEPLOYMENT_ENV=paper\nBFX_EXECUTION_POLICY=paper\n",
+        encoding="utf-8",
+    )
+    (home / "bfx/bot.env").write_text(
+        "DATABASE_URL=postgresql://local/test\n"
+        "BFX_EXCHANGE_ACCOUNT_ID=3f19d046-5030-494c-9a0a-9573bb890c1f\n"
+        "BFX_VAULT_KEK=opaque\n",
+        encoding="utf-8",
+    )
+    (home / "bfx/webapi.env").write_text(
+        "DATABASE_URL=postgresql://local/test\n"
+        "BETTER_AUTH_JWKS_URL=https://local.invalid/jwks\n"
+        "BFX_VAULT_KEK=opaque\n"
+        "BFX_OPERATOR_ROLE=admin\n"
+        "BFX_OPERATOR_USER_ID=operator\n",
+        encoding="utf-8",
+    )
+    (home / "bfx/frontend.env").write_text(
+        "NEXT_PUBLIC_APP_URL=https://local.invalid\n"
+        "NEXT_PUBLIC_BETTER_AUTH_URL=https://local.invalid\n"
+        "API_URL=http://webapi\n"
+        "BETTER_AUTH_SECRET=opaque\n"
+        "BETTER_AUTH_URL=https://local.invalid\n"
+        "DATABASE_URL=postgresql://local/test\n"
+        "REDIS_URL=redis://local\n"
+        "PASSKEY_RP_ID=local.invalid\n"
+        "BFX_OPERATOR_USER_ID=operator\n"
+        "BFX_OPERATOR_ROLE=admin\n",
+        encoding="utf-8",
+    )
+    secret_dir = home / "bfx/pgbackrest/conf.d"
+    secret_file = secret_dir / "r2.conf"
+    secret_file.write_bytes(secret_bytes)
+    secret_dir.chmod(0o700)
+    secret_file.chmod(0o600)
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    subprocess.run((real_git, "init", "-q", str(repo)), check=True)
+    subprocess.run((real_git, "-C", str(repo), "add", "deploy/vm/pgbackrest/pgbackrest.conf"), check=True)
+    subprocess.run(
+        (
+            real_git,
+            "-C",
+            str(repo),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ),
+        check=True,
+    )
+    git_shim = bin_dir / "git"
+    git_shim.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$*\" == \"pull --ff-only origin main\" ]]; then exit 0; fi\n"
+        f"exec {shlex.quote(real_git)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    git_shim.chmod(0o755)
+
+    python_shim = bin_dir / "python3"
+    python_shim.write_text(
+        f"#!{sys.executable}\n"
+        "import functools, os, pathlib, sys\n"
+        f"real_python = {sys.executable!r}\n"
+        "if len(sys.argv) > 1 and sys.argv[1].endswith('/secret_validation.py'):\n"
+        "    module_dir = str(pathlib.Path(sys.argv[1]).parent)\n"
+        "    sys.path.insert(0, module_dir)\n"
+        "    import secret_validation as validator\n"
+        "    validator.validate_secret_dir = functools.partial(\n"
+        "        validator.validate_secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()\n"
+        "    )\n"
+        "    status = validator.main(sys.argv[2:])\n"
+        "    raise SystemExit(42 if status == 0 else status)\n"
+        "os.execv(real_python, [real_python, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    python_shim.chmod(0o755)
+
+    return subprocess.run(
+        (str(repo / "scripts/deploy-vm.sh"), "paper"),
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_bytes",
+    (
+        _secret_text().encode("utf-8").replace(b"\n", b"\r"),
+        _secret_text().replace("# VM-only values", "; not-a-pgbackrest-comment").encode(),
+    ),
+    ids=("bare-cr", "semicolon-comment"),
+)
+def test_deploy_caller_rejects_pgbackrest_incompatible_secret_lines(
+    tmp_path: Path, invalid_bytes: bytes,
+) -> None:
+    completed = _run_deploy_through_secret_preflight(tmp_path, invalid_bytes)
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == "secret_config_invalid\n"
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
 
 
 def test_deploy_preflight_checks_secret_boundary_and_custom_image_labels() -> None:
