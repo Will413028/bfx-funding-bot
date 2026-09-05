@@ -234,16 +234,25 @@ as zero lag. Any failed collection replaces old green evidence with
 
 ### 6. Capture the same-target bounded baseline.json
 
-While writes remain halted, select the exact backup label and optional PITR
-timestamp for the drill. Capture `baseline.json` from the same backup/PITR target
-state: the database must not advance between the target and baseline
-capture. The artifact is an absolute-path, non-symlink regular JSON file of at
-most 64 KiB with exactly the following fields and no extras:
+While writes remain halted, select the exact backup label and recovery boundary
+for the drill. Capture `baseline.json` for the same database state that restore
+must verify: the database must not advance between the selected target and
+baseline capture. Omitting `--target-time` and using `target_time: null` does
+not set a recovery cutoff; pgBackRest may replay through the available archive
+stream. That null-target workflow is safe only when all database writers remain
+stopped until `restore-db` has completed recovery. If writers must resume after
+baseline capture, select an explicit PITR target while the database is still
+quiescent, pass explicit `--target-time`, and record the same non-null
+`target_time` value in the baseline. The same-target rule requires the same backup/PITR target
+identity (label plus nullable or non-null time) in the request and baseline,
+and both must represent the same database state. The artifact is an
+absolute-path, non-symlink regular JSON file of at most 64 KiB with exactly the
+following fields and no extras:
 
 | Field | Bounded contract |
 |---|---|
 | `target_backup_label` | Selected pgBackRest label, matching the drill request byte-for-byte. |
-| `target_time` | JSON null or the selected UTC `YYYY-MM-DDTHH:MM:SSZ` PITR time, matching the request. |
+| `target_time` | JSON null only for the no-cutoff workflow that keeps all writers stopped through restore recovery; otherwise the selected UTC `YYYY-MM-DDTHH:MM:SSZ` PITR time, matching `--target-time` exactly. |
 | `database_name` | Existing restored database; PostgreSQL identifier of at most 63 characters. |
 | `account_id` | Canonical lowercase UUID selected for replay. |
 | `environment` | Exact drill realm: `prod`, `shadow`, or `ci`. |
@@ -263,11 +272,15 @@ environment, projector, or database state cannot be reused.
 Before selecting a fresh backup, quiesce **all database writers**, including
 bot, webapi, jobs and migrations, through the separately approved maintenance
 procedure. A trading halt alone does not stop event or schema writes. Maintain
-that quiescence from before the selected backup starts until capture finishes;
-retain the backup `info` label/start/stop and maintenance interval in the
-operator evidence bundle. For PITR, the selected UTC target must fall after
-that backup's completion, within the same unchanged interval, with archived
-WAL coverage confirmed. Do not approximate PITR by filtering `occurred_at_ms`:
+that quiescence from before the selected backup starts until capture finishes.
+For a null target, extend it until `restore-db` has completed recovery; do not
+resume a writer after baseline capture while a no-cutoff restore is still able
+to consume newer archived WAL. If writers must resume after baseline capture,
+use the explicit-PITR workflow above. Retain the backup `info` label/start/stop,
+selected recovery boundary, and maintenance interval in the operator evidence
+bundle. For PITR, the selected UTC target must fall after that backup's
+completion, within the same unchanged interval, with archived WAL coverage
+confirmed. Do not approximate PITR by filtering `occurred_at_ms`:
 event time is not commit time. If the target predates quiescence or any writer
 advanced state, stop and select a fresh backup, or use independently approved
 read-only tooling against an isolated copy restored to that exact target.
@@ -290,7 +303,7 @@ read -r -p 'Existing database: ' DATABASE_NAME
 read -r -p 'Canonical account UUID: ' ACCOUNT_ID
 read -r -p 'Exact environment (prod/shadow/ci): ' DR_ENVIRONMENT
 read -r -p 'Selected backup label: ' BACKUP_LABEL
-read -r -p 'UTC PITR target, or empty for backup end: ' TARGET_TIME
+read -r -p 'UTC PITR target (empty only while writers stay stopped through restore recovery): ' TARGET_TIME
 read -r -p 'Projector version: ' PROJECTOR_VERSION
 docker exec --user postgres --interactive "$CAPTURE_CONTAINER" \
   psql -X -qAt --no-password --host /var/run/postgresql --username postgres \
@@ -407,9 +420,15 @@ deploy/vm/pgbackrest/restore-drill.sh \
   --baseline /absolute/path/baseline.json
 ```
 
-If a PITR time is selected, add `--target-time` and require it to match
-`target_time` in the same baseline. The runner rejects a relative, missing,
-oversized, malformed, or mismatched artifact before creating DR resources.
+If a PITR time is selected, add `--target-time` and require it to match the same
+non-null `target_time` in the baseline. This explicit cutoff is required when
+writers resume after baseline capture. If `--target-time` is omitted, the
+baseline must contain `target_time: null`; this is not a selected-backup cutoff,
+and all database writers must stay stopped until `restore-db` has completed
+recovery. In both workflows, the selected label/time, baseline, and recovered
+cluster must represent the same database state. The runner rejects a relative,
+missing, oversized, malformed, or mismatched artifact before creating DR
+resources.
 
 `restore-data` is the Compose logical volume key; `DR_VOLUME_NAME` supplies a
 generated external Docker volume. Neither name may be production

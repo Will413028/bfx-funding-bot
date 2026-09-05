@@ -871,6 +871,23 @@ def test_offsite_runbook_baseline_has_read_only_capture_and_offline_assembly() -
         assert marker in text
 
 
+def test_offsite_runbook_null_target_requires_quiescence_or_matching_pitr() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "or empty for backup end" not in normalized
+    for marker in (
+        "does not set a recovery cutoff",
+        "available archive stream",
+        "all database writers remain stopped until `restore-db` has completed recovery",
+        "If writers must resume after baseline capture",
+        "explicit `--target-time`",
+        "same non-null `target_time`",
+        "same database state",
+    ):
+        assert marker in normalized
+
+
 def _runbook_python_snippet(prefix: str) -> str:
     text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
     block = text[text.index(prefix):]
