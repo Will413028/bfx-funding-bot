@@ -175,6 +175,33 @@ def _write_failure_log(output_path: Path, code: str) -> None:
     os.chmod(log_path, 0o600)
 
 
+def _invalidate_evidence(path: Path) -> None:
+    """Revoke stale green evidence even when atomic replacement runs out of space."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        # Truncation needs no new directory entry or data blocks, and also works
+        # when the file is writable but its parent directory disallows unlink.
+        with path.open("r+") as handle:
+            handle.truncate(0)
+
+
+def _unlink_env_file(path: Path, *, timeout: float) -> None:
+    """Isolate potentially blocking filesystem IO in a killable child, not a thread."""
+    subprocess.run(
+        (
+            sys.executable, "-c",
+            "from pathlib import Path; import sys; Path(sys.argv[1]).unlink(missing_ok=True)",
+            str(path),
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=timeout,
+    )
+
+
 class RestoreDrill:
     """Execute one isolated restore lifecycle using injectable command execution."""
 
@@ -458,10 +485,9 @@ class RestoreDrill:
                 failed = True
         if env_path is not None:
             try:
+                _unlink_env_file(env_path, timeout=self._remaining())
                 self._remaining()
-                env_path.unlink(missing_ok=True)
-                self._remaining()
-            except (OSError, DrillFailureError):
+            except (OSError, subprocess.SubprocessError, DrillFailureError):
                 failed = True
         commands: list[tuple[str, ...]] = []
         if volume_created:
@@ -577,6 +603,15 @@ class RestoreDrill:
                     )
                 try:
                     _write_json(self._output_path, report)
+                except OSError:
+                    failure_persist_failed = True
+                    try:
+                        _invalidate_evidence(self._output_path)
+                    except OSError:
+                        failure_persist_failed = True
+                # A full disk or failed invalidation must not skip the separate,
+                # bounded diagnostic marker; no raw exception text is persisted.
+                try:
                     _write_failure_log(
                         self._output_path,
                         "cleanup_failed" if cleanup_failed else str(report["error_code"]),

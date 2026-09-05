@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +18,7 @@ from types import ModuleType
 import pytest
 import yaml
 
+from scripts.halt2_cutover import _read_dr_measurement
 from scripts.verify_projection_replay import _TEMPORARY_TABLE_NAMES, replay_one_account
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -742,14 +745,14 @@ def test_deadline_interrupts_blocked_commands_and_still_cleans(tmp_path: Path, s
 def test_cleanup_deadline_reserves_time_to_unlink_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _Clock()
     unlinked_at = []
-    original_unlink = Path.unlink
+    original_unlink = restore_drill._unlink_env_file
 
-    def unlink(path, *args, **kwargs):
-        if path.suffix == ".env":
-            unlinked_at.append(clock.now)
-        return original_unlink(path, *args, **kwargs)
+    def unlink(path, *, timeout):
+        unlinked_at.append(clock.now)
+        assert 0 < timeout <= 130 - clock.now
+        return original_unlink(path, timeout=timeout)
 
-    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(restore_drill, "_unlink_env_file", unlink)
 
     class CleanupBlocking(_FakeRunner):
         def __call__(self, command, *, timeout=None, input_text=None):
@@ -789,13 +792,11 @@ def test_cleanup_unlink_failure_replaces_green_without_leaking(tmp_path: Path, m
     real_unlink = Path.unlink
     paths = []
 
-    def failing_unlink(path, *args, **kwargs):
-        if path.suffix == ".env":
-            paths.append(path)
-            raise OSError("TOKEN-SENTINEL")
-        return real_unlink(path, *args, **kwargs)
+    def failing_unlink(path, *, timeout):
+        paths.append(path)
+        raise OSError("TOKEN-SENTINEL")
 
-    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    monkeypatch.setattr(restore_drill, "_unlink_env_file", failing_unlink)
     fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
     try:
         assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
@@ -973,6 +974,113 @@ def test_cleanup_failure_atomically_replaces_provisional_success(tmp_path: Path,
     assert report["error_code"] == "cleanup_failed"
     assert set(report) == {"schema_version", "measured", "kind", "observed_at_ms", "error_code"}
     assert (tmp_path / "restore.log").read_text() == "restore drill failed: cleanup_failed\n"
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "replace", "write_and_unlink"])
+def test_cleanup_persistence_failure_invalidates_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str,
+) -> None:
+    output = tmp_path / "restore.json"
+    fake = _CleanupObservingRunner(output, cleanup_status=2)
+    real_write = restore_drill._write_json
+    real_replace = os.replace
+    real_unlink = Path.unlink
+
+    def fail_write(path, report):
+        if report["measured"] is False and failure_stage != "replace":
+            # Prove the artifact is currently accepted, before injecting ENOSPC.
+            assert _read_dr_measurement(output, key="rto_seconds") >= 0
+            raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+        real_write(path, report)
+
+    def fail_replace(source, destination):
+        if json.loads(Path(source).read_text())["measured"] is False:
+            assert _read_dr_measurement(output, key="rto_seconds") >= 0
+            raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+        real_replace(source, destination)
+
+    def fail_unlink(path, *args, **kwargs):
+        if path == output and failure_stage == "write_and_unlink":
+            raise PermissionError("TOKEN-SENTINEL")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(restore_drill, "_write_json", fail_write)
+    monkeypatch.setattr(restore_drill.os, "replace", fail_replace)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
+    with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
+        _read_dr_measurement(output, key="rto_seconds")
+    assert (tmp_path / "restore.log").read_text() == "restore drill failed: cleanup_failed\n"
+    assert not list(tmp_path.glob(".restore.json.*.tmp"))
+
+
+def test_cleanup_log_failure_does_not_prevent_failure_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "restore.json"
+    fake = _CleanupObservingRunner(output, cleanup_status=2)
+
+    def fail_log(*args):
+        raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+
+    monkeypatch.setattr(restore_drill, "_write_failure_log", fail_log)
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
+    assert json.loads(output.read_text())["error_code"] == "cleanup_failed"
+    with pytest.raises(ValueError, match="rto_seconds_unmeasured"):
+        _read_dr_measurement(output, key="rto_seconds")
+
+
+def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    real_unlink = Path.unlink
+    real_popen = subprocess.Popen
+    env_paths = []
+    children = []
+
+    def blocking_unlink(path, *args, **kwargs):
+        if path.suffix == ".env":
+            time.sleep(2)
+        return real_unlink(path, *args, **kwargs)
+
+    def blocking_popen(command, *args, **kwargs):
+        if command[0] == sys.executable and "-c" in command:
+            command = list(command)
+            index = command.index("-c") + 1
+            command[index] = "import time; time.sleep(2); " + command[index]
+            process = real_popen(command, *args, **kwargs)
+            children.append(process)
+            return process
+        return real_popen(command, *args, **kwargs)
+
+    class SlowComposeCleanup(_FakeRunner):
+        def __call__(self, command, *, timeout=None, input_text=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text)
+            if "rm" in command and "restore-db" in command:
+                env_paths.append(Path(command[command.index("--env-file") + 1]))
+                clock.now += 29.8  # Only 0.2 seconds remain for env unlink.
+            return result
+
+    monkeypatch.setattr(Path, "unlink", blocking_unlink)
+    monkeypatch.setattr(restore_drill.subprocess, "Popen", blocking_popen)
+    fake = SlowComposeCleanup(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    try:
+        started = time.monotonic()
+        status = _drill(tmp_path, fake, clock=clock).run(_request(tmp_path))
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.5, f"cleanup waited for blocking unlink: {elapsed:.2f}s"
+        assert status == 2
+        report = json.loads((tmp_path / "restore.json").read_text())
+        assert report["error_code"] == "cleanup_failed"
+        assert report["measured"] is False
+        with pytest.raises(ValueError, match="rto_seconds_unmeasured"):
+            _read_dr_measurement(tmp_path / "restore.json", key="rto_seconds")
+        assert children and all(child.poll() is not None for child in children)
+        assert "DATABASE-PASSWORD-SENTINEL" not in json.dumps(report)
+    finally:
+        for path in env_paths:
+            real_unlink(path, missing_ok=True)
 
 
 def test_compose_up_failure_still_cleans_the_attempted_container(tmp_path: Path) -> None:
