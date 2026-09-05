@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -197,6 +198,51 @@ def _invalidate_evidence(path: Path) -> None:
         # when the file is writable but its parent directory disallows unlink.
         with path.open("r+") as handle:
             handle.truncate(0)
+
+
+_FALLBACK_INVALID_EVIDENCE = (
+    b'{"error_code":"restore_output_invalid","kind":"restore",'
+    b'"measured":false,"observed_at_ms":0,"schema_version":1}\n'
+)
+
+
+def _force_revoke_evidence(path: Path) -> bool:
+    """Use an independent filesystem path to make failed evidence unaccepted."""
+    try:
+        os.unlink(path)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        offset = 0
+        while offset < len(_FALLBACK_INVALID_EVIDENCE):
+            written = os.write(descriptor, _FALLBACK_INVALID_EVIDENCE[offset:])
+            if written <= 0:
+                return False
+            offset += written
+        os.fsync(descriptor)
+        return True
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _revoke_after_failure(path: Path) -> bool:
+    """Keep a failed high-level revoke from leaving an accepted old report."""
+    try:
+        _invalidate_evidence(path)
+        return True
+    except (KeyboardInterrupt, OSError):
+        return _force_revoke_evidence(path)
 
 
 def _unlink_env_file(path: Path, *, timeout: float) -> None:
@@ -574,8 +620,10 @@ class RestoreDrill:
         try:
             try:
                 _invalidate_evidence(self._output_path)
-            except OSError:
+            except (KeyboardInterrupt, OSError):
                 failure_code = "evidence_invalidation_failed"
+                if not _revoke_after_failure(self._output_path):
+                    failure_persist_failed = True
             if failure_code is None:
                 baseline = load_restore_baseline(
                     request.baseline_path, target_backup_label=request.backup_label,
@@ -656,16 +704,12 @@ class RestoreDrill:
                     _write_json(self._output_path, success_report)
                     self._remaining()
                 except KeyboardInterrupt:
-                    try:
-                        _invalidate_evidence(self._output_path)
-                    except OSError:
+                    if not _revoke_after_failure(self._output_path):
                         failure_persist_failed = True
                     raise
                 except (DrillFailureError, OSError, TypeError, ValueError):
                     failure_code = "evidence_persist_failed"
-                    try:
-                        _invalidate_evidence(self._output_path)
-                    except OSError:
+                    if not _revoke_after_failure(self._output_path):
                         failure_persist_failed = True
             if failure_code is not None:
                 try:
@@ -682,9 +726,7 @@ class RestoreDrill:
                     _write_json(self._output_path, report)
                 except OSError:
                     failure_persist_failed = True
-                    try:
-                        _invalidate_evidence(self._output_path)
-                    except OSError:
+                    if not _revoke_after_failure(self._output_path):
                         failure_persist_failed = True
                 # A full disk or failed invalidation must not skip the separate,
                 # bounded diagnostic marker; no raw exception text is persisted.

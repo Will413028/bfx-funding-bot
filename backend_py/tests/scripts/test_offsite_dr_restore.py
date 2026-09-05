@@ -1175,6 +1175,59 @@ def test_evidence_invalidation_failure_cannot_accept_previous_green(
     assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8")
 
 
+def test_failed_persistence_and_invalidation_cannot_leave_green_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "restore.json"
+    output.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
+    clock = _Clock()
+    fake = _CleanupObservingRunner(output)
+    real_write = restore_drill._write_json
+    real_invalidate = restore_drill._invalidate_evidence
+    invalidation_calls = 0
+
+    def fail_after_green_publish(path, report):
+        if report["measured"] is False:
+            raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+        real_write(path, report)
+        clock.now += 3601
+
+    def invalidate_once_then_fail(path: Path) -> None:
+        nonlocal invalidation_calls
+        invalidation_calls += 1
+        if invalidation_calls == 1:
+            real_invalidate(path)
+            return
+        raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+
+    monkeypatch.setattr(restore_drill, "_write_json", fail_after_green_publish)
+    monkeypatch.setattr(restore_drill, "_invalidate_evidence", invalidate_once_then_fail)
+
+    assert _drill(tmp_path, fake, clock=clock).run(_request(tmp_path)) == 2
+    assert invalidation_calls >= 2
+    with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
+        _read_dr_measurement(output, key="rto_seconds")
+    if output.exists():
+        assert json.loads(output.read_text(encoding="utf-8"))["measured"] is False
+        assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8")
+
+
+def test_initial_invalidation_interruption_cannot_leave_green_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "restore.json"
+    output.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
+
+    def interrupt_invalidation(path: Path) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(restore_drill, "_invalidate_evidence", interrupt_invalidation)
+
+    assert _drill(tmp_path, _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))).run(_request(tmp_path)) == 2
+    with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
+        _read_dr_measurement(output, key="rto_seconds")
+
+
 @pytest.mark.parametrize("failure_stage", ["write", "replace"])
 def test_success_persistence_failure_leaves_measurement_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str,

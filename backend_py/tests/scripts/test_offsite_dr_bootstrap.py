@@ -47,6 +47,9 @@ def test_secret_wizard_captures_only_vm_secret_fragment() -> None:
     assert 'sudo chown "$(id -u):70" "$CANDIDATE_DIR" "$CANDIDATE_FILE"' in stage_text
     assert 'sudo chmod 0750 "$SECRET_DIR"' in stage_text
     assert 'sudo chmod 0640 "$CANDIDATE_FILE"' in stage_text
+    assert 'sudo chown "$(id -u):70" "$SECRET_DIR" "$SECRET_FILE"' in stage_text
+    assert 'sudo chmod 0640 "$SECRET_FILE"' in stage_text
+    assert 'python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$SECRET_DIR"' in stage_text
     assert 'sudo chown 70:70 "$SECRET_DIR" "$SECRET_FILE"' not in stage_text
     assert "https://developers.cloudflare.com/r2/api/tokens/" in stage_text
     assert "set_secret " not in stage_text
@@ -215,6 +218,7 @@ repo1-cipher-pass=cipher-pass-old
 
 def _wizard_fixture(
     tmp_path: Path, *, existing: str | None = None, validator_mode: str = "ok",
+    target_kind: str = "file", extra_direct_file: bool = False,
 ) -> tuple[dict[str, str], Path, Path, Path, Path]:
     bin_dir = tmp_path / "bin"
     destination = tmp_path / "systemd"
@@ -290,9 +294,15 @@ exec /usr/bin/python3 "$@"
     if existing is not None:
         secret_dir.mkdir()
         secret_file = secret_dir / "r2.conf"
-        secret_file.write_text(existing, encoding="utf-8")
+        if target_kind == "directory":
+            secret_file.mkdir()
+        else:
+            secret_file.write_text(existing, encoding="utf-8")
         secret_dir.chmod(0o750)
-        secret_file.chmod(0o640)
+        if secret_file.is_file():
+            secret_file.chmod(0o640)
+        if extra_direct_file:
+            (secret_dir / "extra.conf").write_text("unexpected\n", encoding="utf-8")
     else:
         secret_file = secret_dir / "r2.conf"
     env = {
@@ -348,7 +358,9 @@ def test_wizard_runs_from_normal_checkout_and_sets_host_group_contract(tmp_path:
     assert f"chown {os.getuid()}:70 {secret_dir}" in calls
     assert "chown 70:70" not in calls
     assert "chmod 0750" in calls and "chmod 0640" in calls
-    assert "secret_validation.py --secret-dir" in validator_log.read_text(encoding="utf-8")
+    validator_calls = validator_log.read_text(encoding="utf-8")
+    assert validator_calls.count("secret_validation.py --secret-dir") == 2
+    assert f"--secret-dir {secret_dir}" in validator_calls
     assert "secret-key-sentinel" not in completed.stdout + completed.stderr
     assert "cipher-pass-sentinel" not in completed.stdout + completed.stderr
 
@@ -377,6 +389,51 @@ def test_wizard_partial_rerun_updates_only_selected_persisted_values(tmp_path: P
     assert "repo1-cipher-pass=cipher-pass-old" in text
     assert "secret-key-old" not in completed.stdout + completed.stderr
     assert "cipher-pass-old" not in completed.stdout + completed.stderr
+
+
+def test_wizard_rejects_existing_target_directory_before_replacement(tmp_path: Path) -> None:
+    env, _, secret_file, log, _ = _wizard_fixture(
+        tmp_path, existing=WIZARD_SECRET, target_kind="directory",
+    )
+    values = ["a" * 32, "offsite-dr", "access-key", "secret-key", "cipher-pass"]
+
+    completed = _run_wizard(env, values)
+
+    assert completed.returncode != 0
+    assert secret_file.is_dir()
+    assert not (secret_file / "r2.conf").exists()
+    assert not log.exists() or "daemon-reload" not in log.read_text(encoding="utf-8")
+    assert "secret-key" not in completed.stdout + completed.stderr
+    assert "cipher-pass" not in completed.stdout + completed.stderr
+
+
+def test_wizard_rejects_extra_direct_target_entry_before_replacement(tmp_path: Path) -> None:
+    env, secret_dir, secret_file, log, _ = _wizard_fixture(
+        tmp_path, existing=WIZARD_SECRET, extra_direct_file=True,
+    )
+    before = _snapshot(secret_file)
+
+    completed = _run_wizard(env, ["", "", "", ""])
+
+    assert completed.returncode != 0
+    assert _snapshot(secret_file) == before
+    assert (secret_dir / "extra.conf").read_text(encoding="utf-8") == "unexpected\n"
+    assert not log.exists() or "daemon-reload" not in log.read_text(encoding="utf-8")
+
+
+def test_wizard_identical_content_rerun_repairs_target_metadata(tmp_path: Path) -> None:
+    env, secret_dir, secret_file, log, _ = _wizard_fixture(tmp_path, existing=WIZARD_SECRET)
+    secret_dir.chmod(0o700)
+    secret_file.chmod(0o600)
+
+    completed = _run_wizard(env, ["", "", "", ""])
+
+    assert completed.returncode == 0, completed.stderr
+    assert secret_dir.stat().st_mode & 0o777 == 0o750
+    assert secret_file.stat().st_mode & 0o777 == 0o640
+    calls = log.read_text(encoding="utf-8")
+    assert f"chown {os.getuid()}:70 {secret_dir} {secret_file}" in calls
+    assert f"chmod 0640 {secret_file}" in calls
 
 
 @pytest.mark.parametrize("failure", ("invalid", "eof", "validation", "interrupt"))
