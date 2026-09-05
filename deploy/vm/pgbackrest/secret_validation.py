@@ -64,20 +64,34 @@ def _validate_permissions(
 
 def _parse_file(path: Path, seen: set[str]) -> None:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        content = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         _invalid()
+    # Python splitlines accepts separators that the pgBackRest INI loader does
+    # not. NUL/control bytes can also truncate or change an opaque secret value.
+    if any(
+        (ord(char) < 32 and char not in "\n\r\t")
+        or char in "\x7f\x85\u2028\u2029"
+        for char in content
+    ):
+        _invalid()
+    lines = content.split("\n")
+    in_global = False
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", ";")):
             continue
-        if stripped.startswith("[") and stripped.endswith("]"):
+        if stripped.startswith("["):
+            if stripped != "[global]" or in_global:
+                _invalid()
+            in_global = True
             continue
         key, separator, value = line.partition("=")
         key = key.strip()
         value = value.strip()
         if (
-            not separator
+            not in_global
+            or not separator
             or key not in REQUIRED_OPTIONS
             or key in seen
             or not value
@@ -85,6 +99,8 @@ def _parse_file(path: Path, seen: set[str]) -> None:
         ):
             _invalid()
         seen.add(key)
+    if not in_global:
+        _invalid()
 
 
 def validate_secret_dir(
@@ -114,7 +130,11 @@ def validate_secret_dir(
             entry_stat = entry.lstat()
         except OSError:
             _invalid()
-        if stat.S_ISLNK(entry_stat.st_mode) or not stat.S_ISREG(entry_stat.st_mode):
+        if (
+            stat.S_ISLNK(entry_stat.st_mode)
+            or not stat.S_ISREG(entry_stat.st_mode)
+            or entry.suffix != ".conf"
+        ):
             _invalid()
         _validate_permissions(
             entry_stat,

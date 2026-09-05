@@ -55,6 +55,15 @@ EvidenceError = evidence.EvidenceError
 render_restore_evidence = evidence.render_restore_evidence
 
 
+@pytest.fixture(autouse=True)
+def clean_default_config_boundary(monkeypatch: pytest.MonkeyPatch):
+    # Lifecycle unit tests do not depend on the developer's index/dirty state.
+    # Separate real-Git prerequisite tests below exercise all clean-config gates.
+    original = restore_drill._config_is_clean_tracked
+    monkeypatch.setattr(restore_drill, "_config_is_clean_tracked",
+                        lambda path: True if path == CONFIG_PATH else original(path))
+
+
 @pytest.mark.integration
 async def test_generated_verifier_replays_snapshots_without_source_sequence_privileges(
     pg_engine, pg_session_factory,
@@ -242,7 +251,7 @@ def test_bootstrap_uses_existing_baseline_db_and_stdin_only_password(
     assert command[:5] == ("docker", "exec", "--user", "postgres", "--interactive")
     assert command[6:] == (
         "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-h", "/var/run/postgresql",
-        "-U", "postgres", "-d", "bfx",
+        "-U", "bfx", "-d", "bfx",
     )
     health_index = next(i for i, argv in enumerate(fake.commands) if "--format={{.State.Health.Status}}" in argv)
     assert health_index < fake.commands.index(command)
@@ -343,8 +352,7 @@ def test_dr_compose_uses_generated_external_resources_without_production_inputs(
     assert verifier["networks"] == ["dr"]
     assert "restore-data:/var/lib/postgresql" in restore_db["volumes"]
     assert restore_db["healthcheck"]["test"] == [
-        "CMD-SHELL",
-        "pg_isready -U postgres -d template1",
+        "CMD", "pg_isready", "-U", "${DR_SQL_ADMIN_ROLE}", "-d", "${DR_DATABASE_NAME}",
     ]
     assert "ports" not in compose["services"]["restore-db"]
     assert "ports" not in compose["services"]["verifier"]
@@ -405,14 +413,16 @@ def test_restore_plan_names_are_random_prefixed_and_cleanup_is_generated_only() 
         plan.container_name,
     )
     verifier_run_index = plan.run_commands[4].index("run")
-    assert plan.run_commands[4][verifier_run_index : verifier_run_index + 5] == (
+    assert plan.run_commands[4][verifier_run_index : verifier_run_index + 7] == (
         "run",
         "--rm",
         "--no-deps",
+        "--name",
+        plan.verifier_container_name,
         "verifier",
         "replay",
     )
-    assert plan.cleanup_commands[1:] == (
+    assert plan.cleanup_commands[1:4] == (
         ("docker", "volume", "rm", plan.volume_name),
         ("docker", "network", "rm", plan.egress_network_name),
         ("docker", "network", "rm", plan.network_name),
@@ -553,7 +563,7 @@ class _FakeRunner:
         self.image_id = f"sha256:{'b' * 64}\n"
         self.image_labels = json.dumps(IMAGE_LABELS)
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
         self.timeouts.append(timeout)
         if input_text is not None:
@@ -578,6 +588,8 @@ class _FakeRunner:
             return subprocess.CompletedProcess(command, self.compose_up_status, "", "")
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
             return subprocess.CompletedProcess(command, 0, "healthy\n", "")
+        if input_text and "pg_is_in_recovery()" in input_text:
+            return subprocess.CompletedProcess(command, 0, "f\n", "")
         if command[:3] == ("docker", "exec", command[2]):
             if input_text and "CREATE ROLE" in input_text:
                 return subprocess.CompletedProcess(command, self.bootstrap_status, "", "DATABASE-PASSWORD-SENTINEL")
@@ -635,6 +647,130 @@ class _Clock:
         return self.now
 
 
+def test_sql_admin_matches_deployed_cluster() -> None:
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read(CONFIG_PATH)
+    production = yaml.safe_load((ROOT / "docker-compose.bot.yml").read_text())
+    assert production["services"]["postgres"]["env_file"] == ".env.runtime"
+    assert config["bfx"].get("pg1-user") == "bfx"
+
+
+@pytest.mark.parametrize("recovery", ["t", "invalid", "", "f\nt", "timeout", "poll"])
+def test_recovery_must_finish_before_disconnect_and_bootstrap(tmp_path: Path, recovery: str) -> None:
+    clock = _Clock()
+    queries = []
+    class Recovery(_FakeRunner):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
+            if input_text and "pg_is_in_recovery()" in input_text:
+                queries.append(len(self.commands) - 1)
+                assert command[command.index("-U") + 1] == "bfx"
+                assert command[command.index("-d") + 1] == "bfx"
+                if recovery == "timeout":
+                    clock.now += timeout
+                    raise subprocess.TimeoutExpired(command, timeout)
+                value = ("t" if len(queries) == 1 else "f") if recovery == "poll" else recovery
+                return subprocess.CompletedProcess(command, 0, value + "\n", "")
+            return result
+    fake = Recovery(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    drill = _drill(tmp_path, fake, clock=clock)
+    drill._sleep = lambda seconds: setattr(clock, "now", clock.now + seconds)
+    assert drill.run(_request(tmp_path)) == (0 if recovery == "poll" else 2)
+    assert queries
+    disconnects = [i for i, cmd in enumerate(fake.commands) if "disconnect" in cmd]
+    if recovery == "poll":
+        assert len(queries) == 2
+        assert max(queries) < disconnects[0]
+        assert next(i for i, cmd in enumerate(fake.commands) if "verifier" in cmd) > disconnects[0]
+    else:
+        assert not disconnects
+        assert not any("CREATE ROLE" in data for _, data in fake.inputs)
+        assert not any("verifier" in cmd for cmd in fake.commands)
+        assert json.loads((tmp_path / "restore.json").read_text())["measured"] is False
+
+
+@pytest.mark.parametrize("networks", [{}, {"production": {}},
+    {"bfx-dr-20260904t031700z-a1b2c3d4e5f60718-net": {}, "production": {}}])
+def test_membership_requires_exact_generated_internal_network(tmp_path: Path, networks: dict) -> None:
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+                       container_networks=json.dumps(networks))
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
+    assert not any("verifier" in cmd for cmd in fake.commands)
+
+
+def test_compose_uses_sanitized_process_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    injected = dict.fromkeys(("DR_NETWORK_NAME", "DR_CONTAINER_NAME", "DR_SQL_ADMIN_ROLE", "DR_DATABASE_NAME", "DATABASE_URL", "POSTGRES_USER", "BFX_DEPLOYMENT_ENV", "BFX_VAULT_KEK", "COMPOSE_FILE", "COMPOSE_PROFILES", "COMPOSE_ENV_FILES", "COMPOSE_PROJECT_NAME"), "PRODUCTION-SENTINEL")
+    for key, value in injected.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///test-docker.sock")
+    observed = []
+    class Environment(_FakeRunner):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            if command[:2] == ("docker", "compose"):
+                observed.append(env)
+            return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
+    fake = Environment(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 0
+    assert len(observed) == 3  # up, verifier, cleanup
+    for environment in observed:
+        assert environment is not None
+        assert not set(injected) & environment.keys()
+        assert environment["PATH"] == os.environ["PATH"]
+        assert environment["DOCKER_HOST"] == "unix:///test-docker.sock"
+    assert "PRODUCTION-SENTINEL" not in fake.env_text
+
+
+def test_real_command_boundary_passes_sanitized_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    def subprocess_run(command, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(restore_drill.subprocess, "run", subprocess_run)
+    environment = {"PATH": "/bin", "DOCKER_HOST": "unix:///test.sock"}
+    restore_drill._run_command(("docker", "compose", "version"), timeout=1, env=environment)
+    assert seen[0]["env"] == environment
+    assert not seen[0].get("shell", False)
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "already-removed", "cleanup-failure"])
+def test_verifier_container_cleanup_is_independent_of_compose_client(tmp_path: Path, outcome: str) -> None:
+    clock = _Clock()
+    running = set()
+    attempted = []
+    class Verifier(_FakeRunner):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
+            if "run" in command and "verifier" in command:
+                name = command[command.index("--name") + 1] if "--name" in command else "anonymous-verifier"
+                attempted.append(name)
+                if outcome == "already-removed":
+                    return result
+                running.add(name)
+                clock.now += timeout
+                raise subprocess.TimeoutExpired(command, timeout)
+            if command[:3] == ("docker", "container", "rm"):
+                assert 0 < timeout <= 30
+                if outcome in {"cleanup-failure", "already-removed"}:
+                    return subprocess.CompletedProcess(command, 2, "", "TOKEN-SENTINEL")
+                running.discard(command[-1])
+            if command[:3] == ("docker", "container", "ls"):
+                return subprocess.CompletedProcess(command, 0, "\n".join(running), "")
+            return result
+    fake = Verifier(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    status = _drill(tmp_path, fake, clock=clock).run(_request(tmp_path))
+    assert status == (0 if outcome == "already-removed" else 2)
+    assert attempted and re.fullmatch(r"bfx-dr-[a-z0-9-]+-verifier", attempted[0])
+    removal = next(i for i, cmd in enumerate(fake.commands) if cmd[:3] == ("docker", "container", "rm"))
+    assert fake.commands[removal][-1] == attempted[0]
+    assert removal < next(i for i, cmd in enumerate(fake.commands) if cmd[:3] == ("docker", "network", "rm"))
+    if outcome != "cleanup-failure":
+        assert not running
+    else:
+        assert json.loads((tmp_path / "restore.json").read_text())["error_code"] == "cleanup_failed"
+
+
 def test_image_evidence_uses_container_id_and_fixed_labels(tmp_path: Path) -> None:
     fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 0
@@ -678,8 +814,8 @@ def test_deadline_is_shared_from_first_create_and_all_commands_are_bounded(tmp_p
     clock = _Clock()
 
     class Advancing(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if "rm" not in command:
                 clock.now += 10
             return result
@@ -706,7 +842,7 @@ def test_deadline_interrupts_blocked_commands_and_still_cleans(tmp_path: Path, s
     blocked = []
 
     class Blocking(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
             match = {
                 "create": command[:3] == ("docker", "network", "create"),
                 "compose": "up" in command,
@@ -722,7 +858,7 @@ def test_deadline_interrupts_blocked_commands_and_still_cleans(tmp_path: Path, s
                 blocked.append(timeout)
                 clock.now += timeout if timeout is not None else 4000
                 raise subprocess.TimeoutExpired(command, timeout or 4000, stderr="TOKEN-SENTINEL")
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if "rm" not in command:
                 clock.now += 1
             return result
@@ -755,8 +891,8 @@ def test_cleanup_deadline_reserves_time_to_unlink_env(tmp_path: Path, monkeypatc
     monkeypatch.setattr(restore_drill, "_unlink_env_file", unlink)
 
     class CleanupBlocking(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if "rm" in command:
                 clock.now += timeout if timeout is not None else 100
                 raise subprocess.TimeoutExpired(command, timeout or 100)
@@ -775,8 +911,8 @@ def test_cleanup_deadline_rejects_late_success(tmp_path: Path) -> None:
     clock = _Clock()
 
     class LateCleanup(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if command[:3] == ("docker", "network", "rm") and command[-1].endswith("-net"):
                 clock.now += 31
             return result
@@ -814,8 +950,8 @@ def test_cleanup_only_removes_successfully_created_resources(tmp_path: Path, cre
     class FailedCreate(_FakeRunner):
         creates = 0
 
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if command[:2] in (("docker", "network"), ("docker", "volume")) and "create" in command:
                 self.creates += 1
                 if self.creates == create_index + 1:
@@ -834,8 +970,8 @@ def test_health_deadline_cannot_extend_nearly_expired_global_budget(tmp_path: Pa
     health_timeouts = []
 
     class SlowCompose(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if "up" in command:
                 clock.now += 3590
             if "--format={{.State.Health.Status}}" in command:
@@ -865,7 +1001,7 @@ def test_deadline_rejects_late_evidence_and_cleans(tmp_path: Path, monkeypatch: 
     fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
     assert _drill(tmp_path, fake, clock=clock).run(_request(tmp_path)) == 2
     assert json.loads((tmp_path / "restore.json").read_text())["measured"] is False
-    assert len([cmd for cmd in fake.commands if "rm" in cmd]) == 4
+    assert len([cmd for cmd in fake.commands if "rm" in cmd]) == 5
 
 
 @pytest.mark.parametrize("target_time", [None, "2026-09-04T04:00:00Z"])
@@ -899,10 +1035,10 @@ class _ImageAndEvidenceAdvancingRunner(_FakeRunner):
         super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
         self.clock = clock
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if command[:3] == ("docker", "image", "inspect"):
             self.clock.now += 1.25
-        return super().__call__(command, timeout=timeout, input_text=input_text)
+        return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
 
 
 def test_rto_includes_image_and_evidence_validation_before_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -935,12 +1071,12 @@ class _CleanupObservingRunner(_FakeRunner):
         self.cleanup_status = cleanup_status
         self.evidence_present_during_cleanup = False
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if "rm" in command:
             self.evidence_present_during_cleanup = self.output_path.exists()
             if self.cleanup_status:
                 return subprocess.CompletedProcess(command, self.cleanup_status, "", "")
-        return super().__call__(command, timeout=timeout, input_text=input_text)
+        return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
 
 
 def test_cleanup_failure_atomically_replaces_provisional_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1055,8 +1191,8 @@ def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
         return real_popen(command, *args, **kwargs)
 
     class SlowComposeCleanup(_FakeRunner):
-        def __call__(self, command, *, timeout=None, input_text=None):
-            result = super().__call__(command, timeout=timeout, input_text=input_text)
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
             if "rm" in command and "restore-db" in command:
                 env_paths.append(Path(command[command.index("--env-file") + 1]))
                 clock.now += 29.8  # Only 0.2 seconds remain for env unlink.
@@ -1105,11 +1241,11 @@ class _HealthTimeoutRunner(_FakeRunner):
         super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
         self.health_timeouts: list[float | None] = []
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
             self.health_timeouts.append(timeout)
             raise subprocess.TimeoutExpired(command, timeout or 0)
-        return super().__call__(command, input_text=input_text)
+        return super().__call__(command, input_text=input_text, env=env)
 
 
 def test_health_inspect_timeout_uses_remaining_deadline_and_writes_failure(tmp_path: Path) -> None:
@@ -1146,6 +1282,8 @@ def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tm
         "DR_NETWORK_NAME",
         "DR_EGRESS_NETWORK_NAME",
         "DR_CONTAINER_NAME",
+        "DR_SQL_ADMIN_ROLE",
+        "DR_DATABASE_NAME",
         "DATABASE_URL",
         "BFX_DEPLOYMENT_ENV",
         "DR_ACCOUNT_ID",
@@ -1271,17 +1409,21 @@ def test_command_runner_exception_is_redacted_into_failure_evidence(tmp_path: Pa
     assert "TOKEN-SENTINEL" not in report
 
 
-def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid", ["placeholder", "extension", "section", "outside-section"])
+def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path, invalid: str) -> None:
     fake = _FakeRunner(
         verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
     )
     secret_dir = _write_valid_secret_dir(tmp_path)
-    (secret_dir / "r2.conf").write_text(
-        (secret_dir / "r2.conf").read_text(encoding="utf-8").replace(
-            "opaque-access-key", "<ACCOUNT_ID>"
-        ),
-        encoding="utf-8",
-    )
+    secret_file = secret_dir / "r2.conf"
+    if invalid == "extension":
+        secret_file.rename(secret_file.with_suffix(".txt"))
+    elif invalid == "section":
+        secret_file.write_text(secret_file.read_text().replace("[global]", "[bfx]"))
+    elif invalid == "outside-section":
+        secret_file.write_text(secret_file.read_text().replace("[global]\n", ""))
+    else:
+        secret_file.write_text(secret_file.read_text().replace("opaque-access-key", "<ACCOUNT_ID>"))
     drill = RestoreDrill(
         command_runner=fake,
         config_path=CONFIG_PATH,

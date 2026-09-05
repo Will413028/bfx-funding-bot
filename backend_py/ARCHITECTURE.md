@@ -451,12 +451,29 @@ head/hash 與 empty-projector replay，而不是用設定存在或檔案存在�
 Isolated restore 的 staged boundary 固定如下：Compose 只以 `restore-data` 作為
 logical volume key，由 runner 注入 generated external volume name；production
 `bfx_pgdata` 永不成為 restore target。`restore-db` 先同時加入 generated internal
-network 與 temporary R2 egress network，健康後必須斷開 R2 egress，才可啟動只在
-internal network 的 verifier。runner 透過 local socket 以 OS user `postgres`
+network 與 temporary R2 egress network，healthcheck 後須以 SQL role `bfx` 在既有
+baseline DB 確認 `pg_is_in_recovery()=false`（同一 global deadline），才斷開
+R2 egress，核對 membership 恰好只含 generated internal network。
+runner 透過 local socket 以 OS user `postgres`、SQL admin role `bfx`
 連入 existing restored database，建立 ephemeral verifier role；verifier 不取得
 R2 credential、application secret 或 Bitfinex connectivity。所有 container-side
 pgBackRest/psql command 都使用 `--user postgres`，production PostgreSQL 則以
 `archive_timeout=60s` 確保低寫入量時仍有 bounded WAL archive latency。
+
+Stanza 固定 `pg1-user=bfx`；health/recovery/bootstrap/schema/capture 同用 SQL
+`bfx`，不靠 DR `POSTGRES_*` initialization。所有 Compose subprocess 使用 sanitized
+env，移除 ambient `DR_*`、`DATABASE_URL`、`POSTGRES_*`、`BFX_*`、`COMPOSE_*`，
+保留 PATH／Docker transport。Verifier container 使用 generated name，啟動 attempt
+前標記 cleanup eligibility；timeout 後仍須独立清理，先於 networks，整體 cleanup
+仍受獨立 30 秒 deadline 約束。
+
+pgBackRest 2.59.1 info 的 `timestamp.start/stop` 是 strict integer epoch；
+stanza/repository `status.code` 必須為 integer 0。Smoke raw stdout/stderr 只進
+trap-cleaned private temp，輸出固定 markers。Backup refresh 先失效舊 evidence；
+atomic persistence 遇 ENOSPC 亦須 remove/truncate 舊綠燈，wrapper 失敗不得 cat 舊報告。
+Halt 1 Step 2 僅做 legacy-schema-compatible realm/count/event integrity backup/
+restore；canonical UUID baseline/staged replay 延後至 migration 與 cutover verify
+後的 [post-identity gate](../docs/runbooks/halt-1-exchange-account-cutover.md#post-identity-dr-gate)。
 
 每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
 核對 migration heads、event count/head/hash 與 account/environment/projector。

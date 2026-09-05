@@ -28,6 +28,11 @@ else
   exit 2
 fi
 
+python3 "$SCRIPT_DIR/evidence.py" backup-failure \
+  --error-code backup_refresh_incomplete --output "$OUTPUT" >/dev/null 2>&1 || {
+  echo "backup_evidence_unavailable" >&2
+  exit 2
+}
 BACKUP_LOG="$(mktemp)"
 trap 'rm -f -- "$BACKUP_LOG"' EXIT
 BACKUP_STATUS=0
@@ -40,4 +45,4 @@ if ((BACKUP_STATUS != 0)); then
   exit "$BACKUP_STATUS"
 fi
 
-exec "$SCRIPT_DIR/status.sh" --require-rpo
+"$SCRIPT_DIR/status.sh" --require-rpo

@@ -30,6 +30,8 @@ class RestorePlan:
     network_name: str
     egress_network_name: str
     container_name: str
+    verifier_container_name: str
+    sql_admin_role: str
     verify_role: str
     database_name: str
     account_id: str
@@ -103,6 +105,7 @@ def build_restore_plan(
     network_name = _generated_name(f"bfx-dr-{resource_id}-net")
     egress_network_name = _generated_name(f"bfx-dr-{resource_id}-egress")
     container_name = _generated_name(f"bfx-dr-{resource_id}-db")
+    verifier_container_name = _generated_name(f"bfx-dr-{resource_id}-verifier")
     verify_role = _verify_role(f"bfx_dr_{resource_id.replace('-', '_')}")
     compose_prefix = (
         "docker",
@@ -118,6 +121,8 @@ def build_restore_plan(
         network_name=network_name,
         egress_network_name=egress_network_name,
         container_name=container_name,
+        verifier_container_name=verifier_container_name,
+        sql_admin_role="bfx",
         verify_role=verify_role,
         database_name=database_name,
         expected_event_hash=expected_event_hash,
@@ -158,6 +163,8 @@ def build_restore_plan(
                 "run",
                 "--rm",
                 "--no-deps",
+                "--name",
+                verifier_container_name,
                 "verifier",
                 "replay",
                 "--account-id",
@@ -175,5 +182,6 @@ def build_restore_plan(
             ("docker", "volume", "rm", volume_name),
             ("docker", "network", "rm", egress_network_name),
             ("docker", "network", "rm", network_name),
+            ("docker", "container", "rm", "--force", verifier_container_name),
         ),
     )

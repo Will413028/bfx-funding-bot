@@ -27,6 +27,7 @@ BACKUP_ERROR_CODES = frozenset(
         "archiver_output_invalid",
         "pgbackrest_info_invalid",
         "pgbackrest_check_failed",
+        "backup_refresh_incomplete",
         "config_unreadable",
     }
 )
@@ -251,6 +252,27 @@ def _parse_pgbackrest_info(info_json: str) -> str:
             break
     if stanza is None:
         _raise("backup_set_missing")
+    if len(payload) != 1:
+        _raise("pgbackrest_info_invalid")
+    repositories = stanza.get("repo")
+    if not isinstance(repositories, list) or len(repositories) != 1:
+        _raise("pgbackrest_info_invalid")
+    repository = repositories[0]
+    if (
+        not isinstance(repository, dict)
+        or type(repository.get("key")) is not int
+        or repository["key"] != 1
+        or repository.get("cipher") != "aes-256-cbc"
+    ):
+        _raise("pgbackrest_info_invalid")
+    for item in (stanza, repository):
+        status = item.get("status")
+        if (
+            not isinstance(status, dict)
+            or type(status.get("code")) is not int
+            or status["code"] != 0
+        ):
+            _raise("pgbackrest_info_invalid")
 
     backups = stanza.get("backup")
     if not isinstance(backups, list) or not backups:
@@ -272,10 +294,10 @@ def _parse_pgbackrest_info(info_json: str) -> str:
             _raise("pgbackrest_info_invalid")
         start = timestamp.get("start")
         stop = timestamp.get("stop")
-        if not isinstance(start, dict) or not isinstance(stop, dict):
+        if type(start) is not int or type(stop) is not int:
             _raise("pgbackrest_info_invalid")
-        start_epoch = _nonnegative_int(start.get("epoch"), code="pgbackrest_info_invalid")
-        stop_epoch = _nonnegative_int(stop.get("epoch"), code="pgbackrest_info_invalid")
+        start_epoch = _nonnegative_int(start, code="pgbackrest_info_invalid")
+        stop_epoch = _nonnegative_int(stop, code="pgbackrest_info_invalid")
         if stop_epoch < start_epoch:
             _raise("pgbackrest_info_invalid")
         parsed.append((stop_epoch, label, backup_type, start_epoch))
@@ -545,6 +567,21 @@ def render_failure_evidence(
 
 
 def _atomic_write_json(path: Path, report: dict[str, object]) -> None:
+    try:
+        _replace_json(path, report)
+    except OSError:
+        # A failed refresh must revoke any previously accepted green artifact.
+        # Unlink needs no new blocks; writable-file truncation also works when
+        # the directory denies unlink. Never expose filesystem exception text.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            with suppress(OSError), path.open("r+") as handle:
+                handle.truncate(0)
+        raise
+
+
+def _replace_json(path: Path, report: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
@@ -587,6 +624,9 @@ def _safe_observed_at_ms(archiver_tsv: str) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="kind", required=True)
+
+    smoke = subparsers.add_parser("smoke-info")
+    smoke.add_argument("--info-json", type=Path, required=True)
 
     backup = subparsers.add_parser("backup")
     backup.add_argument("--archiver-tsv", type=Path, required=True)
@@ -632,6 +672,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not _paths_are_absolute(args):
         return 2
+    if args.kind == "smoke-info":
+        try:
+            _parse_pgbackrest_info(_read_input(args.info_json, code="pgbackrest_info_invalid"))
+        except EvidenceError:
+            return 2
+        return 0
 
     observed_at_ms = time.time_ns() // 1_000_000
     if args.kind == "backup-failure":
