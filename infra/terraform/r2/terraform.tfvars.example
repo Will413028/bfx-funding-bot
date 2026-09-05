@@ -1,0 +1,4 @@
+# Non-secret inputs only. Keep the real terraform.tfvars outside Git.
+cloudflare_account_id = "00000000000000000000000000000000"
+backup_bucket_name    = "bfx-funding-bot-pgbackrest"
+bucket_location       = null

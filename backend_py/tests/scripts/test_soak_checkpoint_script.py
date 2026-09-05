@@ -153,7 +153,7 @@ fi
 if [ "$#" -eq 6 ] && [ "$1" = exec ] && [ "$2" = bfx-bot ] && [ "$3" = python ] && [ "$4" = -c ]; then
   exec python -c "$5" "$6"
 fi
-if [ "$#" -eq 11 ] && [ "$1" = exec ] && [ "$2" = bfx-postgres ] && [ "$3" = psql ] && [ "$4" = -U ] && [ "$5" = bfx ] && [ "$6" = -d ] && [ "$7" = bfx ] && [ "$8" = -X ] && [ "$9" = -qAt ] && [ "${10}" = -c ]; then
+if [ "$#" -eq 13 ] && [ "$1" = exec ] && [ "$2" = --user ] && [ "$3" = postgres ] && [ "$4" = bfx-postgres ] && [ "$5" = psql ] && [ "$6" = -U ] && [ "$7" = bfx ] && [ "$8" = -d ] && [ "$9" = bfx ] && [ "${10}" = -X ] && [ "${11}" = -qAt ] && [ "${12}" = -c ]; then
   printf '%s\\n' '7'
   exit 0
 fi
@@ -212,10 +212,27 @@ exit 99
     assert len(scope_execs) == 1
     assert len(probe_execs) == 1 and probe_execs[0][5] == base_url
     assert "/healthz" in probe_execs[0][4] and "/readyz" in probe_execs[0][4]
-    sql_calls = [argv for argv in invocations if argv[:2] == ["exec", "bfx-postgres"]]
+    sql_calls = [
+        argv
+        for argv in invocations
+        if argv[:4] == ["exec", "--user", "postgres", "bfx-postgres"]
+    ]
     assert len(sql_calls) == 4
     for argv in sql_calls:
-        assert argv[:10] == ["exec", "bfx-postgres", "psql", "-U", "bfx", "-d", "bfx", "-X", "-qAt", "-c"]
-        statements = [part.strip() for part in argv[10].split(";") if part.strip()]
+        assert argv[:12] == [
+            "exec",
+            "--user",
+            "postgres",
+            "bfx-postgres",
+            "psql",
+            "-U",
+            "bfx",
+            "-d",
+            "bfx",
+            "-X",
+            "-qAt",
+            "-c",
+        ]
+        statements = [part.strip() for part in argv[12].split(";") if part.strip()]
         assert len(statements) == 1 and statements[0].upper().startswith("SELECT ")
-        assert not re.search(r"\b(insert|update|delete|truncate|drop|alter|grant|revoke|create|vacuum|reindex)\b", argv[10], re.I)
+        assert not re.search(r"\b(insert|update|delete|truncate|drop|alter|grant|revoke|create|vacuum|reindex)\b", argv[12], re.I)

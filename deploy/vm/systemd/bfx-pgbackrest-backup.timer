@@ -1,0 +1,10 @@
+[Unit]
+Description=Create the daily bfx pgBackRest backup at 03:17 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+Unit=bfx-pgbackrest-backup.service
+
+[Install]
+WantedBy=timers.target
