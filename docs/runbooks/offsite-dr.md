@@ -90,7 +90,15 @@ python3 deploy/vm/pgbackrest/secret_validation.py --secret-dir "$PGBACKREST_SECR
 The validator must exit zero and print nothing. `secret_config_invalid` is a
 hard stop. The directory and every direct file must remain non-symlink,
 readable/traversable by UID/GID 70, and contain no unknown, duplicate, empty,
-or placeholder assignment.
+or placeholder assignment. Every direct file must be regular with a case-sensitive
+`.conf` suffix and exactly one `[global]` section; assignments before that
+section, wrong/extra/repeated sections and ambiguous parser syntax are rejected.
+
+The deployed cluster's existing SQL admin role is `bfx`, distinct from OS user
+`postgres` (UID/GID 70). The stanza sets `pg1-user=bfx`; status, DR health,
+recovery, bootstrap, schema queries and baseline capture use SQL role `bfx`.
+Container execs retain `--user postgres`. Verify that the existing role/database
+match this contract before a drill; DR Compose never initializes `POSTGRES_*`.
 
 R2 does not supply the S3 Object Lock behavior assumed by some S3 clients.
 Treat R2 Bucket Lock as a separate retention control and leave it disabled
@@ -129,18 +137,16 @@ operator-confirmed smoke wrapper:
 deploy/vm/pgbackrest/smoke.sh --confirm-r2-smoke
 ```
 
-The wrapper executes this exact fail-fast sequence as container user
-`postgres`; review each stage independently rather than treating a later
-command as proof that an earlier result was valid:
-
-```bash
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx stanza-create
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx check
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx --type=full backup
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx --type=diff backup
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx info --output=json
-docker exec --user postgres bfx-postgres pgbackrest --stanza=bfx verify
-```
+The wrapper executes `stanza-create`, `check`, `--type=full backup`,
+`--type=diff backup`, `info --output=json`, and `verify` as container OS user
+`postgres`. All stdout/stderr is captured in a private, trap-cleaned temporary
+directory. Only fixed stage/error markers are printed, including `smoke_info_ok`.
+Never print or tee raw info JSON: even an exit-zero command can contain
+endpoint/bucket diagnostics and `status.code=99`. Require exactly stanza
+`bfx`, repository key 1 with the approved cipher, and strict integer
+`status.code == 0` for both stanza and repository. Backup timestamps in the
+pinned 2.59.1 JSON are integer epoch `timestamp.start/stop`, never nested
+epoch objects; bool/float/negative/reversed values fail validation.
 
 Require real R2 success for `stanza-create`, archive `check`, full backup,
 differential backup, `info`, and `verify`. Authentication, list/head/read,
@@ -229,10 +235,20 @@ Require exit zero and a bounded `backup.json` with `measured: true`,
 `rpo_seconds <= 300`, fresh `observed_at_ms`, stanza `bfx`, repository `r2`, a
 bounded last archived WAL name, latest backup label, and tracked config digest.
 Unavailable, stale, malformed, or failed archive state must not be interpreted
-as zero lag. Any failed collection replaces old green evidence with
-`measured: false`.
+as zero lag. Refresh first invalidates old evidence with
+`measured: false` / `backup_refresh_incomplete`; any failed collection stays
+unmeasured. If atomic persistence fails (including ENOSPC), remove the old
+artifact or truncate it if unlink is denied. Halt 2 must reject that missing/
+empty artifact. Wrappers never print old output after persistence failure.
 
 ### 6. Capture the same-target bounded baseline.json
+
+This UUID procedure requires the additive identity schema and verified cutover.
+For Halt 1 before migration, use only the
+[legacy-schema-compatible backup/restore gate](halt-1-exchange-account-cutover.md#2-freeze-writes先做-backup--isolated-restore).
+Return here at the explicit [post-identity DR gate](halt-1-exchange-account-cutover.md#post-identity-dr-gate)
+after the identity migrations and cutover verification; pre-identity artifacts
+cannot satisfy this UUID gate.
 
 While writes remain halted, select the exact backup label and recovery boundary
 for the drill. Capture `baseline.json` for the same database state that restore
@@ -306,7 +322,7 @@ read -r -p 'Selected backup label: ' BACKUP_LABEL
 read -r -p 'UTC PITR target (empty only while writers stay stopped through restore recovery): ' TARGET_TIME
 read -r -p 'Projector version: ' PROJECTOR_VERSION
 docker exec --user postgres --interactive "$CAPTURE_CONTAINER" \
-  psql -X -qAt --no-password --host /var/run/postgresql --username postgres \
+  psql -X -qAt --no-password --host /var/run/postgresql --username bfx \
   --dbname "$DATABASE_NAME" --set ON_ERROR_STOP=1 \
   --set account_id="$ACCOUNT_ID" --set environment="$DR_ENVIRONMENT" \
   > "$BASELINE_WORK_DIR/capture.json" <<'SQL'
@@ -434,15 +450,30 @@ resources.
 generated external Docker volume. Neither name may be production
 `bfx_pgdata`. The runner creates one generated internal network and one
 generated egress network. restore-db alone has temporary R2 egress during
-restore, and the runner disconnects that egress before verifier starts.
+restore/recovery. `pg_isready` only proves connections are accepted. Before
+disconnect, the runner polls `SELECT pg_is_in_recovery();` on the existing
+baseline database as SQL role `bfx` and requires `f` within the same global
+deadline. True retries; invalid output, command failure or timeout fails closed.
+Only then disconnect egress, prove membership is exactly the generated internal network,
+bootstrap, and start verifier.
 
-After restore-db is healthy, the runner uses the local PostgreSQL socket as OS user `postgres`
+After restore-db has completed recovery and egress is disconnected, the runner uses the local PostgreSQL socket as OS user `postgres`
 via `docker exec --user postgres --interactive`, validates the
 existing restored database, and creates an ephemeral verifier role on that
 database. It does not rely on `POSTGRES_USER`, `POSTGRES_PASSWORD`, or
 `POSTGRES_DB` to initialize restored non-empty PGDATA and does not create a new
 application database. The role password travels only through stdin and the
-temporary mode-`0600` connection file.
+temporary mode-`0600` connection file. Every actual Compose subprocess receives
+a sanitized environment: ambient `DR_*`, `DATABASE_URL`, `POSTGRES_*`,
+`BFX_*` and `COMPOSE_*` cannot override generated interpolation or the verifier
+URL. PATH and Docker transport settings such as DOCKER_HOST remain available.
+The SQL admin role is never passed to the verifier as its login.
+
+The verifier container has a validated generated name and cleanup eligibility
+is recorded before the Compose run attempt. Cleanup independently force-removes
+that verifier container before removing networks, even after client timeout;
+normal `--rm` removal is tolerated only after confirming absence. All cleanup
+shares the independent 30-second deadline; failures invalidate success.
 
 The verifier remains on the generated internal network only. The isolated
 verifier has no R2 or application secrets, no production env file, no application port,

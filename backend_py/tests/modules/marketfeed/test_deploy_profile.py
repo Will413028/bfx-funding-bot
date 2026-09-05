@@ -105,7 +105,7 @@ def _deploy_root(tmp_path: Path) -> Path:
     secret_dir.chmod(0o700)
     secret_file = secret_dir / "r2.conf"
     secret_file.write_text(
-        "\n".join(
+        "[global]\n" + "\n".join(
             f"{option}=safe-fixture-value"
             for option in (
                 "repo1-s3-endpoint",
@@ -247,10 +247,18 @@ def test_deploy_rejects_nonregular_config_before_secret_or_docker(
     assert not (root / "fake-docker.log").exists()
 
 
-def test_deploy_rejects_invalid_secret_before_docker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid", ["missing-options", "extension", "section", "outside-section"])
+def test_deploy_rejects_invalid_secret_before_docker(tmp_path: Path, invalid: str) -> None:
     root = _deploy_root(tmp_path)
     secret_file = root.parent / "home/bfx/pgbackrest/conf.d/r2.conf"
-    secret_file.write_text("[global]\nrepo1-s3-key=opaque-test-value\n")
+    if invalid == "extension":
+        secret_file.rename(secret_file.with_suffix(".txt"))
+    elif invalid == "section":
+        secret_file.write_text(secret_file.read_text().replace("[global]", "[bfx]"))
+    elif invalid == "outside-section":
+        secret_file.write_text(secret_file.read_text().replace("[global]\n", ""))
+    else:
+        secret_file.write_text("[global]\nrepo1-s3-key=opaque-test-value\n")
 
     result = _run_deploy(root, "paper")
 

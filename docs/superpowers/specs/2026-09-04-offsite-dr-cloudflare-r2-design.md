@@ -99,12 +99,15 @@ the foundation can be considered review-ready.
    egress network is created without `--internal` and is attached only to
    `restore-db` during pgBackRest restore/recovery. The runner must verify the
    two network properties, disconnect egress after the restore container is
-   healthy and before starting `verifier`, then remove both generated networks.
+   healthy and SQL role `bfx` confirms `pg_is_in_recovery()` is false within
+   the same global deadline. Require membership to be exactly the generated
+   internal network before bootstrap/verifier; then remove both generated networks.
    The verifier never receives R2 egress.
 4. **Restored-cluster bootstrap:** `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
    `POSTGRES_DB` are not treated as initialization controls for restored PGDATA.
-   Once PostgreSQL is healthy, the runner connects through the local socket as
-   OS user `postgres`, validates the operator-selected existing database, and
+   After recovery completion and egress disconnect, the runner connects through
+   the local socket as OS user `postgres`, SQL admin role `bfx`, validates the
+   operator-selected existing database, and
    creates a generated ephemeral verifier role with only `CONNECT`, `TEMPORARY`,
    schema `USAGE`, and the fixed event/projection/migration `SELECT` grants.
    The verifier receives only a temporary connection URL; production app
@@ -122,7 +125,8 @@ the foundation can be considered review-ready.
    pinned image labels, and is accepted only when fresh. All subprocesses share
    one monotonic 3600-second deadline; cleanup has its own short deadline and
    removes only generated resources. Any status/preflight failure atomically
-   replaces prior evidence with `measured:false`.
+   replaces prior evidence with `measured:false`; persistence failure must remove
+   or truncate stale green evidence, including ENOSPC.
 
 The Compose volume key is always the tracked logical key `restore-data`; its
 external Docker volume name is supplied through `DR_VOLUME_NAME`. This keeps
@@ -130,6 +134,28 @@ the rendered Compose model valid while retaining generated-resource ownership
 in the runner.
 
 ### PostgreSQL and image boundary
+
+Final broad-review contracts: actual Compose subprocesses receive sanitized env
+without ambient `DR_*`, `DATABASE_URL`, `POSTGRES_*`, `BFX_*` or `COMPOSE_*`;
+generated interpolation/verifier credentials are authoritative while PATH and
+Docker transport remain available. The verifier has a validated generated
+container name and cleanup eligibility recorded before the run attempt. Cleanup
+independently force-removes that container before removing networks, tolerating
+normal auto-removal only after a successful exact-name absence check, within
+the independent 30-second budget.
+
+Pinned 2.59.1 info timestamps are strict integer epoch `timestamp.start/stop`;
+bool/float/string/negative/reversed timestamps fail closed. Both stanza and
+repository status require integer zero, stanza `bfx` and repository key 1 with
+the approved cipher. Smoke captures all stdout/stderr privately with trap cleanup
+and emits fixed stage/error markers only; no raw info JSON is printed.
+Backup/status/preflight mark refresh incomplete before collecting; persistence
+errors invalidate/truncate/remove prior green evidence, including ENOSPC.
+
+Halt 1 retains a pre-identity legacy-schema-compatible realm/count/event-integrity
+backup/restore gate. The canonical UUID baseline and staged UUID replay gate is
+linked from its post-identity step, after additive migration and cutover
+verification (and contract/grants); legacy evidence cannot satisfy Halt 2.
 
 - 建立 `deploy/vm/postgres/Dockerfile`，base 為 PostgreSQL 18 Alpine 的 pinned
   digest；明確保留 `PGDATA=/var/lib/postgresql/18/docker` 與現有
@@ -153,7 +179,8 @@ repo，VM 上由 operator 建立並以最小權限掛載。
 
 固定設定：
 
-- stanza `bfx`，`pg1-path=/var/lib/postgresql/18/docker`。
+- stanza `bfx`，`pg1-path=/var/lib/postgresql/18/docker`、`pg1-user=bfx`；
+  SQL admin role 固定為 deployed cluster 既有的 `bfx`，與 OS user `postgres` 分開。
 - `repo1-type=s3`、`repo1-s3-region=auto`、`repo1-s3-uri-style=path`、R2
   account endpoint，以及 bucket prefix `/pgbackrest`。
 - `repo1-block=y`、`repo1-bundle=y`、`archive-async=y`、`start-fast=y`；object
@@ -179,7 +206,9 @@ retention control 而非已驗證 WORM。
 - R2 endpoint/bucket、R2 Access Key ID、Secret Access Key、repository cipher pass
   全在 VM secret boundary；不進 git、CI variables、shell history、Docker image
   layer 或 evidence JSON。
-- `conf.d` secret directory/file 必須是非 symlink、只含且各含一次
+- `conf.d` secret directory/file 必須是非 symlink；direct regular files 只能用
+  `.conf` suffix，每檔只有單一 `[global]` section，拒絕 section 外 assignment、
+  wrong/extra/repeated sections 與 parser ambiguity。只含且各含一次
   `repo1-s3-endpoint`、`repo1-s3-bucket`、`repo1-s3-key`、
   `repo1-s3-key-secret`、`repo1-cipher-pass` 五個 options；container postgres
   UID/GID 可讀取，其他使用者不可讀寫，並以 read-only bind mount 注入。
@@ -232,7 +261,9 @@ backup evidence 最少為：
    `bot.env`、`webapi.env`、`frontend.env`、`BFX_VAULT_KEK`，不加入 production
    Docker network，也不啟動 daemon、webapi 或 Bitfinex client。restore-db 暫時
    同時加入 generated R2 egress network 與 generated DR internal network；只要
-   restore-db healthcheck 通過就斷開 egress。
+   restore-db healthcheck 通過且 SQL role `bfx` 於既有 baseline database 查得
+   `pg_is_in_recovery()=false` 才斷開 egress；true 必須在 global deadline 內輪詢，
+   invalid output／timeout 均 fail closed。
 3. verifier 只加入 generated DR internal network；它執行 schema/version、
    row-count、event head/hash，再以現有
    `verify_projection_replay.py replay` 從 empty temporary projection 重建並比較

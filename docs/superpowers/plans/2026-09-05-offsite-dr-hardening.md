@@ -4,7 +4,7 @@
 
 **Goal:** 修正第一版 offsite DR foundation 的 RPO、R2 egress、restored-cluster bootstrap、baseline verification、secret boundary 與 evidence lifecycle 缺口，使 branch 可進入 final review。
 
-**Architecture:** Production PostgreSQL 以 `archive_timeout=60s` 搭配 pinned pgBackRest image 持續 archive；所有 container-side data-plane command 以 `--user postgres` 執行，pgBackRest raw log 不落地。DR restore 使用兩個 generated external Docker network：restore-db 在還原階段暫時使用可出站至 R2 的 egress network，健康後斷開 egress，再由只位於 internal network 的 verifier 以 ephemeral least-privilege role 對既有 database 執行 replay。
+**Architecture:** Production PostgreSQL 以 `archive_timeout=60s` 搭配 pinned pgBackRest image 持續 archive；所有 container-side data-plane command 以 `--user postgres` 執行，pgBackRest raw log 不落地。DR restore 使用兩個 generated external Docker network：restore-db 在還原階段暫時使用可出站至 R2 的 egress network，SQL role `bfx` 確认 recovery 完成後斷開 egress，再由只位於 internal network 的 verifier 以 ephemeral least-privilege role 對既有 database 執行 replay。
 
 **Tech Stack:** PostgreSQL 18 Alpine, pgBackRest 2.59.1, Cloudflare R2 S3 API, Docker Compose, Bash, Python 3.13 standard library, systemd, pytest。
 
@@ -61,6 +61,35 @@
 - Modify `docs/runbooks/offsite-dr.md`、`backend_py/ARCHITECTURE.md`、`docs/runbooks/halt-1-exchange-account-cutover.md`：document the approved boundary without personal paths or credentials。
 
 ## Stable interfaces
+
+### Final broad-review corrections
+
+The final fix pass adds these required contracts to all tasks below:
+
+- SQL admin is the existing `bfx` role; stanza `pg1-user=bfx`, healthcheck,
+  recovery, bootstrap, schema and baseline capture must agree. OS exec remains
+  `postgres`; DR Compose has no `POSTGRES_*` initialization.
+- Pinned 2.59.1 info uses strict integer epoch `timestamp.start/stop`. Reject
+  bool/float/string/negative values and stop-before-start. Validate stanza
+  `bfx`, repository key 1/cipher and integer zero status codes; raw fields
+  never enter bounded evidence.
+- All actual Compose subprocesses receive sanitized env, removing ambient
+  `DR_*`, `DATABASE_URL`, `POSTGRES_*`, `BFX_*`, `COMPOSE_*` while retaining
+  PATH/DOCKER_HOST. Fake runner and real subprocess interfaces accept `env`.
+- `RestorePlan` includes generated `verifier_container_name` and fixed validated
+  `sql_admin_role="bfx"`. Record verifier cleanup eligibility before run.
+  Independently force-remove it before networks within the 30-second cleanup
+  budget; after nonzero removal require a successful exact-name listing proving
+  absence to tolerate normal auto-removal.
+- Smoke privately captures every stage in a trap-cleaned directory and emits
+  fixed markers only. `info` exit zero does not bypass status validation.
+- Backup/status/preflight invalidate old evidence before capture; centralized
+  atomic persistence removes/truncates stale green on ENOSPC. Wrappers cannot
+  print old artifacts on nonzero persistence.
+- Halt 1 Step 2 retains a legacy-schema-compatible backup/restore gate using
+  realm/count/event integrity. Canonical UUID baseline + staged UUID replay
+  occur only at the linked post-identity gate after additive migration and
+  cutover verification (and contract/grants), before worker restart.
 
 ### Secret validator
 
@@ -138,6 +167,8 @@ class RestorePlan:
     network_name: str
     egress_network_name: str
     container_name: str
+    verifier_container_name: str
+    sql_admin_role: str
     verify_role: str
     database_name: str
     account_id: str
@@ -157,7 +188,7 @@ existing account/environment/projector/label/run-id checks. `create_commands`
 are, in order, internal network creation, egress network creation, and volume
 creation. `run_commands` are Compose `up restore-db`, egress property inspect,
 egress disconnect, post-disconnect container-network inspect, and Compose
-`run --rm --no-deps verifier`; the verifier argv contains
+`run --rm --no-deps --name <generated-verifier> verifier`; the verifier argv contains
 `--expected-event-hash`. Every Compose command uses the absolute Compose path.
 All cleanup commands contain only generated project/container/volume/network
 names.
@@ -283,8 +314,10 @@ not yet exist.
 
 - [ ] **Step 3: Implement `secret_validation.py`.**
 
-Walk only direct entries in the supplied directory; reject symlink/non-regular
-entries. Parse blank/comment/section lines, accept exactly the five option names,
+Walk only direct entries in the supplied directory; require regular non-symlink
+`.conf` files. Each file has exactly one approved `[global]` section; reject
+assignments outside it, wrong/extra/repeated sections and ambiguous syntax.
+Parse blank/comment lines, accept exactly the five option names,
 reject every other assignment and duplicate, and treat values as opaque for
 validation. Require non-empty values, no case-insensitive marker matching
 `example|placeholder|change[-_ ]?me|replace[-_ ]?me|<[^>]+>`, no group/other
@@ -329,7 +362,7 @@ git commit -m "🐛 Fix: validate pgBackRest secret boundary consistently"
 Assert the Compose file declares only the logical volume key `restore-data`
 with `external: true` and `name: ${DR_VOLUME_NAME}`, declares external `dr`
 and `r2-egress` networks, mounts restore-db on both and verifier on `dr` only,
-uses fixed `pg_isready -U postgres -d template1`, and contains no `POSTGRES_*`,
+uses argv `pg_isready -U ${DR_SQL_ADMIN_ROLE} -d ${DR_DATABASE_NAME}` with SQL role `bfx` and the validated existing baseline database, and contains no `POSTGRES_*`,
 `.env.runtime`, production env file, port or `BFX_VAULT_KEK` reference. Extend
 the plan test to assert `egress_network_name`, ordered create commands with
 exactly one `--internal`, a disconnect command before verifier, and cleanup of
@@ -366,8 +399,9 @@ networks:
 Set restore-db networks to `[dr, r2-egress]`, verifier networks to `[dr]`,
 mount `restore-data:/var/lib/postgresql`, and remove `POSTGRES_USER`,
 `POSTGRES_PASSWORD`, and `POSTGRES_DB`. Keep only generated DR restore inputs
-on restore-db. The healthcheck must use the existing cluster superuser and
-`template1`, not environment initialization.
+on restore-db. The healthcheck uses SQL admin role `bfx` and the validated
+existing baseline database. The runner additionally requires `pg_is_in_recovery()`
+to return false before disconnect; connection acceptance is insufficient.
 
 - [ ] **Step 4: Extend `RestorePlan` and command construction.**
 
@@ -382,9 +416,9 @@ docker volume create <volume>
 
 The plan must inspect the egress network and require `.Internal=false`, then
 run `docker network disconnect <egress-network> <container>`, inspect the
-container network membership to prove egress is absent, and only then run
-`docker compose run --rm --no-deps verifier`. Cleanup must remove the Compose
-container, volume, egress network, then internal network. Every generated
+container network membership to require exactly the generated internal network, and only then run
+`docker compose run --rm --no-deps --name <generated-verifier> verifier`. Cleanup must independently force-remove the named verifier, then remove the Compose
+restore-db container, volume, egress network, then internal network. Every generated
 argument is validated against `^bfx-dr-[a-z0-9-]+$`; the Compose path is
 absolute and all commands remain argv tuples without `shell=True`.
 
@@ -459,8 +493,10 @@ the bounded output only after validation.
 
 - [ ] **Step 4: Implement local-socket role bootstrap without POSTGRES init.**
 
-After restore-db health, run a fixed `psql` command as OS user `postgres` over
-the container-local socket. Use a generated role name and password; send the
+After restore-db health, poll `SELECT pg_is_in_recovery();` through the local
+socket as OS user `postgres`, SQL role `bfx`, on the existing baseline database.
+Require false within the same global deadline, then disconnect egress, require
+exact internal membership, and bootstrap with that same SQL admin role. Use a generated role name and password; send the
 password only in `stdin` to `psql`, never in argv. The SQL must validate the
 baseline database exists, create the generated login role, grant only
 `CONNECT`, `TEMPORARY`, schema `public` `USAGE`, and `SELECT` on
@@ -572,7 +608,7 @@ Assert the runbook orders: install four unit files with `install -m 0644`,
 secret, build image, `stanza-create`, `check`, full, diff, info/verify,
 `baseline.json`, staged isolated restore with `--baseline`, measured evidence,
 then timer enablement. Assert it documents `restore-data`, temporary R2 egress
-disconnect, existing database/local `postgres` bootstrap, `--user postgres`,
+disconnect, existing database/local OS `postgres` / SQL `bfx` bootstrap, `--user postgres`,
 `archive_timeout=60s`, and no production `bfx_pgdata` restore or Bitfinex request.
 
 - [ ] **Step 2: Run documentation tests and verify RED.**
@@ -596,7 +632,7 @@ baseline fails the drill. Use the command:
 deploy/vm/pgbackrest/restore-drill.sh \
   --account-id <canonical-uuid> \
   --environment prod \
-  --projector-version projector-v3 \
+  --projector-version execution-state-v1 \
   --backup-label <label> \
   --baseline /absolute/path/baseline.json
 ```

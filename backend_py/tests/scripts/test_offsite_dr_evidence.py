@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -267,26 +268,79 @@ def test_renderer_image_labels_drop_unbounded_extra_metadata(tmp_path: Path) -> 
     assert TOKEN_SENTINEL not in json.dumps(report)
 
 
+@pytest.mark.parametrize("value", [True, 1.0, -1, "1756875000", {"epoch": 1756875000}])
+@pytest.mark.parametrize("field", ["start", "stop"])
+def test_pinned_info_rejects_noninteger_epoch(field: str, value: object) -> None:
+    payload = json.loads(_info_json())
+    payload[0]["backup"][0]["timestamp"][field] = value
+    with pytest.raises(EvidenceError, match="pgbackrest_info_invalid"):
+        evidence._parse_pgbackrest_info(json.dumps(payload))
+
+
+def test_pinned_info_rejects_stop_before_start() -> None:
+    payload = json.loads(_info_json())
+    payload[0]["backup"][0]["timestamp"] = {"start": 20, "stop": 19}
+    with pytest.raises(EvidenceError, match="pgbackrest_info_invalid"):
+        evidence._parse_pgbackrest_info(json.dumps(payload))
+
+
+@pytest.mark.parametrize("kind", ["backup", "backup-invalid", "backup-failure"])
+@pytest.mark.parametrize("fault", ["write", "replace", "write-and-unlink"])
+def test_backup_enospc_revokes_green_at_halt2_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, fault: str,
+) -> None:
+    from scripts.halt2_cutover import _read_dr_measurement
+
+    output = tmp_path / "backup.json"
+    output.write_text(json.dumps({
+        "measured": True, "rpo_seconds": 1, "observed_at_ms": time.time_ns() // 1_000_000,
+    }))
+    assert _read_dr_measurement(output, key="rpo_seconds") == 1
+    archiver, info = tmp_path / "archiver.tsv", tmp_path / "info.json"
+    archiver.write_text("1756961300000\t1756961240000\t00000001000000000000000A\t0\t")
+    info.write_text(_info_json() if kind == "backup" else "{}")
+    config = _config(tmp_path)
+    def enospc(*args, **kwargs):
+        raise OSError(errno.ENOSPC, TOKEN_SENTINEL)
+    monkeypatch.setattr(evidence.os if fault == "replace" else evidence.tempfile,
+                        "replace" if fault == "replace" else "NamedTemporaryFile", enospc)
+    if fault == "write-and-unlink":
+        unlink = Path.unlink
+        def denied(path, *args, **kwargs):
+            if path == output:
+                raise PermissionError(TOKEN_SENTINEL)
+            return unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", denied)
+    argv = ["backup-failure", "--error-code", "pgbackrest_check_failed"] if kind == "backup-failure" else [
+        "backup", "--archiver-tsv", str(archiver), "--info-json", str(info), "--config", str(config),
+    ]
+    assert evidence.main([*argv, "--output", str(output)]) == 2
+    with pytest.raises(ValueError):
+        _read_dr_measurement(output, key="rpo_seconds")
+
+
 def _info_json() -> str:
     return json.dumps(
         [
             {
                 "name": "bfx",
+                "status": {"code": 0, "message": "ok"},
+                "repo": [{"key": 1, "cipher": "aes-256-cbc", "status": {"code": 0, "message": "ok"}}],
                 "backup": [
                     {
                         "label": "20260903031700-F",
                         "type": "full",
                         "timestamp": {
-                            "start": {"epoch": 1756875000},
-                            "stop": {"epoch": 1756875120},
+                            "start": 1756875000,
+                            "stop": 1756875120,
                         },
                     },
                     {
                         "label": "20260904031700-D",
                         "type": "diff",
                         "timestamp": {
-                            "start": {"epoch": 1756961220},
-                            "stop": {"epoch": 1756961240},
+                            "start": 1756961220,
+                            "stop": 1756961240,
                         },
                     },
                 ],
@@ -400,7 +454,7 @@ def test_backup_evidence_requires_a_full_backup(tmp_path: Path) -> None:
 
 def test_backup_evidence_rejects_json_float_epoch(tmp_path: Path) -> None:
     info = json.loads(_info_json())
-    info[0]["backup"][0]["timestamp"]["start"]["epoch"] = 1.0
+    info[0]["backup"][0]["timestamp"]["start"] = 1.0
 
     with pytest.raises(EvidenceError, match=r"^pgbackrest_info_invalid$"):
         render_backup_evidence(

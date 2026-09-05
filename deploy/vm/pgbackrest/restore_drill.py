@@ -75,10 +75,11 @@ CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _run_command(
-    command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None
+    command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        command, capture_output=True, text=True, check=False, timeout=timeout, input=input_text
+        command, capture_output=True, text=True, check=False, timeout=timeout, input=input_text, env=env
     )
 
 
@@ -113,9 +114,21 @@ def _validate_plan_resources(plan: RestorePlan) -> None:
             plan.network_name,
             plan.egress_network_name,
             plan.container_name,
+            plan.verifier_container_name,
         )
     ):
         _failure("restore_output_invalid")
+    if plan.sql_admin_role != "bfx":
+        _failure("restore_output_invalid")
+
+
+def _compose_environment() -> dict[str, str]:
+    """Generated interpolation is authoritative; retain Docker transport and PATH."""
+    return {
+        key: value for key, value in os.environ.items()
+        if key != "DATABASE_URL"
+        and not key.startswith(("DR_", "POSTGRES_", "BFX_", "COMPOSE_"))
+    }
 
 
 def _config_is_clean_tracked(path: Path) -> bool:
@@ -245,6 +258,8 @@ class RestoreDrill:
     ) -> subprocess.CompletedProcess[str]:
         try:
             kwargs: dict[str, object] = {}
+            if command[:2] == ("docker", "compose"):
+                kwargs["env"] = _compose_environment()
             if input_text is not None:
                 kwargs["input_text"] = input_text
             remaining = self._remaining()
@@ -304,6 +319,8 @@ class RestoreDrill:
             "DR_NETWORK_NAME": plan.network_name,
             "DR_EGRESS_NETWORK_NAME": plan.egress_network_name,
             "DR_CONTAINER_NAME": plan.container_name,
+            "DR_SQL_ADMIN_ROLE": plan.sql_admin_role,
+            "DR_DATABASE_NAME": plan.database_name,
             "DATABASE_URL": database_url,
             "BFX_DEPLOYMENT_ENV": plan.environment,
             "DR_ACCOUNT_ID": plan.account_id,
@@ -341,8 +358,26 @@ class RestoreDrill:
             networks = json.loads(completed.stdout)
         except (json.JSONDecodeError, TypeError):
             _failure("restore_output_invalid")
-        if not isinstance(networks, dict) or plan.egress_network_name in networks:
+        if not isinstance(networks, dict) or set(networks) != {plan.network_name}:
             _failure("restore_output_invalid")
+
+    def _wait_for_recovery(self, plan: RestorePlan) -> None:
+        while True:
+            completed = self._require_success(
+                (
+                    "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
+                    "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+                    "-h", "/var/run/postgresql", "-U", plan.sql_admin_role, "-d", plan.database_name,
+                ),
+                input_text="SELECT pg_is_in_recovery();\n",
+            )
+            self._remaining()
+            result = completed.stdout.strip()
+            if result == "f":
+                return
+            if result != "t":
+                _failure("restore_output_invalid")
+            self._sleep(min(1, self._remaining()))
 
     def _wait_for_health(self, plan: RestorePlan) -> None:
         deadline = self._clock() + min(600, self._remaining())
@@ -379,7 +414,7 @@ class RestoreDrill:
             (
                 "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
                 "psql", "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1",
-                "-h", "/var/run/postgresql", "-U", "postgres", "-d", plan.database_name,
+                "-h", "/var/run/postgresql", "-U", plan.sql_admin_role, "-d", plan.database_name,
             ),
             input_text=query,
         )
@@ -416,7 +451,7 @@ class RestoreDrill:
             (
                 "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
-                "-h", "/var/run/postgresql", "-U", "postgres", "-d", plan.database_name,
+                "-h", "/var/run/postgresql", "-U", plan.sql_admin_role, "-d", plan.database_name,
             ),
             input_text=sql,
         )
@@ -467,6 +502,7 @@ class RestoreDrill:
         env_path: Path | None,
         *,
         container_started: bool,
+        verifier_started: bool,
         volume_created: bool,
         egress_network_created: bool,
         network_created: bool,
@@ -474,6 +510,23 @@ class RestoreDrill:
         # Cleanup is independent of the restore budget, including after timeout.
         self._deadline = self._clock() + 30
         failed = False
+        # A timed-out Compose client can leave its one-off container running.
+        # The generated name is eligible before starting the client.
+        if verifier_started:
+            try:
+                result = self._call(plan.cleanup_commands[4], timeout=min(10, self._remaining() - 1))
+                if result.returncode != 0:
+                    # --rm may already have removed it. Confirm absence without
+                    # interpreting or exposing Docker's raw error text.
+                    remaining = self._require_success((
+                        "docker", "container", "ls", "--all", "--filter",
+                        f"name=^/{plan.verifier_container_name}$", "--format={{.Names}}",
+                    ))
+                    if remaining.stdout.strip():
+                        failed = True
+                self._remaining()
+            except DrillFailureError:
+                failed = True
         # Compose needs the env file. Reserve a second for unlink, then spend
         # the rest of this same cleanup budget on the known-created resources.
         if container_started and env_path is not None:
@@ -512,6 +565,7 @@ class RestoreDrill:
         egress_network_created = False
         volume_created = False
         container_cleanup_eligible = False
+        verifier_cleanup_eligible = False
         rto_started: float | None = None
         failure_code: str | None = None
         success_report: dict[str, object] | None = None
@@ -540,11 +594,13 @@ class RestoreDrill:
             container_cleanup_eligible = True
             self._require_success(_compose_with_env(plan.run_commands[0], env_path))
             self._wait_for_health(plan)
+            self._wait_for_recovery(plan)
             self._require_external_egress(plan.run_commands[1])
             self._require_success(plan.run_commands[2])
             self._require_egress_absent(plan.run_commands[3], plan)
             self._bootstrap_role(plan, password)
             schema_tsv = self._schema_tsv(plan)
+            verifier_cleanup_eligible = True
             replay_json = self._replay_json(
                 _compose_with_env(plan.run_commands[4], env_path), plan
             )
@@ -584,6 +640,7 @@ class RestoreDrill:
             if plan is not None:
                 cleanup_failed = self._cleanup(
                     plan, env_path, container_started=container_cleanup_eligible,
+                    verifier_started=verifier_cleanup_eligible,
                     volume_created=volume_created,
                     egress_network_created=egress_network_created,
                     network_created=network_created,

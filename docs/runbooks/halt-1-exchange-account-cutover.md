@@ -40,7 +40,7 @@ chmod 700 release-evidence
 cp deploy/vm/identity-realm-map.example.json release-evidence/identity-realm-map.json
 chmod 600 release-evidence/identity-realm-map.json
 
-docker exec bfx-postgres psql -U bfx -d bfx -v ON_ERROR_STOP=1 -Atc \
+docker exec --user postgres bfx-postgres psql -U bfx -d bfx -v ON_ERROR_STOP=1 -Atc \
   "SELECT 'event_log', account_id, deployment_environment, count(*)
      FROM event_log GROUP BY account_id, deployment_environment
      ORDER BY account_id, deployment_environment" \
@@ -51,12 +51,16 @@ docker exec bfx-postgres psql -U bfx -d bfx -v ON_ERROR_STOP=1 -Atc \
 
 宣布 maintenance window，停止 deployment/reconcile submit path；保留 liveness 與
 read-only admin probe。依 VM backup policy 產生 encrypted offsite backup，並把它
-restore 到不連 Bitfinex 的隔離 Postgres。只在隔離 restore 上驗證 schema、row
-counts、`event_log` head 與 application event hash；不要把 production secret 帶到
-restore。備份、PITR 與 isolated restore 的固定操作順序見
-[Offsite DR operator runbook](offsite-dr.md)。必須先為 same backup/PITR target
-建立 bounded baseline，完成 staged R2-egress disconnect restore，並取得
-fresh measured evidence；unit/timer 存在或 offline tests green 都不能取代這些 gate：
+restore 到不連 Bitfinex 的隔離 Postgres。此處只允許 **legacy-schema-compatible**
+backup/restore verification：對同一 frozen backup/PITR target 比對既有 schema、
+legacy realm／environment counts、event head 與完整 event row integrity。
+使用經 operator review 的 legacy restore 流程，只能還原至全新 generated volume，
+保留 R2 recovery egress 直到 SQL role `bfx` 查詢 `pg_is_in_recovery()=false`，
+然後斷開 egress；不能掛 production volume、application secret 或啟動 worker。
+備份與 secret 安全規則見 [Offsite DR operator runbook](offsite-dr.md)；
+該文件 UUID capture/replay 程序必須延後至
+[post-identity DR gate](#post-identity-dr-gate)。本步的 pre-identity backup gate
+仍須先通過，unit/timer 存在或 offline tests green 不能取代隔離還原證據：
 
 ```bash
 git rev-parse HEAD > release-evidence/release-sha.txt
@@ -68,8 +72,25 @@ uv run alembic current
 `alembic check` 當成通過條件，否則它會正確地報出待套用的 identity operations。
 `alembic check` 固定放在 contract migration 完成後的 Step 6。
 
-隔離資料庫上的 event evidence 至少包含：每個 account/environment 的 count、
-最高 `event_seq`、`cutover_identity.py` preflight 回傳的 `event_head`/`event_hash`。
+對 frozen source 與隔離 restored copy 各執行下列 read-only SQL，完整比對輸出。
+它僅依賴 legacy columns；`legacy_row_hash` 是同 schema/server 下的 row integrity
+digest，不是後續 UUID replay 的 canonical event hash，不能供 Halt 2 使用。
+SQL 以 OS user `postgres`、SQL role `bfx` 執行；每個 money table 的 realm/count
+也必須與 Step 1 manifest 一致。任何缺列、額外 realm 或 digest mismatch 都停止：
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT account_id, deployment_environment, count(*) AS event_count,
+       max(event_seq) AS event_head,
+       encode(sha256(convert_to(
+           string_agg(to_jsonb(e)::text, E'\n' ORDER BY event_seq), 'UTF8'
+       )), 'hex') AS legacy_row_hash
+FROM public.event_log AS e
+GROUP BY account_id, deployment_environment
+ORDER BY account_id, deployment_environment;
+ROLLBACK;
+```
+
 同時以 Bitfinex REST 做一次 fresh **full-account** reconcile（offers、credits、
 wallet availability，不只 strategy symbols），把 normalized snapshot 與 query
 時間保存到 evidence；snapshot 不含 API headers 或 secret。
@@ -84,7 +105,7 @@ wallet availability，不只 strategy symbols），把 normalized snapshot 與 q
 ```bash
 cd ~/bfx
 docker compose --env-file .env.runtime -f docker-compose.bot.yml stop bot
-docker exec bfx-postgres psql -U bfx -d bfx -Atc \
+docker exec --user postgres bfx-postgres psql -U bfx -d bfx -Atc \
   "SELECT count(*) FROM event_log
      WHERE event_type='RESERVATION_INTENT'
        AND occurred_at_ms >= (EXTRACT(EPOCH FROM now())*1000)::bigint - 20*60*1000"
@@ -178,7 +199,19 @@ RESET ROLE;
 預期結果為 `can_read_position=t`、`can_write_event=f`、
 `can_update_credentials=t`；任何其他 privilege 都停止 release，先修正 role。
 
-### 7. Replay、auth boundary 與一帳號 canary gate
+<a id="post-identity-dr-gate"></a>
+
+### 7. Post-identity DR、Replay、auth boundary 與一帳號 canary gate
+
+Step 4 additive identity migration、Step 5 cutover verify、Step 6 contract
+migration 與 Step 6a grants 全部通過後，維持 all-writer quiescence，重新建立
+post-identity backup。此時才可依 [canonical UUID baseline capture](offsite-dr.md#6-capture-the-same-target-bounded-baselinejson)
+及 [staged UUID restore/replay](offsite-dr.md#7-run-the-staged-isolated-restore-with---baseline)
+為 same backup/PITR target 取得 fresh measured evidence。逐欄核對 UUID、
+environment、migration heads、event count/head/hash 及 projections，確認 recovery
+完成後才 disconnect egress，且 generated verifier/container/volume/networks
+cleanup 成功。不得重用 Step 2 legacy backup 或將其 integrity digest 當作
+canonical UUID baseline；本 gate 通過前不得 restart worker 或進 Halt 2。
 
 在 worker restart 前做 read-only replay/rebuild，確認 event head/hash、projection
 counts、membership 404/403 行為與 explicit URL contract。確認 daemon env 只有

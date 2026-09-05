@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -63,6 +64,34 @@ def _write_secret_dir(
 
 def _secret_validation() -> ModuleType:
     return _load_module("offsite_dr_secret_validation", SECRET_VALIDATION_PATH)
+
+
+@pytest.mark.parametrize("suffix", [".txt", ".CONF", "", ".conf.bak"])
+def test_secret_validator_rejects_files_pgbackrest_will_not_load(tmp_path: Path, suffix: str) -> None:
+    secret_dir, secret_file = _write_secret_dir(tmp_path)
+    secret_file.rename(secret_dir / ("r2" + suffix))
+    validator = _secret_validation()
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
+
+
+@pytest.mark.parametrize("header", ["", "[bfx]", "[global:backup]", "[global]\n[global]",
+                                   "[global]\n[bfx]", "[DEFAULT]", "[ global ]"])
+def test_secret_validator_rejects_wrong_or_ambiguous_section(tmp_path: Path, header: str) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, text=_secret_text().replace("[global]", header))
+    validator = _secret_validation()
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
+
+
+@pytest.mark.parametrize("control", ["\x00", "\v", "\f", "\x85", "\u2028"])
+def test_secret_validator_rejects_ambiguous_control_characters(tmp_path: Path, control: str) -> None:
+    secret_dir, _ = _write_secret_dir(
+        tmp_path, text=_secret_text(**{"repo1-cipher-pass": f"opaque{control}#hidden"}),
+    )
+    validator = _secret_validation()
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
 
 
 def test_secret_validator_accepts_exact_options_without_returning_values(tmp_path: Path) -> None:
@@ -373,6 +402,68 @@ def test_status_is_read_only_and_does_not_restore_or_archive_push() -> None:
     assert "restore" not in source
 
 
+@pytest.mark.parametrize("invalid", ["valid", "stanza", "repo", "status", "repo-status", "bool-status", "malformed"])
+def test_smoke_validates_private_info_without_raw_output(tmp_path: Path, invalid: str) -> None:
+    payload = json.loads(_info_json())
+    if invalid == "stanza":
+        payload[0]["name"] = "other"
+    elif invalid == "repo":
+        payload[0]["repo"][0]["key"] = 2
+    elif invalid == "status":
+        payload[0]["status"]["code"] = 99
+    elif invalid == "repo-status":
+        payload[0]["repo"][0]["status"]["code"] = 99
+    elif invalid == "bool-status":
+        payload[0]["status"]["code"] = False
+    payload[0]["status"]["message"] = TOKEN_SENTINEL
+    raw = json.dumps(payload) if invalid != "malformed" else TOKEN_SENTINEL
+    completed, calls, leftovers = _smoke(tmp_path, raw)
+    assert completed.returncode == (0 if invalid == "valid" else 2)
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+    assert not leftovers
+    if invalid != "valid":
+        assert "verify" not in calls
+
+
+@pytest.mark.parametrize("stage", ["stanza-create", "check", "--type=full", "--type=diff", "info", "verify"])
+def test_smoke_command_failures_are_bounded_and_trap_cleaned(tmp_path: Path, stage: str) -> None:
+    completed, _, leftovers = _smoke(tmp_path, _info_json(), failed_stage=stage)
+    assert completed.returncode == 2
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+    assert not leftovers
+
+
+def _smoke(tmp_path: Path, raw: str, *, failed_stage: str = ""):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+    log = tmp_path / "calls"
+    docker = bin_dir / "docker"
+    docker.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+printf '%s\\n' 'TOKEN-SENTINEL' >&2
+if [[ -n "$FAILED_STAGE" && "$*" == *"$FAILED_STAGE"* ]]; then
+  printf '%s\\n' 'TOKEN-SENTINEL'
+  exit 23
+fi
+if [[ "$*" == *" info "* ]]; then
+  printf '%s\\n' "$FAKE_INFO_JSON"
+else
+  printf '%s\\n' 'TOKEN-SENTINEL'
+fi
+""")
+    docker.chmod(0o755)
+    completed = subprocess.run(
+        [str(PG_BACKREST_DIR / "smoke.sh"), "--confirm-r2-smoke"], capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+             "TMPDIR": str(temporary), "FAKE_DOCKER_LOG": str(log),
+             "FAKE_INFO_JSON": raw, "FAILED_STAGE": failed_stage},
+    )
+    return completed, log.read_text(), list(temporary.iterdir())
+
+
 def _fake_docker(tmp_path: Path) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -385,7 +476,7 @@ printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 printf '%s\\n' 'TOKEN-SENTINEL' >&2
 case "$*" in
   *psql*)
-    [[ "$*" == *'POSTGRES_USER'* && "$*" == *'POSTGRES_DB'* ]] || exit 42
+    [[ "$*" == *'-U bfx'* && "$*" == *'-d bfx'* ]] || exit 42
     printf '%s\\n' "$FAKE_ARCHIVER_TSV"
     ;;
   *'pgbackrest --stanza=bfx info --output=json'*) printf '%s\\n' "$FAKE_INFO_JSON" ;;
@@ -403,21 +494,23 @@ def _info_json() -> str:
         [
             {
                 "name": "bfx",
+                "status": {"code": 0, "message": "ok"},
+                "repo": [{"key": 1, "cipher": "aes-256-cbc", "status": {"code": 0, "message": "ok"}}],
                 "backup": [
                     {
                         "label": "20260903031700-F",
                         "type": "full",
                         "timestamp": {
-                            "start": {"epoch": 1756875000},
-                            "stop": {"epoch": 1756875120},
+                            "start": 1756875000,
+                            "stop": 1756875120,
                         },
                     },
                     {
                         "label": "20260904031700-D",
                         "type": "diff",
                         "timestamp": {
-                            "start": {"epoch": 1756961220},
-                            "stop": {"epoch": 1756961240},
+                            "start": 1756961220,
+                            "stop": 1756961240,
                         },
                     },
                 ],
@@ -478,6 +571,7 @@ def test_status_collects_one_select_and_redacts_command_diagnostics(tmp_path: Pa
     docker_log = log_path.read_text(encoding="utf-8")
     assert len(re.findall(r"\bSELECT\b", docker_log, re.I)) == 1
     assert docker_log.count("pgbackrest --stanza=bfx info --output=json") == 1
+    assert "exec --user postgres bfx-postgres-test psql" in docker_log
     assert TOKEN_SENTINEL not in completed.stdout
     assert TOKEN_SENTINEL not in completed.stderr
     assert TOKEN_SENTINEL not in json.dumps(report)
@@ -497,6 +591,61 @@ def test_status_returns_nonzero_and_measured_false_for_stale_archive(tmp_path: P
     assert TOKEN_SENTINEL not in completed.stdout
     assert TOKEN_SENTINEL not in completed.stderr
     assert TOKEN_SENTINEL not in json.dumps(report)
+
+
+@pytest.mark.parametrize("wrapper", ["status.sh", "preflight.sh", "backup.sh"])
+@pytest.mark.parametrize("fault", ["enospc", "mktemp"])
+def test_wrapper_persistence_fault_revokes_old_measurement(
+    tmp_path: Path, wrapper: str, fault: str,
+) -> None:
+    from scripts.halt2_cutover import _read_dr_measurement
+
+    bin_dir, log = _fake_docker(tmp_path)
+    output = tmp_path / "bfx/dr-evidence/backup.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps({"measured": True, "rpo_seconds": 1,
+                                  "observed_at_ms": time.time_ns() // 1_000_000}))
+    assert _read_dr_measurement(output, key="rpo_seconds") == 1
+    shim = bin_dir / ("python3" if fault == "enospc" else "mktemp")
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import errno, runpy, sys, tempfile\n"
+        "def fail(*args, **kwargs):\n    raise OSError(errno.ENOSPC, 'TOKEN-SENTINEL')\n"
+        "tempfile.NamedTemporaryFile = fail\n"
+        "target = sys.argv.pop(1)\nrunpy.run_path(target, run_name='__main__')\n"
+        if fault == "enospc" else "#!/usr/bin/env bash\nexit 1\n"
+    )
+    shim.chmod(0o755)
+    args = ["--type", "full"] if wrapper == "backup.sh" else ["--output", str(output)]
+    completed = subprocess.run(
+        [str(PG_BACKREST_DIR / wrapper), *args], capture_output=True, text=True,
+        env={**os.environ, "HOME": str(tmp_path),
+             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+             "FAKE_DOCKER_LOG": str(log), "FAKE_INFO_JSON": _info_json(),
+             "FAKE_ARCHIVER_TSV": "1756961300000\t1756961240000\twal\t0\t"},
+    )
+    assert completed.returncode != 0
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+    with pytest.raises(ValueError):
+        _read_dr_measurement(output, key="rpo_seconds")
+    assert '"measured":true' not in completed.stdout.replace(" ", "")
+
+
+def test_status_never_prints_stale_output_when_renderer_exits_nonzero(tmp_path: Path) -> None:
+    bin_dir, log = _fake_docker(tmp_path)
+    renderer = bin_dir / "python3"
+    renderer.write_text("#!/usr/bin/env bash\nexit 2\n")
+    renderer.chmod(0o755)
+    output = tmp_path / "backup.json"
+    output.write_text('{"measured": true, "rpo_seconds": 1}')
+    completed = subprocess.run(
+        [str(PG_BACKREST_DIR / "status.sh"), "--output", str(output)],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+             "FAKE_DOCKER_LOG": str(log), "FAKE_INFO_JSON": _info_json(), "FAKE_ARCHIVER_TSV": ""},
+    )
+    assert completed.returncode == 2
+    assert completed.stdout == ""
 
 
 @pytest.mark.parametrize("wrapper_name", ("preflight.sh", "backup.sh"))
@@ -758,12 +907,12 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "sudo systemctl daemon-reload",
             "Create and validate the VM secret fragment",
             "Build and validate bfx-postgres:local",
-            "pgbackrest --stanza=bfx stanza-create",
-            "pgbackrest --stanza=bfx check",
-            "pgbackrest --stanza=bfx --type=full backup",
-            "pgbackrest --stanza=bfx --type=diff backup",
-            "pgbackrest --stanza=bfx info --output=json",
-            "pgbackrest --stanza=bfx verify",
+            "`stanza-create`",
+            "`check`",
+            "`--type=full backup`",
+            "`--type=diff backup`",
+            "`info --output=json`",
+            "`verify`",
             "pgbackrest --stanza=bfx expire",
             "Capture the same-target bounded baseline.json",
             "Run the staged isolated restore with --baseline",
@@ -777,11 +926,11 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
     flattened = text.replace("\\\n", "  ")
     activation_gate = flattened.index("### 9. Enable, start, and list the timers")
     gate_markers = (
-        "pgbackrest --stanza=bfx check",
-        "pgbackrest --stanza=bfx --type=full backup",
-        "pgbackrest --stanza=bfx --type=diff backup",
-        "pgbackrest --stanza=bfx info --output=json",
-        "pgbackrest --stanza=bfx verify",
+        "`check`",
+        "`--type=full backup`",
+        "`--type=diff backup`",
+        "`info --output=json`",
+        "`verify`",
         "pgbackrest --stanza=bfx expire",
         "preflight.sh --output",
         "load_restore_baseline(",
@@ -1017,7 +1166,7 @@ def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> 
         "Missing or mismatched baseline",
         "`restore-data`",
         "restore-db alone has temporary R2 egress",
-        "disconnects that egress before verifier",
+        "Only then disconnect egress",
         "existing restored database",
         "ephemeral verifier role",
         "verifier has no R2 or application secrets",
@@ -1057,3 +1206,30 @@ def test_architecture_and_halt1_document_staged_dr_and_fresh_evidence() -> None:
     assert "[Offsite DR operator runbook](offsite-dr.md)" in halt1
     assert "same backup/PITR target" in halt1
     assert "fresh measured evidence" in halt1
+
+
+def test_halt1_legacy_backup_precedes_identity_and_uuid_gate_follows_cutover() -> None:
+    halt1 = (ROOT / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text()
+    step2 = halt1.split("### 2.", 1)[1].split("### 3.", 1)[0]
+    assert "legacy-schema-compatible" in step2
+    assert "canonical UUID baseline" not in step2
+    assert "cutover_identity.py" not in step2
+    assert "#post-identity-dr-gate" in step2
+    gate = halt1.split('<a id="post-identity-dr-gate"></a>', 1)[1]
+    assert halt1.index('<a id="post-identity-dr-gate"></a>') > halt1.index("### 6a.")
+    assert "canonical UUID baseline" in gate
+    assert "same backup/PITR target" in gate
+    assert "fresh measured evidence" in gate
+    assert "offsite-dr.md#6-" in gate and "offsite-dr.md#7-" in gate
+    assert "docker exec bfx-postgres psql" not in halt1
+
+
+def test_runbook_broad_runtime_contracts_match_current_consumers() -> None:
+    runbook = (ROOT / "docs/runbooks/offsite-dr.md").read_text()
+    assert "--username bfx" in runbook
+    assert "--username postgres" not in runbook
+    for marker in ("pg1-user=bfx", "pg_is_in_recovery()", "SQL admin role",
+                   "sanitized", "COMPOSE_*", "exactly the generated internal network",
+                   "smoke_info_ok", "status.code", "ENOSPC", "verifier container",
+                   "legacy-schema-compatible"):
+        assert marker in runbook

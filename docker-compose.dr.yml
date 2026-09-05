@@ -15,7 +15,7 @@ services:
       - ${DR_PGBACKREST_SECRET_DIR}:/etc/pgbackrest/conf.d:ro
     networks: [dr, r2-egress]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d template1"]
+      test: ["CMD", "pg_isready", "-U", "${DR_SQL_ADMIN_ROLE}", "-d", "${DR_DATABASE_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 60

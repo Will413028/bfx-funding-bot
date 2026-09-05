@@ -33,6 +33,12 @@ done
   exit 2
 }
 
+# Invalidate the previous measurement before any capture/allocation can fail.
+python3 "$SCRIPT_DIR/evidence.py" backup-failure \
+  --error-code backup_refresh_incomplete --output "$OUTPUT" >/dev/null 2>&1 || {
+  echo "backup_evidence_unavailable" >&2
+  exit 2
+}
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
 ARCHIVER_FILE="$TEMP_DIR/archiver.tsv"
@@ -48,9 +54,8 @@ SQL="SELECT
 FROM pg_stat_archiver;"
 
 ARCHIVER_STATUS=0
-docker exec --user postgres "$CONTAINER" sh -ceu \
-  'exec psql -X -qAt -F "$1" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$2"' \
-  sh $'\t' "$SQL" \
+docker exec --user postgres "$CONTAINER" psql -X -qAt -F $'\t' \
+  -v ON_ERROR_STOP=1 -h /var/run/postgresql -U bfx -d bfx -c "$SQL" \
   >"$ARCHIVER_FILE" 2>"$COMMAND_LOG" || ARCHIVER_STATUS=$?
 if ((ARCHIVER_STATUS != 0)); then
   : >"$ARCHIVER_FILE"
@@ -63,7 +68,6 @@ if ((INFO_STATUS != 0)); then
   : >"$INFO_FILE"
 fi
 
-mkdir -p -- "$(dirname "$OUTPUT")"
 EVIDENCE_STATUS=0
 python3 "$SCRIPT_DIR/evidence.py" backup \
   --archiver-tsv "$ARCHIVER_FILE" \
@@ -72,13 +76,11 @@ python3 "$SCRIPT_DIR/evidence.py" backup \
   --output "$OUTPUT" \
   --rpo-limit-seconds 300 || EVIDENCE_STATUS=$?
 
-if [[ -f "$OUTPUT" ]]; then
-  cat "$OUTPUT"
-fi
-
 if ((ARCHIVER_STATUS != 0 || INFO_STATUS != 0 || EVIDENCE_STATUS != 0)); then
+  echo "backup_evidence_unavailable" >&2
   exit 2
 fi
+cat "$OUTPUT"
 if [[ "$REQUIRE_RPO" != true ]]; then
   exit 0
 fi
