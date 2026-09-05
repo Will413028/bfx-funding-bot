@@ -204,6 +204,41 @@ def test_secret_validator_cli_prints_only_bounded_error(tmp_path: Path, invalid:
     assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        (),
+        (TOKEN_SENTINEL,),
+        ("--secret-dir",),
+        ("--secret-dir", f"--{TOKEN_SENTINEL}"),
+        ("--secret-dir", ".", f"--{TOKEN_SENTINEL}"),
+        ("--secret-dir", ".", TOKEN_SENTINEL),
+    ),
+    ids=(
+        "missing-required-option",
+        "missing-required-option-with-token",
+        "missing-option-value",
+        "missing-option-value-with-token",
+        "unknown-option-with-token",
+        "unknown-positional-with-token",
+    ),
+)
+def test_secret_validator_cli_rejects_malformed_arguments_without_echo(
+    arguments: tuple[str, ...],
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SECRET_VALIDATION_PATH), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == "secret_config_invalid\n"
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+
+
 @pytest.mark.parametrize("marker", ("PLACEHOLDER", "ChangeMe", "change-me", "CHANGE_ME", "change me", "ReplaceMe", "replace-me", "replace_me", "replace me"))
 def test_secret_validator_rejects_every_marker_variant(tmp_path: Path, marker: str) -> None:
     secret_dir, _ = _write_secret_dir(tmp_path, text=_secret_text(**{"repo1-cipher-pass": marker}))
