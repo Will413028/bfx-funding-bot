@@ -51,7 +51,9 @@ operator environment, never by putting them in the copied `backend.hcl`.
 cp infra/terraform/r2/backend.hcl.example /secure/path/backend.hcl
 cp infra/terraform/r2/terraform.tfvars.example /secure/path/terraform.tfvars
 cd infra/terraform/r2
-export CLOUDFLARE_API_TOKEN='<Cloudflare-management-token>'
+read -r -s -p 'Cloudflare management token (hidden; not saved to history): ' CLOUDFLARE_API_TOKEN
+printf '\n'
+export CLOUDFLARE_API_TOKEN
 terraform init -backend-config=/secure/path/backend.hcl
 ```
 
