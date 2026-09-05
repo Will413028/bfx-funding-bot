@@ -88,9 +88,10 @@ def validate_secret_dir(
 
 The function never returns secret values. It rejects directory/file symlinks,
 non-regular files, empty values, duplicate/unknown assignments, known example
-markers, group/other access, and a directory/file that the supplied PostgreSQL
-UID/GID cannot traverse/read. Its CLI prints only `secret_config_invalid` on
-failure.
+markers, group/other write access, other-user read access, and a directory/file
+that the supplied PostgreSQL UID/GID cannot traverse/read. Group read/traverse
+is allowed only when the file/directory group is the supplied PostgreSQL GID;
+the CLI prints only `secret_config_invalid` on failure.
 
 ### Restore baseline
 
@@ -154,8 +155,9 @@ class RestorePlan:
 validates the database identifier and lowercase hash in addition to the
 existing account/environment/projector/label/run-id checks. `create_commands`
 are, in order, internal network creation, egress network creation, and volume
-creation. `run_commands` are Compose `up restore-db`, egress disconnect, and
-Compose `run --rm verifier`; the verifier argv contains
+creation. `run_commands` are Compose `up restore-db`, egress property inspect,
+egress disconnect, post-disconnect container-network inspect, and Compose
+`run --rm --no-deps verifier`; the verifier argv contains
 `--expected-event-hash`. Every Compose command uses the absolute Compose path.
 All cleanup commands contain only generated project/container/volume/network
 names.
@@ -286,9 +288,10 @@ entries. Parse blank/comment/section lines, accept exactly the five option names
 reject every other assignment and duplicate, and treat values as opaque for
 validation. Require non-empty values, no case-insensitive marker matching
 `example|placeholder|change[-_ ]?me|replace[-_ ]?me|<[^>]+>`, no group/other
-permission bits, and owner/group read/traverse permission for the supplied
-PostgreSQL UID/GID. Return only sorted `Path` objects. The CLI must print only
-`secret_config_invalid` and return 2 on any `SecretConfigError`.
+write bits or other-user read bits, and owner/group read/traverse permission
+for the supplied PostgreSQL UID/GID. Return only sorted `Path` objects. The
+CLI must print only `secret_config_invalid` and return 2 on any
+`SecretConfigError`.
 
 - [ ] **Step 4: Replace duplicated shell/Python checks with the shared validator.**
 
@@ -377,12 +380,13 @@ docker network create <egress-network>
 docker volume create <volume>
 ```
 
-The second run command must be
-`docker network disconnect <egress-network> <container>` and the verifier
-command must be the third. Cleanup must remove the Compose container, volume,
-egress network, then internal network. Every generated argument is validated
-against `^bfx-dr-[a-z0-9-]+$`; the Compose path is absolute and all commands
-remain argv tuples without `shell=True`.
+The plan must inspect the egress network and require `.Internal=false`, then
+run `docker network disconnect <egress-network> <container>`, inspect the
+container network membership to prove egress is absent, and only then run
+`docker compose run --rm --no-deps verifier`. Cleanup must remove the Compose
+container, volume, egress network, then internal network. Every generated
+argument is validated against `^bfx-dr-[a-z0-9-]+$`; the Compose path is
+absolute and all commands remain argv tuples without `shell=True`.
 
 - [ ] **Step 5: Run focused tests and commit.**
 
