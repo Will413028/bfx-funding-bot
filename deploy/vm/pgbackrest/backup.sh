@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
 CONTAINER="${BFX_POSTGRES_CONTAINER:-bfx-postgres}"
+OUTPUT="${HOME}/bfx/dr-evidence/backup.json"
 
 [[ "$CONTAINER" =~ ^[A-Za-z0-9_.-]+$ ]] || {
   echo "ERROR: invalid postgres container name" >&2
@@ -27,5 +28,16 @@ else
   exit 2
 fi
 
-docker exec "$CONTAINER" pgbackrest --stanza=bfx --type="$TYPE" backup
+BACKUP_LOG="$(mktemp)"
+trap 'rm -f -- "$BACKUP_LOG"' EXIT
+BACKUP_STATUS=0
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx --type="$TYPE" backup \
+  >"$BACKUP_LOG" 2>&1 || BACKUP_STATUS=$?
+if ((BACKUP_STATUS != 0)); then
+  python3 "$SCRIPT_DIR/evidence.py" backup-failure \
+    --error-code pgbackrest_check_failed \
+    --output "$OUTPUT" || exit 2
+  exit "$BACKUP_STATUS"
+fi
+
 exec "$SCRIPT_DIR/status.sh" --require-rpo

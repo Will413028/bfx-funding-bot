@@ -25,9 +25,12 @@ fi
 CHECK_LOG="$(mktemp)"
 trap 'rm -f -- "$CHECK_LOG"' EXIT
 CHECK_STATUS=0
-docker exec "$CONTAINER" pgbackrest --stanza=bfx check \
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx check \
   >"$CHECK_LOG" 2>&1 || CHECK_STATUS=$?
 if ((CHECK_STATUS != 0)); then
+  python3 "$SCRIPT_DIR/evidence.py" backup-failure \
+    --error-code pgbackrest_check_failed \
+    --output "$OUTPUT" || exit 2
   exit "$CHECK_STATUS"
 fi
 

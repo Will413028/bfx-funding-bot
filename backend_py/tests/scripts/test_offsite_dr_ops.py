@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 PG_BACKREST_DIR = ROOT / "deploy/vm/pgbackrest"
 TOKEN_SENTINEL = "TOKEN-SENTINEL"
@@ -18,6 +20,8 @@ def test_pgbackrest_wrappers_fail_closed_and_have_no_mutating_sql() -> None:
     for name in ("status.sh", "preflight.sh", "backup.sh", "smoke.sh"):
         source = (PG_BACKREST_DIR / name).read_text(encoding="utf-8")
         assert "set -euo pipefail" in source
+        assert "docker exec --user postgres" in source
+        assert 'docker exec "$CONTAINER"' not in source
         assert not re.search(
             r"\b(insert|update|delete|truncate|drop|alter|grant|revoke)\b",
             source,
@@ -93,6 +97,10 @@ def _info_json() -> str:
 def _run_status(tmp_path: Path, archiver_tsv: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     bin_dir, log_path = _fake_docker(tmp_path)
     output = tmp_path / "backup.json"
+    output.write_text(
+        json.dumps({"schema_version": 1, "measured": True, "rpo_seconds": 1}),
+        encoding="utf-8",
+    )
     environment = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -139,6 +147,58 @@ def test_status_returns_nonzero_and_measured_false_for_stale_archive(tmp_path: P
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["measured"] is False
     assert report["error_code"] == "archive_lag_exceeded"
+    assert "rpo_seconds" not in report
+    assert TOKEN_SENTINEL not in completed.stdout
+    assert TOKEN_SENTINEL not in completed.stderr
+    assert TOKEN_SENTINEL not in json.dumps(report)
+
+
+@pytest.mark.parametrize("wrapper_name", ("preflight.sh", "backup.sh"))
+def test_wrapper_failure_replaces_stale_green_evidence(
+    tmp_path: Path, wrapper_name: str
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'TOKEN-SENTINEL' >&2
+exit 23
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    output = tmp_path / "bfx/dr-evidence/backup.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(
+        json.dumps({"schema_version": 1, "measured": True, "rpo_seconds": 1}),
+        encoding="utf-8",
+    )
+    command = [str(PG_BACKREST_DIR / wrapper_name)]
+    if wrapper_name == "preflight.sh":
+        command.extend(("--output", str(output)))
+    else:
+        command.extend(("--type", "full"))
+
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "BFX_POSTGRES_CONTAINER": "bfx-postgres-test",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 23
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["measured"] is False
+    assert report["error_code"] == "pgbackrest_check_failed"
     assert "rpo_seconds" not in report
     assert TOKEN_SENTINEL not in completed.stdout
     assert TOKEN_SENTINEL not in completed.stderr

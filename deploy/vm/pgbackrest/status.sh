@@ -48,7 +48,7 @@ SQL="SELECT
 FROM pg_stat_archiver;"
 
 ARCHIVER_STATUS=0
-docker exec "$CONTAINER" sh -ceu \
+docker exec --user postgres "$CONTAINER" sh -ceu \
   'exec psql -X -qAt -F "$1" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$2"' \
   sh $'\t' "$SQL" \
   >"$ARCHIVER_FILE" 2>"$COMMAND_LOG" || ARCHIVER_STATUS=$?
@@ -57,7 +57,7 @@ if ((ARCHIVER_STATUS != 0)); then
 fi
 
 INFO_STATUS=0
-docker exec "$CONTAINER" pgbackrest --stanza=bfx info --output=json \
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx info --output=json \
   >"$INFO_FILE" 2>"$COMMAND_LOG" || INFO_STATUS=$?
 if ((INFO_STATUS != 0)); then
   : >"$INFO_FILE"
