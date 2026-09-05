@@ -175,6 +175,19 @@ def test_backup_evidence_requires_a_full_backup(tmp_path: Path) -> None:
         )
 
 
+def test_backup_evidence_rejects_json_float_epoch(tmp_path: Path) -> None:
+    info = json.loads(_info_json())
+    info[0]["backup"][0]["timestamp"]["start"]["epoch"] = 1.0
+
+    with pytest.raises(EvidenceError, match=r"^pgbackrest_info_invalid$"):
+        render_backup_evidence(
+            archiver_tsv="1756961300000\t1756961240000\twal\t0\t",
+            info_json=json.dumps(info),
+            config_path=_config(tmp_path),
+            rpo_limit_seconds=300,
+        )
+
+
 def _replay_report(*, matches: bool = True) -> str:
     row_counts = {"event_log": 9}
     content_hashes = {"event_log": "a" * 64}

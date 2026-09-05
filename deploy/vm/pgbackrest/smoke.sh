@@ -12,9 +12,9 @@ fi
   exit 2
 }
 
-docker exec "$CONTAINER" pgbackrest --stanza=bfx stanza-create
-docker exec "$CONTAINER" pgbackrest --stanza=bfx check
-docker exec "$CONTAINER" pgbackrest --stanza=bfx --type=full backup
-docker exec "$CONTAINER" pgbackrest --stanza=bfx --type=diff backup
-docker exec "$CONTAINER" pgbackrest --stanza=bfx info --output=json
-docker exec "$CONTAINER" pgbackrest --stanza=bfx verify
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx stanza-create
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx check
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx --type=full backup
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx --type=diff backup
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx info --output=json
+docker exec --user postgres "$CONTAINER" pgbackrest --stanza=bfx verify

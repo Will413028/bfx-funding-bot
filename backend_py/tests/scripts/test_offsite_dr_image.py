@@ -31,6 +31,7 @@ def test_tracked_pgbackrest_config_contains_no_secret_options() -> None:
         "repo1-s3-uri-style=path", "repo1-block=y", "repo1-bundle=y",
         "archive-async=y", "start-fast=y", "repo1-cipher-type=aes-256-cbc",
         "repo1-retention-full=4", "repo1-retention-diff=6",
+        "log-level-file=off", "log-level-console=off", "log-level-stderr=off",
         "pg1-path=/var/lib/postgresql/18/docker",
     ):
         assert option in config
@@ -42,6 +43,7 @@ def test_production_postgres_service_uses_archive_image_and_keeps_autoheal_separ
     assert postgres["image"] == "bfx-postgres:local"
     assert postgres["build"]["dockerfile"] == "deploy/vm/postgres/Dockerfile"
     assert "archive_mode=on" in " ".join(postgres["command"])
+    assert "archive_timeout=60s" in postgres["command"]
     assert "archive_command=pgbackrest --stanza=bfx archive-push %p" in " ".join(postgres["command"])
     assert any("/etc/pgbackrest/pgbackrest.conf" in item for item in postgres["volumes"])
     assert any("/etc/pgbackrest/conf.d" in item for item in postgres["volumes"])

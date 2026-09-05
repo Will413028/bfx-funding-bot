@@ -22,6 +22,7 @@ BACKUP_ERROR_CODES = frozenset(
         "backup_set_missing",
         "archiver_output_invalid",
         "pgbackrest_info_invalid",
+        "pgbackrest_check_failed",
         "config_unreadable",
     }
 )
@@ -65,11 +66,13 @@ def _raise(code: str) -> None:
 
 
 def _nonnegative_int(value: object, *, code: str) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        _raise(code)
+    if isinstance(value, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)", value) is None:
         _raise(code)
     try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+        parsed = int(value)
+    except ValueError:
         _raise(code)
     if parsed < 0:
         _raise(code)
@@ -426,6 +429,10 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument("--output", type=Path, required=True)
     backup.add_argument("--rpo-limit-seconds", type=int, default=300)
 
+    backup_failure = subparsers.add_parser("backup-failure")
+    backup_failure.add_argument("--error-code", required=True)
+    backup_failure.add_argument("--output", type=Path, required=True)
+
     restore = subparsers.add_parser("restore")
     restore.add_argument("--schema-tsv", type=Path, required=True)
     restore.add_argument("--replay-json", type=Path, required=True)
@@ -453,6 +460,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     observed_at_ms = time.time_ns() // 1_000_000
+    if args.kind == "backup-failure":
+        try:
+            report = render_failure_evidence(
+                kind="backup",
+                error_code=args.error_code,
+                observed_at_ms=observed_at_ms,
+            )
+            _atomic_write_json(args.output, report)
+        except (EvidenceError, OSError):
+            return 2
+        return 0
+
     try:
         if args.kind == "backup":
             archiver_tsv = _read_input(args.archiver_tsv, code="archiver_output_invalid")
