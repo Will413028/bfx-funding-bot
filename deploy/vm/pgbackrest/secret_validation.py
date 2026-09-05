@@ -130,15 +130,20 @@ def validate_secret_dir(
     return tuple(files)
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        _invalid()
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _ArgumentParser(description=__doc__)
     parser.add_argument("--secret-dir", required=True, type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         validate_secret_dir(args.secret_dir)
     except SecretConfigError:
         print(_ERROR, file=sys.stderr)
