@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -771,6 +772,35 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "Declare DR ready",
         ),
     )
+    # Headings alone miss commands pasted above the gates. Check every actual
+    # activation (including sudo/options/continued lines), not just the first.
+    flattened = text.replace("\\\n", "  ")
+    activation_gate = flattened.index("### 9. Enable, start, and list the timers")
+    gate_markers = (
+        "pgbackrest --stanza=bfx check",
+        "pgbackrest --stanza=bfx --type=full backup",
+        "pgbackrest --stanza=bfx --type=diff backup",
+        "pgbackrest --stanza=bfx info --output=json",
+        "pgbackrest --stanza=bfx verify",
+        "pgbackrest --stanza=bfx expire",
+        "preflight.sh --output",
+        "load_restore_baseline(",
+        "--baseline /absolute/path/baseline.json",
+        "egress_disconnected: true",
+        "Never edit\nJSON to manufacture acceptance.",
+    )
+    for marker in gate_markers:
+        assert 0 <= flattened.index(marker) < activation_gate, marker
+    activations = []
+    for match in re.finditer(r"\bsystemctl\b[^\n`]*", flattened):
+        argv = shlex.split(match.group())
+        if {"enable", "start"}.intersection(argv) and any(
+            arg.endswith(".timer") for arg in argv
+        ):
+            assert match.start() > activation_gate, "timer activation before acceptance gates"
+            activations.append(argv)
+    assert any("enable" in argv for argv in activations)
+    assert any("start" in argv for argv in activations)
     assert "systemctl enable --now" not in text
     assert "sudo systemctl enable bfx-pgbackrest-backup.timer" in text
     assert "sudo systemctl start bfx-pgbackrest-backup.timer" in text
@@ -791,14 +821,162 @@ def test_offsite_runbook_documents_secret_and_archive_contracts() -> None:
     for marker in (
         "exactly these five options",
         "UID/GID 70",
-        "mode `0700`",
-        "mode `0600`",
+        "mode `0750`",
+        "mode `0640`",
+        'sudo chown "$(id -u):70"',
+        'test -r "$PGBACKREST_SECRET_DIR/r2.conf"',
+        '--user 70:70 --network none',
+        'test -r /secrets/r2.conf',
         "secret_validation.py",
         "archive_timeout=60s",
         "docker exec --user postgres",
         "dedicated disposable R2 repository",
     ):
         assert marker in text
+
+
+def test_offsite_runbook_disposable_expire_proves_inventory_deletion() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    for marker in (
+        "repo1-retention-full=1",
+        "repo1-retention-diff=1",
+        "expire-auto=n",
+        "for backup_type in full diff full diff",
+        '"$DISPOSABLE_CONTAINER" != bfx-postgres',
+        "before.json",
+        "after.json",
+        "assert len(full) == 2 and len(diff) == 2",
+        "assert after == {full[-1], diff[-1]}",
+        "assert set(before) - after == {full[0], diff[0]}",
+    ):
+        assert marker in text
+
+
+def test_offsite_runbook_baseline_has_read_only_capture_and_offline_assembly() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    for marker in (
+        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",
+        "exchange_account_id = :'account_id'::uuid",
+        "deployment_environment = :'environment'",
+        "FROM public.alembic_version",
+        "ORDER BY event_seq",
+        "canonical_event_hash(rows)",
+        'type(capture["event_count"]) is int',
+        'type(capture["event_head"]) is int',
+        "load_restore_baseline(",
+        "operator-supplied",
+        "all database writers",
+        "not an automatic production baseline generator",
+    ):
+        assert marker in text
+
+
+def _runbook_python_snippet(prefix: str) -> str:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    block = text[text.index(prefix):]
+    return block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+
+@pytest.mark.parametrize("remaining", ("retained", "unchanged", "empty", "lost-diff"))
+def test_runbook_inventory_assertions_reject_noop_and_retained_data_loss(
+    tmp_path: Path, remaining: str,
+) -> None:
+    labels = {
+        "20260904-000000F": "full",
+        "20260904-000000F_20260904-000100D": "diff",
+        "20260905-000000F": "full",
+        "20260905-000000F_20260905-000100D": "diff",
+    }
+    retained = dict(list(labels.items())[2:])
+    after = {
+        "retained": retained, "unchanged": labels, "empty": {},
+        "lost-diff": {"20260905-000000F": "full"},
+    }[remaining]
+    for name, inventory in (("before", labels), ("after", after)):
+        (tmp_path / f"{name}.json").write_text(json.dumps([{
+            "name": "bfx", "status": {"code": 0},
+            "backup": [{"label": label, "type": kind} for label, kind in inventory.items()],
+        }]))
+    completed = subprocess.run(
+        [sys.executable, "-", str(tmp_path)],
+        input=_runbook_python_snippet('python3 - "$DISPOSABLE_EVIDENCE_DIR"'),
+        capture_output=True, text=True, check=False,
+    )
+    assert (completed.returncode == 0) is (remaining == "retained")
+
+
+@pytest.mark.parametrize("invalid", (None, "scope", "count", "head", "migrations"))
+def test_runbook_baseline_assembly_uses_existing_canonical_and_loader_contract(
+    tmp_path: Path, invalid: str | None,
+) -> None:
+    account = "00000000-0000-0000-0000-000000000001"
+    capture = {
+        "database_name": "bfx", "account_id": account, "environment": "prod",
+        "migration_heads": ["abc123"], "event_count": 1, "event_head": 7,
+        "events": [{
+            "event_seq": 7, "account_id": "legacy-account",
+            "exchange_account_id": account, "deployment_environment": "prod",
+            "event_type": "fixture", "cid": None, "venue_offer_id": None,
+            "venue_seq": None, "event_id": None, "schema_version": 2,
+            "payload": {}, "occurred_at_ms": 1,
+        }],
+    }
+    if invalid == "scope":
+        capture["events"][0]["deployment_environment"] = "shadow"
+    elif invalid == "count":
+        capture["event_count"] = True
+    elif invalid == "head":
+        capture["event_head"] = 7.0
+    elif invalid == "migrations":
+        capture["migration_heads"] = []
+    (tmp_path / "capture.json").write_text(json.dumps(capture))
+    completed = subprocess.run(
+        [sys.executable, "-", str(tmp_path), "bfx", account, "prod",
+         "20260905-000000F", "", "execution-state-v1"],
+        input=_runbook_python_snippet('uv run python - "$BASELINE_WORK_DIR"'),
+        cwd=ROOT / "backend_py", capture_output=True, text=True, check=False,
+    )
+    assert (completed.returncode == 0) is (invalid is None), completed.stderr
+    output = tmp_path / "baseline.json"
+    if invalid is None:
+        from uuid import UUID
+
+        from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+        from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+
+        row = EventLogRow(**{**capture["events"][0], "exchange_account_id": UUID(account)})
+        baseline = json.loads(output.read_text())
+        assert baseline["event_hash"] == canonical_event_hash([row])
+        assert baseline["event_count"] == 1 and baseline["event_head"] == 7
+        assert baseline["target_time"] is None
+        assert output.stat().st_mode & 0o777 == 0o600
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("verb", ("enable", "start", "enable --now", "--now enable"))
+@pytest.mark.parametrize("gate", (4, 5, 6, 7, 8, 9))
+def test_offsite_runbook_rejects_timer_command_moved_before_gates(
+    monkeypatch: pytest.MonkeyPatch, verb: str, gate: int,
+) -> None:
+    path = ROOT / "docs/runbooks/offsite-dr.md"
+    original = path.read_text(encoding="utf-8")
+    original_verb = "start" if verb == "start" else "enable"
+    command = (
+        f"sudo systemctl {original_verb} bfx-pgbackrest-backup.timer bfx-pgbackrest-status.timer"
+    )
+    moved = command.replace(f"systemctl {original_verb}", f"systemctl {verb}")
+    mutated = original.replace(command + "\n", "")
+    position = mutated.index(f"### {gate}.")
+    mutated = mutated[:position] + f"```bash\n{moved}\n```\n\n" + mutated[position:]
+    read_text = Path.read_text
+    monkeypatch.setattr(
+        Path, "read_text",
+        lambda self, *args, **kwargs: mutated if self == path else read_text(self, *args, **kwargs),
+    )
+
+    with pytest.raises(AssertionError, match="timer activation before acceptance gates"):
+        test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement()
 
 
 def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> None:
@@ -833,7 +1011,7 @@ def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> 
     command = """deploy/vm/pgbackrest/restore-drill.sh \\
   --account-id <canonical-uuid> \\
   --environment prod \\
-  --projector-version projector-v3 \\
+  --projector-version execution-state-v1 \\
   --backup-label <label> \\
   --baseline /absolute/path/baseline.json"""
     assert command in text
