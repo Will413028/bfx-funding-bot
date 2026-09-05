@@ -29,28 +29,66 @@ restore gate below has passed.
 
 Run the following steps from the repository root on the VM, in order.
 
-### 1. Install the four systemd unit files without enabling them
+### 0. Provision the R2 backup bucket with Terraform
 
-Install all four tracked unit files with mode `0644`, then reload systemd. Do
-not enable or start either timer yet.
+The operator, not the coding agent, supplies `CLOUDFLARE_API_TOKEN` as the
+Cloudflare management credential. Terraform state bucket is separate from the
+pgBackRest backup bucket: provision and secure the independent state bucket
+before this step. The bucket-scoped R2 S3 runtime credential used by pgBackRest
+is different from `CLOUDFLARE_API_TOKEN`; the runtime R2 token is not a
+Terraform resource and must never enter Terraform variables, state, plans, or
+Git.
+
+From `infra/terraform/r2`, use the operator-held `backend.hcl` and reviewed
+non-secret variable values:
 
 ```bash
-sudo install -m 0644 deploy/vm/systemd/bfx-pgbackrest-backup.service /etc/systemd/system/bfx-pgbackrest-backup.service
-sudo install -m 0644 deploy/vm/systemd/bfx-pgbackrest-backup.timer /etc/systemd/system/bfx-pgbackrest-backup.timer
-sudo install -m 0644 deploy/vm/systemd/bfx-pgbackrest-status.service /etc/systemd/system/bfx-pgbackrest-status.service
-sudo install -m 0644 deploy/vm/systemd/bfx-pgbackrest-status.timer /etc/systemd/system/bfx-pgbackrest-status.timer
-sudo systemctl daemon-reload
+terraform init -backend-config=backend.hcl
+terraform plan -out=r2.tfplan
+terraform apply r2.tfplan
 ```
 
-Unit installation and `daemon-reload` only make definitions available. They
-are not backup acceptance and must not be followed by early timer enablement.
+Review the plan before applying it; apply only that reviewed plan. If the backup
+bucket already exists, import it before planning as documented in
+[`infra/terraform/r2/README.md`](../../infra/terraform/r2/README.md). Terraform
+manages only the backup bucket and the lifecycle rule that aborts incomplete
+multipart uploads. R2 lifecycle does not own pgBackRest retention; pgBackRest
+owns retention. The coding agent does not perform production terraform apply or
+token creation, inject VM secrets, activate timers, run backup/restore, or call
+Bitfinex.
+
+### 1. Install the timer definitions without enabling them
+
+Install the tracked definitions and reload systemd with the checked installer:
+
+```bash
+./scripts/install-pgbackrest-timers.sh
+```
+
+The installer copies definitions, runs `daemon-reload`, and verifies both timers
+are inactive and disabled. It installs definitions only: it never enables,
+starts, or stops a timer. This is not backup acceptance and must not be
+followed by early timer activation.
 
 ### 2. Create and validate the VM secret fragment after provisioning R2
 
-Create a private Cloudflare R2 Standard bucket dedicated to this repository,
-with pgBackRest objects under `/pgbackrest`. Create a bucket-scoped **Object
-Read & Write** token; do not use an account-admin token. Keep the repository
-cipher passphrase in separate offline escrow.
+Use the VM wizard as the preferred path:
+
+```bash
+./scripts/setup-pgbackrest-r2.sh
+```
+
+The wizard creates the VM-only fragment, directs the operator to create a
+bucket-scoped **Object Read & Write** R2 S3 credential, validates it, and then
+installs timer definitions without activating them. Follow the official
+[Cloudflare R2 token documentation](https://developers.cloudflare.com/r2/api/tokens/).
+The Cloudflare management token used by Terraform is distinct from these
+bucket-scoped R2 S3 runtime credentials. Keep the repository cipher passphrase
+in separate offline escrow.
+
+If the wizard is unavailable, use the following manual fallback contract. It
+must produce the same private R2 Standard bucket and VM-only fragment; do not
+use an account-admin token.
 
 Create `$HOME/bfx/pgbackrest/conf.d/r2.conf` outside the repository. Under one
 `[global]` section, the fragment contains exactly these five options, each

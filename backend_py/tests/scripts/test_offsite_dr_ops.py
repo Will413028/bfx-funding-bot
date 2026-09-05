@@ -1049,26 +1049,30 @@ def _assert_ordered(text: str, markers: tuple[str, ...]) -> None:
 
 def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement() -> None:
     text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
 
-    unit_names = (
-        "bfx-pgbackrest-backup.service",
-        "bfx-pgbackrest-backup.timer",
-        "bfx-pgbackrest-status.service",
-        "bfx-pgbackrest-status.timer",
-    )
-    for unit_name in unit_names:
-        assert (
-            f"sudo install -m 0644 deploy/vm/systemd/{unit_name} "
-            f"/etc/systemd/system/{unit_name}"
-        ) in text
+    assert "./scripts/install-pgbackrest-timers.sh" in text
+    assert "sudo install -m 0644 deploy/vm/systemd/" not in text
 
     _assert_ordered(
         text,
         (
-            "Install the four systemd unit files",
-            "sudo systemctl daemon-reload",
-            "Create and validate the VM secret fragment",
+            "### 0. Provision the R2 backup bucket with Terraform",
+            "terraform init -backend-config=backend.hcl",
+            "terraform plan -out=r2.tfplan",
+            "terraform apply r2.tfplan",
+            "./scripts/install-pgbackrest-timers.sh",
+            "./scripts/setup-pgbackrest-r2.sh",
             "Build and validate bfx-postgres:local",
+            "`stanza-create`",
+            "Run the staged isolated restore with --baseline",
+            "Accept only fresh measured evidence",
+            "Enable, start, and list the timers",
+        ),
+    )
+    _assert_ordered(
+        text,
+        (
             "`stanza-create`",
             "`check`",
             "`--type=full backup`",
@@ -1083,6 +1087,13 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "Declare DR ready",
         ),
     )
+    for marker in (
+        "Terraform state bucket is separate from the pgBackRest backup bucket",
+        "runtime R2 token is not a Terraform resource",
+        "R2 lifecycle does not own pgBackRest retention",
+        "coding agent does not perform production terraform apply or token creation",
+    ):
+        assert marker in normalized
     # Headings alone miss commands pasted above the gates. Check every actual
     # activation (including sudo/options/continued lines), not just the first.
     flattened = text.replace("\\\n", "  ")
