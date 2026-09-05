@@ -14,6 +14,7 @@ _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _RUN_ID = re.compile(r"[0-9TZ-]+-[a-f0-9]{16}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _GENERATED_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
+_VERIFY_ROLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 
 class RestoreInputError(ValueError):
@@ -25,7 +26,9 @@ class RestorePlan:
     project_name: str
     volume_name: str
     network_name: str
+    egress_network_name: str
     container_name: str
+    verify_role: str
     account_id: str
     environment: str
     projector_version: str
@@ -56,6 +59,12 @@ def _generated_name(value: str) -> str:
     return value
 
 
+def _verify_role(value: str) -> str:
+    if _VERIFY_ROLE.fullmatch(value) is None:
+        _invalid()
+    return value
+
+
 def build_restore_plan(
     *,
     account_id: str,
@@ -82,7 +91,9 @@ def build_restore_plan(
     project_name = _generated_name(f"bfx-dr-{resource_id}")
     volume_name = _generated_name(f"bfx-dr-{resource_id}-data")
     network_name = _generated_name(f"bfx-dr-{resource_id}-net")
+    egress_network_name = _generated_name(f"bfx-dr-{resource_id}-egress")
     container_name = _generated_name(f"bfx-dr-{resource_id}-db")
+    verify_role = _verify_role(f"bfx_dr_{resource_id.replace('-', '_')}")
     compose_prefix = (
         "docker",
         "compose",
@@ -95,7 +106,9 @@ def build_restore_plan(
         project_name=project_name,
         volume_name=volume_name,
         network_name=network_name,
+        egress_network_name=egress_network_name,
         container_name=container_name,
+        verify_role=verify_role,
         account_id=canonical_account_id,
         environment=environment,
         projector_version=projector_version,
@@ -103,14 +116,36 @@ def build_restore_plan(
         target_time=target_time,
         create_commands=(
             ("docker", "network", "create", "--internal", network_name),
+            ("docker", "network", "create", egress_network_name),
             ("docker", "volume", "create", volume_name),
         ),
         run_commands=(
             (*compose_prefix, "up", "--detach", "restore-db"),
             (
+                "docker",
+                "network",
+                "inspect",
+                "--format={{.Internal}}",
+                egress_network_name,
+            ),
+            (
+                "docker",
+                "network",
+                "disconnect",
+                egress_network_name,
+                container_name,
+            ),
+            (
+                "docker",
+                "inspect",
+                "--format={{json .NetworkSettings.Networks}}",
+                container_name,
+            ),
+            (
                 *compose_prefix,
                 "run",
                 "--rm",
+                "--no-deps",
                 "verifier",
                 "replay",
                 "--account-id",
@@ -124,6 +159,7 @@ def build_restore_plan(
         cleanup_commands=(
             (*compose_prefix, "rm", "-sf", "restore-db"),
             ("docker", "volume", "rm", volume_name),
+            ("docker", "network", "rm", egress_network_name),
             ("docker", "network", "rm", network_name),
         ),
     )

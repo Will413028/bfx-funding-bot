@@ -101,15 +101,40 @@ def _write_valid_secret_dir(tmp_path: Path) -> Path:
     return secret_dir
 
 
-def test_dr_compose_is_internal_and_has_no_production_env_files() -> None:
+def test_dr_compose_uses_generated_external_resources_without_production_inputs() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.dr.yml").read_text())
 
     assert set(compose["services"]) == {"restore-db", "verifier"}
-    assert compose["networks"]["dr"]["internal"] is True
+    assert compose["volumes"] == {
+        "restore-data": {"external": True, "name": "${DR_VOLUME_NAME}"}
+    }
+    assert compose["networks"] == {
+        "dr": {"external": True, "name": "${DR_NETWORK_NAME}"},
+        "r2-egress": {
+            "external": True,
+            "name": "${DR_EGRESS_NETWORK_NAME}",
+        },
+    }
+    restore_db = compose["services"]["restore-db"]
+    verifier = compose["services"]["verifier"]
+    assert restore_db["networks"] == ["dr", "r2-egress"]
+    assert verifier["networks"] == ["dr"]
+    assert "restore-data:/var/lib/postgresql" in restore_db["volumes"]
+    assert restore_db["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "pg_isready -U postgres -d template1",
+    ]
     assert "ports" not in compose["services"]["restore-db"]
     assert "ports" not in compose["services"]["verifier"]
     source = (ROOT / "docker-compose.dr.yml").read_text()
-    for forbidden in ("bot.env", "webapi.env", "frontend.env", ".env.runtime", "BFX_VAULT_KEK"):
+    for forbidden in (
+        "POSTGRES_",
+        "bot.env",
+        "webapi.env",
+        "frontend.env",
+        ".env.runtime",
+        "BFX_VAULT_KEK",
+    ):
         assert forbidden not in source
 
 
@@ -125,8 +150,55 @@ def test_restore_plan_names_are_random_prefixed_and_cleanup_is_generated_only() 
 
     assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.volume_name)
     assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.network_name)
+    assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.egress_network_name)
     assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.container_name)
     assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.project_name)
+    assert plan.verify_role == "bfx_dr_20260904t031700z_a1b2c3d4e5f60718"
+    assert plan.create_commands == (
+        ("docker", "network", "create", "--internal", plan.network_name),
+        ("docker", "network", "create", plan.egress_network_name),
+        ("docker", "volume", "create", plan.volume_name),
+    )
+    assert sum(command.count("--internal") for command in plan.create_commands) == 1
+    assert plan.run_commands[1] == (
+        "docker",
+        "network",
+        "inspect",
+        "--format={{.Internal}}",
+        plan.egress_network_name,
+    )
+    assert plan.run_commands[2] == (
+        "docker",
+        "network",
+        "disconnect",
+        plan.egress_network_name,
+        plan.container_name,
+    )
+    assert plan.run_commands[3] == (
+        "docker",
+        "inspect",
+        "--format={{json .NetworkSettings.Networks}}",
+        plan.container_name,
+    )
+    verifier_run_index = plan.run_commands[4].index("run")
+    assert plan.run_commands[4][verifier_run_index : verifier_run_index + 5] == (
+        "run",
+        "--rm",
+        "--no-deps",
+        "verifier",
+        "replay",
+    )
+    assert plan.cleanup_commands[1:] == (
+        ("docker", "volume", "rm", plan.volume_name),
+        ("docker", "network", "rm", plan.egress_network_name),
+        ("docker", "network", "rm", plan.network_name),
+    )
+    assert all(isinstance(command, tuple) for command in (
+        *plan.create_commands,
+        *plan.run_commands,
+        *plan.cleanup_commands,
+    ))
+    assert "bfx_pgdata" not in repr(plan)
     assert all(
         argument.startswith("bfx-dr-")
         for command in plan.cleanup_commands
@@ -224,6 +296,8 @@ class _FakeRunner:
         *,
         verifier: subprocess.CompletedProcess[str],
         network_internal: str = "true\n",
+        egress_internal: str = "false\n",
+        container_networks: str | None = None,
         compose_up_status: int = 0,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
@@ -231,6 +305,8 @@ class _FakeRunner:
         self.env_mode: int | None = None
         self.verifier = verifier
         self.network_internal = network_internal
+        self.egress_internal = egress_internal
+        self.container_networks = container_networks
         self.compose_up_status = compose_up_status
 
     def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -240,7 +316,17 @@ class _FakeRunner:
             self.env_text = env_path.read_text(encoding="utf-8")
             self.env_mode = env_path.stat().st_mode & 0o777
         if command[:3] == ("docker", "network", "inspect"):
-            return subprocess.CompletedProcess(command, 0, self.network_internal, "")
+            output = self.egress_internal if command[-1].endswith("-egress") else self.network_internal
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command[:3] == (
+            "docker",
+            "inspect",
+            "--format={{json .NetworkSettings.Networks}}",
+        ):
+            networks = self.container_networks
+            if networks is None:
+                networks = json.dumps({"bfx-dr-20260904t031700z-a1b2c3d4e5f60718-net": {}})
+            return subprocess.CompletedProcess(command, 0, f"{networks}\n", "")
         if "up" in command and "restore-db" in command:
             return subprocess.CompletedProcess(command, self.compose_up_status, "", "")
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
@@ -425,10 +511,8 @@ def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tm
         "DR_PROJECT_NAME",
         "DR_VOLUME_NAME",
         "DR_NETWORK_NAME",
+        "DR_EGRESS_NETWORK_NAME",
         "DR_CONTAINER_NAME",
-        "DR_POSTGRES_USER",
-        "DR_POSTGRES_PASSWORD",
-        "DR_POSTGRES_DB",
         "DATABASE_URL",
         "BFX_DEPLOYMENT_ENV",
         "DR_ACCOUNT_ID",
@@ -437,7 +521,7 @@ def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tm
         "DR_TARGET_TIME",
         "DR_PGBACKREST_SECRET_DIR",
     }
-    cleanup = fake.commands[-3:]
+    cleanup = fake.commands[-4:]
     assert all(
         argument.startswith("bfx-dr-")
         for command in cleanup
@@ -457,6 +541,65 @@ def test_noninternal_network_fails_before_restore_or_verifier(tmp_path: Path) ->
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "network_not_internal"
     assert not any("verifier" in command for command in fake.commands)
+
+
+def test_internal_egress_network_fails_before_disconnect_or_verifier(tmp_path: Path) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        egress_internal="true\n",
+    )
+
+    assert _drill(tmp_path, fake).run(_request()) == 2
+
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["error_code"] == "network_not_internal"
+    assert not any(
+        command[:3] == ("docker", "network", "disconnect")
+        or "verifier" in command
+        for command in fake.commands
+    )
+
+
+def test_restore_disconnects_egress_and_proves_absence_before_verifier(tmp_path: Path) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
+    )
+
+    assert _drill(tmp_path, fake).run(_request()) == 0
+
+    disconnect_index = next(
+        index
+        for index, command in enumerate(fake.commands)
+        if command[:3] == ("docker", "network", "disconnect")
+    )
+    membership_index = next(
+        index
+        for index, command in enumerate(fake.commands)
+        if command[:3]
+        == ("docker", "inspect", "--format={{json .NetworkSettings.Networks}}")
+    )
+    verifier_index = next(
+        index
+        for index, command in enumerate(fake.commands)
+        if "run" in command and "verifier" in command
+    )
+    assert disconnect_index < membership_index < verifier_index
+    assert "--no-deps" in fake.commands[verifier_index]
+    assert "DR_EGRESS_NETWORK_NAME=" in fake.env_text
+
+
+def test_restore_rejects_egress_membership_before_verifier(tmp_path: Path) -> None:
+    egress_name = "bfx-dr-20260904t031700z-a1b2c3d4e5f60718-egress"
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        container_networks=json.dumps({egress_name: {}}),
+    )
+
+    assert _drill(tmp_path, fake).run(_request()) == 2
+
+    assert not any("verifier" in command for command in fake.commands)
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["error_code"] == "restore_output_invalid"
 
 
 def test_malformed_replay_hash_fails_without_a_success_measurement(tmp_path: Path) -> None:
