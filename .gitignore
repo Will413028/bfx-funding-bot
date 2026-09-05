@@ -43,6 +43,13 @@ Thumbs.db
 AGENTS.md
 .worktrees/
 
+# Terraform local state and operator-specific inputs
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+
 # Go
 backend/server
 *.exe
