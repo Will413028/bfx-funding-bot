@@ -15,6 +15,8 @@ _RUN_ID = re.compile(r"[0-9TZ-]+-[a-f0-9]{16}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _GENERATED_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
 _VERIFY_ROLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+_DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+_EVENT_HASH = re.compile(r"[0-9a-f]{64}")
 
 
 class RestoreInputError(ValueError):
@@ -29,11 +31,13 @@ class RestorePlan:
     egress_network_name: str
     container_name: str
     verify_role: str
+    database_name: str
     account_id: str
     environment: str
     projector_version: str
     backup_label: str
     target_time: str | None
+    expected_event_hash: str
     create_commands: tuple[tuple[str, ...], ...]
     run_commands: tuple[tuple[str, ...], ...]
     cleanup_commands: tuple[tuple[str, ...], ...]
@@ -73,9 +77,15 @@ def build_restore_plan(
     backup_label: str,
     target_time: str | None,
     run_id: str,
+    database_name: str,
+    expected_event_hash: str,
 ) -> RestorePlan:
     """Validate operator strings and return argv-safe Docker commands."""
     canonical_account_id = _canonical_account_id(account_id)
+    if not isinstance(database_name, str) or _DATABASE_NAME.fullmatch(database_name) is None:
+        _invalid()
+    if not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None:
+        _invalid()
     if environment not in _ENVIRONMENTS:
         _invalid()
     if _PROJECTOR_VERSION.fullmatch(projector_version) is None:
@@ -109,6 +119,8 @@ def build_restore_plan(
         egress_network_name=egress_network_name,
         container_name=container_name,
         verify_role=verify_role,
+        database_name=database_name,
+        expected_event_hash=expected_event_hash,
         account_id=canonical_account_id,
         environment=environment,
         projector_version=projector_version,
@@ -154,6 +166,8 @@ def build_restore_plan(
                 environment,
                 "--projector-version",
                 projector_version,
+                "--expected-event-hash",
+                expected_event_hash,
             ),
         ),
         cleanup_commands=(

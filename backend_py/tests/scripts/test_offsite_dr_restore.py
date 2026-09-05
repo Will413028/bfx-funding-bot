@@ -44,6 +44,20 @@ EvidenceError = evidence.EvidenceError
 render_restore_evidence = evidence.render_restore_evidence
 
 
+def _baseline_payload() -> dict[str, object]:
+    return {
+        "target_backup_label": "20260904031700-F", "target_time": None,
+        "database_name": "bfx", "account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f",
+        "environment": "prod", "projector_version": "projector-v3",
+        "migration_heads": ["head-a", "head-b"], "event_count": 9,
+        "event_head": 42, "event_hash": "a" * 64,
+    }
+
+
+def _baseline():
+    return evidence.RestoreBaseline(**(_baseline_payload() | {"migration_heads": ("head-a", "head-b")}))
+
+
 def _replay_report(*, matches: bool = True) -> str:
     projection_names = (
         "offer_claims",
@@ -81,6 +95,84 @@ def _replay_report(*, matches: bool = True) -> str:
             "diagnostic_diff": diagnostic_diff,
         }
     )
+
+
+@pytest.mark.parametrize("bootstrap_status", [0, 2])
+def test_bootstrap_uses_existing_baseline_db_and_stdin_only_password(
+    tmp_path: Path, bootstrap_status: int, capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        bootstrap_status=bootstrap_status,
+    )
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == (0 if bootstrap_status == 0 else 2)
+    bootstrap = [(command, sql) for command, sql in fake.inputs if "CREATE ROLE" in sql]
+    assert len(bootstrap) == 1
+    command, sql = bootstrap[0]
+    assert command[:5] == ("docker", "exec", "--user", "postgres", "--interactive")
+    assert command[6:] == (
+        "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-h", "/var/run/postgresql",
+        "-U", "postgres", "-d", "bfx",
+    )
+    health_index = next(i for i, argv in enumerate(fake.commands) if "--format={{.State.Health.Status}}" in argv)
+    assert health_index < fake.commands.index(command)
+    assert 'CREATE ROLE "bfx_dr_20260904t031700z_a1b2c3d4e5f60718"' in sql
+    assert "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS" in sql
+    assert "DATABASE-PASSWORD-SENTINEL" in sql
+    assert 'GRANT CONNECT, TEMPORARY ON DATABASE "bfx"' in sql
+    assert "GRANT USAGE ON SCHEMA public" in sql
+    for table in (
+        "event_log", "offer_claims", "position_state", "venue_offer_state", "venue_credit_state",
+        "projection_heads", "reconcile_observation", "submission_attempts", "execution_uncertainties", "alembic_version",
+    ):
+        assert f'public."{table}"' in sql
+    assert "CREATE DATABASE" not in sql
+    assert "GRANT ALL" not in sql
+    assert "ON ALL TABLES" not in sql
+    assert "log_statement = 'none'" in sql
+    assert "log_min_error_statement = 'panic'" in sql
+    assert "log_min_duration_statement = -1" in sql
+    assert fake.env_mode == 0o600
+    assert "postgresql+asyncpg://bfx_dr_20260904t031700z_a1b2c3d4e5f60718:DATABASE-PASSWORD-SENTINEL@bfx-dr-20260904t031700z-a1b2c3d4e5f60718-db:5432/bfx" in fake.env_text
+    assert "DATABASE-PASSWORD-SENTINEL" not in repr(fake.commands)
+    report = (tmp_path / "restore.json").read_text()
+    assert "DATABASE-PASSWORD-SENTINEL" not in report
+    captured = capsys.readouterr()
+    assert "DATABASE-PASSWORD-SENTINEL" not in captured.out + captured.err
+    if bootstrap_status:
+        assert not any("verifier" in argv for argv in fake.commands)
+        assert "DATABASE-PASSWORD-SENTINEL" not in (tmp_path / "restore.log").read_text()
+        assert json.loads(report)["measured"] is False
+    else:
+        verifier = next(argv for argv in fake.commands if "verifier" in argv)
+        assert verifier[verifier.index("--expected-event-hash") + 1] == "a" * 64
+        schema_command, query = next((argv, data) for argv, data in fake.inputs if "server_version_num" in data)
+        assert schema_command[:5] == ("docker", "exec", "--user", "postgres", "--interactive")
+        assert schema_command[schema_command.index("-d") + 1] == "bfx"
+        assert "3f19d046-5030-494c-9a0a-9573bb890c1f" in query
+        assert json.loads(report)["egress_disconnected"] is True
+
+
+def test_missing_baseline_fails_before_resource_creation(tmp_path: Path) -> None:
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    request = _request(tmp_path)
+    request.baseline_path.unlink()
+    assert _drill(tmp_path, fake).run(request) == 2
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("database_name", "bfx;DROP"), ("database_name", "x" * 64),
+    ("expected_event_hash", "A" * 64), ("expected_event_hash", "a" * 63),
+])
+def test_expected_baseline_plan_inputs_are_validated(field: str, value: str) -> None:
+    kwargs = {
+        "account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f", "environment": "prod",
+        "projector_version": "v3", "backup_label": "20260904031700-F", "target_time": None,
+        "run_id": "20260904T031700Z-a1b2c3d4e5f60718", "database_name": "bfx", "expected_event_hash": "a" * 64,
+    }
+    with pytest.raises(RestoreInputError):
+        build_restore_plan(**(kwargs | {field: value}))
 
 
 def _write_valid_secret_dir(tmp_path: Path) -> Path:
@@ -146,6 +238,8 @@ def test_restore_plan_names_are_random_prefixed_and_cleanup_is_generated_only() 
         backup_label="20260904031700-F",
         target_time=None,
         run_id="20260904T031700Z-a1b2c3d4e5f60718",
+        database_name="bfx",
+        expected_event_hash="a" * 64,
     )
 
     assert re.fullmatch(r"bfx-dr-[a-z0-9-]+", plan.volume_name)
@@ -216,6 +310,8 @@ def test_restore_plan_rejects_command_injection_and_noncanonical_account() -> No
             backup_label="20260904031700-F;rm",
             target_time=None,
             run_id="20260904T031700Z-a1b2c3d4e5f60718",
+            database_name="bfx",
+            expected_event_hash="a" * 64,
         )
 
     with pytest.raises(RestoreInputError):
@@ -226,6 +322,8 @@ def test_restore_plan_rejects_command_injection_and_noncanonical_account() -> No
             backup_label="20260904031700-F;rm",
             target_time=None,
             run_id="20260904T031700Z-a1b2c3d4e5f60718",
+            database_name="bfx",
+            expected_event_hash="a" * 64,
         )
 
 
@@ -237,6 +335,8 @@ def test_restore_plan_uses_an_absolute_compose_path_in_every_compose_argv() -> N
         backup_label="20260904031700-F",
         target_time=None,
         run_id="20260904T031700Z-a1b2c3d4e5f60718",
+        database_name="bfx",
+        expected_event_hash="a" * 64,
     )
 
     compose_commands = [
@@ -255,7 +355,9 @@ def test_restore_evidence_contains_only_validated_measurements(tmp_path: Path) -
     report = render_restore_evidence(
         schema_tsv="180000\thead-a,head-b\t9",
         replay_json=_replay_report(),
-        target_backup_label="20260904031700-F",
+        baseline=_baseline(),
+        observed_at_ms=1756961300000,
+        egress_disconnected=True,
         elapsed_seconds=37,
         config_path=config,
         image_digest=f"sha256:{'b' * 64}",
@@ -281,7 +383,9 @@ def test_restore_evidence_rejects_a_false_projection_diagnostic(tmp_path: Path) 
         render_restore_evidence(
             schema_tsv="180000\thead-a\t9",
             replay_json=_replay_report(matches=False),
-            target_backup_label="20260904031700-F",
+            baseline=_baseline(),
+            observed_at_ms=1756961300000,
+            egress_disconnected=True,
             elapsed_seconds=37,
             config_path=config,
             image_digest=f"sha256:{'b' * 64}",
@@ -299,8 +403,10 @@ class _FakeRunner:
         egress_internal: str = "false\n",
         container_networks: str | None = None,
         compose_up_status: int = 0,
+        bootstrap_status: int = 0,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
+        self.inputs: list[tuple[tuple[str, ...], str]] = []
         self.env_text = ""
         self.env_mode: int | None = None
         self.verifier = verifier
@@ -308,9 +414,12 @@ class _FakeRunner:
         self.egress_internal = egress_internal
         self.container_networks = container_networks
         self.compose_up_status = compose_up_status
+        self.bootstrap_status = bootstrap_status
 
-    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
+        if input_text is not None:
+            self.inputs.append((command, input_text))
         if "--env-file" in command:
             env_path = Path(command[command.index("--env-file") + 1])
             self.env_text = env_path.read_text(encoding="utf-8")
@@ -332,7 +441,9 @@ class _FakeRunner:
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
             return subprocess.CompletedProcess(command, 0, "healthy\n", "")
         if command[:3] == ("docker", "exec", command[2]):
-            return subprocess.CompletedProcess(command, 0, "180000\thead-a\t9\n", "")
+            if input_text and "CREATE ROLE" in input_text:
+                return subprocess.CompletedProcess(command, self.bootstrap_status, "", "DATABASE-PASSWORD-SENTINEL")
+            return subprocess.CompletedProcess(command, 0, "180000\thead-a,head-b\t9\n", "")
         if "run" in command and "verifier" in command:
             return self.verifier
         if command[:4] == ("docker", "image", "inspect", "--format={{index .RepoDigests 0}}"):
@@ -361,8 +472,11 @@ def _drill(
     )
 
 
-def _request() -> DrillRequest:
+def _request(tmp_path: Path) -> DrillRequest:
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps(_baseline_payload()))
     return DrillRequest(
+        baseline_path=path,
         account_id="3f19d046-5030-494c-9a0a-9573bb890c1f",
         environment="prod",
         projector_version="projector-v3",
@@ -384,10 +498,10 @@ class _ImageAndEvidenceAdvancingRunner(_FakeRunner):
         super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
         self.clock = clock
 
-    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         if command[:4] == ("docker", "image", "inspect", "--format={{index .RepoDigests 0}}"):
             self.clock.now += 1.25
-        return super().__call__(command)
+        return super().__call__(command, input_text=input_text)
 
 
 def test_rto_includes_image_and_evidence_validation_before_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,7 +520,7 @@ def test_rto_includes_image_and_evidence_validation_before_success(tmp_path: Pat
 
     monkeypatch.setattr(restore_drill, "render_restore_evidence", advancing_renderer)
 
-    assert drill.run(_request()) == 0
+    assert drill.run(_request(tmp_path)) == 0
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["measured"] is True
@@ -420,12 +534,12 @@ class _CleanupObservingRunner(_FakeRunner):
         self.cleanup_status = cleanup_status
         self.evidence_present_during_cleanup = False
 
-    def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         if "rm" in command:
             self.evidence_present_during_cleanup = self.output_path.exists()
             if self.cleanup_status:
                 return subprocess.CompletedProcess(command, self.cleanup_status, "", "")
-        return super().__call__(command)
+        return super().__call__(command, input_text=input_text)
 
 
 def test_success_evidence_is_persisted_before_cleanup_and_cleanup_failure_preserves_it(tmp_path: Path) -> None:
@@ -442,7 +556,7 @@ def test_success_evidence_is_persisted_before_cleanup_and_cleanup_failure_preser
         postgres_gid=os.getgid(),
     )
 
-    assert drill.run(_request()) == 2
+    assert drill.run(_request(tmp_path)) == 2
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert fake.evidence_present_during_cleanup is True
@@ -456,7 +570,7 @@ def test_compose_up_failure_still_cleans_the_attempted_container(tmp_path: Path)
         compose_up_status=2,
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     cleanup = [command for command in fake.commands if "rm" in command and "restore-db" in command]
     assert len(cleanup) == 1
@@ -472,17 +586,17 @@ class _HealthTimeoutRunner(_FakeRunner):
         super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
         self.health_timeouts: list[float | None] = []
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         if command[:3] == ("docker", "inspect", "--format={{.State.Health.Status}}"):
             self.health_timeouts.append(timeout)
             raise subprocess.TimeoutExpired(command, timeout or 0)
-        return super().__call__(command)
+        return super().__call__(command, input_text=input_text)
 
 
 def test_health_inspect_timeout_uses_remaining_deadline_and_writes_failure(tmp_path: Path) -> None:
     fake = _HealthTimeoutRunner()
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["measured"] is False
@@ -498,7 +612,7 @@ def test_verifier_failure_cleans_only_generated_resources_and_redacts_secrets(tm
     )
     drill = _drill(tmp_path, fake)
 
-    assert drill.run(_request()) == 2
+    assert drill.run(_request(tmp_path)) == 2
 
     report = (tmp_path / "restore.json").read_text(encoding="utf-8")
     log = (tmp_path / "restore.log").read_text(encoding="utf-8")
@@ -536,7 +650,7 @@ def test_noninternal_network_fails_before_restore_or_verifier(tmp_path: Path) ->
         network_internal="false\n",
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "network_not_internal"
@@ -549,7 +663,7 @@ def test_internal_egress_network_fails_before_disconnect_or_verifier(tmp_path: P
         egress_internal="true\n",
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "network_not_internal"
@@ -565,7 +679,7 @@ def test_restore_disconnects_egress_and_proves_absence_before_verifier(tmp_path:
         verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 0
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 0
 
     disconnect_index = next(
         index
@@ -595,7 +709,7 @@ def test_restore_rejects_egress_membership_before_verifier(tmp_path: Path) -> No
         container_networks=json.dumps({egress_name: {}}),
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     assert not any("verifier" in command for command in fake.commands)
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
@@ -609,7 +723,7 @@ def test_malformed_replay_hash_fails_without_a_success_measurement(tmp_path: Pat
         verifier=subprocess.CompletedProcess(("fake",), 0, json.dumps(replay), "")
     )
 
-    assert _drill(tmp_path, fake).run(_request()) == 2
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["measured"] is False
@@ -631,7 +745,7 @@ def test_command_runner_exception_is_redacted_into_failure_evidence(tmp_path: Pa
         postgres_gid=os.getgid(),
     )
 
-    assert drill.run(_request()) == 2
+    assert drill.run(_request(tmp_path)) == 2
 
     report = (tmp_path / "restore.json").read_text(encoding="utf-8")
     assert json.loads(report)["error_code"] == "restore_command_failed"
@@ -659,7 +773,7 @@ def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path)
         postgres_gid=os.getgid(),
     )
 
-    assert drill.run(_request()) == 2
+    assert drill.run(_request(tmp_path)) == 2
     assert fake.commands == []
     report = (tmp_path / "restore.json").read_text(encoding="utf-8")
     assert json.loads(report)["error_code"] == "restore_output_invalid"
@@ -684,7 +798,7 @@ def test_restore_secret_preflight_rejects_untracked_config_before_resource_creat
         postgres_gid=os.getgid(),
     )
 
-    assert drill.run(_request()) == 2
+    assert drill.run(_request(tmp_path)) == 2
     assert fake.commands == []
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "restore_output_invalid"
@@ -732,7 +846,7 @@ def test_restore_secret_preflight_requires_exact_clean_tracked_config(
         postgres_gid=os.getgid(),
     )
 
-    assert drill.run(_request()) == (0 if state == "clean" else 2)
+    assert drill.run(_request(tmp_path)) == (0 if state == "clean" else 2)
     if state != "clean":
         assert fake.commands == []
         report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
