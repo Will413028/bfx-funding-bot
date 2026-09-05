@@ -64,7 +64,10 @@ def _validate_permissions(
 
 def _parse_file(path: Path, seen: set[str]) -> None:
     try:
-        content = path.read_text(encoding="utf-8")
+        raw_content = path.read_bytes()
+        if b"\r" in raw_content.replace(b"\r\n", b""):
+            _invalid()
+        content = raw_content.decode("utf-8")
     except (OSError, UnicodeError):
         _invalid()
     # Python splitlines accepts separators that the pgBackRest INI loader does
@@ -79,7 +82,7 @@ def _parse_file(path: Path, seen: set[str]) -> None:
     in_global = False
     for line in lines:
         stripped = line.strip()
-        if not stripped or stripped.startswith(("#", ";")):
+        if not stripped or stripped.startswith("#"):
             continue
         if stripped.startswith("["):
             if stripped != "[global]" or in_global:
