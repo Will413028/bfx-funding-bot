@@ -216,6 +216,25 @@ _prompt_candidate() {
   printf -v "$variable" '%s' "$input"
 }
 
+_validate_target_shape() {
+  if [[ -L "$SECRET_DIR" || ! -d "$SECRET_DIR" ]]; then
+    printf '%s\n' "Secret directory must be a real directory." >&2
+    return 1
+  fi
+  if [[ -L "$SECRET_FILE" || ( -e "$SECRET_FILE" && ! -f "$SECRET_FILE" ) ]]; then
+    printf '%s\n' "Secret fragment must be a regular file, not a directory or symlink." >&2
+    return 1
+  fi
+  local entry
+  for entry in "$SECRET_DIR"/* "$SECRET_DIR"/.[!.]* "$SECRET_DIR"/..?*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    [[ "$entry" == "$SECRET_FILE" ]] && continue
+    [[ -n "$CANDIDATE_DIR" && "$entry" == "$CANDIDATE_DIR" ]] && continue
+    printf '%s\n' "Secret directory contains an unexpected direct entry." >&2
+    return 1
+  done
+}
+
 CANDIDATE_DIR=""
 CANDIDATE_FILE=""
 _cleanup_candidate() {
@@ -237,9 +256,10 @@ fi
 banner "pgBackRest Cloudflare R2 setup"
 
 stage "Prepare the VM-only R2 fragment"
-if [[ -L "$SECRET_DIR" || -L "$SECRET_FILE" ]]; then
-  printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
-  exit 1
+if [[ -e "$SECRET_DIR" || -L "$SECRET_DIR" ]]; then
+  if ! _validate_target_shape; then
+    exit 1
+  fi
 fi
 if [[ -n "$existing_account" ]]; then
   R2_ACCOUNT_ID="$existing_account"
@@ -286,8 +306,7 @@ stage "Protect and validate the fragment"
 if [[ ! -e "$SECRET_DIR" ]]; then
   sudo mkdir -p "$SECRET_DIR"
 fi
-if [[ -L "$SECRET_DIR" || ! -d "$SECRET_DIR" || -L "$SECRET_FILE" ]]; then
-  printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
+if ! _validate_target_shape; then
   exit 1
 fi
 CANDIDATE_DIR=$(sudo mktemp -d "$SECRET_DIR/.r2-candidate.XXXXXX")
@@ -306,18 +325,23 @@ sudo chown "$(id -u):70" "$CANDIDATE_DIR" "$CANDIDATE_FILE"
 sudo chmod 0750 "$CANDIDATE_DIR"
 sudo chmod 0640 "$CANDIDATE_FILE"
 python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$CANDIDATE_DIR"
-if [[ -L "$SECRET_FILE" ]]; then
-  printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
+if ! _validate_target_shape; then
   exit 1
 fi
 if [[ -f "$SECRET_FILE" ]] && cmp -s "$CANDIDATE_FILE" "$SECRET_FILE"; then
-  CANDIDATE_FILE=""
+  rm -f -- "$CANDIDATE_FILE"
 else
-  sudo chown "$(id -u):70" "$SECRET_DIR"
-  sudo chmod 0750 "$SECRET_DIR"
   sudo mv -f -- "$CANDIDATE_FILE" "$SECRET_FILE"
-  CANDIDATE_FILE=""
 fi
+if [[ -n "$CANDIDATE_DIR" ]]; then
+  CANDIDATE_FILE=""
+  rmdir -- "$CANDIDATE_DIR"
+  CANDIDATE_DIR=""
+fi
+sudo chown "$(id -u):70" "$SECRET_DIR" "$SECRET_FILE"
+sudo chmod 0750 "$SECRET_DIR"
+sudo chmod 0640 "$SECRET_FILE"
+python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$SECRET_DIR"
 say "Validation succeeded without printing secret values."
 
 stage "Install timer definitions"
