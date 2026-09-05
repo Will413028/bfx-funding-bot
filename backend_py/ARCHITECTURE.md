@@ -448,10 +448,28 @@ passphrase。`status.sh`、`preflight.sh` 與 isolated restore drill 只產生 b
 redacted、`measured: true|false` evidence，供 Halt 2 核對 RPO、RTO、event
 head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
 
-Isolated restore 只是在 generated volume 與 internal-only network 上量測
-data integrity；不會還原 production volume，也不是 **venue rollback**。任何
-restore point 之後可能發生的 venue mutation 仍須保持 halt、fresh full-account
-reconcile，再依
+Isolated restore 的 staged boundary 固定如下：Compose 只以 `restore-data` 作為
+logical volume key，由 runner 注入 generated external volume name；production
+`bfx_pgdata` 永不成為 restore target。`restore-db` 先同時加入 generated internal
+network 與 temporary R2 egress network，健康後必須斷開 R2 egress，才可啟動只在
+internal network 的 verifier。runner 透過 local socket 以 OS user `postgres`
+連入 existing restored database，建立 ephemeral verifier role；verifier 不取得
+R2 credential、application secret 或 Bitfinex connectivity。所有 container-side
+pgBackRest/psql command 都使用 `--user postgres`，production PostgreSQL 則以
+`archive_timeout=60s` 確保低寫入量時仍有 bounded WAL archive latency。
+
+每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
+核對 migration heads、event count/head/hash 與 account/environment/projector。
+backup/restore evidence 必須有 strict `observed_at_ms`，讀取時不得在未來且不得
+超過 900 seconds；missing、stale、baseline mismatch、egress 未斷開或 cleanup
+failure 一律是 `measured: false`，舊 green report 不得沿用。只有完成真實 R2
+stanza/check/full/diff/info/verify、disposable expire 與 staged isolated restore 的
+新鮮量測，才能宣告 DR ready；offline green 不代表 R2、systemd 或 production
+acceptance。
+
+Isolated restore 只量測 generated resources 上的 data integrity，不會還原
+production volume，也不是 **venue rollback**。任何 restore point 之後可能發生
+的 venue mutation 仍須保持 halt、fresh full-account reconcile，再依
 [offsite DR operator runbook](../docs/runbooks/offsite-dr.md) 與
 [venue-write rollback runbook](../docs/runbooks/rollback-after-venue-write.md)
 處理 adopt、manual resolution 與 forward-fix。
