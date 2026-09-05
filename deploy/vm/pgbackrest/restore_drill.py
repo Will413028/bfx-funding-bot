@@ -52,6 +52,8 @@ build_restore_plan = _commands.build_restore_plan
 EvidenceError = _evidence.EvidenceError
 render_failure_evidence = _evidence.render_failure_evidence
 render_restore_evidence = _evidence.render_restore_evidence
+RestoreBaseline = _evidence.RestoreBaseline
+load_restore_baseline = _evidence.load_restore_baseline
 SecretConfigError = _secret_validation.SecretConfigError
 validate_secret_dir = _secret_validation.validate_secret_dir
 
@@ -67,16 +69,17 @@ class DrillRequest:
     projector_version: str
     backup_label: str
     target_time: str | None
+    baseline_path: Path
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _run_command(
-    command: tuple[str, ...], *, timeout: float | None = None
+    command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        command, capture_output=True, text=True, check=False, timeout=timeout
+        command, capture_output=True, text=True, check=False, timeout=timeout, input=input_text
     )
 
 
@@ -215,24 +218,31 @@ class RestoreDrill:
         self._command_runner_accepts_timeout = _accepts_timeout(command_runner)
 
     def _call(
-        self, command: tuple[str, ...], *, timeout: float | None = None
+        self, command: tuple[str, ...], *, timeout: float | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         try:
+            kwargs: dict[str, object] = {}
+            if input_text is not None:
+                kwargs["input_text"] = input_text
             if timeout is not None and self._command_runner_accepts_timeout:
-                return self._command_runner(command, timeout=timeout)
-            return self._command_runner(command)
+                kwargs["timeout"] = timeout
+            return self._command_runner(command, **kwargs)
         except Exception:
             _failure("restore_command_failed")
 
     def _require_success(
-        self, command: tuple[str, ...], *, timeout: float | None = None
+        self, command: tuple[str, ...], *, timeout: float | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        completed = self._call(command, timeout=timeout)
+        completed = self._call(command, timeout=timeout, input_text=input_text)
         if completed.returncode != 0:
             _failure("restore_command_failed")
         return completed
 
-    def _validate_prerequisites(self, request: DrillRequest) -> RestorePlan:
+    def _validate_prerequisites(
+        self, request: DrillRequest, baseline: RestoreBaseline,
+    ) -> RestorePlan:
         try:
             plan = build_restore_plan(
                 account_id=request.account_id,
@@ -241,6 +251,8 @@ class RestoreDrill:
                 backup_label=request.backup_label,
                 target_time=request.target_time,
                 run_id=self._run_id_factory(),
+                database_name=baseline.database_name,
+                expected_event_hash=baseline.event_hash,
             )
         except RestoreInputError:
             _failure("restore_output_invalid")
@@ -257,11 +269,10 @@ class RestoreDrill:
             _failure("restore_output_invalid")
         return plan
 
-    def _write_env_file(self, plan: RestorePlan) -> Path:
-        password = self._password_factory()
+    def _write_env_file(self, plan: RestorePlan, password: str) -> Path:
         database_url = (
             f"postgresql+asyncpg://{plan.verify_role}:{password}"
-            f"@{plan.container_name}:5432/dr_restore"
+            f"@{plan.container_name}:5432/{plan.database_name}"
         )
         values = {
             "DR_PROJECT_NAME": plan.project_name,
@@ -335,18 +346,56 @@ class RestoreDrill:
     def _schema_tsv(self, plan: RestorePlan) -> str:
         query = (
             "SELECT current_setting('server_version_num'), "
-            "(SELECT string_agg(version_num, ',' ORDER BY version_num) FROM alembic_version), "
-            "(SELECT count(*) FROM event_log WHERE exchange_account_id = :'account_id'::uuid "
-            "AND deployment_environment = :'environment');"
+            "(SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version), "
+            "(SELECT count(*) FROM public.event_log "
+            f"WHERE exchange_account_id = '{plan.account_id}'::uuid "
+            f"AND deployment_environment = '{plan.environment}');\n"
         )
         completed = self._require_success(
             (
-                "docker", "exec", plan.container_name, "psql", "-X", "-qAt", "-F", "\t",
-                "-v", "ON_ERROR_STOP=1", "-v", f"account_id={plan.account_id}", "-v",
-                f"environment={plan.environment}", "-U", "dr_restore", "-d", "dr_restore", "-c", query,
-            )
+                "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
+                "psql", "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1",
+                "-h", "/var/run/postgresql", "-U", "postgres", "-d", plan.database_name,
+            ),
+            input_text=query,
         )
         return completed.stdout
+
+    def _bootstrap_role(self, plan: RestorePlan, password: str) -> None:
+        # Connecting to the baseline database validates it exists before any SQL.
+        # Send separate statements via psql stdin, with logging disabled before
+        # the password-bearing statement is parsed/executed (including on error).
+        tables = (
+            "event_log", "offer_claims", "position_state", "venue_offer_state",
+            "venue_credit_state", "projection_heads", "reconcile_observation",
+            "submission_attempts", "execution_uncertainties", "alembic_version",
+        )
+        role = f'"{plan.verify_role}"'
+        table_list = ", ".join(f'public."{table}"' for table in tables)
+        sql = (
+            "SET log_statement = 'none';\n"
+            "SET log_min_error_statement = 'panic';\n"
+            "SET log_min_duration_statement = -1;\n"
+            "SET log_min_duration_sample = -1;\n"
+            "SET log_statement_sample_rate = 0;\n"
+            "SET log_transaction_sample_rate = 0;\n"
+            "SET log_duration = off;\n"
+            "BEGIN;\n"
+            f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+            f"NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';\n"
+            f'GRANT CONNECT, TEMPORARY ON DATABASE "{plan.database_name}" TO {role};\n'
+            f"GRANT USAGE ON SCHEMA public TO {role};\n"
+            f"GRANT SELECT ON TABLE {table_list} TO {role};\n"
+            "COMMIT;\n"
+        )
+        self._require_success(
+            (
+                "docker", "exec", "--user", "postgres", "--interactive", plan.container_name,
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+                "-h", "/var/run/postgresql", "-U", "postgres", "-d", plan.database_name,
+            ),
+            input_text=sql,
+        )
 
     def _replay_json(self, command: tuple[str, ...], plan: RestorePlan) -> str:
         completed = self._require_success(command)
@@ -427,8 +476,16 @@ class RestoreDrill:
         cleanup_failed = False
         failure_persist_failed = False
         try:
-            plan = self._validate_prerequisites(request)
-            env_path = self._write_env_file(plan)
+            baseline = load_restore_baseline(
+                request.baseline_path, target_backup_label=request.backup_label,
+                target_time=request.target_time, account_id=request.account_id,
+                environment=request.environment, projector_version=request.projector_version,
+            )
+            plan = self._validate_prerequisites(request, baseline)
+            password = self._password_factory()
+            if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
+                _failure("restore_output_invalid")
+            env_path = self._write_env_file(plan, password)
             self._require_success(plan.create_commands[0])
             network_created = True
             self._require_internal_network(plan)
@@ -443,6 +500,7 @@ class RestoreDrill:
             self._require_external_egress(plan.run_commands[1])
             self._require_success(plan.run_commands[2])
             self._require_egress_absent(plan.run_commands[3], plan)
+            self._bootstrap_role(plan, password)
             schema_tsv = self._schema_tsv(plan)
             replay_json = self._replay_json(
                 _compose_with_env(plan.run_commands[4], env_path), plan
@@ -454,7 +512,9 @@ class RestoreDrill:
             success_report = render_restore_evidence(
                 schema_tsv=schema_tsv,
                 replay_json=replay_json,
-                target_backup_label=plan.backup_label,
+                baseline=baseline,
+                observed_at_ms=time.time_ns() // 1_000_000,
+                egress_disconnected=True,
                 elapsed_seconds=elapsed_seconds,
                 config_path=self._config_path,
                 image_digest=image_digest,
@@ -526,6 +586,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--projector-version", required=True)
     parser.add_argument("--backup-label", required=True)
     parser.add_argument("--target-time")
+    parser.add_argument("--baseline", type=Path, required=True)
     return parser
 
 
@@ -538,6 +599,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             projector_version=args.projector_version,
             backup_label=args.backup_label,
             target_time=args.target_time,
+            baseline_path=args.baseline,
         )
     )
 

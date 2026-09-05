@@ -8,9 +8,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import time
 from contextlib import suppress
+from dataclasses import dataclass, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -55,6 +58,9 @@ _PROJECTION_NAMES = (
     "execution_uncertainties",
 )
 _REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_NAMES)
+_DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+_TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_BASELINE_MAX_BYTES = 64 * 1024
 
 
 class EvidenceError(ValueError):
@@ -63,6 +69,107 @@ class EvidenceError(ValueError):
 
 def _raise(code: str) -> None:
     raise EvidenceError(code)
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreBaseline:
+    target_backup_label: str
+    target_time: str | None
+    database_name: str
+    account_id: str
+    environment: str
+    projector_version: str
+    migration_heads: tuple[str, ...]
+    event_count: int
+    event_head: int | None
+    event_hash: str
+
+    def __post_init__(self) -> None:
+        code = "restore_output_invalid"
+        for value, pattern in (
+            (self.target_backup_label, _BACKUP_LABEL),
+            (self.database_name, _DATABASE_NAME),
+            (self.environment, _IDENTIFIER),
+            (self.projector_version, _IDENTIFIER),
+        ):
+            if not isinstance(value, str) or pattern.fullmatch(value) is None:
+                _raise(code)
+        if self.environment not in {"prod", "shadow", "ci"}:
+            _raise(code)
+        if self.target_time is not None:
+            if not isinstance(self.target_time, str) or _TARGET_TIME.fullmatch(self.target_time) is None:
+                _raise(code)
+            try:
+                datetime.strptime(self.target_time, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                _raise(code)
+        try:
+            if not isinstance(self.account_id, str) or str(UUID(self.account_id)) != self.account_id:
+                _raise(code)
+        except ValueError:
+            _raise(code)
+        if (
+            not isinstance(self.migration_heads, tuple)
+            or not 1 <= len(self.migration_heads) <= 32
+            or any(not isinstance(head, str) or _IDENTIFIER.fullmatch(head) is None
+                   for head in self.migration_heads)
+            or len(set(self.migration_heads)) != len(self.migration_heads)
+        ):
+            _raise(code)
+        if type(self.event_count) is not int or self.event_count < 0:
+            _raise(code)
+        if self.event_head is None:
+            if self.event_count != 0:
+                _raise(code)
+        elif type(self.event_head) is not int or self.event_head < 0 or self.event_count == 0:
+            _raise(code)
+        if not _is_sha256(self.event_hash):
+            _raise("event_hash_invalid")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            _raise("restore_output_invalid")
+        result[key] = value
+    return result
+
+
+def load_restore_baseline(
+    path: Path, *, target_backup_label: str, target_time: str | None,
+    account_id: str, environment: str, projector_version: str,
+) -> RestoreBaseline:
+    """Read only a bounded regular JSON file and require exact request identity."""
+    code = "restore_output_invalid"
+    if not path.is_absolute():
+        _raise(code)
+    try:
+        # O_NONBLOCK prevents FIFOs from hanging; fstat checks the opened artifact.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _BASELINE_MAX_BYTES:
+                _raise(code)
+            raw = handle.read(_BASELINE_MAX_BYTES + 1)
+        if len(raw) > _BASELINE_MAX_BYTES:
+            _raise(code)
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        _raise(code)
+    if not isinstance(payload, dict) or set(payload) != {field.name for field in fields(RestoreBaseline)}:
+        _raise(code)
+    if not isinstance(payload["migration_heads"], list):
+        _raise(code)
+    payload["migration_heads"] = tuple(payload["migration_heads"])
+    baseline = RestoreBaseline(**payload)
+    for name, expected in (
+        ("target_backup_label", target_backup_label), ("target_time", target_time),
+        ("account_id", account_id), ("environment", environment),
+        ("projector_version", projector_version),
+    ):
+        if getattr(baseline, name) != expected:
+            _raise(code)
+    return baseline
 
 
 def _nonnegative_int(value: object, *, code: str) -> int:
@@ -255,6 +362,8 @@ def _parse_replay(replay_json: str, *, event_count: int) -> dict[str, object]:
     if event_head_raw is None and event_count == 0:
         event_head: int | None = None
     else:
+        if type(event_head_raw) is not int:
+            _raise("restore_output_invalid")
         event_head = _nonnegative_int(event_head_raw, code="restore_output_invalid")
 
     row_counts_raw = payload.get("row_counts")
@@ -290,6 +399,7 @@ def _parse_replay(replay_json: str, *, event_count: int) -> dict[str, object]:
         if (
             isinstance(old_count, bool)
             or not isinstance(old_count, int)
+            or type(replayed_count) is not int
             or old_count < 0
             or old_count != replayed_count
             or replayed_count != bounded_counts[name]
@@ -316,12 +426,14 @@ def render_restore_evidence(
     *,
     schema_tsv: str,
     replay_json: str,
-    target_backup_label: str,
+    baseline: RestoreBaseline,
     elapsed_seconds: int,
+    observed_at_ms: int,
     config_path: Path,
     image_digest: str,
     network_name: str,
     network_internal: bool,
+    egress_disconnected: bool,
 ) -> dict[str, object]:
     """Return bounded measured restore evidence or raise EvidenceError."""
     if (
@@ -336,16 +448,30 @@ def render_restore_evidence(
         or _NETWORK_NAME.fullmatch(network_name) is None
     ):
         _raise("network_not_internal")
-    if _BACKUP_LABEL.fullmatch(target_backup_label) is None or _SHA256.fullmatch(image_digest) is None:
+    if type(observed_at_ms) is not int or observed_at_ms < 0 or egress_disconnected is not True:
+        _raise("restore_output_invalid")
+    baseline.__post_init__()
+    if _SHA256.fullmatch(image_digest) is None:
         _raise("restore_output_invalid")
 
     server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
     replay = _parse_replay(replay_json, event_count=event_count)
+    if (
+        sorted(migration_heads) != sorted(baseline.migration_heads)
+        or event_count != baseline.event_count
+        or any(replay[name] != getattr(baseline, name) for name in (
+            "account_id", "environment", "projector_version", "event_head", "event_hash"
+        ))
+    ):
+        _raise("restore_output_invalid")
     return {
         "schema_version": 1,
         "measured": True,
         "rto_seconds": elapsed_seconds,
-        "target_backup_label": target_backup_label,
+        "target_backup_label": baseline.target_backup_label,
+        "target_time": baseline.target_time,
+        "observed_at_ms": observed_at_ms,
+        "egress_disconnected": True,
         "server_version_num": server_version_num,
         "migration_heads": migration_heads,
         "event_count": event_count,
@@ -437,6 +563,13 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--schema-tsv", type=Path, required=True)
     restore.add_argument("--replay-json", type=Path, required=True)
     restore.add_argument("--target-backup-label", required=True)
+    restore.add_argument("--target-time")
+    restore.add_argument("--baseline", type=Path, required=True)
+    restore.add_argument("--account-id", required=True)
+    restore.add_argument("--environment", required=True)
+    restore.add_argument("--projector-version", required=True)
+    restore.add_argument("--observed-at-ms", type=int, required=True)
+    restore.add_argument("--egress-disconnected", action="store_true")
     restore.add_argument("--elapsed-seconds", type=int, required=True)
     restore.add_argument("--config", type=Path, required=True)
     restore.add_argument("--image-digest", required=True)
@@ -447,7 +580,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _paths_are_absolute(args: argparse.Namespace) -> bool:
-    names = ("config", "output", "archiver_tsv", "info_json", "schema_tsv", "replay_json")
+    names = ("config", "output", "archiver_tsv", "info_json", "schema_tsv", "replay_json", "baseline")
     return all(
         not hasattr(args, name) or getattr(args, name).is_absolute()
         for name in names
@@ -486,7 +619,13 @@ def main(argv: list[str] | None = None) -> int:
             report = render_restore_evidence(
                 schema_tsv=_read_input(args.schema_tsv, code="schema_output_invalid"),
                 replay_json=_read_input(args.replay_json, code="restore_output_invalid"),
-                target_backup_label=args.target_backup_label,
+                baseline=load_restore_baseline(
+                    args.baseline, target_backup_label=args.target_backup_label,
+                    target_time=args.target_time, account_id=args.account_id,
+                    environment=args.environment, projector_version=args.projector_version,
+                ),
+                observed_at_ms=args.observed_at_ms,
+                egress_disconnected=args.egress_disconnected,
                 elapsed_seconds=args.elapsed_seconds,
                 config_path=args.config,
                 image_digest=args.image_digest,
