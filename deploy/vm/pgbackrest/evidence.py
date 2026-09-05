@@ -11,6 +11,7 @@ import re
 import stat
 import tempfile
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -61,6 +62,12 @@ _REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_NAMES)
 _DATABASE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 _TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _BASELINE_MAX_BYTES = 64 * 1024
+_MAX_EVIDENCE_AGE_MS = 900_000
+_IMAGE_LABELS = {
+    "org.bfx.postgresql.base-digest": "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+    "org.bfx.pgbackrest.version": "2.59.1",
+    "org.bfx.pgbackrest.source-sha256": "1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d",
+}
 
 
 class EvidenceError(ValueError):
@@ -422,6 +429,46 @@ def _parse_replay(replay_json: str, *, event_count: int) -> dict[str, object]:
     }
 
 
+def validate_restore_state(
+    *, schema_tsv: str, replay_json: str, baseline: RestoreBaseline,
+) -> dict[str, object]:
+    """Validate verifier/schema against the baseline before dating a measurement."""
+    baseline.__post_init__()
+    server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
+    replay = _parse_replay(replay_json, event_count=event_count)
+    if (
+        sorted(migration_heads) != sorted(baseline.migration_heads)
+        or event_count != baseline.event_count
+        or any(replay[name] != getattr(baseline, name) for name in (
+            "account_id", "environment", "projector_version", "event_head", "event_hash"
+        ))
+    ):
+        _raise("restore_output_invalid")
+    return {
+        "server_version_num": server_version_num,
+        "migration_heads": migration_heads,
+        "event_count": event_count,
+        **replay,
+    }
+
+
+def validate_image_labels(image_labels: Mapping[str, str]) -> dict[str, str]:
+    """Keep only the three exact pinned labels; arbitrary metadata is never evidence."""
+    if not isinstance(image_labels, Mapping) or any(
+        image_labels.get(name) != expected for name, expected in _IMAGE_LABELS.items()
+    ):
+        _raise("restore_output_invalid")
+    return dict(_IMAGE_LABELS)
+
+
+def _parse_image_labels(raw: str) -> dict[str, str]:
+    try:
+        labels = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (json.JSONDecodeError, TypeError):
+        _raise("restore_output_invalid")
+    return validate_image_labels(labels)
+
+
 def render_restore_evidence(
     *,
     schema_tsv: str,
@@ -431,9 +478,11 @@ def render_restore_evidence(
     observed_at_ms: int,
     config_path: Path,
     image_digest: str,
+    image_labels: Mapping[str, str],
     network_name: str,
     network_internal: bool,
     egress_disconnected: bool,
+    now_ms: int | None = None,
 ) -> dict[str, object]:
     """Return bounded measured restore evidence or raise EvidenceError."""
     if (
@@ -450,20 +499,13 @@ def render_restore_evidence(
         _raise("network_not_internal")
     if type(observed_at_ms) is not int or observed_at_ms < 0 or egress_disconnected is not True:
         _raise("restore_output_invalid")
-    baseline.__post_init__()
-    if _SHA256.fullmatch(image_digest) is None:
+    now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+    if type(now) is not int or not 0 <= now - observed_at_ms <= _MAX_EVIDENCE_AGE_MS:
         _raise("restore_output_invalid")
-
-    server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
-    replay = _parse_replay(replay_json, event_count=event_count)
-    if (
-        sorted(migration_heads) != sorted(baseline.migration_heads)
-        or event_count != baseline.event_count
-        or any(replay[name] != getattr(baseline, name) for name in (
-            "account_id", "environment", "projector_version", "event_head", "event_hash"
-        ))
-    ):
+    if not isinstance(image_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
         _raise("restore_output_invalid")
+    labels = validate_image_labels(image_labels)
+    state = validate_restore_state(schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline)
     return {
         "schema_version": 1,
         "measured": True,
@@ -472,15 +514,13 @@ def render_restore_evidence(
         "target_time": baseline.target_time,
         "observed_at_ms": observed_at_ms,
         "egress_disconnected": True,
-        "server_version_num": server_version_num,
-        "migration_heads": migration_heads,
-        "event_count": event_count,
-        **replay,
+        **state,
         "network_name": network_name,
         "network_internal": True,
         "verifier_exit_status": 0,
         "config_digest": _config_digest(config_path, code="restore_output_invalid"),
         "image_digest": image_digest,
+        "image_labels": labels,
     }
 
 
@@ -573,6 +613,7 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--elapsed-seconds", type=int, required=True)
     restore.add_argument("--config", type=Path, required=True)
     restore.add_argument("--image-digest", required=True)
+    restore.add_argument("--image-labels", required=True)
     restore.add_argument("--network-name", required=True)
     restore.add_argument("--network-internal", action="store_true")
     restore.add_argument("--output", type=Path, required=True)
@@ -629,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
                 elapsed_seconds=args.elapsed_seconds,
                 config_path=args.config,
                 image_digest=args.image_digest,
+                image_labels=_parse_image_labels(args.image_labels),
                 network_name=args.network_name,
                 network_internal=args.network_internal,
             )

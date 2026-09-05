@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -16,6 +17,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 EVIDENCE_PATH = ROOT / "deploy/vm/pgbackrest/evidence.py"
 TOKEN_SENTINEL = "TOKEN-SENTINEL"
+IMAGE_LABELS = {
+    "org.bfx.postgresql.base-digest": "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+    "org.bfx.pgbackrest.version": "2.59.1",
+    "org.bfx.pgbackrest.source-sha256": "1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d",
+}
 PROJECTION_NAMES = (
     "offer_claims",
     "position_state",
@@ -171,7 +177,7 @@ def _render_baseline(tmp_path: Path, **overrides: object):
         "baseline": _baseline(), "elapsed_seconds": 37, "observed_at_ms": 1756961300000,
         "config_path": _config(tmp_path), "image_digest": f"sha256:{'b' * 64}",
         "network_name": "bfx-dr-20260904t031700z-a1b2c3d4e5f60718", "network_internal": True,
-        "egress_disconnected": True,
+        "egress_disconnected": True, "image_labels": IMAGE_LABELS, "now_ms": 1756961300000,
     }
     return render_restore_evidence(**(kwargs | overrides))
 
@@ -204,7 +210,8 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path) -> None:
         "--target-backup-label", "20260904031700-F", "--account-id",
         "3f19d046-5030-494c-9a0a-9573bb890c1f", "--environment", "prod",
         "--projector-version", "projector-v3", "--elapsed-seconds", "37",
-        "--observed-at-ms", "1756961300000", "--egress-disconnected",
+        "--observed-at-ms", str(time.time_ns() // 1_000_000), "--egress-disconnected",
+        "--image-labels", json.dumps(IMAGE_LABELS),
         "--config", str(_config(tmp_path)), "--image-digest", f"sha256:{'b' * 64}",
         "--network-name", "bfx-dr-20260904t031700z-a1b2c3d4e5f60718",
         "--network-internal", "--output", str(output),
@@ -233,6 +240,31 @@ def test_baseline_evidence_emits_validated_target_and_observation(tmp_path: Path
     assert result["target_time"] == "2026-09-04T04:00:00Z"
     assert result["observed_at_ms"] == 1756961300000
     assert result["egress_disconnected"] is True
+
+
+@pytest.mark.parametrize("age_ms", [-1, 900001])
+def test_restore_freshness_rejects_future_and_stale_evidence(tmp_path: Path, age_ms: int) -> None:
+    with pytest.raises(EvidenceError, match="restore_output_invalid"):
+        _render_baseline(tmp_path, now_ms=1756961300000 + age_ms)
+
+
+@pytest.mark.parametrize("age_ms", [0, 900000])
+def test_restore_freshness_accepts_window_boundaries(tmp_path: Path, age_ms: int) -> None:
+    report = _render_baseline(tmp_path, now_ms=1756961300000 + age_ms, image_labels=IMAGE_LABELS)
+    assert report["measured"] is True
+    assert report["image_labels"] == IMAGE_LABELS
+
+
+@pytest.mark.parametrize("labels", [None, {}, [], {**IMAGE_LABELS, "org.bfx.pgbackrest.version": "2.60.0"}])
+def test_renderer_image_labels_fail_closed(tmp_path: Path, labels: object) -> None:
+    with pytest.raises(EvidenceError, match="restore_output_invalid"):
+        _render_baseline(tmp_path, image_labels=labels)
+
+
+def test_renderer_image_labels_drop_unbounded_extra_metadata(tmp_path: Path) -> None:
+    report = _render_baseline(tmp_path, image_labels={**IMAGE_LABELS, "raw": TOKEN_SENTINEL})
+    assert report["image_labels"] == IMAGE_LABELS
+    assert TOKEN_SENTINEL not in json.dumps(report)
 
 
 def _info_json() -> str:
@@ -417,6 +449,8 @@ def test_restore_evidence_keeps_only_stable_bounded_fields(tmp_path: Path) -> No
         replay_json=_replay_report(),
         baseline=_baseline(),
         observed_at_ms=1756961300000,
+        now_ms=1756961300000,
+        image_labels=IMAGE_LABELS,
         egress_disconnected=True,
         elapsed_seconds=37,
         config_path=config,
@@ -445,6 +479,8 @@ def test_restore_evidence_rejects_projection_mismatch(tmp_path: Path) -> None:
             replay_json=_replay_report(matches=False),
             baseline=_baseline(),
             observed_at_ms=1756961300000,
+            now_ms=1756961300000,
+            image_labels=IMAGE_LABELS,
             egress_disconnected=True,
             elapsed_seconds=37,
             config_path=_config(tmp_path),

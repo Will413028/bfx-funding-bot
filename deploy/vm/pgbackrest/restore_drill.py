@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import inspect
 import json
 import math
 import os
@@ -103,18 +102,6 @@ def _compose_with_env(command: tuple[str, ...], env_path: Path) -> tuple[str, ..
 
 def _generated_resource(name: str) -> bool:
     return re.fullmatch(r"bfx-dr-[a-z0-9-]+", name) is not None
-
-
-def _accepts_timeout(runner: CommandRunner) -> bool:
-    try:
-        parameters = inspect.signature(runner).parameters.values()
-    except (TypeError, ValueError):
-        return runner is _run_command
-    return any(
-        parameter.name == "timeout"
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
 
 
 def _validate_plan_resources(plan: RestorePlan) -> None:
@@ -215,7 +202,15 @@ class RestoreDrill:
         self._sleep = sleep
         self._postgres_uid = postgres_uid
         self._postgres_gid = postgres_gid
-        self._command_runner_accepts_timeout = _accepts_timeout(command_runner)
+        self._deadline: float | None = None
+
+    def _remaining(self) -> float:
+        if self._deadline is None:
+            _failure("restore_command_failed")
+        remaining = self._deadline - self._clock()
+        if remaining <= 0:
+            _failure("restore_command_failed")
+        return remaining
 
     def _call(
         self, command: tuple[str, ...], *, timeout: float | None = None,
@@ -225,8 +220,10 @@ class RestoreDrill:
             kwargs: dict[str, object] = {}
             if input_text is not None:
                 kwargs["input_text"] = input_text
-            if timeout is not None and self._command_runner_accepts_timeout:
-                kwargs["timeout"] = timeout
+            remaining = self._remaining()
+            kwargs["timeout"] = remaining if timeout is None else min(timeout, remaining)
+            if kwargs["timeout"] <= 0:
+                _failure("restore_command_failed")
             return self._command_runner(command, **kwargs)
         except Exception:
             _failure("restore_command_failed")
@@ -321,7 +318,7 @@ class RestoreDrill:
             _failure("restore_output_invalid")
 
     def _wait_for_health(self, plan: RestorePlan) -> None:
-        deadline = self._clock() + 600
+        deadline = self._clock() + min(600, self._remaining())
         while True:
             remaining = deadline - self._clock()
             if remaining <= 0:
@@ -425,14 +422,17 @@ class RestoreDrill:
             _failure("projection_replay_mismatch")
         return lines[0]
 
-    def _image_digest(self) -> str:
+    def _image_metadata(self, plan: RestorePlan) -> tuple[str, dict[str, str]]:
         completed = self._require_success(
-            ("docker", "image", "inspect", "--format={{index .RepoDigests 0}}", "bfx-postgres:local")
+            ("docker", "inspect", "--format={{.Image}}", plan.container_name)
         )
-        match = _SHA256.search(completed.stdout)
-        if match is None:
+        image_id = completed.stdout.strip()
+        if _SHA256.fullmatch(image_id) is None:
             _failure("restore_output_invalid")
-        return match.group(0)
+        completed = self._require_success(
+            ("docker", "image", "inspect", "--format={{json .Config.Labels}}", image_id)
+        )
+        return image_id, _evidence._parse_image_labels(completed.stdout)
 
     def _cleanup(
         self,
@@ -444,10 +444,26 @@ class RestoreDrill:
         egress_network_created: bool,
         network_created: bool,
     ) -> bool:
+        # Cleanup is independent of the restore budget, including after timeout.
+        self._deadline = self._clock() + 30
         failed = False
-        commands: list[tuple[str, ...]] = []
+        # Compose needs the env file. Reserve a second for unlink, then spend
+        # the rest of this same cleanup budget on the known-created resources.
         if container_started and env_path is not None:
-            commands.append(_compose_with_env(plan.cleanup_commands[0], env_path))
+            try:
+                command = _compose_with_env(plan.cleanup_commands[0], env_path)
+                if self._call(command, timeout=self._remaining() - 1).returncode != 0:
+                    failed = True
+            except DrillFailureError:
+                failed = True
+        if env_path is not None:
+            try:
+                self._remaining()
+                env_path.unlink(missing_ok=True)
+                self._remaining()
+            except (OSError, DrillFailureError):
+                failed = True
+        commands: list[tuple[str, ...]] = []
         if volume_created:
             commands.append(plan.cleanup_commands[1])
         if egress_network_created:
@@ -458,6 +474,7 @@ class RestoreDrill:
             try:
                 if self._call(command).returncode != 0:
                     failed = True
+                self._remaining()
             except DrillFailureError:
                 failed = True
         return failed
@@ -472,7 +489,6 @@ class RestoreDrill:
         rto_started: float | None = None
         failure_code: str | None = None
         success_report: dict[str, object] | None = None
-        success_persisted = False
         cleanup_failed = False
         failure_persist_failed = False
         try:
@@ -486,10 +502,11 @@ class RestoreDrill:
             if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
                 _failure("restore_output_invalid")
             env_path = self._write_env_file(plan, password)
+            rto_started = self._clock()
+            self._deadline = rto_started + _MAX_RTO_SECONDS
             self._require_success(plan.create_commands[0])
             network_created = True
             self._require_internal_network(plan)
-            rto_started = self._clock()
             self._require_success(plan.create_commands[1])
             egress_network_created = True
             self._require_success(plan.create_commands[2])
@@ -505,10 +522,15 @@ class RestoreDrill:
             replay_json = self._replay_json(
                 _compose_with_env(plan.run_commands[4], env_path), plan
             )
-            image_digest = self._image_digest()
+            self._remaining()
+            _evidence.validate_restore_state(
+                schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline,
+            )
+            image_digest, image_labels = self._image_metadata(plan)
             if rto_started is None:
                 _failure("rto_invalid")
             elapsed_seconds = self._elapsed_seconds(rto_started)
+            self._remaining()
             success_report = render_restore_evidence(
                 schema_tsv=schema_tsv,
                 replay_json=replay_json,
@@ -518,12 +540,14 @@ class RestoreDrill:
                 elapsed_seconds=elapsed_seconds,
                 config_path=self._config_path,
                 image_digest=image_digest,
+                image_labels=image_labels,
                 network_name=plan.network_name,
                 network_internal=True,
             )
             success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
+            self._remaining()
             _write_json(self._output_path, success_report)
-            success_persisted = True
+            self._remaining()
         except DrillFailureError as exc:
             failure_code = str(exc)
         except EvidenceError as exc:
@@ -538,22 +562,9 @@ class RestoreDrill:
                     egress_network_created=egress_network_created,
                     network_created=network_created,
                 )
-                if cleanup_failed and failure_code is None:
-                    failure_code = "cleanup_failed"
-            if env_path is not None:
-                try:
-                    env_path.unlink(missing_ok=True)
-                except OSError:
-                    cleanup_failed = True
-                    if failure_code is None:
-                        failure_code = "cleanup_failed"
-            if success_persisted:
                 if cleanup_failed:
-                    try:
-                        _write_failure_log(self._output_path, "cleanup_failed")
-                    except OSError:
-                        failure_persist_failed = True
-            elif failure_code is not None:
+                    failure_code = "cleanup_failed"
+            if failure_code is not None:
                 try:
                     report = render_failure_evidence(
                         kind="restore", error_code=failure_code,
