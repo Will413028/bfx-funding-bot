@@ -163,8 +163,93 @@ if [ "$PHASE" = canary ]; then
   }
 fi
 
+# --- local pgBackRest DR boundary (validation only; no remote operations) ---
+PGBACKREST_CONFIG_REL="deploy/vm/pgbackrest/pgbackrest.conf"
+PGBACKREST_CONFIG="$ROOT/$PGBACKREST_CONFIG_REL"
+PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
+[ -r "$PGBACKREST_CONFIG" ] || {
+  echo "ERROR: missing pgBackRest config" >&2
+  exit 1
+}
+[ -f "$PGBACKREST_CONFIG" ] && [ ! -L "$PGBACKREST_CONFIG" ] || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+git -C "$ROOT" ls-files --error-unmatch -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+git -C "$ROOT" diff --quiet -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+git -C "$ROOT" diff --cached --quiet -- "$PGBACKREST_CONFIG_REL" \
+  >/dev/null 2>&1 || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
+python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$PGBACKREST_SECRET_DIR"
+PGBACKREST_SECRET_OPTION_PATTERN='^[[:space:]]*repo1-(s3-(endpoint|bucket|key|key-secret)|cipher-pass)[[:space:]]*=[[:space:]]*[^[:space:]]'
+PGBACKREST_TRACKED_SECRET_STATUS=0
+git grep -q -E "$PGBACKREST_SECRET_OPTION_PATTERN" -- . ':!docs/superpowers/specs/**' \
+  || PGBACKREST_TRACKED_SECRET_STATUS=$?
+if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -eq 0 ]; then
+  echo "ERROR: secret pgBackRest option is tracked" >&2
+  exit 1
+fi
+if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -ne 1 ]; then
+  echo "ERROR: unable to scan tracked pgBackRest options" >&2
+  exit 1
+fi
+
+# The bind-mounted spool/log must be writable by postgres in Alpine (UID/GID 70).
+sudo install -d -m 0750 -o 70 -g 70 \
+  "$HOME/bfx/pgbackrest/spool" \
+  "$HOME/bfx/pgbackrest/log"
+install -d -m 0750 -o "$(id -u)" -g "$(id -g)" "$HOME/bfx/dr-evidence"
+docker compose -f docker-compose.bot.yml config --quiet
+
 export GIT_SHA="$(git rev-parse --short HEAD)"
 docker compose -f docker-compose.bot.yml build --build-arg GIT_SHA="$GIT_SHA"
+
+# Task 1 uses project labels because org.opencontainers.image metadata does not
+# encode the pinned PostgreSQL base digest or pgBackRest source checksum.
+EXPECTED_POSTGRES_BASE_DIGEST="sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+EXPECTED_PGBACKREST_VERSION="2.59.1"
+EXPECTED_PGBACKREST_SOURCE_SHA256="1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d"
+ACTUAL_POSTGRES_BASE_DIGEST=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.postgresql.base-digest" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local base digest label" >&2
+  exit 1
+}
+ACTUAL_PGBACKREST_VERSION=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.pgbackrest.version" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local pgBackRest version label" >&2
+  exit 1
+}
+ACTUAL_PGBACKREST_SOURCE_SHA256=$(docker image inspect \
+  --format='{{ index .Config.Labels "org.bfx.pgbackrest.source-sha256" }}' \
+  bfx-postgres:local) || {
+  echo "ERROR: unable to inspect bfx-postgres:local pgBackRest source checksum label" >&2
+  exit 1
+}
+[ "$ACTUAL_POSTGRES_BASE_DIGEST" = "$EXPECTED_POSTGRES_BASE_DIGEST" ] || {
+  echo "ERROR: bfx-postgres:local base digest label mismatch" >&2
+  exit 1
+}
+[ "$ACTUAL_PGBACKREST_VERSION" = "$EXPECTED_PGBACKREST_VERSION" ] || {
+  echo "ERROR: bfx-postgres:local pgBackRest version label mismatch" >&2
+  exit 1
+}
+[ "$ACTUAL_PGBACKREST_SOURCE_SHA256" = "$EXPECTED_PGBACKREST_SOURCE_SHA256" ] || {
+  echo "ERROR: bfx-postgres:local pgBackRest source checksum label mismatch" >&2
+  exit 1
+}
+
 if [ "$PHASE" = canary ]; then
   ACTUAL_IMAGE_DIGEST=$(docker image inspect --format='{{.Id}}' bfx-bot:local) || {
     echo "ERROR: unable to inspect built bfx-bot:local image digest"

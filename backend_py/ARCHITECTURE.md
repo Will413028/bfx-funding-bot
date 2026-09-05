@@ -440,6 +440,57 @@ snapshot 被 replay double-count。contract revision 會在 DDL 前拒絕 NULL U
 realm、孤兒 FK 或非零 legacy scaffold，且為 forward-only（rollback 使用
 verified backup/PITR + venue reconcile，不使用 downgrade）。
 
+### Offsite DR source of truth
+
+PostgreSQL WAL archive 與 base backup 以 **pgBackRest** 寫入 private Cloudflare
+R2 repository；tracked config 不含 endpoint、bucket、credential 或 cipher
+passphrase。`status.sh`、`preflight.sh` 與 isolated restore drill 只產生 bounded、
+redacted、`measured: true|false` evidence，供 Halt 2 核對 RPO、RTO、event
+head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
+
+Isolated restore 的 staged boundary 固定如下：Compose 只以 `restore-data` 作為
+logical volume key，由 runner 注入 generated external volume name；production
+`bfx_pgdata` 永不成為 restore target。`restore-db` 先同時加入 generated internal
+network 與 temporary R2 egress network，healthcheck 後須以 SQL role `bfx` 在既有
+baseline DB 確認 `pg_is_in_recovery()=false`（同一 global deadline），才斷開
+R2 egress，核對 membership 恰好只含 generated internal network。
+runner 透過 local socket 以 OS user `postgres`、SQL admin role `bfx`
+連入 existing restored database，建立 ephemeral verifier role；verifier 不取得
+R2 credential、application secret 或 Bitfinex connectivity。所有 container-side
+pgBackRest/psql command 都使用 `--user postgres`，production PostgreSQL 則以
+`archive_timeout=60s` 確保低寫入量時仍有 bounded WAL archive latency。
+
+Stanza 固定 `pg1-user=bfx`；health/recovery/bootstrap/schema/capture 同用 SQL
+`bfx`，不靠 DR `POSTGRES_*` initialization。所有 Compose subprocess 使用 sanitized
+env，移除 ambient `DR_*`、`DATABASE_URL`、`POSTGRES_*`、`BFX_*`、`COMPOSE_*`，
+保留 PATH／Docker transport。Verifier container 使用 generated name，啟動 attempt
+前標記 cleanup eligibility；timeout 後仍須独立清理，先於 networks，整體 cleanup
+仍受獨立 30 秒 deadline 約束。
+
+pgBackRest 2.59.1 info 的 `timestamp.start/stop` 是 strict integer epoch；
+stanza/repository `status.code` 必須為 integer 0。Smoke raw stdout/stderr 只進
+trap-cleaned private temp，輸出固定 markers。Backup refresh 先失效舊 evidence；
+atomic persistence 遇 ENOSPC 亦須 remove/truncate 舊綠燈，wrapper 失敗不得 cat 舊報告。
+Halt 1 Step 2 僅做 legacy-schema-compatible realm/count/event integrity backup/
+restore；canonical UUID baseline/staged replay 延後至 migration 與 cutover verify
+後的 [post-identity gate](../docs/runbooks/halt-1-exchange-account-cutover.md#post-identity-dr-gate)。
+
+每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
+核對 migration heads、event count/head/hash 與 account/environment/projector。
+backup/restore evidence 必須有 strict `observed_at_ms`，讀取時不得在未來且不得
+超過 900 seconds；missing、stale、baseline mismatch、egress 未斷開或 cleanup
+failure 一律是 `measured: false`，舊 green report 不得沿用。只有完成真實 R2
+stanza/check/full/diff/info/verify、disposable expire 與 staged isolated restore 的
+新鮮量測，才能宣告 DR ready；offline green 不代表 R2、systemd 或 production
+acceptance。
+
+Isolated restore 只量測 generated resources 上的 data integrity，不會還原
+production volume，也不是 **venue rollback**。任何 restore point 之後可能發生
+的 venue mutation 仍須保持 halt、fresh full-account reconcile，再依
+[offsite DR operator runbook](../docs/runbooks/offsite-dr.md) 與
+[venue-write rollback runbook](../docs/runbooks/rollback-after-venue-write.md)
+處理 adopt、manual resolution 與 forward-fix。
+
 ---
 
 ## 8. Phases & Deployment
