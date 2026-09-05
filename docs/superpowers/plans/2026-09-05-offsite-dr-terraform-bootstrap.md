@@ -231,6 +231,8 @@ def test_timer_installer_is_definition_only() -> None:
     for unit_name in EXPECTED_UNITS:
         assert f"{unit_name}" in installer_text
     assert "systemctl daemon-reload" in installer_text
+    assert "systemctl is-active" in installer_text
+    assert "systemctl is-enabled" in installer_text
     assert "systemctl enable" not in installer_text
     assert "systemctl start" not in installer_text
     assert "enable --now" not in installer_text
