@@ -29,10 +29,10 @@ OUT="$REPORTS/l3-verify-24h-$(date -u +%Y%m%d-%H%M).txt"
   docker logs --since 24h bfx-bot 2>&1 | grep "divergence_detected" | tail -2 \
     | sed -E "s/.*cell=([^ ]+).*live=ExtractedSignal\(signal_score=([-0-9.e]+).*replay=ExtractedSignal\(signal_score=([-0-9.e]+).*/\1 live=\2 replay=\3/"
   echo "--- 已收盤 bar 被改寫的證據（revocation trigger）---"
-  docker exec bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candle_revisions" </dev/null
+  docker exec --user postgres bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candle_revisions" </dev/null
   echo "--- 封存進度（已定稿 / 未定稿）---"
-  docker exec bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candles WHERE finalized_at_ms IS NOT NULL" </dev/null
-  docker exec bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candles WHERE is_final = false" </dev/null
+  docker exec --user postgres bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candles WHERE finalized_at_ms IS NOT NULL" </dev/null
+  docker exec --user postgres bfx-postgres psql -U bfx -d bfx -tAc "SELECT count(*) FROM funding_candles WHERE is_final = false" </dev/null
   echo "--- 真 ERROR（用 log level 欄位，不是 grep -i error）---"
   docker logs --since 24h bfx-bot 2>&1 | grep -cE "^[0-9-]+ [0-9:,]+ (ERROR|CRITICAL) "
   echo "--- 交易狀態：問 guard 會不會下單，不是讀 env ---"
