@@ -32,6 +32,23 @@ def test_pgbackrest_wrappers_fail_closed_and_have_no_mutating_sql() -> None:
     )
 
 
+def test_all_vm_psql_docker_execs_run_as_postgres() -> None:
+    offenders: list[str] = []
+    matched = 0
+    for script in sorted((ROOT / "deploy/vm").rglob("*.sh")):
+        source = script.read_text(encoding="utf-8")
+        logical_source = re.sub(r"\\\n[ \t]*", " ", source)
+        for command in logical_source.splitlines():
+            if "docker exec" not in command or re.search(r"\bpsql\b", command) is None:
+                continue
+            matched += 1
+            if re.search(r"\bdocker exec\s+--user postgres(?:\s|$)", command) is None:
+                offenders.append(str(script.relative_to(ROOT)))
+
+    assert matched > 0
+    assert offenders == []
+
+
 def test_status_is_read_only_and_does_not_restore_or_archive_push() -> None:
     source = (PG_BACKREST_DIR / "status.sh").read_text(encoding="utf-8")
     assert "pg_stat_archiver" in source
