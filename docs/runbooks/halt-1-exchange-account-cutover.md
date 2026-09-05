@@ -54,7 +54,9 @@ read-only admin probe。依 VM backup policy 產生 encrypted offsite backup，�
 restore 到不連 Bitfinex 的隔離 Postgres。只在隔離 restore 上驗證 schema、row
 counts、`event_log` head 與 application event hash；不要把 production secret 帶到
 restore。備份、PITR 與 isolated restore 的固定操作順序見
-[Offsite DR operator runbook](offsite-dr.md)：
+[Offsite DR operator runbook](offsite-dr.md)。必須先為 same backup/PITR target
+建立 bounded baseline，完成 staged R2-egress disconnect restore，並取得
+fresh measured evidence；unit/timer 存在或 offline tests green 都不能取代這些 gate：
 
 ```bash
 git rev-parse HEAD > release-evidence/release-sha.txt

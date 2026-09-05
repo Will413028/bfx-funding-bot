@@ -727,33 +727,138 @@ def test_deploy_requires_exact_task_1_image_labels_after_build() -> None:
         assert forbidden_script not in source
 
 
-def test_offsite_runbook_contains_ordered_bootstrap_and_restore_controls() -> None:
-    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text()
-    ordered = (
-        "Create the private R2 bucket",
-        "Create a bucket-scoped Object Read & Write token",
-        "Create the VM secret fragment",
-        "Build and validate bfx-postgres:local",
-        "stanza-create",
-        "pgbackrest --stanza=bfx check",
-        "backup.sh --type full",
-        "backup.sh --type diff",
-        "Enable the backup and status timers",
-        "Run an isolated restore drill",
-        "Record measured RPO/RTO evidence",
-    )
+def _assert_ordered(text: str, markers: tuple[str, ...]) -> None:
     cursor = -1
-    for item in ordered:
-        position = text.find(item, cursor + 1)
-        assert position > cursor, item
+    for marker in markers:
+        position = text.find(marker, cursor + 1)
+        assert position > cursor, marker
         cursor = position
+
+
+def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+
+    unit_names = (
+        "bfx-pgbackrest-backup.service",
+        "bfx-pgbackrest-backup.timer",
+        "bfx-pgbackrest-status.service",
+        "bfx-pgbackrest-status.timer",
+    )
+    for unit_name in unit_names:
+        assert (
+            f"sudo install -m 0644 deploy/vm/systemd/{unit_name} "
+            f"/etc/systemd/system/{unit_name}"
+        ) in text
+
+    _assert_ordered(
+        text,
+        (
+            "Install the four systemd unit files",
+            "sudo systemctl daemon-reload",
+            "Create and validate the VM secret fragment",
+            "Build and validate bfx-postgres:local",
+            "pgbackrest --stanza=bfx stanza-create",
+            "pgbackrest --stanza=bfx check",
+            "pgbackrest --stanza=bfx --type=full backup",
+            "pgbackrest --stanza=bfx --type=diff backup",
+            "pgbackrest --stanza=bfx info --output=json",
+            "pgbackrest --stanza=bfx verify",
+            "pgbackrest --stanza=bfx expire",
+            "Capture the same-target bounded baseline.json",
+            "Run the staged isolated restore with --baseline",
+            "Accept only fresh measured evidence",
+            "Enable, start, and list the timers",
+            "Declare DR ready",
+        ),
+    )
+    assert "systemctl enable --now" not in text
+    assert "sudo systemctl enable bfx-pgbackrest-backup.timer" in text
+    assert "sudo systemctl start bfx-pgbackrest-backup.timer" in text
+    assert "systemctl list-timers --all" in text
+
+
+def test_offsite_runbook_documents_secret_and_archive_contracts() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+
+    for option in (
+        "repo1-s3-endpoint",
+        "repo1-s3-bucket",
+        "repo1-s3-key",
+        "repo1-s3-key-secret",
+        "repo1-cipher-pass",
+    ):
+        assert option in text
+    for marker in (
+        "exactly these five options",
+        "UID/GID 70",
+        "mode `0700`",
+        "mode `0600`",
+        "secret_validation.py",
+        "archive_timeout=60s",
+        "docker exec --user postgres",
+        "dedicated disposable R2 repository",
+    ):
+        assert marker in text
+
+
+def test_offsite_runbook_documents_same_target_baseline_and_staged_restore() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+
+    for field in (
+        "target_backup_label",
+        "target_time",
+        "database_name",
+        "account_id",
+        "environment",
+        "projector_version",
+        "migration_heads",
+        "event_count",
+        "event_head",
+        "event_hash",
+    ):
+        assert f"`{field}`" in text
+    for marker in (
+        "same backup/PITR target",
+        "Missing or mismatched baseline",
+        "`restore-data`",
+        "restore-db alone has temporary R2 egress",
+        "disconnects that egress before verifier",
+        "existing restored database",
+        "ephemeral verifier role",
+        "verifier has no R2 or application secrets",
+        "local PostgreSQL socket as OS user `postgres`",
+    ):
+        assert marker in text
+
+    command = """deploy/vm/pgbackrest/restore-drill.sh \\
+  --account-id <canonical-uuid> \\
+  --environment prod \\
+  --projector-version projector-v3 \\
+  --backup-label <label> \\
+  --baseline /absolute/path/baseline.json"""
+    assert command in text
     assert "docker volume rm bfx_pgdata" not in text
     assert "docker compose down -v" not in text
-    assert "Bitfinex" in text
+    assert "no Bitfinex request" in text
 
 
-def test_architecture_documents_dr_is_not_venue_rollback() -> None:
-    architecture = (ROOT / "backend_py/ARCHITECTURE.md").read_text()
-    assert "pgBackRest" in architecture
-    assert "restore" in architecture.lower()
-    assert "venue rollback" in architecture.lower()
+def test_architecture_and_halt1_document_staged_dr_and_fresh_evidence() -> None:
+    architecture = (ROOT / "backend_py/ARCHITECTURE.md").read_text(encoding="utf-8")
+    halt1 = (ROOT / "docs/runbooks/halt-1-exchange-account-cutover.md").read_text(
+        encoding="utf-8"
+    )
+
+    for marker in (
+        "restore-data",
+        "restore-db",
+        "R2 egress",
+        "ephemeral verifier role",
+        "existing restored database",
+        "observed_at_ms",
+        "900 seconds",
+        "venue rollback",
+    ):
+        assert marker in architecture
+    assert "[Offsite DR operator runbook](offsite-dr.md)" in halt1
+    assert "same backup/PITR target" in halt1
+    assert "fresh measured evidence" in halt1
