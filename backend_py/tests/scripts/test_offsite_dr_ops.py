@@ -451,6 +451,20 @@ def _run_status(tmp_path: Path, archiver_tsv: str) -> tuple[subprocess.Completed
     return completed, output, log_path
 
 
+def test_status_freshness_is_enforced_by_halt2_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.halt2_cutover import _read_dr_measurement
+
+    completed, output, _ = _run_status(
+        tmp_path, "1756961300000\t1756961240000\t00000001000000000000000A\t0\t",
+    )
+    assert completed.returncode == 0
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1756961300)
+    assert _read_dr_measurement(output, key="rpo_seconds") == 60
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1756962201)
+    with pytest.raises(ValueError, match="rpo_seconds_measurement_stale"):
+        _read_dr_measurement(output, key="rpo_seconds")
+
+
 def test_status_collects_one_select_and_redacts_command_diagnostics(tmp_path: Path) -> None:
     completed, output, log_path = _run_status(
         tmp_path,

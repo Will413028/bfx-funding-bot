@@ -372,6 +372,11 @@ def _read_dr_measurement(path: Path, *, key: str) -> int:
         raise ValueError(f"{key}_measurement_invalid") from exc
     if seconds < 0:
         raise ValueError(f"{key}_measurement_invalid")
+    observed = value.get("observed_at_ms")
+    if type(observed) is not int or observed < 0:
+        raise ValueError(f"{key}_measurement_invalid")
+    if not 0 <= int(time.time() * 1000) - observed <= 900_000:
+        raise ValueError(f"{key}_measurement_stale")
     return seconds
 
 
