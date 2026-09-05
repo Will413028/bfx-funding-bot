@@ -93,6 +93,9 @@ _REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_REPORT_TABLE_NAMES)
 _VOLATILE_PROJECTION_COLUMNS = frozenset({
     "recorded_at", "updated_at", "opened_at", "resolved_at",
 })
+_SURROGATE_PROJECTION_COLUMNS: dict[str, frozenset[str]] = {
+    "reconcile_observation": frozenset({"id"}),
+}
 
 
 class ReplayVerificationError(ValueError):
@@ -145,12 +148,15 @@ def _canonical_value(value: object) -> object:
 
 def _canonical_projection_row(row: object) -> dict[str, object]:
     table = row.__table__  # type: ignore[attr-defined]  # SQLAlchemy mapped row.
+    excluded_columns = _VOLATILE_PROJECTION_COLUMNS | _SURROGATE_PROJECTION_COLUMNS.get(
+        table.name, frozenset()
+    )
     return {
         row.__mapper__.get_property_by_column(column).key: _canonical_value(  # type: ignore[attr-defined]
             getattr(row, row.__mapper__.get_property_by_column(column).key)  # type: ignore[attr-defined]
         )
         for column in table.columns
-        if column.key not in _VOLATILE_PROJECTION_COLUMNS
+        if column.key not in excluded_columns
     }
 
 

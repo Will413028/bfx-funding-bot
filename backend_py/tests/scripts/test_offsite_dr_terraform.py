@@ -59,3 +59,18 @@ def test_state_example_is_separate_from_backup_bucket() -> None:
         "repo1-cipher-pass",
     )
     assert not any(item in tfvars_example_text for item in forbidden_assignments)
+
+
+def test_r2_backend_example_uses_documented_checksum_compatibility_setting() -> None:
+    assert "skip_s3_checksum            = true" in backend_example_text
+
+
+def test_module_readme_orders_bootstrap_apply_before_acceptance_gates() -> None:
+    plan = readme_text.index("terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan")
+    show = readme_text.index("terraform show /secure/path/r2.tfplan")
+    apply = readme_text.index("terraform apply /secure/path/r2.tfplan")
+    gates = readme_text.index("R2 smoke", apply)
+
+    assert plan < show < apply < gates
+    assert "STOP: manually review" in readme_text
+    assert "bootstrap apply" in readme_text

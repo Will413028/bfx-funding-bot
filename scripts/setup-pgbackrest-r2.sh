@@ -194,6 +194,46 @@ if [[ "$SECRET_DIR" != /* || "$SECRET_DIR" == / ]]; then
   exit 1
 fi
 
+_prompt_candidate() {
+  local variable="$1" option="$2" prompt="$3" hidden="$4"
+  local current input
+  current=$(_existing "$option" || true)
+  if [[ -n "$current" ]]; then
+    printf '  %s%s%s %s[Enter keeps current]%s ' "$BOLD" "$prompt" "$RESET" "$DIM" "$RESET"
+  else
+    printf '  %s%s%s ' "$BOLD" "$prompt" "$RESET"
+  fi
+  if [[ "$hidden" == true ]]; then
+    if ! IFS= read -r -s input; then
+      printf '\n'
+      return 1
+    fi
+    printf '\n'
+  elif ! IFS= read -r input; then
+    return 1
+  fi
+  [[ -z "$input" && -n "$current" ]] && input="$current"
+  printf -v "$variable" '%s' "$input"
+}
+
+CANDIDATE_DIR=""
+CANDIDATE_FILE=""
+_cleanup_candidate() {
+  if [[ -n "$CANDIDATE_FILE" ]]; then
+    rm -f -- "$CANDIDATE_FILE" || true
+  fi
+  if [[ -n "$CANDIDATE_DIR" && -d "$CANDIDATE_DIR" ]]; then
+    rmdir -- "$CANDIDATE_DIR" || true
+  fi
+}
+trap _cleanup_candidate EXIT
+
+existing_endpoint=$(_existing "repo1-s3-endpoint" || true)
+existing_account=""
+if [[ "$existing_endpoint" =~ ^https://([a-z0-9]{32})\.r2\.cloudflarestorage\.com$ ]]; then
+  existing_account="${BASH_REMATCH[1]}"
+fi
+
 banner "pgBackRest Cloudflare R2 setup"
 
 stage "Prepare the VM-only R2 fragment"
@@ -201,48 +241,83 @@ if [[ -L "$SECRET_DIR" || -L "$SECRET_FILE" ]]; then
   printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
   exit 1
 fi
-sudo mkdir -p "$SECRET_DIR"
-sudo chown "$(id -u):$(id -g)" "$SECRET_DIR"
-sudo chmod 0700 "$SECRET_DIR"
-if [[ -e "$SECRET_FILE" ]]; then
-  sudo chown "$(id -u):$(id -g)" "$SECRET_FILE"
-  sudo chmod 0600 "$SECRET_FILE"
+if [[ -n "$existing_account" ]]; then
+  R2_ACCOUNT_ID="$existing_account"
+  say "Using the account ID from the existing R2 endpoint."
+elif ! _prompt_candidate R2_ACCOUNT_ID "" "Cloudflare account ID (32 lowercase characters):" false; then
+  printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
 fi
-[[ -f "$SECRET_FILE" ]] || printf '[global]\n' > "$SECRET_FILE"
-ask R2_ACCOUNT_ID "Cloudflare account ID (32 lowercase characters):"
 if [[ ! "$R2_ACCOUNT_ID" =~ ^[a-z0-9]{32}$ ]]; then
   printf '%s\n' "Cloudflare account ID must be 32 lowercase characters." >&2
   exit 1
 fi
-ask R2_BUCKET "Terraform-created R2 bucket name (3-63 characters):"
+if ! _prompt_candidate R2_BUCKET repo1-s3-bucket "Terraform-created R2 bucket name (3-63 characters):" false; then
+  printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
+fi
 if [[ ! "$R2_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
   printf '%s\n' "Bucket name must be 3-63 lowercase characters." >&2
   exit 1
 fi
-R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-write_env repo1-s3-endpoint "$R2_ENDPOINT"
-write_env repo1-s3-bucket "$R2_BUCKET"
 
 stage "Create and capture the bucket-scoped R2 token"
 open_url "https://developers.cloudflare.com/r2/api/tokens/"
 step "Create an R2 API token with Object Read & Write permission."
 step "Scope it to the bucket created by Terraform, then copy its Access Key ID."
-ask R2_ACCESS_KEY_ID "Paste the R2 Access Key ID:"
+if ! _prompt_candidate R2_ACCESS_KEY_ID repo1-s3-key "Paste the R2 Access Key ID:" false; then
+  printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
+fi
 step "Copy the one-time Secret Access Key without sharing it or saving it elsewhere."
-ask_secret R2_SECRET_ACCESS_KEY "Paste the R2 Secret Access Key:"
-write_env repo1-s3-key "$R2_ACCESS_KEY_ID"
-write_env repo1-s3-key-secret "$R2_SECRET_ACCESS_KEY"
+if ! _prompt_candidate R2_SECRET_ACCESS_KEY repo1-s3-key-secret "Paste the R2 Secret Access Key:" true; then
+  printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
+fi
 
 stage "Capture the repository cipher passphrase"
 say "This passphrase needs separate offline escrow; loss makes the repository unusable."
-ask_secret R2_CIPHER_PASS "Paste the repository cipher passphrase:"
-write_env repo1-cipher-pass "$R2_CIPHER_PASS"
+if ! _prompt_candidate R2_CIPHER_PASS repo1-cipher-pass "Paste the repository cipher passphrase:" true; then
+  printf '%s\n' "Input ended before the candidate fragment was complete." >&2
+  exit 2
+fi
 
 stage "Protect and validate the fragment"
-sudo chown 70:70 "$SECRET_DIR" "$SECRET_FILE"
-sudo chmod 0750 "$SECRET_DIR"
-sudo chmod 0640 "$SECRET_FILE"
-"$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$SECRET_DIR"
+if [[ ! -e "$SECRET_DIR" ]]; then
+  sudo mkdir -p "$SECRET_DIR"
+fi
+if [[ -L "$SECRET_DIR" || ! -d "$SECRET_DIR" || -L "$SECRET_FILE" ]]; then
+  printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
+  exit 1
+fi
+CANDIDATE_DIR=$(sudo mktemp -d "$SECRET_DIR/.r2-candidate.XXXXXX")
+sudo chown "$(id -u):70" "$CANDIDATE_DIR"
+sudo chmod 0750 "$CANDIDATE_DIR"
+CANDIDATE_FILE="$CANDIDATE_DIR/r2.conf"
+{
+  printf '[global]\n'
+  printf 'repo1-s3-endpoint=%s\n' "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+  printf 'repo1-s3-bucket=%s\n' "$R2_BUCKET"
+  printf 'repo1-s3-key=%s\n' "$R2_ACCESS_KEY_ID"
+  printf 'repo1-s3-key-secret=%s\n' "$R2_SECRET_ACCESS_KEY"
+  printf 'repo1-cipher-pass=%s\n' "$R2_CIPHER_PASS"
+} | sudo tee "$CANDIDATE_FILE" >/dev/null
+sudo chown "$(id -u):70" "$CANDIDATE_DIR" "$CANDIDATE_FILE"
+sudo chmod 0750 "$CANDIDATE_DIR"
+sudo chmod 0640 "$CANDIDATE_FILE"
+python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$CANDIDATE_DIR"
+if [[ -L "$SECRET_FILE" ]]; then
+  printf '%s\n' "Secret directory and fragment must not be symlinks." >&2
+  exit 1
+fi
+if [[ -f "$SECRET_FILE" ]] && cmp -s "$CANDIDATE_FILE" "$SECRET_FILE"; then
+  CANDIDATE_FILE=""
+else
+  sudo chown "$(id -u):70" "$SECRET_DIR"
+  sudo chmod 0750 "$SECRET_DIR"
+  sudo mv -f -- "$CANDIDATE_FILE" "$SECRET_FILE"
+  CANDIDATE_FILE=""
+fi
 say "Validation succeeded without printing secret values."
 
 stage "Install timer definitions"

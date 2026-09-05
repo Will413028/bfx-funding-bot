@@ -568,9 +568,12 @@ Read the restored container immutable `.Image` ID and fixed OCI labels, reject
 missing/malformed/mismatched labels, and pass them to the renderer. Capture
 `observed_at_ms` only after verifier/baseline validation and include the exact
 requested `target_time` (including JSON null). Require `egress_disconnected is
-True` before measured success. If cleanup fails after a provisional success,
-atomically write a bounded `measured:false` `cleanup_failed` report over the
-provisional report; retain only the bounded `restore.log` marker.
+True` before measured success. Keep the rendered success report in memory while
+cleanup runs. Publish it atomically as `measured:true` only after cleanup
+succeeds. If cleanup fails, atomically write a bounded `measured:false`
+`cleanup_failed` report; if cleanup, interruption, persistence, or invalidation
+prevents that, leave the evidence unavailable and retain only the bounded
+`restore.log` marker.
 
 - [ ] **Step 5: Add artifact freshness validation without changing Halt 2 state transitions.**
 

@@ -572,64 +572,67 @@ class RestoreDrill:
         cleanup_failed = False
         failure_persist_failed = False
         try:
-            baseline = load_restore_baseline(
-                request.baseline_path, target_backup_label=request.backup_label,
-                target_time=request.target_time, account_id=request.account_id,
-                environment=request.environment, projector_version=request.projector_version,
-            )
-            plan = self._validate_prerequisites(request, baseline)
-            password = self._password_factory()
-            if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
-                _failure("restore_output_invalid")
-            env_path = self._write_env_file(plan, password)
-            rto_started = self._clock()
-            self._deadline = rto_started + _MAX_RTO_SECONDS
-            self._require_success(plan.create_commands[0])
-            network_created = True
-            self._require_internal_network(plan)
-            self._require_success(plan.create_commands[1])
-            egress_network_created = True
-            self._require_success(plan.create_commands[2])
-            volume_created = True
-            container_cleanup_eligible = True
-            self._require_success(_compose_with_env(plan.run_commands[0], env_path))
-            self._wait_for_health(plan)
-            self._wait_for_recovery(plan)
-            self._require_external_egress(plan.run_commands[1])
-            self._require_success(plan.run_commands[2])
-            self._require_egress_absent(plan.run_commands[3], plan)
-            self._bootstrap_role(plan, password)
-            schema_tsv = self._schema_tsv(plan)
-            verifier_cleanup_eligible = True
-            replay_json = self._replay_json(
-                _compose_with_env(plan.run_commands[4], env_path), plan
-            )
-            self._remaining()
-            _evidence.validate_restore_state(
-                schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline,
-            )
-            image_digest, image_labels = self._image_metadata(plan)
-            if rto_started is None:
-                _failure("rto_invalid")
-            elapsed_seconds = self._elapsed_seconds(rto_started)
-            self._remaining()
-            success_report = render_restore_evidence(
-                schema_tsv=schema_tsv,
-                replay_json=replay_json,
-                baseline=baseline,
-                observed_at_ms=time.time_ns() // 1_000_000,
-                egress_disconnected=True,
-                elapsed_seconds=elapsed_seconds,
-                config_path=self._config_path,
-                image_digest=image_digest,
-                image_labels=image_labels,
-                network_name=plan.network_name,
-                network_internal=True,
-            )
-            success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
-            self._remaining()
-            _write_json(self._output_path, success_report)
-            self._remaining()
+            try:
+                _invalidate_evidence(self._output_path)
+            except OSError:
+                failure_code = "evidence_invalidation_failed"
+            if failure_code is None:
+                baseline = load_restore_baseline(
+                    request.baseline_path, target_backup_label=request.backup_label,
+                    target_time=request.target_time, account_id=request.account_id,
+                    environment=request.environment, projector_version=request.projector_version,
+                )
+                plan = self._validate_prerequisites(request, baseline)
+                password = self._password_factory()
+                if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
+                    _failure("restore_output_invalid")
+                env_path = self._write_env_file(plan, password)
+                rto_started = self._clock()
+                self._deadline = rto_started + _MAX_RTO_SECONDS
+                self._require_success(plan.create_commands[0])
+                network_created = True
+                self._require_internal_network(plan)
+                self._require_success(plan.create_commands[1])
+                egress_network_created = True
+                self._require_success(plan.create_commands[2])
+                volume_created = True
+                container_cleanup_eligible = True
+                self._require_success(_compose_with_env(plan.run_commands[0], env_path))
+                self._wait_for_health(plan)
+                self._wait_for_recovery(plan)
+                self._require_external_egress(plan.run_commands[1])
+                self._require_success(plan.run_commands[2])
+                self._require_egress_absent(plan.run_commands[3], plan)
+                self._bootstrap_role(plan, password)
+                schema_tsv = self._schema_tsv(plan)
+                verifier_cleanup_eligible = True
+                replay_json = self._replay_json(
+                    _compose_with_env(plan.run_commands[4], env_path), plan
+                )
+                self._remaining()
+                _evidence.validate_restore_state(
+                    schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline,
+                )
+                image_digest, image_labels = self._image_metadata(plan)
+                if rto_started is None:
+                    _failure("rto_invalid")
+                elapsed_seconds = self._elapsed_seconds(rto_started)
+                self._remaining()
+                success_report = render_restore_evidence(
+                    schema_tsv=schema_tsv,
+                    replay_json=replay_json,
+                    baseline=baseline,
+                    observed_at_ms=time.time_ns() // 1_000_000,
+                    egress_disconnected=True,
+                    elapsed_seconds=elapsed_seconds,
+                    config_path=self._config_path,
+                    image_digest=image_digest,
+                    image_labels=image_labels,
+                    network_name=plan.network_name,
+                    network_internal=True,
+                )
+                success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
+                self._remaining()
         except DrillFailureError as exc:
             failure_code = str(exc)
         except EvidenceError as exc:
@@ -647,6 +650,23 @@ class RestoreDrill:
                 )
                 if cleanup_failed:
                     failure_code = "cleanup_failed"
+            if success_report is not None and failure_code is None:
+                try:
+                    self._remaining()
+                    _write_json(self._output_path, success_report)
+                    self._remaining()
+                except KeyboardInterrupt:
+                    try:
+                        _invalidate_evidence(self._output_path)
+                    except OSError:
+                        failure_persist_failed = True
+                    raise
+                except (DrillFailureError, OSError, TypeError, ValueError):
+                    failure_code = "evidence_persist_failed"
+                    try:
+                        _invalidate_evidence(self._output_path)
+                    except OSError:
+                        failure_persist_failed = True
             if failure_code is not None:
                 try:
                     report = render_failure_evidence(
