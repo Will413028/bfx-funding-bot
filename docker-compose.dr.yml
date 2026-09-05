@@ -9,16 +9,13 @@ services:
       DR_VOLUME_NAME: ${DR_VOLUME_NAME}
       DR_TARGET_BACKUP_LABEL: ${DR_TARGET_BACKUP_LABEL}
       DR_TARGET_TIME: ${DR_TARGET_TIME}
-      POSTGRES_USER: ${DR_POSTGRES_USER}
-      POSTGRES_PASSWORD: ${DR_POSTGRES_PASSWORD}
-      POSTGRES_DB: ${DR_POSTGRES_DB}
     volumes:
-      - ${DR_VOLUME_NAME}:/var/lib/postgresql
+      - restore-data:/var/lib/postgresql
       - ./deploy/vm/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
       - ${DR_PGBACKREST_SECRET_DIR}:/etc/pgbackrest/conf.d:ro
-    networks: [dr]
+    networks: [dr, r2-egress]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d template1"]
       interval: 5s
       timeout: 5s
       retries: 60
@@ -44,6 +41,8 @@ volumes:
 
 networks:
   dr:
-    internal: true
     external: true
     name: ${DR_NETWORK_NAME}
+  r2-egress:
+    external: true
+    name: ${DR_EGRESS_NETWORK_NAME}

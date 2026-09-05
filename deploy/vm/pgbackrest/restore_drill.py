@@ -117,7 +117,13 @@ def _accepts_timeout(runner: CommandRunner) -> bool:
 def _validate_plan_resources(plan: RestorePlan) -> None:
     if not all(
         _generated_resource(name)
-        for name in (plan.project_name, plan.volume_name, plan.network_name, plan.container_name)
+        for name in (
+            plan.project_name,
+            plan.volume_name,
+            plan.network_name,
+            plan.egress_network_name,
+            plan.container_name,
+        )
     ):
         _failure("restore_output_invalid")
 
@@ -254,16 +260,15 @@ class RestoreDrill:
     def _write_env_file(self, plan: RestorePlan) -> Path:
         password = self._password_factory()
         database_url = (
-            f"postgresql+asyncpg://dr_restore:{password}@{plan.container_name}:5432/dr_restore"
+            f"postgresql+asyncpg://{plan.verify_role}:{password}"
+            f"@{plan.container_name}:5432/dr_restore"
         )
         values = {
             "DR_PROJECT_NAME": plan.project_name,
             "DR_VOLUME_NAME": plan.volume_name,
             "DR_NETWORK_NAME": plan.network_name,
+            "DR_EGRESS_NETWORK_NAME": plan.egress_network_name,
             "DR_CONTAINER_NAME": plan.container_name,
-            "DR_POSTGRES_USER": "dr_restore",
-            "DR_POSTGRES_PASSWORD": password,
-            "DR_POSTGRES_DB": "dr_restore",
             "DATABASE_URL": database_url,
             "BFX_DEPLOYMENT_ENV": plan.environment,
             "DR_ACCOUNT_ID": plan.account_id,
@@ -287,6 +292,22 @@ class RestoreDrill:
         )
         if completed.stdout.strip() != "true":
             _failure("network_not_internal")
+
+    def _require_external_egress(self, command: tuple[str, ...]) -> None:
+        completed = self._require_success(command)
+        if completed.stdout.strip() != "false":
+            _failure("network_not_internal")
+
+    def _require_egress_absent(
+        self, command: tuple[str, ...], plan: RestorePlan
+    ) -> None:
+        completed = self._require_success(command)
+        try:
+            networks = json.loads(completed.stdout)
+        except (json.JSONDecodeError, TypeError):
+            _failure("restore_output_invalid")
+        if not isinstance(networks, dict) or plan.egress_network_name in networks:
+            _failure("restore_output_invalid")
 
     def _wait_for_health(self, plan: RestorePlan) -> None:
         deadline = self._clock() + 600
@@ -364,16 +385,26 @@ class RestoreDrill:
             _failure("restore_output_invalid")
         return match.group(0)
 
-    def _cleanup(self, plan: RestorePlan, env_path: Path | None, *, container_started: bool,
-                 volume_created: bool, network_created: bool) -> bool:
+    def _cleanup(
+        self,
+        plan: RestorePlan,
+        env_path: Path | None,
+        *,
+        container_started: bool,
+        volume_created: bool,
+        egress_network_created: bool,
+        network_created: bool,
+    ) -> bool:
         failed = False
         commands: list[tuple[str, ...]] = []
         if container_started and env_path is not None:
             commands.append(_compose_with_env(plan.cleanup_commands[0], env_path))
         if volume_created:
             commands.append(plan.cleanup_commands[1])
-        if network_created:
+        if egress_network_created:
             commands.append(plan.cleanup_commands[2])
+        if network_created:
+            commands.append(plan.cleanup_commands[3])
         for command in commands:
             try:
                 if self._call(command).returncode != 0:
@@ -386,6 +417,7 @@ class RestoreDrill:
         plan: RestorePlan | None = None
         env_path: Path | None = None
         network_created = False
+        egress_network_created = False
         volume_created = False
         container_cleanup_eligible = False
         rto_started: float | None = None
@@ -402,12 +434,19 @@ class RestoreDrill:
             self._require_internal_network(plan)
             rto_started = self._clock()
             self._require_success(plan.create_commands[1])
+            egress_network_created = True
+            self._require_success(plan.create_commands[2])
             volume_created = True
             container_cleanup_eligible = True
             self._require_success(_compose_with_env(plan.run_commands[0], env_path))
             self._wait_for_health(plan)
+            self._require_external_egress(plan.run_commands[1])
+            self._require_success(plan.run_commands[2])
+            self._require_egress_absent(plan.run_commands[3], plan)
             schema_tsv = self._schema_tsv(plan)
-            replay_json = self._replay_json(_compose_with_env(plan.run_commands[1], env_path), plan)
+            replay_json = self._replay_json(
+                _compose_with_env(plan.run_commands[4], env_path), plan
+            )
             image_digest = self._image_digest()
             if rto_started is None:
                 _failure("rto_invalid")
@@ -435,7 +474,9 @@ class RestoreDrill:
             if plan is not None:
                 cleanup_failed = self._cleanup(
                     plan, env_path, container_started=container_cleanup_eligible,
-                    volume_created=volume_created, network_created=network_created,
+                    volume_created=volume_created,
+                    egress_network_created=egress_network_created,
+                    network_created=network_created,
                 )
                 if cleanup_failed and failure_code is None:
                     failure_code = "cleanup_failed"
