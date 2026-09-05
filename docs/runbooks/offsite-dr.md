@@ -27,7 +27,9 @@ restore gate below has passed.
 
 ## One-time installation and measured acceptance
 
-Run the following steps from the repository root on the VM, in order.
+Start the following steps from the repository root on the VM, in order. Section
+0 temporarily changes into the Terraform module directory and returns to the
+repository root before Section 1.
 
 ### 0. Provision the R2 backup bucket with Terraform
 
@@ -39,17 +41,45 @@ is different from `CLOUDFLARE_API_TOKEN`; the runtime R2 token is not a
 Terraform resource and must never enter Terraform variables, state, plans, or
 Git.
 
-From `infra/terraform/r2`, use the operator-held `backend.hcl` and reviewed
-non-secret variable values:
+Copy both tracked examples outside Git, replace only their non-secret
+placeholders, and keep the resulting files at the operator-controlled secure
+paths below. The independent state bucket and its state-bucket R2 S3 runtime
+credentials must already exist; provide those backend credentials through the
+operator environment, never by putting them in the copied `backend.hcl`.
 
 ```bash
-terraform init -backend-config=backend.hcl
-terraform plan -out=r2.tfplan
-terraform apply r2.tfplan
+cp infra/terraform/r2/backend.hcl.example /secure/path/backend.hcl
+cp infra/terraform/r2/terraform.tfvars.example /secure/path/terraform.tfvars
+cd infra/terraform/r2
+export CLOUDFLARE_API_TOKEN='<Cloudflare-management-token>'
+terraform init -backend-config=/secure/path/backend.hcl
 ```
 
-Review the plan before applying it; apply only that reviewed plan. If the backup
-bucket already exists, import it before planning as documented in
+If the backup bucket already exists, import it from the same module directory
+after `terraform init` and before `terraform plan`, using its actual
+jurisdiction. Skip this step for a newly created bucket:
+
+```bash
+terraform import -var-file=/secure/path/terraform.tfvars \
+  cloudflare_r2_bucket.backup '<account_id>/<bucket_name>/<jurisdiction>'
+```
+
+Review the generated plan before applying it; apply only that reviewed plan.
+Continue from `infra/terraform/r2` to generate the plan:
+
+```bash
+terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan
+```
+
+After reviewing `/secure/path/r2.tfplan`, apply only that reviewed plan and
+return to the repository root:
+
+```bash
+terraform apply /secure/path/r2.tfplan
+cd ../../..
+```
+
+The complete example and state/backend boundary are also documented in
 [`infra/terraform/r2/README.md`](../../infra/terraform/r2/README.md). Terraform
 manages only the backup bucket and the lifecycle rule that aborts incomplete
 multipart uploads. R2 lifecycle does not own pgBackRest retention; pgBackRest
