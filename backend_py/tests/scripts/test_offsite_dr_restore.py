@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]
 COMMANDS_PATH = ROOT / "deploy/vm/pgbackrest/restore_commands.py"
 DRILL_PATH = ROOT / "deploy/vm/pgbackrest/restore_drill.py"
 EVIDENCE_PATH = ROOT / "deploy/vm/pgbackrest/evidence.py"
+CONFIG_PATH = ROOT / "deploy/vm/pgbackrest/pgbackrest.conf"
 ABSOLUTE_COMPOSE_PATH = str(ROOT / "docker-compose.dr.yml")
 
 
@@ -79,6 +81,24 @@ def _replay_report(*, matches: bool = True) -> str:
             "diagnostic_diff": diagnostic_diff,
         }
     )
+
+
+def _write_valid_secret_dir(tmp_path: Path) -> Path:
+    secret_dir = tmp_path / "conf.d"
+    secret_dir.mkdir()
+    secret_file = secret_dir / "r2.conf"
+    values = {
+        "repo1-s3-endpoint": "https://account.r2.cloudflarestorage.com",
+        "repo1-s3-bucket": "offsite-dr",
+        "repo1-s3-key": "opaque-access-key",
+        "repo1-s3-key-secret": "TOKEN-SENTINEL",
+        "repo1-cipher-pass": "opaque-cipher-pass",
+    }
+    assignments = "\n".join(f"{key}={value}" for key, value in values.items())
+    secret_file.write_text(f"[global]\n{assignments}\n", encoding="utf-8")
+    secret_file.chmod(0o600)
+    secret_dir.chmod(0o700)
+    return secret_dir
 
 
 def test_dr_compose_is_internal_and_has_no_production_env_files() -> None:
@@ -241,18 +261,17 @@ def _drill(
     run_id: str = "20260904T031700Z-a1b2c3d4e5f60718",
     clock: Callable[[], float] = restore_drill.time.monotonic,
 ) -> RestoreDrill:
-    config = tmp_path / "pgbackrest.conf"
-    config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
-    secret_dir = tmp_path / "conf.d"
-    secret_dir.mkdir()
+    secret_dir = _write_valid_secret_dir(tmp_path)
     return RestoreDrill(
         command_runner=fake,
-        config_path=config,
+        config_path=CONFIG_PATH,
         secret_dir=secret_dir,
         output_path=tmp_path / "restore.json",
         run_id_factory=lambda: run_id,
         password_factory=lambda: "DATABASE-PASSWORD-SENTINEL",
         clock=clock,
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
     )
 
 
@@ -326,15 +345,16 @@ class _CleanupObservingRunner(_FakeRunner):
 def test_success_evidence_is_persisted_before_cleanup_and_cleanup_failure_preserves_it(tmp_path: Path) -> None:
     output_path = tmp_path / "restore.json"
     fake = _CleanupObservingRunner(output_path, cleanup_status=2)
+    secret_dir = _write_valid_secret_dir(tmp_path)
     drill = RestoreDrill(
         command_runner=fake,
-        config_path=tmp_path / "pgbackrest.conf",
-        secret_dir=tmp_path / "conf.d",
+        config_path=CONFIG_PATH,
+        secret_dir=secret_dir,
         output_path=output_path,
         run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
     )
-    (tmp_path / "pgbackrest.conf").write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
-    (tmp_path / "conf.d").mkdir()
 
     assert drill.run(_request()) == 2
 
@@ -457,16 +477,15 @@ def test_command_runner_exception_is_redacted_into_failure_evidence(tmp_path: Pa
     def explode(_: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         raise RuntimeError("TOKEN-SENTINEL")
 
-    config = tmp_path / "pgbackrest.conf"
-    config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
-    secret_dir = tmp_path / "conf.d"
-    secret_dir.mkdir()
+    secret_dir = _write_valid_secret_dir(tmp_path)
     drill = RestoreDrill(
         command_runner=explode,
-        config_path=config,
+        config_path=CONFIG_PATH,
         secret_dir=secret_dir,
         output_path=tmp_path / "restore.json",
         run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
     )
 
     assert drill.run(_request()) == 2
@@ -474,3 +493,104 @@ def test_command_runner_exception_is_redacted_into_failure_evidence(tmp_path: Pa
     report = (tmp_path / "restore.json").read_text(encoding="utf-8")
     assert json.loads(report)["error_code"] == "restore_command_failed"
     assert "TOKEN-SENTINEL" not in report
+
+
+def test_restore_rejects_invalid_secret_before_resource_creation(tmp_path: Path) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
+    )
+    secret_dir = _write_valid_secret_dir(tmp_path)
+    (secret_dir / "r2.conf").write_text(
+        (secret_dir / "r2.conf").read_text(encoding="utf-8").replace(
+            "opaque-access-key", "<ACCOUNT_ID>"
+        ),
+        encoding="utf-8",
+    )
+    drill = RestoreDrill(
+        command_runner=fake,
+        config_path=CONFIG_PATH,
+        secret_dir=secret_dir,
+        output_path=tmp_path / "restore.json",
+        run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
+    )
+
+    assert drill.run(_request()) == 2
+    assert fake.commands == []
+    report = (tmp_path / "restore.json").read_text(encoding="utf-8")
+    assert json.loads(report)["error_code"] == "restore_output_invalid"
+    assert "<ACCOUNT_ID>" not in report
+
+
+def test_restore_secret_preflight_rejects_untracked_config_before_resource_creation(
+    tmp_path: Path,
+) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
+    )
+    config = tmp_path / "pgbackrest.conf"
+    config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
+    drill = RestoreDrill(
+        command_runner=fake,
+        config_path=config,
+        secret_dir=_write_valid_secret_dir(tmp_path),
+        output_path=tmp_path / "restore.json",
+        run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
+    )
+
+    assert drill.run(_request()) == 2
+    assert fake.commands == []
+    report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    assert report["error_code"] == "restore_output_invalid"
+
+
+@pytest.mark.parametrize("state", ("clean", "unstaged", "staged", "untracked", "wildcard", "symlink"))
+def test_restore_secret_preflight_requires_exact_clean_tracked_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = repo / "pgbackrest.conf"
+    if state == "symlink":
+        target = tmp_path / "untracked-target.conf"
+        target.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
+        config.symlink_to(target)
+    else:
+        config.write_text("[global]\nrepo1-type=s3\n", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ("git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+             "-c", "user.name=Test", "-c", "user.email=test@invalid", *args),
+            check=True, capture_output=True, text=True,
+        )
+
+    git("init", "-q")
+    git("add", "pgbackrest.conf")
+    git("commit", "-qm", "test fixture")
+    if state in {"untracked", "wildcard"}:
+        config = repo / ("untracked.conf" if state == "untracked" else "pgbackrest*.conf")
+    if state != "clean":
+        config.write_text("[global]\nrepo1-type=s3\n# changed\n", encoding="utf-8")
+    if state == "staged":
+        git("add", "pgbackrest.conf")
+    monkeypatch.setattr(restore_drill, "ROOT", repo)
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    drill = RestoreDrill(
+        command_runner=fake,
+        config_path=config,
+        secret_dir=_write_valid_secret_dir(tmp_path),
+        output_path=tmp_path / "restore.json",
+        run_id_factory=lambda: "20260904T031700Z-a1b2c3d4e5f60718",
+        postgres_uid=os.getuid(),
+        postgres_gid=os.getgid(),
+    )
+
+    assert drill.run(_request()) == (0 if state == "clean" else 2)
+    if state != "clean":
+        assert fake.commands == []
+        report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+        assert report["error_code"] == "restore_output_invalid"

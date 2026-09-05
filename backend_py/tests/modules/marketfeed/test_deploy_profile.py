@@ -75,6 +75,15 @@ def _deploy_root(tmp_path: Path) -> Path:
         REPOSITORY_ROOT / "deploy/vm/pgbackrest/pgbackrest.conf",
         root / "deploy/vm/pgbackrest/pgbackrest.conf",
     )
+    # Exercise the real validator with the test host's identity, without VM chown.
+    (root / "deploy/vm/pgbackrest/secret_validation.py").write_text(
+        "import functools, os, sys\n"
+        f"sys.path.insert(0, {str(REPOSITORY_ROOT / 'deploy/vm/pgbackrest')!r})\n"
+        "import secret_validation as validator\n"
+        "validator.validate_secret_dir = functools.partial(validator.validate_secret_dir, "
+        "postgres_uid=os.getuid(), postgres_gid=os.getgid())\n"
+        "raise SystemExit(validator.main())\n"
+    )
     evidence = tmp_path / "halt2-canary-evidence.json"
     evidence.write_text("{}\n")
     canary_profile = root / "deploy/vm/canary.env"
@@ -93,6 +102,7 @@ def _deploy_root(tmp_path: Path) -> Path:
     home.mkdir(parents=True)
     secret_dir = home / "pgbackrest/conf.d"
     secret_dir.mkdir(parents=True)
+    secret_dir.chmod(0o700)
     secret_file = secret_dir / "r2.conf"
     secret_file.write_text(
         "\n".join(
@@ -214,6 +224,38 @@ def test_deploy_rejects_non_tracked_pgbackrest_config_before_docker(
 
     assert result.returncode != 0
     assert "pgBackRest config must be a clean tracked artifact" in result.stderr
+    assert not (root / "fake-docker.log").exists()
+
+
+@pytest.mark.parametrize("kind", ("symlink", "directory"))
+def test_deploy_rejects_nonregular_config_before_secret_or_docker(
+    tmp_path: Path, kind: str,
+) -> None:
+    root = _deploy_root(tmp_path)
+    config = root / "deploy/vm/pgbackrest/pgbackrest.conf"
+    target = root.parent / "untracked-target.conf"
+    config.rename(target)
+    if kind == "symlink":
+        config.symlink_to(target)
+    else:
+        config.mkdir()
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode == 1
+    assert "pgBackRest config must be a clean tracked artifact" in result.stderr
+    assert not (root / "fake-docker.log").exists()
+
+
+def test_deploy_rejects_invalid_secret_before_docker(tmp_path: Path) -> None:
+    root = _deploy_root(tmp_path)
+    secret_file = root.parent / "home/bfx/pgbackrest/conf.d/r2.conf"
+    secret_file.write_text("[global]\nrepo1-s3-key=opaque-test-value\n")
+
+    result = _run_deploy(root, "paper")
+
+    assert result.returncode == 2
+    assert result.stderr == "secret_config_invalid\n"
     assert not (root / "fake-docker.log").exists()
 
 
