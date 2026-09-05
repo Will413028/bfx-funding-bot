@@ -15,6 +15,8 @@ from types import ModuleType
 import pytest
 import yaml
 
+from scripts.verify_projection_replay import _TEMPORARY_TABLE_NAMES, replay_one_account
+
 ROOT = Path(__file__).resolve().parents[3]
 COMMANDS_PATH = ROOT / "deploy/vm/pgbackrest/restore_commands.py"
 DRILL_PATH = ROOT / "deploy/vm/pgbackrest/restore_drill.py"
@@ -42,6 +44,123 @@ DrillRequest = restore_drill.DrillRequest
 RestoreDrill = restore_drill.RestoreDrill
 EvidenceError = evidence.EvidenceError
 render_restore_evidence = evidence.render_restore_evidence
+
+
+@pytest.mark.integration
+async def test_generated_verifier_replays_snapshots_without_source_sequence_privileges(
+    pg_engine, pg_session_factory,
+) -> None:
+    """A copied source default must fail here, even if bootstrap grants widen."""
+    from decimal import Decimal
+    from uuid import UUID
+
+    import psycopg
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+
+    account_id = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
+    async with pg_session_factory() as session:
+        session.add(ExchangeAccount(id=account_id, venue="bitfinex", label="dr-replay"))
+        await session.flush()
+        for timestamp in (1_000, 2_000):
+            await PostgresEventStore(deployment_environment="ci").append_snapshot(
+                session,
+                VenueSnapshotObserved(
+                    account_id=str(account_id), environment="ci",
+                    query_started_at_ms=timestamp, query_finished_at_ms=timestamp + 1,
+                    offers=(), credits=(), wallet_available={"fUST": Decimal("7")},
+                    coverage=SnapshotCoverage(True, True, True),
+                ),
+            )
+        await session.commit()
+
+    # Execute the production bootstrap SQL against the isolated testcontainer;
+    # only the Docker transport is replaced, not role creation or permissions.
+    admin_url = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+    def bootstrap_runner(command, *, input_text=None, timeout=None):
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(input_text)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    async with pg_engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))
+
+    plan = build_restore_plan(
+        account_id=str(account_id), environment="ci", projector_version="execution-state-v1",
+        backup_label="20260904031700-F", target_time=None,
+        run_id=restore_drill._new_run_id(), database_name=pg_engine.url.database,
+        expected_event_hash="a" * 64,
+    )
+    password = restore_drill._new_password()
+    RestoreDrill(command_runner=bootstrap_runner)._bootstrap_role(plan, password)
+    verifier_engine = create_async_engine(
+        pg_engine.url.set(username=plan.verify_role, password=password),
+        pool_size=2, max_overflow=0,
+    )
+    verifier_sessions = async_sessionmaker(verifier_engine, expire_on_commit=False)
+
+    async def source_state():
+        async with pg_engine.connect() as connection:
+            tables = {
+                name: (await connection.execute(text(
+                    f"SELECT to_jsonb(t) FROM public.{name} t ORDER BY to_jsonb(t)::text"
+                ))).scalars().all()
+                for name in _TEMPORARY_TABLE_NAMES
+            }
+            sequences = {
+                name: (await connection.execute(text(
+                    f"SELECT last_value, is_called FROM public.{name}"
+                ))).one()
+                for name in ("reconcile_observation_id_seq", "event_log_event_seq_seq")
+            }
+        return tables, sequences
+
+    try:
+        before = await source_state()
+        async with verifier_sessions() as session:
+            assert await session.scalar(text("SELECT current_user")) == plan.verify_role
+            assert await session.scalar(text(
+                "SELECT bool_or(has_sequence_privilege(oid, 'USAGE, UPDATE')) "
+                "FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'"
+            )) is False
+            assert await session.scalar(text(
+                "SELECT bool_or(has_table_privilege(oid, 'INSERT, UPDATE, DELETE, TRUNCATE')) "
+                "FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'"
+            )) is False
+            first = await replay_one_account(
+                session, account_id=account_id, environment="ci",
+                projector_version=plan.projector_version,
+            )
+            # The source session holds one connection; the only other pooled
+            # connection ran replay and must retain neither tables nor sequence.
+            async with verifier_engine.connect() as connection:
+                assert await connection.scalar(text(
+                    "SELECT count(*) FROM pg_class WHERE relnamespace = pg_my_temp_schema()"
+                )) == 0
+            second = await replay_one_account(
+                session, account_id=account_id, environment="ci", expected_event_hash=first.event_hash,
+                projector_version=plan.projector_version,
+            )
+        assert first.row_counts["event_log"] == 2
+        assert first.row_counts["reconcile_observation"] == 2
+        assert first.row_counts["position_state"] == 1
+        assert all(item["matches"] for item in first.diagnostic_diff.values())
+        assert first.content_hashes == second.content_hashes
+        assert await source_state() == before
+    finally:
+        await verifier_engine.dispose()
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(psycopg.sql.SQL("DROP OWNED BY {}").format(
+                psycopg.sql.Identifier(plan.verify_role)
+            ))
+            connection.execute(psycopg.sql.SQL("DROP ROLE {}").format(
+                psycopg.sql.Identifier(plan.verify_role)
+            ))
 
 
 def _baseline_payload() -> dict[str, object]:
