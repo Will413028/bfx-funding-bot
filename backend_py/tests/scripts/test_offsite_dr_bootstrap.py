@@ -35,6 +35,7 @@ def test_secret_wizard_captures_only_vm_secret_fragment() -> None:
         assert option in stage_text
     assert 'secret_validation.py" --secret-dir' in stage_text
     assert "install-pgbackrest-timers.sh" in stage_text
+    assert 'sudo chown 70:70 "$SECRET_DIR" "$SECRET_FILE"' in stage_text
     assert "chmod 0750" in stage_text
     assert "chmod 0640" in stage_text
     assert "https://developers.cloudflare.com/r2/api/tokens/" in stage_text

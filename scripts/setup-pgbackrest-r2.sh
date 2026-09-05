@@ -239,7 +239,7 @@ ask_secret R2_CIPHER_PASS "Paste the repository cipher passphrase:"
 write_env repo1-cipher-pass "$R2_CIPHER_PASS"
 
 stage "Protect and validate the fragment"
-sudo chown postgres:postgres "$SECRET_DIR" "$SECRET_FILE"
+sudo chown 70:70 "$SECRET_DIR" "$SECRET_FILE"
 sudo chmod 0750 "$SECRET_DIR"
 sudo chmod 0640 "$SECRET_FILE"
 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$SECRET_DIR"
