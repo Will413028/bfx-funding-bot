@@ -77,9 +77,11 @@ post-acceptance action in the offsite DR runbook.
 Create `scripts/install-pgbackrest-timers.sh` as a non-interactive, idempotent
 installer. It verifies Linux/systemd availability, copies the four tracked
 units with mode `0644`, runs `daemon-reload`, and leaves both timers disabled
-and stopped. It must not call `enable`, `start`, `enable --now`, Docker, or
-pgBackRest. The runbook remains the only place that activates timers after all
-R2 smoke, disposable expire, isolated restore, cleanup, and fresh-evidence
+and stopped. After reload it must verify that both timers are inactive and
+disabled; if a pre-existing timer is active or enabled, it fails without
+mutating that state. It must not call `enable`, `start`, `enable --now`, Docker,
+or pgBackRest. The runbook remains the only place that activates timers after
+all R2 smoke, disposable expire, isolated restore, cleanup, and fresh-evidence
 gates pass.
 
 ## Data and control flow

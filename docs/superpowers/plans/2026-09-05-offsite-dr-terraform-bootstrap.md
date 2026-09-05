@@ -303,9 +303,12 @@ bfx-pgbackrest-status.timer
 Run `sudo systemctl daemon-reload`, print only the destination and a message
 that timers remain disabled/stopped, and exit zero. Do not call `enable`,
 `start`, `enable --now`, Docker, pgBackRest, or any application command. A
-missing source unit, non-Linux host, missing `sudo`, failed install, or failed
-daemon reload must return nonzero. Keep the existing runbook as the gate that
-activates timers after measured acceptance.
+missing source unit, non-Linux host, missing `sudo`, failed install, failed
+daemon reload, or a pre-existing active/enabled timer must return nonzero. After
+reload, check both timers with `systemctl is-active` and `systemctl is-enabled`;
+if either reports active/enabled, fail without stopping or disabling it. Keep
+the existing runbook as the gate that activates timers after measured
+acceptance.
 
 - [ ] **Step 5: Run focused tests and shell checks.**
 
