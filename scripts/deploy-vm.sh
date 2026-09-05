@@ -171,6 +171,10 @@ PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
   echo "ERROR: missing pgBackRest config" >&2
   exit 1
 }
+[ -f "$PGBACKREST_CONFIG" ] && [ ! -L "$PGBACKREST_CONFIG" ] || {
+  echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
+  exit 1
+}
 git -C "$ROOT" ls-files --error-unmatch -- "$PGBACKREST_CONFIG_REL" \
   >/dev/null 2>&1 || {
   echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
@@ -186,46 +190,8 @@ git -C "$ROOT" diff --cached --quiet -- "$PGBACKREST_CONFIG_REL" \
   echo "ERROR: pgBackRest config must be a clean tracked artifact" >&2
   exit 1
 }
-[ -d "$PGBACKREST_SECRET_DIR" ] || {
-  echo "ERROR: missing pgBackRest secret directory" >&2
-  exit 1
-}
-PGBACKREST_OTHER_ACCESSIBLE_FILE=""
-PGBACKREST_OTHER_ACCESSIBLE_FILE=$(find "$PGBACKREST_SECRET_DIR" -type f -perm -0007 -print -quit) || {
-  echo "ERROR: unable to inspect pgBackRest secret file permissions" >&2
-  exit 1
-}
-if [ -n "$PGBACKREST_OTHER_ACCESSIBLE_FILE" ]; then
-  echo "ERROR: pgBackRest secret file is accessible by other users" >&2
-  exit 1
-fi
-PGBACKREST_SECRET_FILE=""
-PGBACKREST_SECRET_FILE=$(find "$PGBACKREST_SECRET_DIR" -type f -print -quit) || {
-  echo "ERROR: unable to list pgBackRest secret files" >&2
-  exit 1
-}
-if [ -z "$PGBACKREST_SECRET_FILE" ]; then
-  echo "ERROR: missing pgBackRest secret file" >&2
-  exit 1
-fi
-PGBACKREST_EXAMPLE_PATTERN='(<[^>]+>|example|placeholder|change[-_ ]?me|replace[-_ ]?me)'
-if ! find "$PGBACKREST_SECRET_DIR" -type f -exec sh -ceu '
-  marker_pattern="$1"
-  shift
-  for secret_file do
-    [ -r "$secret_file" ] && [ -s "$secret_file" ] || exit 1
-    marker_status=0
-    LC_ALL=C grep -Eiq "$marker_pattern" "$secret_file" || marker_status=$?
-    if [ "$marker_status" -eq 0 ]; then
-      exit 1
-    fi
-    [ "$marker_status" -eq 1 ] || exit 1
-  done
-' sh "$PGBACKREST_EXAMPLE_PATTERN" {} +; then
-  echo "ERROR: empty pgBackRest secret file or example marker detected" >&2
-  exit 1
-fi
-PGBACKREST_SECRET_OPTION_PATTERN='^[[:space:]]*repo1-(s3-key(-secret)?|cipher-pass)[[:space:]]*='
+python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir "$PGBACKREST_SECRET_DIR"
+PGBACKREST_SECRET_OPTION_PATTERN='^[[:space:]]*repo1-(s3-(endpoint|bucket|key|key-secret)|cipher-pass)[[:space:]]*=[[:space:]]*[^[:space:]]'
 PGBACKREST_TRACKED_SECRET_STATUS=0
 git grep -q -E "$PGBACKREST_SECRET_OPTION_PATTERN" -- . ':!docs/superpowers/specs/**' \
   || PGBACKREST_TRACKED_SECRET_STATUS=$?

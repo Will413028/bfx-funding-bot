@@ -43,12 +43,17 @@ def _load_module(name: str, path: Path) -> ModuleType:
 
 _commands = _load_module("_bfx_restore_commands", SCRIPT_DIR / "restore_commands.py")
 _evidence = _load_module("_bfx_restore_evidence", SCRIPT_DIR / "evidence.py")
+_secret_validation = _load_module(
+    "_bfx_secret_validation", SCRIPT_DIR / "secret_validation.py"
+)
 RestoreInputError = _commands.RestoreInputError
 RestorePlan = _commands.RestorePlan
 build_restore_plan = _commands.build_restore_plan
 EvidenceError = _evidence.EvidenceError
 render_failure_evidence = _evidence.render_failure_evidence
 render_restore_evidence = _evidence.render_restore_evidence
+SecretConfigError = _secret_validation.SecretConfigError
+validate_secret_dir = _secret_validation.validate_secret_dir
 
 
 class DrillFailureError(ValueError):
@@ -117,6 +122,34 @@ def _validate_plan_resources(plan: RestorePlan) -> None:
         _failure("restore_output_invalid")
 
 
+def _config_is_clean_tracked(path: Path) -> bool:
+    try:
+        relative_path = path.relative_to(ROOT)
+    except ValueError:
+        return False
+    if path.is_symlink() or not path.is_file():
+        return False
+    git = ("git", "--literal-pathspecs", "-C", str(ROOT))
+    commands = (
+        (*git, "ls-files", "--error-unmatch", "--", str(relative_path)),
+        (*git, "diff", "--quiet", "--", str(relative_path)),
+        (*git, "diff", "--cached", "--quiet", "--", str(relative_path)),
+    )
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            return False
+        if completed.returncode != 0:
+            return False
+    return True
+
+
 def _write_json(path: Path, report: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -160,6 +193,8 @@ class RestoreDrill:
         password_factory: Callable[[], str] = _new_password,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        postgres_uid: int = 70,
+        postgres_gid: int = 70,
     ) -> None:
         self._command_runner = command_runner
         self._config_path = config_path
@@ -169,6 +204,8 @@ class RestoreDrill:
         self._password_factory = password_factory
         self._clock = clock
         self._sleep = sleep
+        self._postgres_uid = postgres_uid
+        self._postgres_gid = postgres_gid
         self._command_runner_accepts_timeout = _accepts_timeout(command_runner)
 
     def _call(
@@ -202,7 +239,15 @@ class RestoreDrill:
         except RestoreInputError:
             _failure("restore_output_invalid")
         _validate_plan_resources(plan)
-        if not self._config_path.is_file() or not self._secret_dir.is_dir() or not COMPOSE_PATH.is_file():
+        if not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file():
+            _failure("restore_output_invalid")
+        try:
+            validate_secret_dir(
+                self._secret_dir,
+                postgres_uid=self._postgres_uid,
+                postgres_gid=self._postgres_gid,
+            )
+        except SecretConfigError:
             _failure("restore_output_invalid")
         return plan
 

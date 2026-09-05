@@ -2,18 +2,297 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 PG_BACKREST_DIR = ROOT / "deploy/vm/pgbackrest"
+SECRET_VALIDATION_PATH = PG_BACKREST_DIR / "secret_validation.py"
 TOKEN_SENTINEL = "TOKEN-SENTINEL"
 SYSTEMD_DIR = ROOT / "deploy/vm/systemd"
+
+
+def _load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _secret_text(**replacements: str) -> str:
+    values = {
+        "repo1-s3-endpoint": "https://account.r2.cloudflarestorage.com",
+        "repo1-s3-bucket": "offsite-dr",
+        "repo1-s3-key": "opaque-access-key",
+        "repo1-s3-key-secret": TOKEN_SENTINEL,
+        "repo1-cipher-pass": "opaque-cipher-pass",
+        **replacements,
+    }
+    assignments = "\n".join(f"{key}={value}" for key, value in values.items())
+    return f"# VM-only values\n\n[global]\n{assignments}\n"
+
+
+def _write_secret_dir(
+    tmp_path: Path,
+    *,
+    text: str | None = None,
+    file_mode: int = 0o600,
+    directory_mode: int = 0o700,
+) -> tuple[Path, Path]:
+    secret_dir = tmp_path / "conf.d"
+    secret_dir.mkdir()
+    os.chown(secret_dir, -1, os.getgid())
+    secret_file = secret_dir / "r2.conf"
+    secret_file.write_text(text if text is not None else _secret_text(), encoding="utf-8")
+    secret_file.chmod(file_mode)
+    secret_dir.chmod(directory_mode)
+    return secret_dir, secret_file
+
+
+def _secret_validation() -> ModuleType:
+    return _load_module("offsite_dr_secret_validation", SECRET_VALIDATION_PATH)
+
+
+def test_secret_validator_accepts_exact_options_without_returning_values(tmp_path: Path) -> None:
+    secret_dir, secret_file = _write_secret_dir(tmp_path)
+    validator = _secret_validation()
+
+    result = validator.validate_secret_dir(
+        secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+    )
+
+    assert result == (secret_file,)
+    assert all(isinstance(path, Path) for path in result)
+    assert TOKEN_SENTINEL not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "invalid_text",
+    (
+        _secret_text() + "repo1-s3-key=duplicate\n",
+        _secret_text().replace(
+            "repo1-s3-endpoint=https://account.r2.cloudflarestorage.com\n", ""
+        ),
+        _secret_text() + "repo1-s3-region=auto\n",
+        _secret_text(**{"repo1-s3-key": ""}),
+        _secret_text(**{"repo1-s3-endpoint": "https://<ACCOUNT_ID>.invalid"}),
+        _secret_text(**{"repo1-s3-bucket": "Production-Example"}),
+    ),
+    ids=("duplicate", "missing", "unknown", "empty", "angle-marker", "example-marker"),
+)
+def test_secret_validator_rejects_invalid_assignments_without_leaking(
+    tmp_path: Path, invalid_text: str
+) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, text=invalid_text)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError) as caught:
+        validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+        )
+
+    assert str(caught.value) == "secret_config_invalid"
+    assert TOKEN_SENTINEL not in str(caught.value)
+
+
+def test_secret_validator_rejects_symlink_file_without_leaking(tmp_path: Path) -> None:
+    secret_dir = tmp_path / "conf.d"
+    secret_dir.mkdir()
+    secret_dir.chmod(0o700)
+    target = tmp_path / "r2-target.conf"
+    target.write_text(_secret_text(), encoding="utf-8")
+    target.chmod(0o600)
+    (secret_dir / "r2.conf").symlink_to(target)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError) as caught:
+        validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+        )
+
+    assert str(caught.value) == "secret_config_invalid"
+    assert TOKEN_SENTINEL not in str(caught.value)
+
+
+def test_secret_validator_rejects_group_read_for_a_non_postgres_group(
+    tmp_path: Path,
+) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, file_mode=0o640)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid() + 1
+        )
+
+
+@pytest.mark.parametrize("file_mode", (0o604, 0o620, 0o602))
+def test_secret_validator_rejects_other_read_or_group_other_write(
+    tmp_path: Path, file_mode: int
+) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, file_mode=file_mode)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+        )
+
+
+def test_secret_validator_rejects_directory_not_traversable_by_postgres(
+    tmp_path: Path,
+) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path)
+    validator = _secret_validation()
+
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=70, postgres_gid=70)
+
+
+def test_secret_validator_allows_postgres_group_read_and_traverse(tmp_path: Path) -> None:
+    secret_dir, secret_file = _write_secret_dir(
+        tmp_path, file_mode=0o640, directory_mode=0o750
+    )
+    validator = _secret_validation()
+
+    result = validator.validate_secret_dir(
+        secret_dir, postgres_uid=-1, postgres_gid=os.getgid()
+    )
+
+    assert result == (secret_file,)
+
+
+@pytest.mark.parametrize("invalid", (False, True), ids=("valid", "placeholder"))
+def test_secret_validator_cli_prints_only_bounded_error(tmp_path: Path, invalid: bool) -> None:
+    secret_dir, _ = _write_secret_dir(
+        tmp_path,
+        text=_secret_text(
+            **{"repo1-s3-key-secret": f"{TOKEN_SENTINEL}-example" if invalid else TOKEN_SENTINEL}
+        ),
+    )
+
+    # Use this host's identity so the CLI reaches parsing on non-VM test hosts.
+    entrypoint = (
+        "import functools, os, sys; "
+        "sys.path.insert(0, sys.argv.pop(1)); "
+        "import secret_validation as validator; "
+        "validator.validate_secret_dir = functools.partial(validator.validate_secret_dir, "
+        "postgres_uid=os.getuid(), postgres_gid=os.getgid()); "
+        "raise SystemExit(validator.main())"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", entrypoint, str(PG_BACKREST_DIR), "--secret-dir", str(secret_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == (2 if invalid else 0)
+    assert completed.stdout == ""
+    assert completed.stderr == ("secret_config_invalid\n" if invalid else "")
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("marker", ("PLACEHOLDER", "ChangeMe", "change-me", "CHANGE_ME", "change me", "ReplaceMe", "replace-me", "replace_me", "replace me"))
+def test_secret_validator_rejects_every_marker_variant(tmp_path: Path, marker: str) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, text=_secret_text(**{"repo1-cipher-pass": marker}))
+    validator = _secret_validation()
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
+
+
+def test_secret_validator_treats_values_as_opaque(tmp_path: Path) -> None:
+    secret_dir, secret_file = _write_secret_dir(
+        tmp_path,
+        text=_secret_text(**{"repo1-cipher-pass": "opaque=a#b;c%value $d 'quoted'"}),
+    )
+    validator = _secret_validation()
+    assert validator.validate_secret_dir(
+        secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+    ) == (secret_file,)
+
+
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_secret_validator_checks_all_direct_files_and_returns_sorted_paths(
+    tmp_path: Path, duplicate: bool,
+) -> None:
+    secret_dir, secret_file = _write_secret_dir(
+        tmp_path, text=_secret_text().replace("repo1-s3-key=opaque-access-key\n", "")
+    )
+    first = secret_dir / "a.conf"
+    first.write_text("[global]\nrepo1-s3-key=opaque-access-key\n", encoding="utf-8")
+    first.chmod(0o600)
+    if duplicate:
+        secret_file.write_text(_secret_text(), encoding="utf-8")
+    validator = _secret_validation()
+    if duplicate:
+        with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+            validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
+    else:
+        assert validator.validate_secret_dir(
+            secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()
+        ) == (first, secret_file)
+
+
+@pytest.mark.parametrize("kind", ("missing", "empty", "nested-directory", "fifo", "symlink-directory", "invalid-utf8", "malformed-line"))
+def test_secret_validator_rejects_invalid_filesystem_or_text(tmp_path: Path, kind: str) -> None:
+    secret_dir, secret_file = _write_secret_dir(tmp_path)
+    if kind == "missing":
+        secret_dir = tmp_path / "missing"
+    elif kind == "empty":
+        secret_file.unlink()
+    elif kind == "nested-directory":
+        (secret_dir / "nested").mkdir()
+    elif kind == "fifo":
+        os.mkfifo(secret_dir / "pipe")
+    elif kind == "symlink-directory":
+        link = tmp_path / "link"
+        link.symlink_to(secret_dir, target_is_directory=True)
+        secret_dir = link
+    elif kind == "invalid-utf8":
+        secret_file.write_bytes(b"\xff")
+    else:
+        secret_file.write_text(_secret_text() + "malformed\n", encoding="utf-8")
+    validator = _secret_validation()
+    with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+        validator.validate_secret_dir(secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid())
+
+
+@pytest.mark.parametrize(
+    ("directory_mode", "file_mode", "same_owner", "same_group"),
+    ((0o755, 0o600, True, True), (0o720, 0o600, True, True),
+     (0o702, 0o600, True, True), (0o600, 0o600, True, True),
+     (0o740, 0o640, False, True), (0o710, 0o600, True, False),
+     (0o750, 0o200, True, True), (0o750, 0o640, False, False),
+     (0o750, 0o040, True, True)),
+)
+def test_secret_validator_rejects_unsafe_directory_or_unreadable_file(
+    tmp_path: Path, directory_mode: int, file_mode: int, same_owner: bool, same_group: bool,
+) -> None:
+    secret_dir, _ = _write_secret_dir(tmp_path, directory_mode=directory_mode, file_mode=file_mode)
+    try:
+        validator = _secret_validation()
+        with pytest.raises(validator.SecretConfigError, match=r"^secret_config_invalid$"):
+            validator.validate_secret_dir(
+                secret_dir,
+                postgres_uid=os.getuid() if same_owner else os.getuid() + 1,
+                postgres_gid=os.getgid() if same_group else os.getgid() + 1,
+            )
+    finally:
+        # Restore traversal for pytest's temporary-directory cleanup on macOS.
+        secret_dir.chmod(0o700)
+        (secret_dir / "r2.conf").chmod(0o600)
 
 
 def test_pgbackrest_wrappers_fail_closed_and_have_no_mutating_sql() -> None:
@@ -333,30 +612,49 @@ def test_deploy_preflight_fails_closed_for_untracked_or_modified_config() -> Non
     assert "pgBackRest config must be a clean tracked artifact" in source
 
 
-def test_deploy_preflight_rejects_unsafe_or_placeholder_secret_files_without_leaking() -> None:
+def test_deploy_preflight_uses_shared_secret_validator_without_leaking() -> None:
     source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    assert 'find "$PGBACKREST_SECRET_DIR" -type f -perm -0007' in source
-    assert 'find "$PGBACKREST_SECRET_DIR" -type f -exec sh -ceu' in source
-    assert '"$PGBACKREST_EXAMPLE_PATTERN" {} +' in source
-    assert "empty pgBackRest secret file" in source
-    assert "example marker" in source
+    assert (
+        'python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir '
+        '"$PGBACKREST_SECRET_DIR"'
+    ) in source.replace("\\\n", "")
     assert "git grep -q -E" in source
     assert "':!docs/superpowers/specs/**'" in source
+    for option in ("endpoint", "bucket", "key", "key-secret", "cipher-pass"):
+        assert option in source
+    assert 'find "$PGBACKREST_SECRET_DIR"' not in source
     assert 'cat "$secret_file"' not in source
     assert 'echo "$secret_value"' not in source
 
 
-def test_deploy_secret_scans_fail_closed_on_command_errors() -> None:
+def test_deploy_tracked_secret_scan_fails_closed_on_command_errors() -> None:
     source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    for error in (
-        "unable to inspect pgBackRest secret file permissions",
-        "unable to list pgBackRest secret files",
-        "unable to scan tracked pgBackRest options",
-    ):
-        assert error in source
+    assert "unable to scan tracked pgBackRest options" in source
     assert "PGBACKREST_TRACKED_SECRET_STATUS=$?" in source
     assert 'if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -eq 0 ]' in source
     assert 'if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -ne 1 ]' in source
+
+
+@pytest.mark.parametrize("option", ("repo1-s3-endpoint", "repo1-s3-bucket", "repo1-s3-key", "repo1-s3-key-secret", "repo1-cipher-pass"))
+@pytest.mark.parametrize("value", (TOKEN_SENTINEL, "", " \t"), ids=("nonempty", "empty", "whitespace"))
+def test_deploy_tracked_secret_scan_checks_only_nonempty_assignments(
+    tmp_path: Path, option: str, value: str,
+) -> None:
+    subprocess.run(("git", "init", "-q", str(tmp_path)), check=True, capture_output=True)
+    (tmp_path / "tracked.conf").write_text(f"  {option} = {value}\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(tmp_path), "add", "tracked.conf"), check=True, capture_output=True)
+    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
+    scan = "PGBACKREST_SECRET_OPTION_PATTERN=" + source.split("PGBACKREST_SECRET_OPTION_PATTERN=", 1)[1]
+    scan = scan.split("# The bind-mounted spool/log", 1)[0]
+
+    completed = subprocess.run(
+        ("bash", "-c", "set -eu\n" + scan), cwd=tmp_path, capture_output=True, text=True,
+    )
+
+    assert completed.returncode == (1 if value.strip() else 0)
+    assert completed.stdout == ""
+    assert completed.stderr == ("ERROR: secret pgBackRest option is tracked\n" if value.strip() else "")
+    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
 
 
 def test_deploy_requires_exact_task_1_image_labels_after_build() -> None:
