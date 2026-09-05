@@ -1,6 +1,6 @@
 # Offsite DR Foundation Design
 
-**Status:** Proposed — implementation pending spec review
+**Status:** Approved — foundation implemented; hardening implementation in progress
 **Date:** 2026-09-04
 **Design reference:** Repository-local offsite DR implementation plan
 
@@ -71,11 +71,63 @@ PostgreSQL 18 container
       WAL + weekly full + daily differential
              │
              ▼
-  isolated restore volume + internal-only Docker network
+  isolated restore volume
+    ├─ temporary R2 egress network (restore-db only, restore phase)
+    └─ DR internal network (restore-db + verifier; egress disconnected before verifier)
              │
              ├─ schema / row-count / pgBackRest verification
              └─ verify_projection_replay.py → event/projection hashes
 ```
+
+## Approved hardening revision (2026-09-05)
+
+The first implementation exposed load-bearing gaps between the RPO claim, the
+R2 egress boundary, and the behavior of a restored non-empty PostgreSQL data
+directory. The following revision is part of this design and is required before
+the foundation can be considered review-ready.
+
+1. **RPO boundary:** production PostgreSQL sets `archive_timeout=60s` alongside
+   `archive_mode=on` and `archive_command`. A low-write workload must not wait
+   indefinitely for a full WAL segment before archiving.
+2. **Runtime identity and logging:** every pgBackRest/psql operation executed
+   through `docker exec` uses `--user postgres`. The tracked pgBackRest config
+   disables persistent file, console, and stderr logging; evidence and bounded
+   exit codes are the diagnostic boundary, so R2 endpoint/bucket values cannot
+   enter host logs.
+3. **Staged DR networking:** the generated DR internal network is created with
+   `--internal` and is used by `restore-db` and `verifier`. A second generated
+   egress network is created without `--internal` and is attached only to
+   `restore-db` during pgBackRest restore/recovery. The runner must verify the
+   two network properties, disconnect egress after the restore container is
+   healthy and before starting `verifier`, then remove both generated networks.
+   The verifier never receives R2 egress.
+4. **Restored-cluster bootstrap:** `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+   `POSTGRES_DB` are not treated as initialization controls for restored PGDATA.
+   Once PostgreSQL is healthy, the runner connects through the local socket as
+   OS user `postgres`, validates the operator-selected existing database, and
+   creates a generated ephemeral verifier role with only `CONNECT`, `TEMPORARY`,
+   schema `USAGE`, and the fixed event/projection/migration `SELECT` grants.
+   The verifier receives only a temporary connection URL; production app
+   secrets are never mounted into the DR Compose project.
+5. **Expected-state baseline:** every measured drill requires a bounded,
+   operator-supplied baseline artifact bound to the selected backup label and
+   PITR target. It contains the restored database name, account/environment/
+   projector identity, migration heads, event count, event head, and canonical
+   event hash. The drill passes the expected hash to
+   `verify_projection_replay.py` and compares every baseline field before
+   writing measured success evidence. Missing or mismatched baseline is a
+   failed drill.
+6. **Evidence and lifecycle:** restore evidence includes `observed_at_ms` and
+   the validated `target_time`, uses the immutable local container image ID plus
+   pinned image labels, and is accepted only when fresh. All subprocesses share
+   one monotonic 3600-second deadline; cleanup has its own short deadline and
+   removes only generated resources. Any status/preflight failure atomically
+   replaces prior evidence with `measured:false`.
+
+The Compose volume key is always the tracked logical key `restore-data`; its
+external Docker volume name is supplied through `DR_VOLUME_NAME`. This keeps
+the rendered Compose model valid while retaining generated-resource ownership
+in the runner.
 
 ### PostgreSQL and image boundary
 
@@ -85,7 +137,8 @@ PostgreSQL 18 container
 - 以 upstream pgBackRest 2.59.1 distribution tarball 建置 binary，並在 build
   時核對 SHA-256；不使用 floating third-party pgBackRest image。
 - `postgres` service 改用這個 image，啟動參數加入
-  `archive_mode=on` 與 `archive_command='pgbackrest --stanza=bfx archive-push %p'`。
+  `archive_mode=on`、`archive_timeout=60s` 與
+  `archive_command='pgbackrest --stanza=bfx archive-push %p'`。
   `archive-async=y`、spool path 與 log path 都在不屬於 `PGDATA` 的 volume。
 - 維持現有 PostgreSQL healthcheck，不把 R2 lag 直接接到 autoheal。R2 故障時
   應由 backup status/alert 顯示 fail-closed，而不是讓 autoheal 反覆重啟資料庫。
@@ -111,6 +164,9 @@ repo，VM 上由 operator 建立並以最小權限掛載。
 - 初始 retention：每週日 03:17 UTC full、其餘日 diff；保留 4 組 full 與每組
   6 組 differential。archive retention 不另行壓縮，先跟隨尚未過期 backup；
   實測容量與 restore 時間後再調整。
+- `log-level-file=off`、`log-level-console=off`、`log-level-stderr=off`；
+  不把 pgBackRest raw diagnostics 寫入 persistent log，wrapper 只保留
+  allowlisted error code 與 exit status。
 
 R2 token 只使用 bucket-scoped Object Read & Write，因 pgBackRest 需要 list/read/
 write/delete/multipart object operations；不使用 account-admin token。bucket
@@ -123,8 +179,12 @@ retention control 而非已驗證 WORM。
 - R2 endpoint/bucket、R2 Access Key ID、Secret Access Key、repository cipher pass
   全在 VM secret boundary；不進 git、CI variables、shell history、Docker image
   layer 或 evidence JSON。
-- `conf.d` secret file 以 container postgres 可讀、且不對其他使用者開放的最小權限建立，
-  read-only bind mount；deploy preflight 驗證檔案存在、權限與不含示意值。
+- `conf.d` secret directory/file 必須是非 symlink、只含且各含一次
+  `repo1-s3-endpoint`、`repo1-s3-bucket`、`repo1-s3-key`、
+  `repo1-s3-key-secret`、`repo1-cipher-pass` 五個 options；container postgres
+  UID/GID 可讀取，其他使用者不可讀寫，並以 read-only bind mount 注入。
+  deploy 與 restore preflight 共用同一個 validator，拒絕空值、示意值、重複
+  options 與未知 secret options。
 - cipher passphrase 必須另行 offline escrow；遺失它等同遺失 encrypted repository
   的可讀性。R2 token rotation 與 cipher rotation 是不同 runbook，不在本 change
   自動處理。
@@ -170,26 +230,33 @@ backup evidence 最少為：
    prefix 的 temporary restore volume，不讀寫 `bfx_pgdata`。
 2. restore container 只掛 pgBackRest config、R2 secret 與 temporary volume；不掛
    `bot.env`、`webapi.env`、`frontend.env`、`BFX_VAULT_KEK`，不加入 production
-   Docker network，也不啟動 daemon、webapi 或 Bitfinex client。
-3. restored PostgreSQL 與 verifier 使用 `internal: true` 的 DR network；verifier
-   執行 schema/version、row-count、event head/hash，再以現有
+   Docker network，也不啟動 daemon、webapi 或 Bitfinex client。restore-db 暫時
+   同時加入 generated R2 egress network 與 generated DR internal network；只要
+   restore-db healthcheck 通過就斷開 egress。
+3. verifier 只加入 generated DR internal network；它執行 schema/version、
+   row-count、event head/hash，再以現有
    `verify_projection_replay.py replay` 從 empty temporary projection 重建並比較
-   projection content hashes。
+   projection content hashes。還原後的既有 database/role 不由
+   `POSTGRES_*` environment 初始化，改由 runner 建立 ephemeral least-privilege
+   verifier role。
 4. script 量測 restore start 到所有 verifier gate 成功的 elapsed seconds，寫出
    `{"measured": true, "rto_seconds": N, ...}` 的 redacted restore evidence。
 5. 成功或失敗都只清理 script 建立且名稱經驗證的 DR resources；失敗保留 evidence
    與 bounded logs，絕不觸碰 production volume。任何 event/projection hash mismatch、
    schema mismatch、network isolation failure 或 verifier nonzero 都是 failed drill。
 
-restore evidence 最少包含 `schema_version`、`measured`、`rto_seconds`、target
-backup label/time、isolated network assertion、event head/hash、projection hashes、
-row counts、verifier exit status 與 config/image digest。它可直接被目前 Halt 2
-`_artifact_hashes()` 讀取；`rto_seconds > 60` 仍會被 Halt 2 preflight 拒絕。
+restore evidence 最少包含 `schema_version`、`measured`、`rto_seconds`、
+`observed_at_ms`、validated target backup label/time、isolated network assertion、
+event head/hash、projection hashes、row counts、verifier exit status、config digest
+與 immutable image ID/labels。它可直接被目前 Halt 2 `_artifact_hashes()` 讀取；
+`rto_seconds > 60` 仍會被 Halt 2 preflight 拒絕。沒有 expected-state baseline、
+stale evidence、egress 尚未斷開或任何 cleanup failure 都不得產生 measured success。
 
 ### Scheduling and operator controls
 
 - 新增 `bfx-pgbackrest-backup.service/.timer`，每天 03:17 UTC 呼叫 one-shot
-  wrapper；wrapper 依 UTC weekday 選 full 或 diff，使用 `docker exec bfx-postgres`
+  wrapper；wrapper 依 UTC weekday 選 full 或 diff，使用
+  `docker exec --user postgres bfx-postgres`
   而非 `docker compose run`，避免繼承 app service 的 healthcheck/autoheal。
 - 新增 `bfx-pgbackrest-status.service/.timer`，每 5 分鐘產生 status/evidence，
   但不自動 restore、resume、刪除 repository 或改 halt state。
@@ -218,7 +285,7 @@ row counts、verifier exit status 與 config/image digest。它可直接被目�
 先以 TDD 寫 offline contract tests，再做 opt-in integration smoke：
 
 - config contract test：確認 PGDATA、stanza、R2 endpoint/region、encryption、
-  archive command、retention 與 secret fragment boundary；tracked files 不得含
+  archive timeout/command、retention、log suppression 與 secret fragment boundary；tracked files 不得含
   credential literal 或可被直接載入的 secret config。
 - compose/systemd contract test：確認 custom image、volume mount、archive command、
   timer schedule、one-shot 不帶 autoheal，及 production healthcheck 不會因 archive
@@ -227,8 +294,15 @@ row counts、verifier exit status 與 config/image digest。它可直接被目�
   `rpo_seconds > 300`、`rto_seconds > 60` fixture 驗證 fail-closed 與現有
   `halt2_cutover` parser 相容。
 - restore command-builder test：確認 temporary volume/network 名稱只接受受控值、
+  `restore-data` logical volume 與兩個 generated networks 的 staged lifecycle、
   不會引用 `bfx_pgdata` 或 production env files，並在任何步驟 failure 時保留
   evidence。
+- restore baseline/auth test：確認 baseline 欄位與 selected target 完全一致、
+  expected event hash 進入 verifier argv、ephemeral role bootstrap 只使用 local
+  `--user postgres` socket path，且 secret 不進 command output/evidence。
+- lifecycle evidence test：確認 local image ID/labels、`observed_at_ms`、target
+  time、freshness、global command deadline、independent cleanup deadline，以及
+  failure 時 measured:false 會取代舊的 measured:true report。
 - opt-in operator smoke：用真實 bucket/token 執行 `stanza-create`、`check`、full
   backup、diff backup、`info`、`verify`；再執行 isolated restore。這些不進預設 CI，
   不把 credential 帶入測試，也不在 coding-agent session 自動對 production 執行。
@@ -256,7 +330,8 @@ row counts、verifier exit status 與 config/image digest。它可直接被目�
    delete lifecycle，且 `stanza-create`、archive check、full/diff backup 與
    `info/verify` 成功。
 4. Isolated restore drill 成功，event head/hash 與 empty-projector replay hash
-   一致；restore evidence 可被現有 Halt 2 artifact parser 接受。
+   一致且符合 expected-state baseline；restore evidence 可被現有 Halt 2 artifact
+   parser 接受，並證明 verifier 在 egress 斷開後仍只位於 internal network。
 5. 連續觀測後才記錄實測 RPO/RTO；未達 target 時維持 halt、修正 backup/restore，
    不以 CI green、config presence 或 backup file existence 宣稱 DR ready。
 
