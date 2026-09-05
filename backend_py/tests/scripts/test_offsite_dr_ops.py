@@ -1064,7 +1064,8 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "cp infra/terraform/r2/backend.hcl.example /secure/path/backend.hcl",
             "cp infra/terraform/r2/terraform.tfvars.example /secure/path/terraform.tfvars",
             "cd infra/terraform/r2",
-            "export CLOUDFLARE_API_TOKEN='<Cloudflare-management-token>'",
+            "read -r -s -p 'Cloudflare management token (hidden; not saved to history): ' CLOUDFLARE_API_TOKEN",
+            "export CLOUDFLARE_API_TOKEN",
             "terraform init -backend-config=/secure/path/backend.hcl",
             "terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan",
             "terraform apply /secure/path/r2.tfplan",
@@ -1135,6 +1136,21 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
     assert "sudo systemctl enable bfx-pgbackrest-backup.timer" in text
     assert "sudo systemctl start bfx-pgbackrest-backup.timer" in text
     assert "systemctl list-timers --all" in text
+
+
+def test_offsite_terraform_docs_read_management_token_without_history_assignment() -> None:
+    safe_prompt = (
+        "read -r -s -p 'Cloudflare management token (hidden; not saved to history): ' "
+        "CLOUDFLARE_API_TOKEN"
+    )
+    for path in (
+        ROOT / "docs/runbooks/offsite-dr.md",
+        ROOT / "infra/terraform/r2/README.md",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert safe_prompt in text
+        assert "export CLOUDFLARE_API_TOKEN" in text
+        assert "export CLOUDFLARE_API_TOKEN=" not in text
 
 
 def test_offsite_runbook_documents_secret_and_archive_contracts() -> None:

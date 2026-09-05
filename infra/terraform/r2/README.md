@@ -27,7 +27,9 @@ Run these commands from this directory:
 ```bash
 cp backend.hcl.example /secure/path/backend.hcl
 cp terraform.tfvars.example /secure/path/terraform.tfvars
-export CLOUDFLARE_API_TOKEN='<Cloudflare-management-token>'
+read -r -s -p 'Cloudflare management token (hidden; not saved to history): ' CLOUDFLARE_API_TOKEN
+printf '\n'
+export CLOUDFLARE_API_TOKEN
 terraform init -backend-config=/secure/path/backend.hcl
 terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan
 terraform apply /secure/path/r2.tfplan
