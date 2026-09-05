@@ -1,5 +1,6 @@
 """Static contracts for the VM-only offsite DR bootstrap scripts."""
 
+import re
 from pathlib import Path
 
 
@@ -55,6 +56,12 @@ def test_timer_installer_is_definition_only() -> None:
     assert "systemctl daemon-reload" in installer_text
     assert "systemctl is-active" in installer_text
     assert "systemctl is-enabled" in installer_text
+    assert not re.search(
+        r"\bsystemctl\s+(?:--\S+\s+)*(?:enable|start|stop|disable)\b",
+        installer_text,
+    )
+    assert "systemctl stop" not in installer_text
+    assert "systemctl disable" not in installer_text
     assert "systemctl enable" not in installer_text
     assert "systemctl start" not in installer_text
     assert "enable --now" not in installer_text

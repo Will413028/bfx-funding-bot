@@ -1053,14 +1053,22 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
 
     assert "./scripts/install-pgbackrest-timers.sh" in text
     assert "sudo install -m 0644 deploy/vm/systemd/" not in text
+    assert "terraform init -backend-config=backend.hcl" not in text
+    assert "terraform plan -out=r2.tfplan" not in text
+    assert "terraform apply r2.tfplan" not in text
 
     _assert_ordered(
         text,
         (
             "### 0. Provision the R2 backup bucket with Terraform",
-            "terraform init -backend-config=backend.hcl",
-            "terraform plan -out=r2.tfplan",
-            "terraform apply r2.tfplan",
+            "cp infra/terraform/r2/backend.hcl.example /secure/path/backend.hcl",
+            "cp infra/terraform/r2/terraform.tfvars.example /secure/path/terraform.tfvars",
+            "cd infra/terraform/r2",
+            "export CLOUDFLARE_API_TOKEN='<Cloudflare-management-token>'",
+            "terraform init -backend-config=/secure/path/backend.hcl",
+            "terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan",
+            "terraform apply /secure/path/r2.tfplan",
+            "cd ../../..",
             "./scripts/install-pgbackrest-timers.sh",
             "./scripts/setup-pgbackrest-r2.sh",
             "Build and validate bfx-postgres:local",
