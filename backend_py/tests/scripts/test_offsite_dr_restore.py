@@ -1069,18 +1069,21 @@ class _CleanupObservingRunner(_FakeRunner):
         super().__init__(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
         self.output_path = output_path
         self.cleanup_status = cleanup_status
-        self.evidence_present_during_cleanup = False
+        self.evidence_present_during_cleanup: list[bool] = []
 
     def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         if "rm" in command:
-            self.evidence_present_during_cleanup = self.output_path.exists()
+            self.evidence_present_during_cleanup.append(self.output_path.exists())
             if self.cleanup_status:
                 return subprocess.CompletedProcess(command, self.cleanup_status, "", "")
         return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
 
 
-def test_cleanup_failure_atomically_replaces_provisional_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cleanup_failure_never_publishes_green_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     output_path = tmp_path / "restore.json"
+    output_path.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
     fake = _CleanupObservingRunner(output_path, cleanup_status=2)
     secret_dir = _write_valid_secret_dir(tmp_path)
     drill = RestoreDrill(
@@ -1104,49 +1107,100 @@ def test_cleanup_failure_atomically_replaces_provisional_success(tmp_path: Path,
     assert drill.run(_request(tmp_path)) == 2
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
-    assert fake.evidence_present_during_cleanup is True
-    assert [item["measured"] for item in replacements] == [True, False]
+    assert fake.evidence_present_during_cleanup
+    assert all(present is False for present in fake.evidence_present_during_cleanup)
+    assert [item["measured"] for item in replacements] == [False]
     assert report["measured"] is False
     assert report["error_code"] == "cleanup_failed"
     assert set(report) == {"schema_version", "measured", "kind", "observed_at_ms", "error_code"}
     assert (tmp_path / "restore.log").read_text() == "restore drill failed: cleanup_failed\n"
 
 
-@pytest.mark.parametrize("failure_stage", ["write", "replace", "write_and_unlink"])
-def test_cleanup_persistence_failure_invalidates_green(
+def test_success_publishes_only_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "restore.json"
+    fake = _CleanupObservingRunner(output_path)
+    drill = _drill(tmp_path, fake)
+    replacements = []
+    real_replace = os.replace
+
+    def observe_replace(source, destination):
+        replacements.append(json.loads(Path(source).read_text(encoding="utf-8")))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(restore_drill.os, "replace", observe_replace)
+
+    assert drill.run(_request(tmp_path)) == 0
+
+    assert fake.evidence_present_during_cleanup
+    assert all(present is False for present in fake.evidence_present_during_cleanup)
+    assert [item["measured"] for item in replacements] == [True]
+    assert json.loads(output_path.read_text(encoding="utf-8"))["measured"] is True
+
+
+def test_cleanup_interruption_leaves_previous_evidence_unavailable(tmp_path: Path) -> None:
+    output = tmp_path / "restore.json"
+    output.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
+
+    class InterruptingCleanup(_CleanupObservingRunner):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            if "rm" in command:
+                self.evidence_present_during_cleanup.append(self.output_path.exists())
+                raise KeyboardInterrupt
+            return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
+
+    fake = InterruptingCleanup(output)
+    with pytest.raises(KeyboardInterrupt):
+        _drill(tmp_path, fake).run(_request(tmp_path))
+
+    assert not output.exists()
+
+
+def test_evidence_invalidation_failure_cannot_accept_previous_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "restore.json"
+    output.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
+
+    def fail_invalidation(path: Path) -> None:
+        raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+
+    monkeypatch.setattr(restore_drill, "_invalidate_evidence", fail_invalidation)
+    assert _drill(tmp_path, _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))).run(_request(tmp_path)) == 2
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["measured"] is False
+    assert report["error_code"] == "restore_output_invalid"
+    assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_success_persistence_failure_leaves_measurement_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str,
 ) -> None:
     output = tmp_path / "restore.json"
-    fake = _CleanupObservingRunner(output, cleanup_status=2)
+    fake = _CleanupObservingRunner(output)
     real_write = restore_drill._write_json
     real_replace = os.replace
-    real_unlink = Path.unlink
 
     def fail_write(path, report):
-        if report["measured"] is False and failure_stage != "replace":
-            # Prove the artifact is currently accepted, before injecting ENOSPC.
-            assert _read_dr_measurement(output, key="rto_seconds") >= 0
+        if report["measured"] is True and failure_stage == "write":
             raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
         real_write(path, report)
 
     def fail_replace(source, destination):
-        if json.loads(Path(source).read_text())["measured"] is False:
-            assert _read_dr_measurement(output, key="rto_seconds") >= 0
+        if json.loads(Path(source).read_text(encoding="utf-8"))["measured"] is True:
             raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
         real_replace(source, destination)
 
-    def fail_unlink(path, *args, **kwargs):
-        if path == output and failure_stage == "write_and_unlink":
-            raise PermissionError("TOKEN-SENTINEL")
-        return real_unlink(path, *args, **kwargs)
-
     monkeypatch.setattr(restore_drill, "_write_json", fail_write)
     monkeypatch.setattr(restore_drill.os, "replace", fail_replace)
-    monkeypatch.setattr(Path, "unlink", fail_unlink)
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
     with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
         _read_dr_measurement(output, key="rto_seconds")
-    assert (tmp_path / "restore.log").read_text() == "restore drill failed: cleanup_failed\n"
+    assert not output.exists() or json.loads(output.read_text())["measured"] is False
+    assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8") if output.exists() else True
     assert not list(tmp_path.glob(".restore.json.*.tmp"))
 
 

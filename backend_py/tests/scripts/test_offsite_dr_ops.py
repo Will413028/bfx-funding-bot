@@ -1068,6 +1068,7 @@ def test_offsite_runbook_orders_install_acceptance_restore_and_timer_enablement(
             "export CLOUDFLARE_API_TOKEN",
             "terraform init -backend-config=/secure/path/backend.hcl",
             "terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan",
+            "terraform show /secure/path/r2.tfplan",
             "terraform apply /secure/path/r2.tfplan",
             "cd ../../..",
             "./scripts/install-pgbackrest-timers.sh",
@@ -1151,6 +1152,18 @@ def test_offsite_terraform_docs_read_management_token_without_history_assignment
         assert safe_prompt in text
         assert "export CLOUDFLARE_API_TOKEN" in text
         assert "export CLOUDFLARE_API_TOKEN=" not in text
+
+
+def test_offsite_runbook_exports_shared_secret_dir_before_preferred_wizard() -> None:
+    text = (ROOT / "docs/runbooks/offsite-dr.md").read_text(encoding="utf-8")
+    assignment = text.index('PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"')
+    export = text.index("export PGBACKREST_SECRET_DIR", assignment)
+    wizard = text.index("./scripts/setup-pgbackrest-r2.sh")
+    section_three = text.index("### 3. Build and validate bfx-postgres:local")
+    mount = text.index('src=$PGBACKREST_SECRET_DIR', section_three)
+
+    assert assignment < export < wizard < section_three < mount
+    assert text.count('PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"') == 1
 
 
 def test_offsite_runbook_documents_secret_and_archive_contracts() -> None:

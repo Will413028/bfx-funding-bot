@@ -32,6 +32,8 @@ printf '\n'
 export CLOUDFLARE_API_TOKEN
 terraform init -backend-config=/secure/path/backend.hcl
 terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan
+terraform show /secure/path/r2.tfplan
+# STOP: manually review the rendered saved plan before applying it.
 terraform apply /secure/path/r2.tfplan
 ```
 
@@ -44,10 +46,11 @@ terraform import -var-file=/secure/path/terraform.tfvars \
 ```
 
 The lifecycle resource does not support import; after importing an existing
-bucket, review the first plan carefully before applying lifecycle changes.
+bucket, review the first plan carefully before applying lifecycle changes. The
+reviewed bootstrap apply is the Terraform step and must precede the R2 smoke,
+disposable-expire, isolated-restore, cleanup, and fresh-evidence acceptance
+gates. It creates or updates the backup bucket and abort-incomplete-multipart
+rule only; timer activation remains the final Section 9 runbook action.
 
 Production apply, creation of the management token and runtime R2 credentials,
 secret injection, and every restore acceptance gate are operator-only actions.
-Do not apply this module, enable backup timers, or treat a backup as accepted
-until the documented R2 smoke, disposable-expire, isolated-restore, cleanup,
-and fresh-evidence gates have passed.

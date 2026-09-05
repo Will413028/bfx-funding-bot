@@ -67,16 +67,18 @@ terraform import -var-file=/secure/path/terraform.tfvars \
 ```
 
 Review the generated plan before applying it; apply only that reviewed plan.
-Continue from `infra/terraform/r2` to generate the plan:
+Continue from `infra/terraform/r2` to generate the bootstrap plan:
 
 ```bash
 terraform plan -var-file=/secure/path/terraform.tfvars -out=/secure/path/r2.tfplan
 ```
 
-After reviewing `/secure/path/r2.tfplan`, apply only that reviewed plan and
-return to the repository root:
+Stop for manual review of the rendered saved plan before applying it. After
+that review, apply only the reviewed bootstrap plan and return to the
+repository root:
 
 ```bash
+terraform show /secure/path/r2.tfplan
 terraform apply /secure/path/r2.tfplan
 cd ../../..
 ```
@@ -103,6 +105,14 @@ starts, or stops a timer. This is not backup acceptance and must not be
 followed by early timer activation.
 
 ### 2. Create and validate the VM secret fragment after provisioning R2
+
+Use this same absolute secret directory for the wizard, host validation, and
+the container mount in Section 3:
+
+```bash
+PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
+export PGBACKREST_SECRET_DIR
+```
 
 Use the VM wizard as the preferred path:
 
@@ -146,7 +156,6 @@ mapping before continuing.
 Validate the boundary without printing values:
 
 ```bash
-PGBACKREST_SECRET_DIR="$HOME/bfx/pgbackrest/conf.d"
 test -d "$PGBACKREST_SECRET_DIR" && test ! -L "$PGBACKREST_SECRET_DIR"
 test -f "$PGBACKREST_SECRET_DIR/r2.conf" && test ! -L "$PGBACKREST_SECRET_DIR/r2.conf"
 sudo chown "$(id -u):70" "$PGBACKREST_SECRET_DIR" "$PGBACKREST_SECRET_DIR/r2.conf"
