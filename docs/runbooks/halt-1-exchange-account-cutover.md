@@ -165,7 +165,40 @@ uv run alembic check
 以 UUID 重建的 primary/unique indexes，以及只在 zero-row gate 後刪除三個 legacy
 scaffold tables。contract revision 是 forward-only。
 
-### 6a. 套用 webapi least-privilege grants
+### 6a. Bootstrap legacy environment credential（僅 vault 原本為空時）
+
+若舊 daemon 使用環境變數中的 key/secret，而 `api_keys` 沒有資料，identity
+backfill 不會憑空產生 credential。Step 5 verify 也不能取代此處的實際 key
+permission verification。完成 contract migration 後、post-identity backup 前，
+保持所有 writer 停止，由 operator 將原有秘密注入一次性程序的環境：
+`BFX_BOOTSTRAP_API_KEY`、`BFX_BOOTSTRAP_API_SECRET`、既有 `BFX_VAULT_KEK`、
+owner DB role 的 `DATABASE_URL`。不可把秘密放入 CLI arguments、shell history、
+tracked files、Docker image 或 log；不要使用 `set -x` 或輸出 container inspect。
+
+工具不讀 dotenv，不建立 account/membership，不輪替既有 credential。目標 UUID
+及 owner 必須先對照已 review 的 identity manifest；Bitfinex permission check
+只證明 key 的權限，不能證明 key 屬於正確的實際帳號，仍須人工核對來源及
+fresh full-account venue snapshot。預設 dry-run 會實際查詢 Bitfinex permissions，
+在 DB transaction 內建立／驗證後 rollback，並非完全沒有外部請求。
+
+```bash
+cd backend_py
+# UUID 與 OWNER_USER_ID 是非秘密的已核對 manifest 值；秘密由 operator 安全注入。
+uv run python scripts/bootstrap_account_credential.py \
+  --exchange-account-id "$UUID" --owner-user-id "$OWNER_USER_ID"
+# dry-run 回報 verified 且 applied=false，operator review 後才可執行：
+uv run python scripts/bootstrap_account_credential.py \
+  --exchange-account-id "$UUID" --owner-user-id "$OWNER_USER_ID" --apply
+```
+
+apply 會重新驗證 funding-write、拒絕其他 write scopes，再以 UUID AAD 加密的
+credential 提交；錯誤只回傳固定失敗訊息，不輸出 upstream error 或 traceback。
+已有任何 credential（含 revoked/retired）會拒絕執行，不會覆寫或復活舊 key。
+若 apply 連線中断而結果不明，先唯讀確認 vault 狀態，不可手動刪除再重跑。
+完成此步不代表可 restart worker；仍須 grants、post-identity DR/replay、runtime
+KEK/UUID 設定、config 與 venue reconciliation 等後續 gate 全部通過。
+
+### 6b. 套用 webapi least-privilege grants
 
 contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
 能讀 projection、account/membership，並管理自己的 credential/config draft；不得
@@ -204,7 +237,7 @@ RESET ROLE;
 ### 7. Post-identity DR、Replay、auth boundary 與一帳號 canary gate
 
 Step 4 additive identity migration、Step 5 cutover verify、Step 6 contract
-migration 與 Step 6a grants 全部通過後，維持 all-writer quiescence，重新建立
+migration、必要的 Step 6a bootstrap 與 Step 6b grants 全部通過後，維持 all-writer quiescence，重新建立
 post-identity backup。此時才可依 [canonical UUID baseline capture](offsite-dr.md#6-capture-the-same-target-bounded-baselinejson)
 及 [staged UUID restore/replay](offsite-dr.md#7-run-the-staged-isolated-restore-with---baseline)
 為 same backup/PITR target 取得 fresh measured evidence。逐欄核對 UUID、

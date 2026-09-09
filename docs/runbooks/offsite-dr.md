@@ -191,7 +191,8 @@ Build the pinned custom image without starting production:
 docker compose -f docker-compose.bot.yml build postgres
 docker run --rm --user 70:70 --network none --entrypoint sh \
   --mount "type=bind,src=$PGBACKREST_SECRET_DIR,dst=/secrets,readonly" \
-  bfx-postgres:local -ec 'test "$(id -u)" = 70; test "$(id -g)" = 70; test -r /secrets; test -x /secrets; test -r /secrets/r2.conf'
+  --mount "type=bind,src=$(pwd)/deploy/vm/pgbackrest/pgbackrest.conf,dst=/etc/pgbackrest/pgbackrest.conf,readonly" \
+  bfx-postgres:local -ec 'test "$(id -u)" = 70; test "$(id -g)" = 70; test -r /etc/pgbackrest/pgbackrest.conf; test -r /secrets; test -x /secrets; test -r /secrets/r2.conf'
 ```
 
 Require the host validator and this network-free container access check to
@@ -199,6 +200,22 @@ exit zero without printing values. The latter tests the mounted permissions
 as the actual pinned container identity before any R2 command. Repeat both
 checks after secret replacement or ownership changes; every additional direct
 file must meet the same regular, non-symlink and five-option aggregate boundary.
+
+The tracked, non-secret `pgbackrest.conf` must also be readable by container
+UID/GID 70 (for example, mode `0644`). Do not apply that public file mode to
+the secret fragment. A host checkout created under umask `077` can pass Git's
+clean-content check while its `0600` config prevents WAL recovery.
+
+The restore entrypoint requires a mount at `/var/lib/postgresql` and fixes
+PGDATA to `/var/lib/postgresql/18/docker`. It rejects symlink components,
+nonempty PGDATA (including hidden files), and unrelated entries anywhere in
+that volume. It never clears an existing directory. Use a fresh generated
+volume after a failed attempt; do not restart the restore entrypoint on a
+partially restored volume. It prepares both the versioned parent and PGDATA
+for UID/GID 70 and checks mounted configuration access before contacting R2.
+The restore command itself also runs as `postgres`: running it as root can
+leave a root-owned lock directory that prevents the subsequent PostgreSQL
+recovery process from fetching WAL in the same container.
 
 Inspect `bfx-postgres:local` and require the pinned PostgreSQL base digest,
 pgBackRest version, and pgBackRest source SHA-256 labels. During the separately
@@ -334,7 +351,10 @@ for the drill. Capture `baseline.json` for the same database state that restore
 must verify: the database must not advance between the selected target and
 baseline capture. Omitting `--target-time` and using `target_time: null` does
 not set a recovery cutoff; pgBackRest may replay through the available archive
-stream. That null-target workflow is safe only when all database writers remain
+stream (`--type=default`, without `--target-action`). Explicit time recovery
+uses `--type=time --target=... --target-action=promote`. Do not replace the
+null-target workflow with `--type=immediate`: that changes the recovery boundary.
+That null-target workflow is safe only when all database writers remain
 stopped until `restore-db` has completed recovery. If writers must resume after
 baseline capture, select an explicit PITR target while the database is still
 quiescent, pass explicit `--target-time`, and record the same non-null

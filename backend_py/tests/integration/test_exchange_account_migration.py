@@ -4,6 +4,9 @@ import pathlib
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from bfx_funding_bot.modules.accounts.identity_cutover import IdentityCutover, IdentityManifest
 
 pytestmark = pytest.mark.integration
 
@@ -71,6 +74,45 @@ async def test_identity_revision_creates_tables_and_nullable_columns(pg_engine, 
         and fk.get("options", {}).get("ondelete", "").upper() == "RESTRICT"
         for fk in fks
     )
+
+
+async def test_cutover_preflight_runs_at_additive_revision_before_event_v3(
+    pg_engine, monkeypatch
+) -> None:
+    """Halt 1 must not select columns introduced only after its contract revision."""
+    sync_url = _sync_url(pg_engine)
+    monkeypatch.setenv("DATABASE_URL", sync_url)
+    _reset_schema(sync_url)
+    _upgrade(sync_url, "8a1b2c3d4e5f")
+    engine = create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO event_log
+                    (account_id, deployment_environment, event_type, payload, occurred_at_ms)
+                VALUES ('primary', 'prod', 'TEST', '{"amount":"1"}'::jsonb, 1)
+            """))
+    finally:
+        engine.dispose()
+
+    manifest = IdentityManifest.from_dict({
+        "version": 1,
+        "accounts": [{
+            "exchange_account_id": "550e8400-e29b-41d4-a716-446655440000",
+            "venue": "bitfinex",
+            "label": "Primary",
+            "legacy_realms": ["primary"],
+            "user_ids": [],
+            "memberships": {},
+        }],
+    })
+    factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with factory() as session:
+        report = await IdentityCutover(kek=bytes(range(32))).preflight(session, manifest)
+
+    assert report.event_head == 1
+    assert report.unmapped_rows == ()
+    assert report.legacy_realm_counts == {"primary": 1}
 
 
 @pytest.mark.parametrize(
