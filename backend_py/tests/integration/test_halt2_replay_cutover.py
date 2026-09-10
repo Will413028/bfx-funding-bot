@@ -426,6 +426,148 @@ async def test_replay_is_independent_of_runtime_execution_decision_audit_state(
     assert second.content_hashes == first.content_hashes
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_historical_cycles_replay_with_dr_role_preserves_source(
+    pg_engine, pg_session_factory, invalid: bool,
+) -> None:
+    """Real DR SELECT/TEMP privileges suffice; source projections are never inputs."""
+    import subprocess
+
+    import psycopg
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+    from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+    from scripts.verify_projection_replay import _TEMPORARY_TABLE_NAMES
+    from tests.modules.execution.event_store.test_historical_claim_cycles import (
+        ACCOUNT,
+        historical_rows,
+    )
+    from tests.scripts.test_offsite_dr_restore import (
+        RestoreDrill,
+        build_restore_plan,
+        restore_drill,
+    )
+
+    async with pg_session_factory() as session:
+        session.add(ExchangeAccount(id=ACCOUNT, venue="bitfinex", label="synthetic-replay"))
+        rows = historical_rows(first_amount="7", environment="ci")
+        if invalid:
+            rows[5].payload.update(amount="2", size_usdt="2")
+        session.add_all(rows)
+        await session.flush()
+        event_hash = canonical_event_hash(rows)
+        if not invalid:
+            await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+                session, account_id=str(ACCOUNT), deployment_environment="ci",
+            )
+            position = (await session.scalars(select(PositionStateRow))).one()
+            claim = (await session.scalars(select(OfferClaimRow))).one()
+            assert (position.reserved, position.realized, position.lent_amount) == (0, 12, 12)
+            assert (claim.state, claim.venue_offer_id, claim.size_usdt) == ("released", "old-b", 5)
+        else:
+            session.add(PositionStateRow(
+                account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
+                deployment_environment="ci", symbol="fUST", reserved=Decimal("9"),
+                realized=Decimal("99"), last_event_seq=0, last_updated_ms=1,
+            ))
+        await session.commit()
+
+    # Reuse the DR integration bootstrap pattern and execute its actual SQL.
+    # The transport replacement connects only to this isolated testcontainer.
+    admin_url = pg_engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+    def bootstrap_runner(command, *, input_text=None, timeout=None):
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(input_text)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    async with pg_engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))
+    plan = build_restore_plan(
+        account_id=str(ACCOUNT), environment="ci", projector_version="execution-state-v1",
+        backup_label="20260904031700-F", target_time=None,
+        run_id=restore_drill._new_run_id(), database_name=pg_engine.url.database,
+        expected_event_hash=event_hash,
+    )
+    password = restore_drill._new_password()
+    drill = RestoreDrill(command_runner=bootstrap_runner)
+    drill._deadline = restore_drill.time.monotonic() + 3600
+    drill._bootstrap_role(plan, password)
+    verifier_engine = create_async_engine(
+        pg_engine.url.set(username=plan.verify_role, password=password),
+        pool_size=2, max_overflow=0,
+    )
+    verifier_sessions = async_sessionmaker(verifier_engine, expire_on_commit=False)
+
+    async def source_state():
+        async with pg_engine.connect() as connection:
+            return {
+                name: (await connection.execute(text(
+                    f"SELECT to_jsonb(t) FROM public.{name} t ORDER BY to_jsonb(t)::text"
+                ))).scalars().all()
+                for name in _TEMPORARY_TABLE_NAMES
+            }
+
+    try:
+        before = await source_state()
+        async with verifier_sessions() as session:
+            assert await session.scalar(text("SELECT current_user")) == plan.verify_role
+            assert await session.scalar(text(
+                "SELECT bool_or(has_table_privilege(oid, 'INSERT, UPDATE, DELETE, TRUNCATE')) "
+                "FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'"
+            )) is False
+            assert await session.scalar(text(
+                "SELECT bool_or(has_sequence_privilege(oid, 'USAGE, UPDATE')) "
+                "FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'"
+            )) is False
+            if invalid:
+                with pytest.raises(ValueError, match="cycle identity conflict"):
+                    await replay_one_account(
+                        session, account_id=ACCOUNT, environment="ci",
+                        projector_version="execution-state-v1", expected_event_hash=event_hash,
+                    )
+            else:
+                first = await replay_one_account(
+                    session, account_id=ACCOUNT, environment="ci",
+                    projector_version="execution-state-v1", expected_event_hash=event_hash,
+                )
+                assert first.row_counts["event_log"] == 6
+                assert first.row_counts["offer_claims"] == 1
+                assert all(item["matches"] for item in first.diagnostic_diff.values())
+        assert await source_state() == before
+        if not invalid:
+            async with pg_session_factory() as session:
+                position = (await session.scalars(select(PositionStateRow))).one()
+                position.realized = Decimal("999")
+                position.lent_amount = Decimal("999")
+                await session.commit()
+            mutated = await source_state()
+            async with verifier_sessions() as session:
+                second = await replay_one_account(
+                    session, account_id=ACCOUNT, environment="ci",
+                    projector_version="execution-state-v1", expected_event_hash=event_hash,
+                )
+            assert second.content_hashes == first.content_hashes
+            assert second.row_counts == first.row_counts
+            assert second.diagnostic_diff["position_state"]["matches"] is False
+            assert await source_state() == mutated
+        async with pg_session_factory() as session:
+            stored = (await session.scalars(select(EventLogRow).order_by(EventLogRow.event_seq))).all()
+            assert canonical_event_hash(stored) == event_hash
+            assert len(stored) == 6
+    finally:
+        await verifier_engine.dispose()
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(psycopg.sql.SQL("DROP OWNED BY {}").format(
+                psycopg.sql.Identifier(plan.verify_role),
+            ))
+            connection.execute(psycopg.sql.SQL("DROP ROLE {}").format(
+                psycopg.sql.Identifier(plan.verify_role),
+            ))
+
+
 def test_replay_derives_historical_v2_uuid_and_accepts_global_sequence_gaps() -> None:
     """Treating global rows from other accounts as a corruption is unsafe."""
     payload = {"amount": "1", "account_id": str(_ACCOUNT), "is_simulated": True}
