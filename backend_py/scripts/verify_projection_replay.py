@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import RowCollector
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
@@ -207,6 +208,7 @@ async def _replay_into_empty_temporary_projection(
     account_id: UUID,
     environment: str,
     projector_version: str,
+    diagnostic_collector: RowCollector | None = None,
 ) -> tuple[
     dict[str, int],
     dict[str, str],
@@ -221,6 +223,10 @@ async def _replay_into_empty_temporary_projection(
     ``rebuild_snapshot_from_log`` projector are invoked.
     """
     projector_type = _projector_implementation(projector_version)
+    source_rows = (
+        await _archive_projection_rows(session, account_id=account_id, environment=environment)
+        if diagnostic_collector is not None else {}
+    )
     source_connection = await session.connection()
     async with (
         source_connection.engine.connect() as connection,
@@ -264,7 +270,31 @@ async def _replay_into_empty_temporary_projection(
         row_counts, content_hashes, offer_exposure, credit_exposure = await _projection_evidence(
             replay_session, account_id=account_id, environment=environment,
         )
+        if diagnostic_collector is not None:
+            rebuilt_rows = await _archive_projection_rows(
+                replay_session, account_id=account_id, environment=environment,
+            )
+            for name, model in _TEMPORARY_PROJECTION_MODELS:
+                diagnostic_collector(
+                    name, source_rows[name], rebuilt_rows[name],
+                    key_columns=tuple(column.key for column in model.__table__.primary_key),  # type: ignore[attr-defined]
+                )
     return row_counts, content_hashes, offer_exposure, credit_exposure
+
+
+async def _archive_projection_rows(
+    session: AsyncSession, *, account_id: UUID, environment: str,
+) -> dict[str, list[dict[str, object]]]:
+    """Copy every physical column on the owning connection, without hash exclusions."""
+    result: dict[str, list[dict[str, object]]] = {}
+    for name, model in _TEMPORARY_PROJECTION_MODELS:
+        table = model.__table__  # type: ignore[attr-defined]
+        rows = await session.execute(select(table).where(
+            table.c.exchange_account_id == account_id,
+            table.c.deployment_environment == environment,
+        ))
+        result[name] = [dict(row) for row in rows.mappings()]
+    return result
 
 
 def _diagnostic_diff(
@@ -361,8 +391,17 @@ async def _diagnostic_projection_evidence(
 async def replay_one_account(
     session: AsyncSession, *, account_id: UUID, environment: str,
     projector_version: str, expected_event_hash: str | None = None,
+    diagnostic_collector: RowCollector | None = None,
 ) -> ReplayReport:
     """Read event_log once and attach runtime counts strictly as diagnostics."""
+    if diagnostic_collector is not None:
+        # Bind events and original full rows to one source MVCC snapshot. Never
+        # silently upgrade an already-started READ COMMITTED transaction.
+        if not session.in_transaction():
+            await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        isolation = await session.scalar(text("SHOW transaction_isolation"))
+        if isolation not in {"repeatable read", "serializable"}:
+            raise ReplayVerificationError("field diagnostics require a consistent source snapshot")
     rows = list(await session.scalars(select(EventLogRow).where(
         EventLogRow.exchange_account_id == account_id,
         EventLogRow.deployment_environment == environment,
@@ -391,6 +430,7 @@ async def replay_one_account(
         account_id=account_id,
         environment=environment,
         projector_version=projector_version,
+        **({"diagnostic_collector": diagnostic_collector} if diagnostic_collector is not None else {}),
     )
     old_row_counts, old_content_hashes = await _diagnostic_projection_evidence(
         session, account_id=account_id, environment=environment,
