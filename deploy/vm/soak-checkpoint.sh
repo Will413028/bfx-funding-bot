@@ -85,7 +85,7 @@ for path, method in (("/healthz", "GET"), ("/readyz", "GET"),
 }
 
 readonly_sql() {
-  docker exec bfx-postgres psql -U bfx -d bfx -X -qAt -c "$1" </dev/null 2>&1 || printf '%s\n' 'unavailable'
+  docker exec --user postgres bfx-postgres psql -U bfx -d bfx -X -qAt -c "$1" </dev/null 2>&1 || printf '%s\n' 'unavailable'
 }
 
 load_canary_scope() {
@@ -112,7 +112,7 @@ readonly_canary_sql() {
     printf '%s\n' 'unavailable (canary scope unavailable)'
     return 0
   fi
-  docker exec bfx-postgres psql -U bfx -d bfx -X -qAt \
+  docker exec --user postgres bfx-postgres psql -U bfx -d bfx -X -qAt \
     -v account="$CANARY_ACCOUNT_ID" -v environment="$CANARY_ENVIRONMENT" \
     -c "$query" </dev/null 2>&1 || printf '%s\n' 'unavailable'
 }

@@ -20,8 +20,9 @@ def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_pat
     backup = tmp_path / "backup.json"
     restore = tmp_path / "restore.json"
     config = tmp_path / "safety.yaml"
-    backup.write_text(json.dumps({"measured": True, "rpo_seconds": 60}))
-    restore.write_text(json.dumps({"measured": True, "rto_seconds": 30}))
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    backup.write_text(json.dumps({"measured": True, "rpo_seconds": 60, "observed_at_ms": 1_000_000}))
+    restore.write_text(json.dumps({"measured": True, "rto_seconds": 30, "observed_at_ms": 1_000_000}))
     config.write_text("config-v1")
     def digest(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -47,7 +48,7 @@ def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_pat
         isolated_restore_evidence_path=str(restore),
         config_artifact_path=str(config),
     )
-    backup.write_text(json.dumps({"measured": True, "rpo_seconds": 60, "tampered": True}))
+    backup.write_text(json.dumps({"measured": True, "rpo_seconds": 60, "observed_at_ms": 1_000_000, "tampered": True}))
     profile = CanaryProfile(
         account_id=UUID(halt2.exchange_account_id), environment="prod", symbol="fUST",
         cell="fUST_a30", strategy="mean_reversion", amount_usdt=150,

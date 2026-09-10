@@ -1,0 +1,17 @@
+# Copy outside Git as backend.hcl, then supply the state-bucket S3 credentials
+# through the operator environment before terraform init. This bucket and its
+# runtime state token must be provisioned separately from the backup bucket.
+bucket = "bfx-funding-bot-terraform-state"
+key    = "r2/terraform.tfstate"
+region = "auto"
+
+endpoints = {
+  s3 = "https://<account_id>.r2.cloudflarestorage.com"
+}
+
+use_path_style              = true
+skip_credentials_validation = true
+skip_metadata_api_check     = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_s3_checksum            = true

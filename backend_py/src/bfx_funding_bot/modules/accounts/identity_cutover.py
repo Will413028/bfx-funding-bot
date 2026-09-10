@@ -777,29 +777,50 @@ class IdentityCutover:
             )
             for table_name, model in _LEGACY_ZERO_ROW_MODELS
         }
+        # Halt 1 runs at the additive identity revision. Select only columns
+        # present at that revision: EventLogRow also maps event-v3 columns
+        # introduced after the identity contract migration.
         events = list(
-            await session.scalars(select(EventLogRow).order_by(EventLogRow.event_seq.asc()))
+            (
+                await session.execute(
+                    select(
+                        EventLogRow.event_seq,
+                        EventLogRow.account_id,
+                        EventLogRow.exchange_account_id,
+                        EventLogRow.deployment_environment,
+                        EventLogRow.event_type,
+                        EventLogRow.cid,
+                        EventLogRow.venue_offer_id,
+                        EventLogRow.venue_seq,
+                        EventLogRow.payload,
+                        EventLogRow.occurred_at_ms,
+                    ).order_by(EventLogRow.event_seq.asc())
+                )
+            ).mappings()
         )
         event_payload = [
             {
-                "event_seq": row.event_seq,
-                "account_id": row.account_id,
+                "event_seq": row["event_seq"],
+                "account_id": row["account_id"],
                 # Include the resolved UUID in the evidence even before the
                 # backfill.  This makes the preflight hash identity-aware and
                 # lets verify prove that the owner did not change in transit.
                 "exchange_account_id": str(
-                    row.exchange_account_id
-                    or realm_to_account.get(row.account_id)
+                    row["exchange_account_id"]
+                    or realm_to_account.get(row["account_id"])
                 )
-                if (row.exchange_account_id or realm_to_account.get(row.account_id))
+                if (
+                    row["exchange_account_id"]
+                    or realm_to_account.get(row["account_id"])
+                )
                 else None,
-                "deployment_environment": row.deployment_environment,
-                "event_type": row.event_type,
-                "cid": row.cid,
-                "venue_offer_id": row.venue_offer_id,
-                "venue_seq": row.venue_seq,
-                "payload": row.payload,
-                "occurred_at_ms": row.occurred_at_ms,
+                "deployment_environment": row["deployment_environment"],
+                "event_type": row["event_type"],
+                "cid": row["cid"],
+                "venue_offer_id": row["venue_offer_id"],
+                "venue_seq": row["venue_seq"],
+                "payload": row["payload"],
+                "occurred_at_ms": row["occurred_at_ms"],
             }
             for row in events
         ]
@@ -815,7 +836,7 @@ class IdentityCutover:
             config_conflicts=config_conflicts,
             manifest_sha_conflicts=manifest_sha_conflicts,
             zero_row_legacy_tables=zero_row_legacy_tables,
-            event_head=events[-1].event_seq if events else None,
+            event_head=events[-1]["event_seq"] if events else None,
             event_hash=hashlib.sha256(encoded_events).hexdigest(),
         )
 

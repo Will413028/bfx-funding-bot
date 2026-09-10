@@ -52,3 +52,6 @@ uv run bfx-shadow                  # 跑 daemon（phase 由 BFX_PHASE 控制）
 - [前端架構設計文件](frontend_architecture.md)
 - [策略設計規範](strategy_specification.md)
 - [Release 0 operator-only containment runbook](docs/runbooks/release-0-operator-containment.md)
+- [Offsite DR Terraform module](infra/terraform/r2/README.md) and
+  [operator runbook](docs/runbooks/offsite-dr.md): Terraform manages only R2
+  infrastructure; the VM wizard manages runtime secret injection.
