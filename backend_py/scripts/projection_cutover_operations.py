@@ -146,6 +146,8 @@ async def verify_database_quiescence(
     Include idle runtime sessions: they can issue another command. Other client
     transactions also block. Idle operator pool connections remain permissible;
     table locks fence their writes during capture, not after the transaction.
+    Each call discards the connection's cached activity snapshot; otherwise a
+    second check in this same transaction could miss a newly connected writer.
     """
     await audit_runtime_roles(session, role_names=runtime_roles)
     omitted = await session.scalar(text("""
@@ -166,11 +168,12 @@ async def verify_database_quiescence(
           ))
         )
     """), {"roles": list(runtime_roles)})
+    await session.execute(text("SELECT pg_stat_clear_snapshot()"))
     active = await session.scalar(text("""
         SELECT EXISTS (
           SELECT 1 FROM pg_stat_activity
           WHERE datname=current_database() AND pid<>pg_backend_pid()
-          AND backend_type='client backend'
+          AND (backend_type='client backend' OR backend_type IS NULL)
           AND (usename=ANY(CAST(:roles AS text[])) OR state IS NULL
                OR state<>'idle' OR xact_start IS NOT NULL OR usename<>session_user)
         )
