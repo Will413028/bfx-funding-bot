@@ -32,15 +32,55 @@ from scripts.halt2_cutover import (
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
 
 
+@pytest.mark.parametrize("kind", [None, "archive_restore", "backup", "unknown"])
+def test_full_restore_measurement_rejects_other_receipt_kinds(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    path = tmp_path / "receipt.json"
+    payload = {"schema_version": 1, "kind": kind, "measured": True,
+               "rto_seconds": 30, "observed_at_ms": 1000000}
+    path.write_text(json.dumps(payload))
+    path.chmod(0o600)
+    with pytest.raises(ValueError):
+        _read_dr_measurement(path, key="rto_seconds")
+
+
+@pytest.mark.parametrize("mutation", ["version", "bool-version", "duplicate", "oversized", "public", "symlink", "unmeasured"])
+def test_receipt_reader_requires_private_bounded_versioned_evidence(tmp_path, monkeypatch, mutation):
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    path = tmp_path / "receipt.json"
+    payload = {"schema_version": 1, "kind": "restore", "measured": True,
+               "rto_seconds": 30, "observed_at_ms": 1000000}
+    if mutation == "version":
+        payload["schema_version"] = 2
+    elif mutation == "bool-version":
+        payload["schema_version"] = True
+    elif mutation == "unmeasured":
+        payload["measured"] = "true"
+    raw = json.dumps(payload)
+    if mutation == "duplicate":
+        raw = raw[:-1] + ', "kind":"restore"}'
+    if mutation == "oversized":
+        raw += " " * 65536
+    path.write_text(raw)
+    path.chmod(0o644 if mutation == "public" else 0o600)
+    if mutation == "symlink":
+        link = tmp_path / "link.json"
+        link.symlink_to(path)
+        path = link
+    with pytest.raises(ValueError):
+        _read_dr_measurement(path, key="rto_seconds")
+
+
 @pytest.mark.parametrize("key", ["rpo_seconds", "rto_seconds"])
 @pytest.mark.parametrize("observed", [None, True, 1000000.0, "1000000", -1, 1000001, 99999])
 def test_dr_freshness_rejects_missing_invalid_future_and_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, observed: object) -> None:
     monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
     path = tmp_path / "dr.json"
-    report = {"measured": True, key: 30}
+    report = {"schema_version": 1, "kind": "backup" if key == "rpo_seconds" else "restore", "measured": True, key: 30}
     if observed is not None:
         report["observed_at_ms"] = observed
     path.write_text(json.dumps(report))
+    path.chmod(0o600)
     with pytest.raises(ValueError):
         _read_dr_measurement(path, key=key)
 
@@ -50,7 +90,8 @@ def test_dr_freshness_rejects_missing_invalid_future_and_stale(tmp_path: Path, m
 def test_dr_freshness_accepts_window_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, age_ms: int) -> None:
     monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
     path = tmp_path / "dr.json"
-    path.write_text(json.dumps({"measured": True, key: 30, "observed_at_ms": 1000000 - age_ms}))
+    path.write_text(json.dumps({"schema_version": 1, "kind": "backup" if key == "rpo_seconds" else "restore", "measured": True, key: 30, "observed_at_ms": 1000000 - age_ms}))
+    path.chmod(0o600)
     assert _read_dr_measurement(path, key=key) == 30
 
 
@@ -58,7 +99,8 @@ def test_dr_freshness_accepts_window_boundaries(tmp_path: Path, monkeypatch: pyt
 def test_dr_freshness_preserves_strict_seconds_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: object) -> None:
     monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
     path = tmp_path / "dr.json"
-    path.write_text(json.dumps({"measured": True, "rto_seconds": seconds, "observed_at_ms": 1000000}))
+    path.write_text(json.dumps({"schema_version": 1, "kind": "restore", "measured": True, "rto_seconds": seconds, "observed_at_ms": 1000000}))
+    path.chmod(0o600)
     with pytest.raises(ValueError):
         _read_dr_measurement(path, key="rto_seconds")
 

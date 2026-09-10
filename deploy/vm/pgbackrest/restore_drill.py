@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -70,6 +71,7 @@ class DrillRequest:
     backup_label: str
     target_time: str | None
     baseline_path: Path
+    archive_only: bool = False
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -491,6 +493,10 @@ class RestoreDrill:
             f'GRANT CONNECT, TEMPORARY ON DATABASE "{plan.database_name}" TO {role};\n'
             f"GRANT USAGE ON SCHEMA public TO {role};\n"
             f"GRANT SELECT ON TABLE {table_list} TO {role};\n"
+            "DO $archive$ BEGIN IF EXISTS (SELECT FROM pg_namespace WHERE nspname='projection_audit') THEN "
+            f"GRANT USAGE ON SCHEMA projection_audit TO {role}; "
+            f"GRANT SELECT ON TABLE projection_audit.runs, projection_audit.rows TO {role}; "
+            "END IF; END $archive$;\n"
             "COMMIT;\n"
         )
         self._require_success(
@@ -552,6 +558,7 @@ class RestoreDrill:
         volume_created: bool,
         egress_network_created: bool,
         network_created: bool,
+        archive_path: Path | None = None,
     ) -> bool:
         # Cleanup is independent of the restore budget, including after timeout.
         self._deadline = self._clock() + 30
@@ -588,6 +595,12 @@ class RestoreDrill:
                 self._remaining()
             except (OSError, subprocess.SubprocessError, DrillFailureError):
                 failed = True
+        if archive_path is not None:
+            try:
+                _unlink_env_file(archive_path, timeout=self._remaining())
+                self._remaining()
+            except (OSError, subprocess.SubprocessError, DrillFailureError):
+                failed = True
         commands: list[tuple[str, ...]] = []
         if volume_created:
             commands.append(plan.cleanup_commands[1])
@@ -607,6 +620,7 @@ class RestoreDrill:
     def run(self, request: DrillRequest) -> int:
         plan: RestorePlan | None = None
         env_path: Path | None = None
+        archive_path: Path | None = None
         network_created = False
         egress_network_created = False
         volume_created = False
@@ -631,12 +645,27 @@ class RestoreDrill:
                     environment=request.environment, projector_version=request.projector_version,
                 )
                 plan = self._validate_prerequisites(request, baseline)
+                if type(request.archive_only) is not bool or (request.archive_only and not baseline.archives):
+                    _failure("restore_output_invalid")
                 password = self._password_factory()
                 if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
                     _failure("restore_output_invalid")
                 env_path = self._write_env_file(plan, password)
                 rto_started = self._clock()
                 self._deadline = rto_started + _MAX_RTO_SECONDS
+                # Archive preparation/verification stays inside the existing deadline.
+                transport = _evidence._archive.transport(baseline.archives or ())
+                with tempfile.NamedTemporaryFile(prefix="bfx-dr-archive-", suffix=".json", delete=False) as handle:
+                    archive_path = Path(handle.name)
+                    os.chmod(archive_path, 0o600)
+                    handle.write(transport)
+                verifier_image = self._require_success((
+                    "docker", "image", "inspect", "--format={{.Id}}", "bfx-bot:local",
+                )).stdout.strip()
+                if not _evidence._archive.image_digest(verifier_image) or (
+                    baseline.verifier_image_digest is not None and baseline.verifier_image_digest != verifier_image
+                ):
+                    _failure("restore_output_invalid")
                 self._require_success(plan.create_commands[0])
                 network_created = True
                 self._require_internal_network(plan)
@@ -654,13 +683,21 @@ class RestoreDrill:
                 self._bootstrap_role(plan, password)
                 schema_tsv = self._schema_tsv(plan)
                 verifier_cleanup_eligible = True
-                replay_json = self._replay_json(
-                    _compose_with_env(plan.run_commands[4], env_path), plan
-                )
+                archive_json = self._require_success(_commands.verifier_command(
+                    plan, image=verifier_image, env_path=env_path, input_path=archive_path,
+                    input_digest=hashlib.sha256(transport).hexdigest(), archive_only=request.archive_only,
+                )).stdout
+                _evidence._archive.validate_report(archive_json, baseline=baseline, archive_only=request.archive_only)
+                replay_json = ""
+                if not request.archive_only:
+                    replay_json = self._replay_json(_commands.verifier_command(
+                        plan, image=verifier_image, env_path=env_path,
+                    ), plan)
                 self._remaining()
-                _evidence.validate_restore_state(
-                    schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline,
-                )
+                if not request.archive_only:
+                    _evidence.validate_restore_state(
+                        schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline,
+                    )
                 image_digest, image_labels = self._image_metadata(plan)
                 if rto_started is None:
                     _failure("rto_invalid")
@@ -678,8 +715,12 @@ class RestoreDrill:
                     image_labels=image_labels,
                     network_name=plan.network_name,
                     network_internal=True,
+                    archive_json=archive_json, archive_only=request.archive_only,
+                    verifier_image_digest=verifier_image,
                 )
                 success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
+                success_report["restore_run_id"] = plan.project_name.removeprefix("bfx-dr-")
+                success_report["archive_input_digest"] = hashlib.sha256(transport).hexdigest()
                 self._remaining()
         except DrillFailureError as exc:
             failure_code = str(exc)
@@ -695,6 +736,7 @@ class RestoreDrill:
                     volume_created=volume_created,
                     egress_network_created=egress_network_created,
                     network_created=network_created,
+                    archive_path=archive_path,
                 )
                 if cleanup_failed:
                     failure_code = "cleanup_failed"
@@ -714,12 +756,12 @@ class RestoreDrill:
             if failure_code is not None:
                 try:
                     report = render_failure_evidence(
-                        kind="restore", error_code=failure_code,
+                        kind="archive_restore" if request.archive_only else "restore", error_code=failure_code,
                         observed_at_ms=time.time_ns() // 1_000_000,
                     )
                 except EvidenceError:
                     report = render_failure_evidence(
-                        kind="restore", error_code="restore_output_invalid",
+                        kind="archive_restore" if request.archive_only else "restore", error_code="restore_output_invalid",
                         observed_at_ms=time.time_ns() // 1_000_000,
                     )
                 try:
@@ -752,6 +794,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backup-label", required=True)
     parser.add_argument("--target-time")
     parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--archive-only", action="store_true")
     return parser
 
 
@@ -765,6 +808,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             backup_label=args.backup_label,
             target_time=args.target_time,
             baseline_path=args.baseline,
+            archive_only=args.archive_only,
         )
     )
 
