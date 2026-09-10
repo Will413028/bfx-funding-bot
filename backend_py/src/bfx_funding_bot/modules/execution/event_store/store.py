@@ -1807,6 +1807,23 @@ class PostgresEventStore:
             ps.last_updated_ms = occurred_at_ms
             ps.last_event_seq = event_seq
 
+    async def _reset_historical_claim(
+        self, session: AsyncSession, row: EventLogRow, *, account_id: str,
+        deployment_environment: str, reset_sequences: frozenset[int],
+    ) -> None:
+        if row.event_seq not in reset_sequences:
+            return
+        await session.execute(delete(OfferClaimRow).where(
+            account_scope_clause(
+                session, account_id=account_id,
+                exchange_account_column=OfferClaimRow.exchange_account_id,
+                legacy_account_column=OfferClaimRow.account_id,
+            ),
+            OfferClaimRow.deployment_environment == deployment_environment,
+            OfferClaimRow.cid == row.cid,
+        ))
+        await session.flush()
+
     async def rebuild_snapshot_from_log(
         self, session: AsyncSession, *, account_id: str, deployment_environment: str,
         symbol: str | None = None,
@@ -1822,6 +1839,12 @@ class PostgresEventStore:
         position_state: latest reconcile_observation checkpoint ⊕ domain events
         with event_seq > fence. Falls back to genesis fold if no checkpoint.
         """
+        from bfx_funding_bot.modules.execution.event_store.historical_claims import (
+            historical_claim_reset_sequences,
+        )
+
+        if deployment_environment != self._env:
+            raise ValueError("rebuild environment does not match event store")
         if symbol is None:
             await self._rebuild_full_from_log(
                 session,
@@ -1829,6 +1852,20 @@ class PostgresEventStore:
                 deployment_environment=deployment_environment,
             )
             return
+        rows = (await session.execute(
+            select(EventLogRow).where(
+                account_scope_clause(
+                    session,
+                    account_id=account_id,
+                    exchange_account_column=EventLogRow.exchange_account_id,
+                    legacy_account_column=EventLogRow.account_id,
+                ),
+                EventLogRow.deployment_environment == deployment_environment,
+            ).order_by(EventLogRow.event_seq.asc())
+        )).scalars().all()
+        reset_sequences = historical_claim_reset_sequences(
+            rows, account_id=account_id, environment=deployment_environment,
+        )
         await session.execute(delete(OfferClaimRow).where(
             account_scope_clause(
                 session,
@@ -1848,21 +1885,13 @@ class PostgresEventStore:
             PositionStateRow.symbol == symbol))
         await session.flush()
 
-        rows = (await session.execute(
-            select(EventLogRow).where(
-                account_scope_clause(
-                    session,
-                    account_id=account_id,
-                    exchange_account_column=EventLogRow.exchange_account_id,
-                    legacy_account_column=EventLogRow.account_id,
-                ),
-                EventLogRow.deployment_environment == deployment_environment,
-            ).order_by(EventLogRow.event_seq.asc())
-        )).scalars().all()
-
         # offer_claims: full fold.
         for r in rows:
             event = deserialize_stored_event(r)
+            await self._reset_historical_claim(
+                session, r, account_id=account_id,
+                deployment_environment=deployment_environment, reset_sequences=reset_sequences,
+            )
             await self._project_offer_claims(
                 session, event, account_id, event_seq=r.event_seq
             )
@@ -1916,20 +1945,13 @@ class PostgresEventStore:
                 continue
             if r.event_type in _AUDIT_ONLY_TYPES:
                 continue  # mirror the live-append skip: no ledger fold, no seq bump
-            # Phase 2: fUSD/fUST coexist in one event_log, so the tail fold MUST
-            # filter on payload["symbol"] == symbol — otherwise the other
-            # currency's deltas mix into this symbol's position_state row.
-            # Legacy rows predate the symbol column (no `symbol` key); they were
-            # fUST-era, so default a missing symbol to DEFAULT_RECONCILE_SYMBOL —
-            # otherwise this filter drops them and silently miscomputes realized
-            # on a genesis rebuild (the deploy pre-flight foot-gun).
-            if ((r.payload or {}).get("symbol") or DEFAULT_RECONCILE_SYMBOL) != symbol:
+            # Use the same stored upcaster as full replay, including the
+            # documented size_usdt alias and historical fUST symbol default.
+            # Reading raw amount here would silently drop pre-amount fills.
+            event = deserialize_stored_event(r)
+            if (getattr(event, "symbol", None) or DEFAULT_RECONCILE_SYMBOL) != symbol:
                 continue
-            # Raw payload read (no deserialize_event) — intentional: the tail fold
-            # only needs the native `amount` and stays decoupled from domain event
-            # objects. If a new event type gains a non-string-serialized amount,
-            # sync this with serialization.py.
-            size = Decimal(str((r.payload or {}).get("amount", 0) or 0))
+            size = Decimal(str(getattr(event, "amount", None) or 0))
             if r.event_type == "RESERVATION_CLAIMED":
                 reserved += size
             elif r.event_type == "ORDER_FILL":
@@ -1951,6 +1973,26 @@ class PostgresEventStore:
         deployment_environment: str,
     ) -> None:
         """Replay all event types into clean account-scoped projections."""
+        from bfx_funding_bot.modules.execution.event_store.historical_claims import (
+            historical_claim_reset_sequences,
+        )
+
+        rows = (
+            await session.execute(
+                select(EventLogRow).where(
+                    account_scope_clause(
+                        session,
+                        account_id=account_id,
+                        exchange_account_column=EventLogRow.exchange_account_id,
+                        legacy_account_column=EventLogRow.account_id,
+                    ),
+                    EventLogRow.deployment_environment == deployment_environment,
+                ).order_by(EventLogRow.event_seq.asc())
+            )
+        ).scalars().all()
+        reset_sequences = historical_claim_reset_sequences(
+            rows, account_id=account_id, environment=deployment_environment,
+        )
         scope_tables = (
             (
                 ExecutionUncertaintyRow,
@@ -1981,21 +2023,12 @@ class PostgresEventStore:
                 )
             )
         await session.flush()
-        rows = (
-            await session.execute(
-                select(EventLogRow).where(
-                    account_scope_clause(
-                        session,
-                        account_id=account_id,
-                        exchange_account_column=EventLogRow.exchange_account_id,
-                        legacy_account_column=EventLogRow.account_id,
-                    ),
-                    EventLogRow.deployment_environment == deployment_environment,
-                ).order_by(EventLogRow.event_seq.asc())
-            )
-        ).scalars().all()
         for row in rows:
             event = deserialize_stored_event(row)
+            await self._reset_historical_claim(
+                session, row, account_id=account_id,
+                deployment_environment=deployment_environment, reset_sequences=reset_sequences,
+            )
             await self._project_event_unlocked(
                 session,
                 event,
