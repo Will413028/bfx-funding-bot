@@ -2,14 +2,20 @@
 
 Capture requires quiescent projection writers and the existing account lock.
 The caller owns commit/rollback. Source and archive cursors hold at most one
-256-row batch; PostgreSQL sorts encoded keys using the archive primary index.
+256-row batch. Original bytes are independently sorted on private temporary
+disk; PostgreSQL sorts stored archive keys using the archive primary index.
 Runtime must never import operator scripts or consume this archive for replay.
 """
 
 import hashlib
 import json
+import sqlite3
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from decimal import Decimal
 from functools import partial
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from typing import cast as type_cast
 from uuid import UUID
@@ -23,11 +29,12 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 
-from .codec import FORMAT_VERSION, decode_row, encode_row
+from .codec import FORMAT_VERSION, JSON_NULL, decode_row, encode_row
 from .contracts import ArchiveManifest, Scope, StreamIdentity
 from .manifest import (
     TABLE_NAMES,
     decode_manifest,
+    digest_rows,
     encode_manifest,
     seal_manifest,
     validate_manifest,
@@ -35,6 +42,25 @@ from .manifest import (
 from .tables import ArchiveRow, ArchiveRun
 
 _BATCH = 256
+
+
+@contextmanager
+def _source_spool() -> Iterator[sqlite3.Connection]:
+    """Private disk-backed sort of ORIGINAL bytes, independent of PG writes.
+
+    Keep the SQLite cache bounded too. The 0700 directory/0600 database are
+    removed on success or exception; connection closure precedes cleanup.
+    """
+    with TemporaryDirectory(prefix="bfx-archive-source-") as directory:
+        path = Path(directory) / "source.sqlite"
+        path.touch(mode=0o600, exist_ok=False)
+        with closing(sqlite3.connect(path)) as source:
+            source.execute("PRAGMA cache_size=-512")
+            source.execute("PRAGMA temp_store=FILE")
+            source.execute(
+                "CREATE TABLE source_rows(row_key BLOB PRIMARY KEY, payload BLOB NOT NULL) WITHOUT ROWID"
+            )
+            yield source
 
 
 def _describe(connection: Connection, name: str) -> tuple[Table, list[dict[str, Any]], list[str]]:
@@ -196,38 +222,49 @@ async def capture_archive(
             table.c.exchange_account_id == scope.account_id,
             table.c.deployment_environment == scope.environment,
         )
-        result = await session.stream(query.execution_options(yield_per=_BATCH))
-        source_count = 0
-        try:
-            async for batch in result.mappings().partitions(_BATCH):
-                inserts = []
-                for row in batch:
-                    values = dict(row)
-                    for column in json_names:
-                        if values[column] is not None:
-                            values[column] = json.loads(values[column], parse_float=Decimal)
-                    payload = encode_row(values)
-                    key = encode_row({k: values[k] for k in keys})
-                    if any(values[k] is None for k in keys) or decode_row(payload) != values:
-                        raise ValueError("archive row failed round-trip/key validation")
-                    inserts.append(
-                        {
-                            "run_id": run_id,
-                            "table_name": name,
-                            "row_key": key,
-                            "encoded_payload": payload,
-                            "row_digest": hashlib.sha256(payload).hexdigest(),
-                        }
-                    )
-                await session.execute(type_cast(Table, ArchiveRow.__table__).insert(), inserts)
-                source_count += len(inserts)
-        finally:
-            await result.close()
+        with _source_spool() as source:
+            result = await session.stream(query.execution_options(yield_per=_BATCH))
+            source_count = 0
+            try:
+                async for batch in result.mappings().partitions(_BATCH):
+                    inserts = []
+                    for row in batch:
+                        values = dict(row)
+                        for column in json_names:
+                            if values[column] is not None:
+                                json_value = json.loads(values[column], parse_float=Decimal)
+                                values[column] = JSON_NULL if json_value is None else json_value
+                        payload = encode_row(values)
+                        key = encode_row({k: values[k] for k in keys})
+                        if any(values[k] is None for k in keys) or decode_row(payload) != values:
+                            raise ValueError("archive row failed round-trip/key validation")
+                        # Save source bytes BEFORE handing the batch to the PG
+                        # archive write path (including drivers and triggers).
+                        try:
+                            source.execute("INSERT INTO source_rows VALUES (?, ?)", (key, payload))
+                        except sqlite3.IntegrityError:
+                            raise ValueError("duplicate source archive key") from None
+                        source_count += 1
+                        inserts.append(
+                            {
+                                "run_id": run_id,
+                                "table_name": name,
+                                "row_key": key,
+                                "encoded_payload": payload,
+                                "row_digest": hashlib.sha256(payload).hexdigest(),
+                            }
+                        )
+                    await session.execute(type_cast(Table, ArchiveRow.__table__).insert(), inserts)
+            finally:
+                await result.close()
+            source_digest = digest_rows(
+                row[0] for row in source.execute("SELECT payload FROM source_rows ORDER BY row_key")
+            )
         entry = {"name": name, "schema": schema, "key_columns": keys}
         count, digest = await _table_digest(session, run_id=run_id, scope=scope, entry=entry)
-        if count != source_count:
-            raise ValueError("archive capture count mismatch")
-        entries.append({**entry, "count": count, "digest": digest})
+        if count != source_count or digest != source_digest:
+            raise ValueError("source/archive content digest or count mismatch")
+        entries.append({**entry, "count": source_count, "digest": source_digest})
     manifest = seal_manifest(
         ArchiveManifest(
             run_id,

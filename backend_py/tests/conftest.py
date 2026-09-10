@@ -83,7 +83,7 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
 
     The container is session-scoped for startup cost, but migration tests are
     allowed to drive the public schema all the way to the irreversible Halt 1
-    contract.  Reset both application schemas before each test so that a
+    contract.  Reset application and archive schemas before each test so that a
     migration test cannot leak NOT NULL/FK state (or rows) into a runtime
     integration test that intentionally exercises the additive ORM fixture.
     """
@@ -92,6 +92,9 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(async_url, pool_pre_ping=True, pool_recycle=600)
 
     async with engine.begin() as conn:
+        # This engine comes only from the session-scoped synthetic container;
+        # never preserve an earlier test's immutable archive across migrations.
+        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         await conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
         await conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         await conn.exec_driver_sql("CREATE SCHEMA public")
