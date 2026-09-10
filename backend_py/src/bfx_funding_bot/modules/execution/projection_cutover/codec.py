@@ -10,12 +10,25 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from uuid import UUID
 
 FORMAT_VERSION = 1
 
 
+class _JSONNull(Enum):
+    VALUE = "json_null"
+
+
+# Additive format-1 leaf, before deployment: existing value bytes stay intact.
+# None is SQL NULL at a column boundary; this singleton is actual top-level JSON
+# null. Nested JSON null remains ordinary None inside its JSON container.
+JSON_NULL = _JSONNull.VALUE
+
+
 def _encode(value: object) -> object:
+    if value is JSON_NULL:
+        return ["json_null"]
     if value is None:
         return ["null"]
     if type(value) is bool:
@@ -56,6 +69,8 @@ def _decode(node: object) -> object:
         raise ValueError("invalid archive type tag")
     if node == ["null"]:
         return None
+    if node == ["json_null"]:
+        return JSON_NULL
     if len(node) != 2:
         raise ValueError("invalid archive typed value")
     tag, value = node

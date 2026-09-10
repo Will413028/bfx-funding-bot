@@ -665,3 +665,242 @@ async def test_unknown_table_corruption_cannot_force_unbounded_verifier_memory(a
     finally:
         tracemalloc.stop()
     assert peak < 8 * 1024 * 1024
+
+
+async def test_capture_rejects_write_time_payload_and_digest_replacement(
+    archive_db, tmp_path, monkeypatch
+):
+    from decimal import Decimal
+    from functools import partial
+    from tempfile import TemporaryDirectory
+
+    from bfx_funding_bot.modules.execution.projection_cutover import archive
+    from bfx_funding_bot.modules.execution.projection_cutover.codec import encode_row
+
+    monkeypatch.setattr(archive, "TemporaryDirectory", partial(TemporaryDirectory, dir=tmp_path))
+    factory, engine = archive_db
+    with engine.begin() as conn:
+        source = dict(
+            conn.execute(text("SELECT * FROM position_state WHERE deployment_environment='ci'"))
+            .mappings()
+            .one()
+        )
+        source["reserved"] = Decimal("555.000")
+        payload = encode_row(source)
+        digest = hashlib.sha256(payload).hexdigest()
+        conn.exec_driver_sql(f"""
+            CREATE FUNCTION public.corrupt_archive_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF NEW.table_name = 'position_state' THEN
+                NEW.encoded_payload = decode('{payload.hex()}', 'hex');
+                NEW.row_digest = '{digest}';
+              END IF;
+              RETURN NEW;
+            END $$
+        """)
+        conn.exec_driver_sql(
+            "CREATE TRIGGER zz_corrupt_archive_insert BEFORE INSERT ON projection_audit.rows FOR EACH ROW EXECUTE FUNCTION public.corrupt_archive_insert()"
+        )
+    async with factory() as session:
+        with pytest.raises(ValueError, match=r"source.*(content|digest)"):
+            await capture_archive(
+                session,
+                scope=SCOPE,
+                run_id=uuid4(),
+                image_digest="synthetic",
+                projector_version="execution-state-v1",
+            )
+        await session.rollback()
+    assert list(tmp_path.iterdir()) == []
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM projection_audit.runs")).scalar_one() == 0
+        assert conn.execute(
+            text("SELECT reserved FROM position_state WHERE deployment_environment='ci'")
+        ).scalar_one() == Decimal("1.2300")
+
+
+@pytest.mark.parametrize("iteration", [0, 1])
+async def test_shared_pg_fixture_resets_previous_audit_schema(pg_engine, iteration):
+    # Each parameter is a separate test using the SAME session testcontainer.
+    # Leave a populated audit schema for the next pg_engine setup to remove.
+    async with pg_engine.begin() as conn:
+        assert await conn.scalar(text("SELECT to_regnamespace('projection_audit')")) is None
+        await conn.exec_driver_sql("CREATE SCHEMA projection_audit")
+        await conn.exec_driver_sql("CREATE TABLE projection_audit.previous_test(id integer)")
+        await conn.execute(
+            text("INSERT INTO projection_audit.previous_test VALUES (:id)"), {"id": iteration}
+        )
+
+
+async def test_nullable_json_null_remains_distinct_from_sql_null(archive_db):
+    from sqlalchemy import JSON, MetaData, Table, null
+
+    from bfx_funding_bot.modules.execution.projection_cutover import codec
+
+    factory, engine = archive_db
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+            INSERT INTO event_log(account_id,exchange_account_id,deployment_environment,event_type,payload,occurred_at_ms)
+            SELECT :s,:a,'ci','CREDIT_CLOSED','{}'::jsonb,i FROM generate_series(1,3) i
+        """),
+            {"a": ACCOUNT, "s": str(ACCOUNT)},
+        )
+        conn.execute(
+            text("""
+            INSERT INTO execution_uncertainties(exchange_account_id,deployment_environment,symbol,kind,
+              correlation_key,intended_amount,evidence,opened_event_seq)
+            VALUES (:a,'ci','fUST','submit_outcome_unknown','sql-null',1,
+              '{"nested": [null,"null",["json_null"],{"type": "json_null"}]}',1)
+        """),
+            {"a": ACCOUNT},
+        )
+        conn.execute(
+            text("""
+            INSERT INTO execution_uncertainties(exchange_account_id,deployment_environment,symbol,kind,
+              correlation_key,intended_amount,evidence,opened_event_seq,state,reconcile_event_seq,
+              resolved_event_seq,resolved_by_operator_id,resolution_reason,resolution_evidence,resolved_at)
+            VALUES (:a,'ci','fUST','submit_outcome_unknown','json-null',1,'{}',1,'resolved',2,3,
+              'synthetic','fixture','null'::jsonb,now())
+        """),
+            {"a": ACCOUNT},
+        )
+        for key, value in (
+            ("json-string", '"null"'),
+            ("json-list", '["json_null"]'),
+            ("json-map", '{"tag":"json_null"}'),
+        ):
+            conn.execute(
+                text("""
+                INSERT INTO execution_uncertainties(exchange_account_id,deployment_environment,symbol,kind,
+                  correlation_key,intended_amount,evidence,opened_event_seq,state,reconcile_event_seq,
+                  resolved_event_seq,resolved_by_operator_id,resolution_reason,resolution_evidence,resolved_at)
+                VALUES (:a,'ci','fUST','submit_outcome_unknown',:key,1,'{}',1,'resolved',2,3,
+                  'synthetic','fixture',CAST(:value AS jsonb),now())
+            """),
+                {"a": ACCOUNT, "key": key, "value": value},
+            )
+        assert conn.execute(
+            text(
+                "SELECT correlation_key,resolution_evidence IS NULL,resolution_evidence::text FROM execution_uncertainties ORDER BY correlation_key"
+            )
+        ).all() == [
+            ("json-list", False, '["json_null"]'),
+            ("json-map", False, '{"tag": "json_null"}'),
+            ("json-null", False, "null"),
+            ("json-string", False, '"null"'),
+            ("sql-null", True, None),
+        ]
+    expected = await capture(factory)
+    with engine.connect() as conn:
+        decoded = [
+            decode_row(payload)
+            for payload in conn.execute(
+                text(
+                    "SELECT encoded_payload FROM projection_audit.rows WHERE run_id=:id AND table_name='execution_uncertainties'"
+                ),
+                {"id": expected.run_id},
+            ).scalars()
+        ]
+    evidence = {row["correlation_key"]: row["resolution_evidence"] for row in decoded}
+    assert evidence["sql-null"] is None
+    assert evidence["json-null"] is not None
+    assert evidence["json-null"] is codec.JSON_NULL
+    assert evidence["json-string"] == "null"
+    assert evidence["json-list"] == ["json_null"]
+    assert evidence["json-map"] == {"tag": "json_null"}
+    assert next(row["evidence"] for row in decoded if row["correlation_key"] == "sql-null") == {
+        "nested": [None, "null", ["json_null"], {"type": "json_null"}],
+    }
+    # Restore ALL fields into a real PG table with the original CHECK/NOT NULL
+    # constraints. Only typed JSON columns need these SQL binding decisions.
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TEMP TABLE restored_uncertainties (LIKE public.execution_uncertainties INCLUDING ALL)"
+        )
+        restored = Table("restored_uncertainties", MetaData(), autoload_with=conn)
+        for row in decoded:
+            values = dict(row)
+            for column in restored.c:
+                if isinstance(column.type, JSON):
+                    if values[column.name] is codec.JSON_NULL:
+                        values[column.name] = JSON.NULL
+                    elif values[column.name] is None:
+                        values[column.name] = null()
+            conn.execute(restored.insert().values(values))
+        assert conn.execute(
+            text(
+                "SELECT correlation_key,resolution_evidence IS NULL,resolution_evidence::text FROM restored_uncertainties ORDER BY correlation_key"
+            )
+        ).all() == [
+            ("json-list", False, '["json_null"]'),
+            ("json-map", False, '{"tag": "json_null"}'),
+            ("json-null", False, "null"),
+            ("json-string", False, '"null"'),
+            ("sql-null", True, None),
+        ]
+        assert (
+            conn.execute(
+                text("SELECT to_jsonb(r) FROM restored_uncertainties r ORDER BY correlation_key")
+            ).all()
+            == conn.execute(
+                text("SELECT to_jsonb(r) FROM execution_uncertainties r ORDER BY correlation_key")
+            ).all()
+        )
+
+
+async def test_capture_source_spool_is_private_and_cleaned_on_success(
+    archive_db, tmp_path, monkeypatch
+):
+    import stat
+    from functools import partial
+    from tempfile import TemporaryDirectory
+
+    from sqlalchemy import event
+
+    from bfx_funding_bot.modules.execution.projection_cutover import archive
+
+    factory, _ = archive_db
+    monkeypatch.setattr(archive, "TemporaryDirectory", partial(TemporaryDirectory, dir=tmp_path))
+    checked = set()
+
+    def inspect_source_files(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO projection_audit.rows"):
+            for directory in tmp_path.iterdir():
+                assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+                database = directory / "source.sqlite"
+                assert stat.S_IMODE(database.stat().st_mode) == 0o600
+                checked.add(directory)
+
+    event.listen(factory.kw["bind"].sync_engine, "before_cursor_execute", inspect_source_files)
+    try:
+        await capture(factory)
+    finally:
+        event.remove(factory.kw["bind"].sync_engine, "before_cursor_execute", inspect_source_files)
+    assert checked
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_source_spool_is_removed_when_pg_insert_aborts(archive_db, tmp_path, monkeypatch):
+    from functools import partial
+    from tempfile import TemporaryDirectory
+
+    from sqlalchemy.exc import DBAPIError
+
+    from bfx_funding_bot.modules.execution.projection_cutover import archive
+
+    factory, engine = archive_db
+    monkeypatch.setattr(archive, "TemporaryDirectory", partial(TemporaryDirectory, dir=tmp_path))
+    with engine.begin() as conn:
+        conn.exec_driver_sql("""
+            CREATE FUNCTION public.reject_archive_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'synthetic insert failure'; END $$
+        """)
+        conn.exec_driver_sql(
+            "CREATE TRIGGER zz_reject_archive_insert BEFORE INSERT ON projection_audit.rows FOR EACH ROW EXECUTE FUNCTION public.reject_archive_insert()"
+        )
+    with pytest.raises(DBAPIError, match="synthetic insert failure"):
+        await capture(factory)
+    assert list(tmp_path.iterdir()) == []
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM projection_audit.runs")).scalar_one() == 0

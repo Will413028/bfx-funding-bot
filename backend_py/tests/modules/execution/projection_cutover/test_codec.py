@@ -93,3 +93,76 @@ def test_rejects_malformed_envelope(payload):
     codec = _codec()
     with pytest.raises(ValueError):
         codec.decode_row(payload)
+
+
+def test_json_null_has_its_own_singleton_leaf_and_preserves_sql_null_bytes():
+    codec = _codec()
+    assert hasattr(codec, "JSON_NULL"), "JSON null singleton is missing"
+    assert codec.encode_row({"x": None}) == b'{"row":["map",{"x":["null"]}],"version":1}'
+    assert (
+        codec.encode_row({"x": codec.JSON_NULL})
+        == b'{"row":["map",{"x":["json_null"]}],"version":1}'
+    )
+    decoded = codec.decode_row(codec.encode_row({"sql": None, "json": codec.JSON_NULL}))
+    assert decoded["sql"] is None
+    assert decoded["json"] is codec.JSON_NULL
+    from copy import deepcopy
+
+    assert deepcopy(decoded)["json"] is codec.JSON_NULL
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "json_null",
+        "null",
+        ["json_null"],
+        {"type": "json_null"},
+        {"version": 1, "row": ["json_null"]},
+        {"nested": [None, "null", ["json_null"], {"tag": "json_null"}]},
+    ],
+)
+def test_user_json_cannot_impersonate_json_null_leaf(value):
+    codec = _codec()
+    assert hasattr(codec, "JSON_NULL"), "JSON null singleton is missing"
+    encoded = codec.encode_row({"x": value})
+    assert encoded != codec.encode_row({"x": codec.JSON_NULL})
+    decoded = codec.decode_row(encoded)["x"]
+    assert decoded == value
+    assert decoded is not codec.JSON_NULL
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        ["json_null", None],
+        ["json_null", "null"],
+        ["json_null", []],
+        ["json_null", {}, None],
+        ["JSON_NULL"],
+        ["unknown_null"],
+        {"tag": "json_null"},
+    ],
+)
+def test_malformed_json_null_and_unknown_tags_fail_closed(node):
+    codec = _codec()
+    with pytest.raises(ValueError):
+        codec.decode_row(json.dumps({"version": 1, "row": ["map", {"x": node}]}).encode())
+
+
+def test_existing_format_one_value_bytes_remain_unchanged():
+    codec = _codec()
+    values = {
+        "decimal": Decimal("1.2300"),
+        "json": {"nested": [None, True, "json_null"]},
+        "uuid": UUID(int=1),
+        "time": datetime.fromisoformat("2001-02-03T04:05:06+00:00"),
+    }
+    expected = (
+        b'{"row":["map",{"decimal":["decimal","1.2300"],'
+        b'"json":["map",{"nested":["list",[["null"],["bool",true],["str","json_null"]]]}],'
+        b'"time":["datetime","2001-02-03T04:05:06+00:00"],'
+        b'"uuid":["uuid","00000000-0000-0000-0000-000000000001"]}],"version":1}'
+    )
+    assert codec.encode_row(values) == expected
+    assert codec.decode_row(expected) == values
