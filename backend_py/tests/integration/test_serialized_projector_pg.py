@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-_REVISION = "e7b1c2d3e4f5"
+_REVISION = "f8c2d4e6a901"
 _ENV = "ci"
 
 
@@ -40,6 +40,7 @@ def _reset_and_upgrade(sync_url: str) -> None:
     engine = create_engine(sync_url)
     try:
         with engine.begin() as connection:
+            connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
             connection.exec_driver_sql("DROP SCHEMA public CASCADE")
             connection.exec_driver_sql("CREATE SCHEMA public")
@@ -170,6 +171,7 @@ async def test_cutover_seeds_historical_projection_cursor(
     try:
         with engine.begin() as connection:
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
             connection.exec_driver_sql("DROP SCHEMA public CASCADE")
             connection.exec_driver_sql("CREATE SCHEMA public")
         config = Config(str(_ALEMBIC_INI))
@@ -412,3 +414,27 @@ async def test_projection_failure_rolls_back_event_claim_and_head_in_postgres(
         assert await session.scalar(select(func.count()).select_from(EventLogRow)) == 0
         assert await session.scalar(select(func.count()).select_from(OfferClaimRow)) == 0
         assert await session.scalar(select(func.count()).select_from(ProjectionHeadRow)) == 0
+
+
+@pytest.mark.asyncio
+async def test_archive_revision_strict_append_and_unknown_revision_rejection(
+    pg_engine, pg_session_factory, monkeypatch,
+) -> None:
+    from sqlalchemy import text
+    sync_url = pg_engine.url.render_as_string(hide_password=False).replace("+asyncpg", "+psycopg")
+    monkeypatch.setenv("DATABASE_URL", sync_url)
+    _reset_and_upgrade(sync_url)
+    account = uuid4()
+    await _seed_accounts(pg_session_factory, account)
+    writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=_ENV))
+    async with pg_session_factory() as session:
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "f8c2d4e6a901"
+        result = await writer.append(session, _claimed(account, cid=123, venue_seq=123))
+        assert result.persisted and result.projection_head == result.event_seq
+        await session.commit()
+    for revision in ("unknown", "bc4d5e6f7081"):
+        async with pg_session_factory() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num=:r"), {"r": revision})
+            with pytest.raises(ValueError, match="cursor migration incomplete"):
+                await writer.append(session, _claimed(account, cid=124, venue_seq=124))
+            await session.rollback()
