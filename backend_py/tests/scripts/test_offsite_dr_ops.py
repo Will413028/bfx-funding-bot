@@ -633,8 +633,9 @@ def test_wrapper_persistence_fault_revokes_old_measurement(
     bin_dir, log = _fake_docker(tmp_path)
     output = tmp_path / "bfx/dr-evidence/backup.json"
     output.parent.mkdir(parents=True)
-    output.write_text(json.dumps({"measured": True, "rpo_seconds": 1,
+    output.write_text(json.dumps({"schema_version": 1, "kind": "backup", "measured": True, "rpo_seconds": 1,
                                   "observed_at_ms": time.time_ns() // 1_000_000}))
+    output.chmod(0o600)
     assert _read_dr_measurement(output, key="rpo_seconds") == 1
     shim = bin_dir / ("python3" if fault == "enospc" else "mktemp")
     shim.write_text(

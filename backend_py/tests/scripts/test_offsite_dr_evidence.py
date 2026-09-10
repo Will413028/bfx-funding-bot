@@ -49,7 +49,18 @@ evidence = _load_evidence()
 EvidenceError = evidence.EvidenceError
 render_backup_evidence = evidence.render_backup_evidence
 render_failure_evidence = evidence.render_failure_evidence
-render_restore_evidence = evidence.render_restore_evidence
+def render_restore_evidence(**kwargs):
+    return evidence.render_restore_evidence(**{
+        "archive_json": _archive_report(), "verifier_image_digest": "sha256:" + "b" * 64,
+        **kwargs,
+    })
+
+
+def _archive_report():
+    return json.dumps({"schema_version": 1,
+        "scope": {"account_id": "3f19d046-5030-494c-9a0a-9573bb890c1f", "environment": "prod"},
+        "event_count": 9, "event_head": 42, "event_hash": "a" * 64,
+        "migration_heads": ["head-a", "head-b"], "archives": [], "archive_only": False})
 
 
 def _baseline_payload() -> dict[str, object]:
@@ -76,6 +87,96 @@ def _load_baseline(path: Path, **identity: object):
 
 def _baseline():
     return evidence.RestoreBaseline(**(_baseline_payload() | {"migration_heads": ("head-a", "head-b")}))
+
+
+def test_archive_baseline_version_two_requires_explicit_inventory_and_bot_image(tmp_path):
+    path = tmp_path / "baseline.json"
+    payload = _baseline_payload() | {"schema_version": 2, "archives": [],
+                                   "verifier_image_digest": "sha256:" + "c" * 64}
+    path.write_text(json.dumps(payload))
+    path.chmod(0o600)
+    baseline = _load_baseline(path)
+    assert baseline.archives == ()
+    assert baseline.schema_version == 2
+    for field in ("archives", "verifier_image_digest"):
+        path.write_text(json.dumps({k: v for k, v in payload.items() if k != field}))
+        with pytest.raises(EvidenceError):
+            _load_baseline(path)
+
+
+def test_legacy_dataclass_serialization_remains_explicit_and_compatible(tmp_path):
+    from dataclasses import asdict
+    path = tmp_path / "baseline.json"
+    payload = asdict(_baseline())
+    path.write_text(json.dumps(payload))
+    assert _load_baseline(path).schema_version == 1
+    assert _load_baseline(path).archives is None
+    path.write_text(json.dumps(payload | {"archives": []}))
+    with pytest.raises(EvidenceError):
+        _load_baseline(path)
+
+
+def test_render_restore_requires_explicit_archive_inventory_observation(tmp_path):
+    with pytest.raises(EvidenceError, match="restore_output_invalid"):
+        _render_baseline(tmp_path, archive_json=None)
+
+
+def test_render_restore_rejects_nonboolean_archive_mode(tmp_path):
+    with pytest.raises(EvidenceError):
+        _render_baseline(tmp_path, archive_only=0)
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "oversized"])
+def test_full_restore_replay_evidence_is_bounded_and_unambiguous(tmp_path, mutation):
+    raw = _replay_report()
+    if mutation == "duplicate":
+        raw = raw[:-1] + ', "event_hash":"' + "a" * 64 + '"}'
+    else:
+        raw += " " * 65536
+    with pytest.raises(EvidenceError):
+        _render_baseline(tmp_path, replay_json=raw)
+
+
+@pytest.mark.parametrize("script", ["evidence.py", "restore_drill.py"])
+def test_host_entrypoint_remains_standalone_stdlib(script):
+    result = subprocess.run((sys.executable, "-I", "-S", str(EVIDENCE_PATH.with_name(script)), "--help"),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["pin", "public", "symlink", "oversized", "duplicate-run"])
+def test_opaque_transport_requires_private_pinned_bounded_inputs(tmp_path, mutation):
+    path = tmp_path / "prepared.json"
+    path.write_bytes(b"opaque bytes preserved without host decoding")
+    path.chmod(0o600)
+    ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "b" * 64,
+           "prepared_path": str(path), "prepared_digest": hashlib.sha256(path.read_bytes()).hexdigest()}
+    if mutation == "pin":
+        path.write_bytes(b"changed")
+    elif mutation == "public":
+        path.chmod(0o644)
+    elif mutation == "symlink":
+        link = tmp_path / "link"
+        link.symlink_to(path)
+        ref["prepared_path"] = str(link)
+    elif mutation == "oversized":
+        path.write_bytes(b"x" * 1048577)
+        ref["prepared_digest"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises((ValueError, OSError)):
+        evidence._archive.transport((ref, ref) if mutation == "duplicate-run" else (ref,))
+
+
+def test_opaque_transport_preserves_exact_prepared_file_bytes(tmp_path):
+    import base64
+    path = tmp_path / "prepared.json"
+    raw = b'not decoded by host\x00\xff'
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "b" * 64,
+           "prepared_path": str(path), "prepared_digest": hashlib.sha256(raw).hexdigest()}
+    envelope = json.loads(evidence._archive.transport((ref,)))
+    assert base64.b64decode(envelope["prepared"][0]["payload"]) == raw
+    assert envelope["prepared"][0]["sha256"] == ref["prepared_digest"]
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -202,6 +303,9 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path) -> None:
     schema = tmp_path / "schema.tsv"
     replay = tmp_path / "replay.json"
     output = tmp_path / "restore.json"
+    archives = tmp_path / "archives.json"
+    archives.write_text(_archive_report())
+    archives.chmod(0o600)
     baseline.write_text(json.dumps(_baseline_payload()))
     schema.write_text("180000\thead-a,head-b\t9")
     replay.write_text(_replay_report())
@@ -216,6 +320,7 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path) -> None:
         "--config", str(_config(tmp_path)), "--image-digest", f"sha256:{'b' * 64}",
         "--network-name", "bfx-dr-20260904t031700z-a1b2c3d4e5f60718",
         "--network-internal", "--output", str(output),
+        "--archive-json", str(archives), "--verifier-image-digest", "sha256:" + "b" * 64,
     )
     completed = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert completed.returncode == 0
@@ -293,8 +398,9 @@ def test_backup_enospc_revokes_green_at_halt2_reader(
 
     output = tmp_path / "backup.json"
     output.write_text(json.dumps({
-        "measured": True, "rpo_seconds": 1, "observed_at_ms": time.time_ns() // 1_000_000,
+        "schema_version": 1, "kind": "backup", "measured": True, "rpo_seconds": 1, "observed_at_ms": time.time_ns() // 1_000_000,
     }))
+    output.chmod(0o600)
     assert _read_dr_measurement(output, key="rpo_seconds") == 1
     archiver, info = tmp_path / "archiver.tsv", tmp_path / "info.json"
     archiver.write_text("1756961300000\t1756961240000\t00000001000000000000000A\t0\t")
@@ -367,6 +473,7 @@ def test_backup_evidence_calculates_rpo_and_is_bounded(tmp_path: Path) -> None:
 
     assert result == {
         "schema_version": 1,
+        "kind": "backup",
         "measured": True,
         "rpo_seconds": 60,
         "observed_at_ms": 1756961300000,
@@ -515,6 +622,7 @@ def test_restore_evidence_keeps_only_stable_bounded_fields(tmp_path: Path) -> No
 
     assert result["measured"] is True
     assert result["rto_seconds"] == 37
+    assert result["kind"] == "restore"
     assert result["event_hash"] == "a" * 64
     assert result["event_count"] == 9
     assert result["row_counts"]["offer_claims"] == 1

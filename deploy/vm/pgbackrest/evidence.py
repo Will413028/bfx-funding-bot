@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -18,6 +19,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
+
+_archive_spec = importlib.util.spec_from_file_location(
+    "_bfx_archive_evidence", Path(__file__).with_name("archive_evidence.py")
+)
+assert _archive_spec is not None and _archive_spec.loader is not None
+_archive = importlib.util.module_from_spec(_archive_spec)
+_archive_spec.loader.exec_module(_archive)
 
 BACKUP_ERROR_CODES = frozenset(
     {
@@ -91,9 +99,24 @@ class RestoreBaseline:
     event_count: int
     event_head: int | None
     event_hash: str
+    schema_version: int = 1
+    archives: tuple[dict[str, str], ...] | None = None
+    verifier_image_digest: str | None = None
 
     def __post_init__(self) -> None:
         code = "restore_output_invalid"
+        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
+            _raise(code)
+        if self.schema_version == 1:
+            if self.archives is not None or self.verifier_image_digest is not None:
+                _raise(code)
+        else:
+            try:
+                _archive.validate_references(self.archives)
+                if not _archive.image_digest(self.verifier_image_digest):
+                    _raise(code)
+            except (ValueError, TypeError):
+                _raise(code)
         for value, pattern in (
             (self.target_backup_label, _BACKUP_LABEL),
             (self.database_name, _DATABASE_NAME),
@@ -164,7 +187,25 @@ def load_restore_baseline(
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
     except (OSError, UnicodeError, ValueError, RecursionError):
         _raise(code)
-    if not isinstance(payload, dict) or set(payload) != {field.name for field in fields(RestoreBaseline)}:
+    all_fields = {field.name for field in fields(RestoreBaseline)}
+    legacy_fields = all_fields - {"schema_version", "archives", "verifier_image_digest"}
+    if not isinstance(payload, dict):
+        _raise(code)
+    if set(payload) == legacy_fields:
+        pass
+    elif (set(payload) == all_fields and type(payload["schema_version"]) is int
+          and payload["schema_version"] == 1 and payload["archives"] is None
+          and payload["verifier_image_digest"] is None):
+        # Existing runbook serializes the legacy constructor with asdict().
+        # This is explicit legacy input, never an inferred v2 empty inventory.
+        pass
+    elif set(payload) == all_fields and type(payload["schema_version"]) is int and payload["schema_version"] == 2:
+        if not isinstance(payload["archives"], list):
+            _raise(code)
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+            _raise(code)
+        payload["archives"] = tuple(payload["archives"])
+    else:
         _raise(code)
     if not isinstance(payload["migration_heads"], list):
         _raise(code)
@@ -324,6 +365,7 @@ def render_backup_evidence(
     latest_backup_label = _parse_pgbackrest_info(info_json)
     return {
         "schema_version": 1,
+        "kind": "backup",
         "measured": True,
         "rpo_seconds": rpo_seconds,
         "observed_at_ms": observed_at_ms,
@@ -361,9 +403,11 @@ def _is_sha256(value: object) -> bool:
 
 
 def _parse_replay(replay_json: str, *, event_count: int) -> dict[str, object]:
+    if not isinstance(replay_json, str) or len(replay_json.encode()) > 65536:
+        _raise("restore_output_invalid")
     try:
-        payload = json.loads(replay_json)
-    except (json.JSONDecodeError, TypeError):
+        payload = json.loads(replay_json, object_pairs_hook=_unique_json_object)
+    except (ValueError, TypeError, RecursionError):
         _raise("restore_output_invalid")
     if not isinstance(payload, dict):
         _raise("restore_output_invalid")
@@ -505,6 +549,9 @@ def render_restore_evidence(
     network_internal: bool,
     egress_disconnected: bool,
     now_ms: int | None = None,
+    archive_json: str | None = None,
+    archive_only: bool = False,
+    verifier_image_digest: str | None = None,
 ) -> dict[str, object]:
     """Return bounded measured restore evidence or raise EvidenceError."""
     if (
@@ -527,11 +574,31 @@ def render_restore_evidence(
     if not isinstance(image_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
         _raise("restore_output_invalid")
     labels = validate_image_labels(image_labels)
-    state = validate_restore_state(schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline)
+    try:
+        archives = _archive.validate_report(archive_json, baseline=baseline, archive_only=archive_only)
+    except (ValueError, TypeError, RecursionError):
+        _raise("restore_output_invalid")
+    if not _archive.image_digest(verifier_image_digest) or (
+        baseline.verifier_image_digest is not None and baseline.verifier_image_digest != verifier_image_digest
+    ):
+        _raise("restore_output_invalid")
+    if archive_only:
+        server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
+        if migration_heads != sorted(baseline.migration_heads) or event_count != baseline.event_count:
+            _raise("restore_output_invalid")
+        state = {"server_version_num": server_version_num, "migration_heads": migration_heads,
+                 "event_count": event_count, "event_head": baseline.event_head,
+                 "event_hash": baseline.event_hash, "account_id": baseline.account_id,
+                 "environment": baseline.environment, "projector_version": baseline.projector_version}
+    else:
+        state = validate_restore_state(schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline)
     return {
         "schema_version": 1,
         "measured": True,
         "rto_seconds": elapsed_seconds,
+        "kind": "archive_restore" if archive_only else "restore",
+        "archive_verification": archives,
+        "verifier_image_digest": verifier_image_digest,
         "target_backup_label": baseline.target_backup_label,
         "target_time": baseline.target_time,
         "observed_at_ms": observed_at_ms,
@@ -548,13 +615,13 @@ def render_restore_evidence(
 
 def render_failure_evidence(
     *,
-    kind: Literal["backup", "restore"],
+    kind: Literal["backup", "restore", "archive_restore"],
     error_code: str,
     observed_at_ms: int,
 ) -> dict[str, object]:
     """Return a measured=false report with only a bounded error code."""
     allowlist = BACKUP_ERROR_CODES if kind == "backup" else RESTORE_ERROR_CODES
-    if kind not in {"backup", "restore"} or error_code not in allowlist:
+    if kind not in {"backup", "restore", "archive_restore"} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
     observed = _nonnegative_int(observed_at_ms, code="archiver_output_invalid")
     return {
@@ -645,6 +712,9 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--target-backup-label", required=True)
     restore.add_argument("--target-time")
     restore.add_argument("--baseline", type=Path, required=True)
+    restore.add_argument("--archive-json", type=Path, required=True)
+    restore.add_argument("--archive-only", action="store_true")
+    restore.add_argument("--verifier-image-digest", required=True)
     restore.add_argument("--account-id", required=True)
     restore.add_argument("--environment", required=True)
     restore.add_argument("--projector-version", required=True)
@@ -661,7 +731,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _paths_are_absolute(args: argparse.Namespace) -> bool:
-    names = ("config", "output", "archiver_tsv", "info_json", "schema_tsv", "replay_json", "baseline")
+    names = ("config", "output", "archiver_tsv", "info_json", "schema_tsv", "replay_json", "baseline", "archive_json")
     return all(
         not hasattr(args, name) or getattr(args, name).is_absolute()
         for name in names
@@ -704,6 +774,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             report = render_restore_evidence(
+                archive_json=_archive.read_private(args.archive_json).decode(),
+                archive_only=args.archive_only, verifier_image_digest=args.verifier_image_digest,
                 schema_tsv=_read_input(args.schema_tsv, code="schema_output_invalid"),
                 replay_json=_read_input(args.replay_json, code="restore_output_invalid"),
                 baseline=load_restore_baseline(

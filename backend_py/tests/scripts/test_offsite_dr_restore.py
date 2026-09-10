@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -52,7 +53,11 @@ build_restore_plan = restore_commands.build_restore_plan
 DrillRequest = restore_drill.DrillRequest
 RestoreDrill = restore_drill.RestoreDrill
 EvidenceError = evidence.EvidenceError
-render_restore_evidence = evidence.render_restore_evidence
+def render_restore_evidence(**kwargs):
+    return evidence.render_restore_evidence(**{
+        "archive_json": _archive_report(), "verifier_image_digest": "sha256:" + "b" * 64,
+        **kwargs,
+    })
 
 
 @pytest.fixture(autouse=True)
@@ -197,6 +202,126 @@ def _baseline():
     return evidence.RestoreBaseline(**(_baseline_payload() | {"migration_heads": ("head-a", "head-b")}))
 
 
+def _archive_report():
+    return json.dumps({"schema_version": 1,
+        "scope": {"account_id": _baseline_payload()["account_id"], "environment": "prod"},
+        "event_count": 9, "event_head": 42, "event_hash": "a" * 64,
+        "migration_heads": ["head-a", "head-b"], "archives": [], "archive_only": False})
+
+
+def _is_verifier(command):
+    return any(script in command for script in (
+        "scripts/verify_projection_archive.py", "scripts/verify_projection_replay.py"))
+
+
+def test_legacy_drill_always_runs_archive_inventory_verifier(tmp_path):
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == 0
+    assert any("scripts/verify_projection_archive.py" in argv for argv in fake.commands)
+
+
+def test_archive_only_requires_independent_archive_baseline(tmp_path):
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    request = replace(_request(tmp_path), archive_only=True)
+    assert _drill(tmp_path, fake).run(request) == 2
+
+
+def _prepared_request(tmp_path, fake, *, archive_only=True):
+    request = _request(tmp_path)
+    prepared = tmp_path / "prepared.json"
+    prepared.write_bytes(b"opaque protected prepared artifact")
+    prepared.chmod(0o600)
+    ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "d" * 64,
+           "prepared_path": str(prepared), "prepared_digest": hashlib.sha256(prepared.read_bytes()).hexdigest()}
+    payload = _baseline_payload() | {"schema_version": 2, "archives": [ref],
+                                   "verifier_image_digest": "sha256:" + "b" * 64}
+    request.baseline_path.write_text(json.dumps(payload))
+    request.baseline_path.chmod(0o600)
+    report = json.loads(_archive_report())
+    report["archive_only"] = archive_only
+    tables = list(evidence._archive.TABLES)
+    report["archives"] = [{"run_id": ref["run_id"], "manifest_digest": ref["manifest_digest"],
+        "scope": report["scope"], "verified_tables": tables,
+        "verified_counts": dict.fromkeys(tables, 0), "verified_digests": dict.fromkeys(tables, "e" * 64),
+        "original_event_count": 9, "original_event_head": 42, "original_event_hash": "a" * 64,
+        "image_digest": "sha256:" + "b" * 64, "projector_version": "projector-v3",
+        "migration_heads": ["head-a", "head-b"], "prepared_digest": ref["prepared_digest"]}]
+    fake.archive_report = json.dumps(report)
+    return replace(request, archive_only=archive_only)
+
+
+def test_prepare_only_physically_restores_and_never_accepts_active_parity(tmp_path):
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 2, _replay_report(matches=False), ""))
+    request = _prepared_request(tmp_path, fake)
+    assert _drill(tmp_path, fake).run(request) == 0
+    report = json.loads((tmp_path / "restore.json").read_text())
+    assert report["kind"] == "archive_restore"
+    assert report["restore_run_id"] == "20260904t031700z-a1b2c3d4e5f60718"
+    assert len(report["archive_input_digest"]) == 64
+    assert report["target_backup_label"] == "20260904031700-F"
+    assert report["archive_verification"]["archives"][0]["original_event_hash"] == "a" * 64
+    assert any("restore-db" in command and "up" in command for command in fake.commands)
+    assert any("scripts/verify_projection_archive.py" in command for command in fake.commands)
+    archive_command = next(command for command in fake.commands if "scripts/verify_projection_archive.py" in command)
+    assert archive_command[archive_command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    assert not any("scripts/verify_projection_replay.py" in command for command in fake.commands)
+    with pytest.raises(ValueError):
+        _read_dr_measurement(tmp_path / "restore.json", key="rto_seconds")
+    with pytest.raises(ValueError):
+        _read_dr_measurement(tmp_path / "restore.json", key="rpo_seconds")
+
+
+def test_full_restore_requires_active_parity_after_archive_success(tmp_path):
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(matches=False), ""))
+    request = _prepared_request(tmp_path, fake, archive_only=False)
+    assert _drill(tmp_path, fake).run(request) == 2
+    assert json.loads((tmp_path / "restore.json").read_text())["measured"] is False
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("original_event_count", 10), ("original_event_head", 0),
+    ("migration_heads", []), ("projector_version", ""),
+])
+def test_full_restore_rejects_malformed_archive_identity_even_with_active_parity(tmp_path, field, value):
+    fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    request = _prepared_request(tmp_path, fake, archive_only=False)
+    report = json.loads(fake.archive_report)
+    report["archives"][0][field] = value
+    fake.archive_report = json.dumps(report)
+    assert _drill(tmp_path, fake).run(request) == 2
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "scope", "source", "version", "bot-image", "manifest", "cleanup"])
+def test_archive_restore_fails_closed_on_binding_or_cleanup(tmp_path, mutation):
+    class Runner(_FakeRunner):
+        def __call__(self, command, **kwargs):
+            if mutation == "cleanup" and command[:3] == ("docker", "volume", "rm"):
+                return subprocess.CompletedProcess(command, 2, "", "")
+            return super().__call__(command, **kwargs)
+    fake = Runner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+    request = _prepared_request(tmp_path, fake)
+    report = json.loads(fake.archive_report)
+    if mutation == "missing":
+        report["archives"] = []
+    elif mutation == "extra":
+        report["archives"] *= 2
+    elif mutation == "scope":
+        report["scope"]["environment"] = "ci"
+    elif mutation == "source":
+        report["archives"][0]["original_event_hash"] = "f" * 64
+    elif mutation == "version":
+        report["schema_version"] = True
+    elif mutation == "bot-image":
+        report["archives"][0]["image_digest"] = "sha256:" + "f" * 64
+    elif mutation == "manifest":
+        report["archives"][0]["manifest_digest"] = "f" * 64
+    fake.archive_report = json.dumps(report)
+    assert _drill(tmp_path, fake).run(request) == 2
+    output = json.loads((tmp_path / "restore.json").read_text())
+    assert output["measured"] is False
+    assert output["kind"] == "archive_restore"
+
+
 def _replay_report(*, matches: bool = True) -> str:
     projection_names = (
         "offer_claims",
@@ -279,11 +404,11 @@ def test_bootstrap_uses_existing_baseline_db_and_stdin_only_password(
     captured = capsys.readouterr()
     assert "DATABASE-PASSWORD-SENTINEL" not in captured.out + captured.err
     if bootstrap_status:
-        assert not any("verifier" in argv for argv in fake.commands)
+        assert not any(_is_verifier(argv) for argv in fake.commands)
         assert "DATABASE-PASSWORD-SENTINEL" not in (tmp_path / "restore.log").read_text()
         assert json.loads(report)["measured"] is False
     else:
-        verifier = next(argv for argv in fake.commands if "verifier" in argv)
+        verifier = next(argv for argv in fake.commands if "scripts/verify_projection_replay.py" in argv)
         assert verifier[verifier.index("--expected-event-hash") + 1] == "a" * 64
         schema_command, query = next((argv, data) for argv, data in fake.inputs if "server_version_num" in data)
         assert schema_command[:5] == ("docker", "exec", "--user", "postgres", "--interactive")
@@ -562,10 +687,17 @@ class _FakeRunner:
         self.timeouts: list[float | None] = []
         self.image_id = f"sha256:{'b' * 64}\n"
         self.image_labels = json.dumps(IMAGE_LABELS)
+        self.archive_report = _archive_report()
 
     def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
         self.timeouts.append(timeout)
+        if "scripts/verify_projection_archive.py" in command:
+            return subprocess.CompletedProcess(command, 0, self.archive_report, "")
+        if "scripts/verify_projection_replay.py" in command:
+            return self.verifier
+        if command[:4] == ("docker", "image", "inspect", "--format={{.Id}}"):
+            return subprocess.CompletedProcess(command, 0, self.image_id, "")
         if input_text is not None:
             self.inputs.append((command, input_text))
         if "--env-file" in command:
@@ -683,11 +815,11 @@ def test_recovery_must_finish_before_disconnect_and_bootstrap(tmp_path: Path, re
     if recovery == "poll":
         assert len(queries) == 2
         assert max(queries) < disconnects[0]
-        assert next(i for i, cmd in enumerate(fake.commands) if "verifier" in cmd) > disconnects[0]
+        assert next(i for i, cmd in enumerate(fake.commands) if _is_verifier(cmd)) > disconnects[0]
     else:
         assert not disconnects
         assert not any("CREATE ROLE" in data for _, data in fake.inputs)
-        assert not any("verifier" in cmd for cmd in fake.commands)
+        assert not any(_is_verifier(cmd) for cmd in fake.commands)
         assert json.loads((tmp_path / "restore.json").read_text())["measured"] is False
 
 
@@ -697,7 +829,7 @@ def test_membership_requires_exact_generated_internal_network(tmp_path: Path, ne
     fake = _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
                        container_networks=json.dumps(networks))
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
-    assert not any("verifier" in cmd for cmd in fake.commands)
+    assert not any(_is_verifier(cmd) for cmd in fake.commands)
 
 
 def test_compose_uses_sanitized_process_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -713,7 +845,7 @@ def test_compose_uses_sanitized_process_environment(tmp_path: Path, monkeypatch:
             return super().__call__(command, timeout=timeout, input_text=input_text, env=env)
     fake = Environment(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 0
-    assert len(observed) == 3  # up, verifier, cleanup
+    assert len(observed) == 2  # compose up and cleanup; verifiers use pinned docker run
     for environment in observed:
         assert environment is not None
         assert not set(injected) & environment.keys()
@@ -742,7 +874,7 @@ def test_verifier_container_cleanup_is_independent_of_compose_client(tmp_path: P
     class Verifier(_FakeRunner):
         def __call__(self, command, *, timeout=None, input_text=None, env=None):
             result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
-            if "run" in command and "verifier" in command:
+            if _is_verifier(command):
                 name = command[command.index("--name") + 1] if "--name" in command else "anonymous-verifier"
                 attempted.append(name)
                 if outcome == "already-removed":
@@ -852,7 +984,7 @@ def test_deadline_interrupts_blocked_commands_and_still_cleans(tmp_path: Path, s
                 "disconnect": "disconnect" in command,
                 "image": "--format={{.Image}}" in command,
                 "labels": "--format={{json .Config.Labels}}" in command,
-                "verifier": "verifier" in command,
+                "verifier": _is_verifier(command),
             }[stage]
             if match and not blocked:
                 blocked.append(timeout)
@@ -1061,7 +1193,7 @@ def test_rto_includes_image_and_evidence_validation_before_success(tmp_path: Pat
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["measured"] is True
-    assert report["rto_seconds"] == 3
+    assert report["rto_seconds"] == 4  # bot image, PG image labels, final evidence
 
 
 class _CleanupObservingRunner(_FakeRunner):
@@ -1418,7 +1550,7 @@ def test_noninternal_network_fails_before_restore_or_verifier(tmp_path: Path) ->
 
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "network_not_internal"
-    assert not any("verifier" in command for command in fake.commands)
+    assert not any(_is_verifier(command) for command in fake.commands)
 
 
 def test_internal_egress_network_fails_before_disconnect_or_verifier(tmp_path: Path) -> None:
@@ -1433,7 +1565,7 @@ def test_internal_egress_network_fails_before_disconnect_or_verifier(tmp_path: P
     assert report["error_code"] == "network_not_internal"
     assert not any(
         command[:3] == ("docker", "network", "disconnect")
-        or "verifier" in command
+        or _is_verifier(command)
         for command in fake.commands
     )
 
@@ -1459,10 +1591,11 @@ def test_restore_disconnects_egress_and_proves_absence_before_verifier(tmp_path:
     verifier_index = next(
         index
         for index, command in enumerate(fake.commands)
-        if "run" in command and "verifier" in command
+        if _is_verifier(command)
     )
     assert disconnect_index < membership_index < verifier_index
-    assert "--no-deps" in fake.commands[verifier_index]
+    assert fake.commands[verifier_index][:2] == ("docker", "run")
+    assert fake.commands[verifier_index][fake.commands[verifier_index].index("--network") + 1].endswith("-net")
     assert "DR_EGRESS_NETWORK_NAME=" in fake.env_text
 
 
@@ -1475,7 +1608,7 @@ def test_restore_rejects_egress_membership_before_verifier(tmp_path: Path) -> No
 
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
 
-    assert not any("verifier" in command for command in fake.commands)
+    assert not any(_is_verifier(command) for command in fake.commands)
     report = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
     assert report["error_code"] == "restore_output_invalid"
 

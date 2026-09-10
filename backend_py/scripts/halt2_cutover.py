@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -357,12 +358,30 @@ def _artifact_hashes(evidence: Halt2Evidence, *, config_artifact: Path) -> dict[
 def _read_dr_measurement(path: Path, *, key: str) -> int:
     """Read an explicit measured DR result; a file hash alone is not evidence."""
     try:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > 65536):
+                raise ValueError("invalid receipt file")
+            raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("oversized receipt")
+        def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for name, item in pairs:
+                if name in result:
+                    raise ValueError("duplicate receipt key")
+                result[name] = item
+            return result
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (OSError, ValueError, RecursionError) as exc:
         raise ValueError(f"{key}_measurement_unavailable") from exc
     if not isinstance(value, dict) or value.get("measured") is not True:
         raise ValueError(f"{key}_unmeasured")
+    expected_kind = {"rpo_seconds": "backup", "rto_seconds": "restore"}.get(key)
+    if (expected_kind is None or value.get("kind") != expected_kind
+            or type(value.get("schema_version")) is not int or value["schema_version"] != 1):
+        raise ValueError(f"{key}_measurement_invalid")
     raw_seconds = value.get(key)
     if isinstance(raw_seconds, bool) or not isinstance(raw_seconds, (int, str)):
         raise ValueError(f"{key}_measurement_invalid")

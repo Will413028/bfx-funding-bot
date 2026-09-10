@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,29 @@ class RestorePlan:
 
 def _invalid() -> None:
     raise RestoreInputError("invalid_restore_input")
+
+
+def verifier_command(
+    plan: RestorePlan, *, image: str, env_path: Path, input_path: Path | None = None,
+    input_digest: str | None = None, archive_only: bool = False,
+) -> tuple[str, ...]:
+    """Pin both verifiers to the observed bot image on the isolated network."""
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute():
+        _invalid()
+    command = ("docker", "run", "--rm", "--name", plan.verifier_container_name,
+               "--user", f"{os.getuid()}:{os.getgid()}",
+               "--network", plan.network_name, "--env-file", str(env_path), "--entrypoint", "python")
+    if input_path is not None:
+        if (not input_path.is_absolute() or any(c in str(input_path) for c in ":,\n\r")
+                or input_digest is None or _EVENT_HASH.fullmatch(input_digest) is None):
+            _invalid()
+        return (*command, "--volume", f"{input_path}:/run/archive-input.json:ro", image,
+                "scripts/verify_projection_archive.py", "--input", "/run/archive-input.json",
+                "--input-digest", input_digest, "--account-id", plan.account_id,
+                "--environment", plan.environment, *(("--archive-only",) if archive_only else ()))
+    return (*command, image, "scripts/verify_projection_replay.py", "replay",
+            "--account-id", plan.account_id, "--environment", plan.environment,
+            "--projector-version", plan.projector_version, "--expected-event-hash", plan.expected_event_hash)
 
 
 def _canonical_account_id(account_id: str) -> str:
