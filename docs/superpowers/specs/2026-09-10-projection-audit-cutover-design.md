@@ -3,7 +3,7 @@
 ## 決策與核准邊界
 
 使用者已選擇 A：完整封存舊 checkpoints／投影，以新的完整 venue snapshot
-建立切換基準，再使用 event-only projector。本文是詳細設計，待審閱核准；
+建立切換基準，再使用 event-only projector。本文詳細設計已於 2026-09-10 獲使用者核准；
 選擇方向不等於核准 production 套用、修改付費資源或恢復交易。
 
 延續 `2026-09-10-historical-claim-replay-compatibility-design.md`。
