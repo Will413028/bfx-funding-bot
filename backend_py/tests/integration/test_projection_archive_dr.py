@@ -20,14 +20,71 @@ from tests.integration.test_projection_cutover_archive import (
 pytestmark = pytest.mark.integration
 
 
-def _transport(expected):
+@pytest.mark.parametrize("mutation", ["valid", "reordered", "omit-old", "omit-target", "wrong-target",
+                                     "missing-target", "payload", "prefix"])
+async def test_two_historical_runs_bind_only_explicit_target(archive_db, mutation):
+    from uuid import uuid4
+
+    from bfx_funding_bot.modules.execution.projection_cutover.archive import capture_archive
+
+    factory, engine = archive_db
+    insert = text("INSERT INTO event_log(account_id,exchange_account_id,deployment_environment,event_type,payload,occurred_at_ms) VALUES (:s,:a,'ci','CREDIT_CLOSED','{}',1)")
+    manifests = []
+    for image in ("a", "b"):
+        with engine.begin() as conn:
+            if mutation == "prefix" and image == "b":
+                # Target B legitimately pins the changed stream. Only A's independent
+                # original prefix can detect this historical corruption.
+                conn.exec_driver_sql("SET LOCAL session_replication_role=replica")
+                conn.execute(text("UPDATE event_log SET payload=CAST(:p AS jsonb)"),
+                             {"p": '{"tampered":true}'})
+            conn.execute(insert, {"s": str(SCOPE.account_id), "a": SCOPE.account_id})
+        async with factory.begin() as session:
+            manifests.append(await capture_archive(session, scope=SCOPE, run_id=uuid4(),
+                image_digest="sha256:" + image * 64, projector_version="projector-" + image))
+    old, target = manifests
+    envelope = {"schema_version": 2, "target_run_id": str(target.run_id),
+                "prepared": [json.loads(_transport(m))["prepared"][0] for m in manifests]}
+    if mutation == "reordered":
+        envelope["prepared"].reverse()
+    elif mutation == "omit-old":
+        envelope["prepared"].pop(0)
+    elif mutation == "omit-target":
+        envelope["prepared"].pop()
+    elif mutation == "wrong-target":
+        envelope["target_run_id"] = str(old.run_id)
+    elif mutation == "missing-target":
+        del envelope["target_run_id"]
+    elif mutation == "payload":
+        with engine.begin() as conn:
+            conn.exec_driver_sql("SET LOCAL session_replication_role=replica")
+            conn.execute(text("UPDATE projection_audit.rows SET encoded_payload=convert_to('{}','UTF8') WHERE run_id=:r AND table_name='position_state'"), {"r": old.run_id})
+    module = importlib.import_module("scripts.verify_projection_archive")
+    async with factory() as session:
+        if mutation not in {"valid", "reordered"}:
+            with pytest.raises(ValueError):
+                await module.verify_restore_archives(session, scope=SCOPE,
+                    raw=json.dumps(envelope).encode(), archive_only=True)
+        else:
+            result = await module.verify_restore_archives(session, scope=SCOPE,
+                raw=json.dumps(envelope).encode(), archive_only=True)
+            assert result["schema_version"] == 2
+            assert result["target_run_id"] == str(target.run_id)
+            by_run = {r["run_id"]: r for r in result["archives"]}
+            assert by_run[str(old.run_id)]["original_event_count"] == 1
+            assert by_run[str(target.run_id)]["original_event_count"] == 2
+            assert by_run[str(old.run_id)]["image_digest"] == "sha256:" + "a" * 64
+
+
+def _transport(expected, *, archive_only=False):
     from bfx_funding_bot.modules.execution.projection_cutover.codec import decode_row, encode_row
     from bfx_funding_bot.modules.execution.projection_cutover.manifest import encode_manifest
     prepared = encode_row({"kind": "projection-cutover-prepared-v1",
         "diagnostic_digest": "a" * 64, "classification_digest": "b" * 64,
         "operational_digest": "c" * 64, "runtime_roles": ["bot"], "snapshot": {},
         "manifest": decode_row(encode_manifest(expected))})
-    return json.dumps({"schema_version": 1, "prepared": [{
+    return json.dumps({"schema_version": 2 if archive_only else 1,
+        **({"target_run_id": str(expected.run_id)} if archive_only else {}), "prepared": [{
         "sha256": hashlib.sha256(prepared).hexdigest(),
         "payload": base64.b64encode(prepared).decode(),
     }]}).encode()
@@ -50,10 +107,12 @@ async def test_original_nonempty_event_identity_is_verified(archive_db, mutation
     async with factory() as session:
         if mutation in {"tampered-prefix", "append-archive-only"}:
             with pytest.raises(ValueError, match="identity"):
-                await module.verify_restore_archives(session, scope=SCOPE, raw=_transport(expected),
+                await module.verify_restore_archives(session, scope=SCOPE,
+                    raw=_transport(expected, archive_only=mutation == "append-archive-only"),
                     archive_only=mutation == "append-archive-only")
         else:
-            result = await module.verify_restore_archives(session, scope=SCOPE, raw=_transport(expected),
+            result = await module.verify_restore_archives(session, scope=SCOPE,
+                raw=_transport(expected, archive_only=mutation == "unchanged"),
                 archive_only=mutation == "unchanged")
             assert result["event_count"] == (2 if mutation == "append-full" else 1)
             assert result["archives"][0]["original_event_count"] == 1
@@ -96,7 +155,8 @@ async def test_archive_dr_preserves_sql_null_and_json_null_distinction(archive_d
     expected = await capture(factory)
     module = importlib.import_module("scripts.verify_projection_archive")
     async with factory() as session:
-        report = await module.verify_restore_archives(session, scope=SCOPE, raw=_transport(expected), archive_only=True)
+        report = await module.verify_restore_archives(session, scope=SCOPE,
+            raw=_transport(expected, archive_only=True), archive_only=True)
         payload = await session.scalar(text("SELECT encoded_payload FROM projection_audit.rows WHERE table_name='execution_uncertainties'"))
     assert report["archives"][0]["verified_counts"]["execution_uncertainties"] == 1
     row = decode_row(payload)
@@ -110,7 +170,7 @@ async def test_real_archive_cli_preserves_pinned_prepared_manifest(archive_db, t
     import sys
     factory, engine = archive_db
     expected = await capture(factory)
-    raw = _transport(expected)
+    raw = _transport(expected, archive_only=True)
     path = tmp_path / "input.json"
     path.write_bytes(raw)
     path.chmod(0o600)
@@ -202,7 +262,7 @@ async def test_prepare_only_verifier_proves_original_identity_and_preserves_byte
         "diagnostic_digest": "a" * 64, "classification_digest": "b" * 64,
         "operational_digest": "c" * 64, "runtime_roles": ["bot"], "snapshot": {},
         "manifest": decode_row(encode_manifest(expected))})
-    transport = json.dumps({"schema_version": 1, "prepared": [{
+    transport = json.dumps({"schema_version": 2, "target_run_id": str(expected.run_id), "prepared": [{
         "sha256": hashlib.sha256(prepared).hexdigest(),
         "payload": base64.b64encode(prepared).decode(),
     }]}).encode()

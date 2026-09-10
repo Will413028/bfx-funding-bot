@@ -72,6 +72,7 @@ class DrillRequest:
     target_time: str | None
     baseline_path: Path
     archive_only: bool = False
+    target_run_id: str | None = None
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -647,6 +648,9 @@ class RestoreDrill:
                 plan = self._validate_prerequisites(request, baseline)
                 if type(request.archive_only) is not bool or (request.archive_only and not baseline.archives):
                     _failure("restore_output_invalid")
+                if request.archive_only != (request.target_run_id is not None):
+                    _failure("restore_output_invalid")
+                _evidence._archive.validate_target(request.target_run_id, baseline.archives or ())
                 password = self._password_factory()
                 if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
                     _failure("restore_output_invalid")
@@ -654,7 +658,7 @@ class RestoreDrill:
                 rto_started = self._clock()
                 self._deadline = rto_started + _MAX_RTO_SECONDS
                 # Archive preparation/verification stays inside the existing deadline.
-                transport = _evidence._archive.transport(baseline.archives or ())
+                transport = _evidence._archive.transport(baseline.archives or (), target_run_id=request.target_run_id)
                 with tempfile.NamedTemporaryFile(prefix="bfx-dr-archive-", suffix=".json", delete=False) as handle:
                     archive_path = Path(handle.name)
                     os.chmod(archive_path, 0o600)
@@ -687,7 +691,8 @@ class RestoreDrill:
                     plan, image=verifier_image, env_path=env_path, input_path=archive_path,
                     input_digest=hashlib.sha256(transport).hexdigest(), archive_only=request.archive_only,
                 )).stdout
-                _evidence._archive.validate_report(archive_json, baseline=baseline, archive_only=request.archive_only)
+                _evidence._archive.validate_report(archive_json, baseline=baseline, archive_only=request.archive_only,
+                                                   target_run_id=request.target_run_id)
                 replay_json = ""
                 if not request.archive_only:
                     replay_json = self._replay_json(_commands.verifier_command(
@@ -716,6 +721,7 @@ class RestoreDrill:
                     network_name=plan.network_name,
                     network_internal=True,
                     archive_json=archive_json, archive_only=request.archive_only,
+                    target_run_id=request.target_run_id,
                     verifier_image_digest=verifier_image,
                 )
                 success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
@@ -795,6 +801,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-time")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--archive-only", action="store_true")
+    parser.add_argument("--target-run-id")
     return parser
 
 
@@ -809,6 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_time=args.target_time,
             baseline_path=args.baseline,
             archive_only=args.archive_only,
+            target_run_id=args.target_run_id,
         )
     )
 

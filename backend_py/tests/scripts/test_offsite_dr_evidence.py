@@ -166,7 +166,8 @@ def test_opaque_transport_requires_private_pinned_bounded_inputs(tmp_path, mutat
         evidence._archive.transport((ref, ref) if mutation == "duplicate-run" else (ref,))
 
 
-def test_opaque_transport_preserves_exact_prepared_file_bytes(tmp_path):
+@pytest.mark.parametrize("target", [None, "00000000-0000-0000-0000-000000000123"])
+def test_opaque_transport_preserves_exact_prepared_file_bytes(tmp_path, target):
     import base64
     path = tmp_path / "prepared.json"
     raw = b'not decoded by host\x00\xff'
@@ -174,7 +175,9 @@ def test_opaque_transport_preserves_exact_prepared_file_bytes(tmp_path):
     path.chmod(0o600)
     ref = {"run_id": "00000000-0000-0000-0000-000000000123", "manifest_digest": "b" * 64,
            "prepared_path": str(path), "prepared_digest": hashlib.sha256(raw).hexdigest()}
-    envelope = json.loads(evidence._archive.transport((ref,)))
+    envelope = json.loads(evidence._archive.transport((ref,), target_run_id=target))
+    assert envelope["schema_version"] == (1 if target is None else 2)
+    assert envelope.get("target_run_id") == target
     assert base64.b64decode(envelope["prepared"][0]["payload"]) == raw
     assert envelope["prepared"][0]["sha256"] == ref["prepared_digest"]
 
@@ -298,7 +301,11 @@ def test_baseline_replay_rejects_noninteger_observations(tmp_path: Path, field: 
         _render_baseline(tmp_path, replay_json=json.dumps(replay))
 
 
-def test_baseline_restore_cli_requires_matching_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mutation", ["baseline", "missing", "mode", "utf8"])
+@pytest.mark.parametrize("persist_failure", [False, True])
+@pytest.mark.parametrize("archive_only", [False, True])
+def test_baseline_restore_cli_requires_matching_state(tmp_path: Path, monkeypatch, capsys,
+                                                     mutation, persist_failure, archive_only) -> None:
     baseline = tmp_path / "baseline.json"
     schema = tmp_path / "schema.tsv"
     replay = tmp_path / "replay.json"
@@ -325,11 +332,29 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path) -> None:
     completed = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert completed.returncode == 0
     assert json.loads(output.read_text())["measured"] is True
-    baseline.write_text(json.dumps(_baseline_payload() | {"event_head": 43}))
-    completed = subprocess.run(argv, capture_output=True, text=True, check=False)
-    assert completed.returncode == 2
-    assert json.loads(output.read_text())["measured"] is False
-    assert TOKEN_SENTINEL not in output.read_text() + completed.stdout + completed.stderr
+    from scripts.halt2_cutover import _read_dr_measurement
+    assert _read_dr_measurement(output, key="rto_seconds") == 37
+    if mutation == "baseline":
+        baseline.write_text(json.dumps(_baseline_payload() | {"event_head": 43}))
+    elif mutation == "missing":
+        archives.unlink()
+    elif mutation == "mode":
+        archives.chmod(0o644)
+    else:
+        archives.write_bytes(b"\xff" + TOKEN_SENTINEL.encode())
+    if persist_failure:
+        def fail_replace(*args):
+            raise OSError(errno.ENOSPC, TOKEN_SENTINEL)
+        monkeypatch.setattr(evidence.os, "replace", fail_replace)
+    assert evidence.main([*argv[2:], *(["--archive-only"] if archive_only else [])]) == 2
+    with pytest.raises(ValueError):
+        _read_dr_measurement(output, key="rto_seconds")
+    if output.exists():
+        assert json.loads(output.read_text())["measured"] is False
+        assert json.loads(output.read_text())["kind"] == ("archive_restore" if archive_only else "restore")
+        assert TOKEN_SENTINEL not in output.read_text()
+    captured = capsys.readouterr()
+    assert TOKEN_SENTINEL not in captured.out + captured.err
 
 
 @pytest.mark.parametrize(("field", "value"), [

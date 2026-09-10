@@ -49,8 +49,10 @@ def decode_archive_inputs(raw: bytes) -> tuple[ArchiveManifest, ...]:
         raise ValueError("archive input oversized")
     try:
         envelope = json.loads(raw, object_pairs_hook=_unique)
-        if (not isinstance(envelope, dict) or set(envelope) != {"schema_version", "prepared"}
-                or type(envelope["schema_version"]) is not int or envelope["schema_version"] != 1
+        if (not isinstance(envelope, dict)
+                or type(envelope.get("schema_version")) is not int or envelope["schema_version"] not in (1, 2)
+                or set(envelope) != ({"schema_version", "prepared"} if envelope["schema_version"] == 1
+                                     else {"schema_version", "prepared", "target_run_id"})
                 or not isinstance(envelope["prepared"], list) or len(envelope["prepared"]) > MAX_RUNS):
             raise ValueError("archive input version/shape")
         manifests = []
@@ -69,6 +71,11 @@ def decode_archive_inputs(raw: bytes) -> tuple[ArchiveManifest, ...]:
             if not isinstance(manifest_fields, dict):
                 raise ValueError("archive prepared manifest shape")
             manifests.append(decode_manifest(encode_row(manifest_fields)))
+        if envelope["schema_version"] == 2:
+            target = envelope["target_run_id"]
+            if (not isinstance(target, str) or str(UUID(target)) != target
+                    or target not in {str(m.run_id) for m in manifests}):
+                raise ValueError("archive target invalid")
         return tuple(manifests)
     except (TypeError, KeyError, UnicodeError, RecursionError) as exc:
         raise ValueError("archive input invalid") from exc
@@ -142,6 +149,10 @@ async def verify_restore_archives(
     session: AsyncSession, *, scope: Scope, raw: bytes, archive_only: bool,
 ) -> dict[str, Any]:
     expected = decode_archive_inputs(raw)
+    envelope = json.loads(raw)
+    target_run_id = envelope.get("target_run_id")
+    if archive_only != (target_run_id is not None):
+        raise ValueError("archive target required only for archive-only")
     if archive_only and not expected:
         raise ValueError("archive-only requires independent manifests")
     reports = await verify_archives(session, scope=scope, expected=expected)
@@ -154,7 +165,7 @@ async def verify_restore_archives(
         manifest = manifests[report["run_id"]]
         with session.no_autoflush:
             await _verify_original_prefix(session, manifest)
-        if archive_only and (manifest.stream != stream or list(manifest.migration_heads) != heads):
+        if report["run_id"] == target_run_id and (manifest.stream != stream or list(manifest.migration_heads) != heads):
             raise ValueError("archive-only original event/schema identity mismatch")
         report.update({
             "original_event_count": manifest.stream.count, "original_event_head": manifest.stream.head,
@@ -166,6 +177,8 @@ async def verify_restore_archives(
               "event_count": stream.count, "event_head": stream.head if stream.count else None,
               "event_hash": stream.digest, "migration_heads": heads, "archives": reports,
               "archive_only": archive_only}
+    if target_run_id is not None:
+        report.update(schema_version=2, target_run_id=target_run_id)
     if len(json.dumps(report).encode()) > 65536:
         raise ValueError("archive report oversized")
     return report
