@@ -40,7 +40,6 @@ Thumbs.db
 # Other agent tool local state (not part of repo)
 .agents/
 .codex/
-AGENTS.md
 .worktrees/
 
 # Go
