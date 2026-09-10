@@ -42,6 +42,13 @@ Thumbs.db
 .codex/
 .worktrees/
 
+# Terraform local state and operator-specific inputs
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+
 # Go
 backend/server
 *.exe

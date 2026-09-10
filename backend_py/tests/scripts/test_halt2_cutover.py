@@ -23,12 +23,44 @@ from scripts.halt2_cutover import (
     EXIT_VERIFICATION_FAILED,
     Halt2Evidence,
     PreflightReport,
+    _read_dr_measurement,
     collect_preflight_report,
     main,
     verify_preflight,
 )
 
 ACCOUNT_ID = UUID("3f19d046-5030-494c-9a0a-9573bb890c1f")
+
+
+@pytest.mark.parametrize("key", ["rpo_seconds", "rto_seconds"])
+@pytest.mark.parametrize("observed", [None, True, 1000000.0, "1000000", -1, 1000001, 99999])
+def test_dr_freshness_rejects_missing_invalid_future_and_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, observed: object) -> None:
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    path = tmp_path / "dr.json"
+    report = {"measured": True, key: 30}
+    if observed is not None:
+        report["observed_at_ms"] = observed
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError):
+        _read_dr_measurement(path, key=key)
+
+
+@pytest.mark.parametrize("key", ["rpo_seconds", "rto_seconds"])
+@pytest.mark.parametrize("age_ms", [0, 900000])
+def test_dr_freshness_accepts_window_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, age_ms: int) -> None:
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    path = tmp_path / "dr.json"
+    path.write_text(json.dumps({"measured": True, key: 30, "observed_at_ms": 1000000 - age_ms}))
+    assert _read_dr_measurement(path, key=key) == 30
+
+
+@pytest.mark.parametrize("seconds", [True, 30.0, -1, "30.0", None])
+def test_dr_freshness_preserves_strict_seconds_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: object) -> None:
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    path = tmp_path / "dr.json"
+    path.write_text(json.dumps({"measured": True, "rto_seconds": seconds, "observed_at_ms": 1000000}))
+    with pytest.raises(ValueError):
+        _read_dr_measurement(path, key="rto_seconds")
 
 
 def test_preflight_and_replay_use_the_same_nonempty_event_hash_contract() -> None:

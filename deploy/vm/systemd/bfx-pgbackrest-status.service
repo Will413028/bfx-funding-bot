@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect bfx pgBackRest status evidence
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bfx-funding-bot
+ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/status.sh --output /home/ubuntu/bfx/dr-evidence/backup.json

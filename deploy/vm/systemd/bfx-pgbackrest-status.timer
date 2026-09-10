@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect bfx pgBackRest status evidence every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=bfx-pgbackrest-status.service
+
+[Install]
+WantedBy=timers.target

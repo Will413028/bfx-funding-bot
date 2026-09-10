@@ -12,7 +12,7 @@ LOG=/home/ubuntu/bfx/reports/halt-watch.log
 TS=$(date -u '+%Y-%m-%d %H:%M UTC')
 
 # Outcome that matters most: did anything actually get reserved recently?
-N_INTENT=$(docker exec bfx-postgres psql -U bfx -d bfx -tAc \
+N_INTENT=$(docker exec --user postgres bfx-postgres psql -U bfx -d bfx -tAc \
   "SELECT count(*) FROM event_log WHERE event_type='RESERVATION_INTENT' AND occurred_at_ms >= (EXTRACT(EPOCH FROM now())*1000)::bigint - 20*60*1000" \
   2>/dev/null </dev/null | tr -d '[:space:]')
 
