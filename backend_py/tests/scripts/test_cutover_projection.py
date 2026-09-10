@@ -472,6 +472,61 @@ async def test_real_parser_nonempty_offer_and_credit_records_and_safe_failure():
     assert "SECRET" not in str(failure.value)
 
 
+@pytest.mark.integration
+async def test_database_quiescence_refuses_hidden_session_metadata(archive_db):
+    from uuid import uuid4
+
+    factory, kwargs = await prepare_fixture(archive_db)
+    reader = "synthetic_observer_" + uuid4().hex
+    with archive_db[1].begin() as connection:
+        connection.exec_driver_sql(f"CREATE ROLE {reader} NOLOGIN")
+        connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {reader}")
+        connection.exec_driver_sql(f"GRANT SELECT ON trading_halt TO {reader}")
+    async with factory() as other, factory() as observer:
+        other_pid = await other.scalar(text("SELECT pg_backend_pid()"))
+        await observer.execute(text(f"SET LOCAL ROLE {reader}"))
+        metadata = (await observer.execute(text(
+            "SELECT backend_type,state FROM pg_stat_activity WHERE pid=:pid"
+        ), {"pid": other_pid})).one()
+        assert metadata.backend_type is None and metadata.state is None
+        with pytest.raises(ValueError):
+            await operations().verify_database_quiescence(
+                observer, scope=kwargs["scope"], runtime_roles=kwargs["runtime_roles"],
+            )
+
+
+@pytest.mark.integration
+async def test_database_quiescence_refreshes_activity_after_new_writer_in_same_transaction(archive_db):
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
+
+    factory, kwargs = await prepare_fixture(archive_db)
+    new_engine = create_async_engine(factory.kw["bind"].url)
+    try:
+        async with factory() as observer:
+            await AccountEventWriter(store=PostgresEventStore(deployment_environment="ci")).acquire_lock(
+                observer, account_id=kwargs["scope"].account_id,
+            )
+            await operations().verify_database_quiescence(
+                observer, scope=kwargs["scope"], runtime_roles=kwargs["runtime_roles"],
+            )
+            async with new_engine.connect() as writer:
+                writer_pid = await writer.scalar(text("SELECT pg_backend_pid()"))
+                # Positive reproduction control: this observer's first activity
+                # snapshot does not include the newly opened client transaction.
+                assert await observer.scalar(text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=:pid)"
+                ), {"pid": writer_pid}) is False
+                with pytest.raises(ValueError):
+                    await operations().verify_database_quiescence(
+                        observer, scope=kwargs["scope"], runtime_roles=kwargs["runtime_roles"],
+                    )
+    finally:
+        await new_engine.dispose()
+
+
 async def prepare_fixture(archive_db):
     import hashlib
     from uuid import uuid4
