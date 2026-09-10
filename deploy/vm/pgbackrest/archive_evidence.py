@@ -70,28 +70,47 @@ def validate_references(references: object) -> None:
         seen.add(run_id)
 
 
-def transport(references: tuple[dict[str, Any], ...]) -> bytes:
+def validate_target(target_run_id: str | None, references: tuple[dict[str, Any], ...]) -> None:
+    if target_run_id is not None and (
+        not isinstance(target_run_id, str) or str(UUID(target_run_id)) != target_run_id
+        or target_run_id not in {ref["run_id"] for ref in references}
+    ):
+        raise ValueError("restore_output_invalid")
+
+
+def transport(references: tuple[dict[str, Any], ...], *, target_run_id: str | None = None) -> bytes:
     """Host never interprets typed payloads. Their exact bytes retain Task3's pin."""
     validate_references(references)
+    validate_target(target_run_id, references)
     items = []
     for ref in references:
         raw = read_private(Path(ref["prepared_path"]), expected_digest=ref["prepared_digest"])
         items.append({"sha256": ref["prepared_digest"], "payload": base64.b64encode(raw).decode("ascii")})
-    result = json.dumps({"schema_version": 1, "prepared": items}, separators=(",", ":")).encode()
+    envelope = {"schema_version": 1, "prepared": items}
+    if target_run_id is not None:
+        envelope.update(schema_version=2, target_run_id=target_run_id)
+    result = json.dumps(envelope, separators=(",", ":")).encode()
     if len(result) > MAX_BYTES:
         raise ValueError("restore_output_invalid")
     return result
 
 
-def validate_report(raw: str | None, *, baseline: Any, archive_only: bool) -> dict[str, Any]:
+def validate_report(raw: str | None, *, baseline: Any, archive_only: bool,
+                    target_run_id: str | None = None) -> dict[str, Any]:
     """Accept only the bounded exact inventory and independently bound identities."""
     if type(archive_only) is not bool or not isinstance(raw, str) or len(raw.encode()) > MAX_REPORT_BYTES:
         raise ValueError("restore_output_invalid")
     report = json.loads(raw, object_pairs_hook=unique)
+    validate_target(target_run_id, baseline.archives or ())
+    if archive_only != (target_run_id is not None):
+        raise ValueError("restore_output_invalid")
+    target_fields = {"target_run_id"} if archive_only else set()
     if (not isinstance(report, dict) or set(report) != {
         "schema_version", "scope", "event_count", "event_head", "event_hash",
         "migration_heads", "archives", "archive_only"
-    } or type(report["schema_version"]) is not int or report["schema_version"] != 1
+    } | target_fields or type(report["schema_version"]) is not int
+            or report["schema_version"] != (2 if archive_only else 1)
+            or report.get("target_run_id") != target_run_id
             or type(report["archive_only"]) is not bool or report["archive_only"] != archive_only
             or report["scope"] != {"account_id": baseline.account_id, "environment": baseline.environment}
             or type(report["event_count"]) is not int or report["event_count"] != baseline.event_count
@@ -139,7 +158,7 @@ def validate_report(raw: str | None, *, baseline: Any, archive_only: bool) -> di
                 or (item["original_event_count"] == 0 and item["original_event_head"] != 0)
                 or not digest(item["original_event_hash"])):
             raise ValueError("restore_output_invalid")
-        if archive_only and (item["original_event_count"] != baseline.event_count
+        if run_id == target_run_id and (item["original_event_count"] != baseline.event_count
                 or item["original_event_head"] != (baseline.event_head or 0)
                 or item["original_event_hash"] != baseline.event_hash
                 or item["image_digest"] != baseline.verifier_image_digest

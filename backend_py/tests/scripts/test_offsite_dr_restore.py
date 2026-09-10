@@ -239,6 +239,8 @@ def _prepared_request(tmp_path, fake, *, archive_only=True):
     request.baseline_path.chmod(0o600)
     report = json.loads(_archive_report())
     report["archive_only"] = archive_only
+    if archive_only:
+        report.update(schema_version=2, target_run_id=ref["run_id"])
     tables = list(evidence._archive.TABLES)
     report["archives"] = [{"run_id": ref["run_id"], "manifest_digest": ref["manifest_digest"],
         "scope": report["scope"], "verified_tables": tables,
@@ -247,7 +249,7 @@ def _prepared_request(tmp_path, fake, *, archive_only=True):
         "image_digest": "sha256:" + "b" * 64, "projector_version": "projector-v3",
         "migration_heads": ["head-a", "head-b"], "prepared_digest": ref["prepared_digest"]}]
     fake.archive_report = json.dumps(report)
-    return replace(request, archive_only=archive_only)
+    return replace(request, archive_only=archive_only, target_run_id=ref["run_id"] if archive_only else None)
 
 
 def test_prepare_only_physically_restores_and_never_accepts_active_parity(tmp_path):
@@ -269,6 +271,62 @@ def test_prepare_only_physically_restores_and_never_accepts_active_parity(tmp_pa
         _read_dr_measurement(tmp_path / "restore.json", key="rto_seconds")
     with pytest.raises(ValueError):
         _read_dr_measurement(tmp_path / "restore.json", key="rpo_seconds")
+
+
+@pytest.mark.parametrize("mutation", ["valid", "request-missing", "request-unknown", "report-target",
+                                     "omit-old", "old-image", "target-image", "target-projector", "target-heads"])
+def test_prepare_only_target_is_bound_without_requiring_historical_current_identity(tmp_path, mutation):
+    transported = []
+    class TransportObservingRunner(_FakeRunner):
+        def __call__(self, command, **kwargs):
+            if "scripts/verify_projection_archive.py" in command:
+                path = Path(command[command.index("--volume") + 1].split(":", 1)[0])
+                raw = path.read_bytes()
+                assert hashlib.sha256(raw).hexdigest() == command[command.index("--input-digest") + 1]
+                transported.append(raw)
+            return super().__call__(command, **kwargs)
+    fake = TransportObservingRunner(verifier=subprocess.CompletedProcess(("fake",), 2, "", ""))
+    request = _prepared_request(tmp_path, fake)
+    report = json.loads(fake.archive_report)
+    target = report["archives"][0]["run_id"]
+    report.update(schema_version=2, target_run_id=target)
+    payload = json.loads(request.baseline_path.read_text())
+    old_id = "00000000-0000-0000-0000-000000000456"
+    payload["archives"].append({**payload["archives"][0], "run_id": old_id})
+    request.baseline_path.write_text(json.dumps(payload))
+    old = {**report["archives"][0], "run_id": old_id, "original_event_count": 1,
+           "original_event_head": 2, "original_event_hash": "f" * 64,
+           "image_digest": "sha256:" + "c" * 64, "projector_version": "historical",
+           "migration_heads": ["historical-head"]}
+    report["archives"].insert(0, old)
+    request = replace(request, target_run_id=target)
+    if mutation == "request-missing":
+        request = replace(request, target_run_id=None)
+    elif mutation == "request-unknown":
+        request = replace(request, target_run_id="00000000-0000-0000-0000-000000000789")
+    elif mutation == "report-target":
+        report["target_run_id"] = old_id
+    elif mutation == "omit-old":
+        report["archives"].pop(0)
+    elif mutation == "old-image":
+        old["image_digest"] = "invalid"
+    elif mutation.startswith("target-"):
+        field, value = {"target-image": ("image_digest", "sha256:" + "f" * 64),
+                        "target-projector": ("projector_version", "other"),
+                        "target-heads": ("migration_heads", ["other-head"])}[mutation]
+        report["archives"][1][field] = value
+    fake.archive_report = json.dumps(report)
+    assert _drill(tmp_path, fake).run(request) == (0 if mutation == "valid" else 2)
+    receipt = json.loads((tmp_path / "restore.json").read_text())
+    if mutation == "valid":
+        assert receipt["schema_version"] == 2
+        assert receipt["target_run_id"] == target
+        assert receipt["archive_verification"]["target_run_id"] == target
+        assert len(receipt["archive_verification"]["archives"]) == 2
+        assert json.loads(transported[0])["target_run_id"] == target
+        assert receipt["archive_input_digest"] == hashlib.sha256(transported[0]).hexdigest()
+    else:
+        assert receipt["measured"] is False
 
 
 def test_full_restore_requires_active_parity_after_archive_success(tmp_path):

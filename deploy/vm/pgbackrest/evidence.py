@@ -552,6 +552,7 @@ def render_restore_evidence(
     archive_json: str | None = None,
     archive_only: bool = False,
     verifier_image_digest: str | None = None,
+    target_run_id: str | None = None,
 ) -> dict[str, object]:
     """Return bounded measured restore evidence or raise EvidenceError."""
     if (
@@ -575,7 +576,8 @@ def render_restore_evidence(
         _raise("restore_output_invalid")
     labels = validate_image_labels(image_labels)
     try:
-        archives = _archive.validate_report(archive_json, baseline=baseline, archive_only=archive_only)
+        archives = _archive.validate_report(archive_json, baseline=baseline, archive_only=archive_only,
+                                            target_run_id=target_run_id)
     except (ValueError, TypeError, RecursionError):
         _raise("restore_output_invalid")
     if not _archive.image_digest(verifier_image_digest) or (
@@ -593,7 +595,8 @@ def render_restore_evidence(
     else:
         state = validate_restore_state(schema_tsv=schema_tsv, replay_json=replay_json, baseline=baseline)
     return {
-        "schema_version": 1,
+        "schema_version": 2 if archive_only else 1,
+        **({"target_run_id": target_run_id} if archive_only else {}),
         "measured": True,
         "rto_seconds": elapsed_seconds,
         "kind": "archive_restore" if archive_only else "restore",
@@ -714,6 +717,7 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--baseline", type=Path, required=True)
     restore.add_argument("--archive-json", type=Path, required=True)
     restore.add_argument("--archive-only", action="store_true")
+    restore.add_argument("--target-run-id")
     restore.add_argument("--verifier-image-digest", required=True)
     restore.add_argument("--account-id", required=True)
     restore.add_argument("--environment", required=True)
@@ -776,6 +780,7 @@ def main(argv: list[str] | None = None) -> int:
             report = render_restore_evidence(
                 archive_json=_archive.read_private(args.archive_json).decode(),
                 archive_only=args.archive_only, verifier_image_digest=args.verifier_image_digest,
+                target_run_id=args.target_run_id,
                 schema_tsv=_read_input(args.schema_tsv, code="schema_output_invalid"),
                 replay_json=_read_input(args.replay_json, code="restore_output_invalid"),
                 baseline=load_restore_baseline(
@@ -792,13 +797,14 @@ def main(argv: list[str] | None = None) -> int:
                 network_name=args.network_name,
                 network_internal=args.network_internal,
             )
-    except EvidenceError as exc:
+    except (EvidenceError, ValueError, OSError) as exc:
         code = str(exc)
         allowlist = BACKUP_ERROR_CODES if args.kind == "backup" else RESTORE_ERROR_CODES
         if code not in allowlist:
             code = "archiver_output_invalid" if args.kind == "backup" else "restore_output_invalid"
         report = render_failure_evidence(
-            kind=args.kind, error_code=code, observed_at_ms=observed_at_ms
+            kind="archive_restore" if args.kind == "restore" and args.archive_only else args.kind,
+            error_code=code, observed_at_ms=observed_at_ms
         )
         with suppress(OSError):
             _atomic_write_json(args.output, report)
