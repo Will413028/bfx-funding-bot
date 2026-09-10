@@ -34,6 +34,7 @@ from alembic import context
 from bfx_funding_bot.core.alembic_compare import compare_server_default, include_object
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.modules.execution.projection_cutover.tables import ArchiveBase
 
 config = context.config
 
@@ -43,7 +44,12 @@ config.set_main_option("sqlalchemy.url", settings.database_url_sync)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+target_metadata = [Base.metadata, ArchiveBase.metadata]
+
+
+def include_name(name, type_, parent_names):
+    """Reflect only schemas owned by these migrations, never third-party schemas."""
+    return type_ != "schema" or name in {None, "public", "projection_audit"}
 
 # Session-level advisory lock that serializes concurrent `alembic upgrade` runs
 # (e.g. during VM cutover). Distinct namespace from the daemon writer lock so the
@@ -92,6 +98,8 @@ def do_run_migrations(connection: Connection) -> None:
             compare_type=True,
             compare_server_default=compare_server_default,
             include_object=include_object,
+            include_schemas=True,
+            include_name=include_name,
         )
         with context.begin_transaction():
             context.run_migrations()
