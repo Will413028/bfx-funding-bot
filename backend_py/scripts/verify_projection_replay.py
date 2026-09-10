@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any, TypeGuard
 from uuid import UUID
 
-from sqlalchemy import insert, select, text
+from sqlalchemy import JSON, Text, cast, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.projection_cutover.codec import JSON_NULL
 from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import RowCollector
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
@@ -289,11 +290,22 @@ async def _archive_projection_rows(
     result: dict[str, list[dict[str, object]]] = {}
     for name, model in _TEMPORARY_PROJECTION_MODELS:
         table = model.__table__  # type: ignore[attr-defined]
-        rows = await session.execute(select(table).where(
+        json_names = {column.name for column in table.c if isinstance(column.type, JSON)}
+        columns = [
+            cast(column, Text).label(column.name) if column.name in json_names else column
+            for column in table.c
+        ]
+        rows = await session.execute(select(*columns).where(
             table.c.exchange_account_id == account_id,
             table.c.deployment_environment == environment,
         ))
-        result[name] = [dict(row) for row in rows.mappings()]
+        values = [dict(row) for row in rows.mappings()]
+        for value in values:
+            for column in json_names:
+                if value[column] is not None:
+                    decoded = json.loads(value[column], parse_float=Decimal)
+                    value[column] = JSON_NULL if decoded is None else decoded
+        result[name] = values
     return result
 
 
