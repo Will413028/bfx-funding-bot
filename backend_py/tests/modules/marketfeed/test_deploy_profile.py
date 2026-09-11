@@ -41,6 +41,20 @@ def test_deployment_profiles_use_registered_projector_version() -> None:
         assert env["BFX_PROJECTOR_VERSION"] == "execution-state-v1"
 
 
+def test_canary_is_fust_only_and_has_no_implicit_reserve() -> None:
+    cells = load_cells_only(REPOSITORY_ROOT / "backend_py/configs/cells.canary.yaml")
+    assert {cell.symbol for cell in cells} == {"fUST"}
+
+    safety = yaml.safe_load(
+        (REPOSITORY_ROOT / "backend_py/configs/safety.canary.yaml").read_text()
+    )
+    assert safety["hard_guards"]["allocation_cap"]["caps"] == {"fUSD": 0, "fUST": 10000}
+    assert safety["hard_guards"]["buying_power"]["buffers"] == {"fUST": 0}
+
+    env = parse_env_file(REPOSITORY_ROOT / "deploy/vm/canary.env")
+    assert env["BFX_BALANCE_BUFFER_USDT"] == "0"
+
+
 @pytest.mark.parametrize("legacy_var", ["BFX_ACCOUNT_ID", "BFX_API_KEY", "BFX_API_SECRET"])
 def test_deploy_script_rejects_legacy_identity_and_env_credentials(
     tmp_path: Path, legacy_var: str
@@ -407,7 +421,7 @@ def test_canary_requires_confirmation_before_fake_docker_and_displays_safety_cap
 
     assert result.returncode != 0
     assert "canary deploy needs interactive confirmation" in result.stderr
-    assert "per-symbol caps: caps: {fUSD: 400, fUST: 10000}" in result.stdout
+    assert "per-symbol caps: caps: {fUSD: 0, fUST: 10000}" in result.stdout
     assert "BFX_ALLOCATION_CAP_USDT  : 0" in result.stdout
     assert not (root / "fake-docker.log").exists()
 

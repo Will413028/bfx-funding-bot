@@ -85,6 +85,7 @@ from bfx_funding_bot.modules.execution.projection_cutover.manifest import (
     encode_manifest,
 )
 from bfx_funding_bot.modules.execution.projection_cutover.snapshot import (
+    SUPPORTED_SYMBOLS,
     validate_cutover_snapshot,
     validate_cutover_snapshot_preflight,
 )
@@ -109,6 +110,19 @@ _DIFFERENCE_FIELDS = frozenset({
     "table", "key_digest", "column", "before_digest", "after_digest", "classification",
 })
 _CLASSIFICATION_FIELDS = _DIFFERENCE_FIELDS | {"reason", "evidence"}
+
+
+def parse_managed_symbols(raw: str) -> frozenset[str]:
+    parts = tuple(part.strip() for part in raw.split(","))
+    symbols = frozenset(parts)
+    if (
+        not raw.strip()
+        or any(not part for part in parts)
+        or len(parts) != len(symbols)
+        or not symbols <= SUPPORTED_SYMBOLS
+    ):
+        raise ValueError("managed_symbols_invalid")
+    return symbols
 
 
 def _is_digest(value: object) -> bool:
@@ -272,6 +286,7 @@ async def prepare_archive(
         "kind": "projection-cutover-prepared-v1", "diagnostic_digest": evidence.diagnostic.digest,
         "classification_digest": evidence.classification.digest,
         "snapshot": serialize_event(snapshot),
+        "managed_symbols": sorted(managed_symbols),
         "operational_digest": row_digest(operation_inventory), "runtime_roles": list(runtime_roles),
     }
     expected: dict[str, Any] | None = None
@@ -664,6 +679,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--projector-version", required=True, choices=("execution-state-v1",))
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--managed-symbols", default="fUST")
     parser.add_argument("--diagnostic", type=Path)
     parser.add_argument("--diagnostic-digest")
     parser.add_argument("--classification", type=Path)
@@ -679,6 +695,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_digest):
         raise ValueError("image_identity_invalid")
+    args.managed_symbols = parse_managed_symbols(args.managed_symbols)
     if args.dry_run and args.command != "prepare":
         raise ValueError("invalid_dry_run_command")
     return args
@@ -737,7 +754,7 @@ async def run_command(
         ):
             raise ValueError("runtime_inventory_incomplete")
         max_age_ms = int(os.environ.get("BFX_HALT2_MAX_SNAPSHOT_AGE_SECONDS", "300")) * 1000
-        symbols = frozenset({"fUST", "fUSD"})
+        symbols = args.managed_symbols
         await verify_local_operations(inventory, runner=runner)
         if args.prepared_digest:
             repeat_evidence: dict[str, Any] = decode_row(read_private(args.output, expected_digest=args.prepared_digest))
@@ -789,9 +806,17 @@ async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, A
     archive_input = bounded("archive_input", 1024 * 1024)
     inventory: dict[str, Any] = decode_row(bounded("operations", 65536))
     snapshot_payload = decode_row(bounded("snapshot", 1024 * 1024))
-    if (set(prepared) != {"kind", "manifest", "snapshot", "diagnostic_digest", "classification_digest", "operational_digest", "runtime_roles"}
+    if (set(prepared) != {"kind", "manifest", "snapshot", "managed_symbols", "diagnostic_digest", "classification_digest", "operational_digest", "runtime_roles"}
             or prepared["kind"] != "projection-cutover-prepared-v1"):
         raise ValueError("prepared_format_invalid")
+    if (
+        type(prepared["managed_symbols"]) is not list
+        or any(type(symbol) is not str for symbol in prepared["managed_symbols"])
+    ):
+        raise ValueError("managed_symbols_invalid")
+    prepared_symbols = parse_managed_symbols(",".join(prepared["managed_symbols"]))
+    if prepared["managed_symbols"] != sorted(prepared_symbols) or prepared_symbols != args.managed_symbols:
+        raise ValueError("apply_managed_symbols_mismatch")
     manifest = decode_manifest(encode_row(prepared["manifest"]))
     if any(getattr(manifest, key) != value for key, value in {
         "scope": scope, "run_id": args.run_id, "image_digest": args.image_digest,
@@ -840,7 +865,9 @@ async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, A
     snapshot = deserialize_event("VENUE_SNAPSHOT_OBSERVED", snapshot_payload)
     if not isinstance(snapshot, VenueSnapshotObserved):
         raise ValueError("prepared_snapshot_invalid")
-    validate_cutover_snapshot_preflight(snapshot, scope=scope, managed_symbols=frozenset({"fUST", "fUSD"}))
+    if frozenset(snapshot.wallet_available) != prepared_symbols:
+        raise ValueError("apply_managed_symbols_mismatch")
+    validate_cutover_snapshot_preflight(snapshot, scope=scope, managed_symbols=prepared_symbols)
     await verify_local_operations(inventory, runner=runner)
 
     async def quiescence(
@@ -858,6 +885,7 @@ async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, A
             await session.execute(text("SET LOCAL lock_timeout='2s'"))
             await session.execute(text("SET LOCAL statement_timeout='30s'"))
             applied = await apply_cutover(session, expected=manifest, snapshot=snapshot,
+                managed_symbols=prepared_symbols,
                 archive_restore_receipt=receipt, evidence=evidence, runtime_roles=runtime_roles,
                 operation_digest=operation_digest, quiescence_verifier=quiescence,
                 now_ms=int(time.time() * 1000))

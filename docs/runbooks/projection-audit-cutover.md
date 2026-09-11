@@ -104,6 +104,7 @@ uv run python -m scripts.cutover_projection prepare \
   --account-id "$ACCOUNT_ID" --environment "$CUTOVER_ENVIRONMENT" \
   --run-id "$RUN_ID" --image-digest "$IMAGE_DIGEST" \
   --projector-version execution-state-v1 \
+  --managed-symbols fUST \
   --diagnostic "$CUTOVER_DIR/diagnostic" --diagnostic-digest "$DIAGNOSTIC_DIGEST" \
   --classification "$CUTOVER_DIR/classification" --classification-digest "$CLASSIFICATION_DIGEST" \
   --operations "$OPERATIONS_FILE" --operations-digest "$OPERATIONS_DIGEST" \
@@ -169,10 +170,13 @@ uv run python -m scripts.verify_projection_archive \
 
 ## 4. Fresh snapshot、atomic apply 與 repeat
 
-完成 restore 後重新取得 explicit full-account snapshot。fUSD 零餘額仍需實際完整的
-offers/credits/wallet coverage 與 `fUSD: 0`；缺 symbol/page/status/rate、非 finite 數字、
-未知 exposure 或 uncertainty 都要停止。Freshness 從 query start 起算，上限 300 秒，
-包含鎖等待與 transaction 執行時間。不能以舊 capture 更新 timestamp 偽造新鮮度。
+完成 restore 後重新取得 explicit snapshot，並以 `--managed-symbols` 宣告本輪 scope。
+本輪 recovery 使用 `--managed-symbols fUST`，因此 fUST 的 offers/credits/wallet 必須
+完整覆蓋；fUSD 保持 dark，不可把缺少 fUSD snapshot 當成零。任何 scope 外 active
+exposure 或非零 position 都要停止；若只剩所有 exposure/ledger buckets 與 `n_credits`
+皆為零的 fUSD legacy scaffold，atomic rebuild 可移除該 inert row。缺 symbol/page/status/rate、
+非 finite 數字、未知 exposure 或 uncertainty 也都要停止。Freshness 從 query start 起算，上限 300 秒，包含鎖等待與
+transaction 執行時間。不能以舊 capture 更新 timestamp 偽造新鮮度。
 
 目前沒有 snapshot CLI。核准的 collector 使用 `collect_snapshot`，以
 `encode_row(serialize_event(snapshot))` 保存 private file 與 SHA-256；isolated pytest
@@ -183,6 +187,7 @@ uv run python -m scripts.cutover_projection apply \
   --account-id "$ACCOUNT_ID" --environment "$CUTOVER_ENVIRONMENT" \
   --run-id "$RUN_ID" --image-digest "$IMAGE_DIGEST" \
   --projector-version execution-state-v1 \
+  --managed-symbols fUST \
   --diagnostic "$CUTOVER_DIR/diagnostic" --diagnostic-digest "$DIAGNOSTIC_DIGEST" \
   --classification "$CUTOVER_DIR/classification" --classification-digest "$CLASSIFICATION_DIGEST" \
   --prepared "$CUTOVER_DIR/prepared" --prepared-digest "$PREPARED_DIGEST" \

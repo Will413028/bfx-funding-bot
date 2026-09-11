@@ -992,7 +992,50 @@ async def test_prepare_refuses_drift_or_nonquiescent_runtime(archive_db, tmp_pat
 def command_args(command, output):
     return [command, "--account-id", str(UUID(int=100)), "--environment", "ci",
             "--run-id", str(UUID(int=99)), "--image-digest", "sha256:" + "a" * 64,
-            "--projector-version", "execution-state-v1", "--output", str(output)]
+            "--projector-version", "execution-state-v1", "--output", str(output),
+            "--managed-symbols", "fUST,fUSD"]
+
+
+def test_cli_managed_symbols_are_bounded_and_explicit(tmp_path):
+    args = cli().parse_args([*command_args("prepare", tmp_path / "prepared"),
+                             "--managed-symbols", "fUST"])
+    assert args.managed_symbols == frozenset({"fUST"})
+
+    default_args = cli().parse_args(command_args("prepare", tmp_path / "default")[:-2])
+    assert default_args.managed_symbols == frozenset({"fUST"})
+
+    for invalid in ("", "fEUR", "fUST,fUST", "fUST,"):
+        with pytest.raises(ValueError, match="managed_symbols"):
+            cli().parse_args([*command_args("prepare", tmp_path / "invalid"),
+                              "--managed-symbols", invalid])
+
+
+@pytest.mark.asyncio
+async def test_real_parser_accepts_explicit_fust_only_wallet_scope():
+    import httpx
+
+    from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+    from tests.modules.execution.projection_cutover.test_snapshot import SCOPE
+
+    def respond(request):
+        return httpx.Response(
+            200,
+            json=[["funding", "UST", "17", "0", "17"]]
+            if request.url.path.endswith("wallets") else [],
+        )
+
+    result = await cli().collect_snapshot(
+        scope=SCOPE,
+        managed_symbols=frozenset({"fUST"}),
+        max_age_ms=300_000,
+        ctx=AccountContext(
+            account_id=str(SCOPE.account_id),
+            credentials=Credentials(api_key="synthetic", api_secret="synthetic"),
+            allocation_cap_usdt=Decimal("0"),
+        ),
+        transport=httpx.MockTransport(respond),
+    )
+    assert result.wallet_available == {"fUST": Decimal("17")}
 
 
 @pytest.mark.integration
@@ -1106,6 +1149,7 @@ def test_private_reader_enforces_command_bound_before_reading(tmp_path, monkeypa
 
 @pytest.mark.parametrize("mutation", [
     "receipt_digest", "prepared_pin", "target", "v1", "operations", "diagnostic",
+    "managed_scope",
     "snapshot_scope", "snapshot_environment", "snapshot_coverage", "snapshot_wallet_symbols",
     "snapshot_wallet_infinite", "snapshot_offer_original_infinite", "snapshot_offer_rate_infinite",
     "snapshot_credit_amount_infinite",
@@ -1153,7 +1197,12 @@ async def test_cli_apply_rejects_unverified_files_before_transaction(archive_db,
         snapshot["offers"][0]["rate"] = "Infinity"
     elif mutation == "snapshot_credit_amount_infinite":
         snapshot["credits"][0]["amount"] = "Infinity"
+    elif mutation == "snapshot_binding":
+        snapshot = serialize_event(runtime_args["snapshot"])
+        snapshot["event_id"] = str(UUID(int=778))
     args = command_args("apply", tmp_path / "applied")
+    if mutation == "managed_scope":
+        args[-1] = "fUST"
     files = {"prepared": (tmp_path / "prepared").read_bytes(),
              "receipt": json.dumps(receipt).encode(), "archive-input": values["archive_input"],
              "operations": encode_row(values["operation_inventory"]),

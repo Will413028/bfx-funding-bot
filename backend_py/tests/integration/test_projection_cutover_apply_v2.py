@@ -130,6 +130,104 @@ async def test_caller_transaction_commit_and_ambiguous_restart(archive_db, tmp_p
     assert await complete_raw(factory) == committed
 
 
+async def test_fust_only_cutover_rebuilds_only_selected_symbol(archive_db, tmp_path):
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["snapshot"] = replace(
+        args["snapshot"],
+        wallet_available={"fUST": Decimal("17")},
+    )
+    args["managed_symbols"] = frozenset({"fUST"})
+
+    async with factory.begin() as session:
+        await module.apply_cutover(session, **args)
+
+    async with factory() as session:
+        rows = (await session.execute(text(
+            "SELECT symbol, offered_amount, lent_amount, available_amount, uncertain_amount "
+            "FROM position_state WHERE exchange_account_id=:account "
+            "AND deployment_environment='ci' ORDER BY symbol"
+        ), {"account": args["expected"].scope.account_id})).all()
+    assert rows == [("fUST", 0, 0, 17, 0)]
+
+
+async def test_prepared_artifact_records_managed_symbol_scope(archive_db, tmp_path):
+    factory, kwargs = await prepare_fixture(archive_db)
+    kwargs = {
+        **kwargs,
+        "managed_symbols": frozenset({"fUST"}),
+        "snapshot": replace(kwargs["snapshot"], wallet_available={"fUST": Decimal("17")}),
+    }
+    prepared = await cli.prepare_archive(
+        factory,
+        **_prepare_kwargs(kwargs),
+        output=tmp_path / "prepared-fust",
+        dry_run=False,
+    )
+
+    assert prepared["managed_symbols"] == ["fUST"]
+
+
+async def test_fust_only_cutover_rejects_existing_fusd_projection(archive_db, tmp_path):
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path, history=True)
+    args["snapshot"] = replace(
+        args["snapshot"],
+        wallet_available={"fUST": Decimal("17")},
+    )
+    args["managed_symbols"] = frozenset({"fUST"})
+    before = await complete_raw(factory)
+
+    with pytest.raises(ValueError, match="apply_out_of_scope_projection"):
+        async with factory.begin() as session:
+            await module.apply_cutover(session, **args)
+    assert await complete_raw(factory) == before
+
+
+async def test_fust_only_cutover_rejects_preexisting_fusd_position_before_rebuild(archive_db, tmp_path):
+    factory, engine = archive_db
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,"
+            "symbol,available_amount,last_updated_ms) VALUES (:account_text,:account_uuid,'ci','fUSD',1,999)"
+        ), {"account_text": str(UUID(int=100)), "account_uuid": UUID(int=100)})
+
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["snapshot"] = replace(args["snapshot"], wallet_available={"fUST": Decimal("17")})
+    args["managed_symbols"] = frozenset({"fUST"})
+    before = await complete_raw(factory)
+
+    with pytest.raises(ValueError, match="apply_out_of_scope_projection"):
+        async with factory.begin() as session:
+            await module.apply_cutover(session, **args)
+
+    assert await complete_raw(factory) == before
+
+
+async def test_fust_only_cutover_allows_zero_fusd_scaffold(archive_db, tmp_path):
+    factory, engine = archive_db
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,"
+            "symbol,last_updated_ms) VALUES (:account_text,:account_uuid,'ci','fUSD',999)"
+        ), {"account_text": str(UUID(int=100)), "account_uuid": UUID(int=100)})
+
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["snapshot"] = replace(args["snapshot"], wallet_available={"fUST": Decimal("17")})
+    args["managed_symbols"] = frozenset({"fUST"})
+
+    async with factory.begin() as session:
+        await module.apply_cutover(session, **args)
+
+    async with factory() as session:
+        assert (await session.execute(text(
+            "SELECT symbol, available_amount FROM position_state "
+            "WHERE exchange_account_id=:account AND deployment_environment='ci'"
+        ), {"account": args["expected"].scope.account_id})).all() == [("fUST", 17)]
+
+
 @pytest.mark.parametrize("age_ms", [-1, 900_001])
 async def test_new_apply_rejects_future_or_stale_restore_before_append(archive_db, tmp_path, monkeypatch, age_ms):
     module = runtime()
