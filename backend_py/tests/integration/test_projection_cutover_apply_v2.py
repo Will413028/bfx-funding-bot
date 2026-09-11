@@ -130,6 +130,81 @@ async def test_caller_transaction_commit_and_ambiguous_restart(archive_db, tmp_p
     assert await complete_raw(factory) == committed
 
 
+@pytest.mark.parametrize("age_ms", [-1, 900_001])
+async def test_new_apply_rejects_future_or_stale_restore_before_append(archive_db, tmp_path, monkeypatch, age_ms):
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["now_ms"] = 1_000_000
+    args["snapshot"] = replace(args["snapshot"], query_started_at_ms=999_800,
+                               query_finished_at_ms=999_900, occurred_at_ms=999_900)
+    args["archive_restore_receipt"]["observed_at_ms"] = 1_000_000 - age_ms
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
+    before = await complete_raw(factory)
+
+    async def forbidden(*a, **kw):
+        raise AssertionError("invalid restore freshness reached snapshot mutation")
+
+    monkeypatch.setattr(module.PostgresEventStore, "append_snapshot", forbidden)
+    with pytest.raises(ValueError, match="restore_receipt_time_invalid"):
+        async with factory.begin() as session:
+            await module.apply_cutover(session, **args)
+    assert await complete_raw(factory) == before
+
+
+@pytest.mark.parametrize("age_ms", [0, 900_000])
+async def test_restore_window_boundaries_and_completed_repeat(archive_db, tmp_path, monkeypatch, age_ms):
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["now_ms"] = 1_000_000
+    args["snapshot"] = replace(args["snapshot"], query_started_at_ms=999_800,
+                               query_finished_at_ms=999_900, occurred_at_ms=999_900)
+    args["archive_restore_receipt"]["observed_at_ms"] = 1_000_000 - age_ms
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
+    async with factory.begin() as session:
+        receipt = await module.apply_cutover(session, **args)
+    committed = await complete_raw(factory)
+    # Exact committed requests still validate current state with an old receipt
+    # or a wall-clock rollback. Neither retry may append another event.
+    for now_ms in (2_000_001, 0):
+        async with factory.begin() as session:
+            assert await module.apply_cutover(session, **{**args, "now_ms": now_ms}) == receipt
+        assert await complete_raw(factory) == committed
+
+
+@pytest.mark.parametrize("stage", ["lock", "source", "archive"])
+async def test_restore_freshness_counts_elapsed_apply_time(archive_db, tmp_path, monkeypatch, stage):
+    module = runtime()
+    factory, args, _ = await fixture(archive_db, tmp_path)
+    args["now_ms"] = 1_000_000
+    args["snapshot"] = replace(args["snapshot"], query_started_at_ms=999_800,
+                               query_finished_at_ms=999_900, occurred_at_ms=999_900)
+    args["archive_restore_receipt"]["observed_at_ms"] = 100_000
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    owner, name = {
+        "lock": (module.AccountEventWriter, "acquire_lock"),
+        "source": (module, "_verify_live_archive"),
+        "archive": (module, "capture_archive"),
+    }[stage]
+    original = getattr(owner, name)
+
+    async def delayed(*a, **kw):
+        result = await original(*a, **kw)
+        clock[0] = 0.001
+        return result
+
+    monkeypatch.setattr(owner, name, delayed)
+    if stage != "archive":
+        async def forbidden(*a, **kw):
+            raise AssertionError("elapsed restore deadline reached snapshot mutation")
+        monkeypatch.setattr(module.PostgresEventStore, "append_snapshot", forbidden)
+    before = await complete_raw(factory)
+    with pytest.raises(ValueError, match="restore_receipt_time_invalid"):
+        async with factory.begin() as session:
+            await module.apply_cutover(session, **args)
+    assert await complete_raw(factory) == before
+
+
 @pytest.mark.parametrize("point", ["before_append", "after_append", "before_rebuild", "after_rebuild",
                                   "before_parity", "after_parity", "before_receipt", "after_receipt"])
 async def test_boundary_failure_rolls_back_all_raw_tables(archive_db, tmp_path, monkeypatch, point):

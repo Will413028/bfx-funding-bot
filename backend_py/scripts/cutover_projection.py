@@ -50,7 +50,7 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.projection_cutover.apply import (
     apply_cutover,
     validate_apply_evidence,
-    validate_restore_receipt,
+    validate_restore_receipt_preflight,
 )
 from bfx_funding_bot.modules.execution.projection_cutover.archive import (
     _describe,
@@ -96,7 +96,7 @@ from scripts.projection_cutover_operations import (
     verify_local_operations,
 )
 from scripts.verify_projection_archive import _unique, decode_archive_inputs
-from scripts.verify_projection_replay import _archive_projection_rows, replay_one_account
+from scripts.verify_projection_replay import replay_one_account
 
 _ALLOWED_CLASSIFICATIONS = frozenset({
     "identity_representation",
@@ -299,15 +299,10 @@ async def prepare_archive(
         await verify_local_operations(operation_inventory, runner=runner)
         if await _stream_identity(session, scope) != evidence.diagnostic.stream:
             raise ValueError("prepare_stream_drift")
-        rows = await _archive_projection_rows(session, account_id=scope.account_id, environment=scope.environment)
-        for table in evidence.diagnostic.tables:
-            table_name = table.get("name")
-            if not isinstance(table_name, str):
-                raise ValueError("prepare_identity_mismatch")
-            connection = await session.connection()
-            _, schema, keys = await connection.run_sync(partial(_describe, name=table_name))
-            if {**_table_facts(table_name, rows[table_name], keys), "schema": schema} != table:
-                raise ValueError("prepare_original_projection_drift")
+        # Keep only eight compact facts; each physical table is cursor-read
+        # through a private external spool that is closed before the next one.
+        if await _diagnostic_table_facts(session, scope=scope) != evidence.diagnostic.tables:
+            raise ValueError("prepare_original_projection_drift")
         if expected is not None:
             manifest = decode_manifest(encode_row(expected["manifest"]))
             if any(getattr(manifest, key) != value for key, value in {
@@ -813,7 +808,9 @@ async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, A
     validate_apply_evidence(manifest, evidence)
     if not isinstance(receipt, dict):
         raise ValueError("restore_receipt_invalid")
-    validate_restore_receipt(manifest, receipt)
+    # Identity-only here: a committed identical request may reuse old evidence.
+    # Runtime checks freshness for new requests after the locked receipt lookup.
+    validate_restore_receipt_preflight(manifest, receipt)
     archives = decode_archive_inputs(archive_input)
     transport = json.loads(archive_input, object_pairs_hook=_unique)
     roles = inventory.get("runtime_roles")

@@ -85,6 +85,10 @@ def compare_sorted_rows(
             key, left = old
             right = {}
             old = next(old_rows, None)
+        elif new[0] < old[0]:
+            key, right = new
+            left = {}
+            new = next(new_rows, None)
         else:
             key, left = old
             right = new[1]
