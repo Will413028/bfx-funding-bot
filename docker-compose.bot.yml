@@ -67,7 +67,11 @@ services:
     image: bfx-bot:local
     command: ["sh", "-c", "alembic upgrade head"]
     working_dir: /app
-    env_file: .env.runtime
+    # Migrations run as the operator principal; the daemon and weekly report
+    # use the restricted runtime URL from .env.runtime.
+    env_file:
+      - .env.runtime
+      - .env.migrate.runtime
     restart: "no"
     depends_on:
       postgres:

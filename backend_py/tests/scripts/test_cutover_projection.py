@@ -560,6 +560,7 @@ class FixedOperations:
             return ("\n".join(f"{unit} masked -" for unit in (
                 "bfx-weekly-report.service", "bfx-weekly-report.timer",
                 "bfx-halt-watch.service", "bfx-halt-watch.timer",
+                "bfx-pg-backup.service", "bfx-pg-backup.timer",
             )) + ("\nbfx-surprise.timer enabled -" if self.unknown_unit else "")).encode()
         if "list-units" in argv:
             return b""
