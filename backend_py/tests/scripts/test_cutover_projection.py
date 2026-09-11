@@ -535,6 +535,7 @@ class FixedOperations:
         self.unknown_unit = False
         self.remote = False
         self.oneoff = False
+        self.null_oneoff = False
         self.calls = []
 
     async def __call__(self, argv):
@@ -552,7 +553,7 @@ class FixedOperations:
             if "inspect" in argv:
                 number = int(argv[-1], 16)
                 return json.dumps({
-                    "id": argv[-1], "project": "bfx", "service": ("bot", "webapi", "frontend", "autoheal")[number - 1], "oneoff": "True" if self.oneoff else "False",
+                    "id": argv[-1], "project": "bfx", "service": ("bot", "webapi", "frontend", "autoheal")[number - 1], "oneoff": None if self.null_oneoff else "True" if self.oneoff else "False",
                     "image": "sha256:" + "a" * 64, "running": self.running, "paused": False,
                     "restarting": False, "status": "exited", "restart": self.restart,
                 }).encode()
@@ -592,6 +593,15 @@ async def test_remote_docker_environment_never_executes_a_probe(env):
     with pytest.raises(ValueError):
         await operations().verify_local_operations(operation_inventory(), runner=runner, environ=env)
     assert runner.calls == []
+
+
+def test_operational_inventory_treats_missing_compose_oneoff_label_as_persistent():
+    runner = FixedOperations()
+    runner.null_oneoff = True
+
+    import asyncio
+
+    asyncio.run(operations().verify_local_operations(operation_inventory(), runner=runner, environ={}))
 
 
 async def test_oneoff_cannot_replace_expected_regular_service_inventory():

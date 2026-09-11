@@ -109,6 +109,12 @@ async def verify_local_operations(
                     raise ValueError("container_identity_invalid")
                 state = json.loads(await read((*DOCKER, "inspect", "--format", INSPECT, identity)))
                 service = state.get("service")
+                # Compose 5.x omits the oneoff label on persistent containers;
+                # Docker's Go template therefore returns JSON null.  Only the
+                # absent-label case maps to the persistent value.  Explicit
+                # non-boolean labels remain invalid and fail closed.
+                if state.get("oneoff") is None:
+                    state["oneoff"] = "False"
                 if (state.get("id") != identity or state.get("project") != "bfx"
                         or service not in SERVICES or state.get("oneoff") not in {"True", "False"}
                         or state.get("image") != expected["images"][service]):
