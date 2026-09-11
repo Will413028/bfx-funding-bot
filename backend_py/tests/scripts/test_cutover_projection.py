@@ -1,5 +1,6 @@
 """Prepare evidence must share the archive's lossless PostgreSQL representation."""
 
+import asyncio
 from decimal import Decimal
 from uuid import UUID
 
@@ -7,6 +8,10 @@ import pytest
 from sqlalchemy import text
 
 from bfx_funding_bot.modules.execution.projection_cutover.codec import JSON_NULL, encode_row
+from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
+    EvidenceWriter,
+    VerifiedCutoverEvidence,
+)
 from scripts.verify_projection_replay import _archive_projection_rows
 from tests.integration.test_projection_cutover_archive import archive_db as _archive_db
 from tests.integration.test_projection_cutover_archive import archive_pg as _archive_pg
@@ -168,6 +173,240 @@ def classification(diag):
     }
 
 
+def _v2_identity():
+    from bfx_funding_bot.modules.execution.projection_cutover.contracts import Scope, StreamIdentity
+
+    return {
+        "run_id": UUID(int=99),
+        "scope": Scope(UUID(int=100), "ci"),
+        "image_digest": "sha256:" + "a" * 64,
+        "projector_version": "execution-state-v1",
+        "stream": StreamIdentity(2, 2, "b" * 64),
+    }
+
+
+def _v2_difference(index: int) -> dict[str, object]:
+    return {
+        "table": "position_state",
+        "key_digest": f"{index + 3:064x}",
+        "column": "last_updated_ms" if index == 0 else "reserved",
+        "before_digest": "d" * 64,
+        "after_digest": "e" * 64,
+        "classification": "unexplained",
+    }
+
+
+def _write_v2_evidence(tmp_path, *, classifications=None, diagnostic_identity=None):
+    identity = {**_v2_identity(), **(diagnostic_identity or {})}
+    diagnostics = [_v2_difference(0), _v2_difference(1)]
+    diagnostic_path = tmp_path / "diagnostic"
+    diagnostic = EvidenceWriter.create(
+        diagnostic_path,
+        manifest_fields={
+            "kind": "projection-cutover-diagnostic-v2",
+            "format_version": 2,
+            **identity,
+            "record_kind": "difference",
+            "tables": [],
+        },
+    )
+    for record in diagnostics:
+        diagnostic.append(record)
+    diagnostic_manifest = diagnostic.finish()
+    if classifications is None:
+        classifications = [
+            {
+                **record,
+                "classification": "historical_state" if index == 0 else "time_sequence",
+                "reason": "synthetic reason",
+                "evidence": "synthetic evidence",
+            }
+            for index, record in enumerate(diagnostics)
+        ]
+    classification_path = tmp_path / "classification"
+    classification = EvidenceWriter.create(
+        classification_path,
+        manifest_fields={
+            "kind": "projection-cutover-classification-v2",
+            "format_version": 2,
+            **identity,
+            "record_kind": "classification",
+            "diagnostic_digest": diagnostic_manifest.digest,
+            "reviewer": "synthetic-operator",
+        },
+    )
+    for record in classifications:
+        classification.append(record)
+    classification_manifest = classification.finish()
+    return identity, diagnostics, diagnostic_manifest, classification_path, classification_manifest, diagnostic_path
+
+
+def test_v2_verifier_returns_only_compact_lockstep_summary_and_exact_counts(tmp_path):
+    identity, _, diagnostic_manifest, classification_path, classification_manifest, diagnostic_path = (
+        _write_v2_evidence(tmp_path)
+    )
+    summary = cli().verify_cutover_evidence(
+        diagnostic_path,
+        classification_path,
+        expected_diagnostic_digest=diagnostic_manifest.digest,
+        expected_classification_digest=classification_manifest.digest,
+        expected_run_id=identity["run_id"],
+        expected_scope=identity["scope"],
+        expected_image_digest=identity["image_digest"],
+        expected_projector_version=identity["projector_version"],
+    )
+    assert isinstance(summary, VerifiedCutoverEvidence)
+    assert summary.diagnostic == diagnostic_manifest
+    assert summary.classification == classification_manifest
+    assert summary.classification_counts == (("historical_state", 1), ("time_sequence", 1))
+    assert not hasattr(summary, "records")
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "missing", "reordered", "unexplained", "unknown", "reason", "evidence"])
+def test_v2_verifier_rejects_incomplete_or_unbound_classification(tmp_path, mutation):
+    _, diagnostics, diagnostic_manifest, _, _, diagnostic_path = _write_v2_evidence(tmp_path)
+    if mutation == "duplicate":
+        records = [{**diagnostics[0], "classification": "historical_state", "reason": "r", "evidence": "e"}] * 2
+    elif mutation == "missing":
+        records = []
+    elif mutation == "reordered":
+        records = [
+            {**diagnostics[1], "classification": "historical_state", "reason": "r", "evidence": "e"},
+            {**diagnostics[0], "classification": "time_sequence", "reason": "r", "evidence": "e"},
+        ]
+    else:
+        records = [
+            {**diagnostics[0], "classification": "historical_state", "reason": "r", "evidence": "e"}
+        ]
+        records[0][mutation] = {
+            "unexplained": "unexplained",
+            "unknown": "not-an-allowed-class",
+            "reason": "",
+            "evidence": "",
+        }[mutation]
+    classification_path = tmp_path / "classification-mutated"
+    classification = EvidenceWriter.create(
+        classification_path,
+        manifest_fields={
+            "kind": "projection-cutover-classification-v2",
+            "format_version": 2,
+            **_v2_identity(),
+            "record_kind": "classification",
+            "diagnostic_digest": diagnostic_manifest.digest,
+            "reviewer": "synthetic-operator",
+        },
+    )
+    for record in records:
+        classification.append(record)
+    classification_manifest = classification.finish()
+    with pytest.raises(ValueError):
+        cli().verify_cutover_evidence(
+            diagnostic_path,
+            classification_path,
+            expected_diagnostic_digest=diagnostic_manifest.digest,
+            expected_classification_digest=classification_manifest.digest,
+            expected_run_id=_v2_identity()["run_id"],
+            expected_scope=_v2_identity()["scope"],
+            expected_image_digest=_v2_identity()["image_digest"],
+            expected_projector_version=_v2_identity()["projector_version"],
+        )
+
+
+def test_v2_verifier_rejects_identity_digest_and_incomplete_directory(tmp_path):
+    identity, _, diagnostic_manifest, classification_path, classification_manifest, diagnostic_path = (
+        _write_v2_evidence(tmp_path)
+    )
+    with pytest.raises(ValueError):
+        cli().verify_cutover_evidence(
+            diagnostic_path,
+            classification_path,
+            expected_diagnostic_digest="0" * 64,
+            expected_classification_digest=classification_manifest.digest,
+            expected_run_id=identity["run_id"],
+            expected_scope=identity["scope"],
+            expected_image_digest=identity["image_digest"],
+            expected_projector_version=identity["projector_version"],
+        )
+    with pytest.raises(ValueError):
+        cli().verify_cutover_evidence(
+            diagnostic_path,
+            classification_path,
+            expected_diagnostic_digest=diagnostic_manifest.digest,
+            expected_classification_digest=classification_manifest.digest,
+            expected_run_id=UUID(int=101),
+            expected_scope=identity["scope"],
+            expected_image_digest=identity["image_digest"],
+            expected_projector_version=identity["projector_version"],
+        )
+    (classification_path / "COMPLETE").unlink()
+    with pytest.raises(ValueError):
+        cli().verify_cutover_evidence(
+            diagnostic_path,
+            classification_path,
+            expected_diagnostic_digest=diagnostic_manifest.digest,
+            expected_classification_digest=classification_manifest.digest,
+            expected_run_id=identity["run_id"],
+            expected_scope=identity["scope"],
+            expected_image_digest=identity["image_digest"],
+            expected_projector_version=identity["projector_version"],
+        )
+
+
+def test_v2_verifier_rejects_non_string_classification(tmp_path):
+    _, diagnostics, diagnostic_manifest, _, _, diagnostic_path = _write_v2_evidence(tmp_path)
+    classification_path = tmp_path / "classification-unhashable"
+    classification = EvidenceWriter.create(
+        classification_path,
+        manifest_fields={
+            "kind": "projection-cutover-classification-v2",
+            "format_version": 2,
+            **_v2_identity(),
+            "record_kind": "classification",
+            "diagnostic_digest": diagnostic_manifest.digest,
+            "reviewer": "synthetic-operator",
+        },
+    )
+    classification.append({
+        **diagnostics[0],
+        "classification": ["historical_state"],
+        "reason": "r",
+        "evidence": "e",
+    })
+    classification.append({
+        **diagnostics[1],
+        "classification": "historical_state",
+        "reason": "r",
+        "evidence": "e",
+    })
+    classification_manifest = classification.finish()
+    with pytest.raises(ValueError):
+        cli().verify_cutover_evidence(
+            diagnostic_path,
+            classification_path,
+            expected_diagnostic_digest=diagnostic_manifest.digest,
+            expected_classification_digest=classification_manifest.digest,
+            expected_run_id=UUID(int=99),
+            expected_scope=_v2_identity()["scope"],
+            expected_image_digest=_v2_identity()["image_digest"],
+            expected_projector_version=_v2_identity()["projector_version"],
+        )
+
+
+def test_prepare_requires_v2_evidence_directories(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite://")
+    identity = _v2_identity()
+    args = cli().parse_args([
+        "prepare", "--account-id", str(identity["scope"].account_id), "--environment", "ci",
+        "--run-id", str(identity["run_id"]), "--image-digest", identity["image_digest"],
+        "--projector-version", identity["projector_version"], "--output", str(tmp_path / "prepared"),
+        "--diagnostic", str(tmp_path / "legacy-diagnostic.json"), "--diagnostic-digest", "a" * 64,
+        "--classification", str(tmp_path / "legacy-classification.json"), "--classification-digest", "b" * 64,
+        "--operations", str(tmp_path / "operations"), "--operations-digest", "c" * 64,
+    ])
+    with pytest.raises(ValueError, match="evidence_format_invalid"):
+        asyncio.run(cli().run_command(args))
+
+
 def test_review_binds_every_difference_and_artifact_digest():
     import hashlib
 
@@ -203,8 +442,12 @@ def test_review_rejects_unreviewed_missing_new_or_drifted_difference(mutation):
 
 
 @pytest.mark.integration
-async def test_diagnose_captures_all_original_columns_without_mutation(pg_session_factory):
+async def test_diagnose_captures_all_original_columns_without_mutation(pg_session_factory, tmp_path):
     from bfx_funding_bot.modules.execution.projection_cutover.contracts import Scope
+    from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
+        DIAGNOSTIC_KIND,
+        iter_verified_records,
+    )
     from tests.integration.test_projection_cutover_diagnostics import _seed, _source_state
     from tests.modules.execution.event_store.test_historical_claim_cycles import ACCOUNT
 
@@ -213,11 +456,16 @@ async def test_diagnose_captures_all_original_columns_without_mutation(pg_sessio
     result = await cli().diagnose(
         pg_session_factory, scope=Scope(ACCOUNT, "ci"), run_id=UUID(int=99),
         image_digest="sha256:" + "a" * 64, projector_version="execution-state-v1",
+        output=tmp_path / "diagnostic",
     )
-    assert result["stream"]["count"] > 0
-    assert len(result["tables"]) == 8
-    assert all(d["classification"] == "unexplained" for d in result["differences"])
-    assert any(d["column"] == "last_updated_ms" for d in result["differences"])
+    assert result.kind == DIAGNOSTIC_KIND
+    assert result.stream.count > 0
+    assert len(result.tables) == 8
+    differences = list(iter_verified_records(
+        tmp_path / "diagnostic", expected_digest=result.digest, expected_kind=DIAGNOSTIC_KIND,
+    ))
+    assert all(d["classification"] == "unexplained" for d in differences)
+    assert any(d["column"] == "last_updated_ms" for d in differences)
     assert await _source_state(pg_session_factory) == before
 
 
@@ -372,6 +620,14 @@ async def test_operational_unreadable_or_unbounded_probe_fails_closed(payload):
         await operations().verify_local_operations(operation_inventory(), runner=probe, environ={})
 
 
+def _prepare_kwargs(values):
+    return {
+        key: value
+        for key, value in values.items()
+        if key not in {"diagnostic_path", "classification_path", "diagnostic_digest", "classification_digest"}
+    }
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("drift", ["freshness", "operations"])
 async def test_prepare_rechecks_freshness_and_operations_after_capture(archive_db, tmp_path, monkeypatch, drift):
@@ -392,7 +648,7 @@ async def test_prepare_rechecks_freshness_and_operations_after_capture(archive_d
 
     monkeypatch.setattr(cli(), "capture_archive", delayed_capture)
     with pytest.raises(ValueError):
-        await cli().prepare_archive(factory, **kwargs, output=tmp_path / "prepared", dry_run=False)
+        await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=tmp_path / "prepared", dry_run=False)
     async with factory() as session:
         assert await session.scalar(text("SELECT count(*) FROM projection_audit.runs")) == 0
 
@@ -409,7 +665,7 @@ async def test_omitted_noinherit_login_with_reachable_writer_role_blocks_prepare
         connection.exec_driver_sql(f"GRANT writer_{suffix} TO omitted_{suffix}")
         connection.exec_driver_sql(f"GRANT UPDATE ON position_state TO writer_{suffix}")
     with pytest.raises(ValueError):
-        await cli().prepare_archive(factory, **kwargs, output=tmp_path / "prepared", dry_run=False)
+        await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=tmp_path / "prepared", dry_run=False)
 
 
 @pytest.mark.integration
@@ -421,7 +677,7 @@ async def test_prepare_refuses_new_event_since_reviewed_repeatable_read_snapshot
             "event_type,payload,occurred_at_ms) VALUES (:s,:id,'ci','CREDIT_CLOSED','{}',1300)"
         ), {"id": UUID(int=100), "s": str(UUID(int=100))})
     with pytest.raises(ValueError):
-        await cli().prepare_archive(factory, **kwargs, output=tmp_path / "prepared", dry_run=False)
+        await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=tmp_path / "prepared", dry_run=False)
     async with factory() as session:
         assert await session.scalar(text("SELECT count(*) FROM projection_audit.runs")) == 0
         assert await session.scalar(text("SELECT count(*) FROM event_log")) == 1
@@ -433,7 +689,7 @@ async def test_prepare_refuses_empty_table_schema_drift_since_diagnose(archive_d
     with archive_db[1].begin() as connection:
         connection.exec_driver_sql("ALTER TABLE venue_credit_state ADD COLUMN synthetic_drift text")
     with pytest.raises(ValueError):
-        await cli().prepare_archive(factory, **kwargs, output=tmp_path / "prepared", dry_run=False)
+        await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=tmp_path / "prepared", dry_run=False)
 
 
 async def test_real_parser_nonempty_offer_and_credit_records_and_safe_failure():
@@ -528,11 +784,16 @@ async def test_database_quiescence_refreshes_activity_after_new_writer_in_same_t
 
 
 async def prepare_fixture(archive_db):
-    import hashlib
+    from pathlib import Path
+    from tempfile import mkdtemp
     from uuid import uuid4
 
-    from bfx_funding_bot.modules.execution.projection_cutover.codec import row_digest
     from bfx_funding_bot.modules.execution.projection_cutover.contracts import Scope
+    from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
+        CLASSIFICATION_KIND,
+        EvidenceWriter,
+        iter_verified_records,
+    )
     from tests.modules.execution.projection_cutover.test_snapshot import snapshot
 
     factory, engine = archive_db
@@ -544,21 +805,53 @@ async def prepare_fixture(archive_db):
             "INSERT INTO trading_halt(account_id,exchange_account_id,deployment_environment,"
             "halted,reason,actor,created_at_ms) VALUES (:s,:a,'ci',true,'synthetic','operator',1000)"
         ), {"s": str(scope.account_id), "a": scope.account_id})
+    evidence_root = Path(mkdtemp(prefix="bfx-cutover-fixture-"))
+    diagnostic_path = evidence_root / "diagnostic"
     diag = await cli().diagnose(
         factory, scope=scope, run_id=UUID(int=99), image_digest="sha256:" + "a" * 64,
-        projector_version="execution-state-v1",
+        projector_version="execution-state-v1", output=diagnostic_path,
     )
-    payload = encode_row({
-        "diagnostic_digest": row_digest(diag), "reviewer": "synthetic-operator",
-        "classifications": [{**difference, "classification": "historical_state",
-                              "reason": "synthetic projection has no event source",
-                              "evidence": "empty-source-stream-fixture"}
-                             for difference in diag["differences"]],
-    })
+    classification_path = evidence_root / "classification"
+    classification = EvidenceWriter.create(
+        classification_path,
+        manifest_fields={
+            "kind": CLASSIFICATION_KIND,
+            "format_version": 2,
+            "run_id": diag.run_id,
+            "scope": diag.scope,
+            "image_digest": diag.image_digest,
+            "projector_version": diag.projector_version,
+            "stream": diag.stream,
+            "record_kind": "classification",
+            "diagnostic_digest": diag.digest,
+            "reviewer": "synthetic-operator",
+        },
+    )
+    for difference in iter_verified_records(
+        diagnostic_path, expected_digest=diag.digest, expected_kind="projection-cutover-diagnostic-v2",
+    ):
+        classification.append({
+            **difference,
+            "classification": "historical_state",
+            "reason": "synthetic projection has no event source",
+            "evidence": "empty-source-stream-fixture",
+        })
+    classification_manifest = classification.finish()
+    verified = cli().verify_cutover_evidence(
+        diagnostic_path,
+        classification_path,
+        expected_diagnostic_digest=diag.digest,
+        expected_classification_digest=classification_manifest.digest,
+        expected_run_id=diag.run_id,
+        expected_scope=scope,
+        expected_image_digest=diag.image_digest,
+        expected_projector_version=diag.projector_version,
+    )
     return factory, {
         "scope": scope, "run_id": UUID(int=99), "image_digest": "sha256:" + "a" * 64,
-        "projector_version": "execution-state-v1", "diagnostic": diag,
-        "classification_payload": payload, "classification_digest": hashlib.sha256(payload).hexdigest(),
+        "projector_version": "execution-state-v1", "evidence": verified,
+        "diagnostic_path": diagnostic_path, "classification_path": classification_path,
+        "diagnostic_digest": diag.digest, "classification_digest": classification_manifest.digest,
         "snapshot": snapshot(), "managed_symbols": frozenset({"fUST", "fUSD"}),
         "now_ms": 1200, "max_age_ms": 300_000, "operation_inventory": operation_inventory(),
         "runtime_roles": (role,), "runner": FixedOperations(),
@@ -571,15 +864,24 @@ async def test_prepare_archives_only_repeat_verifies_identity_and_dry_run_rolls_
 
     factory, kwargs = await prepare_fixture(archive_db)
     output = tmp_path / "prepared"
-    dry = await cli().prepare_archive(factory, **kwargs, output=output, dry_run=True)
+    dry = await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=output, dry_run=True)
     assert dry["kind"] == "projection-cutover-prepared-v1"
     assert not output.exists()
     async with factory() as session:
         assert await session.scalar(text("SELECT count(*) FROM projection_audit.runs")) == 0
-    result = await cli().prepare_archive(factory, **kwargs, output=output, dry_run=False)
+    result = await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=output, dry_run=False)
     assert output.stat().st_mode & 0o777 == 0o600
+    from bfx_funding_bot.modules.execution.projection_cutover.codec import decode_row
+
+    prepared_payload = output.read_bytes()
+    prepared = decode_row(prepared_payload)
+    assert prepared["diagnostic_digest"] == kwargs["evidence"].diagnostic.digest
+    assert prepared["classification_digest"] == kwargs["evidence"].classification.digest
+    assert b"chunks" not in prepared_payload
+    assert b"synthetic projection has no event source" not in prepared_payload
+    assert b"empty-source-stream-fixture" not in prepared_payload
     repeated = await cli().prepare_archive(
-        factory, **kwargs, output=output, dry_run=False,
+        factory, **_prepare_kwargs(kwargs), output=output, dry_run=False,
         prepared_digest=hashlib.sha256(output.read_bytes()).hexdigest(),
     )
     assert repeated == result
@@ -588,7 +890,7 @@ async def test_prepare_archives_only_repeat_verifies_identity_and_dry_run_rolls_
         assert await session.scalar(text("SELECT count(*) FROM event_log")) == 0
         assert await session.scalar(text("SELECT reserved FROM position_state WHERE symbol='fUST'")) == Decimal("1.2300")
     with pytest.raises(ValueError):
-        await cli().prepare_archive(factory, **{**kwargs, "image_digest": "sha256:" + "c" * 64},
+        await cli().prepare_archive(factory, **_prepare_kwargs({**kwargs, "image_digest": "sha256:" + "c" * 64}),
                                     output=output, dry_run=False,
                                     prepared_digest=hashlib.sha256(output.read_bytes()).hexdigest())
 
@@ -612,7 +914,7 @@ async def test_prepare_refuses_drift_or_nonquiescent_runtime(archive_db, tmp_pat
             # pg_stat_activity.usename is session_user, so a pending transaction
             # by another operator connection must also block capture.
         with pytest.raises(ValueError):
-            await cli().prepare_archive(factory, **kwargs, output=tmp_path / "prepared", dry_run=False)
+            await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=tmp_path / "prepared", dry_run=False)
         async with factory() as session:
             assert await session.scalar(text("SELECT count(*) FROM projection_audit.runs")) == 0
     finally:
@@ -640,7 +942,11 @@ def test_cli_requires_every_explicit_identity_field(flag, tmp_path):
 async def test_cli_diagnose_and_independent_archive_verification(archive_db, tmp_path, monkeypatch):
     import hashlib
 
-    from bfx_funding_bot.modules.execution.projection_cutover.codec import decode_row
+    from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
+        DIAGNOSTIC_KIND,
+        iter_verified_records,
+        verify_artifact,
+    )
 
     factory, kwargs = await prepare_fixture(archive_db)
     # Explicit password rendering is used only for this synthetic container env.
@@ -648,10 +954,23 @@ async def test_cli_diagnose_and_independent_archive_verification(archive_db, tmp
     diagnostic_path = tmp_path / "diagnostic"
     result = await cli().run_command(cli().parse_args(command_args("diagnose", diagnostic_path)))
     assert result["status"] == "diagnosed"
-    diagnostic_evidence = decode_row(diagnostic_path.read_bytes())
-    assert diagnostic_evidence["stream"]["count"] == 0
+    diagnostic_manifest = verify_artifact(
+        diagnostic_path,
+        expected_digest=result["diagnostic_digest"],
+        expected_kind=DIAGNOSTIC_KIND,
+    )
+    assert diagnostic_manifest.stream.count == 0
+    assert result["difference_count"] == diagnostic_manifest.record_count
+    assert all(
+        record["classification"] == "unexplained"
+        for record in iter_verified_records(
+            diagnostic_path,
+            expected_digest=diagnostic_manifest.digest,
+            expected_kind=DIAGNOSTIC_KIND,
+        )
+    )
     output = tmp_path / "prepared"
-    await cli().prepare_archive(factory, **kwargs, output=output, dry_run=False)
+    await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=output, dry_run=False)
     args = [*command_args("verify-archive", output),
         "--prepared-digest", hashlib.sha256(output.read_bytes()).hexdigest(),
     ]
@@ -688,12 +1007,19 @@ async def test_cli_prepare_uses_uuid_vault_and_real_reads_outside_transaction(ar
         ))
     inventory = {**kwargs["operation_inventory"], "runtime_roles": dict.fromkeys(("bot", "webapi", "frontend", "weekly-report"), kwargs["runtime_roles"][0])}
     args = command_args("prepare", tmp_path / "prepared")
-    for name, payload in (("diagnostic", encode_row(kwargs["diagnostic"])),
-                          ("classification", kwargs["classification_payload"]),
-                          ("operations", encode_row(inventory))):
-        path = tmp_path / name
-        cli().write_private(path, payload)
-        args.extend([f"--{name}", str(path), f"--{name}-digest", hashlib.sha256(payload).hexdigest()])
+    args.extend([
+        "--diagnostic", str(kwargs["diagnostic_path"]),
+        "--diagnostic-digest", kwargs["diagnostic_digest"],
+        "--classification", str(kwargs["classification_path"]),
+        "--classification-digest", kwargs["classification_digest"],
+    ])
+    operations_path = tmp_path / "operations"
+    operations_payload = encode_row(inventory)
+    cli().write_private(operations_path, operations_payload)
+    args.extend([
+        "--operations", str(operations_path),
+        "--operations-digest", hashlib.sha256(operations_payload).hexdigest(),
+    ])
     paths = []
 
     async def respond(request):

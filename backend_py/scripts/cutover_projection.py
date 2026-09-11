@@ -30,6 +30,13 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
     VenueOfferObservation,
 )
+from bfx_funding_bot.modules.execution.event_store.replay_verification import (
+    _PROJECTION_SPOOL_TABLES,
+    _TEMPORARY_PROJECTION_MODELS,
+    _projection_spool,
+    _spool_facts,
+    _spool_projection_rows,
+)
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
     serialize_event,
@@ -51,8 +58,21 @@ from bfx_funding_bot.modules.execution.projection_cutover.codec import (
     encode_row,
     row_digest,
 )
-from bfx_funding_bot.modules.execution.projection_cutover.contracts import Scope
-from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import compare_rows
+from bfx_funding_bot.modules.execution.projection_cutover.contracts import (
+    Difference,
+    Scope,
+    StreamIdentity,
+)
+from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import DifferenceSink
+from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
+    CLASSIFICATION_KIND,
+    DIAGNOSTIC_KIND,
+    EvidenceManifest,
+    EvidenceWriter,
+    VerifiedCutoverEvidence,
+    _opened_artifact,
+    iter_verified_records,
+)
 from bfx_funding_bot.modules.execution.projection_cutover.manifest import (
     TABLE_NAMES,
     decode_manifest,
@@ -69,29 +89,180 @@ from scripts.projection_cutover_operations import (
 )
 from scripts.verify_projection_replay import _archive_projection_rows, replay_one_account
 
+_ALLOWED_CLASSIFICATIONS = frozenset({
+    "identity_representation",
+    "historical_state",
+    "time_sequence",
+    "missing_symbol",
+    "checkpoint_source",
+})
+_DIFFERENCE_FIELDS = frozenset({
+    "table", "key_digest", "column", "before_digest", "after_digest", "classification",
+})
+_CLASSIFICATION_FIELDS = _DIFFERENCE_FIELDS | {"reason", "evidence"}
+
+
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_manifest_identity(
+    manifest: EvidenceManifest,
+    *,
+    kind: str,
+    run_id: UUID,
+    scope: Scope,
+    image_digest: str,
+    projector_version: str,
+) -> None:
+    if (
+        manifest.kind != kind
+        or manifest.format_version != 2
+        or manifest.run_id != run_id
+        or manifest.scope != scope
+        or manifest.image_digest != image_digest
+        or manifest.projector_version != projector_version
+    ):
+        raise ValueError("evidence_identity_mismatch")
+
+
+def _validate_difference_record(record: Mapping[str, object]) -> dict[str, object]:
+    if set(record) != _DIFFERENCE_FIELDS:
+        raise ValueError("diagnostic_record_invalid")
+    if (
+        not _is_nonempty_string(record["table"])
+        or not _is_digest(record["key_digest"])
+        or not _is_nonempty_string(record["column"])
+        or (record["before_digest"] is not None and not _is_digest(record["before_digest"]))
+        or (record["after_digest"] is not None and not _is_digest(record["after_digest"]))
+        or (record["before_digest"] is None and record["after_digest"] is None)
+        or record["classification"] != "unexplained"
+    ):
+        raise ValueError("diagnostic_record_invalid")
+    return dict(record)
+
+
+def _validate_classification_record(record: Mapping[str, object]) -> dict[str, object]:
+    if set(record) != _CLASSIFICATION_FIELDS:
+        raise ValueError("classification_record_invalid")
+    if (
+        not _is_nonempty_string(record["table"])
+        or not _is_digest(record["key_digest"])
+        or not _is_nonempty_string(record["column"])
+        or (record["before_digest"] is not None and not _is_digest(record["before_digest"]))
+        or (record["after_digest"] is not None and not _is_digest(record["after_digest"]))
+        or (record["before_digest"] is None and record["after_digest"] is None)
+        or not isinstance(record["classification"], str)
+        or record["classification"] not in _ALLOWED_CLASSIFICATIONS
+        or not _is_nonempty_string(record["reason"])
+        or not _is_nonempty_string(record["evidence"])
+    ):
+        raise ValueError("classification_record_invalid")
+    return dict(record)
+
+
+def _validate_verified_evidence(evidence: VerifiedCutoverEvidence) -> None:
+    if not isinstance(evidence, VerifiedCutoverEvidence):
+        raise ValueError("evidence_format_invalid")
+    diagnostic = evidence.diagnostic
+    classification = evidence.classification
+    if (
+        diagnostic.kind != DIAGNOSTIC_KIND
+        or classification.kind != CLASSIFICATION_KIND
+        or diagnostic.format_version != 2
+        or classification.format_version != 2
+        or diagnostic.record_kind != "difference"
+        or classification.record_kind != "classification"
+        or diagnostic.digest != classification.diagnostic_digest
+        or diagnostic.record_count != classification.record_count
+        or diagnostic.stream != classification.stream
+        or not _is_digest(diagnostic.digest)
+        or not _is_digest(classification.digest)
+        or not _is_nonempty_string(classification.reviewer)
+    ):
+        raise ValueError("evidence_format_invalid")
+    if any(
+        not isinstance(name, str)
+        or name not in _ALLOWED_CLASSIFICATIONS
+        or type(count) is not int
+        or count <= 0
+        for name, count in evidence.classification_counts
+    ):
+        raise ValueError("evidence_format_invalid")
+    if len({name for name, _ in evidence.classification_counts}) != len(evidence.classification_counts):
+        raise ValueError("evidence_format_invalid")
+    if sum(count for _, count in evidence.classification_counts) != classification.record_count:
+        raise ValueError("evidence_format_invalid")
+
+
+class _DiagnosticEvidenceSink:
+    def __init__(self, writer: EvidenceWriter) -> None:
+        self._writer = writer
+        self.table_names: list[str] = []
+        self.table_facts: list[Mapping[str, object]] = []
+
+    def begin_table(self, name: str, key_columns: tuple[str, ...]) -> None:
+        self.table_names.append(name)
+
+    def append(self, difference: Difference) -> None:
+        self._writer.append(asdict(difference))
+
+    def finish_table(self, table_facts: Mapping[str, object]) -> None:
+        self.table_facts.append(dict(table_facts))
+
 
 async def prepare_archive(
     factory: async_sessionmaker[AsyncSession], *, scope: Scope, run_id: UUID,
-    image_digest: str, projector_version: str, diagnostic: dict[str, Any],
-    classification_payload: bytes, classification_digest: str,
+    image_digest: str, projector_version: str,
+    evidence: VerifiedCutoverEvidence | None = None,
     snapshot: VenueSnapshotObserved, managed_symbols: frozenset[str], now_ms: int,
     max_age_ms: int, operation_inventory: dict[str, Any], runtime_roles: tuple[str, ...],
     output: Path, dry_run: bool, prepared_digest: str | None = None, runner: Runner = run_fixed,
+    **legacy: object,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    identities = {"run_id": run_id, "scope": asdict(scope), "image_digest": image_digest,
-                  "projector_version": projector_version}
-    if (diagnostic.get("kind") != "projection-cutover-diagnostic-v1"
-            or any(diagnostic.get(key) != value for key, value in identities.items())
-            or sorted(table["name"] for table in diagnostic["tables"]) != list(TABLE_NAMES)
-            or operation_inventory["images"]["bot"] != image_digest):
+    if evidence is None or legacy:
+        # Keep the old keyword shape from being silently reinterpreted as v2.
+        raise ValueError("evidence_format_invalid")
+    _validate_verified_evidence(evidence)
+    _validate_manifest_identity(
+        evidence.diagnostic,
+        kind=DIAGNOSTIC_KIND,
+        run_id=run_id,
+        scope=scope,
+        image_digest=image_digest,
+        projector_version=projector_version,
+    )
+    _validate_manifest_identity(
+        evidence.classification,
+        kind=CLASSIFICATION_KIND,
+        run_id=run_id,
+        scope=scope,
+        image_digest=image_digest,
+        projector_version=projector_version,
+    )
+    if tuple(table.get("name") for table in evidence.diagnostic.tables) != TABLE_NAMES:
         raise ValueError("prepare_identity_mismatch")
-    validate_classification(diagnostic, classification_payload, expected_digest=classification_digest)
+    try:
+        bot_image = operation_inventory["images"]["bot"]
+    except (KeyError, TypeError):
+        raise ValueError("prepare_identity_mismatch") from None
+    if bot_image != image_digest:
+        raise ValueError("prepare_identity_mismatch")
     validate_cutover_snapshot(snapshot, scope=scope, managed_symbols=managed_symbols,
                               now_ms=now_ms, max_age_ms=max_age_ms)
     binding = {
-        "kind": "projection-cutover-prepared-v1", "diagnostic_digest": row_digest(diagnostic),
-        "classification_digest": classification_digest, "snapshot": serialize_event(snapshot),
+        "kind": "projection-cutover-prepared-v1", "diagnostic_digest": evidence.diagnostic.digest,
+        "classification_digest": evidence.classification.digest,
+        "snapshot": serialize_event(snapshot),
         "operational_digest": row_digest(operation_inventory), "runtime_roles": list(runtime_roles),
     }
     expected: dict[str, Any] | None = None
@@ -117,13 +288,16 @@ async def prepare_archive(
         validate_cutover_snapshot(snapshot, scope=scope, managed_symbols=managed_symbols,
             now_ms=now_ms + int((time.monotonic() - started) * 1000), max_age_ms=max_age_ms)
         await verify_local_operations(operation_inventory, runner=runner)
-        if asdict(await _stream_identity(session, scope)) != diagnostic["stream"]:
+        if await _stream_identity(session, scope) != evidence.diagnostic.stream:
             raise ValueError("prepare_stream_drift")
         rows = await _archive_projection_rows(session, account_id=scope.account_id, environment=scope.environment)
-        for table in diagnostic["tables"]:
+        for table in evidence.diagnostic.tables:
+            table_name = table.get("name")
+            if not isinstance(table_name, str):
+                raise ValueError("prepare_identity_mismatch")
             connection = await session.connection()
-            _, schema, keys = await connection.run_sync(partial(_describe, name=table["name"]))
-            if {**_table_facts(table["name"], rows[table["name"]], keys), "schema": schema} != table:
+            _, schema, keys = await connection.run_sync(partial(_describe, name=table_name))
+            if {**_table_facts(table_name, rows[table_name], keys), "schema": schema} != table:
                 raise ValueError("prepare_original_projection_drift")
         if expected is not None:
             manifest = decode_manifest(encode_row(expected["manifest"]))
@@ -137,10 +311,10 @@ async def prepare_archive(
         else:
             manifest = await capture_archive(session, scope=scope, run_id=run_id,
                                              image_digest=image_digest, projector_version=projector_version)
-            for table, original in zip(manifest.tables, diagnostic["tables"], strict=True):
-                if any(table[key] != value for key, value in original.items()):
-                    raise ValueError("prepare_archive_source_mismatch")
             result = {**binding, "manifest": decode_row(encode_manifest(manifest))}
+        for table, original in zip(manifest.tables, evidence.diagnostic.tables, strict=True):
+            if any(table[key] != value for key, value in original.items()):
+                raise ValueError("prepare_archive_source_mismatch")
         await verify_database_quiescence(session, scope=scope, runtime_roles=runtime_roles)
         await verify_local_operations(operation_inventory, runner=runner)
         validate_cutover_snapshot(snapshot, scope=scope, managed_symbols=managed_symbols,
@@ -163,42 +337,87 @@ def _table_facts(
             "digest": digest_rows(encode_row(row) for row in ordered)}
 
 
+async def _diagnostic_table_facts(
+    session: AsyncSession, *, scope: Scope,
+) -> tuple[dict[str, object], ...]:
+    """Capture exact source table facts without retaining projection rows."""
+    models = dict(_TEMPORARY_PROJECTION_MODELS)
+    connection = await session.connection()
+    facts: list[dict[str, object]] = []
+    for name in TABLE_NAMES:
+        try:
+            model = models[name]
+        except KeyError:
+            raise ValueError("diagnostic_table_model_mismatch") from None
+        _, schema, keys = await connection.run_sync(partial(_describe, name=name))
+        with _projection_spool() as spool:
+            count = await _spool_projection_rows(
+                session,
+                model=model,
+                account_id=scope.account_id,
+                environment=scope.environment,
+                spool=spool,
+                target=_PROJECTION_SPOOL_TABLES["source"],
+            )
+            observed_count, digest = _spool_facts(spool, side="source")
+        if observed_count != count:
+            raise ValueError("diagnostic_table_count_mismatch")
+        facts.append({
+            "name": name,
+            "schema": schema,
+            "key_columns": keys,
+            "count": count,
+            "digest": digest,
+        })
+    return tuple(facts)
+
+
 async def diagnose(
     factory: async_sessionmaker[AsyncSession], *, scope: Scope, run_id: UUID,
-    image_digest: str, projector_version: str,
-) -> dict[str, Any]:
-    tables: list[dict[str, Any]] = []
-    differences: list[dict[str, Any]] = []
+    image_digest: str, projector_version: str, output: Path,
+) -> EvidenceManifest:
+    if output.exists() or output.is_symlink():
+        raise ValueError("diagnostic_target_exists")
 
-    def collect(
-        table: str, before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]],
-        *, key_columns: tuple[str, ...],
-    ) -> None:
-        tables.append(_table_facts(table, before, key_columns))
-        differences.extend(asdict(difference) for difference in compare_rows(
-            table, before, after, key_columns=key_columns,
-        ))
-
-    # The optional collector starts its own fresh REPEATABLE READ transaction.
-    # Closing this session rolls it back; prepare uses a new READ COMMITTED one.
+    # The source table facts, event identity, and temporary replay all share
+    # one repeatable-read snapshot. The writer is created before replay starts
+    # and receives one Difference at a time through the runtime sink boundary.
     async with factory() as session:
+        await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        stream = await _stream_identity(session, scope)
+        tables = await _diagnostic_table_facts(session, scope=scope)
+        writer = EvidenceWriter.create(
+            output,
+            manifest_fields={
+                "kind": DIAGNOSTIC_KIND,
+                "format_version": 2,
+                "run_id": run_id,
+                "scope": scope,
+                "image_digest": image_digest,
+                "projector_version": projector_version,
+                "stream": stream,
+                "record_kind": "difference",
+                "tables": tables,
+            },
+        )
+        sink = _DiagnosticEvidenceSink(writer)
+        difference_sink: DifferenceSink = sink
         report = await replay_one_account(
             session, account_id=scope.account_id, environment=scope.environment,
-            projector_version=projector_version, diagnostic_collector=collect,
+            projector_version=projector_version, difference_sink=difference_sink,
         )
-        connection = await session.connection()
-        for table in tables:
-            _, schema, keys = await connection.run_sync(partial(_describe, name=table["name"]))
-            if keys != table["key_columns"]:
-                raise ValueError("diagnostic_key_schema_mismatch")
-            table["schema"] = schema
-    return {
-        "kind": "projection-cutover-diagnostic-v1", "run_id": run_id,
-        "scope": asdict(scope), "image_digest": image_digest, "projector_version": projector_version,
-        "stream": {"count": report.row_counts["event_log"], "head": report.event_head or 0,
-                   "digest": report.event_hash},
-        "tables": sorted(tables, key=lambda table: table["name"]), "differences": differences,
-    }
+        report_stream = StreamIdentity(
+            report.row_counts["event_log"], report.event_head or 0, report.event_hash,
+        )
+        if report_stream != stream:
+            raise ValueError("diagnostic_stream_drift")
+        expected_facts = tuple(
+            {key: table[key] for key in ("name", "key_columns", "count", "digest")}
+            for table in tables
+        )
+        if tuple(sink.table_names) != TABLE_NAMES or tuple(sink.table_facts) != expected_facts:
+            raise ValueError("diagnostic_table_facts_mismatch")
+        return writer.finish()
 
 
 def validate_classification(diagnostic: dict[str, Any], payload: bytes, *, expected_digest: str) -> None:
@@ -231,6 +450,104 @@ def validate_classification(diagnostic: dict[str, Any], payload: bytes, *, expec
         }))
     if len(actual) != len(set(actual)) or sorted(actual) != sorted(expected):
         raise ValueError("classification_difference_mismatch")
+
+
+def verify_cutover_evidence(
+    diagnostic_path: Path,
+    classification_path: Path,
+    *,
+    expected_diagnostic_digest: str,
+    expected_classification_digest: str,
+    expected_run_id: UUID,
+    expected_scope: Scope,
+    expected_image_digest: str,
+    expected_projector_version: str,
+) -> VerifiedCutoverEvidence:
+    """Fully verify v2 evidence and return only its bounded summary."""
+    with _opened_artifact(
+        diagnostic_path,
+        expected_digest=expected_diagnostic_digest,
+        expected_kind=DIAGNOSTIC_KIND,
+    ) as (_root, _chunks, diagnostic):
+        pass
+    _validate_manifest_identity(
+        diagnostic,
+        kind=DIAGNOSTIC_KIND,
+        run_id=expected_run_id,
+        scope=expected_scope,
+        image_digest=expected_image_digest,
+        projector_version=expected_projector_version,
+    )
+
+    with _opened_artifact(
+        classification_path,
+        expected_digest=expected_classification_digest,
+        expected_kind=CLASSIFICATION_KIND,
+    ) as (_root, _chunks, classification):
+        pass
+    # Check the classification header before opening either record stream for
+    # the lockstep comparison. The iterators below perform the complete
+    # chunk/frame/root verification while retaining no record list.
+    _validate_manifest_identity(
+        classification,
+        kind=CLASSIFICATION_KIND,
+        run_id=expected_run_id,
+        scope=expected_scope,
+        image_digest=expected_image_digest,
+        projector_version=expected_projector_version,
+    )
+    if (
+        classification.diagnostic_digest != diagnostic.digest
+        or classification.stream != diagnostic.stream
+        or classification.record_count != diagnostic.record_count
+    ):
+        raise ValueError("classification_manifest_mismatch")
+
+    diagnostic_records = iter_verified_records(
+        diagnostic_path,
+        expected_digest=diagnostic.digest,
+        expected_kind=DIAGNOSTIC_KIND,
+    )
+    classification_records = iter_verified_records(
+        classification_path,
+        expected_digest=classification.digest,
+        expected_kind=CLASSIFICATION_KIND,
+    )
+    counts: dict[str, int] = {}
+    while True:
+        try:
+            diagnostic_record = next(diagnostic_records)
+        except StopIteration:
+            try:
+                next(classification_records)
+            except StopIteration:
+                break
+            raise ValueError("classification_record_count_mismatch") from None
+        try:
+            classification_record = next(classification_records)
+        except StopIteration:
+            raise ValueError("classification_record_count_mismatch") from None
+        if not isinstance(diagnostic_record, Mapping) or not isinstance(classification_record, Mapping):
+            raise ValueError("classification_record_invalid")
+        expected_binding = _validate_difference_record(diagnostic_record)
+        actual_record = _validate_classification_record(classification_record)
+        actual_binding = {
+            key: actual_record[key]
+            for key in _DIFFERENCE_FIELDS
+        }
+        actual_binding["classification"] = "unexplained"
+        if actual_binding != expected_binding:
+            raise ValueError("classification_record_mismatch")
+        classification_name = actual_record["classification"]
+        if not isinstance(classification_name, str):  # pragma: no cover - validator guards this.
+            raise ValueError("classification_record_invalid")
+        counts[classification_name] = counts.get(classification_name, 0) + 1
+
+    return VerifiedCutoverEvidence(
+        diagnostic=diagnostic,
+        classification=classification,
+        classification_counts=tuple(sorted(counts.items())),
+    )
 
 
 def write_private(path: Path, payload: bytes) -> None:
@@ -366,18 +683,23 @@ async def run_command(
     scope = Scope(args.account_id, args.environment)
     identity = {"scope": scope, "run_id": args.run_id, "image_digest": args.image_digest,
                 "projector_version": args.projector_version}
+    if args.command == "prepare":
+        if not all((args.diagnostic, args.diagnostic_digest, args.classification,
+                    args.classification_digest, args.operations, args.operations_digest)):
+            raise ValueError("prepare_evidence_required")
+        if (
+            args.diagnostic.is_symlink() or not args.diagnostic.is_dir()
+            or args.classification.is_symlink() or not args.classification.is_dir()
+        ):
+            raise ValueError("evidence_format_invalid")
     # Only explicit process environment. Never discover/load a production .env.
     engine = make_async_engine_from_url(os.environ["DATABASE_URL"])
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         if args.command == "diagnose":
-            if args.output.exists() or args.output.is_symlink():
-                raise ValueError("diagnostic_target_exists")
-            diagnostic = await diagnose(factory, **identity)
-            payload = encode_row(diagnostic)
-            write_private(args.output, payload)
-            return {"status": "diagnosed", "diagnostic_digest": hashlib.sha256(payload).hexdigest(),
-                    "difference_count": len(diagnostic["differences"])}
+            diagnostic = await diagnose(factory, **identity, output=args.output)
+            return {"status": "diagnosed", "diagnostic_digest": diagnostic.digest,
+                    "difference_count": diagnostic.record_count}
         if args.command == "verify-archive":
             prepared: dict[str, Any] = decode_row(read_private(args.output, expected_digest=args.prepared_digest))
             if prepared.get("kind") != "projection-cutover-prepared-v1":
@@ -388,11 +710,16 @@ async def run_command(
             async with factory() as session:
                 await verify_archive(session, expected=manifest)
             return {"status": "verified", "manifest_digest": manifest.digest}
-        if not all((args.diagnostic, args.diagnostic_digest, args.classification,
-                    args.classification_digest, args.operations, args.operations_digest)):
-            raise ValueError("prepare_evidence_required")
-        diagnostic = decode_row(read_private(args.diagnostic, expected_digest=args.diagnostic_digest))
-        classification = read_private(args.classification, expected_digest=args.classification_digest)
+        evidence = verify_cutover_evidence(
+            args.diagnostic,
+            args.classification,
+            expected_diagnostic_digest=args.diagnostic_digest,
+            expected_classification_digest=args.classification_digest,
+            expected_run_id=args.run_id,
+            expected_scope=scope,
+            expected_image_digest=args.image_digest,
+            expected_projector_version=args.projector_version,
+        )
         inventory = decode_row(read_private(args.operations, expected_digest=args.operations_digest))
         roles = inventory.get("runtime_roles")
         if not isinstance(roles, dict) or set(roles) != {"bot", "webapi", "frontend", "weekly-report"} or any(
@@ -418,8 +745,7 @@ async def run_command(
                                    allocation_cap_usdt=Decimal("0")), transport=transport,
             )
         result = await prepare_archive(
-            factory, **identity, diagnostic=diagnostic, classification_payload=classification,
-            classification_digest=args.classification_digest, snapshot=snapshot, managed_symbols=symbols,
+            factory, **identity, evidence=evidence, snapshot=snapshot, managed_symbols=symbols,
             now_ms=int(time.time() * 1000), max_age_ms=max_age_ms, operation_inventory=inventory,
             runtime_roles=tuple(sorted(set(roles.values()))), output=args.output, dry_run=args.dry_run,
             prepared_digest=args.prepared_digest, runner=runner,
