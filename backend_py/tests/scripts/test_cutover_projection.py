@@ -928,6 +928,158 @@ def command_args(command, output):
             "--projector-version", "execution-state-v1", "--output", str(output)]
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("lost_output", [False, True])
+async def test_cli_apply_verifies_all_io_before_lock_and_repeat_without_http(archive_db, tmp_path, monkeypatch, lost_output):
+    import hashlib
+    import json
+
+    from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
+    from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
+    from tests.integration.test_projection_cutover_apply_v2 import complete_raw, fixture
+
+    factory, runtime_args, values = await fixture(archive_db, tmp_path)
+    module = cli()
+    monkeypatch.setenv("DATABASE_URL", factory.kw["bind"].url.render_as_string(hide_password=False))
+    monkeypatch.setattr(module.time, "time", lambda: 1.5)
+    args = command_args("apply", tmp_path / "applied")
+    files = {
+        "prepared": (tmp_path / "prepared").read_bytes(),
+        "receipt": json.dumps(runtime_args["archive_restore_receipt"]).encode(),
+        "archive-input": values["archive_input"],
+        "operations": encode_row(values["operation_inventory"]),
+        "snapshot": encode_row(serialize_event(runtime_args["snapshot"])),
+    }
+    for flag, payload in files.items():
+        path = tmp_path / flag
+        if flag != "prepared":
+            module.write_private(path, payload)
+        args.extend(["--" + flag, str(path), "--" + flag + "-digest", hashlib.sha256(payload).hexdigest()])
+    args.extend(["--diagnostic", str(values["diagnostic_path"]), "--diagnostic-digest", values["diagnostic_digest"],
+                 "--classification", str(values["classification_path"]), "--classification-digest", values["classification_digest"]])
+    lock_taken = False
+    reads = set()
+    original_read = module.read_private
+    original_verify = module.verify_cutover_evidence
+    original_lock = AccountEventWriter.acquire_lock
+
+    def read(path, **kw):
+        if path.name != "applied":
+            assert not lock_taken
+            reads.add(path.name)
+        return original_read(path, **kw)
+
+    def verify(*a, **kw):
+        assert not lock_taken
+        result = original_verify(*a, **kw)
+        reads.add("v2-complete")
+        return result
+
+    async def lock(self, session, **kw):
+        nonlocal lock_taken
+        assert reads == {*files, "v2-complete"}
+        lock_taken = True
+        return await original_lock(self, session, **kw)
+
+    async def no_http(**kw):
+        raise AssertionError("apply must use the pinned snapshot and must never query the venue")
+
+    monkeypatch.setattr(module, "read_private", read)
+    monkeypatch.setattr(module, "verify_cutover_evidence", verify)
+    monkeypatch.setattr(module, "collect_snapshot", no_http)
+    monkeypatch.setattr(AccountEventWriter, "acquire_lock", lock)
+    if lost_output:
+        original_write = module.write_private
+        def fail_output(*a, **kw):
+            raise OSError("synthetic post-commit output failure")
+        monkeypatch.setattr(module, "write_private", fail_output)
+        with pytest.raises(OSError, match="post-commit"):
+            await module.run_command(module.parse_args(args), runner=values["runner"])
+        durable = await complete_raw(factory)
+        assert len(durable["public.event_log"]) == len(durable["projection_audit.receipts"]) == 1
+        assert json.loads(durable["public.trading_halt"][0])["halted"] is True
+        assert not (tmp_path / "applied").exists()
+        monkeypatch.setattr(module, "write_private", original_write)
+        lock_taken = False
+        reads.clear()
+        monkeypatch.setattr(module.time, "time", lambda: 999999)
+    result = await module.run_command(module.parse_args(args), runner=values["runner"])
+    assert result["status"] == "applied"
+    committed = await complete_raw(factory)
+    lock_taken = False
+    reads.clear()
+    monkeypatch.setattr(module.time, "time", lambda: 999999)
+    assert await module.run_command(module.parse_args(args), runner=values["runner"]) == result
+    assert await complete_raw(factory) == committed
+
+
+def test_private_reader_enforces_command_bound_before_reading(tmp_path, monkeypatch):
+    import hashlib
+    import os
+
+    module = cli()
+    path = tmp_path / "bounded"
+    module.write_private(path, b"a" * 33)
+    original = os.fdopen
+    class Unreadable:
+        def __init__(self, descriptor, mode):
+            self.source = original(descriptor, mode)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.source.close()
+        def fileno(self):
+            return self.source.fileno()
+        def read(self, *args):
+            raise AssertionError("oversized file was read")
+    monkeypatch.setattr(os, "fdopen", Unreadable)
+    with pytest.raises(ValueError, match="evidence_file"):
+        module.read_private(path, expected_digest=hashlib.sha256(b"a" * 33).hexdigest(), max_bytes=32)
+
+
+@pytest.mark.parametrize("mutation", ["receipt_digest", "prepared_pin", "target", "v1", "operations", "diagnostic"])
+@pytest.mark.integration
+async def test_cli_apply_rejects_unverified_files_before_transaction(archive_db, tmp_path, monkeypatch, mutation):
+    import hashlib
+    import json
+
+    from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
+    from tests.integration.test_projection_cutover_apply_v2 import fixture
+
+    _, runtime_args, values = await fixture(archive_db, tmp_path)
+    module = cli()
+    receipt = runtime_args["archive_restore_receipt"]
+    if mutation == "prepared_pin":
+        receipt["archive_verification"]["archives"][0]["prepared_digest"] = "0" * 64
+    if mutation == "target":
+        receipt["target_run_id"] = str(UUID(int=123))
+    if mutation == "v1":
+        receipt["schema_version"] = 1
+    args = command_args("apply", tmp_path / "applied")
+    files = {"prepared": (tmp_path / "prepared").read_bytes(),
+             "receipt": json.dumps(receipt).encode(), "archive-input": values["archive_input"],
+             "operations": encode_row(values["operation_inventory"]),
+             "snapshot": encode_row(serialize_event(runtime_args["snapshot"]))}
+    for flag, payload in files.items():
+        path = tmp_path / flag
+        if flag != "prepared":
+            module.write_private(path, payload)
+        pin = "0" * 64 if mutation == "receipt_digest" and flag == "receipt" else hashlib.sha256(payload).hexdigest()
+        args.extend(["--" + flag, str(path), "--" + flag + "-digest", pin])
+    args.extend(["--diagnostic", str(values["diagnostic_path"]),
+                 "--diagnostic-digest", "0" * 64 if mutation == "diagnostic" else values["diagnostic_digest"],
+                 "--classification", str(values["classification_path"]), "--classification-digest", values["classification_digest"]])
+    if mutation == "operations":
+        (tmp_path / "operations").chmod(0o644)
+
+    def forbidden(*a, **kw):
+        raise AssertionError("unverified artifacts reached DB creation")
+
+    monkeypatch.setattr(module, "make_async_engine_from_url", forbidden)
+    with pytest.raises(ValueError):
+        await module.run_command(module.parse_args(args), runner=values["runner"])
+
+
 @pytest.mark.parametrize("flag", ["--account-id", "--environment", "--run-id", "--image-digest",
                                  "--projector-version", "--output"])
 def test_cli_requires_every_explicit_identity_field(flag, tmp_path):
