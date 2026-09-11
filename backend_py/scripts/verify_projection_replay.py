@@ -93,7 +93,10 @@ from bfx_funding_bot.modules.execution.events import (
     VenueOfferQuarantined,
     VenueSnapshotObserved,
 )
-from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import RowCollector
+from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import (
+    DifferenceSink,
+    RowCollector,
+)
 
 EXIT_SUCCESS = 0
 EXIT_VERIFICATION_FAILED = 3
@@ -131,11 +134,15 @@ def _diagnostic_diff(
 
 
 async def _diagnostic_projection_evidence(
-    session: AsyncSession, *, account_id: UUID, environment: str
+    session: AsyncSession, *, account_id: UUID, environment: str,
+    streaming: bool = False,
 ) -> tuple[dict[str, int], dict[str, str]]:
     """Read the old runtime projection only after event replay succeeds."""
     row_counts, content_hashes, _, _ = await _projection_evidence(
-        session, account_id=account_id, environment=environment
+        session,
+        account_id=account_id,
+        environment=environment,
+        streaming=streaming,
     )
     return row_counts, content_hashes
 
@@ -143,12 +150,15 @@ async def _diagnostic_projection_evidence(
 async def replay_one_account(
     session: AsyncSession, *, account_id: UUID, environment: str,
     projector_version: str, expected_event_hash: str | None = None,
+    difference_sink: DifferenceSink | None = None,
     diagnostic_collector: RowCollector | None = None,
 ) -> ReplayReport:
     """Read event_log once and attach runtime counts strictly as diagnostics."""
     # Bind events and original full rows to one source MVCC snapshot. Never
     # silently upgrade an already-started READ COMMITTED transaction.
-    if diagnostic_collector is not None and not session.in_transaction():
+    if (
+        difference_sink is not None or diagnostic_collector is not None
+    ) and not session.in_transaction():
         await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
     rows = list(await session.scalars(select(EventLogRow).where(
         EventLogRow.exchange_account_id == account_id,
@@ -157,10 +167,14 @@ async def replay_one_account(
     report = await replay_captured_rows(
         session, rows=rows, account_id=account_id, environment=environment,
         projector_version=projector_version, expected_event_hash=expected_event_hash,
+        difference_sink=difference_sink,
         diagnostic_collector=diagnostic_collector,
     )
     old_row_counts, old_content_hashes = await _diagnostic_projection_evidence(
-        session, account_id=account_id, environment=environment,
+        session,
+        account_id=account_id,
+        environment=environment,
+        streaming=difference_sink is not None,
     )
     return ReplayReport(
         **{
