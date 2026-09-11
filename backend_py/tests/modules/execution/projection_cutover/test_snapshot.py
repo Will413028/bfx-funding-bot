@@ -83,6 +83,18 @@ def test_unknown_offer_exposure_rejected(changes):
         validate(snapshot(offers=(replace(offer, **changes),)))
 
 
+def test_infinite_original_offer_amount_cannot_establish_cutover_authority():
+    from bfx_funding_bot.modules.execution.events import VenueOfferObservation
+
+    offer = VenueOfferObservation(
+        venue_offer_id="1", symbol="fUST", amount_original=Decimal("Infinity"),
+        amount_remaining=Decimal("1"), rate=Decimal("0.001"), period_days=2,
+        status="ACTIVE", mts_created=900, mts_updated=1000,
+    )
+    with pytest.raises(ValueError, match="snapshot_unknown_exposure"):
+        validate(snapshot(offers=(offer,)))
+
+
 def test_snapshot_cannot_backdate_its_event_time():
     with pytest.raises(ValueError):
         validate(snapshot(occurred_at_ms=999))
