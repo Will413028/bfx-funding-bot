@@ -95,11 +95,12 @@ def validate_apply_evidence(expected: ArchiveManifest, evidence: VerifiedCutover
         raise ValueError("apply_evidence_binding_mismatch")
 
 
-def validate_restore_receipt(expected: ArchiveManifest, receipt: Mapping[str, Any]) -> None:
-    """Validate the reviewed v2 archive-only receipt and its exact target facts.
+def validate_restore_receipt_preflight(expected: ArchiveManifest, receipt: Mapping[str, Any]) -> None:
+    """Validate bounded receipt identity without authorizing a new apply.
 
     The CLI checks the independent receipt/transport/prepared byte pins. Here
     we recheck their bounded decoded identity, then bind it to the run receipt.
+    Freshness is deferred until runtime rules out an identical committed retry.
     """
     if len(encode_row(receipt)) > 131072:
         raise ValueError("restore_receipt_oversized")
@@ -149,6 +150,15 @@ def validate_restore_receipt(expected: ArchiveManifest, receipt: Mapping[str, An
     if (len(targets) != 1 or any(targets[0].get(k) != v for k, v in fields.items())
             or not _digest(targets[0].get("prepared_digest"))):
         raise ValueError("restore_archive_manifest_mismatch")
+
+
+def validate_restore_receipt(
+    expected: ArchiveManifest, receipt: Mapping[str, Any], *, now_ms: int,
+) -> None:
+    """Require matching archive evidence within the closed DR 900-second window."""
+    validate_restore_receipt_preflight(expected, receipt)
+    if type(now_ms) is not int or not 0 <= now_ms - receipt["observed_at_ms"] <= 900_000:
+        raise ValueError("restore_receipt_time_invalid")
 
 
 async def _verify_live_archive(session: AsyncSession, expected: ArchiveManifest) -> None:
@@ -251,7 +261,7 @@ async def apply_cutover(
     if await connection.get_isolation_level() != "READ COMMITTED":
         raise ValueError("apply requires READ COMMITTED")
     validate_apply_evidence(expected, evidence)
-    validate_restore_receipt(expected, archive_restore_receipt)
+    validate_restore_receipt_preflight(expected, archive_restore_receipt)
     if (not _digest(operation_digest) or not runtime_roles
             or any(not isinstance(r, str) or not r.strip() for r in runtime_roles)
             or tuple(sorted(set(runtime_roles))) != runtime_roles):
@@ -302,6 +312,9 @@ async def apply_cutover(
     if await _current_stream(session, expected.scope) != expected.stream:
         raise ValueError("apply_stream_drift")
     await _verify_live_archive(session, expected)
+    # Include lock wait and all source checks, immediately before first mutation.
+    validate_restore_receipt(expected, archive_restore_receipt,
+                            now_ms=now_ms + int((time.monotonic() - started) * 1000))
     await store.append_snapshot(session, snapshot)
     await store.rebuild_snapshot_from_log(session, account_id=str(expected.scope.account_id),
                                           deployment_environment=expected.scope.environment)
@@ -330,6 +343,8 @@ async def apply_cutover(
         raise ValueError("apply_final_parity_mismatch")
     validate_cutover_snapshot(snapshot, scope=expected.scope, managed_symbols=_SYMBOLS,
                               now_ms=now_ms + int((time.monotonic() - started) * 1000), max_age_ms=300_000)
+    validate_restore_receipt(expected, archive_restore_receipt,
+                            now_ms=now_ms + int((time.monotonic() - started) * 1000))
     receipt = {"kind": "projection-cutover-applied-v1", "run_id": expected.run_id,
         "snapshot_event_id": snapshot.event_id, "request": request, "new_stream": asdict(stream),
         "active_hashes": hashes, "applied_manifest": decode_row(encode_manifest(applied))}

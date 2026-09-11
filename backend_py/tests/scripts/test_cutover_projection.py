@@ -859,6 +859,62 @@ async def prepare_fixture(archive_db):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("drift", [None, "value", "key", "scope", "count", "schema"])
+async def test_prepare_streams_exact_facts_without_projection_lists(archive_db, tmp_path, monkeypatch, drift):
+    import hashlib
+
+    from bfx_funding_bot.modules.execution.projection_cutover.archive import verify_archive
+    from bfx_funding_bot.modules.execution.projection_cutover.manifest import decode_manifest
+    from tests.integration.test_projection_cutover_apply_v2 import complete_raw
+
+    factory, kwargs = await prepare_fixture(archive_db)
+
+    async def forbidden(*args, **kw):
+        raise AssertionError("prepare materialized all projection tables")
+
+    # This was prepare's whole-dataset reader. Neither first prepare nor repeat
+    # may require it; the streaming path must still prove exact physical facts.
+    monkeypatch.setattr(cli(), "_archive_projection_rows", forbidden, raising=False)
+    if drift is not None:
+        async with factory.begin() as session:
+            await session.execute(text({
+                "value": "UPDATE reconcile_observation SET recorded_at=recorded_at + interval '1 microsecond' WHERE deployment_environment='ci'",
+                "key": "UPDATE reconcile_observation SET id=id+100 WHERE deployment_environment='ci'",
+                "scope": "UPDATE reconcile_observation SET deployment_environment='shadow' WHERE deployment_environment='ci'",
+                "count": "DELETE FROM reconcile_observation WHERE deployment_environment='ci'",
+                "schema": "ALTER TABLE venue_credit_state ADD COLUMN synthetic_drift text",
+            }[drift]))
+    before = await complete_raw(factory)
+    output = tmp_path / "prepared"
+    if drift is not None:
+        with pytest.raises(ValueError, match="prepare_original_projection_drift"):
+            await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=output, dry_run=False)
+        assert await complete_raw(factory) == before
+        assert not output.exists()
+        return
+
+    result = await cli().prepare_archive(factory, **_prepare_kwargs(kwargs), output=output, dry_run=False)
+    manifest = decode_manifest(encode_row(result["manifest"]))
+    assert manifest.tables == kwargs["evidence"].diagnostic.tables
+    assert {entry["name"]: entry["count"] for entry in manifest.tables} == {
+        "execution_uncertainties": 0, "offer_claims": 0, "position_state": 1,
+        "projection_heads": 0, "reconcile_observation": 1, "submission_attempts": 0,
+        "venue_credit_state": 0, "venue_offer_state": 0,
+    }
+    async with factory() as session:
+        await verify_archive(session, expected=manifest)
+    after = await complete_raw(factory)
+    assert {name: rows for name, rows in after.items() if name.startswith("public.")} == {
+        name: rows for name, rows in before.items() if name.startswith("public.")
+    }
+    assert await cli().prepare_archive(
+        factory, **_prepare_kwargs(kwargs), output=output, dry_run=False,
+        prepared_digest=hashlib.sha256(output.read_bytes()).hexdigest(),
+    ) == result
+    assert await complete_raw(factory) == after
+
+
+@pytest.mark.integration
 async def test_prepare_archives_only_repeat_verifies_identity_and_dry_run_rolls_back(archive_db, tmp_path):
     import hashlib
 

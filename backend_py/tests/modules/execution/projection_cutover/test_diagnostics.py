@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import stat
 from collections import Counter
@@ -145,6 +146,56 @@ def test_streaming_comparator_rejects_duplicate_keys_without_materializing_rows(
         tuple(diagnostics.compare_sorted_rows(
             _OneShotRows([{"id": 1}, {"id": 1}]), _OneShotRows([]), key_columns=("id",)
         ))
+
+
+@pytest.mark.parametrize("old_ids,new_ids,added", [
+    (["b"], ["a", "b"], "a"),
+    (["a", "c"], ["a", "b", "c"], "b"),
+])
+def test_streaming_comparator_pairs_leading_and_interleaved_new_keys(old_ids, new_ids, added):
+    from bfx_funding_bot.modules.execution.projection_cutover.codec import encode_row, row_digest
+    from bfx_funding_bot.modules.execution.projection_cutover.contracts import Difference
+
+    changes = tuple(_diagnostics().compare_sorted_rows(
+        _OneShotRows({"id": key, "value": "same"} for key in old_ids),
+        _OneShotRows({"id": key, "value": "same"} for key in new_ids),
+        key_columns=("id",), table="synthetic",
+    ))
+
+    key_digest = hashlib.sha256(encode_row({"id": added})).hexdigest()
+    assert changes == (
+        Difference("synthetic", key_digest, "id", None, row_digest({"id": added})),
+        Difference("synthetic", key_digest, "value", None, row_digest({"value": "same"})),
+    )
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+@pytest.mark.parametrize("keys,error", [(["b", "a"], "not sorted"), (["a", "a"], "duplicate")])
+def test_streaming_comparator_rejects_invalid_order_on_either_side(side, keys, error):
+    rows = _OneShotRows({"id": key} for key in keys)
+    with pytest.raises(ValueError, match=error):
+        tuple(_diagnostics().compare_sorted_rows(
+            rows if side == "before" else iter(()),
+            rows if side == "after" else iter(()), key_columns=("id",),
+        ))
+
+
+def test_streaming_comparator_new_only_key_uses_bounded_lookahead():
+    consumed = {"before": 0, "after": 0}
+
+    def rows(side, start):
+        for number in range(start, 100_000, 2):
+            consumed[side] += 1
+            yield {"id": f"{number:06d}"}
+
+    changes = _diagnostics().compare_sorted_rows(
+        rows("before", 1), rows("after", 0), key_columns=("id",),
+    )
+    first = next(changes)
+    assert first.before_digest is None
+    assert first.after_digest is not None
+    assert consumed == {"before": 1, "after": 2}
+    changes.close()
 
 
 def test_streaming_comparator_writes_complete_large_coverage_without_difference_list(tmp_path):
