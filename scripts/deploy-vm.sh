@@ -12,14 +12,22 @@ cd "$ROOT"
 # Pulling after assembly would deploy the previous commit's profile.
 git pull --ff-only origin main
 SECRETS="$HOME/bfx/bot.env"
+MIGRATION_SECRETS="$HOME/bfx/migrate.env"
 PHASE_ENV="deploy/vm/${PHASE}.env"
 
 [ -f "$SECRETS" ]   || { echo "ERROR: missing secrets $SECRETS (chmod 600)"; exit 1; }
+[ -f "$MIGRATION_SECRETS" ] || { echo "ERROR: missing migration secrets $MIGRATION_SECRETS (chmod 600)"; exit 1; }
 [ -f "$PHASE_ENV" ] || { echo "ERROR: missing $PHASE_ENV"; exit 1; }
 
 # Assemble the single env_file the compose references: secrets + phase config.
 cat "$SECRETS" "$PHASE_ENV" > .env.runtime
 chmod 600 .env.runtime
+cp "$MIGRATION_SECRETS" .env.migrate.runtime
+chmod 600 .env.migrate.runtime
+grep -q '^DATABASE_URL=.' .env.migrate.runtime || {
+  echo "ERROR: DATABASE_URL missing/empty in $MIGRATION_SECRETS"
+  exit 1
+}
 
 # Preflight: required vars present.
 need_common="DATABASE_URL BFX_PHASE BFX_DEPLOYMENT_ENV BFX_EXECUTION_POLICY BFX_EXCHANGE_ACCOUNT_ID BFX_VAULT_KEK"

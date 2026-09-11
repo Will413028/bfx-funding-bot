@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 
@@ -123,6 +124,9 @@ def _deploy_root(tmp_path: Path) -> Path:
         "BFX_EXCHANGE_ACCOUNT_ID=550e8400-e29b-41d4-a716-446655440000\n"
         "BFX_EXPECTED_IMAGE_DIGEST=sha256:expected\n"
         "BFX_VAULT_KEK=safe-fake\n"
+    )
+    (home / "migrate.env").write_text(
+        "DATABASE_URL=postgresql://safe-operator\n"
     )
     (home / "webapi.env").write_text(
         "DATABASE_URL=postgresql://safe-fake\n"
@@ -357,6 +361,8 @@ def test_deploy_script_assembles_the_selected_non_canary_profile(
 
     assert result.returncode == 0, result.stderr
     runtime = parse_env_file(root / ".env.runtime")
+    migration_runtime = parse_env_file(root / ".env.migrate.runtime")
+    assert migration_runtime == {"DATABASE_URL": "postgresql://safe-operator"}
     assert runtime["BFX_EXECUTION_POLICY"] == expected_policy
     assert runtime["BFX_PHASE"] == ("paper" if phase == "paper" else "shadow")
     if phase == "paper":
@@ -371,6 +377,15 @@ def test_deploy_script_assembles_the_selected_non_canary_profile(
         assert runtime["BFX_CELLS_YAML"] == "/app/configs/cells.experimental-p14.yaml"
     assert "deployed phase=" + phase + " sha=safe-test-sha" in result.stdout
     assert len((root / "fake-docker.log").read_text().splitlines()) == 7
+
+
+def test_migrate_service_uses_operator_env_separately_from_runtime_bot_env() -> None:
+    compose = yaml.safe_load((REPOSITORY_ROOT / "docker-compose.bot.yml").read_text())
+
+    assert compose["services"]["migrate"]["env_file"] == [
+        ".env.runtime",
+        ".env.migrate.runtime",
+    ]
 
 
 def test_shadow_p14_selected_cells_have_locked_adaptive_parameters() -> None:

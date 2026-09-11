@@ -34,6 +34,9 @@ OPTIONAL_WRITERS = frozenset({"bfx-l3-verify-24h.service"})
 # These tracked units run pgBackRest/status only, not execution projections.
 # Keep backup scheduling active; the quiescence boundary must not relax RPO.
 BACKUP_UNITS = frozenset({
+    # Legacy daily pg_dump remains a backup-only reader and is allowed to stay
+    # enabled during the cutover quiescence window.
+    "bfx-pg-backup.service", "bfx-pg-backup.timer",
     "bfx-pgbackrest-backup.service", "bfx-pgbackrest-backup.timer",
     "bfx-pgbackrest-status.service", "bfx-pgbackrest-status.timer",
 })
