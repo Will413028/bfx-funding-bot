@@ -1037,12 +1037,22 @@ def test_private_reader_enforces_command_bound_before_reading(tmp_path, monkeypa
         module.read_private(path, expected_digest=hashlib.sha256(b"a" * 33).hexdigest(), max_bytes=32)
 
 
-@pytest.mark.parametrize("mutation", ["receipt_digest", "prepared_pin", "target", "v1", "operations", "diagnostic"])
+@pytest.mark.parametrize("mutation", [
+    "receipt_digest", "prepared_pin", "target", "v1", "operations", "diagnostic",
+    "snapshot_scope", "snapshot_environment", "snapshot_coverage", "snapshot_wallet_symbols",
+    "snapshot_wallet_infinite", "snapshot_offer_original_infinite", "snapshot_offer_rate_infinite",
+    "snapshot_credit_amount_infinite",
+])
 @pytest.mark.integration
 async def test_cli_apply_rejects_unverified_files_before_transaction(archive_db, tmp_path, monkeypatch, mutation):
     import hashlib
     import json
+    from dataclasses import replace
 
+    from bfx_funding_bot.modules.execution.event_store.entities import (
+        VenueCreditObservation,
+        VenueOfferObservation,
+    )
     from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
     from tests.integration.test_projection_cutover_apply_v2 import fixture
 
@@ -1055,11 +1065,32 @@ async def test_cli_apply_rejects_unverified_files_before_transaction(archive_db,
         receipt["target_run_id"] = str(UUID(int=123))
     if mutation == "v1":
         receipt["schema_version"] = 1
+    snapshot = serialize_event(replace(runtime_args["snapshot"],
+        offers=(VenueOfferObservation("o1", "fUST", Decimal("9"), Decimal("7"),
+                                      Decimal("0.001"), 2, "active", 900, 1000),),
+        credits=(VenueCreditObservation("c1", "fUSD", Decimal("11"), Decimal("0.002"),
+                                        3, "active", 900, 1000),)))
+    if mutation == "snapshot_scope":
+        snapshot["account_id"] = str(UUID(int=101))
+    elif mutation == "snapshot_environment":
+        snapshot["environment"] = "prod"
+    elif mutation == "snapshot_coverage":
+        snapshot["coverage"]["active_credits_complete"] = False
+    elif mutation == "snapshot_wallet_symbols":
+        del snapshot["wallet_available"]["fUSD"]
+    elif mutation == "snapshot_wallet_infinite":
+        snapshot["wallet_available"]["fUSD"] = "Infinity"
+    elif mutation == "snapshot_offer_original_infinite":
+        snapshot["offers"][0]["amount_original"] = "Infinity"
+    elif mutation == "snapshot_offer_rate_infinite":
+        snapshot["offers"][0]["rate"] = "Infinity"
+    elif mutation == "snapshot_credit_amount_infinite":
+        snapshot["credits"][0]["amount"] = "Infinity"
     args = command_args("apply", tmp_path / "applied")
     files = {"prepared": (tmp_path / "prepared").read_bytes(),
              "receipt": json.dumps(receipt).encode(), "archive-input": values["archive_input"],
              "operations": encode_row(values["operation_inventory"]),
-             "snapshot": encode_row(serialize_event(runtime_args["snapshot"]))}
+             "snapshot": encode_row(snapshot)}
     for flag, payload in files.items():
         path = tmp_path / flag
         if flag != "prepared":

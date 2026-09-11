@@ -84,7 +84,10 @@ from bfx_funding_bot.modules.execution.projection_cutover.manifest import (
     digest_rows,
     encode_manifest,
 )
-from bfx_funding_bot.modules.execution.projection_cutover.snapshot import validate_cutover_snapshot
+from bfx_funding_bot.modules.execution.projection_cutover.snapshot import (
+    validate_cutover_snapshot,
+    validate_cutover_snapshot_preflight,
+)
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from scripts.projection_cutover_operations import (
     Runner,
@@ -840,6 +843,7 @@ async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, A
     snapshot = deserialize_event("VENUE_SNAPSHOT_OBSERVED", snapshot_payload)
     if not isinstance(snapshot, VenueSnapshotObserved):
         raise ValueError("prepared_snapshot_invalid")
+    validate_cutover_snapshot_preflight(snapshot, scope=scope, managed_symbols=frozenset({"fUST", "fUSD"}))
     await verify_local_operations(inventory, runner=runner)
 
     async def quiescence(

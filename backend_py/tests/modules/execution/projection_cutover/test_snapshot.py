@@ -35,6 +35,15 @@ def test_complete_empty_offers_and_explicit_zero_wallet_pass():
     validate(snapshot())
 
 
+def test_preflight_accepts_stale_content_but_full_validation_still_rejects():
+    from bfx_funding_bot.modules.execution.projection_cutover import snapshot as module
+
+    value = snapshot()
+    module.validate_cutover_snapshot_preflight(value, scope=SCOPE, managed_symbols=SYMBOLS)
+    with pytest.raises(ValueError, match="snapshot_time_invalid"):
+        validate(value, now_ms=301001)
+
+
 @pytest.mark.parametrize("changes", [
     {"account_id": str(UUID(int=101))}, {"account_id": "not-a-uuid"},
     {"environment": "prod"}, {"wallet_available": {"fUST": Decimal("1")}},
