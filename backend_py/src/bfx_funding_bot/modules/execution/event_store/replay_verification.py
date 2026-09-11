@@ -1,10 +1,16 @@
 """Read-only verification of caller-captured events using the production projector."""
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Sequence
+import os
+import sqlite3
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID
 
 from sqlalchemy import JSON, Text, cast, insert, select, text
@@ -30,8 +36,16 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     VenueOfferStateRow,
 )
 from bfx_funding_bot.modules.execution.event_store.writer import DEFAULT_PROJECTOR_VERSION
-from bfx_funding_bot.modules.execution.projection_cutover.codec import JSON_NULL
-from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import RowCollector
+from bfx_funding_bot.modules.execution.projection_cutover.codec import (
+    JSON_NULL,
+    decode_row,
+    encode_row,
+)
+from bfx_funding_bot.modules.execution.projection_cutover.diagnostics import (
+    DifferenceSink,
+    RowCollector,
+    compare_sorted_rows,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
     SubmissionAttemptRow,
@@ -68,6 +82,8 @@ _REPORT_TABLE_NAMES = ("event_log", *_PROJECTION_REPORT_TABLE_NAMES)
 _VOLATILE_PROJECTION_COLUMNS = frozenset({
     "recorded_at", "updated_at", "opened_at", "resolved_at",
 })
+_PROJECTION_STREAM_BATCH = 256
+_PROJECTION_SPOOL_TABLES = {"source": "source_rows", "rebuilt": "rebuilt_rows"}
 _SURROGATE_PROJECTION_COLUMNS: dict[str, frozenset[str]] = {
     "reconcile_observation": frozenset({"id"}),
 }
@@ -128,8 +144,13 @@ def _canonical_projection_row(row: object) -> dict[str, object]:
 
 async def _projection_evidence(
     session: AsyncSession, *, account_id: UUID, environment: str,
+    streaming: bool = False,
 ) -> tuple[dict[str, int], dict[str, str], dict[str, Decimal], dict[str, Decimal]]:
     """Hash scoped projection rows without retaining or reporting their contents."""
+    if streaming:
+        return await _stream_projection_evidence(
+            session, account_id=account_id, environment=environment,
+        )
     row_counts: dict[str, int] = {}
     content_hashes: dict[str, str] = {}
     for name, model in _TEMPORARY_PROJECTION_MODELS:
@@ -166,6 +187,303 @@ async def _projection_evidence(
     return row_counts, content_hashes, offer_exposure, credit_exposure
 
 
+@contextmanager
+def _projection_hash_spool() -> Iterator[sqlite3.Connection]:
+    """Provide a private disk-backed spool for canonical projection hashes."""
+    with TemporaryDirectory(prefix="bfx-projection-hash-") as directory:
+        root = Path(directory)
+        os.chmod(root, 0o700)
+        path = root / "projection.sqlite"
+        path.touch(mode=0o600, exist_ok=False)
+        os.chmod(path, 0o600)
+        with closing(sqlite3.connect(path)) as spool:
+            spool.execute("PRAGMA cache_size=-512")
+            spool.execute("PRAGMA temp_store=FILE")
+            spool.execute(
+                "CREATE TABLE canonical_rows("
+                "sort_key TEXT NOT NULL, sequence INTEGER NOT NULL, payload BLOB NOT NULL,"
+                "PRIMARY KEY(sort_key, sequence)) WITHOUT ROWID"
+            )
+            spool.commit()
+            yield spool
+
+
+def _canonical_projection_bytes(row: Mapping[str, object]) -> bytes:
+    """Encode one canonical row exactly as ``projection_content_hash`` does."""
+    return json.dumps(
+        row, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str,
+    ).encode()
+
+
+async def _stream_projection_table_hash(
+    session: AsyncSession,
+    *,
+    model: type[object],
+    account_id: UUID,
+    environment: str,
+) -> tuple[int, str]:
+    """Return the existing projection hash using a bounded external sort."""
+    table = model.__table__  # type: ignore[attr-defined]  # SQLAlchemy mapped row.
+    statement = select(model).where(
+        table.c.exchange_account_id == account_id,
+        table.c.deployment_environment == environment,
+    ).execution_options(populate_existing=True, yield_per=_PROJECTION_STREAM_BATCH)
+    with _projection_hash_spool() as spool:
+        result = await session.stream_scalars(statement)
+        count = 0
+        try:
+            async for row in result:
+                canonical = _canonical_projection_row(row)
+                payload = _canonical_projection_bytes(canonical)
+                sort_key = hashlib.sha256(b"[" + payload + b"]").hexdigest()
+                spool.execute(
+                    "INSERT INTO canonical_rows(sort_key, sequence, payload) VALUES (?, ?, ?)",
+                    (sort_key, count, payload),
+                )
+                count += 1
+        finally:
+            await result.close()
+        spool.commit()
+
+        digest = hashlib.sha256(b"[")
+        cursor = spool.execute(
+            "SELECT payload FROM canonical_rows ORDER BY sort_key, sequence"
+        )
+        try:
+            first = True
+            for (payload,) in cursor:
+                if not first:
+                    digest.update(b",")
+                digest.update(bytes(payload))
+                first = False
+        finally:
+            cursor.close()
+        digest.update(b"]")
+    return count, digest.hexdigest()
+
+
+async def _stream_projection_evidence(
+    session: AsyncSession, *, account_id: UUID, environment: str,
+) -> tuple[dict[str, int], dict[str, str], dict[str, Decimal], dict[str, Decimal]]:
+    """Compute projection evidence without materializing physical rows in Python."""
+    row_counts: dict[str, int] = {}
+    content_hashes: dict[str, str] = {}
+    for name, model in _TEMPORARY_PROJECTION_MODELS:
+        row_counts[name], content_hashes[name] = await _stream_projection_table_hash(
+            session, model=model, account_id=account_id, environment=environment,
+        )
+
+    offer_exposure: dict[str, Decimal] = {}
+    offer_result = await session.stream_scalars(select(VenueOfferStateRow).where(
+        VenueOfferStateRow.exchange_account_id == account_id,
+        VenueOfferStateRow.deployment_environment == environment,
+        VenueOfferStateRow.is_terminal.is_(False),
+    ).execution_options(populate_existing=True, yield_per=_PROJECTION_STREAM_BATCH))
+    try:
+        async for offer_row in offer_result:
+            offer_exposure[offer_row.symbol] = (
+                offer_exposure.get(offer_row.symbol, Decimal("0"))
+                + Decimal(str(offer_row.amount_remaining))
+            )
+    finally:
+        await offer_result.close()
+
+    credit_exposure: dict[str, Decimal] = {}
+    credit_result = await session.stream_scalars(select(VenueCreditStateRow).where(
+        VenueCreditStateRow.exchange_account_id == account_id,
+        VenueCreditStateRow.deployment_environment == environment,
+        VenueCreditStateRow.is_terminal.is_(False),
+    ).execution_options(populate_existing=True, yield_per=_PROJECTION_STREAM_BATCH))
+    try:
+        async for credit_row in credit_result:
+            credit_exposure[credit_row.symbol] = (
+                credit_exposure.get(credit_row.symbol, Decimal("0"))
+                + Decimal(str(credit_row.amount))
+            )
+    finally:
+        await credit_result.close()
+    return row_counts, content_hashes, offer_exposure, credit_exposure
+
+
+@contextmanager
+def _projection_spool() -> Iterator[sqlite3.Connection]:
+    """Provide a private disk-backed spool for one projection table."""
+    with TemporaryDirectory(prefix="bfx-projection-diagnostic-") as directory:
+        root = Path(directory)
+        os.chmod(root, 0o700)
+        path = root / "projection.sqlite"
+        path.touch(mode=0o600, exist_ok=False)
+        os.chmod(path, 0o600)
+        with closing(sqlite3.connect(path)) as spool:
+            spool.execute("PRAGMA cache_size=-512")
+            spool.execute("PRAGMA temp_store=FILE")
+            spool.execute(
+                "CREATE TABLE source_rows("
+                "row_key BLOB PRIMARY KEY, payload BLOB NOT NULL"
+                ") WITHOUT ROWID"
+            )
+            spool.execute(
+                "CREATE TABLE rebuilt_rows("
+                "row_key BLOB PRIMARY KEY, payload BLOB NOT NULL"
+                ") WITHOUT ROWID"
+            )
+            spool.commit()
+            yield spool
+
+
+def _decode_projection_json(value: object) -> object:
+    decoded = json.loads(value, parse_float=Decimal) if isinstance(value, (bytes, str)) else value
+    return JSON_NULL if decoded is None else decoded
+
+
+def _projection_values(
+    row: Mapping[str, object], *, json_names: set[str]
+) -> dict[str, object]:
+    values = dict(row)
+    for column in json_names:
+        if values[column] is not None:
+            values[column] = _decode_projection_json(values[column])
+    return values
+
+
+async def _spool_projection_rows(
+    session: AsyncSession,
+    *,
+    model: type[object],
+    account_id: UUID,
+    environment: str,
+    spool: sqlite3.Connection,
+    target: str,
+) -> int:
+    table = model.__table__  # type: ignore[attr-defined]  # SQLAlchemy mapped row.
+    key_columns = tuple(column.key for column in table.primary_key)
+    json_names = {column.name for column in table.c if isinstance(column.type, JSON)}
+    columns = [
+        cast(column, Text).label(column.name) if column.name in json_names else column
+        for column in table.c
+    ]
+    statement = select(*columns).where(
+        table.c.exchange_account_id == account_id,
+        table.c.deployment_environment == environment,
+    ).execution_options(
+        populate_existing=True,
+        yield_per=_PROJECTION_STREAM_BATCH,
+    )
+    result = await session.stream(statement)
+    count = 0
+    try:
+        async for raw_row in result.mappings():
+            values = _projection_values(
+                {str(key): value for key, value in raw_row.items()},
+                json_names=json_names,
+            )
+            if any(column not in values for column in key_columns):
+                raise ReplayVerificationError("missing archive row key")
+            if any(values[column] is None for column in key_columns):
+                raise ReplayVerificationError("null archive row key")
+            payload = encode_row(values)
+            key = encode_row({column: values[column] for column in key_columns})
+            try:
+                spool.execute(
+                    f"INSERT INTO {target}(row_key, payload) VALUES (?, ?)",
+                    (key, payload),
+                )
+            except sqlite3.IntegrityError:
+                raise ReplayVerificationError("duplicate archive row key") from None
+            count += 1
+    finally:
+        await result.close()
+    spool.commit()
+    return count
+
+
+def _spool_cursor(
+    spool: sqlite3.Connection, *, side: str
+) -> Iterator[Mapping[str, object]]:
+    try:
+        table = _PROJECTION_SPOOL_TABLES[side]
+    except KeyError:
+        raise ValueError("invalid projection spool side") from None
+    cursor = spool.execute(f"SELECT payload FROM {table} ORDER BY row_key")
+    try:
+        for (payload,) in cursor:
+            yield decode_row(bytes(payload))
+    finally:
+        cursor.close()
+
+
+def _spool_facts(
+    spool: sqlite3.Connection, *, side: str
+) -> tuple[int, str]:
+    try:
+        table = _PROJECTION_SPOOL_TABLES[side]
+    except KeyError:
+        raise ValueError("invalid projection spool side") from None
+    digest = hashlib.sha256()
+    count = 0
+    cursor = spool.execute(f"SELECT payload FROM {table} ORDER BY row_key")
+    try:
+        for (payload,) in cursor:
+            encoded = bytes(payload)
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+            count += 1
+    finally:
+        cursor.close()
+    return count, digest.hexdigest()
+
+
+async def _stream_projection_differences(
+    source_session: AsyncSession,
+    rebuilt_session: AsyncSession,
+    *,
+    account_id: UUID,
+    environment: str,
+    difference_sink: DifferenceSink,
+) -> None:
+    """Spool and merge one physical projection table at a time."""
+    models = sorted(_TEMPORARY_PROJECTION_MODELS, key=lambda item: item[0])
+    for name, model in models:
+        table = model.__table__  # type: ignore[attr-defined]  # SQLAlchemy mapped row.
+        key_columns = tuple(column.key for column in table.primary_key)
+        difference_sink.begin_table(name, key_columns)
+        with _projection_spool() as spool:
+            source_count = await _spool_projection_rows(
+                source_session,
+                model=model,
+                account_id=account_id,
+                environment=environment,
+                spool=spool,
+                target=_PROJECTION_SPOOL_TABLES["source"],
+            )
+            rebuilt_count = await _spool_projection_rows(
+                rebuilt_session,
+                model=model,
+                account_id=account_id,
+                environment=environment,
+                spool=spool,
+                target=_PROJECTION_SPOOL_TABLES["rebuilt"],
+            )
+            source_facts = _spool_facts(spool, side="source")
+            rebuilt_facts = _spool_facts(spool, side="rebuilt")
+            if source_facts[0] != source_count or rebuilt_facts[0] != rebuilt_count:
+                raise ReplayVerificationError("projection spool count mismatch")
+            for difference in compare_sorted_rows(
+                _spool_cursor(spool, side="source"),
+                _spool_cursor(spool, side="rebuilt"),
+                key_columns=key_columns,
+                table=name,
+            ):
+                difference_sink.append(difference)
+            table_facts: Mapping[str, object] = {
+                "name": name,
+                "key_columns": list(key_columns),
+                "count": source_facts[0],
+                "digest": source_facts[1],
+            }
+        difference_sink.finish_table(table_facts)
+
+
 async def _replay_into_empty_temporary_projection(
     session: AsyncSession,
     *,
@@ -174,6 +492,7 @@ async def _replay_into_empty_temporary_projection(
     environment: str,
     projector_version: str,
     diagnostic_collector: RowCollector | None = None,
+    difference_sink: DifferenceSink | None = None,
 ) -> tuple[
     dict[str, int],
     dict[str, str],
@@ -187,6 +506,8 @@ async def _replay_into_empty_temporary_projection(
     copied into the temporary ``event_log`` before the normal deserializer and
     ``rebuild_snapshot_from_log`` projector are invoked.
     """
+    if diagnostic_collector is not None and difference_sink is not None:
+        raise ReplayVerificationError("choose one projection diagnostic boundary")
     projector_type = _projector_implementation(projector_version)
     source_rows = (
         await _archive_projection_rows(session, account_id=account_id, environment=environment)
@@ -233,9 +554,20 @@ async def _replay_into_empty_temporary_projection(
             deployment_environment=environment,
         )
         row_counts, content_hashes, offer_exposure, credit_exposure = await _projection_evidence(
-            replay_session, account_id=account_id, environment=environment,
+            replay_session,
+            account_id=account_id,
+            environment=environment,
+            streaming=difference_sink is not None,
         )
-        if diagnostic_collector is not None:
+        if difference_sink is not None:
+            await _stream_projection_differences(
+                session,
+                replay_session,
+                account_id=account_id,
+                environment=environment,
+                difference_sink=difference_sink,
+            )
+        elif diagnostic_collector is not None:
             rebuilt_rows = await _archive_projection_rows(
                 replay_session, account_id=account_id, environment=environment,
             )
@@ -339,16 +671,19 @@ async def replay_captured_rows(
     environment: str,
     projector_version: str = DEFAULT_PROJECTOR_VERSION,
     expected_event_hash: str | None = None,
+    difference_sink: DifferenceSink | None = None,
     diagnostic_collector: RowCollector | None = None,
 ) -> ReplayReport:
     """Verify captured rows and rebuild on an isolated temporary connection.
 
     Rows may include the caller's flushed, uncommitted events. Never reread
     public event_log to recover them, or commit/rollback the source transaction.
-    The default path supports READ COMMITTED. A full-row collector requires the
+    The default path supports READ COMMITTED. A diagnostic sink requires the
     caller to capture events within an existing REPEATABLE READ/serializable
     transaction so events and source diagnostics share one MVCC snapshot.
     """
+    if difference_sink is not None and diagnostic_collector is not None:
+        raise ReplayVerificationError("choose one projection diagnostic boundary")
     for row in rows:
         try:
             deserialize_stored_event(row)
@@ -360,13 +695,15 @@ async def replay_captured_rows(
         rows, account_id=account_id, environment=environment,
         projector_version=projector_version, expected_event_hash=expected_event_hash,
     )
-    if diagnostic_collector is not None:
+    if difference_sink is not None or diagnostic_collector is not None:
         isolation = await session.scalar(text("SHOW transaction_isolation"))
         if isolation not in {"repeatable read", "serializable"}:
             raise ReplayVerificationError("field diagnostics require a consistent source snapshot")
     row_counts, content_hashes, offers, credits = await _replay_into_empty_temporary_projection(
         session, rows=rows, account_id=account_id, environment=environment,
-        projector_version=projector_version, diagnostic_collector=diagnostic_collector,
+        projector_version=projector_version,
+        diagnostic_collector=diagnostic_collector,
+        difference_sink=difference_sink,
     )
     return replace(
         report,

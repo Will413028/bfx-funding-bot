@@ -1,5 +1,7 @@
 """Real temporary projector sees captured uncommitted rows, never commits source."""
 
+from collections.abc import Mapping
+from dataclasses import asdict
 from decimal import Decimal
 
 import pytest
@@ -12,12 +14,29 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, ProjectionHeadRow
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
+from bfx_funding_bot.modules.execution.projection_cutover.contracts import Difference
 from scripts.verify_projection_replay import replay_one_account
 from tests.integration.test_projection_cutover_diagnostics import _seed, _source_state
 from tests.modules.execution.event_store.test_historical_claim_cycles import ACCOUNT
 from tests.modules.execution.event_store.test_replay_verification import runtime
 
 pytestmark = pytest.mark.integration
+
+
+class _RecordingDifferenceSink:
+    def __init__(self) -> None:
+        self.tables: list[tuple[str, tuple[str, ...]]] = []
+        self.differences: list[Difference] = []
+        self.facts: list[Mapping[str, object]] = []
+
+    def begin_table(self, name: str, key_columns: tuple[str, ...]) -> None:
+        self.tables.append((name, key_columns))
+
+    def append(self, difference: Difference) -> None:
+        self.differences.append(difference)
+
+    def finish_table(self, table_facts: Mapping[str, object]) -> None:
+        self.facts.append(dict(table_facts))
 
 
 async def _sequences(factory):
@@ -100,6 +119,64 @@ async def test_uncommitted_snapshot_replays_without_public_writes_or_source_comm
         ))).all() for name in original} == own_rows
         await session.rollback()
     assert await _source_state(pg_session_factory) == original
+
+
+async def test_streaming_difference_sink_emits_table_facts_and_differences(pg_session_factory):
+    kernel = runtime()
+    await _seed(pg_session_factory)
+    async with pg_session_factory() as session:
+        await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        sink = _RecordingDifferenceSink()
+        report = await kernel.replay_captured_rows(
+            session,
+            rows=await _captured(session),
+            account_id=ACCOUNT,
+            environment="ci",
+            difference_sink=sink,
+        )
+        plain = await kernel.replay_captured_rows(
+            session,
+            rows=await _captured(session),
+            account_id=ACCOUNT,
+            environment="ci",
+        )
+        operator_sink = _RecordingDifferenceSink()
+        operator_report = await replay_one_account(
+            session,
+            account_id=ACCOUNT,
+            environment="ci",
+            projector_version="execution-state-v1",
+            difference_sink=operator_sink,
+        )
+
+    assert [name for name, _keys in sink.tables] == sorted([
+        "offer_claims", "position_state", "venue_offer_state", "venue_credit_state",
+        "projection_heads", "reconcile_observation", "submission_attempts",
+        "execution_uncertainties",
+    ])
+    assert [facts["name"] for facts in sink.facts] == [name for name, _keys in sink.tables]
+    assert all(
+        isinstance(facts["count"], int)
+        and facts["count"] >= 0
+        and facts["name"] in report.row_counts
+        and isinstance(facts["digest"], str)
+        and len(facts["digest"]) == 64
+        for facts in sink.facts
+    )
+    assert any(
+        difference.table == "offer_claims" and difference.column == "last_updated_ms"
+        for difference in sink.differences
+    )
+    assert all(asdict(difference)["classification"] == "unexplained"
+               for difference in sink.differences)
+    assert report.row_counts == plain.row_counts
+    assert report.content_hashes == plain.content_hashes
+    assert report.replayed_offer_exposure_by_symbol == plain.replayed_offer_exposure_by_symbol
+    assert report.replayed_credit_exposure_by_symbol == plain.replayed_credit_exposure_by_symbol
+    assert operator_report.row_counts == plain.row_counts
+    assert operator_report.content_hashes == plain.content_hashes
+    assert operator_report.diagnostic_old_row_counts is not None
+    assert len(operator_sink.facts) == len(sink.facts)
 
 
 async def test_operator_and_captured_historical_replay_have_identical_evidence(pg_session_factory):
