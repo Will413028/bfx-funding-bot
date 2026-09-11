@@ -136,7 +136,7 @@ async def _projection_evidence(
         rows = list(await session.scalars(select(model).where(
             model.exchange_account_id == account_id,  # type: ignore[attr-defined]
             model.deployment_environment == environment,  # type: ignore[attr-defined]
-        )))
+        ).execution_options(populate_existing=True)))
         canonical_rows = sorted(
             (_canonical_projection_row(row) for row in rows),
             key=lambda value: projection_content_hash([value]),
@@ -148,7 +148,7 @@ async def _projection_evidence(
         VenueOfferStateRow.exchange_account_id == account_id,
         VenueOfferStateRow.deployment_environment == environment,
         VenueOfferStateRow.is_terminal.is_(False),
-    )):
+    ).execution_options(populate_existing=True)):
         offer_exposure[offer_row.symbol] = (
             offer_exposure.get(offer_row.symbol, Decimal("0"))
             + Decimal(str(offer_row.amount_remaining))
@@ -158,7 +158,7 @@ async def _projection_evidence(
         VenueCreditStateRow.exchange_account_id == account_id,
         VenueCreditStateRow.deployment_environment == environment,
         VenueCreditStateRow.is_terminal.is_(False),
-    )):
+    ).execution_options(populate_existing=True)):
         credit_exposure[credit_row.symbol] = (
             credit_exposure.get(credit_row.symbol, Decimal("0"))
             + Decimal(str(credit_row.amount))

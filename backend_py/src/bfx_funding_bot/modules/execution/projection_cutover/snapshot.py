@@ -53,11 +53,13 @@ def validate_cutover_snapshot(
                 raise ValueError("snapshot_duplicate_exposure")
             ids.add(identity)
             amount = getattr(observation, "amount_remaining", getattr(observation, "amount", None))
+            original = getattr(observation, "amount_original", amount)
             rate = observation.rate
             if (
                 observation.symbol not in managed_symbols
                 or observation.status not in {"active", "partially_filled"}
                 or not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0
+                or not isinstance(original, Decimal) or not original.is_finite()
                 or not isinstance(rate, Decimal) or not rate.is_finite() or rate < 0
                 or type(observation.period_days) is not int or observation.period_days <= 0
                 or type(observation.mts_created) is not int
