@@ -12,6 +12,25 @@ def validate_cutover_snapshot(
     snapshot: VenueSnapshotObserved, *, scope: Scope, managed_symbols: frozenset[str],
     now_ms: int, max_age_ms: int,
 ) -> None:
+    validate_cutover_snapshot_preflight(snapshot, scope=scope, managed_symbols=managed_symbols)
+    times = (now_ms, max_age_ms, snapshot.query_started_at_ms, snapshot.query_finished_at_ms)
+    if any(type(value) is not int for value in times) or not (
+        0 < max_age_ms <= 300_000
+        and 0 <= snapshot.query_started_at_ms <= snapshot.query_finished_at_ms <= now_ms
+        and now_ms - snapshot.query_started_at_ms <= max_age_ms
+        and snapshot.occurred_at_ms == snapshot.query_finished_at_ms
+    ):
+        raise ValueError("snapshot_time_invalid")
+
+
+def validate_cutover_snapshot_preflight(
+    snapshot: VenueSnapshotObserved, *, scope: Scope, managed_symbols: frozenset[str],
+) -> None:
+    """Check scope and complete finite exposure before opening a transaction.
+
+    Wall-clock freshness belongs to the full validator, after completed-request
+    detection: a stale but otherwise valid snapshot must still permit a retry.
+    """
     if (
         not isinstance(scope.account_id, UUID)
         or scope.environment not in {"ci", "shadow", "prod"}
@@ -23,14 +42,6 @@ def validate_cutover_snapshot(
         symbol not in {"fUST", "fUSD"} for symbol in managed_symbols
     ):
         raise ValueError("snapshot_managed_symbols_invalid")
-    times = (now_ms, max_age_ms, snapshot.query_started_at_ms, snapshot.query_finished_at_ms)
-    if any(type(value) is not int for value in times) or not (
-        0 < max_age_ms <= 300_000
-        and 0 <= snapshot.query_started_at_ms <= snapshot.query_finished_at_ms <= now_ms
-        and now_ms - snapshot.query_started_at_ms <= max_age_ms
-        and snapshot.occurred_at_ms == snapshot.query_finished_at_ms
-    ):
-        raise ValueError("snapshot_time_invalid")
     coverage = snapshot.coverage
     # The three full-account REST endpoints are unpaginated. A different page
     # count has no supported completeness proof in this collection boundary.
