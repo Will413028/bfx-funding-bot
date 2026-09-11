@@ -524,6 +524,11 @@ async def _replay_into_empty_temporary_projection(
                 "CREATE TEMPORARY TABLE "
                 f"{table_name} (LIKE {table_name} INCLUDING ALL) ON COMMIT DROP"
             ))
+        # A pooled connection may hold prepared SELECTs previously resolved to
+        # public tables. Creating a shadow table alone need not reparse those
+        # statements. An explicit local path change binds every cached plan to
+        # the temporary projection; transaction exit restores the caller path.
+        await replay_session.execute(text("SET LOCAL search_path TO pg_temp, public"))
         # LIKE copies the source serial default. Snapshot inserts omit id, so
         # give the temporary table its own identity sequence instead of using
         # (or requiring write privileges on) the source sequence. PostgreSQL

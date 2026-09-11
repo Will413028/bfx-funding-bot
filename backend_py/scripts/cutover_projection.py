@@ -47,6 +47,11 @@ from bfx_funding_bot.modules.execution.events import (
     SnapshotCoverage,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.projection_cutover.apply import (
+    apply_cutover,
+    validate_apply_evidence,
+    validate_restore_receipt,
+)
 from bfx_funding_bot.modules.execution.projection_cutover.archive import (
     _describe,
     _stream_identity,
@@ -87,6 +92,7 @@ from scripts.projection_cutover_operations import (
     verify_database_quiescence,
     verify_local_operations,
 )
+from scripts.verify_projection_archive import _unique, decode_archive_inputs
 from scripts.verify_projection_replay import _archive_projection_rows, replay_one_account
 
 _ALLOWED_CLASSIFICATIONS = frozenset({
@@ -559,14 +565,16 @@ def write_private(path: Path, payload: bytes) -> None:
         os.fsync(output.fileno())
 
 
-def read_private(path: Path, *, expected_digest: str) -> bytes:
+def read_private(path: Path, *, expected_digest: str, max_bytes: int = 64 * 1024 * 1024) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as source:
         info = os.fstat(source.fileno())
         if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid != os.getuid() or info.st_size > 64 * 1024 * 1024):
+                or info.st_uid != os.getuid() or info.st_size > max_bytes):
             raise ValueError("evidence_file_not_private")
-        payload = source.read()
+        payload = source.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ValueError("evidence_file_oversized")
     if hashlib.sha256(payload).hexdigest() != expected_digest:
         raise ValueError("evidence_digest_mismatch")
     return payload
@@ -665,6 +673,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--operations", type=Path)
     parser.add_argument("--operations-digest")
     parser.add_argument("--prepared-digest")
+    parser.add_argument("--prepared", type=Path)
+    for name in ("receipt", "archive-input", "snapshot"):
+        parser.add_argument("--" + name, type=Path)
+        parser.add_argument("--" + name + "-digest")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_digest):
@@ -679,7 +691,7 @@ async def run_command(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
     if args.command == "apply":
-        raise ValueError("apply_not_implemented")
+        return await _run_apply(args, runner=runner)
     scope = Scope(args.account_id, args.environment)
     identity = {"scope": scope, "run_id": args.run_id, "image_digest": args.image_digest,
                 "projector_version": args.projector_version}
@@ -753,6 +765,110 @@ async def run_command(
         return {"status": "dry_run" if args.dry_run else "prepared",
                 "manifest_digest": result["manifest"]["digest"],
                 "prepared_digest": row_digest(result)}
+    finally:
+        await engine.dispose()
+
+
+async def _run_apply(args: argparse.Namespace, *, runner: Runner) -> dict[str, Any]:
+    """Verify all external bytes before even constructing the apply engine.
+
+    The explicit pinned snapshot permits deterministic restarts without HTTP.
+    A newly collected snapshot is supplied as a private serialized event file.
+    """
+    required = ("prepared", "receipt", "archive_input", "snapshot", "operations", "diagnostic", "classification")
+    if any(not getattr(args, key) or not getattr(args, key + "_digest") for key in required):
+        raise ValueError("apply_evidence_required")
+    scope = Scope(args.account_id, args.environment)
+
+    def bounded(key: str, limit: int) -> bytes:
+        payload = read_private(getattr(args, key), expected_digest=getattr(args, key + "_digest"), max_bytes=limit)
+        if len(payload) > limit:
+            raise ValueError("apply_artifact_oversized")
+        return payload
+
+    prepared: dict[str, Any] = decode_row(bounded("prepared", 1024 * 1024))
+    receipt = json.loads(bounded("receipt", 65536), object_pairs_hook=_unique)
+    archive_input = bounded("archive_input", 1024 * 1024)
+    inventory: dict[str, Any] = decode_row(bounded("operations", 65536))
+    snapshot_payload = decode_row(bounded("snapshot", 1024 * 1024))
+    if (set(prepared) != {"kind", "manifest", "snapshot", "diagnostic_digest", "classification_digest", "operational_digest", "runtime_roles"}
+            or prepared["kind"] != "projection-cutover-prepared-v1"):
+        raise ValueError("prepared_format_invalid")
+    manifest = decode_manifest(encode_row(prepared["manifest"]))
+    if any(getattr(manifest, key) != value for key, value in {
+        "scope": scope, "run_id": args.run_id, "image_digest": args.image_digest,
+        "projector_version": args.projector_version,
+    }.items()):
+        raise ValueError("apply_identity_mismatch")
+    evidence = verify_cutover_evidence(
+        args.diagnostic, args.classification,
+        expected_diagnostic_digest=args.diagnostic_digest,
+        expected_classification_digest=args.classification_digest,
+        expected_run_id=args.run_id, expected_scope=scope,
+        expected_image_digest=args.image_digest, expected_projector_version=args.projector_version,
+    )
+    validate_apply_evidence(manifest, evidence)
+    if not isinstance(receipt, dict):
+        raise ValueError("restore_receipt_invalid")
+    validate_restore_receipt(manifest, receipt)
+    archives = decode_archive_inputs(archive_input)
+    transport = json.loads(archive_input, object_pairs_hook=_unique)
+    roles = inventory.get("runtime_roles")
+    if (not isinstance(roles, dict) or set(roles) != {"bot", "webapi", "frontend", "weekly-report"}
+            or any(not isinstance(role, str) or not role.strip() for role in roles.values())):
+        raise ValueError("runtime_inventory_incomplete")
+    runtime_roles = tuple(sorted(set(roles.values())))
+    operation_digest = row_digest(inventory)
+    target_reports = [r for r in receipt["archive_verification"]["archives"] if r["run_id"] == str(args.run_id)]
+    if (transport["schema_version"] != 2 or transport["target_run_id"] != str(args.run_id)
+            or len({m.run_id for m in archives}) != len(archives)
+            or [m for m in archives if m.run_id == args.run_id] != [manifest]
+            or {str(m.run_id) for m in archives} != {r["run_id"] for r in receipt["archive_verification"]["archives"]}
+            or receipt["archive_input_digest"] != args.archive_input_digest
+            or target_reports[0]["prepared_digest"] != args.prepared_digest
+            or any(prepared[key] != value for key, value in {
+                "diagnostic_digest": evidence.diagnostic.digest,
+                "classification_digest": evidence.classification.digest,
+                "operational_digest": operation_digest, "runtime_roles": list(runtime_roles),
+            }.items())
+            or inventory.get("images", {}).get("bot") != manifest.image_digest):
+        raise ValueError("apply_artifact_binding_mismatch")
+    for archived, item in zip(archives, transport["prepared"], strict=True):
+        report = next(r for r in receipt["archive_verification"]["archives"] if r["run_id"] == str(archived.run_id))
+        if report["prepared_digest"] != item["sha256"] or report["manifest_digest"] != archived.digest:
+            raise ValueError("apply_transport_binding_mismatch")
+    snapshot = deserialize_event("VENUE_SNAPSHOT_OBSERVED", snapshot_payload)
+    if not isinstance(snapshot, VenueSnapshotObserved):
+        raise ValueError("prepared_snapshot_invalid")
+    await verify_local_operations(inventory, runner=runner)
+
+    async def quiescence(
+        session: AsyncSession, *, scope: Scope, runtime_roles: tuple[str, ...], operation_digest: str,
+    ) -> None:
+        if operation_digest != row_digest(inventory):
+            raise ValueError("apply_operations_drift")
+        await verify_database_quiescence(session, scope=scope, runtime_roles=runtime_roles)
+        await verify_local_operations(inventory, runner=runner)
+
+    engine = make_async_engine_from_url(os.environ["DATABASE_URL"])
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
+            await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+            await session.execute(text("SET LOCAL lock_timeout='2s'"))
+            await session.execute(text("SET LOCAL statement_timeout='30s'"))
+            applied = await apply_cutover(session, expected=manifest, snapshot=snapshot,
+                archive_restore_receipt=receipt, evidence=evidence, runtime_roles=runtime_roles,
+                operation_digest=operation_digest, quiescence_verifier=quiescence,
+                now_ms=int(time.time() * 1000))
+        # A failed output write cannot undo the committed cutover. A repeat
+        # verifies the immutable DB receipt and can recreate the missing file.
+        payload = encode_row(applied)
+        if args.output.exists() or args.output.is_symlink():
+            if read_private(args.output, expected_digest=hashlib.sha256(payload).hexdigest()) != payload:
+                raise ValueError("apply_output_mismatch")
+        else:
+            write_private(args.output, payload)
+        return {"status": "applied", "run_id": str(manifest.run_id), "receipt_digest": row_digest(applied)}
     finally:
         await engine.dispose()
 
