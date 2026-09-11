@@ -436,6 +436,20 @@ async def test_buying_power_env_fallback_for_unlisted_symbol() -> None:
     assert over.allowed is False
 
 
+@pytest.mark.asyncio
+async def test_buying_power_explicit_zero_buffer_beats_env_fallback() -> None:
+    ledger = _FakeBalanceLedger({"fUST": Decimal("100")})
+    guard = BuyingPowerGuard(
+        ledger=ledger,
+        buffers={"fUST": Decimal("0")},
+        default_buffer=Decimal("0"),
+        env_fallback_buffer=Decimal("3"),
+    )
+
+    assert (await guard.evaluate(_post_decision(100.0, symbol="fUST"), _bp_ctx())).allowed is True
+    assert (await guard.evaluate(_post_decision(100.01, symbol="fUST"), _bp_ctx())).allowed is False
+
+
 class _FakeLock:
     def __init__(self, held: bool) -> None:
         self._held = held

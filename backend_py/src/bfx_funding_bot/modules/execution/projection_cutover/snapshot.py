@@ -7,6 +7,8 @@ from bfx_funding_bot.modules.execution.events import VenueSnapshotObserved
 
 from .contracts import Scope
 
+SUPPORTED_SYMBOLS = frozenset({"fUST", "fUSD"})
+
 
 def validate_cutover_snapshot(
     snapshot: VenueSnapshotObserved, *, scope: Scope, managed_symbols: frozenset[str],
@@ -38,9 +40,7 @@ def validate_cutover_snapshot_preflight(
         or snapshot.environment != scope.environment
     ):
         raise ValueError("snapshot_scope_mismatch")
-    if not managed_symbols or any(
-        symbol not in {"fUST", "fUSD"} for symbol in managed_symbols
-    ):
+    if not managed_symbols or any(symbol not in SUPPORTED_SYMBOLS for symbol in managed_symbols):
         raise ValueError("snapshot_managed_symbols_invalid")
     coverage = snapshot.coverage
     # The three full-account REST endpoints are unpaginated. A different page

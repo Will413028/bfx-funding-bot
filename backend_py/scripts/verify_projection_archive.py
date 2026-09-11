@@ -28,6 +28,7 @@ from bfx_funding_bot.modules.execution.projection_cutover.manifest import (
     decode_manifest,
     validate_manifest,
 )
+from bfx_funding_bot.modules.execution.projection_cutover.snapshot import SUPPORTED_SYMBOLS
 from bfx_funding_bot.modules.execution.projection_cutover.tables import ArchiveRun
 
 MAX_INPUT_BYTES = 1024 * 1024
@@ -63,10 +64,21 @@ def decode_archive_inputs(raw: bytes) -> tuple[ArchiveManifest, ...]:
             if hashlib.sha256(payload).hexdigest() != item["sha256"]:
                 raise ValueError("archive prepared digest")
             prepared = decode_row(payload)
-            if (set(prepared) != {"kind", "diagnostic_digest", "classification_digest",
-                                  "operational_digest", "runtime_roles", "snapshot", "manifest"}
+            required_fields = {"kind", "diagnostic_digest", "classification_digest",
+                               "operational_digest", "runtime_roles", "snapshot", "manifest"}
+            if (set(prepared) not in (required_fields, required_fields | {"managed_symbols"})
                     or prepared["kind"] != "projection-cutover-prepared-v1"):
                 raise ValueError("archive prepared kind/shape")
+            if "managed_symbols" in prepared:
+                symbols = prepared["managed_symbols"]
+                if (
+                    type(symbols) is not list
+                    or any(type(symbol) is not str for symbol in symbols)
+                    or not symbols
+                    or symbols != sorted(set(symbols))
+                    or not set(symbols) <= SUPPORTED_SYMBOLS
+                ):
+                    raise ValueError("archive prepared managed symbols")
             manifest_fields = prepared["manifest"]
             if not isinstance(manifest_fields, dict):
                 raise ValueError("archive prepared manifest shape")

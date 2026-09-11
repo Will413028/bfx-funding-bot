@@ -15,7 +15,7 @@ hard_guards:
     sub_task_stale_threshold_seconds: 300  # 5-minute watchdog
   allocation_cap:
     enabled: true
-    caps: {fUSD: 400, fUST: 3000}  # per-symbol cap; fUSD=400 mirrors safety.canary.yaml dry-run (this file is the non-canary default, NOT loaded by canary — canary.env sets BFX_SAFETY_CONFIG=configs/safety.canary.yaml). guards AND reconciler sizing read caps[symbol].
+    caps: {fUSD: 400, fUST: 3000}  # per-symbol cap for the non-canary default (canary loads safety.canary.yaml instead). guards AND reconciler sizing read caps[symbol].
     default_cap: 0
   buying_power:
     enabled: true

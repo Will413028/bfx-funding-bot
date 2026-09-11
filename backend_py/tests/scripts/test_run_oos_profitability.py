@@ -15,12 +15,12 @@ def test_canary_yaml_loads_cells():
     # CANARY_YAML resolves relative to cwd (backend_py/); load via absolute path
     yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.canary.yaml"
     cells = mod.load_cells_only(yaml_path)
-    # canary runs fUST (live) + fUSD (DRY-RUN 2026-06-02: cap>0 but USD unfunded ->
-    # per-symbol balance gate hard-blocks fUSD). Both currencies use the same
-    # MeanReversion a30 + p2 set (p30-sparse + RatePercentile excluded).
-    assert len(cells) == 4
+    # Recovery canary runs fUST only; fUSD stays dark until a separate reviewed
+    # change provides explicit coverage. fUST uses the MeanReversion a30 + p2
+    # set (p30-sparse + RatePercentile excluded).
+    assert len(cells) == 2
     assert {c.period_agg for c in cells} == {"a30", "p2"}
-    assert {c.symbol for c in cells} == {"fUST", "fUSD"}
+    assert {c.symbol for c in cells} == {"fUST"}
     assert all(c.strategy.value == "mean_reversion" for c in cells)
 
 

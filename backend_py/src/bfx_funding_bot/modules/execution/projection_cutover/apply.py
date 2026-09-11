@@ -17,6 +17,7 @@ from sqlalchemy import JSON, Table, Text, select, text
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
 from bfx_funding_bot.modules.execution.event_store.replay_verification import (
     _projection_evidence,
@@ -28,12 +29,19 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
     serialize_event,
 )
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, PositionStateRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    OfferClaimRow,
+    PositionStateRow,
+    VenueCreditStateRow,
+    VenueOfferStateRow,
+)
 from bfx_funding_bot.modules.execution.event_store.writer import (
     DEFAULT_PROJECTOR_VERSION,
     AccountEventWriter,
 )
 from bfx_funding_bot.modules.execution.events import VenueSnapshotObserved
+from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
 from .archive import (
     _describe,
@@ -51,10 +59,9 @@ from .evidence import (
     _manifest_digest,
 )
 from .manifest import TABLE_NAMES, decode_manifest, digest_rows, encode_manifest, validate_manifest
-from .snapshot import validate_cutover_snapshot
+from .snapshot import SUPPORTED_SYMBOLS, validate_cutover_snapshot
 from .tables import ArchiveReceipt
 
-_SYMBOLS = frozenset({"fUST", "fUSD"})
 _CLASSIFICATIONS = frozenset({
     "identity_representation", "historical_state", "time_sequence", "missing_symbol", "checkpoint_source",
 })
@@ -202,11 +209,78 @@ async def _current_stream(session: AsyncSession, scope: Scope) -> StreamIdentity
     return StreamIdentity(len(rows), rows[-1].event_seq if rows else 0, canonical_event_hash(rows))
 
 
+async def _verify_preapply_projection_scope(
+    session: AsyncSession, *, scope: Scope, managed_symbols: frozenset[str],
+) -> None:
+    """Reject supported out-of-scope state before the event-only rebuild can delete it.
+
+    Unsupported source-only rows are retained for the diagnostic/classification
+    path (for example a classified historical fEUR scaffold); supported symbols
+    omitted from the operator scope are never allowed to disappear silently.
+    """
+    position_rows = (await session.scalars(select(PositionStateRow).where(
+        account_scope_clause(
+            session,
+            account_id=scope.account_id,
+            exchange_account_column=PositionStateRow.exchange_account_id,
+            legacy_account_column=PositionStateRow.account_id,
+        ),
+        PositionStateRow.deployment_environment == scope.environment,
+    ))).all()
+    for position in position_rows:
+        if position.symbol not in SUPPORTED_SYMBOLS - managed_symbols:
+            continue
+        if (
+            any(value != 0 for value in (
+                position.offered_amount,
+                position.lent_amount,
+                position.available_amount,
+                position.uncertain_amount,
+                position.reserved,
+                position.realized,
+            ))
+            or position.n_credits not in (None, 0)
+        ):
+            raise ValueError("apply_out_of_scope_projection")
+
+    offer_symbols = set(await session.scalars(select(VenueOfferStateRow.symbol).where(
+        VenueOfferStateRow.exchange_account_id == scope.account_id,
+        VenueOfferStateRow.deployment_environment == scope.environment,
+        VenueOfferStateRow.is_terminal.is_(False),
+    )))
+    credit_symbols = set(await session.scalars(select(VenueCreditStateRow.symbol).where(
+        VenueCreditStateRow.exchange_account_id == scope.account_id,
+        VenueCreditStateRow.deployment_environment == scope.environment,
+        VenueCreditStateRow.is_terminal.is_(False),
+    )))
+    claim_symbols = set(await session.scalars(select(OfferClaimRow.symbol).where(
+        account_scope_clause(
+            session,
+            account_id=scope.account_id,
+            exchange_account_column=OfferClaimRow.exchange_account_id,
+            legacy_account_column=OfferClaimRow.account_id,
+        ),
+        OfferClaimRow.deployment_environment == scope.environment,
+        OfferClaimRow.state.in_(("pending", "unknown", "claimed")),
+    )))
+    uncertainty_symbols = set(await session.scalars(select(ExecutionUncertaintyRow.symbol).where(
+        ExecutionUncertaintyRow.exchange_account_id == scope.account_id,
+        ExecutionUncertaintyRow.deployment_environment == scope.environment,
+        ExecutionUncertaintyRow.state == "open",
+    )))
+    if ((offer_symbols | credit_symbols | claim_symbols | uncertainty_symbols)
+            & SUPPORTED_SYMBOLS) - managed_symbols:
+        raise ValueError("apply_out_of_scope_projection")
+
+
 async def _verify_parity(
     session: AsyncSession, *, expected: ArchiveManifest,
-    snapshot: VenueSnapshotObserved, rows: Sequence[EventLogRow], stream: StreamIdentity,
+    snapshot: VenueSnapshotObserved, managed_symbols: frozenset[str],
+    rows: Sequence[EventLogRow], stream: StreamIdentity,
 ) -> dict[str, str]:
     scope = expected.scope
+    if not managed_symbols or not managed_symbols <= SUPPORTED_SYMBOLS:
+        raise ValueError("apply_managed_symbols_invalid")
     replay = await replay_captured_rows(session, rows=rows, account_id=scope.account_id,
         environment=scope.environment, projector_version=expected.projector_version,
         expected_event_hash=stream.digest)
@@ -219,16 +293,22 @@ async def _verify_parity(
             or offers != replay.replayed_offer_exposure_by_symbol
             or credits != replay.replayed_credit_exposure_by_symbol):
         raise ValueError("apply_projection_parity_mismatch")
-    wanted_offers = {s: sum((o.amount_remaining for o in snapshot.offers if o.symbol == s), Decimal(0)) for s in _SYMBOLS}
-    wanted_credits = {s: sum((c.amount for c in snapshot.credits if c.symbol == s), Decimal(0)) for s in _SYMBOLS}
+    wanted_offers = {
+        s: sum((o.amount_remaining for o in snapshot.offers if o.symbol == s), Decimal(0))
+        for s in managed_symbols
+    }
+    wanted_credits = {
+        s: sum((c.amount for c in snapshot.credits if c.symbol == s), Decimal(0))
+        for s in managed_symbols
+    }
     positions = (await session.scalars(select(PositionStateRow).where(
         PositionStateRow.exchange_account_id == scope.account_id,
         PositionStateRow.deployment_environment == scope.environment,
     ).execution_options(populate_existing=True))).all()
-    if (set(offers) - _SYMBOLS or set(credits) - _SYMBOLS
-            or {p.symbol for p in positions} != _SYMBOLS
+    if (set(offers) - managed_symbols or set(credits) - managed_symbols
+            or {p.symbol for p in positions} != managed_symbols
             or any(offers.get(s, Decimal(0)) != wanted_offers[s]
-                   or credits.get(s, Decimal(0)) != wanted_credits[s] for s in _SYMBOLS)
+                   or credits.get(s, Decimal(0)) != wanted_credits[s] for s in managed_symbols)
             or any(p.available_amount != snapshot.wallet_available[p.symbol]
                    or p.offered_amount != wanted_offers[p.symbol]
                    or p.lent_amount != wanted_credits[p.symbol]
@@ -247,6 +327,7 @@ async def _insert_receipt(session: AsyncSession, *, expected: ArchiveManifest, r
 
 async def apply_cutover(
     session: AsyncSession, *, expected: ArchiveManifest, snapshot: VenueSnapshotObserved,
+    managed_symbols: frozenset[str] | None = None,
     archive_restore_receipt: Mapping[str, object], evidence: VerifiedCutoverEvidence,
     runtime_roles: tuple[str, ...], operation_digest: str,
     quiescence_verifier: QuiescenceVerifier, now_ms: int,
@@ -262,6 +343,9 @@ async def apply_cutover(
         raise ValueError("apply requires READ COMMITTED")
     validate_apply_evidence(expected, evidence)
     validate_restore_receipt_preflight(expected, archive_restore_receipt)
+    managed_symbols = SUPPORTED_SYMBOLS if managed_symbols is None else frozenset(managed_symbols)
+    if not managed_symbols or not managed_symbols <= SUPPORTED_SYMBOLS:
+        raise ValueError("apply_managed_symbols_invalid")
     if (not _digest(operation_digest) or not runtime_roles
             or any(not isinstance(r, str) or not r.strip() for r in runtime_roles)
             or tuple(sorted(set(runtime_roles))) != runtime_roles):
@@ -270,7 +354,8 @@ async def apply_cutover(
         "diagnostic_digest": evidence.diagnostic.digest,
         "classification_digest": evidence.classification.digest,
         "restore_receipt_digest": row_digest(archive_restore_receipt),
-        "operation_digest": operation_digest, "runtime_roles": list(runtime_roles)}
+        "operation_digest": operation_digest, "runtime_roles": list(runtime_roles),
+        "managed_symbols": sorted(managed_symbols)}
     receipt_table = cast(Table, ArchiveReceipt.__table__)
     saved = (await session.execute(select(receipt_table).where(receipt_table.c.run_id == expected.run_id))).mappings().one_or_none()
     completed: dict[str, Any] | None = decode_row(saved["evidence"]) if saved is not None else None
@@ -307,11 +392,14 @@ async def apply_cutover(
         await verify_archive(session, expected=applied)
         await _verify_live_archive(session, applied)
         return completed
-    validate_cutover_snapshot(snapshot, scope=expected.scope, managed_symbols=_SYMBOLS,
+    validate_cutover_snapshot(snapshot, scope=expected.scope, managed_symbols=managed_symbols,
                               now_ms=now_ms + int((time.monotonic() - started) * 1000), max_age_ms=300_000)
     if await _current_stream(session, expected.scope) != expected.stream:
         raise ValueError("apply_stream_drift")
     await _verify_live_archive(session, expected)
+    await _verify_preapply_projection_scope(
+        session, scope=expected.scope, managed_symbols=managed_symbols,
+    )
     # Include lock wait and all source checks, immediately before first mutation.
     validate_restore_receipt(expected, archive_restore_receipt,
                             now_ms=now_ms + int((time.monotonic() - started) * 1000))
@@ -327,7 +415,10 @@ async def apply_cutover(
             or serialize_event(deserialize_stored_event(rows[-1])) != serialize_event(snapshot)):
         raise ValueError("apply_event_prefix_or_head_mismatch")
     stream = StreamIdentity(len(rows), rows[-1].event_seq, canonical_event_hash(rows))
-    hashes = await _verify_parity(session, expected=expected, snapshot=snapshot, rows=rows, stream=stream)
+    hashes = await _verify_parity(
+        session, expected=expected, snapshot=snapshot, managed_symbols=managed_symbols,
+        rows=rows, stream=stream,
+    )
     applied = await capture_archive(session, scope=expected.scope,
         run_id=uuid5(expected.run_id, "projection-cutover-applied-v1"),
         image_digest=expected.image_digest, projector_version=expected.projector_version)
@@ -341,7 +432,7 @@ async def apply_cutover(
         environment=expected.scope.environment, streaming=True))[1]
     if final_hashes != hashes or await _current_stream(session, expected.scope) != stream:
         raise ValueError("apply_final_parity_mismatch")
-    validate_cutover_snapshot(snapshot, scope=expected.scope, managed_symbols=_SYMBOLS,
+    validate_cutover_snapshot(snapshot, scope=expected.scope, managed_symbols=managed_symbols,
                               now_ms=now_ms + int((time.monotonic() - started) * 1000), max_age_ms=300_000)
     validate_restore_receipt(expected, archive_restore_receipt,
                             now_ms=now_ms + int((time.monotonic() - started) * 1000))

@@ -802,6 +802,10 @@ def _run_deploy_through_secret_preflight(
         "BFX_VAULT_KEK=opaque\n",
         encoding="utf-8",
     )
+    (home / "bfx/migrate.env").write_text(
+        "DATABASE_URL=postgresql://local/operator\n",
+        encoding="utf-8",
+    )
     (home / "bfx/webapi.env").write_text(
         "DATABASE_URL=postgresql://local/test\n"
         "BETTER_AUTH_JWKS_URL=https://local.invalid/jwks\n"

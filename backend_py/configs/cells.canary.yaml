@@ -5,11 +5,8 @@
 # QUALIFIED_PAIRS: mean_reversion fUST_a30, fUST_p2). RatePercentile is
 # disqualified under LOCF (Task 10 sweep) -- excluded. p30 / fUST_p30 excluded.
 #
-# fUSD: per-currency independent allocation shipped (Phase 1+2 + NAV-split) and is
-# LIVE. As of 2026-06-02 fUSD is enabled as a DRY-RUN (cap>0, see cells below) while
-# USD is UNFUNDED -- the per-symbol balance gate hard-blocks every fUSD offer
-# (available=0), so this validates the cross-currency machinery on real infra with
-# zero real exposure. When USD is funded, fUSD begins lending up to caps.fUSD.
+# fUSD is intentionally DARK for this recovery: no canary cells and no allocation
+# cap. It is reintroduced only by a separate reviewed change with fresh coverage.
 #
 # Params identical to configs/cells.yaml (do not re-tune here).
 # Select at deploy time: BFX_CELLS_YAML=configs/cells.canary.yaml
@@ -32,22 +29,5 @@ cells:
     period_agg: p2
     timeframe: 1h
     params: {threshold_sigma: 0.5, ratio_sigma: 0.4062263004196277, ema_span: 24}
-
-  # fUSD DRY-RUN (2026-06-02): cap>0 but USD UNFUNDED -> balance gate hard-blocks
-  # every fUSD offer (available=0). Mirrors the fUST set (a30 + p2; excludes
-  # p30-sparse + all RatePercentile). ratio_sigma copied verbatim from cells.yaml
-  # (derive_cells --check / pytest -m gate enforce byte-match + beats-AlwaysFRR).
-  # Revert to dark = remove these 2 cells + set caps.fUSD=0.
-  - strategy: mean_reversion
-    symbol: fUSD
-    period_agg: a30
-    timeframe: 1h
-    params: {threshold_sigma: 0.5, ratio_sigma: 0.3766563427150627, ema_span: 24}
-
-  - strategy: mean_reversion
-    symbol: fUSD
-    period_agg: p2
-    timeframe: 1h
-    params: {threshold_sigma: 0.5, ratio_sigma: 0.3450137927640065, ema_span: 24}
 
 phase3b_wfo_results_ref: docs/research/2026-05-18-phase3b-wfo-results.md

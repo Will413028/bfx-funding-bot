@@ -292,7 +292,8 @@ sequenceDiagram
 
 | 參數 | 值 | env |
 |---|---|---|
-| Canary allocation caps | fUST 10000 USDT；fUSD 400 USDT | `safety.canary.yaml` 的 `allocation_cap.caps` 是 binding per-symbol cap；`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅是 caps map 缺少 symbol 時的 fallback，不能覆寫 map |
+| Canary allocation caps | fUST 10000 USDT；fUSD 0（dark） | `safety.canary.yaml` 的 `allocation_cap.caps` 是 binding per-symbol cap；`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅是 caps map 缺少 symbol 時的 fallback，不能覆寫 map |
+| Canary balance buffer | fUST 0（無隱含保留） | `safety.canary.yaml` 的 `buying_power.buffers`；需保留時必須明確設定正值 |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
 | Per-cell concentration | `max(70% × target, target / n_active_cells)`；≥2 active cells 等同 70%，僅 1 active cell 時可達 100%（見 commit `0d29fc8`） | `BFX_CONCENTRATION_PCT`=0.70 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
@@ -448,13 +449,22 @@ snapshot → atomic apply → identical repeat → independent new baseline → 
 `cutover_projection` 只有 `diagnose/prepare/verify-archive/apply` commands；沒有
 classify、snapshot、cleanup 或 resume command。Prepare CLI 會讀 vault/venue，即使
 `--dry-run` 亦然；apply 只消費 digest-pinned serialized snapshot，不做 HTTP。
+每次 recovery 以 `--managed-symbols` 明確宣告 scope；本輪 production recovery 使用
+`--managed-symbols fUST`，prepared artifact 會 pin 該 scope。snapshot 必須完整覆蓋
+scope；任何 scope 外的 active offer/credit/position 都 fail closed，不能把遺漏的幣別
+默認當成零。CLI recovery default 為 fUST；library `apply_cutover` 未指定 scope 時僅
+維持既有 fUST/fUSD compatibility default，production operator 仍必須明確傳入 scope。
+scope 外若只剩所有 exposure/ledger buckets 與 `n_credits` 都為零的 supported-symbol
+legacy scaffold，才可由同一個 atomic rebuild 清掉；任何非零值仍 fail closed。
 
 Diagnostic/classification 使用 v2 local evidence directories（`manifest/COMPLETE/chunks`），
 directories/files 為 `0700`/`0600`，拒絕 symlink、extra/incomplete content。固定 bounds：
 record 1 MiB、part 4 MiB、artifact 2 GiB、4096 parts、manifest 16 MiB。
 `EvidenceWriter` 串流寫入，`verify_cutover_evidence` 驗 identity/digests 與逐筆分類完整性，
-runtime 只接收 compact `VerifiedCutoverEvidence`。Prepared-v1 小 envelope 與 archive
-codec 不變，但不接受 v1 diagnostic 作為 cutover authority。Local artifact cleanup
+runtime 只接收 compact `VerifiedCutoverEvidence`。Prepared-v1 小 envelope 維持 kind 與
+archive codec，但現在 required `managed_symbols` 會 pin operator scope；舊 envelope
+可供 archive verifier 讀取，不能直接作為新的 apply authority，也不能冒充新 scope。
+不接受 v1 diagnostic 作為 cutover authority。Local artifact cleanup
 只作用於本次產生的 exact paths，需 deadline/absence evidence，不清 immutable DB archive。
 
 Apply 要求 caller-owned READ COMMITTED transaction；先取 account advisory lock，
@@ -545,11 +555,17 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
 | `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
-| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；binding cap 在 `safety.canary.yaml` 的 per-symbol map（fUST 10000、fUSD 400），`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅為 map 未列 symbol 的 fallback；四個 armed mean_reversion cells 為 fUST a30/p2 與 fUSD a30/p2，fUSD 未入金時由 balance gate 擋住所有 offer |
+| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；本輪 recovery 只啟用 fUST（cap 10000、a30/p2），fUSD cap=0 且無 canary cells，保持 dark；`BFX_BALANCE_BUFFER_USDT=0` 代表沒有隱含保留，需保留時必須明確設定 |
 
 **Phase ⟷ Realm guard**（`load_config()`）：canary 只能配 prod realm（真錢不可污染校準資料），paper/shadow 只能配 shadow|ci（模擬不可污染真錢分析）。違規 `ValueError` fail-fast。
 
-**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；`cells.canary.yaml`（四個 armed mean_reversion cells：fUST a30/p2、fUSD a30/p2；RatePercentile 與 p30 不在 canary set）。`shadow-p14` 專用 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、`t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由 deployment reconciler 依 gap 動態決定。
+**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
+`cells.canary.yaml` 只有兩個 armed mean_reversion fUST cells（a30/p2），fUSD
+保持 dark；RatePercentile 與 p30 不在 canary set。`shadow-p14` 專用
+`cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、
+`t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、
+`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由
+deployment reconciler 依 gap 動態決定。
 
 **基礎設施**
 
