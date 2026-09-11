@@ -623,6 +623,68 @@ the fresh backup/restore evidence bundle satisfies every gate above. Offline
 tests, image build, systemd syntax, or timer scheduling alone do not establish
 R2 reachability, restore success, production rollout acceptance, or RPO/RTO.
 
+## Projection cutover archive verification
+
+Use the [projection audit cutover runbook](projection-audit-cutover.md) for the
+ordered diagnose → prepare/archive → archive-only restore → fresh snapshot →
+atomic apply → repeat → independent new baseline → complete restore procedure.
+Production schema, role grants, archive and apply each remain behind explicit
+operator approval. Actual runtime role denial and controlled writers must be
+proven; a superuser runtime role is an unresolved gate, not a test exemption.
+
+Cutover diagnostic/classification inputs are private **v2 directories** with
+`manifest`, `COMPLETE`, and `chunks/`, modes `0700`/`0600`. Limits are 1 MiB per
+record, 4 MiB per part, 2 GiB per artifact and 4096 parts; manifest limit is
+16 MiB. Keep these outside git and shared logs. Their manifest digests are
+semantic pins, not file SHA-256. The small `projection-cutover-prepared-v1`
+codec envelope still carries the archive manifest and the two v2 digest pins.
+This evidence format is distinct from the DB `projection_audit` archive.
+
+Step 6's default schema-v1 baseline example is for scopes without completed
+archives. A scope with archives requires `RestoreBaseline(schema_version=2, …)`
+with `verifier_image_digest` and an `archives` tuple containing the **entire**
+completed inventory. Each reference has exactly `run_id`, `manifest_digest`,
+`prepared_path` (absolute private file), and `prepared_digest` (file SHA-256).
+Retain independently pinned original codec bytes; do not derive the expected
+inventory from the restored DB being accepted. The runner consumes these files
+with the existing `archive_evidence.transport` helper, bounded to 32 runs and
+1 MiB total transport; archive verifier reports are bounded to 64 KiB.
+
+For a prepared-only cutover, add `--archive-only --target-run-id "$RUN_ID"` to
+step 7's exact `restore-drill.sh` command. The selected target must appear in
+the baseline references. Archive-only uses schema-v2 transport with that
+`target_run_id`, verifies archive bytes/inventory and each original event prefix,
+and requires the target's event count/head/hash/schema to equal the restored
+state. Older archives may have earlier heads. It deliberately skips old active
+projection parity and emits `kind=archive_restore`; this is **not** complete DR
+acceptance and cannot replace a `kind=restore` result or authorize trading.
+`scripts.verify_projection_archive` also supports `--archive-only` with
+`--account-id`, `--environment`, `--input`, and `--input-digest`; it is the
+SELECT-only verifier, not the resource runner or receipt generator.
+
+After apply, capture a fresh source baseline tied to a new backup/PITR target,
+including both old and applied archive expectations. Do not copy the apply
+receipt's derived event identity into the baseline. Run step 7 without
+`--archive-only` or `--target-run-id`: complete restore uses schema-v1 archive
+transport (no target) with the schema-v2 baseline, verifies all archives and
+prefixes, then checks the independent new baseline and active/replay parity.
+The ordinary schema-v1 baseline must not silently hide a completed archive.
+
+Keep exact generated-resource and local artifact inventories. The runner's
+independent 30-second cleanup deadline and absence checks remain mandatory;
+local v2 directories need separately bounded cleanup of that run's owned paths.
+There is no cutover cleanup command. Preserve independent manifests/receipts
+until handoff acceptance; never prune a shared temp root, backup repository,
+production volume or immutable DB archive to make a rehearsal appear clean.
+
+Apply performs caller-owned atomic DB work after bounded file verification;
+before-commit rollback does not undo a committed prepare archive. After commit,
+lost output requires a pinned identical retry and DB receipt verification, not
+an old-DB restore. Stale historical projection heads can still make strict
+serialized append reject reused CID cycles; prove the exact private source in
+rehearsal and keep that gate open until resolved. No automatic DB rollback is
+safe after a venue write; retain halt and follow the forward-repair policy.
+
 ## Rotation and incident posture
 
 R2 token rotation and repository cipher rotation are separate procedures. For

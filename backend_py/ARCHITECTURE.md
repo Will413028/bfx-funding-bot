@@ -440,6 +440,43 @@ snapshot 被 replay double-count。contract revision 會在 DDL 前拒絕 NULL U
 realm、孤兒 FK 或非零 legacy scaffold，且為 forward-only（rollback 使用
 verified backup/PITR + venue reconcile，不使用 downgrade）。
 
+### Projection audit cutover release boundary
+
+操作順序與 exact CLI flags 見 [projection cutover runbook](../docs/runbooks/projection-audit-cutover.md)：
+diagnose → immutable archive → independently verified archive-only restore → fresh
+snapshot → atomic apply → identical repeat → independent new baseline → archive+active verify。
+`cutover_projection` 只有 `diagnose/prepare/verify-archive/apply` commands；沒有
+classify、snapshot、cleanup 或 resume command。Prepare CLI 會讀 vault/venue，即使
+`--dry-run` 亦然；apply 只消費 digest-pinned serialized snapshot，不做 HTTP。
+
+Diagnostic/classification 使用 v2 local evidence directories（`manifest/COMPLETE/chunks`），
+directories/files 為 `0700`/`0600`，拒絕 symlink、extra/incomplete content。固定 bounds：
+record 1 MiB、part 4 MiB、artifact 2 GiB、4096 parts、manifest 16 MiB。
+`EvidenceWriter` 串流寫入，`verify_cutover_evidence` 驗 identity/digests 與逐筆分類完整性，
+runtime 只接收 compact `VerifiedCutoverEvidence`。Prepared-v1 小 envelope 與 archive
+codec 不變，但不接受 v1 diagnostic 作為 cutover authority。Local artifact cleanup
+只作用於本次產生的 exact paths，需 deadline/absence evidence，不清 immutable DB archive。
+
+Apply 要求 caller-owned READ COMMITTED transaction；先取 account advisory lock，
+再查 completed receipt，並以 SHARE ROW EXCLUSIVE table locks fence direct writers。
+在同一 transaction 完成 snapshot append、genesis rebuild、event prefix/new head、
+fresh DB parity、舊 archive preservation、applied archive 與 receipt。CLI 將 bounded
+外部 file/evidence 驗證置於 engine/lock 前，lock_timeout=2s、statement_timeout=30s；
+不宣稱整個 apply 都是 constant memory 或具有同等 global deadline。
+Before-commit failure 撤銷本次 DB row writes；sequence gaps 與先前 committed prepare
+archive 可保留。After-commit output failure 不撤銷 DB；相同 request 的 repeat 驗證
+receipt/current state 後回原結果，可接受已過期的原 snapshot，不 append 第二次。
+新 apply 的 snapshot 則必須完整且自 query start 起 ≤300 秒，包含執行耗時。
+
+實際 runtime roles（含 reachable roles/PUBLIC/column grants/ownership）必須證明無
+archive 寫入能力；superuser 是未解 operator gate。Persistent halt、controlled
+Docker/systemd writers 與 DB session inventory 必須同時成立，不能將 lock 當成永久
+禁止外部 admin 啟動 writer。歷史 CID cycles 的 genesis replay 不等於 strict append
+可補齊落後 head；這個 source-specific seam 必須在 private rehearsal 驗證，失敗保留
+halt，不改 event/head 來繞過。Production schema/grants/archive/apply 各須 explicit
+operator approval；runtime identity/KEK/auth denial、fresh exposure、no uncertainty、
+RPO/RTO、bounded canary/two fresh reconciles 仍是另外的 gates。
+
 ### Offsite DR source of truth
 
 PostgreSQL WAL archive 與 base backup 以 **pgBackRest** 寫入 private Cloudflare
@@ -477,6 +514,13 @@ restore；canonical UUID baseline/staged replay 延後至 migration 與 cutover 
 
 每次 measured restore 都綁定同一 backup/PITR target 的 bounded baseline，逐欄
 核對 migration heads、event count/head/hash 與 account/environment/projector。
+Completed projection archives 要求 schema-v2 baseline 的完整 manifest/prepared-file
+references 與 verifier image pin。`restore-drill.sh --archive-only --target-run-id`
+使用 v2 archive transport，驗 target 與舊 prefixes/bytes，略過舊 active parity，產生
+`kind=archive_restore`；它只解除 prepare 與舊 parity 的依賴，不放寬 full DR。
+Apply 後以 source 獨立建立新 baseline、配對新 backup/PITR，complete restore 不帶這兩個
+flags，使用無 target 的 v1 transport 驗所有舊/applied archives 與 active replay。
+不得從待驗 restored DB 或 apply receipt 倒算 expected event baseline。
 backup/restore evidence 必須有 strict `observed_at_ms`，讀取時不得在未來且不得
 超過 900 seconds；missing、stale、baseline mismatch、egress 未斷開或 cleanup
 failure 一律是 `measured: false`，舊 green report 不得沿用。只有完成真實 R2
