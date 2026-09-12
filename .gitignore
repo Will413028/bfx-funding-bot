@@ -40,6 +40,7 @@ Thumbs.db
 # Other agent tool local state (not part of repo)
 .agents/
 .codex/
+.superpowers/
 .worktrees/
 
 # Terraform local state and operator-specific inputs
