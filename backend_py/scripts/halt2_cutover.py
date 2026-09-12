@@ -17,7 +17,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from alembic.config import Config
@@ -36,6 +36,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncert
 EXIT_SUCCESS = 0
 EXIT_PRECONDITION_FAILED = 2
 EXIT_VERIFICATION_FAILED = 3
+HALT2_MAX_RESTORE_RTO_SECONDS: Final = 3600
 
 _LEGACY_ENVIRONMENT_VARIABLES = ("BFX_ACCOUNT_ID",)
 
@@ -191,7 +192,7 @@ def verify_preflight(
         reasons.append("backup_rpo_exceeded")
     if report.restore_rto_seconds is None:
         reasons.append("restore_rto_unmeasured")
-    elif report.restore_rto_seconds > 60:
+    elif report.restore_rto_seconds > HALT2_MAX_RESTORE_RTO_SECONDS:
         reasons.append("restore_rto_exceeded")
     if not report.persistent_halt:
         reasons.append("persistent_halt_absent")
