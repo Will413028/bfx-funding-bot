@@ -829,6 +829,10 @@ def _request(tmp_path: Path) -> DrillRequest:
     )
 
 
+def _timing_report(tmp_path: Path) -> dict[str, object]:
+    return json.loads((tmp_path / "restore-timing.json").read_text(encoding="utf-8"))
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 100.0
@@ -1024,6 +1028,126 @@ def test_deadline_is_shared_from_first_create_and_all_commands_are_bounded(tmp_p
             assert timeout <= 30
     assert fake.timeouts[0] == 3600
     assert json.loads((tmp_path / "restore.json").read_text())["rto_seconds"] == restore_count * 10
+
+
+def test_success_writes_separate_allowlisted_stage_timing_diagnostic(tmp_path: Path) -> None:
+    clock = _Clock()
+
+    class Advancing(_FakeRunner):
+        def __call__(self, command, *, timeout=None, input_text=None, env=None):
+            result = super().__call__(command, timeout=timeout, input_text=input_text, env=env)
+            clock.now += 1
+            return result
+
+    fake = Advancing(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))
+
+    assert _drill(tmp_path, fake, clock=clock).run(_request(tmp_path)) == 0
+
+    accepted = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    diagnostic = _timing_report(tmp_path)
+    assert accepted["rto_seconds"] == next(
+        index for index, command in enumerate(fake.commands) if "rm" in command
+    )
+    assert "stages" not in accepted
+    assert diagnostic == {
+        "complete": True,
+        "kind": "restore_timing",
+        "restore_run_id": "20260904t031700z-a1b2c3d4e5f60718",
+        "schema_version": 1,
+        "stages": {
+            "cleanup": 5.0,
+            "isolation_bootstrap": 5.0,
+            "physical_and_wal_recovery": 3.0,
+            "resource_setup": 5.0,
+            "verification": 4.0,
+        },
+    }
+
+
+def test_failed_restore_times_cleanup_with_independent_bound(tmp_path: Path) -> None:
+    clock = _Clock()
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        compose_up_status=2,
+    )
+
+    assert _drill(tmp_path, fake, clock=clock).run(_request(tmp_path)) == 2
+
+    cleanup = [
+        timeout
+        for command, timeout in zip(fake.commands, fake.timeouts, strict=True)
+        if "rm" in command
+    ]
+    accepted = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    diagnostic = _timing_report(tmp_path)
+    assert cleanup and all(timeout is not None and 0 < timeout <= 30 for timeout in cleanup)
+    assert accepted["measured"] is False
+    assert diagnostic["complete"] is False
+    assert diagnostic["restore_run_id"] == "20260904t031700z-a1b2c3d4e5f60718"
+    assert set(diagnostic["stages"]) == {
+        "resource_setup",
+        "physical_and_wal_recovery",
+        "cleanup",
+    }
+
+
+@pytest.mark.parametrize(
+    ("compose_up_status", "expected_status", "expected_measured"),
+    [(0, 0, True), (2, 2, False)],
+)
+def test_timing_persistence_failure_does_not_skip_cleanup_or_change_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compose_up_status: int,
+    expected_status: int,
+    expected_measured: bool,
+) -> None:
+    fake = _FakeRunner(
+        verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""),
+        compose_up_status=compose_up_status,
+    )
+
+    def fail_timing_write(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "TOKEN-SENTINEL")
+
+    monkeypatch.setattr(restore_drill, "_write_timing_json", fail_timing_write)
+
+    assert _drill(tmp_path, fake).run(_request(tmp_path)) == expected_status
+
+    accepted = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
+    cleanup = [
+        timeout
+        for command, timeout in zip(fake.commands, fake.timeouts, strict=True)
+        if "rm" in command
+    ]
+    assert cleanup and all(timeout is not None and 0 < timeout <= 30 for timeout in cleanup)
+    assert accepted["measured"] is expected_measured
+    assert set(accepted).isdisjoint({"complete", "stages"})
+    assert not (tmp_path / "restore-timing.json").exists()
+
+
+def test_timing_invalidation_interruption_cannot_leave_previous_green_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "restore.json"
+    output.write_text('{"measured":true,"rto_seconds":37}\n', encoding="utf-8")
+
+    def interrupt_timing_invalidation(path: Path) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        restore_drill, "_invalidate_timing_json", interrupt_timing_invalidation
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _drill(
+            tmp_path,
+            _FakeRunner(
+                verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), "")
+            ),
+        ).run(_request(tmp_path))
+
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("stage", ["create", "compose", "health", "bootstrap", "schema", "disconnect", "image", "labels", "verifier"])
@@ -1299,7 +1423,8 @@ def test_cleanup_failure_never_publishes_green_evidence(
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert fake.evidence_present_during_cleanup
     assert all(present is False for present in fake.evidence_present_during_cleanup)
-    assert [item["measured"] for item in replacements] == [False]
+    accepted_replacements = [item for item in replacements if item["kind"] != "restore_timing"]
+    assert [item["measured"] for item in accepted_replacements] == [False]
     assert report["measured"] is False
     assert report["error_code"] == "cleanup_failed"
     assert set(report) == {"schema_version", "measured", "kind", "observed_at_ms", "error_code"}
@@ -1325,7 +1450,8 @@ def test_success_publishes_only_after_cleanup(
 
     assert fake.evidence_present_during_cleanup
     assert all(present is False for present in fake.evidence_present_during_cleanup)
-    assert [item["measured"] for item in replacements] == [True]
+    accepted_replacements = [item for item in replacements if item["kind"] != "restore_timing"]
+    assert [item["measured"] for item in accepted_replacements] == [True]
     assert json.loads(output_path.read_text(encoding="utf-8"))["measured"] is True
 
 
