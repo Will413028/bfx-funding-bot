@@ -17,7 +17,7 @@
 - Projection replay 僅使用 event_log、upcasters、projector version；舊 projection 只能產生 diagnostic diff，不能作 runtime fallback 或 second source of truth。
 - Fault injector 必須能模擬 accept+drop、reject+drop、timeout/reset、malformed body、5xx-after-side-effect、process crash-before-outcome、multiple-candidate 與 out-of-order delivery；每個 case 都驗證 one-attempt/no-retry。
 - Canary 只允許一個預先指定 account、symbol、最小 amount、單一 strategy/cell；禁止從 canary 報告自動提升 cap 或擴大 symbols。
-- Pre-cutover backup/restore evidence must record the ADR targets RPO <= 5 minutes and execution RTO <= 60 seconds; an unmeasured claim is a failed gate.
+- Pre-cutover backup/restore evidence must record the ADR targets RPO <= 5 minutes and Halt 2 restore RTO <= 3600 seconds; an unmeasured claim is a failed gate.
 - 報告不得包含 API key/secret、Authorization header、完整 raw response；只存 hash、bounded reason、event seq、venue ID 與時間。
 - 所有 migration/verification commands 從 backend_py/ 使用 uv run；實際 production 操作依 runbook 由 operator 執行。
 

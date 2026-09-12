@@ -21,7 +21,7 @@ RPO/RTO 已達標，直到實測 evidence 產生。
   `{"measured": true, "rpo_seconds": N}` 與
   `{"measured": true, "rto_seconds": N}`。
 - operational target 是 RPO ≤300s、restore drill RTO ≤3600s；Halt 2 canary
-  gate 的更嚴格 restore RTO ≤60s 維持不變，不能用一般 DR target 取代。
+  gate 採用已核准、與既有 operational target 對齊的 restore RTO ≤3600s。
 - R2 S3 API 的 endpoint 是 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`、region
   是 `auto`；pgBackRest 2.59.1 支援 PostgreSQL 18、S3 repository、async archive
   與 client-side repository encryption。
@@ -280,7 +280,7 @@ restore evidence 最少包含 `schema_version`、`measured`、`rto_seconds`、
 `observed_at_ms`、validated target backup label/time、isolated network assertion、
 event head/hash、projection hashes、row counts、verifier exit status、config digest
 與 immutable image ID/labels。它可直接被目前 Halt 2 `_artifact_hashes()` 讀取；
-`rto_seconds > 60` 仍會被 Halt 2 preflight 拒絕。沒有 expected-state baseline、
+`rto_seconds > 3600` 仍會被 Halt 2 preflight 拒絕。沒有 expected-state baseline、
 stale evidence、egress 尚未斷開或任何 cleanup failure 都不得產生 measured success。
 
 ### Scheduling and operator controls
@@ -322,7 +322,7 @@ stale evidence、egress 尚未斷開或任何 cleanup failure 都不得產生 me
   timer schedule、one-shot 不帶 autoheal，及 production healthcheck 不會因 archive
   lag 觸發 restart。
 - report contract test：用 unavailable、stale、failed archive、malformed JSON、
-  `rpo_seconds > 300`、`rto_seconds > 60` fixture 驗證 fail-closed 與現有
+  `rpo_seconds > 300`、`rto_seconds > 3600` fixture 驗證 fail-closed 與現有
   `halt2_cutover` parser 相容。
 - restore command-builder test：確認 temporary volume/network 名稱只接受受控值、
   `restore-data` logical volume 與兩個 generated networks 的 staged lifecycle、

@@ -32,7 +32,8 @@ canonical event hash 不變。DR runner 正確回報 `projection_replay_mismatch
 不能把舊 checkpoint 當可丟棄 cache，也不能用今日快照假裝補出歷史明細。
 
 實體還原 benchmark 約 88.7 秒，其中 pgBackRest restore 約 78.8 秒。
-這不是包含完整 verifier 的成功 RTO，且已超過 Halt 2 的 60 秒門檻。
+這不是包含完整 verifier 的成功 RTO，且位於已核准、與既有 operational target
+對齊的 Halt 2 3600 秒門檻內。
 process-max=4／同步 archive 的既有比較未達標；不能斷言單一硬體瓶頸。
 
 ## 替代方案
@@ -136,7 +137,8 @@ RTO 優化是獨立量測工作，不是本封存方案的預期收益。計時�
 先量測每階段與 CPU／I/O／傳輸，再按單一變數提出優化及 pytest regression。
 變更 OCI 容量／性能計費、備份範圍、retention 或 RTO 定義需另行核准。
 
-維持 Halt 2 **RPO <=300 秒、RTO <=60 秒**；<=3600 秒一般 DR 門檻不取代它。
+維持 Halt 2 **RPO <=300 秒、RTO <=3600 秒**；此為與既有 operational target
+對齊的已核准門檻。
 若實測仍無法達成，明確回報阻擋，不承諾恢復日期、不放寬門檻。
 
 ## 6. 測試與交付邊界

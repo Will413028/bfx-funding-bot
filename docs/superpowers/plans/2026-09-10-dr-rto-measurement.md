@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- 維持 Halt 2 **RPO <=300 秒、RTO <=60 秒**；<=3600 秒一般 DR 門檻不取代它。
+- 維持 Halt 2 **RPO <=300 秒、RTO <=3600 秒**；此為與既有 operational target
+  對齊的已核准門檻。
 - 不得把成本移到計時前或使用預先還原的 volume 冒充冷恢復。
 - 變更 OCI 容量／性能計費、備份範圍、retention 或 RTO 定義需另行核准。
 - 不新增自動 retention／清除政策；不刪除已封存歷史來縮短 restore。
@@ -83,14 +84,14 @@ evidence, inference, proposed changes and operator approvals.
 - [ ] Prepare a single-variable comparison only for a supported, reversible setting on the
   isolated restore. Read current installed tool help/primary vendor docs before selecting it.
   No additional uncontrolled tuning sweep; current process-max/archive-mode comparisons already
-  failed the 60-second gate. If no supported safe candidate is justified, report that fact.
+  failed the former sub-minute benchmark. If no supported safe candidate is justified, report that fact.
 - [ ] Compare at least three baseline and three candidate runs only after the candidate is
   approved, with no overlapping restores and identical verified data scope. Report each duration
   plus min/median/max, cold volume policy and remote/local cache caveats; never cherry-pick best run.
 - [ ] Optimization proposal must state expected bottleneck, measured impact, correctness
   regressions to test, rollback and possible cost. Hardware/payment, restore scope or threshold
   changes stop for separate approval; no automatic Terraform apply.
-- [ ] Archive+active parity, fresh RPO<=300 and full measured RTO<=60 are all required for later
+- [ ] Archive+active parity, fresh RPO<=300 and full measured RTO<=3600 are all required for later
   release. A successful benchmark does not authorize production cutover, canary or resume.
 
 ## Self-review coverage

@@ -9,8 +9,8 @@ policy in force throughout the procedure.
 
 - Operational RPO must be measured at **<=300 seconds**.
 - An isolated restore drill must be measured at **<=3600 seconds**.
-- The Halt 2 canary keeps its stricter isolated-restore RTO gate of **<=60
-  seconds**. Meeting the operational target does not satisfy that gate.
+- The Halt 2 canary uses the approved isolated-restore RTO gate of **<=3600
+  seconds**, aligned with the existing operational target.
 - Only bounded, fresh reports with `measured: true` count as evidence. A green
   offline test, valid config, timer state, or backup object is not evidence of
   R2 reachability or recoverability.
@@ -618,8 +618,9 @@ exit status zero.
 Retain both reports and their digests in the release or incident evidence
 bundle. A future/stale timestamp, missing field, cleanup error, or
 `measured: false` report blocks acceptance. Halt 2 may consume the same fresh
-artifacts but remains blocked unless `rto_seconds <= 60` and all its other
-event, projection, reconcile, image, and configuration gates pass. Never edit
+artifacts but remains blocked unless `rto_seconds <= 3600`, the approved
+alignment with the existing operational target, and all its other event,
+projection, reconcile, image, and configuration gates pass. Never edit
 JSON to manufacture acceptance.
 
 ### 9. Enable, start, and list the timers

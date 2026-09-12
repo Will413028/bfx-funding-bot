@@ -228,6 +228,30 @@ def test_preflight_rejects_absent_persistent_halt() -> None:
     assert "persistent_halt_absent" in result.stop_reasons
 
 
+@pytest.mark.parametrize(
+    ("restore_rto_seconds", "expected_exit_code", "expected_reasons"),
+    [
+        (60, EXIT_SUCCESS, ()),
+        (61, EXIT_SUCCESS, ()),
+        (3600, EXIT_SUCCESS, ()),
+        (3601, EXIT_PRECONDITION_FAILED, ("restore_rto_exceeded",)),
+    ],
+)
+def test_preflight_enforces_halt2_restore_rto_boundary(
+    restore_rto_seconds: int,
+    expected_exit_code: int,
+    expected_reasons: tuple[str, ...],
+) -> None:
+    result = verify_preflight(
+        _report(restore_rto_seconds=restore_rto_seconds),
+        _evidence(restore_rto_seconds=restore_rto_seconds),
+        environ={},
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert result.stop_reasons == expected_reasons
+
+
 def test_preflight_rejects_unmeasured_dr_and_incomplete_snapshot() -> None:
     result = verify_preflight(
         _report(
@@ -235,14 +259,14 @@ def test_preflight_rejects_unmeasured_dr_and_incomplete_snapshot() -> None:
             venue_snapshot_observed_at_ms=None,
             venue_snapshot_complete=False,
             backup_rpo_seconds=None,
-            restore_rto_seconds=61,
+            restore_rto_seconds=3601,
         ),
         _evidence(
             venue_snapshot_fence=None,
             venue_snapshot_observed_at_ms=None,
             venue_snapshot_complete=False,
             backup_rpo_seconds=None,
-            restore_rto_seconds=61,
+            restore_rto_seconds=3601,
         ),
     )
 

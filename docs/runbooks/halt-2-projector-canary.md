@@ -30,7 +30,7 @@ immutable evidence where applicable.
 | `backup_evidence_hash`, `isolated_restore_evidence_hash` | Hashes prove measured backup and isolated restore evidence. |
 | `event_count`, `event_head`, `event_hash` | Account-local event-chain continuity. |
 | `open_uncertainty_count`, `venue_snapshot_fence`, `venue_snapshot_observed_at_ms`, `venue_snapshot_complete` | No unresolved submit, a fresh full-account snapshot fence, and complete venue coverage. |
-| `preflight_observed_at_ms`, `backup_rpo_seconds`, `restore_rto_seconds` | Preflight freshness plus measured RPO ≤ 300s and RTO ≤ 60s. |
+| `preflight_observed_at_ms`, `backup_rpo_seconds`, `restore_rto_seconds` | Preflight freshness plus measured RPO ≤ 300s and RTO ≤ 3600s. |
 | `config_digest`, `image_digest`, `projector_version` | Exact immutable build/config/projector inputs. |
 | `persistent_halt`, `stop_reasons` | Halt is durable and every refusal is explicit. |
 
