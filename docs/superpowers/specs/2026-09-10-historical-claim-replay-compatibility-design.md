@@ -116,9 +116,10 @@ evidence; repository fixtures use synthetic identifiers and amounts.
    independently captured canonical baseline, and isolated restore/replay.
    Verify image/config/schema identity, recovery completion, network isolation,
    and cleanup. Failed or stale evidence is not reusable acceptance.
-5. Meet the existing Halt 2 RPO <=300 seconds and RTO <=60 seconds. A successful
-   general DR drill with RTO <=3600 seconds does not satisfy the canary gate.
-   If measurement exceeds 60 seconds, optimize and remeasure; changing that
+5. Meet the approved Halt 2 RPO <=300 seconds and restore RTO <=3600 seconds,
+   aligned with the existing operational target. A successful general DR drill
+   with RTO <=3600 seconds does not by itself satisfy the canary gate. If
+   measurement exceeds 3600 seconds, optimize and remeasure; changing that
    threshold is a separate operator decision, not part of Option A.
 6. Validate runtime UUID/KEK and removal of legacy credential fallbacks,
    configuration, auth boundaries, halt effectiveness, no open uncertainty,

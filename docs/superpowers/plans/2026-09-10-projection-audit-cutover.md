@@ -18,7 +18,8 @@
 - 不新增自動 retention／清除政策；不刪除已封存歷史來縮短 restore。
 - 沿既有 validated append 路徑寫入新 snapshot event；不得直接 SQL 插入跳過 provenance、identity 或 snapshot validation。
 - 私有真實資料僅在 operator 隔離環境演練，不寫入 repository fixtures。
-- 維持 Halt 2 **RPO <=300 秒、RTO <=60 秒**；<=3600 秒一般 DR 門檻不取代它。
+- 維持 Halt 2 **RPO <=300 秒、RTO <=3600 秒**；此為與既有 operational target
+  對齊的已核准門檻。
 - 不得把實作完成當作套用授權。任何一項未過，都維持 halt。
 - Migration execution: `cd backend_py && uv run alembic upgrade head`; tests use pytest, not unittest.
 

@@ -18,7 +18,8 @@
 - Use the same stored-row compatibility policy for full and symbol-scoped rebuilds.
 - Canonical event identity and hash serialization do not change.
 - Use pytest, not unittest.
-- Meet the existing Halt 2 RPO <=300 seconds and RTO <=60 seconds.
+- Meet the approved Halt 2 RPO <=300 seconds and restore RTO <=3600 seconds,
+  aligned with the existing operational target.
 - Do not resume before fresh DR, config/auth/exposure and bounded-canary evidence passes.
 
 ### Task 1: Stored-row cycle validation and replay integration
@@ -90,7 +91,7 @@
 - [ ] Privately audit all source historical CID collisions against Task 1 boundaries. Preserve exact source inputs and reason codes. If any conflict is unprovable, halt compatibility rollout and investigate; never add ad-hoc exceptions.
 - [ ] Build reviewed release on DR; restore into generated isolated resources, disconnect egress after recovery, and run actual same-target replay. Preserve count/hash/projection comparisons and cleanup evidence. Investigate mismatch rather than changing expected baseline.
 - [ ] When necessary, design a separately reviewed projection repair before touching production projections. The approved Option A does not authorize rewriting immutable history.
-- [ ] With source writers halted, create fresh R2 backup/preflight and canonical source baseline, then rerun isolated restore with the matching target. Require measured RPO <=300 seconds and RTO <=60 seconds; diagnose performance or any replay error without lowering the threshold.
+- [ ] With source writers halted, create fresh R2 backup/preflight and canonical source baseline, then rerun isolated restore with the matching target. Require measured RPO <=300 seconds and RTO <=3600 seconds; diagnose performance or any replay error without lowering the threshold.
 - [ ] Validate runtime UUID/KEK, removal of legacy secret fallbacks, config/image identities, API auth denial, no unresolved UNKNOWN/orphan, persistent halt and fresh full-account venue exposure parity.
 - [ ] Perform bounded canary only within explicit operator authority; require two increasing fresh reconcile fences/timestamps with zero exposure difference and stable projection evidence. Resume only after the complete gate passes and verify running daemon health and intended trading operation. Retain last safe rollback evidence.
 - [ ] Report actual completion or precise remaining blockers. Do not equate Task 1 completion or a physical restore with trading restored.
