@@ -44,6 +44,7 @@ def _load_module(name: str, path: Path) -> ModuleType:
 
 _commands = _load_module("_bfx_restore_commands", SCRIPT_DIR / "restore_commands.py")
 _evidence = _load_module("_bfx_restore_evidence", SCRIPT_DIR / "evidence.py")
+_timing = _load_module("_bfx_restore_timing", SCRIPT_DIR / "restore_timing.py")
 _secret_validation = _load_module(
     "_bfx_secret_validation", SCRIPT_DIR / "secret_validation.py"
 )
@@ -57,6 +58,17 @@ RestoreBaseline = _evidence.RestoreBaseline
 load_restore_baseline = _evidence.load_restore_baseline
 SecretConfigError = _secret_validation.SecretConfigError
 validate_secret_dir = _secret_validation.validate_secret_dir
+StageTiming = _timing.StageTiming
+
+_REQUIRED_TIMING_STAGES = frozenset(
+    {
+        "resource_setup",
+        "physical_and_wal_recovery",
+        "isolation_bootstrap",
+        "verification",
+        "cleanup",
+    }
+)
 
 
 class DrillFailureError(ValueError):
@@ -182,6 +194,20 @@ def _write_json(path: Path, report: dict[str, object]) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _write_timing_json(path: Path, report: dict[str, object]) -> None:
+    """Persist non-authoritative timing separately from acceptance evidence."""
+    _write_json(path, report)
+
+
+def _invalidate_timing_json(path: Path) -> None:
+    """Remove stale timing without entering the accepted-receipt code path."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        with path.open("r+") as handle:
+            handle.truncate(0)
 
 
 def _write_failure_log(output_path: Path, code: str) -> None:
@@ -622,6 +648,12 @@ class RestoreDrill:
         plan: RestorePlan | None = None
         env_path: Path | None = None
         archive_path: Path | None = None
+        timing_output_path = self._output_path.with_name(
+            f"{self._output_path.stem}-timing.json"
+        )
+        timing = StageTiming(clock=self._clock)
+        timing_stage: str | None = None
+        timing_usable = True
         network_created = False
         egress_network_created = False
         volume_created = False
@@ -632,6 +664,29 @@ class RestoreDrill:
         success_report: dict[str, object] | None = None
         cleanup_failed = False
         failure_persist_failed = False
+
+        def begin_timing(name: str) -> None:
+            nonlocal timing_stage, timing_usable
+            if not timing_usable:
+                return
+            try:
+                timing.begin(name)
+                timing_stage = name
+            except Exception:
+                timing_stage = None
+                timing_usable = False
+
+        def end_timing(name: str) -> None:
+            nonlocal timing_stage, timing_usable
+            if not timing_usable:
+                return
+            try:
+                timing.end(name)
+                timing_stage = None
+            except Exception:
+                timing_stage = None
+                timing_usable = False
+
         try:
             try:
                 _invalidate_evidence(self._output_path)
@@ -639,6 +694,12 @@ class RestoreDrill:
                 failure_code = "evidence_invalidation_failed"
                 if not _revoke_after_failure(self._output_path):
                     failure_persist_failed = True
+            try:
+                _invalidate_timing_json(timing_output_path)
+            except OSError:
+                # Timing is diagnostic only. The accepted restore receipt keeps
+                # its existing invalidation and failure behavior above.
+                timing_usable = False
             if failure_code is None:
                 baseline = load_restore_baseline(
                     request.baseline_path, target_backup_label=request.backup_label,
@@ -657,6 +718,7 @@ class RestoreDrill:
                 env_path = self._write_env_file(plan, password)
                 rto_started = self._clock()
                 self._deadline = rto_started + _MAX_RTO_SECONDS
+                begin_timing("resource_setup")
                 # Archive preparation/verification stays inside the existing deadline.
                 transport = _evidence._archive.transport(baseline.archives or (), target_run_id=request.target_run_id)
                 with tempfile.NamedTemporaryFile(prefix="bfx-dr-archive-", suffix=".json", delete=False) as handle:
@@ -677,15 +739,21 @@ class RestoreDrill:
                 egress_network_created = True
                 self._require_success(plan.create_commands[2])
                 volume_created = True
+                end_timing("resource_setup")
+                begin_timing("physical_and_wal_recovery")
                 container_cleanup_eligible = True
                 self._require_success(_compose_with_env(plan.run_commands[0], env_path))
                 self._wait_for_health(plan)
                 self._wait_for_recovery(plan)
+                end_timing("physical_and_wal_recovery")
+                begin_timing("isolation_bootstrap")
                 self._require_external_egress(plan.run_commands[1])
                 self._require_success(plan.run_commands[2])
                 self._require_egress_absent(plan.run_commands[3], plan)
                 self._bootstrap_role(plan, password)
                 schema_tsv = self._schema_tsv(plan)
+                end_timing("isolation_bootstrap")
+                begin_timing("verification")
                 verifier_cleanup_eligible = True
                 archive_json = self._require_success(_commands.verifier_command(
                     plan, image=verifier_image, env_path=env_path, input_path=archive_path,
@@ -728,6 +796,7 @@ class RestoreDrill:
                 success_report["restore_run_id"] = plan.project_name.removeprefix("bfx-dr-")
                 success_report["archive_input_digest"] = hashlib.sha256(transport).hexdigest()
                 self._remaining()
+                end_timing("verification")
         except DrillFailureError as exc:
             failure_code = str(exc)
         except EvidenceError as exc:
@@ -735,7 +804,10 @@ class RestoreDrill:
         except (OSError, ValueError, TypeError):
             failure_code = "restore_output_invalid"
         finally:
+            if timing_stage is not None:
+                end_timing(timing_stage)
             if plan is not None:
+                begin_timing("cleanup")
                 cleanup_failed = self._cleanup(
                     plan, env_path, container_started=container_cleanup_eligible,
                     verifier_started=verifier_cleanup_eligible,
@@ -744,6 +816,7 @@ class RestoreDrill:
                     network_created=network_created,
                     archive_path=archive_path,
                 )
+                end_timing("cleanup")
                 if cleanup_failed:
                     failure_code = "cleanup_failed"
             if success_report is not None and failure_code is None:
@@ -785,6 +858,33 @@ class RestoreDrill:
                     )
                 except OSError:
                     failure_persist_failed = True
+            if timing_usable:
+                try:
+                    stages = timing.render()
+                    complete = (
+                        failure_code is None
+                        and not failure_persist_failed
+                        and success_report is not None
+                        and set(stages) == _REQUIRED_TIMING_STAGES
+                    )
+                    _write_timing_json(
+                        timing_output_path,
+                        {
+                            "schema_version": 1,
+                            "kind": "restore_timing",
+                            "restore_run_id": (
+                                plan.project_name.removeprefix("bfx-dr-")
+                                if plan is not None
+                                else None
+                            ),
+                            "complete": complete,
+                            "stages": stages,
+                        },
+                    )
+                except Exception:
+                    # Diagnostics must never alter accepted receipt semantics.
+                    with suppress(OSError):
+                        _invalidate_timing_json(timing_output_path)
         if failure_code is not None or failure_persist_failed:
             return 2
         if success_report is None:

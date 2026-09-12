@@ -582,6 +582,29 @@ count/head/hash, and all fixed empty-projector counts/hashes against the
 same-target baseline. Any command, network, baseline, replay, image, deadline,
 or cleanup failure exits nonzero and writes `measured: false`.
 
+The runner also writes a non-authoritative stage diagnostic beside the receipt:
+`restore-timing.json` for the default `restore.json` output. It contains only
+`schema_version`, `kind=restore_timing`, the generated `restore_run_id`,
+`complete`, and an allowlisted `stages` map of monotonic durations in seconds.
+Require its non-null `restore_run_id` to equal the accepted receipt before
+using the durations; this prevents a stale diagnostic from being associated
+with another run. The fixed stages are `resource_setup`,
+`physical_and_wal_recovery`, `isolation_bootstrap`, `verification`, and
+`cleanup`. Physical restore and WAL recovery remain one stage because the
+runner has no finer pgBackRest stage evidence; do not split them by subtracting
+estimated delays.
+
+`complete: true` means all five timing stages closed and the existing restore
+receipt path completed successfully. A failed lifecycle may retain only its
+closed stages with `complete: false`. Cleanup keeps its independent 30-second
+deadline and remains outside the accepted RTO budget. Timing persistence occurs
+after cleanup and cannot change, replace, or promote the accepted restore
+receipt; a persistence failure removes the diagnostic when possible. Stage
+durations are for bottleneck diagnosis only: they can include boundary overhead
+and need not sum exactly to `rto_seconds`. Never use the timing diagnostic to
+satisfy RPO/RTO, authorize a restore, canary, or resume, and never add commands,
+errors, database URLs, credentials, or arbitrary labels to it.
+
 ### 8. Accept only fresh measured evidence
 
 Review `$HOME/bfx/dr-evidence/backup.json` and `restore.json` only after the
