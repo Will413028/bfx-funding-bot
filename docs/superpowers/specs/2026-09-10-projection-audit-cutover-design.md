@@ -34,7 +34,7 @@ canonical event hash 不變。DR runner 正確回報 `projection_replay_mismatch
 實體還原 benchmark 約 88.7 秒，其中 pgBackRest restore 約 78.8 秒。
 這不是包含完整 verifier 的成功 RTO，且位於已核准、與既有 operational target
 對齊的 Halt 2 3600 秒門檻內。
-process-max=4／同步 archive 的既有比較未達標；不能斷言單一硬體瓶頸。
+process-max=4／同步 archive 在原先的 sub-minute benchmark 下，該既有比較未達標；不能斷言單一硬體瓶頸。
 
 ## 替代方案
 

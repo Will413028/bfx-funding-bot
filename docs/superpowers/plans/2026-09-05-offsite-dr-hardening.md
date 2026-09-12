@@ -1,5 +1,7 @@
 # Offsite DR Foundation Hardening Implementation Plan
 
+> **Historical/superseded notice (2026-09-12):** This completed implementation plan records the former Halt 2 restore RTO target of ≤60 seconds. It is not the active policy; operators must follow the current [offsite DR runbook](../../runbooks/offsite-dr.md) and [DR design spec](../specs/2026-09-04-offsite-dr-cloudflare-r2-design.md), which define the approved Halt 2 target of ≤3600 seconds. The original plan text and historical benchmark/timeout facts below are preserved.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 修正第一版 offsite DR foundation 的 RPO、R2 egress、restored-cluster bootstrap、baseline verification、secret boundary 與 evidence lifecycle 缺口，使 branch 可進入 final review。

@@ -1,5 +1,7 @@
 # Offsite DR Foundation Implementation Plan
 
+> **Historical/superseded notice (2026-09-12):** This completed implementation plan records the former Halt 2 restore RTO target of ≤60 seconds. It is not the active policy; operators must follow the current [offsite DR runbook](../../runbooks/offsite-dr.md) and [DR design spec](../specs/2026-09-04-offsite-dr-cloudflare-r2-design.md), which define the approved Halt 2 target of ≤3600 seconds. The original plan text and historical benchmark/timeout facts below are preserved.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** 在現有 OCI VM PostgreSQL 18 stack 上交付一套可測試的 pgBackRest + Cloudflare R2 異地備份、狀態 evidence 與 isolated restore foundation。
