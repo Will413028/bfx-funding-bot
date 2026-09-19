@@ -12,7 +12,7 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 部署架構
 
-全部自托於 Oracle Cloud VM `oci-a1`（單機 docker stack，`docker-compose.bot.yml`）。除 Bitfinex venue 外零外部 serverless 依賴。
+應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker stack，`docker-compose.bot.yml`）；外部服務包含 Bitfinex venue 與 Cloudflare R2 offsite backup。
 
 | 服務 | 平台 |
 |------|------|
@@ -21,7 +21,8 @@ Bitfinex 自動放貸 SaaS 平台。
 | Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
 | Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
-> **2026-06-23 棄 Neon + Vercel（Step 1+2 完成）**：Neon 免費額度耗盡（HTTP 402）→ 真錢 bot crash-loop 4 天。**Step 1**：bot/webapi/DB 搬 VM 自托 Postgres。**Step 2**：FE 容器化上 VM（Funnel 443→3001，因 grafana 占 3000）、Better Auth 連本地 Postgres（`bfx_webauth`、direct 無 pooler）+ VM 自托 Redis（Upstash→ioredis）、**Vercel 專案已刪、Neon 完全歸零**（Neon 專案本身於 **2026-07-27 刪除**；刪前完整 dump 至 `oci-a1:~/bfx/backups/neon-final-2026-07-27.sql.gz`，逐表列數已驗證。⚠️ cutover 只搬了 candles / funding_stats，**2026-05-26~06-19 的 1,501 筆真錢 `event_log` 與 549 筆 `offer_claims` 未進 VM，現在只存在於該備份**——VM 的 event_log 從 06-22 起算。要查首次入金後第一個月的事件鏈，得從備份還原）。每日 `pg_dump` 由 systemd timer `bfx-pg-backup.timer`（03:17 UTC）→ `~/bfx/backups/`（Redis session 為 ephemeral，免備份）。每週量測 chain 由 `bfx-weekly-report.timer`（Mon 04:17 UTC）跑 compose `weekly-report` one-shot（`--profile ops`）→ attribution 落表 + G3 報告至 `~/bfx/reports/`（unit 檔在 repo `deploy/vm/systemd/`）。Koyeb 為更早 backend 平台，2026-05-31 已 cutover 至 VM。WS 在 v1 為 dead——FE WS client 已於 2026-06-23 移除（`2252267`，`env.ts` 無 WS 欄位；2026-07-19 驗證 webapi 96h 零 `/auth/ws-token`/404 噪音）。
+- 備份／WAL archive／isolated restore 依 `docs/runbooks/offsite-dr.md`；pgBackRest backup/status timer 定義在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
+- 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 執行 compose `weekly-report`（`--profile ops`）；操作前核對目前 unit、排程及輸出。Redis session 為 ephemeral。
 
 ## 指令執行目錄
 
@@ -41,15 +42,9 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 
 ## 開發規範
 
-### 開發工作流（Superpowers）
+### 開發工作流
 
-**所有功能開發、bug 修復、重構使用 Superpowers 技能：**
-
-1. `brainstorming` skill — 新功能前釐清需求與設計方向
-2. `writing-plans` skill — 輸出實作計畫
-3. `test-driven-development` skill — 實作前先寫測試
-4. `executing-plans` skill — 依計畫逐步實作
-5. `requesting-code-review` skill — 完成後驗證
+需求未決或架構取捨先設計討論；多步驟工作先整理計畫。明確且低風險的修正直接實作與受影響驗證；放貸／風控／DB 行為變更補回歸測試並 review。依任務需要選用可用的 skills，仍須遵守架構與驗證要求。
 
 規則：
 - 每個功能必須包含單元測試，`cd backend_py && uv run pytest -m "not integration"` 全過才能 commit
@@ -57,10 +52,10 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 
 ### 測試與品質（強制）
 
-- **每個 change 必須包含對應的單元測試**，不可只寫程式不寫測試
+- **行為變更補對應的回歸測試**；純文件改動核對指令、路徑與規格即可，不為文件或格式改動新增機械測試
 - **套用 migration 一律使用 `cd backend_py && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
-- 後端架構詳見 `backend_py/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例、SQLAlchemy/Alembic 工作流詳見 `backend_py/CLAUDE.md`（待建；目前散見各 module 註解）
-- 前端測試指令、架構慣例詳見 `frontend/CLAUDE.md`
+- 後端架構詳見 `backend_py/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例、SQLAlchemy/Alembic 工作流詳見 `backend_py/AGENTS.md`（待建；目前散見各 module 註解）
+- 前端測試指令、架構慣例詳見 `frontend/AGENTS.md`
 
 ### Commit 訊息格式
 
@@ -69,9 +64,3 @@ Go `backend/`（atlas/sqlc/go test）已於 2026-05-29 移除，不再使用。
 - type：`feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`
 - subject：小寫開頭、祈使句、結尾不加句號
 - 由 `lefthook.yml` 的 `commit-msg` hook 強制檢查
-
-## Second Brain 關聯
-
-- 技術頁與商業層 hub（`## Product` 段）：`~/second-brain/wiki/projects/bfx-funding-bot/index.md`；跨專案踩坑 `~/second-brain/wiki/tech/`。
-- 個人 Bitfinex funding 投資經驗：`~/second-brain/wiki/finance/crypto/`（strategy、trading-log、exchanges）。個人投資是「我自己怎麼做」，產品邏輯是「給其他人用」——可互相餵養，決策立場不同。
-- commit trailer（`Lesson:` / `Blocked:` / `Todo:` / `Note:`）加在 body，與上方 Conventional Commits subject 不衝突；規格見 `~/second-brain/wiki/system/commit-trailers.md`。
