@@ -107,6 +107,15 @@ IDs after load and retain the evidence before any migration. Created bot/API/FE
 containers must report that resolved `Image` before start. Never change Docker's
 storage driver or use export/import to make the IDs appear equal.
 
+Measurement and every host one-shot (migration/bootstrap/policy/database checks)
+also use create → inspect → attached start. Before execution they verify the
+created container ID/Image, stopped state, command, UID/cwd, read-only rootfs,
+network, capabilities/security options, environment, bind mounts and tmpfs.
+After attached execution they require a proven successful process exit; Docker
+CLI success alone is insufficient. Output remains captured, errors sanitized,
+and cleanup removes only that call's validated created container and anonymous
+volumes, including on inspection/start/exit failure. Commands are never retried.
+
 Keep PostgreSQL18, Redis, container IDs, networks, volume mounts, WAL/pgBackRest
 configuration, runtime files and recovery copies unchanged. Do not use broad
 Compose up/build/down/remove-orphans. Compose app/migration/autoheal definitions

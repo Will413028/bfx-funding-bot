@@ -15,7 +15,7 @@ import bfx_funding_bot.modules.execution.capital_tables
 import bfx_funding_bot.modules.execution.release_tables
 import bfx_funding_bot.modules.marketfeed.daemon  # noqa: F401
 from bfx_funding_bot.core.release_identity import ReleaseManifest
-from scripts.release_package import MEASURE, create_launch, run
+from scripts.release_package import MEASURE, PackagingBlocked, create_launch, run, run_one_shot
 
 # Same full hash functions and same PG account lock as ReleaseWorker. No session
 # transition, permit, venue, worker or financial command is executed here.
@@ -138,8 +138,8 @@ async def test_actual_readonly_consumer_verifies_producer_receipt(
         "BFX_VAULT_KEK=" + base64.b64encode(kek).decode(),
         "DATABASE_URL=postgresql://test:test@fixture-db:5432/test",
     ]))
-    measurement = json.loads(run(["docker", "run", "--rm", "--network", "none", "--read-only",
-        "--env-file", str(env_file), image, "/app/.venv/bin/python", "-c", MEASURE]))
+    measurement = json.loads(run_one_shot(identity, env=env_file, network="none", tmpfs=False,
+        command=["/app/.venv/bin/python", "-c", MEASURE]))
     seconds = measurement.pop("measurement_seconds")
     manifest = ReleaseManifest(version=2, release_id="unapproved-fixture",
         source_revision="a" * 40, image=identity, **measurement)
@@ -224,3 +224,31 @@ async def test_actual_readonly_consumer_verifies_producer_receipt(
             run(["docker", "rm", "-f", container])
         run(["docker", "network", "disconnect", network, pg_id])
         run(["docker", "network", "rm", network])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("exit_code", [0, 17])
+def test_actual_one_shot_output_exit_status_and_cleanup(tmp_path, unapproved_release_image, exit_code):
+    _, identity = unapproved_release_image
+    env = tmp_path / "fixture.env"
+    env.write_text("")
+    created = []
+    def runner(args, *, data=None):
+        output = run(args, data=data)
+        if args[:2] == ["docker", "create"]:
+            created.append(output.decode().strip())
+        return output
+    command = ["/app/.venv/bin/python", "-c", f"print('fixture-output'); raise SystemExit({exit_code})"]
+    try:
+        if exit_code:
+            with pytest.raises(PackagingBlocked, match="one_shot_exit_nonzero:17"):
+                run_one_shot(identity, env=env, network="none", command=command, runner=runner)
+        else:
+            assert run_one_shot(identity, env=env, network="none", command=command, runner=runner) == b"fixture-output\n"
+        assert len(created) == 1
+        assert subprocess.run(["docker", "inspect", created[0]], capture_output=True).returncode != 0
+    finally:
+        # A failed cleanup assertion must not leak the exact test-owned object.
+        for cid in created:
+            if subprocess.run(["docker", "inspect", cid], capture_output=True).returncode == 0:
+                run(["docker", "rm", "--force", "--volumes", cid])

@@ -32,7 +32,9 @@ from scripts.release_package import (
     create_launch,
     prepare_backend,
     prepare_frontend,
+    read_env,
     run,
+    run_one_shot,
 )
 
 
@@ -73,18 +75,6 @@ def protected(path: Path, *, secret: bool = False) -> None:
             raise PackagingBlocked("host_root_control_required")
     if secret and stat.S_IMODE(path.stat().st_mode) != 0o600:
         raise PackagingBlocked("protected_env_mode_0600_required")
-
-
-def read_env(path: Path) -> dict[str, str]:
-    result = {}
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key, separator, value = line.partition("=")
-        if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in result:
-            raise PackagingBlocked("invalid_or_duplicate_environment_key")
-        result[key] = value
-    return result
 
 
 def write_new(path: Path, value: object) -> None:
@@ -153,15 +143,8 @@ def read_bundle(path: Path) -> tuple[dict[str, Any], ReleaseManifest]:
 def one_shot(manifest: ReleaseManifest, *, env: Path, network: str, command: list[str],
              extra_env: dict[str, str] | None = None, mounts: list[str] | None = None) -> bytes:
     protected(env, secret=True)
-    image = resolve_image(manifest.image, run)
-    args = ["docker", "run", "--rm", "--pull=never", "--read-only", "--user", "1000:1000",
-        "--workdir", "/app", "--network", network, "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--env-file", str(env)]
-    for key, value in (extra_env or {}).items():
-        args += ["--env", f"{key}={value}"]
-    for mount in mounts or []:
-        args += ["--mount", mount]
-    return run([*args, image, *command])
+    return run_one_shot(manifest.image, env=env, network=network, command=command,
+                        extra_env=extra_env, mounts=mounts, runner=run)
 
 
 def migrate(args: argparse.Namespace, manifest: ReleaseManifest) -> dict[str, Any]:
