@@ -59,6 +59,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
@@ -194,7 +195,16 @@ class DeploymentReconciler:
 
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+        release: ReleaseCommand | None = None,
     ) -> None:
+        ctx = self._ctx
+        if release is not None:
+            matches = [cell for cell in self._cells if (cell.symbol, cell.cell_id, cell.strategy.value)
+                       == (release.symbol, release.cell, release.strategy)]
+            if len(matches) != 1 or release.amount != self._min_fill:
+                raise ValueError("release_command_scope_or_minimum_mismatch")
+            ctx = replace(ctx, release_session_id=release.session_id,
+                          canary_halt_authorization=release.halt_authorization)
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise
@@ -211,6 +221,8 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            if release is not None and symbol != release.symbol:
+                continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
@@ -221,7 +233,7 @@ class DeploymentReconciler:
             )
             authoritative_uncertainty_guard = evaluate_before_sizing is not None
             if evaluate_before_sizing is not None:
-                pre_sizing_result = await evaluate_before_sizing(symbol, self._ctx)
+                pre_sizing_result = await evaluate_before_sizing(symbol, ctx)
                 if not pre_sizing_result.allowed:
                     log.error(
                         "deployment_symbol_blocked_uncertain_pre_sizing "
@@ -265,6 +277,10 @@ class DeploymentReconciler:
                         symbol=symbol, cell_id=cell, session=session,
                     ) for cell in active}
                 fills = allocate_capital(views=views, min_fill=self._min_fill)
+                if release is not None:
+                    view = views.get(release.cell)
+                    fills = ({release.cell: release.amount}
+                             if view is not None and view.budget.max_new_offer >= release.amount else {})
             except Exception as exc:
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
                 continue
@@ -272,7 +288,7 @@ class DeploymentReconciler:
             # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
             # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
             # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
-            if self._reprice is not None and venue_offers:
+            if release is None and self._reprice is not None and venue_offers:
                 cancel_budget -= await self._reprice_sweep(
                     symbol=symbol,
                     symbol_cells=symbol_cells,
@@ -309,7 +325,7 @@ class DeploymentReconciler:
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
                 )
-                cell_ctx = replace(self._ctx, capital_cell_id=cell_id)
+                cell_ctx = replace(ctx, capital_cell_id=cell_id)
                 guard = await self._safety.evaluate(decision, cell_ctx)
                 snapshot = self._book_provider.snapshot(symbol, now_ms=now)
                 decision_id = str(uuid5(
@@ -391,9 +407,9 @@ class DeploymentReconciler:
                     price=gate_price,
                     fill_evidence=fill_evidence,
                     safety=guard,
-                    audit_context=self._audit_context_factory.build(
+                    audit_context=replace(self._audit_context_factory.build(
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
-                    ),
+                    ), strategy=self._cell_strategy[cell_id].value),
                     optimizer_evidence=optimizer_evidence,
                     optimizer_block_reason=optimizer_block_reason,
                     expected_period_agg=period_agg,
@@ -439,6 +455,8 @@ class DeploymentReconciler:
                     outcome = replace(outcome, capital_view=views[cell_id])
                     result = await self._executor.submit(outcome, cell_ctx)
                 except Exception as exc:
+                    if release is not None:
+                        raise
                     log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
                     if self._attempts is not None:
                         self._attempts.record_error(

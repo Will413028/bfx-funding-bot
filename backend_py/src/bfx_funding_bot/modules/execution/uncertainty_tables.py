@@ -125,6 +125,9 @@ class CanaryCommandPermitRow(Base):
     The halt row is intentionally part of the identity.  A permit can be
     consumed at most once, and a second permit cannot be issued for the same
     append-only halt transition even after the first command is complete.
+    Release-session max_amount/expiry and measured binding live in release_sessions;
+    this amount is the immutable exact decision amount consumed before intent IO.
+    Migration b4e6f8a0c203 protects both legacy and session permit audit in place.
     """
 
     __tablename__ = "canary_command_permits"

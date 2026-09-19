@@ -84,7 +84,7 @@ class HaltStateStore:
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
     ) -> HaltState:
-        """Append a transition. Never updates or deletes an existing row."""
+        """Append a transition; reasserting a halt retains its authorization epoch."""
         row = TradingHaltRow(
             account_id=self._account_id,
             exchange_account_id=account_id_uuid_or_none(self._account_id),
@@ -99,6 +99,9 @@ class HaltStateStore:
                 await acquire_transaction_lock(
                     session, account_id=self._account_id, deployment_environment=self._env,
                 )
+            current = await self.current(session)
+            if halted and current is not None and current.halted:
+                return current
             session.add(row)
             await session.commit()
             return _to_state(row)

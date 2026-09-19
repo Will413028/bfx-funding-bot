@@ -168,6 +168,7 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     configure_canary_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
+    monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(
@@ -187,12 +188,12 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     assert isinstance(metrics_executor, MetricsSubmitMiddleware)
     heartbeat = metrics_executor._inner
     assert isinstance(heartbeat, HeartbeatMiddleware)
-    from bfx_funding_bot.modules.execution.canary_permit import CanaryOneShotGate
-    assert isinstance(heartbeat._inner, CanaryOneShotGate)
-    reservation = heartbeat._inner._inner
+    reservation = heartbeat._inner
     assert isinstance(reservation, ReservationEmittingMiddleware)
     assert reservation._command_gate is not None
     assert reservation._command_gate._safety_evaluator is daemon.safety_chain
+    assert reservation._command_gate is daemon.command_gate
+    assert reservation._command_gate.release_authority is daemon.release_worker.authority
 
     # WS dispatcher queue saturation gauges bound to the live dispatcher.
     assert daemon.ws_dispatcher is not None

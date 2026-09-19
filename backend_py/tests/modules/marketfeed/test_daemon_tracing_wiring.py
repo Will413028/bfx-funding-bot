@@ -153,6 +153,7 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
     configure_canary_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_live.db")
+    monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     daemon = await build_daemon(

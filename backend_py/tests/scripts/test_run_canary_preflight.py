@@ -13,7 +13,8 @@ from scripts.halt2_cutover import Halt2Evidence
 from scripts.run_canary_preflight import verify_canary_preflight
 
 
-def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("release", [False, True])
+def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_path: Path, release) -> None:
     """Changing a signed input after evidence creation must make the real verifier fail."""
     from bfx_funding_bot.modules.marketfeed.daemon import CanaryProfile, CanaryStartupBlocked
 
@@ -57,6 +58,13 @@ def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_pat
         cap_usdt=150, max_evidence_age_seconds=300,
     )
 
+    if release:
+        from scripts.run_canary_preflight import verify_release_preflight
+        with pytest.raises(CanaryStartupBlocked, match="halt2_artifact_evidence_mismatch"):
+            asyncio.run(verify_release_preflight(session=object(), profile=profile,
+                halt2_evidence=halt2, config_artifact=config, image_digest="image-hash",
+                projector_version="projector-v3", now_ms=1_000_000))
+        return
     with pytest.raises(CanaryStartupBlocked, match="halt2_artifact_evidence_mismatch"):
         asyncio.run(
             verify_canary_preflight(
@@ -74,6 +82,32 @@ def test_preflight_rejects_tampered_backup_before_readiness(monkeypatch, tmp_pat
                 now_ms=1_000_000,
             )
         )
+
+
+def test_release_observation_survives_submit_expiry_but_requires_fresh_fences():
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from bfx_funding_bot.modules.marketfeed.daemon import (
+        CanaryEvidence,
+        CanaryProfile,
+        CanaryReadiness,
+        CanaryStartupBlocked,
+        assert_release_observation,
+    )
+    profile = CanaryProfile(UUID("11111111-1111-1111-1111-111111111111"), "ci", "fUST",
+                            "fUST_a30", "mean_reversion", Decimal("153"), Decimal("200"), 300)
+    evidence = CanaryEvidence(str(profile.account_id), "ci", "fUST", "fUST_a30", "mean_reversion",
+        Decimal("153"), "permit", "decision", "attempt", "acknowledged", "123", 1000, 2,
+        (3, 4), (400000, 401000), "a" * 64, Decimal("0"), True, None)
+    readiness = CanaryReadiness(0, 0, True, (3, 4), (400000, 401000), 402000, True)
+    assert_release_observation(profile=profile, evidence=evidence, readiness=readiness)
+    with pytest.raises(CanaryStartupBlocked, match="stale"):
+        assert_release_observation(profile=profile, evidence=evidence,
+                                   readiness=replace(readiness, observed_at_ms=800000))
+    with pytest.raises(CanaryStartupBlocked, match="order"):
+        assert_release_observation(profile=profile,
+            evidence=replace(evidence, reconcile_fences=(3, 3)), readiness=readiness)
 
 
 def test_canary_claim_cannot_override_server_derived_evidence() -> None:

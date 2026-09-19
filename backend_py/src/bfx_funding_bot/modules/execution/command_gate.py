@@ -48,6 +48,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.release_worker import ReleaseCommandAuthority
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitNotSent,
@@ -148,6 +149,8 @@ class AccountCommandGate:
         if not is_simulated and capital_runtime is None:
             raise ValueError("live command gate requires applied capital runtime")
         self._capital = capital_runtime
+        # Installed by live daemon before any supervised task starts.
+        self.release_authority: ReleaseCommandAuthority | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._latched_scopes: dict[tuple[str, str, str], str] = {}
 
@@ -261,6 +264,9 @@ class AccountCommandGate:
                         raise CommandGateBlocked("execution_audit_conflict")
 
                     async def locked_guard(locked: AsyncSession) -> None:
+                        if self.release_authority is not None:
+                            await self.release_authority.admit(locked, ready=ready,
+                                context=context, attempt_id=UUID(str(attempt.attempt_id)))
                         scope = (canonical_account, self._deployment_environment, decision.symbol)
                         if scope in self._latched_scopes:
                             raise CommandGateBlocked(self._latched_scopes[scope])
@@ -282,6 +288,8 @@ class AccountCommandGate:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
                 if self._capital is not None:
+                    if self.release_authority is not None:
+                        await self.release_authority.before_transport(ready, context)
                     await self._guard(decision, context, transport=True)
             except CommandGateBlocked as exc:
                 result = SubmittedOrder(cid=cid, venue_offer_id=None,
@@ -359,6 +367,8 @@ class AccountCommandGate:
         async with lock:
             async with runtime.session_factory.begin() as session:
                 await runtime.repository.writer.prepare_locked(session, account_id=runtime.repository.account_id)
+                if self.release_authority is not None:
+                    await self.release_authority.check_normal(session)
                 claim = await session.scalar(select(OfferClaimRow).where(
                     OfferClaimRow.exchange_account_id == runtime.repository.account_id,
                     OfferClaimRow.deployment_environment == self._deployment_environment,
@@ -398,7 +408,7 @@ class AccountCommandGate:
                 # Bind the durable cancel to the managed offer, not the current quote.
                 signal_correlation_id = reference.signal_correlation_id
                 # No new spending; ordinary cancels never inherit a release halt override.
-                ctx = replace(ctx, canary_halt_authorization=None)
+                ctx = replace(ctx, canary_halt_authorization=None, release_session_id=None)
                 # A cancel is a venue write, not a SKIP. Probe the managed
                 # order's identity; explicitly omit only capital spending checks.
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
@@ -415,6 +425,10 @@ class AccountCommandGate:
             async def before_transport() -> None:
                 # Fresh scoped uncertainty/latch check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
+                if self.release_authority is not None:
+                    async with runtime.session_factory.begin() as fresh:
+                        await self.release_authority.repo.lock(fresh)
+                        await self.release_authority.check_normal(fresh)
                 await self.check(probe, ctx)
                 await self._guard(probe, ctx, transport=True)
 

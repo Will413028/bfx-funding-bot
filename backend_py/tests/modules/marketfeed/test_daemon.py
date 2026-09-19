@@ -545,7 +545,7 @@ async def test_canary_readiness_honors_one_snapshot_pre_command_requirement(
     assert readiness.full_account_snapshot_complete is True
 
 
-async def test_live_build_blocks_missing_halt2_evidence_before_executor_construction(
+async def test_live_build_rejects_legacy_canary_before_executor_construction(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """The real daemon boot boundary must stop before a live executor exists."""
@@ -618,7 +618,7 @@ calibrated_guards:
         raise AssertionError("live executor construction must be unreachable")
 
     monkeypatch.setattr("bfx_funding_bot.modules.marketfeed.daemon.build_executor", should_not_construct_executor)
-    with pytest.raises(CanaryStartupBlocked, match="missing_halt2_evidence"):
+    with pytest.raises(CanaryStartupBlocked, match="legacy_canary_phase_requires_release_session"):
         await build_daemon(cells_yaml_path=cells, skip_ws=True)
 
     assert constructed is False

@@ -238,6 +238,8 @@ class TradingStatusService:
         response says so explicitly — reporting "resumed" while nothing resumed
         is exactly the class of lie this endpoint exists to prevent.
         """
+        if self._phase is Phase.LIVE or self._capital is not None:
+            raise ValueError("release_promotion_required")
         state = await self._require_store().set_halted(
             False, reason=reason, actor=actor,
         )

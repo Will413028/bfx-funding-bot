@@ -1,4 +1,4 @@
-"""build_daemon wires the canary L2 loss-limiter guards to a real NAV source.
+"""build_daemon wires the L2 loss-limiter guards to a real NAV source.
 
 Regression for the #4 safety gap: the canary invariant forces realized_loss_24h
 + drawdown_from_peak ON, but they were wired to _StubPnLSource (0/0) so they
@@ -86,14 +86,15 @@ def _post() -> DecisionPayload:
 
 
 @pytest.mark.asyncio
-async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
+async def test_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
     safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    # Pure NAV wiring test: no legacy canary phase or financial release authority.
+    monkeypatch.setenv("BFX_PHASE", "shadow")
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
@@ -115,7 +116,7 @@ async def test_canary_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     _eng = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
     async with _eng.begin() as _c:
         await _c.run_sync(Base.metadata.create_all)
-    await seed_exchange_account(_eng)
+    await seed_exchange_account(_eng, capital_policies=False)
     await _eng.dispose()
 
     httpx_mock.add_response(

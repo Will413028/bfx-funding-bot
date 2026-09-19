@@ -72,6 +72,7 @@ class AccountContext:
     # Only the command boundary supplies this; guards must reuse its replayed state.
     command_session: AsyncSession | None = None
     before_cancel_transport: Callable[[], Awaitable[None]] | None = None
+    release_session_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)
