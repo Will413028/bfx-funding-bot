@@ -1,5 +1,10 @@
 # Rollback after a Halt 2 venue write
 
+> The venue-reality/UNKNOWN safety decisions below still apply. Legacy canary
+> CLI/env/deploy examples are historical, not capital-policy activation commands.
+> Use [immutable release](immutable-release.md) for exact artifacts and separate
+> authenticated human sessions; never reuse an old permit or receipt after drift.
+
 This is an operator decision runbook. The coding agent does not execute production operations: no remote migration, no deployment, no restart, no
 resume, no cap increase, and no Bitfinex write. Keep reports redacted: never
 record an API key, secret, Authorization header, or complete raw response.

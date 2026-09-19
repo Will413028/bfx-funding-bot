@@ -25,7 +25,7 @@ COPY scripts/ ./scripts/
 
 RUN uv sync --frozen --no-dev
 
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN useradd -m -u 1000 appuser && chmod -R go-w /app /usr/local
 USER appuser
 
 # GIT_SHA → BFX_SERVICE_VERSION: build arg surfaces the deployed commit as
@@ -41,4 +41,5 @@ ENV PATH="/app/.venv/bin:$PATH" \
     BFX_CELLS_YAML=/app/configs/cells.yaml \
     BFX_SERVICE_VERSION=${GIT_SHA}
 
-CMD ["sh", "-c", "alembic upgrade head && exec bfx-shadow"]
+# Schema migration is an explicit owner-only operation, never runtime startup.
+CMD ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"]

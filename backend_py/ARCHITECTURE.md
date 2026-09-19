@@ -251,6 +251,16 @@ sequenceDiagram
 
 ## 4. 放貸演算法（End-to-End Lending Algorithm）
 
+**Capital-policy live authority（2026-09）**：live 使用已套用且 versioned 的
+`CapitalPolicy`、完整且 fresh 的 canonical venue snapshot 與未反映 commitments；
+`CapitalRuntime`/`CapitalBudget` 共用 Decimal authority，planner、guard、command
+boundary、status 不各自重算 cap。帳戶 spendable 扣除 reserve 與 commitments；
+cell_limit 固定為 total_capital ×0.70，cell_headroom 扣除歸屬曝險，單筆上限取
+spendable/headroom 的最小值。只有一個 active cell 也不放寬為100%。USD 明確
+disabled，但所有 USD wallet/offers/credits 仍納入 full-account reconciliation。
+未知/過期 snapshot、pending query、缺少 policy 全部 block，無 env/YAML fallback。
+以下舊 gap/tracker 步驟僅說明 simulation helper／歷史演算法，不是 live 金額權限。
+
 逐步流程（一個完整 decision-to-redeploy 週期）：
 
 **訊號（每 1h candle boundary，每 cell 各一）**
@@ -268,7 +278,7 @@ sequenceDiagram
 6. `allocate_gap(target=cap, current=current_exposure)`：
    - gap = cap − current_exposure（current_exposure = reserved + realized）；
    - **greedy emptiest-first**：依目前各 cell 已部署量由小到大排序，先填最空的；
-   - 每 cell 上限 `cap_per_cell = max(concentration_pct * target, target / n_active_cells)`（`concentration_pct` 預設 70%，`n_active_cells` 為當下 active cell 數）：≥2 active cells 時與舊公式 byte-identical；僅 1 active cell 時可吃下全部 target（同幣別多 cell 皆跑同一策略，cap 對單一 active cell 本就不提供分散效果，見 commit `0d29fc8`）；
+   - simulation helper 每 cell 上限固定 `concentration_pct * target`，預設70%；live 則讀 canonical CapitalBudget，不使用此 target/cap helper；
    - 低於 `effective_min_usdt = ceil(150 * 1.02) = 153` USDT 的零頭（dust）丟棄；總分配 ≤ gap，全域 cap 永不超過。
 7. 逐 fill：讀 `get_active(cell_id)`（須 POST 且未過 ~65min TTL，過期則跳過）→ 讀取同一 symbol、**exact `period_days`** 與所需 amount 的 `MarketSnapshot` → `SafetyGuardChain.evaluate` → `ExecutionEligibility.prepare`。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
 
@@ -285,17 +295,17 @@ sequenceDiagram
 **為什麼這樣設計（WHY）**
 
 - **rate 慢、idle cost 連續**：策略 rate（EMA / percentile window）算起來「慢」且對 1h 尺度才有意義，但閒置資金每秒都在損失機會成本。把 rate 凍結成 ~65min TTL 的 standing quote，讓資金分配能以 90s 高頻運作而不必每次重算訊號。TTL 確保 rate regime 變動後過期的 quote 不會繼續部署。
-- **greedy emptiest-first**：在 relaxed concentration cap（`max(70% * target, target / n_active_cells)`）下儘量分散，避免單一 cell 過度集中；僅 1 active cell 時例外允許吃下全部 target（該情況下 cap 對唯一 cell 無分散意義可言）。
+- **greedy emptiest-first**：固定70% cell limit，不因只有一個 active cell 而放寬。各 cell 共用 account spendable，不能把各自 max_new_offer 加總當成帳戶權限。
 - **per-cell intent 只用 reserved**：venue 的 realized credits 無法回溯歸屬到 cell（venue→cell attribution problem，funding credit 不帶 client cid）。若把 realized 算進 rescale factor，per-cell 意圖會被灌爆超過 `cap_per_cell` 並餓死其他 cell。因此 `CellDeploymentTracker` 只 rescale 到 reserved 總量，並對任何超過 `cap_per_cell` 的 rescale 做 hard clamp（defense-in-depth）。
 
 **參數總覽**
 
 | 參數 | 值 | env |
 |---|---|---|
-| Canary allocation caps | fUST 10000 USDT；fUSD 0（dark） | `safety.canary.yaml` 的 `allocation_cap.caps` 是 binding per-symbol cap；`canary.env` 的 `BFX_ALLOCATION_CAP_USDT=0` 僅是 caps map 缺少 symbol 時的 fallback，不能覆寫 map |
-| Canary balance buffer | fUST 0（無隱含保留） | `safety.canary.yaml` 的 `buying_power.buffers`；需保留時必須明確設定正值 |
+| Live capital policy | fUST all_available；fUSD disabled | DB applied revision/digest；無 YAML/env money authority |
+| Live reserve | 0（明確 applied policy） | reserve_amount；不接受 legacy buffer fallback |
 | Effective min offer | 153 USDT（`ceil(150 × 1.02)`） | `BFX_VENUE_FLOOR_USD`=150, `BFX_MIN_OFFER_BUFFER_PCT`=0.02 |
-| Per-cell concentration | `max(70% × target, target / n_active_cells)`；≥2 active cells 等同 70%，僅 1 active cell 時可達 100%（見 commit `0d29fc8`） | `BFX_CONCENTRATION_PCT`=0.70 |
+| Per-cell concentration | total_capital ×0.70；單一 active cell 仍為70% | applied max_cell_fraction；舊100% relaxation已移除 |
 | Standing quote TTL | 3,900,000 ms（~65min） | `BFX_QUOTE_TTL_MS` |
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
@@ -549,22 +559,28 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 ## 8. Phases & Deployment
 
-**三個 phase（`Phase` enum）**
+**現行部署 phase（`Phase` enum 另保留 legacy `canary`）**
 
 | Phase | 性質 | Realm | Executor | 備註 |
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
 | `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
-| `canary` | **真錢** | `prod` | `bitfinex_live` | 必須為 `book_guarded` 或完整 evidence 的 `optimizer_live`；本輪 recovery 只啟用 fUST（cap 10000、a30/p2），fUSD cap=0 且無 canary cells，保持 dark；`BFX_BALANCE_BUFFER_USDT=0` 代表沒有隱含保留，需保留時必須明確設定 |
+| `live` | **真錢能力；technical start 維持 halt** | `prod` | `bitfinex_live` | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；單筆 canary 與 promotion 透過人類 authenticated release session，不是切換 phase |
 
-**Phase ⟷ Realm guard**（`load_config()`）：canary 只能配 prod realm（真錢不可污染校準資料），paper/shadow 只能配 shadow|ci（模擬不可污染真錢分析）。違規 `ValueError` fail-fast。
+**歷史相容性**：舊 `canary` phase、fUST cap10000／fUSD cap0、
+`BFX_BALANCE_BUFFER_USDT` 與 env-based canary profile 已退役，不是現行資金 authority。
+enum／部分 simulation helpers 保留供歷史測試；不可用舊指令啟動 immutable release。
+
+**Phase ⟷ Realm guard**（`load_config()`）：live／legacy canary 禁止 shadow realm；
+production 使用 prod，ci 僅供測試。paper/shadow 禁止 prod（模擬不可污染真錢分析）。
+違規 `ValueError` fail-fast；webapi 必須明確設定與 manifest 相同的 realm。
 
 **Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
-`cells.canary.yaml` 只有兩個 armed mean_reversion fUST cells（a30/p2），fUSD
-保持 dark；RatePercentile 與 p30 不在 canary set。`shadow-p14` 專用
+`cells.live.yaml` 只有兩個 armed mean_reversion fUST cells（a30/p2），fUSD
+保持 dark；RatePercentile 與 p30 不在 live set。`shadow-p14` 專用
 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、
 `t2=1.5`，並且 profile 固定 `BFX_PHASE=shadow`、`BFX_DEPLOYMENT_ENV=shadow`、
-`optimizer_shadow`；canary profile 不得選用它。單筆送單金額不在 yaml 設定——由
+`optimizer_shadow`；live profile 不得選用它。單筆送單金額不在 yaml 設定——由
 deployment reconciler 依 gap 動態決定。
 
 **基礎設施**
@@ -576,13 +592,32 @@ deployment reconciler 依 gap 動態決定。
 | Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
-**Deploy script（`scripts/deploy-vm.sh`，ON THE VM 跑）**：`git pull --ff-only` **先於** env 組裝（2026-07-10 順序 bug 修正 `2748514`）→ `~/bfx/{bot,webapi,frontend}.env` + `deploy/vm/<phase>.env`（`paper`、`shadow`、`shadow-p14`、`canary`）組成 `.env.runtime`（derived，勿手改）→ preflight 必要變數、phase-policy 契約與 required book/model evidence → canary 仍需 `BFX_CANARY_CONFIRM=yes`，並顯示 binding per-symbol safety caps 與 env fallback → 全 stack build + up。注意：`canary.env` 變更會改 env_file hash → `bfx-postgres` 一併 recreate（volume 安全、短暫重啟）。舊 `deploy-koyeb.sh` 為歷史遺跡。
+**Immutable release（`scripts.immutable_release`）**：clean tracked source archive
+build once → candidate shared inventory/Python/env manifest → saved exact backend
+and frontend images → owner-only schema dry-run/digest apply → bounded BootRecovery
+snapshot bootstrap（初次安裝無 policy 時）→ unchanged policy conversion dry-run/digest
+apply → fresh DR → same-image technical start with existing halt. Host root 由
+Docker inspect 產生 root-owned RO launch proof；actual daemon module、UID1000、RO
+code/Python、no writable executable mounts。新的 container 需要新的 launch proof。
+既有 PG18/Redis/volumes/runtime files 不重建。`deploy-vm.sh --bundle ...` 只是 wrapper；
+舊 moving-main/phase/canary-confirm/whole-stack build 指令已退役，歷史見 git。
+完整 CLI、ownership、首裝順序與 recovery 見
+[immutable release runbook](../docs/runbooks/immutable-release.md)。
+
+**Application authority**：Overview 的 funding-status adapter 沿用 authenticated
+account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 daemon
+讀 canonical status＋dry-evaluate；不讀 auth.user、不推算另一套 budget。
+缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
+ReleaseSessions 由人分開 prepare/authorize/validate/promote，expected_revision 防止
+stale request；既有單一 daemon worker 與 command gate 執行，沒有另一個 executor。
+靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
+仍是人工作業，technical start/health 不等同 activation。
 
 **關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`、
-`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、`BFX_ALLOCATION_CAP_USDT`、
+`BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`、
 `BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
-`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_CONCENTRATION_PCT`、`BFX_SCHEDULER_BUFFER_S`、
+`BFX_MIN_OFFER_BUFFER_PCT`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
 credential vault 解密。public read model 另以明確的

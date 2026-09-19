@@ -111,6 +111,88 @@ export interface UserConfig {
   updatedAt: string;
 }
 
+// Canonical live authority: Decimal values stay strings throughout the UI.
+export interface CapitalPolicy {
+  enabled: boolean;
+  reserve_amount: string;
+  allocation_mode: "all_available";
+  max_cell_fraction: string;
+}
+
+export interface CapitalBudget {
+  spendable: string;
+  cell_limit: string;
+  cell_headroom: string;
+  max_new_offer: string;
+  reason: string | null;
+}
+
+export type CapitalStatus =
+  | {
+      capital_available: false;
+      reason: string;
+      policy_revision?: number;
+      policy?: CapitalPolicy;
+    }
+  | {
+      capital_available: true;
+      policy_revision: number;
+      policy_digest: string;
+      snapshot_seq: number;
+      policy: CapitalPolicy;
+      available_balance: string;
+      unreflected_commitments: string;
+      total_capital: string;
+      spendable: string;
+      unattributed_credit_exposure: string;
+      cells: Record<string, CapitalBudget>;
+    };
+
+export interface FundingStatus {
+  account_id: string;
+  deployment_environment: string;
+  halt: { halted: boolean; reason: string | null; sources: unknown };
+  symbols: Record<string, CapitalStatus>;
+  configured_cells: {
+    symbol: string;
+    cell: string;
+    strategy: string;
+    period: string;
+  }[];
+  dry_run: {
+    account_id: string;
+    deployment_environment: string;
+    symbols: Record<
+      string,
+      {
+        blocked_by: string | null;
+        cells: Record<
+          string,
+          { would_submit: boolean; blocked_by: string | null }
+        >;
+      }
+    >;
+  };
+}
+
+export interface ReleaseSession {
+  id: string;
+  state: string;
+  symbol: string;
+  cell: string;
+  strategy: string;
+  max_amount: string;
+  minimum_amount: string | null;
+  exact_amount: string | null;
+  expires_at_ms: number;
+  request_revision: number;
+  processed_revision: number;
+  halt_id: number | null;
+  binding: Record<string, unknown> | null;
+  evidence: Record<string, unknown>;
+  reason: string | null;
+}
+
 // ── SP4 Projections (operator console read models) ──
 
 /** offer_claims FSM states (backend RegistryState). */

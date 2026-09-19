@@ -6,6 +6,7 @@ import { QueryError } from "@/components/shared/query-error";
 import { useSelectedExchangeAccountId } from "@/features/accounts/hooks/use-exchange-accounts";
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
 import { ExecutionsTable } from "@/features/dashboard/components/executions-table";
+import { FundingPanel } from "@/features/dashboard/components/funding-panel";
 import { OffersTable } from "@/features/dashboard/components/offers-table";
 import { PositionsCard } from "@/features/dashboard/components/positions-card";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
@@ -76,6 +77,10 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-4">
+      <FundingPanel
+        key={account.exchangeAccountId}
+        exchangeAccountId={account.exchangeAccountId}
+      />
       <UncertaintyBanner
         uncertainties={uncertainties.data ?? []}
         visibleSymbols={visibleSymbols}

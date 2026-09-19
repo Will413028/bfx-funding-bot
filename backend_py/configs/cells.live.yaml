@@ -1,0 +1,13 @@
+# Existing qualified fUST cells. Full-account reconciliation still covers fUSD.
+# All amounts/reserve/70% cell authority are applied CapitalPolicy, not this file.
+cells:
+  - strategy: mean_reversion
+    symbol: fUST
+    period_agg: a30
+    timeframe: 1h
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.42049266874194213, ema_span: 24}
+  - strategy: mean_reversion
+    symbol: fUST
+    period_agg: p2
+    timeframe: 1h
+    params: {threshold_sigma: 0.5, ratio_sigma: 0.4062263004196277, ema_span: 24}
