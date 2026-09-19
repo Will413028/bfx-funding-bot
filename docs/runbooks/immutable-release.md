@@ -202,12 +202,24 @@ uv run --frozen --no-sync python -m scripts.immutable_release bootstrap \
 
 It acquires the same account/environment WriterLock, requires an existing true
 halt before loading vault credentials, runs canonical BootRecovery with complete
-fUST/fUSD observations and confirmation, checks accepted freshness and unchanged
-halt epoch, then exits. Default deadline60s, one recovery attempt; direct image
+account-wide observations and confirmation (including any fUSD wallets, offers
+and credits), checks enabled fUST readiness with canonical cell `fUST_a30`,
+accepted freshness and unchanged halt epoch, then exits. A complete fUST-only
+snapshot is supported: absent disabled fUSD wallets remain absent, never inferred
+as zero. Missing enabled fUST or stale/incomplete/unknown account evidence still
+blocks readiness. Default deadline60s, one recovery attempt; direct image
 module `scripts.bootstrap_capital --account-id UUID --environment prod
 --timeout-seconds N` accepts1–300s. It persists canonical reconciliation evidence
 but constructs no executor, scheduler, financial worker or permit consumer and
 calls no venue submit/cancel. Failure leaves halt and conversion guard intact.
+
+Conversion still applies an explicit disabled fUSD policy. Its `fUSD_a30` and
+`fUSD_p2` report cells contain only
+`{"status": "disabled", "capital_evaluated": false}`, even when a fUSD wallet
+exists. These cells describe configuration, with no balance, exposure, delta or
+headroom evaluation. Enabled fUST cells retain canonical financial evaluation
+and snapshot binding in the conversion digest; dry-run/digest apply, account-wide
+acceptance, writer/halt and permit guards remain unchanged.
 
 Prepare an explicit reviewed legacy-source JSON using the unchanged conversion
 contract; see `scripts.convert_capital_policy --help` and capital_conversion

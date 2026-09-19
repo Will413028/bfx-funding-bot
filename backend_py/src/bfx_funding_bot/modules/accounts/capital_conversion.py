@@ -142,6 +142,9 @@ async def convert_capital_policy(
             "old_applied_policy": previous.policy if previous is not None else None, "cells": {}}
         for period in ("a30", "p2"):
             cell = canonical_cell_id(symbol, period)
+            if not policy.enabled:
+                values["cells"][cell] = {"status": "disabled", "capital_evaluated": False}
+                continue
             try:
                 view = await repository.preview_policy(session, symbol=symbol, cell_id=cell,
                                                        now_ms=now_ms, policy=policy)

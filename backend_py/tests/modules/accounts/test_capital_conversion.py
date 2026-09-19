@@ -1,10 +1,17 @@
+from dataclasses import replace
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from bfx_funding_bot.modules.accounts.tables import AccountConfigDraft
-from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRevisionRow
+from bfx_funding_bot.modules.execution.capital_tables import (
+    CapitalPolicyRevisionRow,
+    CapitalSnapshotRow,
+)
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
 from tests.integration.test_capital_repository import (
     capital_db,
@@ -15,6 +22,24 @@ from tests.integration.test_capital_repository import (
 
 # Re-export real DB fixtures; PG variants retain the integration marker.
 __all__ = ["capital_db", "capital_engine"]
+
+
+async def currency_snapshot(factory, repo, **overrides):
+    """Accept immutable evidence with the wallet/coverage shape under test."""
+    async with factory.begin() as session:
+        fence = await repo.begin_snapshot(session, now_ms=1000)
+    event = replace(VenueSnapshotObserved(
+        account_id=str(repo.account_id), environment=repo.environment,
+        query_started_at_ms=1000, query_finished_at_ms=1050,
+        offers=(), credits=(), wallet_available={"fUST": Decimal("1000")},
+        coverage=SnapshotCoverage(True, True, True),
+    ), **overrides)
+    async with factory.begin() as session:
+        result = await repo.accept_snapshot(session, fence=fence, event=event,
+            confirmation=replace(event, query_started_at_ms=1050, query_finished_at_ms=1060,
+                                 event_id=uuid4()), now_ms=1060)
+        assert result.event_seq is not None
+        return result.event_seq
 
 
 @pytest.mark.asyncio
@@ -78,11 +103,15 @@ def legacy():
 
 
 @pytest.mark.asyncio
-async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capital_db):
+@pytest.mark.parametrize("usd_balance", [None, "0", "250"], ids=["ust_only", "usd_zero", "usd_balance"])
+async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capital_db, usd_balance):
     from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     factory, account = capital_db
     repo = repository(account)
-    await snapshot(factory, repo)
+    wallets = {"fUST": Decimal("1000")}
+    if usd_balance is not None:
+        wallets["fUSD"] = Decimal(usd_balance)
+    seq = await currency_snapshot(factory, repo, wallet_available=wallets)
     async with factory.begin() as session:
         session.add(AccountConfigDraft(exchange_account_id=account, config={"currency": "UST"},
                                        revision=7, source="operator"))
@@ -93,6 +122,15 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
                                               now_ms=1100, apply_digest=None)
         assert report["symbols"]["fUST"]["new_policy"]["reserve_amount"] == "0"
         assert report["symbols"]["fUSD"]["new_policy"]["enabled"] is False
+        for cell in ("fUSD_a30", "fUSD_p2"):
+            assert report["symbols"]["fUSD"]["cells"][cell] == {
+                "status": "disabled", "capital_evaluated": False,
+            }
+        stored = await session.get(CapitalSnapshotRow, seq)
+        assert set(stored.classification["symbols"]) == set(wallets)
+        logged = await session.get(EventLogRow, seq)
+        assert set(logged.payload["wallet_available"]) == set(wallets)
+        assert report["symbols"]["fUST"]["cells"]["fUST_a30"]["snapshot_seq"] == seq
         assert report["symbols"]["fUST"]["old_effective"]["cap"] == "200"
         assert report["symbols"]["fUST"]["cells"]["fUST_a30"]["new_max_new_offer"] == "700.00"
         assert report["symbols"]["fUST"]["cells"]["fUST_a30"]["delta"] == "500.00"
@@ -101,6 +139,8 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
         applied = await convert_capital_policy(session, repository=repo, legacy=legacy(),
             now_ms=1100, apply_digest=report["conversion_digest"])
         assert applied["status"] == "applied"
+        assert applied["conversion_digest"] == report["conversion_digest"]
+        assert (await repo.read_applied(session, symbol="fUSD")).policy.enabled is False
         assert (await repo.read_applied(session, symbol="fUST")).policy.reserve_amount == Decimal("0")
         assert (await session.scalar(select(AccountConfigDraft))).revision == 7
         assert (await session.scalar(select(TradingHaltRow))).halted is True
@@ -109,6 +149,88 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
             now_ms=1100, apply_digest=report["conversion_digest"])
         assert again["status"] == "already_applied"
         assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 2
+        stored = await session.get(CapitalSnapshotRow, seq)
+        assert set(stored.classification["symbols"]) == set(wallets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault,reason", [
+    ("missing_ust", "snapshot_symbol_missing"),
+    ("stale", "snapshot_stale"),
+    ("incomplete", "snapshot_unavailable"),
+    ("unknown_usd", "execution_unknown"),
+])
+async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capital_db, fault, reason):
+    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.events import ReservationUnknown
+    from tests.integration.test_capital_repository import intent
+
+    factory, account = capital_db
+    repo = repository(account)
+    if fault == "incomplete":
+        with pytest.raises(CapitalBlockedError, match="snapshot_incomplete"):
+            await currency_snapshot(factory, repo, coverage=SnapshotCoverage(True, False, True))
+    else:
+        wallets = {"fUSD": Decimal("0")} if fault == "missing_ust" else {"fUST": Decimal("1000")}
+        await currency_snapshot(factory, repo, wallet_available=wallets)
+    if fault == "unknown_usd":
+        event, decision = intent(account, symbol="fUSD")
+        async with factory.begin() as session:
+            session.add(decision)
+            await session.flush()
+            await repo.writer.append(session, event)
+            await repo.writer.append(session, ReservationUnknown(
+                symbol="fUSD", cid=event.cid, account_id=str(account), is_simulated=True,
+                signal_correlation_id=event.signal_correlation_id,
+                reservation_ref=event.reservation_ref, amount=event.amount,
+                reason="test-outcome", occurred_at_ms=1150,
+            ))
+    now_ms = 11001 if fault == "stale" else 1200
+    async with factory.begin() as session:
+        report = await convert_capital_policy(session, repository=repo, legacy=legacy(),
+                                              now_ms=now_ms, apply_digest=None)
+        for cell in ("fUST_a30", "fUST_p2"):
+            assert report["symbols"]["fUST"]["cells"][cell] == {"unavailable": reason}
+        assert report["symbols"]["fUSD"]["cells"]["fUSD_a30"] == {
+            "status": "disabled", "capital_evaluated": False,
+        }
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="conversion_snapshot_unavailable"):
+            await convert_capital_policy(session, repository=repo, legacy=legacy(),
+                now_ms=now_ms, apply_digest=report["conversion_digest"])
+        assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["snapshot", "legacy", "policy"])
+async def test_ust_only_conversion_digest_binds_enabled_evidence_and_sources(capital_db, changed):
+    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+
+    factory, account = capital_db
+    repo = repository(account)
+    await currency_snapshot(factory, repo)
+    source = legacy()
+    async with factory.begin() as session:
+        report = await convert_capital_policy(session, repository=repo, legacy=source,
+                                              now_ms=1100, apply_digest=None)
+    if changed == "snapshot":
+        await currency_snapshot(factory, repo)
+    elif changed == "legacy":
+        source["caps"]["fUST"] = "201"
+    else:
+        async with factory.begin() as session:
+            await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
+                                    expected_revision=0, source={"operator": "test"})
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="conversion_changed"):
+            await convert_capital_policy(session, repository=repo, legacy=source,
+                now_ms=1100, apply_digest=report["conversion_digest"])
+        assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == (
+            1 if changed == "policy" else 0
+        )
 
 
 @pytest.mark.asyncio
