@@ -1,6 +1,6 @@
 # Dynamic capital policy and release-scoped canary
 
-日期：2026-09-19。狀態：方向已核准；本文件為待審查設計，尚未實作或部署。
+日期：2026-09-19。狀態：設計已核准，使用者已授權自主實作與技術部署；production acceptance 尚未完成。
 
 ## 1. 目標與範圍
 
@@ -56,7 +56,7 @@
 - `L`：本機 durable commitments 中，尚未被該 snapshot 證明已反映在 A 的金額。
 - `R`：有效政策的 reserve。
 - `T`：同 scope funding capital，包括 available、offers 與 lent，依 canonical projector 的去重分類取得，不能再加一次本機對應 reservation。
-- `E_cell`：cell 已借出、掛單與尚未反映於 snapshot 的 commitments，按 attempt/offer identity 去重。
+- `E_cell`：cell 已借出、掛單與尚未反映於 snapshot 的 commitments，按 attempt/offer identity 去重。完整 snapshot 中已確認、但缺少真實 cell provenance 的 credits 作為 shared unattributed exposure，保守加入每一個 cell 的 concentration 評估；在 A/L/T 的資金計算仍只算一次，不能虛構 ownership。
 
 ```text
 spendable = max(0, A - L - R)
@@ -69,7 +69,7 @@ new_offer_amount <= min(spendable, cell_headroom)
 
 這是「新增可放貸金額」，不是要求每輪重新送出全部帳戶總額。分配器與 pre-submit guard 共用同一 `CapitalPolicy` evaluator；不能由兩套公式分別決定 target 和安全上限。
 
-L 的扣抵必須有 snapshot fence、attempt identity 與 event sequence 的對應證據。不能用「時間較新」猜測某筆已被反映；無法分類時 block，不能清零，也不能同時從 A 與 E 重複扣抵。人工掛單／外部 auto-renew 產生的未知活動沿用 quarantine/uncertainty 流程，不能默認可管理。
+L 的扣抵必須有 snapshot fence、attempt identity 與 event sequence 的對應證據。不能用「時間較新」猜測某筆已被反映；無法分類時 block，不能清零，也不能同時從 A 與 E 重複扣抵。snapshot ingestion 需保存查詢前 command fence，接受時在相同 account lock 下確認查詢期間沒有衝突命令；snapshot append 序號不能充當查詢前 fence。人工掛單／外部 auto-renew 產生的未知活動沿用 quarantine/uncertainty 流程，不能默認可管理。已確認 credit 僅缺 cell provenance 與 execution UNKNOWN 必須區分：前者採上述保守 concentration，後者阻擋送單。
 
 命令執行延用 account-scoped single writer 與 AccountCommandGate：
 
