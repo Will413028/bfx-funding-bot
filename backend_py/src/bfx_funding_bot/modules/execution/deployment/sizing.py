@@ -4,7 +4,39 @@ No I/O, no venue calls — deterministic given inputs (testable in isolation).
 """
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
+from math import nextafter
+
+from bfx_funding_bot.modules.execution.capital_repository import CapitalView
+
+
+def venue_amount(amount: Decimal) -> Decimal:
+    """Downward native amount quantization, including the legacy float boundary."""
+    bounded = amount.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+    wire = float(bounded)
+    while Decimal(str(wire)) > bounded:
+        wire = nextafter(wire, 0.0)
+    return Decimal(str(wire))
+
+
+def allocate_capital(*, views: dict[str, CapitalView], min_fill: Decimal) -> dict[str, Decimal]:
+    """Allocate one consistent canonical budget, emptiest cell first."""
+    if not views:
+        return {}
+    first = next(iter(views.values()))
+    remaining = first.budget.spendable
+    fills: dict[str, Decimal] = {}
+    for cell in sorted(views, key=lambda name: (views[name].snapshot.cell_exposure, name)):
+        view = views[cell]
+        if (view.applied, view.snapshot_seq, view.budget.spendable) != (
+            first.applied, first.snapshot_seq, first.budget.spendable,
+        ):
+            raise ValueError("inconsistent capital views")
+        amount = venue_amount(min(remaining, view.budget.max_new_offer))
+        if amount >= min_fill:
+            fills[cell] = amount
+            remaining -= amount
+    return fills
 
 
 def effective_min_usdt(venue_floor_usd: Decimal, buffer_pct: Decimal) -> Decimal:
@@ -44,11 +76,8 @@ def allocate_gap(
     if gap < min_fill or not active_cells:
         return {}
 
-    # Degenerate-case relaxation: with a single active cell the concentration
-    # cap buys no diversification (all cells run the same strategy per symbol)
-    # and strands (1 − concentration_pct) × target at 0%. max() is
-    # behavior-identical for ≥2 active cells.
-    cap_per_cell = max(concentration_pct * target, target / len(active_cells))
+    # Even a lone active cell must respect the configured concentration limit.
+    cap_per_cell = concentration_pct * target
     ordered = sorted(active_cells, key=lambda c: (deployed.get(c, Decimal("0")), c))
 
     fills: dict[str, Decimal] = {}

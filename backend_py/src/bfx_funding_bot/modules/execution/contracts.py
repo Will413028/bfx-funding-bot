@@ -8,7 +8,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalView
 
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
@@ -94,6 +98,7 @@ class ReadyToSubmit:
     model_version: str | None
     evidence: Mapping[str, object]
     safety: GuardResult
+    capital_view: CapitalView | None = None
 
     def __post_init__(self) -> None:
         if not self.decision_id.strip():

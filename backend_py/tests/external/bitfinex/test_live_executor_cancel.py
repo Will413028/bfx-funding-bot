@@ -1,6 +1,7 @@
 """Unit tests for BitfinexLiveExecutor.cancel — pure fns + I/O shell."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -27,6 +28,29 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+
+
+@pytest.mark.usefixtures("_no_tenacity_sleep")
+async def test_cancel_retry_rechecks_halt_before_each_transport():
+    from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
+    calls = []
+
+    async def transport(request):
+        calls.append(request)
+        return Response(503)
+
+    async def guard():
+        if calls:
+            raise CommandGateBlocked("halted during cancel retry")
+
+    context = AccountContext("test", Credentials("mock", "mock"), Decimal("0"))
+    context = replace(context, before_cancel_transport=guard)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        executor = _make_executor(http=http, bus=DomainEventBus())
+        with pytest.raises(CommandGateBlocked, match="halted during cancel retry"):
+            await executor.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                                  account_id="test", ctx=context)
+    assert len(calls) == 1
 
 
 def test_classify_success() -> None:

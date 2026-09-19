@@ -145,6 +145,16 @@ class SafetyGuardChain:
         finally:
             self.probe.record_heartbeat("safety_chain")
 
+    async def evaluate_transport(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
+        """Post-commit halt/ownership fencing; capital is already reserved durably."""
+        for guard in self.guards:
+            if guard.name == "capital_policy":
+                continue
+            result, _ = await self._evaluate_one(guard, decision, ctx)
+            if not result.allowed:
+                return result
+        return GuardResult(True, "<transport>")
+
     async def dry_evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> DryRunReport:

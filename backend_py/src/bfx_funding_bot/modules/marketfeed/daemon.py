@@ -84,6 +84,9 @@ from bfx_funding_bot.modules.execution.canary_permit import (
     CanaryPermitRepository,
     CanaryPermitScope,
 )
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -143,7 +146,7 @@ from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
-    BuyingPowerGuard,
+    CapitalPolicyGuard,
     DatabaseUncertaintyReader,
     HeartbeatGuard,
     ManualKillGuard,
@@ -286,7 +289,7 @@ class AccountBootstrap:
         """Reject the old process-global realm in live/canary boot modes."""
         legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
         executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
-        if legacy and (phase is Phase.CANARY or executor == "bitfinex_live"):
+        if legacy and (phase in {Phase.CANARY, Phase.LIVE} or executor == "bitfinex_live"):
             raise ConfigurationError(
                 "BFX_ACCOUNT_ID is no longer supported; use "
                 "BFX_EXCHANGE_ACCOUNT_ID"
@@ -767,6 +770,7 @@ class Daemon:
     trading_readiness: TradingReadiness | None = None
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
+    command_gate: AccountCommandGate | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
     metrics: DaemonMetrics | None = None
     # OTel traces (wiki pending #4) — default-off (BFX_OTEL_ENABLED), fail-open.
@@ -1267,16 +1271,17 @@ _CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
 def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
-    """Canary (real money) must not run with a safety guard silently off.
+    """Real money cannot silently disable ownership-independent safety guards.
 
-    Requires the 4 hard guards + the 2 loss-limiters enabled; raises a
-    config-fatal ValueError (propagates to non-zero startup exit) otherwise.
-    No-op for paper/shadow. divergence_rate stays optional.
+    Normal live replaces allocation/buying-power flags with the mandatory
+    applied-policy guard. Both real phases still require kill/auth/heartbeat
+    and both loss limiters. No-op for paper/shadow; divergence stays optional.
     """
-    if phase != Phase.CANARY:
+    if phase not in {Phase.CANARY, Phase.LIVE}:
         return
     missing = [
         name for name in _CANARY_REQUIRED_HARD
+        if not (phase is Phase.LIVE and name in {"allocation_cap", "buying_power"})
         if not getattr(safety_cfg.hard_guards, name).enabled
     ]
     missing += [
@@ -1285,7 +1290,7 @@ def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> Non
     ]
     if missing:
         raise ValueError(
-            f"BFX_PHASE=canary requires all safety guards enabled; disabled: {missing}"
+            f"BFX_PHASE={phase.value} requires all safety guards enabled; disabled: {missing}"
         )
 
 
@@ -1318,9 +1323,12 @@ async def build_daemon(
     config = load_config(cells_yaml_path=cells_yaml_path)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    live_executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
+    if config.phase is Phase.LIVE and not live_executor:
+        raise ConfigurationError("normal live requires bitfinex_live executor")
     try:
         allocation_cap = Decimal(
-            os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
+            "0" if config.phase is Phase.LIVE else os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
         )
     except Exception as exc:
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
@@ -1333,6 +1341,20 @@ async def build_daemon(
             allocation_cap_usdt=allocation_cap,
             phase=config.phase,
         )
+    capital_runtime: CapitalRuntime | None = None
+    if live_executor:
+        capital_runtime = CapitalRuntime(
+            repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
+                environment=config.deployment_environment.value, max_snapshot_age_ms=300_000),
+            session_factory=session_factory, clock=now_ms_utc,
+        )
+        try:
+            async with session_factory.begin() as policy_session:
+                for symbol in configured_symbols(config.cells):
+                    await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
+        except Exception:
+            await db_engine.dispose()
+            raise
 
     probe = HealthProbe()
     # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
@@ -1469,7 +1491,8 @@ async def build_daemon(
     safety_cfg = load_safety_config(safety_cfg_path)
     assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
-    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+    if capital_runtime is None:
+        assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
 
     # This is deliberately before build_executor() and before any live recovery
     # loop is constructed.  The existing AccountCommandGate remains the only
@@ -1563,12 +1586,13 @@ async def build_daemon(
         "effective_cap_per_symbol %s",
         # assert_caps_invariant (above) already proved every configured symbol has
         # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
+        "applied CapitalPolicy" if capital_runtime else
         {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
     )
     # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
-    balance_buffer_usdt = Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
+    balance_buffer_usdt = Decimal("0") if capital_runtime else Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
 
     # Executor is built before the guard chain so guard composition can branch on
     # spec.is_simulated (BuyingPowerGuard is live-only — see allocation_cap block).
@@ -1587,6 +1611,8 @@ async def build_daemon(
         bus=bus,
         nonce_provider=bfx_nonce,
     )
+    if not spec.is_simulated and capital_runtime is None:
+        raise ConfigurationError("live executor requires applied capital runtime")
 
     # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
     # so paper/shadow leave it None and the guard/liveness/release are all inert.
@@ -1634,38 +1660,16 @@ async def build_daemon(
             # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
             watched_sub_tasks=["ws"],
         ))
-    if hg.allocation_cap.enabled:
+    if capital_runtime is not None:
+        guards.append(CapitalPolicyGuard(runtime=capital_runtime))
+    elif hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(
             ledger=ledger,
             caps=hg.allocation_cap.caps,
             default_cap=hg.allocation_cap.default_cap,
-            # Reuse the already-read scalar (read-once, like BuyingPowerGuard
-            # reuses balance_buffer_usdt) rather than re-reading the env var with
-            # a different default. assert_caps_invariant guarantees every
-            # configured symbol has an explicit caps entry, so this fallback is
-            # dead code for real currencies — but keeping it consistent with the
-            # reconciler's env-fallback (account_ctx.allocation_cap_usdt, also
-            # = allocation_cap) avoids a latent divergence.
+            # Legacy simulation-only configuration. Live always uses the policy above.
             env_fallback_cap=allocation_cap,
         ))
-        # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
-        # reads funding-wallet available (0 until the first live reconcile), so in
-        # the simulated path it would block every POST. The chain is inert in sim
-        # today only because its sole evaluator (DeploymentReconciler.deploy) is
-        # live-only; gate here so that contract is local to the guard rather than
-        # an emergent invariant a future sim-path chain evaluation could violate.
-        if not spec.is_simulated:
-            guards.append(BuyingPowerGuard(
-                ledger=ledger,
-                buffers=hg.buying_power.buffers,
-                default_buffer=hg.buying_power.default_buffer,
-                # Legacy global scalar as fallback for any symbol absent from the
-                # buffers map. Reuses the same env value the DeploymentReconciler
-                # clamp consumes (balance_buffer_usdt), so for the live
-                # single-symbol (fUST) case the resolved buffer equals the scalar
-                # and no double subtraction occurs.
-                env_fallback_buffer=balance_buffer_usdt,
-            ))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
@@ -1728,6 +1732,7 @@ async def build_daemon(
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
             uncertainty_handler=ledger.on_reservation_unknown,
+            capital_repository=capital_runtime.repository if capital_runtime else None,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1805,7 +1810,7 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
-    reservation_executor: ExecutorPort = ReservationEmittingMiddleware(
+    reservation_middleware = ReservationEmittingMiddleware(
         executor,
         bus=bus,
         persister=persister,
@@ -1814,7 +1819,9 @@ async def build_daemon(
             ledger.on_reservation_unknown if not spec.is_simulated else None
         ),
         safety_evaluator=safety_chain,
+        capital_runtime=capital_runtime,
     )
+    reservation_executor: ExecutorPort = reservation_middleware
 
     # Halt 2's only live command path is a durable one-shot permit.  The
     # scheduler remains halted by ManualKillGuard; if a separately approved
@@ -1893,6 +1900,7 @@ async def build_daemon(
             raise ValueError(
                 "live execution requires a FundingBookService for the configured policy",
             )
+        assert capital_runtime is not None  # validated immediately after executor construction
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
         execution_gate = ExecutionGate(
@@ -1906,6 +1914,7 @@ async def build_daemon(
             json.dumps(config.model_dump(mode="json"), sort_keys=True).encode(),
         ).hexdigest()
         deployment_reconciler = DeploymentReconciler(
+            capital_runtime=capital_runtime,
             store=quote_store,
             tracker=CellDeploymentTracker(),
             ledger=ledger,
@@ -1917,16 +1926,10 @@ async def build_daemon(
             min_offer_buffer_pct=Decimal(
                 os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02"),
             ),
-            concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
-            balance_buffer_usdt=balance_buffer_usdt,
-            caps=hg.allocation_cap.caps,
-            default_cap=hg.allocation_cap.default_cap,
-            buffers=hg.buying_power.buffers,
-            default_buffer=hg.buying_power.default_buffer,
             clock=now_ms_utc,
             event_sink=stdout_sink,
             phase=config.phase,
-            canceller=executor if isinstance(executor, CancelPort) else None,
+            canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
             reprice=reprice_policy,
             ladder=ladder_policy,
             attempt_recorder=attempt_recorder,
@@ -2166,11 +2169,8 @@ async def build_daemon(
         )
 
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
-    # Reports what the guards actually do, not what the config says. The env
-    # fallbacks passed here are the SAME scalars the guards and the reconciler
-    # resolve against (allocation_cap / balance_buffer_usdt), so the report's
-    # "which tier bound this" answer describes the live resolution rather than
-    # a second reading of the same files.
+    # Real-money status uses the same applied policy reader as the planner and
+    # command gate. Legacy scalar/map arguments are simulation diagnostics only.
     trading_status = TradingStatusService(
         chain=safety_chain,
         ledger=ledger,
@@ -2186,6 +2186,7 @@ async def build_daemon(
         attempts=attempt_recorder,
         halt_store=halt_store,
         readiness=trading_readiness,
+        capital_runtime=capital_runtime,
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
@@ -2276,6 +2277,7 @@ async def build_daemon(
         trading_status=trading_status,
         trading_readiness=trading_readiness,
         writer_lock=writer_lock,
+        command_gate=reservation_middleware.command_gate,
         metrics=metrics,
         tracing=tracing,
     )

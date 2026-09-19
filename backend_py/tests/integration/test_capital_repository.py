@@ -863,3 +863,58 @@ async def test_historical_cycles_validate_venue_ownership_across_cids(capital_db
         else:
             view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
             assert view.budget.spendable == 900
+
+
+@pytest.mark.parametrize("cycle_pairs", [2, 64])
+async def test_historical_capital_read_has_bounded_scope_queries_and_validation(
+    capital_db, capital_engine, monkeypatch, cycle_pairs,
+):
+    from unittest.mock import Mock
+
+    from sqlalchemy import event as sql_event
+
+    import bfx_funding_bot.modules.execution.capital_repository as module
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+
+    factory, account = capital_db
+    repo = repository(account)
+    rows = []
+    for index in range(cycle_pairs):
+        for row in historical_rows(environment="ci"):
+            row.account_id = row.payload["account_id"] = str(account)
+            row.exchange_account_id = account
+            row.cid = row.payload["cid"] = 1000 + index
+            if row.venue_offer_id:
+                row.venue_offer_id = row.payload["venue_offer_id"] = f"{index}-{row.venue_offer_id}"
+            rows.append(row)
+    async with factory.begin() as session:
+        session.add_all(rows)
+        await session.flush()
+        await module.PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+            session, account_id=str(account), deployment_environment="ci",
+        )
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+    validator = Mock(wraps=module.historical_claim_reset_sequences)
+    monkeypatch.setattr(module, "historical_claim_reset_sequences", validator)
+    statements = []
+
+    def record_sql(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    sql_event.listen(capital_engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        for read_number in (1, 2):
+            statements.clear()
+            async with factory.begin() as session:
+                view = await repository(account).read_capital(
+                    session, symbol="fUST", cell_id="a30", now_ms=1100,
+                )
+                assert view.budget.spendable == 900
+            # Full-scope validation is renewed for each locked read, not cached
+            # across transactions, and never repeated for each legacy intent.
+            assert validator.call_count == read_number
+            assert len(statements) < 30, statements
+    finally:
+        sql_event.remove(capital_engine.sync_engine, "before_cursor_execute", record_sql)

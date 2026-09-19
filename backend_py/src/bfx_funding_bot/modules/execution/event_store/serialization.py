@@ -19,6 +19,8 @@ from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import (
     __SCHEMA_VERSION__,
     DEFAULT_RECONCILE_SYMBOL,
+    CancelAcknowledged,
+    CancelRequested,
     CreditClosed,
     OrderFilled,
     ReservationClaimed,
@@ -38,6 +40,8 @@ from bfx_funding_bot.modules.execution.events import (
 
 # event_type string <-> domain class. Clean field names (we own this schema).
 _TYPE_BY_CLASS: dict[type, str] = {
+    CancelRequested: "CANCEL_REQUESTED",
+    CancelAcknowledged: "CANCEL_ACKNOWLEDGED",
     ReservationIntent: "RESERVATION_INTENT",
     ReservationClaimed: "RESERVATION_CLAIMED",
     ReservationFailed: "RESERVATION_FAILED",

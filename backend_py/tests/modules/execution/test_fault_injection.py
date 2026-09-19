@@ -1,7 +1,9 @@
-"""Deterministic submit-fault matrix for the live command boundary.
+"""Deterministic simulated submit-fault matrix using the real HTTP adapter.
 
 The fake transport is deliberately test-local: production keeps using an
 ordinary injected ``httpx.AsyncClient`` and has no fault-mode branches.
+In-memory persistence/uncertainty fixtures are explicitly simulated. Actual
+policy-backed SQLite/PG command faults live in test_capital_command_boundary.
 """
 from __future__ import annotations
 
@@ -379,7 +381,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             uncertainty_reader=reader,
             safety_evaluator=_SafetyEvaluator(),
             deployment_environment=environment,
-            is_simulated=False,
+            is_simulated=True,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -471,7 +473,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=_SafetyEvaluator(),
             deployment_environment="ci",
-            is_simulated=False,
+            is_simulated=True,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -515,7 +517,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 uncertainty_reader=uncertainty_reader,
                 safety_evaluator=_SafetyEvaluator(),
                 deployment_environment="staging",
-                is_simulated=False,
+                is_simulated=True,
                 clock=iter(range(300, 400)).__next__,
                 date_provider=lambda: date(2026, 9, 3),
             )
@@ -668,7 +670,7 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
         uncertainty_reader=_UncertaintyReader(open_scopes),
         safety_evaluator=_SafetyEvaluator(),
         deployment_environment="ci",
-        is_simulated=False,
+        is_simulated=True,
         clock=iter(range(100, 200)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )

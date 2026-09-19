@@ -11,10 +11,13 @@ or process-global realm fallback.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
@@ -65,6 +68,10 @@ class AccountContext:
     # authorize its already-consumed permit through the persistent halt guard.
     # It is never serialized or accepted from an external request.
     canary_halt_authorization: object | None = None
+    capital_cell_id: str | None = None
+    # Only the command boundary supplies this; guards must reuse its replayed state.
+    command_session: AsyncSession | None = None
+    before_cancel_transport: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)

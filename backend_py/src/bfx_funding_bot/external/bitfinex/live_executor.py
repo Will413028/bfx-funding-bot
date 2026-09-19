@@ -484,6 +484,8 @@ class BitfinexLiveExecutor:
         Returns Bitfinex response JSON on 2xx; raises ExecutorAuthError /
         ExecutorFatalError / ExecutorTransientError on 4xx/5xx/network.
         """
+        if ctx.before_cancel_transport is not None:
+            await ctx.before_cancel_transport()
         try:
             voi_int = int(venue_offer_id)
         except ValueError as e:

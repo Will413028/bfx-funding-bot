@@ -8,7 +8,7 @@ any transport; never retry a committed intent after a crash.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -490,12 +490,16 @@ class CapitalRepository:
         inventory = await self._attempt_inventory(session)
         intents = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
+        historical_cycles: dict[int, list[EventLogRow]] | None = None
         for logged_intent in intents:
             decoded = deserialize_stored_event(logged_intent)
             if not isinstance(decoded, ReservationIntent) or decoded.symbol != symbol:
                 continue
             if not isinstance(decoded.submission_attempt, SubmissionAttemptPayload):
-                await self._check_historical_intent(session, logged_intent, event, row.command_fence)
+                if historical_cycles is None:
+                    historical_cycles = await self._historical_cycles(session)
+                await self._check_historical_intent(session, logged_intent, event, row.command_fence,
+                    historical_cycles.get(logged_intent.event_seq, ()))
                 continue
         for logged_intent, decoded, attempt in inventory.values():
             if decoded.symbol != symbol:
@@ -570,31 +574,39 @@ class CapitalRepository:
             raise CapitalBlockedError("attempt_intent_missing")
         return inventory
 
-    async def _check_historical_intent(self, session: AsyncSession, logged_intent: EventLogRow,
-                                       snapshot: VenueSnapshotObserved, fence: int) -> None:
-        """Prove THIS immutable cycle, not the latest mutable claim for its CID.
+    async def _historical_cycles(self, session: AsyncSession) -> dict[int, list[EventLogRow]]:
+        """One complete scoped proof per locked read, never a cross-read cache.
 
-        Reuse the historical replay validator for scope, identity and reset
-        boundaries. Even a single cycle needs complete, full-amount evidence
-        before the query fence; partial fills never establish a terminal cycle.
+        Validate cross-CID venue ownership before indexing any cycle. Building
+        the index in one pass also avoids quadratic scans for reused CIDs.
         """
         rows = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow))
             .order_by(EventLogRow.event_seq))).all()
         try:
-            resets = historical_claim_reset_sequences(rows, account_id=str(self.account_id),
-                                                       environment=self.environment)
+            historical_claim_reset_sequences(rows, account_id=str(self.account_id),
+                                             environment=self.environment)
         except (ValueError, TypeError) as exc:
             raise CapitalBlockedError("unclassifiable_legacy_intent") from exc
-        # Validate the whole scope first: different CIDs cannot share a venue
-        # identity. Only then slice this intent's immutable cycle.
-        rows = [r for r in rows if r.cid == logged_intent.cid]
-        end = next((r.event_seq for r in rows if r.event_seq > logged_intent.event_seq
-                    and r.event_seq in resets), None)
         kinds = {"RESERVATION_INTENT", "RESERVATION_CLAIMED", "RESERVATION_FAILED",
                  "ORDER_FILL", "RESERVATION_RELEASED", "SUBMIT_OUTCOME_UNKNOWN",
                  "SUBMIT_MATCHED_TO_VENUE_OFFER"}
-        cycle = [r for r in rows if r.event_seq >= logged_intent.event_seq
-                 and (end is None or r.event_seq < end) and r.event_type in kinds]
+        cycles: dict[int, list[EventLogRow]] = {}
+        current: dict[int | None, list[EventLogRow]] = {}
+        for row in rows:
+            if row.event_type == "RESERVATION_INTENT":
+                # The full-scope validator already proved every reset boundary.
+                current[row.cid] = cycles[row.event_seq] = []
+            if row.event_type in kinds and row.cid in current:
+                current[row.cid].append(row)
+        return cycles
+
+    async def _check_historical_intent(self, session: AsyncSession, logged_intent: EventLogRow,
+                                       snapshot: VenueSnapshotObserved, fence: int,
+                                       cycle: Sequence[EventLogRow]) -> None:
+        """Require THIS validated cycle's full-amount completion before the fence.
+
+        A latest mutable claim or a partial fill cannot prove a terminal cycle.
+        """
         intent = deserialize_stored_event(logged_intent)
         assert isinstance(intent, ReservationIntent)
         if not cycle or cycle[0].event_seq != logged_intent.event_seq or cycle[-1].event_seq > fence:

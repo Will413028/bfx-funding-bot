@@ -24,9 +24,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     AuthoritativeSafetyEvaluator,
@@ -68,6 +70,7 @@ class ReservationEmittingMiddleware:
         date_provider: Callable[[], date] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         safety_evaluator: AuthoritativeSafetyEvaluator | None = None,
+        capital_runtime: CapitalRuntime | None = None,
     ) -> None:
         if not is_simulated and uncertainty_handler is None:
             raise ValueError(
@@ -105,7 +108,20 @@ class ReservationEmittingMiddleware:
                 clock=self._clock,
                 date_provider=self._date_provider,
                 uncertainty_handler=uncertainty_handler,
+                capital_runtime=capital_runtime,
             )
+
+    @property
+    def command_gate(self) -> AccountCommandGate | None:
+        """Same daemon writer boundary used by an explicitly authorized release session."""
+        return self._command_gate
+
+    async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
+                     account_id: str, ctx: AccountContext) -> None:
+        if self._command_gate is None:
+            raise ValueError("durable cancel command gate required")
+        await self._command_gate.cancel(venue_offer_id=venue_offer_id,
+            signal_correlation_id=signal_correlation_id, account_id=account_id, ctx=ctx)
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
