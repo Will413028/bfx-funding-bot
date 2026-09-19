@@ -75,6 +75,88 @@ class Docker:
         raise AssertionError(f"unanticipated command: {args[:3]}")
 
 
+class OneShotDocker:
+    """Small Docker boundary with inspected settings, attached output and exit."""
+    def __init__(self, image=IMAGE, mutation=None, output=b"verified", exit_code=0):
+        self.image, self.mutation, self.output, self.exit_code = image, mutation, output, exit_code
+        self.calls = []
+        self.cid = "d"*64
+        self.record = {}
+        self.started = False
+
+    def __call__(self, args, *, data=None):
+        from scripts.image_artifact import ImageNotFound
+        from scripts.release_package import PackagingBlocked
+        self.calls.append(args)
+        if args[:3] == ["docker", "image", "inspect"]:
+            if args[-1] != self.image:
+                raise ImageNotFound("image_not_found")
+            record = {"Id": self.image, "Os": "linux", "Architecture": "arm64"}
+            if self.image == IDENTITY.manifest_digest:
+                record["Descriptor"] = {"digest": self.image, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            return json.dumps([record]).encode()
+        if args[:2] == ["docker", "run"]:  # old code executes without inspection
+            self.started = True
+            return self.output
+        if args[:2] == ["docker", "create"]:
+            env = {"PYTHONDONTWRITEBYTECODE": "1"}
+            mounts, tmpfs = [], {}
+            for index, arg in enumerate(args):
+                if arg == "--env-file":
+                    env.update(line.split("=", 1) for line in Path(args[index+1]).read_text().splitlines() if line)
+                if arg == "--env":
+                    key, value = args[index+1].split("=", 1)
+                    env[key] = value
+                if arg == "--tmpfs":
+                    key, value = args[index+1].split(":", 1)
+                    tmpfs[key] = value
+                if arg == "--mount":
+                    fields = dict(item.split("=", 1) for item in args[index+1].split(",") if "=" in item)
+                    mounts.append({"Type": fields["type"], "Source": fields["src"],
+                                   "Destination": fields["dst"], "RW": "readonly" not in args[index+1]})
+            self.record = {"Id": self.cid, "Image": self.image, "Platform": "linux",
+                "State": {"Running": False, "Status": "created", "ExitCode": 0},
+                "Config": {"Cmd": args[args.index(self.image)+1:], "Entrypoint": None,
+                    "User": args[args.index("--user")+1] if "--user" in args else "appuser",
+                    "WorkingDir": "/app", "Env": [f"{k}={v}" for k, v in env.items()]},
+                "HostConfig": {"ReadonlyRootfs": "--read-only" in args, "Privileged": False,
+                    "NetworkMode": args[args.index("--network")+1], "CapAdd": None,
+                    "CapDrop": ["ALL"] if "--cap-drop=ALL" in args else [],
+                    "SecurityOpt": ["no-new-privileges"] if "--security-opt=no-new-privileges" in args else [],
+                    "Tmpfs": tmpfs}, "Mounts": mounts}
+            return self.cid.encode()
+        if args[:2] == ["docker", "inspect"]:
+            assert args[-1] == self.cid
+            record = deepcopy(self.record)
+            if not self.started:
+                if self.mutation in {"Image", "Id"}:
+                    record[self.mutation] = "e"*64
+                elif self.mutation == "Command":
+                    record["Config"]["Cmd"] = ["wrong-command"]
+                elif self.mutation == "ReadonlyRootfs":
+                    record["HostConfig"]["ReadonlyRootfs"] = False
+                elif self.mutation == "NetworkMode":
+                    record["HostConfig"]["NetworkMode"] = "wrong-network"
+                elif self.mutation == "Env":
+                    record["Config"]["Env"] = ["PYTHONDONTWRITEBYTECODE=0"]
+                elif self.mutation == "Mounts":
+                    record["Mounts"].append({"Type": "bind", "Source": "/tmp", "Destination": "/app", "RW": True})
+                elif self.mutation == "Tmpfs":
+                    record["HostConfig"]["Tmpfs"] = {"/app": "rw"}
+            return json.dumps([record]).encode()
+        if args[:2] == ["docker", "start"]:
+            assert args == ["docker", "start", "--attach", self.cid]
+            self.started = True
+            self.record["State"] = {"Running": False, "Status": "exited", "ExitCode": self.exit_code}
+            if self.mutation == "start_error":
+                raise PackagingBlocked("command_failed:docker")
+            return self.output
+        if args[:2] == ["docker", "rm"]:
+            assert args[-1] == self.cid
+            return b""
+        raise AssertionError(args[:3])
+
+
 @pytest.mark.parametrize("store", ["classic", "containerd"])
 def test_deploy_starts_only_measured_image_after_publishing_receipt(tmp_path: Path, store) -> None:
     """A moving tag, implicit build or start-before-receipt must fail this test."""
@@ -137,12 +219,19 @@ def test_launch_mounts_dr_receipts_readonly_without_shadowing_inventory(tmp_path
             evidence_mounts={"/app/configs/safety.yaml": tmp_path / "backup.json"}, publish=lambda _: None)
 
 
-def test_prepare_builds_clean_tracked_archive_and_measures_actual_image(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mutation", [None, "Image"])
+def test_prepare_builds_clean_tracked_archive_and_measures_actual_image(tmp_path: Path, mutation) -> None:
     from scripts.release_package import prepare_backend
     from tests.scripts.test_image_artifact import archive_fixture
     archive = tmp_path / "backend.tar"
     expected = archive_fixture(tmp_path / "expected.tar")
     image = expected["config_digest"]
+    env = tmp_path / "nonsecret.env"
+    env.write_text("BFX_PHASE=live\n")
+    docker = OneShotDocker(image=image, mutation=mutation, output=json.dumps({
+        "inventory": {"src/app.py": "f" * 64}, "python_inventory": {"bin/python3.13": "e" * 64},
+        "environment": {"BFX_PHASE": "live"}, "schema_head": "b4e6f8a0c203",
+        "projector_version": "execution-state-v1", "measurement_seconds": 2.5}).encode())
 
     calls = []
 
@@ -167,16 +256,22 @@ def test_prepare_builds_clean_tracked_archive_and_measures_actual_image(tmp_path
         if args[:3] == ["docker", "image", "inspect"]:
             return json.dumps([{"Id": image, "Os": "linux", "Architecture": "arm64",
                                 "RepoDigests": []}]).encode()
-        if args[:2] == ["docker", "run"]:
-            assert image in args
-            return json.dumps({"inventory": {"src/app.py": "f" * 64},
-                "python_inventory": {"bin/python3.13": "e" * 64},
-                "environment": {"BFX_PHASE": "live"}, "schema_head": "b4e6f8a0c203",
-                "projector_version": "execution-state-v1", "measurement_seconds": 2.5}).encode()
+        if args[0] == "docker":
+            return docker(args, data=data)
         raise AssertionError(args)
 
+    if mutation:
+        from scripts.release_package import PackagingBlocked
+        with pytest.raises(PackagingBlocked):
+            prepare_backend(release_id="fixture", platform="linux/arm64",
+                config_file=env, archive_path=archive, runner=runner)
+        assert not docker.started
+        assert docker.calls[-1] == ["docker", "rm", "--force", "--volumes", docker.cid]
+        return
     release, receipt = prepare_backend(release_id="fixture", platform="linux/arm64",
-        config_file=tmp_path / "nonsecret.env", archive_path=archive, runner=runner)
+        config_file=env, archive_path=archive, runner=runner)
+    assert docker.calls.index(["docker", "inspect", docker.cid]) < docker.calls.index(
+        ["docker", "start", "--attach", docker.cid])
     assert release.image.model_dump() == expected
     assert receipt["archive_filename"] == "backend.tar"
     assert release.python_inventory == {"bin/python3.13": "e" * 64}
@@ -315,6 +410,11 @@ def test_prepare_publishes_only_after_two_independent_verified_exports(tmp_path,
     args.frontend_public.write_text(json.dumps({"NEXT_PUBLIC_APP_URL": "https://example.test",
         "NEXT_PUBLIC_APP_NAME": "fixture", "NEXT_PUBLIC_BETTER_AUTH_URL": "https://example.test"}))
     calls = []
+    docker = OneShotDocker(image=expected["backend"]["config_digest"], output=json.dumps({
+        "inventory": {}, "python_inventory": {},
+        "environment": {"BFX_PHASE": "live", "BFX_EXECUTOR": "bitfinex_live"},
+        "schema_head": "b4e6f8a0c203", "projector_version": "execution-state-v1",
+        "measurement_seconds": 1}).encode())
     def runner(command, *, data=None):
         calls.append(command)
         if command[0] == "git":
@@ -336,11 +436,8 @@ def test_prepare_publishes_only_after_two_independent_verified_exports(tmp_path,
             return b""
         if command[:3] == ["docker", "image", "inspect"]:
             return json.dumps([{"Id": command[-1], "Os": "linux", "Architecture": "arm64"}]).encode()
-        if command[:2] == ["docker", "run"]:
-            return json.dumps({"inventory": {}, "python_inventory": {},
-                "environment": {"BFX_PHASE": "live", "BFX_EXECUTOR": "bitfinex_live"},
-                "schema_head": "b4e6f8a0c203", "projector_version": "execution-state-v1",
-                "measurement_seconds": 1}).encode()
+        if command[0] == "docker":
+            return docker(command, data=data)
         raise AssertionError(command)
     monkeypatch.setattr(cli, "prepare_backend", lambda **kw: producer.prepare_backend(**kw, runner=runner))
     monkeypatch.setattr(cli, "prepare_frontend", lambda **kw: producer.prepare_frontend(**kw, runner=runner))

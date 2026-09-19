@@ -135,18 +135,21 @@ def test_resolver_uses_inspected_host_id_with_correct_role(tmp_path, store):
     assert resolve_image(identity, runner) == host_id
 
 
-@pytest.mark.parametrize("bad", ["platform", "id", "descriptor", "missing_descriptor", "error", "json"])
-def test_resolver_rejects_unclassified_or_wrong_role_proof(tmp_path, bad):
-    from scripts.image_artifact import inspect_archive, resolve_image
+@pytest.mark.parametrize("role", ["config_digest", "manifest_digest"])
+@pytest.mark.parametrize("bad", [None, "platform", "id", "descriptor", "descriptor_digest", "missing_descriptor"])
+def test_resolver_checks_descriptor_for_the_inspected_id_role(tmp_path, role, bad):
+    from scripts.image_artifact import ImageNotFound, inspect_archive, resolve_image
     path = tmp_path / "image.tar"
     archive_fixture(path)
     identity = inspect_archive(path)
+    host_id = getattr(identity, role)
+    lookups = []
     def runner(args, *, data=None):
-        if bad == "json":
-            return b'{"invalid'
-        if bad == "error":
-            raise PackagingBlocked("command_failed:docker")
-        record = {"Id": identity.manifest_digest, "Os": "linux", "Architecture": "arm64",
+        assert args[:3] == ["docker", "image", "inspect"]
+        lookups.append(args[-1])
+        if args[-1] != host_id:
+            raise ImageNotFound("image_not_found")
+        record = {"Id": host_id, "Os": "linux", "Architecture": "arm64",
             "Descriptor": {"digest": identity.manifest_digest, "mediaType": OCI + "manifest.v1+json"}}
         if bad == "platform":
             record["Architecture"] = "amd64"
@@ -154,11 +157,35 @@ def test_resolver_rejects_unclassified_or_wrong_role_proof(tmp_path, bad):
             record["Id"] = "sha256:" + "e" * 64
         elif bad == "descriptor":
             record["Descriptor"]["mediaType"] = OCI + "config.v1+json"
+        elif bad == "descriptor_digest":
+            record["Descriptor"]["digest"] = identity.config_digest
         elif bad == "missing_descriptor":
             del record["Descriptor"]
         return json.dumps([record]).encode()
+    if bad is None or (role == "config_digest" and bad == "missing_descriptor"):
+        assert resolve_image(identity, runner) == host_id
+    else:
+        with pytest.raises(PackagingBlocked, match="image_or_platform_mismatch"):
+            resolve_image(identity, runner)
+    assert lookups == ([identity.config_digest] if role == "config_digest" else
+                       [identity.config_digest, identity.manifest_digest])
+
+
+@pytest.mark.parametrize("bad", ["error", "json"])
+def test_resolver_unclassified_errors_do_not_try_another_role(tmp_path, bad):
+    from scripts.image_artifact import inspect_archive, resolve_image
+    path = tmp_path / "image.tar"
+    archive_fixture(path)
+    identity = inspect_archive(path)
+    lookups = []
+    def runner(args, *, data=None):
+        lookups.append(args[-1])
+        if bad == "json":
+            return b'{"invalid'
+        raise PackagingBlocked("command_failed:docker")
     with pytest.raises(PackagingBlocked):
         resolve_image(identity, runner)
+    assert lookups == [identity.config_digest]
 
 
 @pytest.mark.parametrize("bad", ["pax", "trailing_tar"])

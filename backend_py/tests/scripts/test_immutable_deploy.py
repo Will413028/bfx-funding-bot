@@ -241,26 +241,43 @@ def test_bundle_verifies_both_archives_before_host_execution(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("store", ["classic", "containerd"])
-def test_one_shot_resolves_immutable_host_id_for_migration_bootstrap_policy(tmp_path, monkeypatch, store):
+@pytest.mark.parametrize("mutation", [None, "Image", "Id", "Command", "ReadonlyRootfs",
+    "NetworkMode", "Env", "Mounts", "Tmpfs", "start_error"])
+def test_one_shot_inspects_before_start_and_cleans_up(tmp_path, monkeypatch, store, mutation):
     from scripts import immutable_release as cli
-    from scripts.image_artifact import ImageNotFound
+    from tests.scripts.test_release_package import OneShotDocker
     image = IMAGE if store == "classic" else IDENTITY.manifest_digest
-    def runner(args, *, data=None):
-        if args[:3] == ["docker", "image", "inspect"]:
-            if args[-1] != image:
-                raise ImageNotFound("image_not_found")
-            record = {"Id": image, "Os": "linux", "Architecture": "arm64"}
-            if store == "containerd":
-                record["Descriptor"] = {"digest": image, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
-            return json.dumps([record]).encode()
-        assert args[:2] == ["docker", "run"]
-        assert image in args
-        assert "--pull=never" in args
-        return b"verified"
+    env = tmp_path / "env"
+    env.write_text("BFX_PHASE=live\n")
     monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "run", runner)
     for command in (["uv", "run", "alembic", "upgrade", "head"],
                     ["python", "-m", "scripts.bootstrap_capital"],
                     ["python", "-m", "scripts.convert_capital_policy"],
                     ["python", "-m", "scripts.release_database", "startup"]):
-        assert cli.one_shot(manifest(), env=tmp_path / "env", network="fixture", command=command) == b"verified"
+        docker = OneShotDocker(image=image, mutation=mutation)
+        monkeypatch.setattr(cli, "run", docker)
+        if mutation:
+            with pytest.raises(cli.PackagingBlocked):
+                cli.one_shot(manifest(), env=env, network="fixture", command=command)
+            assert docker.started == (mutation == "start_error")
+        else:
+            assert cli.one_shot(manifest(), env=env, network="fixture", command=command,
+                extra_env={"UV_NO_SYNC": "1"},
+                mounts=[f"type=bind,src={env},dst=/run/fixture.env,readonly"]) == b"verified"
+            assert docker.calls.index(["docker", "inspect", docker.cid]) < docker.calls.index(
+                ["docker", "start", "--attach", docker.cid])
+        assert docker.calls[-1] == ["docker", "rm", "--force", "--volumes", docker.cid]
+
+
+@pytest.mark.parametrize("start_error", [False, True])
+def test_one_shot_checks_process_exit_independently_of_attach_status(tmp_path, monkeypatch, start_error):
+    from scripts import immutable_release as cli
+    from tests.scripts.test_release_package import OneShotDocker
+    env = tmp_path / "env"
+    env.write_text("BFX_PHASE=live\n")
+    docker = OneShotDocker(exit_code=17, mutation="start_error" if start_error else None)
+    monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "run", docker)
+    with pytest.raises(cli.PackagingBlocked, match="one_shot_exit_nonzero:17"):
+        cli.one_shot(manifest(), env=env, network="fixture", command=["python", "-c", "raise SystemExit(17)"])
+    assert docker.calls[-1] == ["docker", "rm", "--force", "--volumes", docker.cid]

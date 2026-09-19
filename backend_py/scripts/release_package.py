@@ -15,8 +15,10 @@ from uuid import uuid4
 
 from bfx_funding_bot.core.release_identity import (
     LaunchReceipt,
+    PackagedImageIdentity,
     ReleaseManifest,
     canonical_digest,
+    identity_json,
     runtime_environment,
 )
 from scripts.image_artifact import PackagingBlocked, Runner, inspect_archive, resolve_image, run
@@ -38,6 +40,103 @@ result = dict(inventory=measure_inventory(Path('/app'), require_protected=True),
 result['measurement_seconds'] = time.perf_counter() - started
 print(json.dumps(result))
 """
+
+
+def read_env(path: Path) -> dict[str, str]:
+    result = {}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in result:
+            raise PackagingBlocked("invalid_or_duplicate_environment_key")
+        result[key] = value
+    return result
+
+
+def run_one_shot(identity: PackagedImageIdentity, *, env: Path, network: str,
+                 command: list[str], extra_env: dict[str, str] | None = None,
+                 mounts: list[str] | None = None, tmpfs: bool = True,
+                 runner: Runner = run) -> bytes:
+    """Create/inspect before any execution; capture output and always remove ours.
+
+    No auto-remove: retain the stopped container long enough to check its exit
+    status, then remove only the validated create result (and anonymous volumes,
+    as docker run --rm did). Never retry a command after any failure.
+    """
+    expected_env = {**read_env(env), **(extra_env or {})}
+    expected_mounts = {}
+    for mount in mounts or []:
+        fields = mount.split(",")
+        parts = dict(field.split("=", 1) for field in fields if "=" in field)
+        if (len(fields) != 4 or set(parts) != {"type", "src", "dst"}
+            or parts["type"] != "bind" or "readonly" not in fields
+            or not Path(parts["src"]).is_absolute() or not Path(parts["dst"]).is_absolute()
+            or parts["dst"] in expected_mounts):
+            raise PackagingBlocked("invalid_one_shot_mount")
+        expected_mounts[parts["dst"]] = parts["src"]
+    image = resolve_image(identity, runner)
+    expected_tmpfs = {"/tmp": "rw,noexec,nosuid,size=64m"} if tmpfs else {}
+    args = ["docker", "create", "--pull=never", "--platform", identity.platform,
+        "--read-only", "--user", "1000:1000", "--entrypoint", "", "--workdir", "/app",
+        "--network", network, "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--env-file", str(env)]
+    for key, value in expected_tmpfs.items():
+        args += ["--tmpfs", f"{key}:{value}"]
+    for key, value in (extra_env or {}).items():
+        args += ["--env", f"{key}={value}"]
+    for mount in mounts or []:
+        args += ["--mount", mount]
+    cid = runner([*args, image, *command]).decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", cid):
+        raise PackagingBlocked("invalid_created_container_id")
+    try:
+        def inspect() -> dict[str, Any]:
+            records = identity_json(runner(["docker", "inspect", cid]))
+            if not isinstance(records, list) or len(records) != 1:
+                raise PackagingBlocked("one_shot_inspection_invalid")
+            record: dict[str, Any] = records[0]
+            if record["Id"] != cid or record["Image"] != image or record["Platform"] != "linux":
+                raise PackagingBlocked("one_shot_identity_mismatch")
+            return record
+
+        record = inspect()
+        config, host = record["Config"], record["HostConfig"]
+        observed_env = dict(item.split("=", 1) for item in config["Env"])
+        observed_mounts = record["Mounts"]
+        if (record["State"]["Running"] or record["State"]["Status"] != "created"
+            or config["Cmd"] != command or config.get("Entrypoint")
+            or config["User"] != "1000:1000" or config["WorkingDir"] != "/app"
+            or not host["ReadonlyRootfs"] or host["Privileged"] or host.get("CapAdd")
+            or "ALL" not in (host.get("CapDrop") or [])
+            or "no-new-privileges" not in (host.get("SecurityOpt") or [])
+            or host["NetworkMode"] != network or (host.get("Tmpfs") or {}) != expected_tmpfs
+            or any(observed_env.get(k) != v for k, v in expected_env.items())
+            or observed_env.get("PYTHONDONTWRITEBYTECODE") != "1"
+            or any(observed_env.get(k) for k in
+                   ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "LD_PRELOAD", "LD_LIBRARY_PATH"))
+            or len(observed_mounts) != len(expected_mounts)
+            or any(m["Type"] != "bind" or m["RW"] for m in observed_mounts)
+            or {m["Destination"]: m["Source"] for m in observed_mounts} != expected_mounts):
+            raise PackagingBlocked("one_shot_settings_mismatch")
+        output = b""
+        start_error = None
+        try:
+            output = runner(["docker", "start", "--attach", cid])
+        except PackagingBlocked as exc:
+            start_error = exc
+        state = inspect()["State"]
+        if state["Running"] or state["Status"] != "exited" or type(state["ExitCode"]) is not int:
+            raise PackagingBlocked("one_shot_exit_unproven")
+        if state["ExitCode"] != 0:
+            raise PackagingBlocked(f"one_shot_exit_nonzero:{state['ExitCode']}")
+        if start_error is not None:
+            raise start_error
+        return output
+    except (ValueError, KeyError, TypeError, IndexError):
+        raise PackagingBlocked("one_shot_inspection_invalid") from None
+    finally:
+        runner(["docker", "rm", "--force", "--volumes", cid])
 
 
 def source_archive(revision: str, component: str, runner: Runner = run) -> bytes:
@@ -88,9 +187,9 @@ def prepare_backend(*, release_id: str, platform: str, config_file: Path, archiv
     image = runner(["docker", "build", "--quiet", "--platform", platform,
         "--build-arg", f"GIT_SHA={revision}", "-"], data=archive).decode().strip().splitlines()[-1]
     artifact = export_image(image, platform, archive_path, runner)
-    measurement = json.loads(runner(["docker", "run", "--rm", "--pull=never",
-        "--read-only", "--network", "none", "--env-file", str(config_file),
-        image, "/app/.venv/bin/python", "-c", MEASURE]))
+    measurement = json.loads(run_one_shot(PackagedImageIdentity.model_validate(artifact["image"]),
+        env=config_file, network="none", tmpfs=False,
+        command=["/app/.venv/bin/python", "-c", MEASURE], runner=runner))
     seconds = measurement.pop("measurement_seconds")
     manifest = ReleaseManifest(version=2, release_id=release_id, source_revision=revision,
         image=artifact["image"], **measurement)
