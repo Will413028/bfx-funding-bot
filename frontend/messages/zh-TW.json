@@ -1,4 +1,20 @@
 {
+  "funding": {
+    "title": "已套用的放貸政策", "halted": "放貸已暫停", "notHalted": "持久暫停已解除，其他風控仍須通過",
+    "enabled": "已啟用", "disabled": "未啟用", "revision": "已套用版本：{revision}",
+    "available": "可用餘額", "pending": "尚未反映的承諾", "reserve": "保留資金", "spendable": "帳戶可動用資金",
+    "total": "總資金", "unattributed": "未歸屬的放貸曝險", "cellHeadroom": "策略餘額上限", "cellBudget": "單筆新增上限",
+    "sharedBudget": "各策略共用帳戶可動用資金，不可加總各策略的新增上限。",
+    "sessionTitle": "Release session", "humanOnly": "準備不會下單。Canary 授權與正式啟用需要分開由人操作；驗證結果仍維持暫停。",
+    "mfaRequired": "需要 operator 登入與已驗證的雙因素 session。服務正常不代表已完成雙因素註冊。",
+    "strategy": "Canary 策略", "meanReversion": "均值回歸", "maximum": "Canary 金額上限（USDT）", "expiry": "授權有效時間（分鐘）",
+    "prepare": "準備 session", "restore": "既有 session ID", "openSession": "開啟 session", "minimum": "計算的最低金額", "exact": "已使用金額", "expires": "到期時間",
+    "confirmCanary": "我授權這一筆真錢放貸", "authorize": "授權 Canary", "validate": "維持暫停並驗證結果",
+    "confirmPromote": "我同意此 release 進入正常放貸", "promote": "正式啟用 release", "evidence": "準備與綁定證據", "refresh": "更新狀態", "newSession": "新增 session",
+    "invalidAmount": "請輸入大於零的十進位金額", "refreshRequired": "Session 無法讀取或已變更，請先更新狀態。",
+    "leaveSession": "離開此 session 選取", "selectionOnly": "離開只清除此瀏覽器的選取，不會取消或修改持久 session，也不會重試放貸。",
+    "unavailable": "無法取得放貸狀態，金額顯示與 release 準備已停用。", "loading": "讀取已套用政策…"
+  },
   "app": {
     "name": "BFX Funding Bot",
     "toggleMenu": "切換導航選單"
@@ -125,6 +141,7 @@
     "authTokenUnavailable": "認證權杖暫時無法取得，請重試。"
   },
   "strategy": {
+    "draftNotice": "儲存草稿不會更改已套用的資金政策，也不會啟動放貸。請在總覽確認已套用版本與 release session。",
     "title": "策略設定",
     "signalParams": "信號參數",
     "executionParams": "執行參數",

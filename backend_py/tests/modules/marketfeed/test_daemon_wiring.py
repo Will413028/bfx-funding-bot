@@ -27,6 +27,95 @@ from tests.modules.marketfeed.account_test_helpers import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_policy", [False, True])
+@pytest.mark.parametrize("runtime_proven", [False, True])
+async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_path, httpx_mock, with_policy, runtime_proven):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
+    configure_account_env(monkeypatch)
+    import os
+    for name in list(os.environ):
+        if name.startswith("BFX_CANARY_") or name in (
+            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+        ):
+            monkeypatch.delenv(name)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'normal.db'}"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine, capital_policies=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    halt = HaltStateStore(factory, account_id=str(TEST_EXCHANGE_ACCOUNT_ID), deployment_environment="ci")
+    await halt.set_halted(True, reason="retained halt", actor="test")
+    if with_policy:
+        repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+        async with factory.begin() as session:
+            await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
+                                    expected_revision=0, source={"fixture": True})
+            await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
+                                    expected_revision=0, source={"fixture": True})
+        from tests.modules.marketfeed.account_test_helpers import configure_release_runtime
+        if runtime_proven:
+            configure_release_runtime(monkeypatch)
+    httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+                            method="GET", json=[], is_reusable=True, is_optional=True)
+    path = _write_cells_yaml(tmp_path)
+    import yaml
+    doc = yaml.safe_load(path.read_text())
+    doc["cells"].append({**doc["cells"][0], "period_agg": "p2"})
+    path.write_text(yaml.safe_dump(doc))
+    try:
+        if not with_policy:
+            with pytest.raises(ValueError, match="policy_unavailable"):
+                await build_daemon(cells_yaml_path=path, skip_ws=True)
+            return
+        if not runtime_proven:
+            from bfx_funding_bot.core.release_identity import ReleaseIdentityError
+            before = await halt.current()
+            with pytest.raises(ReleaseIdentityError):
+                await build_daemon(cells_yaml_path=path, skip_ws=True)
+            assert (await halt.current()).id == before.id
+            assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+            return
+        daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert daemon.release_worker is not None
+        assert daemon.command_gate.release_authority is daemon.release_worker.authority
+        assert len(daemon.config.cells) == 2
+        assert (await halt.current()).halted
+        status = await daemon.trading_status.snapshot()
+        assert status["halt"]["halted"]
+        assert "capital_policy" in {g["name"] for g in status["guards"]}
+        assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
+        # The only allowed POST is the public read-only FX calculation, never
+        # a financial command. Keep unknown requests fatal in this fixture.
+        fx_url = "https://api-pub.bitfinex.com/v2/calc/fx"
+        httpx_mock.add_response(url=fx_url, method="POST", json=[0.999865],
+                                match_json={"ccy1": "UST", "ccy2": "USD"})
+        await daemon.periodic_reconcile._deployment.deploy()
+        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(posts) == 1 and str(posts[0].url) == fx_url
+        assert not any(name in posts[0].headers for name in (
+            "authorization", "bfx-apikey", "bfx-signature", "cookie",
+        ))
+        assert (await halt.current()).halted
+    finally:
+        await engine.dispose()
+
+
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
     # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several
@@ -51,7 +140,7 @@ phase3b_wfo_results_ref: x
 # through to the emit sink (the invariant under test).
 @pytest.mark.parametrize(
     "phase,env_value",
-    [("paper", "ci"), ("shadow", "shadow"), ("canary", "prod")],
+    [("paper", "ci"), ("shadow", "shadow"), ("live", "prod")],
 )
 @pytest.mark.asyncio
 async def test_build_daemon_emit_and_query_env_symmetric(
@@ -71,9 +160,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
         monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
         monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
         monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    if phase == "canary":
-        # canary boot requires all safety guards enabled (assert_canary_guard_invariant).
-        # Executor stays paper (BFX_EXECUTOR unset) — fine for an env-wiring unit test.
+    if phase == "live":
         safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
         monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
@@ -88,6 +175,11 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.delenv("BFX_EXECUTOR", raising=False)
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
+
+    if phase == "live":
+        configure_canary_wiring_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
+        monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -146,7 +238,6 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.setenv("BFX_RECONCILE_INTERVAL_S", "0")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
@@ -224,7 +315,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.setenv("BFX_RESYNC_MIN_INTERVAL_S", "7")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
@@ -292,7 +382,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
@@ -461,7 +550,6 @@ async def test_smoke_runner_gated_off_for_live_executor(
     configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
@@ -517,7 +605,6 @@ async def test_canary_build_wires_writer_lock_and_guard(
     configure_canary_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401

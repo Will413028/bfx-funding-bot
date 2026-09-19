@@ -41,6 +41,13 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 D = Decimal
 
+
+async def test_status_exposes_actual_cell_choices_for_scoped_release_requests():
+    service = _service(cells=[_cell("fUST", "p2")])
+    status = await service.snapshot()
+    assert status["configured_cells"] == [
+        {"symbol": "fUST", "cell": "fUST_p2", "strategy": "mean_reversion", "period": "p2"}]
+
 # Module-level so they can be default arguments (B008). `None` cannot serve as
 # the "not supplied" sentinel here: an unset env fallback IS None, and one test
 # pins that None and Decimal("0") must not render identically.
@@ -519,6 +526,16 @@ async def test_halt_writes_a_persisted_transition() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_resume_requires_release_promotion() -> None:
+    store = _FakeHaltStore(_halt_state(True))
+    service = _service(halt_store=store)
+    service._phase = Phase.LIVE
+    with pytest.raises(ValueError, match="release_promotion_required"):
+        await service.resume(reason="static bearer", actor="admin-api")
+    assert store.state.halted
+    assert store.writes == []
+
+
 async def test_resume_writes_a_persisted_transition() -> None:
     store = _FakeHaltStore(_halt_state(True))
     svc = _service(halt_store=store)

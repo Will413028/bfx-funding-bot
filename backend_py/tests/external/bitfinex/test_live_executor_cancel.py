@@ -1,6 +1,7 @@
 """Unit tests for BitfinexLiveExecutor.cancel — pure fns + I/O shell."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -27,6 +28,80 @@ from bfx_funding_bot.modules.execution.protocols import (
     Credentials,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+from tests.integration.test_capital_repository import capital_db as capital_db
+from tests.integration.test_capital_repository import capital_engine as capital_engine
+
+
+@pytest.mark.usefixtures("_no_tenacity_sleep")
+@pytest.mark.parametrize("scope", ["same", "other_symbol", "other_environment", "other_account", "unreadable", "clear"])
+async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkeypatch, scope):
+    import asyncio
+
+    from sqlalchemy import select
+
+    from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
+    from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+    from bfx_funding_bot.modules.execution.safety.hard_guards import DatabaseUncertaintyReader
+    from tests.integration.test_capital_command_boundary import (
+        append_cancel_race_unknown,
+        cancel_http_boundary,
+    )
+
+    factory, account = capital_db
+    requests = []
+
+    async def transport(request):
+        requests.append(request)
+        async with factory() as observer:
+            assert await observer.scalar(select(EventLogRow.event_seq).where(
+                EventLogRow.event_type == "CANCEL_REQUESTED")) is not None
+        if len(requests) == 1:
+            if scope == "unreadable":
+                async def unavailable(*args, **kwargs):
+                    raise RuntimeError("synthetic uncertainty read failure")
+                monkeypatch.setattr(DatabaseUncertaintyReader, "list_open", unavailable)
+            elif scope != "clear":
+                await append_cancel_race_unknown(factory,
+                    uuid4() if scope == "other_account" else account,
+                    symbol="fUSD" if scope == "other_symbol" else "fUST",
+                    environment="shadow" if scope == "other_environment" else "ci")
+            return Response(503)
+        return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        gate, ctx, _ = await cancel_http_boundary(factory, account, http)
+        command = gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                              account_id=str(account), ctx=ctx)
+        if scope in {"same", "unreadable"}:
+            with pytest.raises(CommandGateBlocked, match="uncertainty"):
+                await asyncio.wait_for(command, timeout=10)
+        else:
+            await asyncio.wait_for(command, timeout=10)
+    # No subsequent HTTP once uncertainty appears; otherwise idempotent retry survives.
+    assert len(requests) == (1 if scope in {"same", "unreadable"} else 2)
+
+
+@pytest.mark.usefixtures("_no_tenacity_sleep")
+async def test_cancel_retry_rechecks_halt_before_each_transport():
+    from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
+    calls = []
+
+    async def transport(request):
+        calls.append(request)
+        return Response(503)
+
+    async def guard():
+        if calls:
+            raise CommandGateBlocked("halted during cancel retry")
+
+    context = AccountContext("test", Credentials("mock", "mock"), Decimal("0"))
+    context = replace(context, before_cancel_transport=guard)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        executor = _make_executor(http=http, bus=DomainEventBus())
+        with pytest.raises(CommandGateBlocked, match="halted during cancel retry"):
+            await executor.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                                  account_id="test", ctx=context)
+    assert len(calls) == 1
 
 
 def test_classify_success() -> None:

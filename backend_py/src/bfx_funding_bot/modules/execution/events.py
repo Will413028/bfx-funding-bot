@@ -238,6 +238,10 @@ class VenueSnapshotObserved:
     wallet_available: Mapping[str, Decimal]
     coverage: SnapshotCoverage
     offer_history: tuple[VenueOfferObservation, ...] = ()
+    capital_query_id: str | None = None
+    capital_command_fence: int | None = None
+    capital_confirmation: Mapping[str, Any] | None = None
+    capital_classification_digest: str | None = None
     occurred_at_ms: int | None = None
     event_id: UUID = field(default_factory=uuid4)
     schema_version: int = field(default=__SCHEMA_VERSION__, init=False, repr=False, compare=False)
@@ -294,6 +298,7 @@ class ReservationIntent:
     execution_decision_id: str | None
     reservation_ref: ReservationRef | None = None
     submission_attempt: SubmissionAttemptPayload | Mapping[str, Any] | None = None
+    capital_authorization: Mapping[str, Any] | None = None
     is_legacy_uncorrelated: bool = field(default=False, init=False)
     amount: Decimal | None = None
     size_usdt: Decimal | None = None  # transitional alias; mapped to amount

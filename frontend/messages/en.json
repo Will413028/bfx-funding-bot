@@ -1,4 +1,20 @@
 {
+  "funding": {
+    "title": "Applied funding policy", "halted": "Lending halted", "notHalted": "Persistent halt cleared; all guards still apply",
+    "enabled": "Enabled", "disabled": "Disabled", "revision": "Applied revision: {revision}",
+    "available": "Available balance", "pending": "Unreflected commitments", "reserve": "Reserve", "spendable": "Account spendable",
+    "total": "Total capital", "unattributed": "Unattributed credit exposure", "cellHeadroom": "Cell headroom", "cellBudget": "Maximum new offer",
+    "sharedBudget": "Cells share account spendable. Their maximum offers must not be added together.",
+    "sessionTitle": "Release session", "humanOnly": "Preparation does not place an offer. Canary authorization and promotion are separate human actions. Validation keeps lending halted.",
+    "mfaRequired": "Operator login and a verified two-factor session are required. Technical service health does not confirm enrollment.",
+    "strategy": "Canary strategy", "meanReversion": "Mean reversion", "maximum": "Maximum canary amount (USDT)", "expiry": "Authorization window (minutes)",
+    "prepare": "Prepare session", "restore": "Existing session ID", "openSession": "Open session", "minimum": "Calculated minimum", "exact": "Consumed amount", "expires": "Expires",
+    "confirmCanary": "I authorize this single real-money offer", "authorize": "Authorize canary", "validate": "Validate outcome while halted",
+    "confirmPromote": "I approve this release for normal lending", "promote": "Promote release", "evidence": "Preparation and binding evidence", "refresh": "Refresh state", "newSession": "New session",
+    "invalidAmount": "Enter a positive decimal amount", "refreshRequired": "Session unavailable or changed. Refresh before acting.",
+    "leaveSession": "Leave session selection", "selectionOnly": "Leaving clears only this browser's selection. It does not cancel or change a durable session or retry an offer.",
+    "unavailable": "Funding status unavailable. Amounts and release preparation are blocked.", "loading": "Loading applied policy…"
+  },
   "app": {
     "name": "BFX Funding Bot",
     "toggleMenu": "Toggle navigation menu"
@@ -125,6 +141,7 @@
     "authTokenUnavailable": "Authentication token unavailable. Please try again."
   },
   "strategy": {
+    "draftNotice": "Saving this draft does not change the applied capital policy or activate lending. Check the applied revision and release session on Overview.",
     "title": "Strategy Configuration",
     "signalParams": "Signal Parameters",
     "executionParams": "Execution Parameters",

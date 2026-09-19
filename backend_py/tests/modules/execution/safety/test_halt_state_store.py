@@ -111,3 +111,15 @@ async def test_default_clock_is_used_when_now_ms_is_omitted(sf) -> None:
     state = await store.current()
     assert state is not None
     assert state.created_at_ms > 0
+
+
+@pytest.mark.asyncio
+async def test_reassertion_preserves_logical_halt_epoch(sf) -> None:
+    store = _store(sf)
+    first = await store.set_halted(True, reason="operator", actor="operator", now_ms=1)
+    again = await store.set_halted(True, reason="terminal", actor="worker", now_ms=2)
+    assert again.id == first.id
+    assert again.actor == "operator"
+    await store.set_halted(False, reason="promotion", actor="operator", now_ms=3)
+    next_epoch = await store.set_halted(True, reason="emergency", actor="operator", now_ms=4)
+    assert next_epoch.id > first.id

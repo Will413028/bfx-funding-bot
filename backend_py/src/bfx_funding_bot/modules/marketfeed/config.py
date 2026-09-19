@@ -67,6 +67,10 @@ class AdaptivePeriodParams(BaseModel):
         return self
 
 
+def canonical_cell_id(symbol: str, period_agg: str) -> str:
+    return f"{symbol}_{period_agg}"
+
+
 class CellConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     strategy: StrategyName
@@ -79,7 +83,7 @@ class CellConfig(BaseModel):
 
     @property
     def cell_id(self) -> str:
-        return f"{self.symbol}_{self.period_agg}"
+        return canonical_cell_id(self.symbol, self.period_agg)
 
     @property
     def pair_id(self) -> str:
@@ -107,7 +111,7 @@ class CellConfig(BaseModel):
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: Annotated[Phase, Field(description="paper / shadow / canary")]
+    phase: Annotated[Phase, Field(description="paper / shadow / canary / live")]
     cells: list[CellConfig]
     database_url: str
     deployment_environment: DeploymentEnvironment
@@ -135,8 +139,17 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
-    if phase_str not in {"paper", "shadow", "canary"}:
-        raise ValueError(f"BFX_PHASE must be paper, shadow, or canary, got {phase_str!r}")
+    if phase_str not in {"paper", "shadow", "canary", "live"}:
+        raise ValueError(f"BFX_PHASE must be paper, shadow, canary, or live, got {phase_str!r}")
+    if phase_str == "live":
+        legacy = [name for name in (
+            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+            "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
+        ) if name in os.environ]
+        if legacy:
+            raise ValueError(
+                f"Remove legacy money env {legacy}; convert and validate applied CapitalPolicy first"
+            )
 
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
@@ -162,9 +175,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     # calibration dataset). paper/shadow are simulated -> must never land in
     # prod (fake fills would corrupt real-money analytics). ci is the universal
     # test/dev realm and is always allowed.
-    if phase_str == "canary" and deployment_environment is DeploymentEnvironment.SHADOW:
+    if phase_str in {"canary", "live"} and deployment_environment is DeploymentEnvironment.SHADOW:
         raise ValueError(
-            "BFX_PHASE=canary (real money) must not run in the shadow realm "
+            f"BFX_PHASE={phase_str} (real money) must not run in the shadow realm "
             "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
             "calibration dataset. Use prod (or ci for tests)."
         )
@@ -186,8 +199,8 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             f"BFX_EXECUTION_POLICY must be one of {valid}, got {execution_policy_raw!r}"
         ) from None
 
-    if phase_str == "canary" and execution_policy is ExecutionPolicy.PAPER:
-        raise ValueError("canary execution_policy must be live-capable, not paper")
+    if phase_str in {"canary", "live"} and execution_policy is ExecutionPolicy.PAPER:
+        raise ValueError(f"{phase_str} execution_policy must be live-capable, not paper")
 
     def required_float(name: str) -> float:
         raw = os.environ.get(name, "").strip()

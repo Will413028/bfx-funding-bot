@@ -241,7 +241,7 @@ def _gate(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
         clock=iter((100, 101, 102, 103, 104, 105)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
@@ -348,7 +348,7 @@ async def test_waiting_submit_rechecks_authoritative_safety_inside_account_lock(
         uncertainty_reader=reader,
         safety_evaluator=safety,
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
         clock=iter((100, 101, 102, 103)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
@@ -562,7 +562,7 @@ async def test_serialized_writer_commits_unknown_attempt_event_and_block_atomica
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
         clock=iter((100, 101)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
@@ -636,7 +636,7 @@ async def test_full_rebuild_replays_attempt_and_uncertainty_with_stable_identity
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
         clock=iter((100, 101)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
@@ -737,7 +737,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
         clock=iter((100, 101)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
@@ -795,7 +795,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
             [GuardResult(allowed=True, guard_name="<chain>")]
         ),
         deployment_environment=ENVIRONMENT,
-        is_simulated=False,
+        is_simulated=True,
     )
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await fresh_gate.submit(_ready(decision_id="decision-after-crash"), _context())

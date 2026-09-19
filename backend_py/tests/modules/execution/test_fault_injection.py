@@ -1,10 +1,13 @@
-"""Deterministic submit-fault matrix for the live command boundary.
+"""Deterministic simulated submit-fault matrix using the real HTTP adapter.
 
 The fake transport is deliberately test-local: production keeps using an
 ordinary injected ``httpx.AsyncClient`` and has no fault-mode branches.
+In-memory persistence/uncertainty fixtures are explicitly simulated. Actual
+policy-backed SQLite/PG command faults live in test_capital_command_boundary.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal
@@ -243,12 +246,13 @@ class _TypedOutcomeExecutor:
 
 
 def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
+    from tests.external.bitfinex.test_funding_rules import evidence
     return ReadyToSubmit(
         decision=DecisionPayload(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=uuid4(),
             offer_rate=0.0001,
-            offer_amount_usdt=12.5,
+            offer_amount_usdt=150.0,
             offer_duration_days=2,
             symbol=symbol,
         ),
@@ -258,6 +262,7 @@ def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
         model_version=None,
         evidence={},
         safety=GuardResult(allowed=True, guard_name="fault_matrix"),
+        funding_amount_evidence=evidence(symbol=symbol, now=int(time.time() * 1000)),
     )
 
 
@@ -265,7 +270,7 @@ def _context(account_id: UUID = _ACCOUNT_ID) -> AccountContext:
     return AccountContext(
         account_id=str(account_id),
         credentials=Credentials(api_key=_API_KEY, api_secret=_API_SECRET),
-        allocation_cap_usdt=Decimal("100"),
+        allocation_cap_usdt=Decimal("1000"),
     )
 
 
@@ -275,7 +280,7 @@ def _success_response() -> list[object]:
         "fon-req",
         None,
         None,
-        [42, "fUST", 0, 0, 12.5, 0, "REQ", None, None, 0, "ACTIVE", None, None, None, 0.0001, 2],
+        [42, "fUST", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE", None, None, None, 0.0001, 2],
         None,
         "SUCCESS",
         None,
@@ -291,7 +296,7 @@ def _unknown_attempt() -> UnknownSubmitAttempt:
         account_id=str(_ACCOUNT_ID),
         symbol="fUST",
         cid=7,
-        amount=Decimal("12.5"),
+        amount=Decimal("150"),
         rate=Decimal("0.0001"),
         period_days=2,
         offer_type="LIMIT",
@@ -310,8 +315,8 @@ def _matching_offer(venue_offer_id: str, *, mts_created: int = 1_000) -> ActiveF
     return ActiveFundingOffer(
         venue_offer_id=venue_offer_id,
         symbol="fUST",
-        amount=Decimal("12.5"),
-        amount_original=Decimal("12.5"),
+        amount=Decimal("150"),
+        amount_original=Decimal("150"),
         rate=0.0001,
         rate_decimal=Decimal("0.0001"),
         period_days=2,
@@ -329,8 +334,8 @@ def _deliver_out_of_order_reconcile() -> tuple[tuple[int, ...], str]:
         None,
         venue_offer_id="venue-1",
         symbol="fUST",
-        amount_original=Decimal("12.5"),
-        amount_remaining=Decimal("12.5"),
+        amount_original=Decimal("150"),
+        amount_remaining=Decimal("150"),
         rate=Decimal("0.0001"),
         period_days=2,
         mts_created=101,
@@ -379,7 +384,7 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
             uncertainty_reader=reader,
             safety_evaluator=_SafetyEvaluator(),
             deployment_environment=environment,
-            is_simulated=False,
+            is_simulated=True,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -471,7 +476,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=_SafetyEvaluator(),
             deployment_environment="ci",
-            is_simulated=False,
+            is_simulated=True,
             clock=iter(range(100, 200)).__next__,
             date_provider=lambda: date(2026, 9, 3),
         )
@@ -502,7 +507,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         )
         unknown_event = unknown_events[0] if unknown_events else None
         if unknown_event is not None:
-            assert unknown_event.size_usdt == Decimal("12.5")
+            assert unknown_event.size_usdt == Decimal("150")
             assert unknown_event.account_id == str(_ACCOUNT_ID)
             assert unknown_event.symbol == "fUST"
             assert (_ACCOUNT_ID, environment, "fUST") in open_scopes
@@ -515,7 +520,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
                 uncertainty_reader=uncertainty_reader,
                 safety_evaluator=_SafetyEvaluator(),
                 deployment_environment="staging",
-                is_simulated=False,
+                is_simulated=True,
                 clock=iter(range(300, 400)).__next__,
                 date_provider=lambda: date(2026, 9, 3),
             )
@@ -590,7 +595,7 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
         assert evidence.outcome_kind == SubmitOutcomeKind.UNKNOWN.value
         assert evidence.uncertainty_state == "open"
         assert evidence.event_seqs == (1, 2)
-        assert evidence.unknown_exposure_usdt == Decimal("12.5")
+        assert evidence.unknown_exposure_usdt == Decimal("150")
         assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
         assert evidence.adjacent_scope_allowed is True
         assert (_ACCOUNT_ID, "ci", "fUST") in evidence.uncertainty_reader_calls
@@ -610,8 +615,8 @@ async def test_multiple_candidate_reconcile_stays_unknown_and_preserves_exposure
     assert evidence.durable_intent_count == 1
     assert evidence.transport_request_count == 1
     assert evidence.retry_count == 0
-    assert evidence.unknown_exposure_usdt == Decimal("12.5")
-    assert evidence.candidate_exposure_usdt == Decimal("25.0")
+    assert evidence.unknown_exposure_usdt == Decimal("150")
+    assert evidence.candidate_exposure_usdt == Decimal("300")
     assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
 
 
@@ -621,8 +626,8 @@ def test_out_of_order_reconcile_projection_rejects_stale_delivery() -> None:
         None,
         venue_offer_id="venue-1",
         symbol="fUST",
-        amount_original=Decimal("12.5"),
-        amount_remaining=Decimal("12.5"),
+        amount_original=Decimal("150"),
+        amount_remaining=Decimal("150"),
         rate=Decimal("0.0001"),
         period_days=2,
         mts_created=101,
@@ -668,7 +673,7 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
         uncertainty_reader=_UncertaintyReader(open_scopes),
         safety_evaluator=_SafetyEvaluator(),
         deployment_environment="ci",
-        is_simulated=False,
+        is_simulated=True,
         clock=iter(range(100, 200)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )

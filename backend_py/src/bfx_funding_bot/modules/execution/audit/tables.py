@@ -28,6 +28,7 @@ class ExecutionDecisionRow(Base):
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     reconcile_id: Mapped[str] = mapped_column(Text, nullable=False)
     cell_id: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy: Mapped[str | None] = mapped_column(Text, nullable=True)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     signal_correlation_id: Mapped[str] = mapped_column(Text, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)

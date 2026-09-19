@@ -1,10 +1,16 @@
 name: bfx
 
+# Infrastructure/history definition, NOT the capital-policy application deployer.
+# Live releases use scripts.immutable_release and exact inspected image IDs.
+# Never broad `up --build`/`down`/`--remove-orphans` during release. Existing PG18,
+# Redis, runtime env files and volumes must remain unchanged. Legacy application
+# profiles below are historical/simulation only; they cannot supply launch proof.
+
 services:
   # Self-hosted Postgres — replaces Neon. Internal-only (no published port);
   # the real-money DB must never be reachable from outside the docker network.
-  # POSTGRES_USER/PASSWORD/DB come from .env.runtime (assembled from ~/bfx/bot.env
-  # by deploy-vm.sh); Settings(extra="ignore") makes bot/migrate ignore them.
+  # POSTGRES_USER/PASSWORD/DB come from existing .env.runtime. The immutable
+  # deployer does NOT rewrite that file or recreate this service.
   postgres:
     build:
       context: .
@@ -64,6 +70,7 @@ services:
     # no ports: internal-only (Better Auth secondaryStorage on the compose network)
 
   migrate:
+    profiles: ["legacy-app"]
     image: bfx-bot:local
     command: ["sh", "-c", "alembic upgrade head"]
     working_dir: /app
@@ -104,6 +111,7 @@ services:
         condition: service_healthy
 
   bot:
+    profiles: ["legacy-app"]
     build:
       context: backend_py
       dockerfile: Dockerfile
@@ -132,6 +140,7 @@ services:
         condition: service_completed_successfully
 
   autoheal:
+    profiles: ["legacy-app"]
     image: willfarrell/autoheal:latest
     restart: unless-stopped
     environment:
@@ -142,6 +151,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   webapi:
+    profiles: ["legacy-app"]
     image: bfx-bot:local
     container_name: bfx-webapi
     command: ["uvicorn", "bfx_funding_bot.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -169,6 +179,7 @@ services:
         condition: service_completed_successfully
 
   frontend:
+    profiles: ["legacy-app"]
     build:
       context: frontend
       dockerfile: Dockerfile

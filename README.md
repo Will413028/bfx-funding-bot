@@ -48,6 +48,9 @@ uv run bfx-shadow                  # 跑 daemon（phase 由 BFX_PHASE 控制）
 
 ## 架構文件
 
+- [Immutable capital-policy release 與人工啟用流程](docs/runbooks/immutable-release.md)
+  — build once、明確 schema/policy apply、保留既有 PG/Redis 與 durable halt；
+  不使用舊 moving-main/phase deploy，technical startup 不等於放貸啟用。
 - [後端 runtime 架構（現行）](backend_py/ARCHITECTURE.md)
 - [前端架構設計文件](frontend_architecture.md)
 - [策略設計規範](strategy_specification.md)

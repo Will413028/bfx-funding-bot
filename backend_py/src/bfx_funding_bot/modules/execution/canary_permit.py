@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.db import session_scope
+from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.protocols import (
@@ -78,10 +79,40 @@ class CanaryCommandPermit:
 
 
 class CanaryPermitRepository:
-    """Issue and consume permits with database row-lock serialization."""
+    """Account transaction lock precedes halt/permit row locks on every path."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    @staticmethod
+    async def consume_bound(session: AsyncSession, *, scope: CanaryPermitScope,
+                            halt_id: int, operator_id: str, issued_at_ms: int,
+                            decision_id: str, now_ms: int) -> CanaryCommandPermitRow:
+        """Session admission, in the SAME transaction as the exact decision's intent.
+
+        A prior issued or consumed permit spends the epoch: never overwrite or
+        adopt legacy authorization. The DB's existing UNIQUE(halt_id) is retained.
+        """
+        await acquire_transaction_lock(session, account_id=str(scope.account_id),
+                                       deployment_environment=scope.environment)
+        if await session.scalar(select(CanaryCommandPermitRow.permit_id).where(
+            CanaryCommandPermitRow.halt_id == halt_id,
+        )) is not None:
+            raise CanaryPermitBlocked("permit_already_consumed")
+        current = await session.scalar(select(TradingHaltRow).where(
+            TradingHaltRow.exchange_account_id == scope.account_id,
+            TradingHaltRow.deployment_environment == scope.environment,
+        ).order_by(TradingHaltRow.id.desc()).limit(1))
+        if current is None or current.id != halt_id or not current.halted:
+            raise CanaryPermitBlocked("persistent_halt_changed")
+        row = CanaryCommandPermitRow(permit_id=uuid4(), halt_id=halt_id,
+            exchange_account_id=scope.account_id, deployment_environment=scope.environment,
+            symbol=scope.symbol, cell=scope.cell, strategy=scope.strategy, amount_usdt=scope.amount_usdt,
+            operator_id=_required(operator_id, field="operator_id"), state="consumed",
+            issued_at_ms=issued_at_ms, consumed_at_ms=now_ms, execution_decision_id=decision_id)
+        session.add(row)
+        await session.flush()
+        return row
 
     async def issue(
         self,
@@ -96,6 +127,8 @@ class CanaryPermitRepository:
             raise ValueError("now_ms must be non-negative")
         try:
             async with session_scope(self._session_factory) as session:
+                await acquire_transaction_lock(session, account_id=str(scope.account_id),
+                                               deployment_environment=scope.environment)
                 halt_result = await session.execute(
                     select(TradingHaltRow.id, TradingHaltRow.halted)
                     .where(
@@ -153,6 +186,8 @@ class CanaryPermitRepository:
         if consumed_at_ms < 0:
             raise ValueError("now_ms must be non-negative")
         async with session_scope(self._session_factory) as session:
+            await acquire_transaction_lock(session, account_id=str(scope.account_id),
+                                           deployment_environment=scope.environment)
             row = await session.scalar(
                 select(CanaryCommandPermitRow)
                 .where(CanaryCommandPermitRow.permit_id == permit_id)
@@ -208,6 +243,8 @@ class CanaryPermitRepository:
         """Bind the consumed permit to the durable attempt created by the gate."""
         decision_id = _required(execution_decision_id, field="execution_decision_id")
         async with session_scope(self._session_factory) as session:
+            await acquire_transaction_lock(session, account_id=str(scope.account_id),
+                                           deployment_environment=scope.environment)
             row = await session.scalar(
                 select(CanaryCommandPermitRow)
                 .where(CanaryCommandPermitRow.permit_id == permit_id)

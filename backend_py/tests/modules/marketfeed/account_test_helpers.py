@@ -20,6 +20,22 @@ TEST_VAULT_KEK = bytes(range(32))
 TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
+def configure_release_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Synthetic measured identity for construction-only tests; never production fallback."""
+    from bfx_funding_bot.core.release_identity import (
+        ReleaseManifest,
+        ReleaseRuntime,
+        VerifiedRelease,
+    )
+    manifest = ReleaseManifest(version=1, release_id="fixture", source_revision="a" * 40,
+        platform="linux/arm64", docker_image_id="sha256:" + "b" * 64,
+        oci_manifest_digest=None, inventory={}, python_inventory={}, environment={}, schema_head="b4e6f8a0c203",
+        projector_version="execution-state-v1")
+    proof = VerifiedRelease(manifest=manifest, release_digest="c" * 64,
+        config_digest="d" * 64, launch_id="e" * 32)
+    monkeypatch.setattr(ReleaseRuntime, "from_environment", classmethod(lambda cls: SimpleNamespace(verify=lambda: proof)))
+
+
 def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the explicit identity and test vault expected by build_daemon."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
@@ -29,49 +45,17 @@ def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def configure_canary_wiring_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:  # type: ignore[no-untyped-def]
-    """Provide a test-only canary boot stub for non-preflight wiring tests.
-
-    These tests exercise daemon construction after the shared preflight.  The
-    dedicated Halt 2 tests cover the real verifier; keeping this stub local to
-    test fixtures prevents unrelated wiring tests from needing production
-    evidence files or a durable permit row.
-    """
+    """Historical fixture name; construction now uses normal live plus measured release."""
     configure_account_env(monkeypatch)
-    monkeypatch.setenv("BFX_CANARY_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
-    monkeypatch.setenv("BFX_CANARY_ENVIRONMENT", "prod")
-    monkeypatch.setenv("BFX_CANARY_SYMBOL", "fUST")
-    monkeypatch.setenv("BFX_CANARY_CELL", "fUST_a30")
-    monkeypatch.setenv("BFX_CANARY_STRATEGY", "rate_percentile")
-    monkeypatch.setenv("BFX_CANARY_AMOUNT_USDT", "150")
-    monkeypatch.setenv("BFX_CANARY_CAP_USDT", "500")
-    monkeypatch.setenv("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS", "300")
-    monkeypatch.setenv(
-        "BFX_CANARY_PERMIT_ID", "33333333-3333-3333-3333-333333333333"
-    )
-    monkeypatch.setenv("BFX_EXPECTED_IMAGE_DIGEST", "sha256:test")
+    configure_release_runtime(monkeypatch)
+    monkeypatch.setenv("BFX_PHASE", "live")
+    monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
     monkeypatch.setenv("BFX_PROJECTOR_VERSION", "execution-state-v1")
     monkeypatch.setenv("BFX_HALT2_EVIDENCE_REPORT", str(tmp_path / "halt2-stub.json"))
 
-    import scripts.halt2_cutover as halt2_cutover
-    import scripts.run_canary_preflight as canary_preflight
 
-    monkeypatch.setattr(
-        halt2_cutover,
-        "_load_evidence",
-        lambda _path: SimpleNamespace(
-            exchange_account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
-            deployment_environment="prod",
-        ),
-    )
-
-    async def _preflight_stub(**_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(canary_preflight, "verify_canary_preflight", _preflight_stub)
-
-
-async def seed_exchange_account(engine: AsyncEngine) -> None:
-    """Provision the account/credential rows after a test schema is created."""
+async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
+    """Provision synthetic identity and explicit applied policies, never an env fallback."""
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
     )
@@ -100,6 +84,17 @@ async def seed_exchange_account(engine: AsyncEngine) -> None:
                 verified_at=datetime.now(UTC),
             )
         )
+    if capital_policies:
+        from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+        from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+        for environment in ("ci", "prod", "shadow"):
+            repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID,
+                                     environment=environment, max_snapshot_age_ms=10000)
+            async with factory.begin() as session:
+                for symbol in ("fUST", "fUSD"):
+                    await repo.apply_policy(session, symbol=symbol,
+                        policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
+                        source={"synthetic_fixture": True})
 
 
 __all__ = [

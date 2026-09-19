@@ -39,6 +39,9 @@ class MarketSnapshot:
     sequence_valid: bool
     checksum_valid: bool
     sequence: int | None
+    # Bound by the provider that admitted this exact snapshot, never a fresh
+    # unrelated book substituted after pricing. Missing evidence cannot send.
+    max_age_ms: int | None = None
 
     def is_fresh(self, *, symbol: str, now_ms: int, max_age_ms: int) -> bool:
         return (
@@ -214,6 +217,7 @@ class FundingBookStore(FundingBookProvider):
             sequence_valid=state.sequence_valid,
             checksum_valid=state.checksum_valid,
             sequence=state.sequence,
+            max_age_ms=self._max_age_ms,
         )
         if (
             state.requires_reconciliation

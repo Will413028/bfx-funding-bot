@@ -25,6 +25,7 @@ class AuditContext:
     signal_correlation_id: str
     service_version: str
     config_hash: str
+    strategy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class ExecutionDecision:
     config_hash: str
     occurred_at_ms: int
     recorded_at_ms: int
+    strategy: str | None = None
 
     def persistence_values(self) -> dict[str, object]:
         """Return primitive, stable values for the append-only SQL row."""
@@ -69,6 +71,7 @@ class ExecutionDecision:
             "deployment_environment": self.deployment_environment,
             "reconcile_id": self.reconcile_id,
             "cell_id": self.cell_id,
+            "strategy": self.strategy,
             "symbol": self.symbol,
             "signal_correlation_id": self.signal_correlation_id,
             "outcome": self.outcome.value,

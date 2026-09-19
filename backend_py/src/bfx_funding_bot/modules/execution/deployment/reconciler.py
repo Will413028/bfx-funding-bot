@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from decimal import Decimal
 from math import isfinite
 from typing import Any, Protocol
@@ -16,7 +17,13 @@ from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.funding_rules import (
+    FundingRuleProvider,
+    minimum_amount,
+    validate_amount,
+)
 from bfx_funding_bot.modules.execution.audit import AuditContext
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
     BlockReason,
@@ -41,8 +48,7 @@ from bfx_funding_bot.modules.execution.deployment.reprice import (
     stale_offers,
 )
 from bfx_funding_bot.modules.execution.deployment.sizing import (
-    allocate_gap,
-    effective_min_usdt,
+    allocate_capital,
 )
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
@@ -57,7 +63,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol
+from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
@@ -120,15 +126,9 @@ class DeploymentReconciler:
         safety_chain: _SafetyChainProtocol,
         executor: ExecutorPort,
         account_ctx: AccountContext,
+        capital_runtime: CapitalRuntime,
         cells: list[CellConfig],
-        venue_floor_usd: Decimal,
-        min_offer_buffer_pct: Decimal,
-        concentration_pct: Decimal,
-        balance_buffer_usdt: Decimal,
-        caps: dict[str, Decimal] | None = None,
-        default_cap: Decimal = Decimal("0"),
-        buffers: dict[str, Decimal] | None = None,
-        default_buffer: Decimal = Decimal("0"),
+        funding_rules: FundingRuleProvider | None,
         clock: Callable[[], int],
         event_sink: _EventSinkProtocol,
         phase: Phase,
@@ -153,19 +153,10 @@ class DeploymentReconciler:
         self._executor = executor
         self._ctx = account_ctx
         self._cells = cells
-        self._min_fill = effective_min_usdt(venue_floor_usd, min_offer_buffer_pct)
-        self._concentration_pct = concentration_pct
-        self._balance_buffer = balance_buffer_usdt
-        # Phase 2 per-symbol sizing. caps[symbol] / buffers[symbol] are resolved
-        # via resolve_for_symbol with the legacy scalars (allocation_cap_usdt /
-        # balance_buffer_usdt) as env-fallback, so the resolved cap/buffer match
-        # exactly what AllocationCapGuard / BuyingPowerGuard enforce per offer.
-        # Defaulting the maps to {} means single-symbol constructions that omit
-        # them resolve to the scalar fallbacks (byte-identical to Phase 1).
-        self._caps = caps or {}
-        self._default_cap = default_cap
-        self._buffers = buffers or {}
-        self._default_buffer = default_buffer
+        self._funding_rules = funding_rules
+        if capital_runtime is None:
+            raise ValueError("deployment requires explicit applied capital runtime")
+        self._capital = capital_runtime
         self._clock = clock
         self._event_sink = event_sink
         self._phase = phase
@@ -207,7 +198,16 @@ class DeploymentReconciler:
 
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+        release: ReleaseCommand | None = None,
     ) -> None:
+        ctx = self._ctx
+        if release is not None:
+            matches = [cell for cell in self._cells if (cell.symbol, cell.cell_id, cell.strategy.value)
+                       == (release.symbol, release.cell, release.strategy)]
+            if len(matches) != 1:
+                raise ValueError("release_command_scope_or_minimum_mismatch")
+            ctx = replace(ctx, release_session_id=release.session_id,
+                          canary_halt_authorization=release.halt_authorization)
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise
@@ -224,6 +224,8 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            if release is not None and symbol != release.symbol:
+                continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
@@ -234,7 +236,7 @@ class DeploymentReconciler:
             )
             authoritative_uncertainty_guard = evaluate_before_sizing is not None
             if evaluate_before_sizing is not None:
-                pre_sizing_result = await evaluate_before_sizing(symbol, self._ctx)
+                pre_sizing_result = await evaluate_before_sizing(symbol, ctx)
                 if not pre_sizing_result.allowed:
                     log.error(
                         "deployment_symbol_blocked_uncertain_pre_sizing "
@@ -267,55 +269,36 @@ class DeploymentReconciler:
                     self._ctx.account_id, symbol,
                 )
                 continue
-            # Resolve cap/buffer with the SAME three-tier chain the per-offer
-            # guards use (map[symbol] → scalar env-fallback → default), so the
-            # reconciler sizes to exactly the cap AllocationCapGuard enforces.
-            cap = resolve_for_symbol(
-                self._caps, symbol, self._ctx.allocation_cap_usdt, self._default_cap,
-            )
-            if cap == 0:
-                # cap=0 ships the currency dark; the AllocationCapGuard also blocks
-                # every POST for it (defense-in-depth). Skip sizing entirely so a
-                # dark symbol produces zero offers (no wasted guard round-trips).
-                continue
-            buffer = resolve_for_symbol(
-                self._buffers, symbol, self._balance_buffer, self._default_buffer,
-            )
             symbol_cells = [c for c in self._cells
                             if self._cell_symbol[c.cell_id] == symbol]
-            e_total = self._ledger.current_exposure(symbol)
-            # Clamp the deployable gap to funds physically present in the funding
-            # wallet (available − buffer) so the reconciler never sizes an offer the
-            # venue must reject for insufficient balance (cap>balance loop, 2026-05-29).
-            headroom = max(Decimal("0"), self._ledger.available_balance(symbol) - buffer)
-            # Rescale per-cell intent to the *reserved* total (pending open offers),
-            # NOT to current_exposure (reserved + realized). Realized credits are
-            # committed to the venue and unattributable to any cell — using e_total
-            # here would inflate per-cell intent past cap_per_cell (factor > 1) and
-            # silently starve cells via negative allocate_gap headroom. cells= scopes
-            # the rescale to THIS symbol's cells only (Phase 2 per-currency
-            # independence): rescaling fUST's cells must not touch fUSD's.
             active = [c.cell_id for c in symbol_cells
                       if self._store.get_active(c.cell_id, now_ms=now) is not None]
-            # Keep the tracker's defense-in-depth clamp aligned with
-            # allocate_gap's relaxed per-cell cap (single-active-cell case),
-            # or reconcile_to_total spuriously clamp-warns every tick while a
-            # lone cell legitimately holds more than concentration_pct * cap.
-            # No active cells → allocation below is a no-op; keep the strict cap.
-            cap_per_cell = (
-                max(self._concentration_pct * cap, cap / len(active))
-                if active else self._concentration_pct * cap
-            )
-            self._tracker.reconcile_to_total(
-                self._ledger.reserved_exposure(symbol),
-                cells=[c.cell_id for c in symbol_cells],
-                cap_per_cell=cap_per_cell,
-            )
+            try:
+                if self._funding_rules is None:
+                    raise ValueError("funding_rule_unavailable")
+                amount_evidence = await self._funding_rules.observe(symbol)
+                # One account lock and transaction for the whole symbol's plan.
+                async with self._capital.session_factory() as session:
+                    views = {cell: await self._capital.read(
+                        symbol=symbol, cell_id=cell, session=session,
+                    ) for cell in active}
+                min_fill = minimum_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
+                fills = allocate_capital(views=views, min_fill=min_fill)
+                if release is not None:
+                    validate_amount(release.amount, amount_evidence, symbol=symbol, now_ms=self._clock())
+                    view = views.get(release.cell)
+                    fills = ({release.cell: release.amount}
+                             if view is not None and view.budget.max_new_offer >= release.amount else {})
+            except Exception as exc:
+                if release is not None:
+                    raise
+                log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
+                continue
 
             # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
             # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
             # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
-            if self._reprice is not None and venue_offers:
+            if release is None and self._reprice is not None and venue_offers:
                 cancel_budget -= await self._reprice_sweep(
                     symbol=symbol,
                     symbol_cells=symbol_cells,
@@ -324,59 +307,11 @@ class DeploymentReconciler:
                     budget=cancel_budget,
                 )
 
-            # Fills are pre-computed from this single pre-loop snapshot; the per-cell
-            # concentration cap is enforced inside allocate_gap, not incrementally as
-            # we record each submit below. Correct within a tick (sum of fills <= gap,
-            # each <= per-cell cap); cross-tick drift is corrected by reconcile_to_total.
-            # If a WS fill/claim lands mid-tick making this snapshot stale, the per-offer
-            # AllocationCapGuard is evaluated ONCE per offer before submit (not at the
-            # moment of submission). A fill landing in the narrow window between guard-eval
-            # and submit is NOT re-checked, so a brief over-cap is possible but
-            # self-corrects on the next ~90 s reconcile. Bitfinex enforces only account
-            # balance, not our internal cap. A stale snapshot can only under-deploy
-            # (safe), never materially over-deploy.
-            fills = allocate_gap(
-                target=cap,
-                current_exposure=e_total,
-                available_headroom=headroom,
-                deployed=self._tracker.snapshot(),
-                active_cells=active,
-                concentration_pct=self._concentration_pct,
-                min_fill=self._min_fill,
-            )
             if not fills:
                 continue  # this symbol has no gap to fill; other symbols still deploy
 
-            gap = cap - e_total
-            allocated = sum(fills.values(), Decimal("0"))
-            stranded = gap - allocated
-            if stranded >= self._min_fill:
-                # Attribute the stranded capital to its true cause. When the
-                # funding-wallet headroom (available − buffer) binds below the policy
-                # gap, the idle capital is balance-limited (cap > balance), not held
-                # back by the concentration cap — mislabelling it as concentration
-                # sends a partial-deployment operator down the wrong diagnostic path.
-                if headroom < gap:
-                    log.info(
-                        "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
-                        "headroom=%s (balance-limited: available−buffer < policy gap) "
-                        "active=%s",
-                        gap, allocated, stranded, headroom, active,
-                    )
-                else:
-                    log.info(
-                        "deployment_capital_stranded gap=%s allocated=%s stranded=%s "
-                        "(concentration cap %s/cell or no further active cell) active=%s",
-                        gap, allocated, stranded, self._concentration_pct, active,
-                    )
-            elif stranded > 0:
-                log.info(
-                    "deployment_capital_stranded_sub_min gap=%s allocated=%s stranded=%s "
-                    "(below venue floor, not submitted) active=%s",
-                    gap, allocated, stranded, active,
-                )
-
             for cell_id, amount in fills.items():
+                now = self._clock()
                 # Legacy adapters re-check their local gate.  DB-backed chains
                 # instead re-evaluate their uncertainty guard below for each
                 # offer, which catches an UNKNOWN opened by the prior submit.
@@ -401,7 +336,9 @@ class DeploymentReconciler:
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
                 )
-                guard = await self._safety.evaluate(decision, self._ctx)
+                cell_ctx = replace(ctx, capital_cell_id=cell_id)
+                guard = await self._safety.evaluate(decision, cell_ctx)
+                now = self._clock()
                 snapshot = self._book_provider.snapshot(symbol, now_ms=now)
                 decision_id = str(uuid5(
                     NAMESPACE_URL,
@@ -482,10 +419,11 @@ class DeploymentReconciler:
                     price=gate_price,
                     fill_evidence=fill_evidence,
                     safety=guard,
-                    audit_context=self._audit_context_factory.build(
+                    audit_context=replace(self._audit_context_factory.build(
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
-                    ),
-                    optimizer_evidence=optimizer_evidence,
+                    ), strategy=self._cell_strategy[cell_id].value),
+                    optimizer_evidence={**(optimizer_evidence or {}),
+                                        "funding_amount": amount_evidence.payload()},
                     optimizer_block_reason=optimizer_block_reason,
                     expected_period_agg=period_agg,
                     expected_horizon_h=expected_horizon_h,
@@ -527,8 +465,12 @@ class DeploymentReconciler:
                                 [(round(a, 2), r) for a, r in rungs], ask_rate,
                             )
                 try:
-                    result = await self._executor.submit(outcome, self._ctx)
+                    outcome = replace(outcome, capital_view=views[cell_id],
+                                      funding_amount_evidence=amount_evidence)
+                    result = await self._executor.submit(outcome, cell_ctx)
                 except Exception as exc:
+                    if release is not None:
+                        raise
                     log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
                     if self._attempts is not None:
                         self._attempts.record_error(
