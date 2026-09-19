@@ -30,6 +30,7 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     "de6f708192a3",
     "e7b1c2d3e4f5",
     "f8c2d4e6a901",
+    "a9d3e5f7b102",
 })
 
 __all__ = [
@@ -106,6 +107,17 @@ class AccountEventWriter:
         account_id = self._event_account_id(event)
         await self.acquire_lock(session, account_id=account_id)
         return await self._append_locked(session, event, account_id=account_id)
+
+    async def prepare_locked(self, session: AsyncSession, *, account_id: UUID) -> None:
+        """Acquire the xact lock, validate readiness and replay before a guard read.
+
+        Caller owns commit/rollback and must use this same session for guard,
+        decision and intent writes. No venue I/O belongs in this transaction.
+        """
+        await self._assert_projector_migration_ready(session)
+        await self.acquire_lock(session, account_id=account_id)
+        await self._ensure_account_writable(session, account_id=account_id)
+        await self._replay_pending(session, account_id=account_id)
 
     async def append_batch(
         self, session: AsyncSession, events: list[object] | tuple[object, ...]
