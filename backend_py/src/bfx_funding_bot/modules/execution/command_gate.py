@@ -56,7 +56,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     normalize_submit_payload,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
-from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload, SkipReason
+from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 log = logging.getLogger(__name__)
 
@@ -378,6 +378,7 @@ class AccountCommandGate:
                 reference = getattr(managed, "reservation_ref", None)
                 if (claim.state not in {"claimed", "released"} or reference is None
                     or decision_row is None
+                    or decision_row.applied_rate is None or decision_row.duration_days is None
                     or (reference.execution_decision_id, reference.cid, reference.venue_offer_id,
                         str(reference.signal_correlation_id), getattr(managed, "symbol", None),
                         decision_row.exchange_account_id, decision_row.deployment_environment,
@@ -398,16 +399,23 @@ class AccountCommandGate:
                 signal_correlation_id = reference.signal_correlation_id
                 # No new spending; ordinary cancels never inherit a release halt override.
                 ctx = replace(ctx, canary_halt_authorization=None)
-                probe = DecisionPayload(decision_outcome=DecisionOutcome.SKIP,
-                    skip_reason=SkipReason.OTHER, signal_correlation_id=signal_correlation_id,
-                    symbol=claim.symbol)
-                await self._guard(probe, replace(ctx, command_session=session))
+                # A cancel is a venue write, not a SKIP. Probe the managed
+                # order's identity; explicitly omit only capital spending checks.
+                probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
+                    signal_correlation_id=signal_correlation_id, symbol=claim.symbol,
+                    offer_amount_usdt=float(claim.size_usdt),
+                    offer_rate=float(decision_row.applied_rate),
+                    offer_duration_days=decision_row.duration_days)
+                await self._guard(probe, replace(ctx, command_session=session), transport=True)
                 await runtime.repository.writer.append(session, CancelRequested(
                     venue_offer_id=venue_offer_id, requested_at_ms=self._clock(),
                     signal_correlation_id=signal_correlation_id, account_id=account_id,
                     occurred_at_ms=self._clock(),
                 ))
             async def before_transport() -> None:
+                # Fresh scoped uncertainty/latch check after commit AND before
+                # every idempotent retry. Read errors fail closed, outside txn.
+                await self.check(probe, ctx)
                 await self._guard(probe, ctx, transport=True)
 
             await before_transport()
