@@ -79,6 +79,14 @@ def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
     assert_canary_guard_invariant(Phase.SHADOW, cfg)  # invariant is canary-only
 
 
+@pytest.mark.parametrize("guard", [
+    "manual_kill", "auth_health", "heartbeat", "realized_loss_24h", "drawdown_from_peak",
+])
+def test_live_keeps_required_noncapital_guards(tmp_path, guard):
+    with pytest.raises(ValueError, match=guard):
+        assert_canary_guard_invariant(Phase.LIVE, _load(tmp_path, disable=guard))
+
+
 _MR_PARAMS = {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100}
 
 

@@ -16,12 +16,13 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     GuardResult,
     WriterLockHandle,
 )
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltState, HaltStateStore
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -34,6 +35,30 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 
 class _HaltStateReader(Protocol):
     async def current(self) -> HaltState | None: ...
+
+
+class CapitalPolicyGuard:
+    """The applied-policy evaluator is the sole live money authority."""
+    name = "capital_policy"
+    is_calibrated = False
+
+    def __init__(self, *, runtime: CapitalRuntime) -> None:
+        self.runtime = runtime
+
+    async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
+        if decision.decision_outcome != DecisionOutcome.POST:
+            return GuardResult(True, self.name)
+        try:
+            if ctx.account_id != str(self.runtime.repository.account_id) or not ctx.capital_cell_id:
+                raise ValueError("capital_scope_missing")
+            view = await self.runtime.read(symbol=decision.symbol, cell_id=ctx.capital_cell_id,
+                                           session=ctx.command_session)
+            amount = Decimal(str(decision.offer_amount_usdt))
+            if not amount.is_finite() or amount <= 0 or amount > view.budget.max_new_offer:
+                return GuardResult(False, self.name, view.budget.reason or "insufficient_deployable_funds")
+            return GuardResult(True, self.name)
+        except Exception as exc:
+            return GuardResult(False, self.name, f"capital_unavailable: {exc}")
 
 
 class ManualKillGuard:
@@ -81,7 +106,12 @@ class ManualKillGuard:
         if self._halt_store is None:
             return GuardResult(allowed=True, guard_name=self.name)
         try:
-            state = await self._halt_store.current()
+            if ctx.command_session is not None:
+                if not isinstance(self._halt_store, HaltStateStore):
+                    raise ValueError("same-session halt reader required")
+                state = await self._halt_store.current(ctx.command_session)
+            else:
+                state = await self._halt_store.current()
         except Exception as exc:
             return GuardResult(
                 allowed=False, guard_name=self.name,
@@ -259,7 +289,17 @@ class UncertaintyGuard:
             )
         try:
             list_open = getattr(self._reader, "list_open", None)
-            if list_open is not None:
+            rows: Sequence[object]
+            if ctx.command_session is not None:
+                rows = (await ctx.command_session.scalars(
+                    select(ExecutionUncertaintyRow).where(
+                        ExecutionUncertaintyRow.exchange_account_id == account_id,
+                        ExecutionUncertaintyRow.deployment_environment == self._deployment_environment,
+                        ExecutionUncertaintyRow.symbol == decision.symbol,
+                        ExecutionUncertaintyRow.state == "open",
+                    )
+                )).all()
+            elif list_open is not None:
                 rows = await list_open(
                     exchange_account_id=account_id,
                     deployment_environment=self._deployment_environment,

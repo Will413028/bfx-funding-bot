@@ -19,9 +19,9 @@ Two design rules follow, and both are load-bearing:
    real ManualKillGuard, not by re-reading BFX_KILL_SWITCH. If the guard's
    logic changes, this report changes with it; it cannot describe a rule the
    money path does not follow.
-2. **Report which tier bound.** Effective caps/buffers come from
-   `resolve_for_symbol_with_source` — the same resolution the guards and the
-   reconciler use — so a knob that binds nothing says so.
+2. **Report applied authority.** Live amounts and per-cell budgets come from
+   the canonical CapitalRuntime with applied revision/digest and snapshot fence.
+   The tier resolver below is retained only for simulation diagnostics.
 
 Read-only throughout: no emit, no state mutation, and the executor is not
 reachable from here.
@@ -29,10 +29,12 @@ reachable from here.
 from __future__ import annotations
 
 import os
+from dataclasses import asdict, replace
 from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
@@ -109,8 +111,12 @@ class TradingStatusService:
         attempts: SubmitAttemptRecorder,
         halt_store: _HaltStoreProtocol | None = None,
         readiness: TradingReadiness | None = None,
+        capital_runtime: CapitalRuntime | None = None,
     ) -> None:
         self._chain = chain
+        if phase is Phase.LIVE and capital_runtime is None:
+            raise ValueError("live status requires applied capital runtime")
+        self._capital = capital_runtime
         self._ledger = ledger
         self._ctx = account_ctx
         self._cells = cells
@@ -132,21 +138,33 @@ class TradingStatusService:
 
     # ---------------------------------------------------------------- status
 
+    def _authority_scope(self) -> dict[str, str | None]:
+        # Bind diagnostics to the repository actually supplying capital, not an
+        # ambient env value or phase label. Legacy simulations have no live realm.
+        repository = self._capital.repository if self._capital else None
+        return {
+            "account_id": str(repository.account_id) if repository else self._ctx.account_id,
+            "deployment_environment": repository.environment if repository else None,
+        }
+
     async def snapshot(self) -> dict[str, Any]:
         return {
             "phase": self._phase.value,
-            "account_id": self._ctx.account_id,
+            **self._authority_scope(),
+            "configured_cells": [{"symbol": cell.symbol, "cell": cell.cell_id,
+                "strategy": cell.strategy.value, "period": cell.period_agg} for cell in self._cells],
             "process_started_at": self._attempts.started_at.isoformat(),
             "halt": await self._halt_state(),
             "guards": [
                 {"name": g.name, "is_calibrated": g.is_calibrated}
                 for g in self._chain.guards
             ],
-            "symbols": {s: self._symbol_status(s) for s in self._symbols},
-            "env_fallback_cap": self._fallback_status(
+            "symbols": {s: await self._capital_status(s) if self._capital else self._symbol_status(s)
+                        for s in (sorted(set(self._symbols) | {"fUST", "fUSD"}) if self._capital else self._symbols)},
+            "env_fallback_cap": None if self._capital else self._fallback_status(
                 self._caps, self._env_fallback_cap, self._default_cap, "cap",
             ),
-            "env_fallback_buffer": self._fallback_status(
+            "env_fallback_buffer": None if self._capital else self._fallback_status(
                 self._buffers, self._env_fallback_buffer, self._default_buffer,
                 "buffer",
             ),
@@ -231,6 +249,8 @@ class TradingStatusService:
         response says so explicitly — reporting "resumed" while nothing resumed
         is exactly the class of lie this endpoint exists to prevent.
         """
+        if self._phase is Phase.LIVE or self._capital is not None:
+            raise ValueError("release_promotion_required")
         state = await self._require_store().set_halted(
             False, reason=reason, actor=actor,
         )
@@ -284,6 +304,40 @@ class TradingStatusService:
             # not evidence that a halt is working.
             "deployable_headroom": str(headroom),
         }
+
+    async def _capital_status(self, symbol: str) -> dict[str, Any]:
+        assert self._capital is not None
+        try:
+            async with self._capital.session_factory() as session:
+                if not any(cell.symbol == symbol for cell in self._cells):
+                    applied = await self._capital.repository.read_applied(session, symbol=symbol)
+                    return {"capital_available": False,
+                        "reason": "policy_disabled" if not applied.policy.enabled else "no_configured_cells",
+                        "policy_revision": applied.revision, "policy_digest": applied.digest,
+                        "policy": {key: str(value) if isinstance(value, Decimal) else value
+                                   for key, value in asdict(applied.policy).items()}}
+                views = {cell.cell_id: await self._capital.read(
+                    symbol=symbol, cell_id=cell.cell_id, session=session,
+                ) for cell in self._cells if cell.symbol == symbol}
+            first = next(iter(views.values()))
+            return {
+                "capital_available": True,
+                "policy_revision": first.applied.revision,
+                "policy_digest": first.applied.digest,
+                "snapshot_seq": first.snapshot_seq,
+                "policy": {key: str(value) if isinstance(value, Decimal) else value
+                           for key, value in asdict(first.applied.policy).items()},
+                "available_balance": str(first.snapshot.available_amount),
+                "unreflected_commitments": str(first.snapshot.unreflected_commitments),
+                "total_capital": str(first.snapshot.total_capital),
+                "spendable": str(first.budget.spendable),
+                "unattributed_credit_exposure": str(first.unattributed_credit_exposure),
+                "cells": {cell: {key: str(value) if isinstance(value, Decimal) else value
+                                 for key, value in asdict(view.budget).items()}
+                          for cell, view in views.items()},
+            }
+        except Exception as exc:
+            return {"capital_available": False, "reason": str(exc)}
 
     def _fallback_status(
         self, mapping: dict[str, Decimal], env_fallback: Decimal | None,
@@ -357,10 +411,16 @@ class TradingStatusService:
             decision = self._probe_decision(
                 sym, amount=amount, rate=rate, period_days=period_days,
             )
-            report = await self._chain.dry_evaluate(decision, self._ctx)
+            reports = {cell.cell_id: await self._chain.dry_evaluate(
+                decision, replace(self._ctx, capital_cell_id=cell.cell_id),
+            ) for cell in self._cells if cell.symbol == sym}
+            # A full first cell must not hide spendable headroom in another.
+            report = next((r for r in reports.values() if r.would_submit), next(iter(reports.values())))
             per_symbol[sym] = {
                 "would_submit": report.would_submit,
                 "blocked_by": report.blocked_by,
+                "cells": {cell: {"would_submit": r.would_submit, "blocked_by": r.blocked_by}
+                          for cell, r in reports.items()},
                 "guards": [
                     {
                         "name": g.name, "allowed": g.allowed,
@@ -377,6 +437,7 @@ class TradingStatusService:
                 },
             }
         return {
+            **self._authority_scope(),
             "would_submit_any": any(s["would_submit"] for s in per_symbol.values()),
             "symbols": per_symbol,
         }

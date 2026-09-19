@@ -20,10 +20,10 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, NamedTuple, Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,6 +37,10 @@ from bfx_funding_bot.external.bitfinex.auth_rest import (
 )
 from bfx_funding_bot.external.bitfinex.errors import BitfinexAPIError, BitfinexShapeError
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_scope_clause
+from bfx_funding_bot.modules.execution.capital_repository import (
+    CapitalBlockedError,
+    CapitalRepository,
+)
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
@@ -395,6 +399,7 @@ class BootRecovery:
         backoff_base_s: float = 1.0,
         clock: Callable[[], int] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
+        capital_repository: CapitalRepository | None = None,
     ) -> None:
         self._store = store
         self._session_factory = session_factory
@@ -425,6 +430,11 @@ class BootRecovery:
         self._backoff_base_s = backoff_base_s
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._uncertainty_handler = uncertainty_handler
+        if capital_repository is not None and (
+            str(capital_repository.account_id), capital_repository.environment
+        ) != (account_ctx.account_id, deployment_environment):
+            raise ValueError("capital repository scope differs from recovery")
+        self._capital_repository = capital_repository
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally
@@ -432,6 +442,18 @@ class BootRecovery:
         # sees a coherent immutable result and never holds a lock over network IO.
         history_start_ms = await self._load_history_start_ms()
         query_started_at_ms = self._clock()
+        capital_fence = None
+        if self._capital_repository is not None:
+            # Commit the command fence BEFORE any venue query. Pending/UNKNOWN
+            # must still reconcile through the ordinary recovery path; such an
+            # observation never becomes capital authority.
+            try:
+                async with session_scope(self._session_factory) as session:
+                    capital_fence = await self._capital_repository.begin_snapshot(
+                        session, now_ms=query_started_at_ms,
+                    )
+            except CapitalBlockedError:
+                pass
         all_offers = await self._fetch_offers(None)
         all_credits = await self._fetch_credits(None)
         wallet_available = await self._fetch_available_all()
@@ -471,7 +493,34 @@ class BootRecovery:
             occurred_at_ms=query_finished_at_ms,
         )
 
+        confirmation = None
+        if capital_fence is not None:
+            confirmation_started = self._clock()
+            confirmed_offers = await self._fetch_offers(None)
+            confirmed_credits = await self._fetch_credits(None)
+            confirmed_wallets = await self._fetch_available_all()
+            confirmation = replace(snapshot_event, event_id=uuid4(),
+                query_started_at_ms=confirmation_started, query_finished_at_ms=self._clock(),
+                offers=tuple(self._offer_observation(o) for o in confirmed_offers),
+                credits=tuple(self._credit_observation(c) for c in confirmed_credits),
+                wallet_available=confirmed_wallets, offer_history=())
+
+        capital_error = None
+        capital_accepted = False
         async with session_scope(self._session_factory) as session:
+            if self._capital_repository is not None and capital_fence is not None:
+                assert confirmation is not None
+                try:
+                    async with session.begin_nested():
+                        snapshot_drift = await self._capital_repository.accept_snapshot(
+                            session, fence=capital_fence, event=snapshot_event,
+                            confirmation=confirmation, now_ms=self._clock(),
+                        )
+                    capital_accepted = True
+                except CapitalBlockedError as exc:
+                    # Preserve raw observation and normal quarantine/recovery
+                    # evidence, while the durable pending query disables capital.
+                    capital_error = exc
             local_claims = await self._load_local_claims(session)
             actions = compute_recovery_actions(
                 venue_offers=all_offers, local_claims=local_claims,
@@ -483,7 +532,8 @@ class BootRecovery:
             unknown_actions = [ev for ev in actions if isinstance(ev, ReservationUnknown)]
             for unknown_action in unknown_actions:
                 await self._store.append(session, unknown_action)
-            snapshot_drift = await self._append_snapshot_event(session, snapshot_event)
+            if not capital_accepted:
+                snapshot_drift = await self._append_snapshot_event(session, snapshot_event)
 
             matched_events: list[SubmitMatchedToVenueOffer] = []
             matched_offer_ids: set[str] = set()
@@ -553,6 +603,9 @@ class BootRecovery:
                 )
                 if was_persisted:
                     persisted_remaining_actions.append(remaining_action)
+
+        if capital_error is not None:
+            raise capital_error
 
         persisted_actions: list[RecoveryAction | SubmitMatchedToVenueOffer] = [
             *unknown_actions,

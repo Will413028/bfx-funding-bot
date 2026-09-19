@@ -1,0 +1,182 @@
+"""Orchestrator acceptance; external Docker/host-root boundaries are fixtures."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from tests.scripts.test_release_package import IMAGE, manifest
+
+
+def fixture(tmp_path, monkeypatch):
+    from scripts import immutable_release as cli
+    release = manifest().model_copy(update={"environment": {"BFX_PHASE": "live",
+        "BFX_OPERATOR_USER_ID": "operator", "BFX_OPERATOR_ROLE": "admin",
+        "BFX_EXCHANGE_ACCOUNT_ID": "account", "BFX_DEPLOYMENT_ENV": "prod",
+        "BFX_SAFETY_CONFIG": "/app/configs/safety.live.yaml"}})
+    args = SimpleNamespace(bundle=tmp_path / "bundle.json", network="existing", halt2=tmp_path / "halt2.json",
+        bot_env=tmp_path / "bot.env", webapi_env=tmp_path / "api.env", frontend_env=tmp_path / "frontend.env",
+        dr_directory=tmp_path / "dr")
+    public = {"NEXT_PUBLIC_APP_URL": "https://example.test"}
+    for path, role in [(args.bot_env, "bfx_bot"), (args.webapi_env, "bfx_webapi"), (args.frontend_env, "bfx_webauth")]:
+        path.write_text(f"DATABASE_URL=postgresql://{role}:synthetic@bfx-postgres/bfx\nBFX_ADMIN_TOKEN=synthetic\n"
+            "BFX_OPERATOR_USER_ID=operator\nBFX_OPERATOR_ROLE=admin\nNEXT_PUBLIC_APP_URL=https://example.test\n")
+    with args.webapi_env.open("a") as stream:
+        stream.write("BFX_DEPLOYMENT_ENV=prod\n")
+    args.halt2.write_text(json.dumps({"backup_evidence_path": "/run/bfx-dr/backup.json",
+        "isolated_restore_evidence_path": "/run/bfx-dr/restore.json"}))
+    args.dr_directory.mkdir()
+    for name in ("backup", "restore"):
+        (args.dr_directory / f"{name}.json").write_text('{}')
+    # This fixture is not host-root acceptance. Actual protected files/RO rootfs
+    # and shared consumer verification run separately inside the candidate image.
+    monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
+    monkeypatch.setattr(cli.os, "chown", lambda *a: None)
+    calls = []
+    infra = [{"Id": "existing-pg", "State": {"Running": True}, "Mounts": [{"Name": "bfx_pgdata"}]},
+             {"Id": "existing-redis", "State": {"Running": True}, "Mounts": [{"Name": "bfx_redisdata"}]}]
+    def runner(command, *, data=None):
+        calls.append(command)
+        if command == ["docker", "inspect", "bfx-postgres", "bfx-redis"]:
+            return json.dumps(infra).encode()
+        if command == ["docker", "inspect", "bfx-bot", "bfx-webapi", "bfx-frontend"]:
+            return json.dumps([{"Id": n, "Name": "/"+n, "State": {"Running": False}} for n in command[2:]]).encode()
+        if command[:2] in (["docker", "rename"], ["docker", "network"]):
+            return b""
+        raise AssertionError(command)
+    monkeypatch.setattr(cli, "run", runner)
+    checks = []
+    def one_shot(*a, **k):
+        checks.append(k)
+        return b'{"halt_id":17,"halted":true,"policies":{"fUST":{"revision":1}}}'
+    monkeypatch.setattr(cli, "one_shot", one_shot)
+    launches = []
+    def launch(release, **kwargs):
+        from bfx_funding_bot.core.release_identity import LaunchReceipt
+        launches.append((release.docker_image_id, kwargs))
+        kwargs["publish"](LaunchReceipt(version=1, launch_id="a"*32, hostname="bfx-"+"a"*32,
+            container_id="b"*64, manifest_digest="c"*64, docker_image_id=IMAGE, platform="linux/arm64"))
+        return "new-bot"
+    monkeypatch.setattr(cli, "create_launch", launch)
+    monkeypatch.setattr(cli, "start_service", lambda **kw: launches.append((kw["image"],kw)) or kw["name"])
+    bundle = {"frontend": {"docker_image_id": IMAGE, "public_environment": public}}
+    return cli, args, bundle, release, calls, checks, launches
+
+
+def test_deploy_preserves_infrastructure_and_halt_and_publishes_dr_before_start(tmp_path, monkeypatch):
+    cli, args, bundle, release, calls, checks, launches = fixture(tmp_path, monkeypatch)
+    result = cli.deploy(args, bundle, release)
+    assert result["resumed"] is False
+    assert result["halt_before"]["halt_id"] == result["halt_after"]["halt_id"] == 17
+    assert result["human_activation_required"] is True
+    assert [image for image, _ in launches] == [IMAGE, IMAGE, IMAGE]
+    evidence = launches[0][1]["evidence_mounts"]
+    assert set(evidence) == {"/run/bfx-dr/backup.json", "/run/bfx-dr/restore.json"}
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence.values())
+    assert all(not any(word in cmd for word in ("build", "pull", "up", "rm", "stop")) for cmd in calls)
+    assert sum(check["command"][-1] == "startup" for check in checks) == 2
+
+
+def test_missing_policy_stops_before_renaming_or_starting_apps(tmp_path, monkeypatch):
+    cli, args, bundle, release, calls, _, launches = fixture(tmp_path, monkeypatch)
+    def blocked(*a, **k):
+        raise cli.PackagingBlocked("deployment_database_check_failed")
+    monkeypatch.setattr(cli, "one_shot", blocked)
+    with pytest.raises(cli.PackagingBlocked):
+        cli.deploy(args, bundle, release)
+    assert not launches
+    assert not any(cmd[:2] == ["docker", "rename"] for cmd in calls)
+
+
+@pytest.mark.parametrize("realm", [None, "ci"])
+def test_webapi_realm_missing_or_mismatched_blocks_before_rename_or_start(tmp_path, monkeypatch, realm):
+    cli, args, bundle, release, calls, checks, launches = fixture(tmp_path, monkeypatch)
+    env = args.webapi_env.read_text().replace("BFX_DEPLOYMENT_ENV=prod\n", "")
+    args.webapi_env.write_text(env + (f"BFX_DEPLOYMENT_ENV={realm}\n" if realm else ""))
+    with pytest.raises(cli.PackagingBlocked, match="runtime_environment_or_operator_mismatch"):
+        cli.deploy(args, bundle, release)
+    assert not launches
+    assert not checks
+    assert not calls
+
+
+def test_dr_destination_cannot_override_application_or_root_receipt(tmp_path, monkeypatch):
+    cli, args, bundle, release, _, _, launches = fixture(tmp_path, monkeypatch)
+    args.halt2.write_text(json.dumps({"backup_evidence_path": "/app/configs/safety.live.yaml",
+        "isolated_restore_evidence_path": "/run/bfx-dr/restore.json"}))
+    with pytest.raises(cli.PackagingBlocked, match="evidence"):
+        cli.deploy(args, bundle, release)
+    assert not launches
+
+
+@pytest.mark.parametrize("drift", [None, "environment", "privileged", "network"])
+def test_service_inspection_rejects_config_drift_before_start(tmp_path, monkeypatch, drift):
+    from scripts import immutable_release as cli
+    env = tmp_path / "api.env"
+    env.write_text("BFX_OPERATOR_USER_ID=operator\n")
+    calls = []
+    def runner(command, *, data=None):
+        calls.append(command)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return json.dumps([{"Id": IMAGE, "Os": "linux", "Architecture": "arm64"}]).encode()
+        if command[:2] == ["docker", "create"]:
+            return b"c" * 64
+        if command[:2] == ["docker", "inspect"]:
+            return json.dumps([{"Id": "c"*64, "Image": IMAGE, "Platform": "linux",
+                "State": {"Running": False}, "Mounts": [],
+                "Config": {"Cmd": ["python", "-m", "uvicorn"], "User": "1000:1000", "Entrypoint": None,
+                    "WorkingDir": "/app", "Env": ["BFX_OPERATOR_USER_ID=" + ("other" if drift == "environment" else "operator")]},
+                "HostConfig": {"ReadonlyRootfs": True, "CapAdd": None, "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges"], "Privileged": drift == "privileged",
+                    "NetworkMode": "other" if drift == "network" else "existing"}}]).encode()
+        if command[:2] == ["docker", "start"]:
+            return b""
+        raise AssertionError(command)
+    monkeypatch.setattr(cli, "run", runner)
+    kwargs = {"image": IMAGE, "platform": "linux/arm64", "name": "fixture", "user": "1000:1000", "env": env,
+        "network": "existing", "command": ["python", "-m", "uvicorn"]}
+    if drift:
+        with pytest.raises(cli.PackagingBlocked, match="service_launch_mismatch"):
+            cli.start_service(**kwargs)
+        assert not any(cmd[:2] == ["docker", "start"] for cmd in calls)
+    else:
+        assert cli.start_service(**kwargs) == "c"*64
+
+
+def test_cli_existing_receipt_blocks_before_any_one_shot(tmp_path, monkeypatch, capsys):
+    from scripts import immutable_release as cli
+    receipt = tmp_path / "existing.json"
+    receipt.write_text('{"preserved":true}')
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli.sys, "argv", ["release", "bootstrap", "--bundle", "/bundle.json",
+        "--network", "fixture", "--env", "/fixture.env", "--receipt", str(receipt)])
+    release = manifest().model_copy(update={"environment": {"BFX_EXCHANGE_ACCOUNT_ID": "account", "BFX_DEPLOYMENT_ENV": "ci"}})
+    monkeypatch.setattr(cli, "read_bundle", lambda _: ({}, release))
+    calls = []
+    monkeypatch.setattr(cli, "one_shot", lambda *a, **k: calls.append(k) or b'{}')
+    assert cli.main() == 2
+    assert not calls
+    assert receipt.read_text() == '{"preserved":true}'
+    assert "new_receipt_path_required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("drift", ["source", "platform", "backend_image"])
+def test_bundle_rejects_inconsistent_provenance(tmp_path, monkeypatch, drift):
+    from bfx_funding_bot.core.release_identity import canonical_digest
+    from scripts import immutable_release as cli
+    release = manifest()
+    backend = {"manifest_digest": canonical_digest(release.model_dump(mode="json")),
+        "source_revision": release.source_revision, "docker_image_id": IMAGE}
+    frontend = {"source_revision": release.source_revision, "platform": "linux/arm64", "docker_image_id": IMAGE}
+    if drift == "source":
+        frontend["source_revision"] = "d"*40
+    elif drift == "platform":
+        frontend["platform"] = "linux/amd64"
+    else:
+        backend["docker_image_id"] = "sha256:" + "d"*64
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps({"version": 1, "manifest": release.model_dump(mode="json"),
+        "backend_preparation": backend, "frontend": frontend}))
+    monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "inspect_image", lambda *a: {})
+    with pytest.raises(cli.PackagingBlocked, match="preparation_mismatch"):
+        cli.read_bundle(path)

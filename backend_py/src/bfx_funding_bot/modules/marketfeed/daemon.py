@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -41,6 +40,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
+from bfx_funding_bot.core.release_identity import ReleaseRuntime
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
@@ -48,6 +48,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
+from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
@@ -79,11 +80,9 @@ from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
-from bfx_funding_bot.modules.execution.canary_permit import (
-    CanaryOneShotGate,
-    CanaryPermitRepository,
-    CanaryPermitScope,
-)
+from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
+from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
 from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_from_env
@@ -128,6 +127,8 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
+from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+from bfx_funding_bot.modules.execution.release_worker import ReleaseWorker, build_release_worker
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -143,7 +144,7 @@ from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
-    BuyingPowerGuard,
+    CapitalPolicyGuard,
     DatabaseUncertaintyReader,
     HeartbeatGuard,
     ManualKillGuard,
@@ -286,7 +287,7 @@ class AccountBootstrap:
         """Reject the old process-global realm in live/canary boot modes."""
         legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
         executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
-        if legacy and (phase is Phase.CANARY or executor == "bitfinex_live"):
+        if legacy and (phase in {Phase.CANARY, Phase.LIVE} or executor == "bitfinex_live"):
             raise ConfigurationError(
                 "BFX_ACCOUNT_ID is no longer supported; use "
                 "BFX_EXCHANGE_ACCOUNT_ID"
@@ -312,38 +313,8 @@ class CanaryProfile:
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> CanaryProfile:
-        def required(name: str) -> str:
-            value = environ.get(name, "").strip()
-            if not value:
-                raise CanaryStartupBlocked(f"missing_canary_setting:{name}")
-            return value
-
-        try:
-            account_id = UUID(required("BFX_CANARY_ACCOUNT_ID"))
-        except ValueError as exc:
-            raise CanaryStartupBlocked("invalid_canary_account_id") from exc
-        try:
-            amount = Decimal(required("BFX_CANARY_AMOUNT_USDT"))
-            cap = Decimal(required("BFX_CANARY_CAP_USDT"))
-            max_age = int(required("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS"))
-        except (ArithmeticError, ValueError) as exc:
-            raise CanaryStartupBlocked("invalid_canary_numeric_setting") from exc
-        if not amount.is_finite() or not cap.is_finite() or amount <= 0 or cap <= 0:
-            raise CanaryStartupBlocked("invalid_canary_amount_or_cap")
-        if amount > cap:
-            raise CanaryStartupBlocked("canary_amount_exceeds_cap")
-        if max_age <= 0:
-            raise CanaryStartupBlocked("invalid_canary_evidence_age")
-        return cls(
-            account_id=account_id,
-            environment=required("BFX_CANARY_ENVIRONMENT"),
-            symbol=required("BFX_CANARY_SYMBOL"),
-            cell=required("BFX_CANARY_CELL"),
-            strategy=required("BFX_CANARY_STRATEGY"),
-            amount_usdt=amount,
-            cap_usdt=cap,
-            max_evidence_age_seconds=max_age,
-        )
+        """Retired compatibility entrypoint; env cannot create session authority."""
+        raise CanaryStartupBlocked("legacy_canary_requires_authenticated_release_session")
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +431,16 @@ def assert_canary_startup(
         reasons.append("canary_cap_mismatch")
     if allocation_cap_usdt != profile.cap_usdt:
         reasons.append("canary_allocation_cap_mismatch")
+    _canary_block(reasons)
+    assert_release_observation(profile=profile, evidence=evidence, readiness=readiness,
+                               historical_outcome_freshness=True)
+
+
+def assert_release_observation(*, profile: CanaryProfile, evidence: CanaryEvidence | None,
+                               readiness: CanaryReadiness,
+                               historical_outcome_freshness: bool = False) -> None:
+    """ACK and two fresh post-outcome fences, independent of normal cells/caps."""
+    reasons: list[str] = []
     if evidence is None:
         reasons.append("missing_canary_evidence")
         _canary_block(reasons)
@@ -507,7 +488,9 @@ def assert_canary_startup(
         or readiness.reconcile_observed_at_ms != evidence.reconcile_observed_at_ms
     ):
         reasons.append("reconcile_evidence_mismatch")
-    if readiness.observed_at_ms - evidence.outcome_at_ms > profile.max_evidence_age_seconds * 1000:
+    freshness_ms = (evidence.outcome_at_ms if historical_outcome_freshness else
+                    min(evidence.reconcile_observed_at_ms, default=0))
+    if not 0 <= readiness.observed_at_ms - freshness_ms <= profile.max_evidence_age_seconds * 1000:
         reasons.append("canary_evidence_stale")
     if not readiness.persistent_halt:
         reasons.append("persistent_halt_absent")
@@ -536,6 +519,13 @@ def assert_canary_pre_command(
         reasons.append("canary_cap_mismatch")
     if allocation_cap_usdt != profile.cap_usdt:
         reasons.append("canary_allocation_cap_mismatch")
+    _canary_block(reasons)
+    assert_release_pre_command(readiness)
+
+
+def assert_release_pre_command(readiness: CanaryReadiness) -> None:
+    """Shared completeness/uncertainty fence; no legacy cap/profile equality."""
+    reasons: list[str] = []
     if readiness.open_uncertainty_count:
         reasons.append("open_execution_uncertainty")
     if readiness.projector_lag:
@@ -767,6 +757,8 @@ class Daemon:
     trading_readiness: TradingReadiness | None = None
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
+    command_gate: AccountCommandGate | None = None
+    release_worker: ReleaseWorker | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
     metrics: DaemonMetrics | None = None
     # OTel traces (wiki pending #4) — default-off (BFX_OTEL_ENABLED), fail-open.
@@ -792,6 +784,8 @@ class Daemon:
             await self.boot_recovery.run()
 
         async with asyncio.TaskGroup() as tg:
+            if self.release_worker is not None:
+                tg.create_task(self.release_worker.run(self._stop_event), name="release_session")
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
             tg.create_task(self._scheduler_loop(),     name="scheduler")
             tg.create_task(self._monitor_loop(),       name="monitor")
@@ -1267,16 +1261,17 @@ _CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
 def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
-    """Canary (real money) must not run with a safety guard silently off.
+    """Real money cannot silently disable ownership-independent safety guards.
 
-    Requires the 4 hard guards + the 2 loss-limiters enabled; raises a
-    config-fatal ValueError (propagates to non-zero startup exit) otherwise.
-    No-op for paper/shadow. divergence_rate stays optional.
+    Normal live replaces allocation/buying-power flags with the mandatory
+    applied-policy guard. Both real phases still require kill/auth/heartbeat
+    and both loss limiters. No-op for paper/shadow; divergence stays optional.
     """
-    if phase != Phase.CANARY:
+    if phase not in {Phase.CANARY, Phase.LIVE}:
         return
     missing = [
         name for name in _CANARY_REQUIRED_HARD
+        if not (phase is Phase.LIVE and name in {"allocation_cap", "buying_power"})
         if not getattr(safety_cfg.hard_guards, name).enabled
     ]
     missing += [
@@ -1285,7 +1280,7 @@ def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> Non
     ]
     if missing:
         raise ValueError(
-            f"BFX_PHASE=canary requires all safety guards enabled; disabled: {missing}"
+            f"BFX_PHASE={phase.value} requires all safety guards enabled; disabled: {missing}"
         )
 
 
@@ -1316,11 +1311,16 @@ async def build_daemon(
     skip_ws: bool = False,
 ) -> Daemon:
     config = load_config(cells_yaml_path=cells_yaml_path)
+    if config.phase is Phase.CANARY:
+        raise CanaryStartupBlocked("legacy_canary_phase_requires_release_session")
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    live_executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
+    if config.phase is Phase.LIVE and not live_executor:
+        raise ConfigurationError("normal live requires bitfinex_live executor")
     try:
         allocation_cap = Decimal(
-            os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
+            "0" if config.phase is Phase.LIVE else os.environ.get("BFX_ALLOCATION_CAP_USDT", "500").strip()
         )
     except Exception as exc:
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
@@ -1333,6 +1333,31 @@ async def build_daemon(
             allocation_cap_usdt=allocation_cap,
             phase=config.phase,
         )
+    capital_runtime: CapitalRuntime | None = None
+    release_runtime: ReleaseRuntime | None = None
+    verified_release = None
+    if live_executor:
+        capital_runtime = CapitalRuntime(
+            repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
+                environment=config.deployment_environment.value, max_snapshot_age_ms=300_000),
+            session_factory=session_factory, clock=now_ms_utc,
+        )
+        try:
+            async with session_factory.begin() as policy_session:
+                for symbol in configured_symbols(config.cells):
+                    await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
+            release_runtime = ReleaseRuntime.from_environment()
+            identity_started = time.perf_counter()
+            verified_release = await asyncio.to_thread(release_runtime.verify)
+            log.info("release_identity_verified digest=%s inventory_seconds=%.6f",
+                     verified_release.release_digest, time.perf_counter() - identity_started)
+        except Exception:
+            await HaltStateStore(session_factory,
+                account_id=str(account_bootstrap.exchange_account_id),
+                deployment_environment=config.deployment_environment.value,
+            ).set_halted(True, reason="release_boot_blocked", actor="worker")
+            await db_engine.dispose()
+            raise
 
     probe = HealthProbe()
     # ── Four Golden Signals metrics (observe-only; /metrics on healthz srv) ──
@@ -1469,55 +1494,12 @@ async def build_daemon(
     safety_cfg = load_safety_config(safety_cfg_path)
     assert_canary_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
-    assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+    if capital_runtime is None:
+        assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
 
-    # This is deliberately before build_executor() and before any live recovery
-    # loop is constructed.  The existing AccountCommandGate remains the only
-    # route to submit; this gate invokes the same read-only verifier as
-    # run_canary_preflight.py rather than trusting a structurally valid report.
-    canary_halt_authorization: object | None = None
-    if (
-        config.phase is Phase.CANARY
-        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
-    ):
-        profile = CanaryProfile.from_environ(os.environ)
-        canary_halt_authorization = object()
-        if profile.environment != env_str or profile.account_id != account_bootstrap.exchange_account_id:
-            raise CanaryStartupBlocked("canary_identity_or_environment_mismatch")
-        # A post-command JSON report is never a daemon boot input.  The daemon
-        # admits only the pre-command durable permit/readiness contract; the
-        # report is generated and verified after the venue boundary.
-        evidence = None
-        halt2_evidence_path = os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "").strip()
-        if not halt2_evidence_path:
-            raise CanaryStartupBlocked("missing_halt2_evidence")
-        image_digest = os.environ.get("BFX_EXPECTED_IMAGE_DIGEST", "").strip()
-        projector_version = os.environ.get("BFX_PROJECTOR_VERSION", "").strip()
-        if not image_digest or not projector_version:
-            raise CanaryStartupBlocked("missing_halt2_runtime_identity")
-        # Local imports keep the production package free of a module-cycle with
-        # the operator CLI while making its one verifier authoritative here too.
-        from scripts.halt2_cutover import _load_evidence
-        from scripts.run_canary_preflight import verify_canary_preflight
-
-        halt2_evidence = _load_evidence(Path(halt2_evidence_path))
-        async with session_factory() as canary_session:
-            await verify_canary_preflight(
-                session=canary_session,
-                profile=profile,
-                halt2_evidence=halt2_evidence,
-                config_artifact=safety_cfg_path,
-                image_digest=image_digest,
-                projector_version=projector_version,
-                environ=os.environ,
-                evidence=evidence,
-                configured_cells=tuple(
-                    (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
-                ),
-                configured_caps=hg.allocation_cap.caps,
-                allocation_cap_usdt=allocation_cap,
-                now_ms=now_ms_utc(),
-            )
+    # Only a scoped durable session can carry this token. No canary env/profile
+    # or pre-issued-permit boot path: both normal and one-shot use the same gate.
+    canary_halt_authorization: object | None = object() if live_executor else None
 
     # L2 loss-limiter source: account NAV (available + reserved + realized)
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
@@ -1563,12 +1545,13 @@ async def build_daemon(
         "effective_cap_per_symbol %s",
         # assert_caps_invariant (above) already proved every configured symbol has
         # an explicit caps entry in ALL phases, so direct indexing can't KeyError.
+        "applied CapitalPolicy" if capital_runtime else
         {s: hg.allocation_cap.caps[s] for s in configured_symbols(config.cells)},
     )
     # Single available-buffer bound shared by the per-offer BuyingPowerGuard and
     # the cumulative DeploymentReconciler clamp — read once so both consume the
     # same value (no double subtraction).
-    balance_buffer_usdt = Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
+    balance_buffer_usdt = Decimal("0") if capital_runtime else Decimal(os.environ.get("BFX_BALANCE_BUFFER_USDT", "3"))
 
     # Executor is built before the guard chain so guard composition can branch on
     # spec.is_simulated (BuyingPowerGuard is live-only — see allocation_cap block).
@@ -1587,6 +1570,8 @@ async def build_daemon(
         bus=bus,
         nonce_provider=bfx_nonce,
     )
+    if not spec.is_simulated and capital_runtime is None:
+        raise ConfigurationError("live executor requires applied capital runtime")
 
     # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
     # so paper/shadow leave it None and the guard/liveness/release are all inert.
@@ -1634,38 +1619,16 @@ async def build_daemon(
             # quiet markets via _ws_heartbeat_poll_loop (Bitfinex hb ~15s).
             watched_sub_tasks=["ws"],
         ))
-    if hg.allocation_cap.enabled:
+    if capital_runtime is not None:
+        guards.append(CapitalPolicyGuard(runtime=capital_runtime))
+    elif hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(
             ledger=ledger,
             caps=hg.allocation_cap.caps,
             default_cap=hg.allocation_cap.default_cap,
-            # Reuse the already-read scalar (read-once, like BuyingPowerGuard
-            # reuses balance_buffer_usdt) rather than re-reading the env var with
-            # a different default. assert_caps_invariant guarantees every
-            # configured symbol has an explicit caps entry, so this fallback is
-            # dead code for real currencies — but keeping it consistent with the
-            # reconciler's env-fallback (account_ctx.allocation_cap_usdt, also
-            # = allocation_cap) avoids a latent divergence.
+            # Legacy simulation-only configuration. Live always uses the policy above.
             env_fallback_cap=allocation_cap,
         ))
-        # BuyingPowerGuard is the physical-funds backstop and is LIVE-ONLY: it
-        # reads funding-wallet available (0 until the first live reconcile), so in
-        # the simulated path it would block every POST. The chain is inert in sim
-        # today only because its sole evaluator (DeploymentReconciler.deploy) is
-        # live-only; gate here so that contract is local to the guard rather than
-        # an emergent invariant a future sim-path chain evaluation could violate.
-        if not spec.is_simulated:
-            guards.append(BuyingPowerGuard(
-                ledger=ledger,
-                buffers=hg.buying_power.buffers,
-                default_buffer=hg.buying_power.default_buffer,
-                # Legacy global scalar as fallback for any symbol absent from the
-                # buffers map. Reuses the same env value the DeploymentReconciler
-                # clamp consumes (balance_buffer_usdt), so for the live
-                # single-symbol (fUST) case the resolved buffer equals the scalar
-                # and no double subtraction occurs.
-                env_fallback_buffer=balance_buffer_usdt,
-            ))
     if cg.realized_loss_24h.enabled:
         guards.append(RealizedLossGuard(
             enabled=True,
@@ -1728,6 +1691,7 @@ async def build_daemon(
             is_simulated=spec.is_simulated,
             symbols=configured_symbols(config.cells),
             uncertainty_handler=ledger.on_reservation_unknown,
+            capital_repository=capital_runtime.repository if capital_runtime else None,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1805,7 +1769,7 @@ async def build_daemon(
     # bfx_executor_submit_duration_seconds and counts outcomes. It re-raises /
     # returns unchanged, so the HeartbeatMiddleware I1 invariant and the
     # no-retry submit contract below are untouched.
-    reservation_executor: ExecutorPort = ReservationEmittingMiddleware(
+    reservation_middleware = ReservationEmittingMiddleware(
         executor,
         bus=bus,
         persister=persister,
@@ -1814,62 +1778,9 @@ async def build_daemon(
             ledger.on_reservation_unknown if not spec.is_simulated else None
         ),
         safety_evaluator=safety_chain,
+        capital_runtime=capital_runtime,
     )
-
-    # Halt 2's only live command path is a durable one-shot permit.  The
-    # scheduler remains halted by ManualKillGuard; if a separately approved
-    # READY candidate reaches this executor, the permit is consumed before the
-    # venue call and the persistent halt is reasserted in all terminal paths.
-    if (
-        config.phase is Phase.CANARY
-        and os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
-        == "bitfinex_live"
-    ):
-        canary_profile = CanaryProfile.from_environ(os.environ)
-        raw_permit_id = os.environ.get("BFX_CANARY_PERMIT_ID", "").strip()
-        try:
-            permit_id = UUID(raw_permit_id)
-        except ValueError as exc:
-            raise CanaryStartupBlocked("invalid_canary_permit_id") from exc
-        canary_scope = CanaryPermitScope(
-            account_id=canary_profile.account_id,
-            environment=canary_profile.environment,
-            symbol=canary_profile.symbol,
-            cell=canary_profile.cell,
-            strategy=canary_profile.strategy,
-            amount_usdt=canary_profile.amount_usdt,
-        )
-        if canary_halt_authorization is None:
-            raise CanaryStartupBlocked("missing_canary_halt_authorization")
-        permit_repository = CanaryPermitRepository(session_factory)
-
-        async def _consume_canary_permit() -> object:
-            return await permit_repository.consume(permit_id, canary_scope)
-
-        async def _record_canary_outcome(decision_id: str) -> object:
-            return await permit_repository.bind_outcome(
-                permit_id,
-                canary_scope,
-                execution_decision_id=decision_id,
-            )
-
-        async def _reassert_canary_halt() -> None:
-            current_halt = await halt_store.current()
-            if current_halt is None or not current_halt.halted:
-                await halt_store.set_halted(
-                    True,
-                    reason="halt2_canary_command_complete",
-                    actor="system:canary-one-shot",
-                )
-
-        reservation_executor = CanaryOneShotGate(
-            reservation_executor,
-            scope=canary_scope,
-            halt_authorization=canary_halt_authorization,
-            consume_permit=_consume_canary_permit,
-            record_outcome=_record_canary_outcome,
-            reassert_halt=_reassert_canary_halt,
-        )
+    reservation_executor: ExecutorPort = reservation_middleware
 
     wrapped_executor: ExecutorPort = MetricsSubmitMiddleware(
         HeartbeatMiddleware(reservation_executor, probe=probe),
@@ -1888,11 +1799,13 @@ async def build_daemon(
     attempt_recorder = SubmitAttemptRecorder()
 
     deployment_reconciler = None
+    release_worker = None
     if not spec.is_simulated:
         if funding_book_service is None:
             raise ValueError(
                 "live execution requires a FundingBookService for the configured policy",
             )
+        assert capital_runtime is not None  # validated immediately after executor construction
         reprice_policy = policy_from_env(os.environ)
         ladder_policy = ladder_policy_from_env(os.environ)
         execution_gate = ExecutionGate(
@@ -1902,10 +1815,11 @@ async def build_daemon(
             events=stdout_sink,
             metrics=metrics,
         )
-        config_hash = hashlib.sha256(
-            json.dumps(config.model_dump(mode="json"), sort_keys=True).encode(),
-        ).hexdigest()
+        assert verified_release is not None
+        config_hash = verified_release.config_digest
+        funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
         deployment_reconciler = DeploymentReconciler(
+            capital_runtime=capital_runtime,
             store=quote_store,
             tracker=CellDeploymentTracker(),
             ledger=ledger,
@@ -1913,20 +1827,11 @@ async def build_daemon(
             executor=wrapped_executor,
             account_ctx=account_ctx,
             cells=config.cells,
-            venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
-            min_offer_buffer_pct=Decimal(
-                os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02"),
-            ),
-            concentration_pct=Decimal(os.environ.get("BFX_CONCENTRATION_PCT", "0.70")),
-            balance_buffer_usdt=balance_buffer_usdt,
-            caps=hg.allocation_cap.caps,
-            default_cap=hg.allocation_cap.default_cap,
-            buffers=hg.buying_power.buffers,
-            default_buffer=hg.buying_power.default_buffer,
+            funding_rules=funding_rules,
             clock=now_ms_utc,
             event_sink=stdout_sink,
             phase=config.phase,
-            canceller=executor if isinstance(executor, CancelPort) else None,
+            canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
             reprice=reprice_policy,
             ladder=ladder_policy,
             attempt_recorder=attempt_recorder,
@@ -1941,10 +1846,27 @@ async def build_daemon(
             audit_context_factory=_DaemonAuditContextFactory(
                 account_id=account_id,
                 deployment_environment=env_str,
-                service_version=event_resource.service_version,
+                service_version=verified_release.manifest.source_revision,
                 config_hash=config_hash,
             ),
         )
+        assert release_runtime is not None and writer_lock is not None
+        assert canary_halt_authorization is not None
+
+        async def _release_plan(command: ReleaseCommand) -> None:
+            assert deployment_reconciler is not None
+            await deployment_reconciler.deploy(release=command)
+
+        release_worker = build_release_worker(runtime=release_runtime, capital=capital_runtime,
+            writer_lock=writer_lock, halt_store=halt_store,
+            funding_rules=funding_rules,
+            configured_cells=tuple((c.strategy.value, c.symbol, c.cell_id) for c in config.cells),
+            halt_authorization=canary_halt_authorization, planner=_release_plan,
+            config_artifact=safety_cfg_path,
+            evidence_path=Path(os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "/run/bfx-release/halt2.json")),
+            clock=now_ms_utc)
+        assert reservation_middleware.command_gate is not None
+        reservation_middleware.command_gate.release_authority = release_worker.authority
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —
         # record_config_regime never raises.
@@ -2166,11 +2088,8 @@ async def build_daemon(
         )
 
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
-    # Reports what the guards actually do, not what the config says. The env
-    # fallbacks passed here are the SAME scalars the guards and the reconciler
-    # resolve against (allocation_cap / balance_buffer_usdt), so the report's
-    # "which tier bound this" answer describes the live resolution rather than
-    # a second reading of the same files.
+    # Real-money status uses the same applied policy reader as the planner and
+    # command gate. Legacy scalar/map arguments are simulation diagnostics only.
     trading_status = TradingStatusService(
         chain=safety_chain,
         ledger=ledger,
@@ -2186,6 +2105,7 @@ async def build_daemon(
         attempts=attempt_recorder,
         halt_store=halt_store,
         readiness=trading_readiness,
+        capital_runtime=capital_runtime,
     )
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
@@ -2276,6 +2196,8 @@ async def build_daemon(
         trading_status=trading_status,
         trading_readiness=trading_readiness,
         writer_lock=writer_lock,
+        command_gate=reservation_middleware.command_gate,
+        release_worker=release_worker,
         metrics=metrics,
         tracing=tracing,
     )

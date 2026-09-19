@@ -91,6 +91,31 @@ def test_canary_rejects_paper_policy(tmp_path: Path, monkeypatch: pytest.MonkeyP
         load_config(cells_yaml_path=yaml_path)
 
 
+def test_normal_live_accepts_two_cells_without_canary_env(tmp_path, monkeypatch):
+    _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
+    config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+    assert config.phase.value == "live"
+    assert len(config.cells) == 2
+
+
+@pytest.mark.parametrize("name", [
+    "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+    "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
+])
+def test_live_rejects_legacy_money_env(tmp_path, monkeypatch, name):
+    _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValueError, match="applied CapitalPolicy"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+
+
+@pytest.mark.parametrize("realm,policy", [("shadow", "book_guarded"), ("ci", "paper")])
+def test_live_retains_real_money_config_guards(tmp_path, monkeypatch, realm, policy):
+    _set_required_config_env(monkeypatch, phase="live", policy=policy, deployment_environment=realm)
+    with pytest.raises(ValueError, match=r"real money|live-capable"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
+
+
 def test_book_guarded_requires_all_book_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

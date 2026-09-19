@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
     account_scope_clause,
@@ -52,13 +53,16 @@ class HaltStateStore:
         self._account_id = account_id
         self._env = deployment_environment
 
-    async def current(self) -> HaltState | None:
+    async def current(self, session: AsyncSession | None = None) -> HaltState | None:
         """Latest transition for this realm, or None if never configured.
 
         None is NOT "running normally" — it means no halt decision has ever
         been recorded here. Callers must keep the two distinguishable.
         """
-        async with self._sf() as session:
+        if session is None:
+            async with self._sf() as owned:
+                return await self.current(owned)
+        else:
             row = (
                 await session.execute(
                     select(TradingHaltRow)
@@ -80,7 +84,7 @@ class HaltStateStore:
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
     ) -> HaltState:
-        """Append a transition. Never updates or deletes an existing row."""
+        """Append a transition; reasserting a halt retains its authorization epoch."""
         row = TradingHaltRow(
             account_id=self._account_id,
             exchange_account_id=account_id_uuid_or_none(self._account_id),
@@ -91,6 +95,13 @@ class HaltStateStore:
             created_at_ms=now_ms if now_ms is not None else int(time.time() * 1000),
         )
         async with self._sf() as session:
+            if account_id_uuid_or_none(self._account_id) is not None:
+                await acquire_transaction_lock(
+                    session, account_id=self._account_id, deployment_environment=self._env,
+                )
+            current = await self.current(session)
+            if halted and current is not None and current.halted:
+                return current
             session.add(row)
             await session.commit()
             return _to_state(row)

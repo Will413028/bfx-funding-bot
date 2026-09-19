@@ -38,9 +38,16 @@ _SCHEMA = json.loads(
 class _EventCapture:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
+        self.degraded = asyncio.Event()
 
     async def emit(self, event: dict[str, Any]) -> None:
         self.events.append(event)
+        if (
+            event["event_type"] == EventType.HEALTH_CHECK.value
+            and event["payload"].get("check_target") == HealthTarget.FILL_TRACKER.value
+            and event["payload"].get("status") == "degraded"
+        ):
+            self.degraded.set()
 
 
 def _validate_against_schema(resp: list, ref: str) -> None:
@@ -133,10 +140,11 @@ async def test_consecutive_failure_emits_degraded() -> None:
         stop = asyncio.Event()
 
         task = asyncio.create_task(tracker.poll_loop(stop))
-        # Enough ticks to exceed CONSECUTIVE_FAIL_THRESHOLD (poll_interval_s=0.01).
-        await asyncio.sleep(0.1)
-        stop.set()
-        await task
+        try:
+            await asyncio.wait_for(axiom.degraded.wait(), timeout=5.0)
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, timeout=5.0)
 
     assert CONSECUTIVE_FAIL_THRESHOLD >= 1  # sanity import use
     hc = [e for e in axiom.events

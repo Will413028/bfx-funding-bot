@@ -1,6 +1,7 @@
 import logging
+from contextlib import asynccontextmanager
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -49,8 +50,83 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     Phase,
     StrategyName,
 )
+from tests.external.bitfinex.test_funding_rules import FixedRules
 
 D = Decimal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing", "expensive", "headroom", "changed"])
+async def test_planner_requires_current_adapter_amount_evidence(fault):
+    from dataclasses import replace
+
+    from tests.external.bitfinex.test_funding_rules import FixedRules, evidence
+    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    class Rules(FixedRules):
+        async def observe(self, symbol):
+            proof = evidence(rate="0.1" if fault == "headroom" else "1")
+            if fault == "expensive":
+                proof = replace(proof, requested_at_ms=-30000)
+            if fault == "changed":
+                proof = replace(proof, rule_digest="old")
+            return proof
+    rec._funding_rules = None if fault == "missing" else Rules()
+    await rec.deploy()
+    assert venue.ready_submissions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate,blocked", [("0.5", True), ("2", False)])
+async def test_release_preserves_exact_preview_amount_when_fx_changes(rate, blocked):
+    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    rec._funding_rules = FixedRules(rate=rate)
+    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("150"), object())
+    if blocked:
+        with pytest.raises(ValueError, match="minimum"):
+            await rec.deploy(release=command)
+        assert venue.ready_submissions == []
+    else:
+        await rec.deploy(release=command)
+        assert venue.ready_submissions[0].decision.offer_amount_usdt == 150
+        assert venue.ready_submissions[0].funding_amount_evidence.usd_per_unit == D("2")
+
+
+def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
+    """Explicit simulated policies/snapshots; never installed by application code."""
+    from bfx_funding_bot.modules.execution.capital_policy import (
+        CapitalPolicy,
+        CapitalSnapshot,
+        evaluate_capital,
+    )
+    from bfx_funding_bot.modules.execution.capital_repository import (
+        AppliedCapitalPolicy,
+        CapitalView,
+    )
+    totals = totals or {"fUST": D("570")}
+    reserves = reserves or {"fUST": D("3")}
+
+    @asynccontextmanager
+    async def transaction():
+        yield None
+
+    class SimulatedCapital:
+        session_factory = staticmethod(transaction)
+
+        async def read(self, *, symbol, cell_id, session=None):
+            total = totals[symbol]
+            reserve = reserves.get(symbol, D("0"))
+            policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserve,
+                                   max_cell_fraction=D("0.70"))
+            exposure = ledger.current_exposure(symbol)
+            available = min(max(D("0"), total - exposure + reserve), ledger.available_balance(symbol))
+            shared = max(D("0"), exposure - ledger.reserved_exposure(symbol))
+            snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
+                                       tracker.deployed(cell_id) + shared)
+            applied = AppliedCapitalPolicy(1, "explicit-test-policy", policy, UUID(int=1))
+            return CapitalView(applied, 1, snapshot, evaluate_capital(policy, snapshot), shared, {})
+
+    return SimulatedCapital()
 
 
 class _CapturingSink:
@@ -380,7 +456,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            optimizer_horizon_h: int | None = None,
            rate_optimizer: RateOptimizer | None = None,
            uncertain_symbols: set[str] | None = None,
-           ledger: _FakeLedger | None = None):
+           ledger: _FakeLedger | None = None, capital_runtime=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -399,20 +475,16 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     optimizer_kwargs: dict[str, object] = {}
     if optimizer_horizon_h is not None:
         optimizer_kwargs["optimizer_horizon_h"] = optimizer_horizon_h
+    fixture_ledger = ledger if ledger is not None else _FakeLedger(
+        exposure, available=available, uncertain_symbols=uncertain_symbols,
+    )
     rec = DeploymentReconciler(
+        capital_runtime=capital_runtime or _simulated_capital(
+            fixture_ledger, tracker, totals={"fUST": cap if cap is not None else D("570")}),
         store=store, tracker=tracker,
-        ledger=(
-            ledger
-            if ledger is not None
-            else _FakeLedger(
-                exposure,
-                available=available,
-                uncertain_symbols=uncertain_symbols,
-            )
-        ),
+        ledger=fixture_ledger,
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.CANARY,
@@ -558,8 +630,28 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     assert len(executor.ready_submissions) == 1
     ready = executor.ready_submissions[0]
     assert ready.decision_id == audit.last.decision_id
+    assert audit.last.strategy == "mean_reversion"
     order_submit = next(event for event in sink.events if event["event_type"] == "order_submit")
     assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
+
+
+async def test_release_selection_uses_minimum_without_reconfiguring_normal_cells():
+    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+    audit = _Audit()
+    rec, executor, _, _ = _build(exposure=D("0"), cap=D("2000"),
+        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")], audit=audit)
+    token = object()
+    from uuid import uuid4
+    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("153"), token)
+    await rec.deploy(release=command)
+    assert len(executor.ready_submissions) == 1
+    assert executor.ready_submissions[0].decision.offer_amount_usdt == 153
+    assert audit.last.cell_id == "fUST_a30"
+    assert audit.last.strategy == "mean_reversion"
+    # Normal scheduler still has both configured cells and the normal budget.
+    await rec.deploy()
+    assert len(executor.ready_submissions) == 3
+    assert any(ready.decision.offer_amount_usdt > 153 for ready in executor.ready_submissions[1:])
 
 
 async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():
@@ -996,37 +1088,23 @@ async def test_available_headroom_binds_below_cap_gap():
 
 
 # ---------------------------------------------------------------------------
-# Stranded-capital log attribution: balance-limited vs concentration
+# Canonical spendable and fixed per-cell limits
 # ---------------------------------------------------------------------------
 
 
-async def test_stranded_log_names_balance_limit_when_headroom_binds(caplog):
-    # gap = cap - exposure = 570 - 0 = 570; available 203, buffer 3 -> headroom 200.
-    # headroom (200) binds below the policy gap (570) but is >= min_fill (153), so a
-    # single cell deploys 200 and 370 is stranded. The real cause is insufficient
-    # funding-wallet balance, NOT the concentration cap — the log must say so.
+async def test_canonical_spendable_limits_total_planned_amount(caplog):
+    # Synthetic policy reserve=3, available=203: spendable=200 binds sizing.
     rec, _ex, _, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_a30")], available=D("203"),
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
-    msg = "\n".join(r.getMessage() for r in caplog.records)
-    assert "deployment_capital_stranded" in msg
-    assert "balance-limited" in msg
-    assert "concentration cap" not in msg
+    assert sum(D(str(d.offer_amount_usdt)) for d in _ex.submitted) == D("200")
 
 
-async def test_stranded_log_names_concentration_when_balance_ample(caplog):
-    # Single-active-cell relaxation raises cap_per_cell to the full policy
-    # target (max(0.70*cap, cap/1) = cap) — a lone cell starting from empty
-    # can no longer be concentration-capped-stranded (see Task 2). Genuine
-    # concentration/no-further-active-cell stranding still happens when the
-    # lone active cell already carries deployed intent close to that (now
-    # relaxed) cap: cap=10000, cell already at 9500 (== reserved, so the
-    # tracker's reconcile_to_total rescale is a no-op) -> cap_per_cell=10000,
-    # e_total=8000 -> gap=2000, cell headroom=10000-9500=500 -> allocated=500,
-    # stranded=1500 (>= min_fill, no other active cell to absorb it), while
-    # balance is ample.
+async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
+    # A single active cell gets no relaxation: 9500 exceeds its 7000 limit,
+    # even when the synthetic snapshot reports ample available cash.
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_a30"))  # only "a30" active; "p2" idle
@@ -1043,18 +1121,15 @@ async def test_stranded_log_names_concentration_when_balance_ample(caplog):
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
-        account_ctx=ctx, cells=cells, venue_floor_usd=D("150"),
-        min_offer_buffer_pct=D("0.02"), concentration_pct=D("0.70"),
-        balance_buffer_usdt=D("3"), clock=lambda: 1_000,
+        capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
+        account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
+        clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
-    msg = "\n".join(r.getMessage() for r in caplog.records)
-    assert "deployment_capital_stranded" in msg
-    assert "concentration cap" in msg
-    assert "balance-limited" not in msg
+    assert rec._executor.submitted == []
 
 
 # ---------------------------------------------------------------------------
@@ -1075,21 +1150,17 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        funding_rules=FixedRules(),
         clock=lambda: 1_000,
+        capital_runtime=_simulated_capital(ledger, tracker),
         event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
 
 
-async def test_orphan_realized_credits_do_not_starve_cell():
-    """C1 regression: ledger reserved=$100 (one open offer), realized=$300 (orphan).
-    total_exposure=$400 — but reconcile_to_total must use reserved=$100, not $400.
-    The cell has recorded intent=$100; factor should be 1.0, NOT 4.0.
-    The gap = 570-400 = 170 → the cell is NOT starved; it should get ~170 allocated.
-    """
+async def test_unattributed_credits_consume_every_cell_headroom():
+    """Shared U=300 conservatively consumes every cell's concentration budget."""
     # Pre-seed the tracker with the open offer we own
     rec, ex, tracker, _ = _build_with_split_ledger(
         reserved=D("100"), realized=D("300"),
@@ -1098,12 +1169,9 @@ async def test_orphan_realized_credits_do_not_starve_cell():
     # Simulate the tracker already recorded our $100 open offer
     tracker.record_deploy("fUST_a30", D("100"))
     await rec.deploy()
-    # gap = 570 - 400 = 170; cap_per_cell = 0.70*570 = 399; cell has 100 deployed
-    # headroom = min(399, 570) - 100 = 299 >= 170 -> fills 170
-    assert len(ex.submitted) == 1, "cell should NOT be starved by orphan realized credits"
-    assert ex.submitted[0].offer_amount_usdt == pytest.approx(170.0)
-    # tracker recorded the new submit on top of the existing 100
-    assert tracker.deployed("fUST_a30") == D("270")
+    # E_cell includes owned 100 + shared U=300: 400 exceeds fixed cell limit 399.
+    assert ex.submitted == []
+    assert tracker.deployed("fUST_a30") == D("100")
 
 
 # ---------------------------------------------------------------------------
@@ -1139,8 +1207,8 @@ async def test_headroom_uses_cell_symbol_available():
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
-        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        capital_runtime=_simulated_capital(ledger, tracker),
+        cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
@@ -1174,9 +1242,8 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
-        caps=caps, default_cap=D("0"), buffers=buffers, default_buffer=D("0"),
+        funding_rules=FixedRules(),
+        capital_runtime=_simulated_capital(ledger, tracker, totals=caps, reserves=buffers),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.CANARY,
@@ -1324,24 +1391,12 @@ async def test_no_reprice_config_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# Single-active-cell stranding fix: the tracker's reconcile_to_total clamp
-# must stay aligned with allocate_gap's relaxed per-cell cap.
+# Diagnostic tracker never rescales or overrides canonical exposure.
 # ---------------------------------------------------------------------------
 
 
-async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
-    """With 1 active POST quote of 2 configured cells, the tracker rescale clamp
-    must use the SAME relaxed cap as allocate_gap — otherwise reconcile_to_total
-    clamp-warns every tick once the lone cell's intent legitimately exceeds
-    concentration_pct * cap.
-
-    current_exposure == cap (gap=0) isolates the tracker-clamp path from
-    allocate_gap: reserved=9000 (the venue-true open-offer total attributable to
-    fUST_p2, already recorded in the tracker) is strictly less than exposure
-    (9000 reserved + 1000 unattributable realized credit = 10000 = cap), so no
-    new fill is computed and reconcile_to_total's clamp is the only thing that
-    can move tracker.deployed("fUST_p2").
-    """
+async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
+    """Recorded intent stays diagnostic; an over-limit cell cannot submit."""
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     store.update(_post_quote("fUST_p2"))  # only one of the two cells POSTs
@@ -1359,13 +1414,13 @@ async def test_tracker_clamp_uses_relaxed_cap_for_single_active_cell():
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
-        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
-        concentration_pct=D("0.70"), balance_buffer_usdt=D("3"),
+        capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
+        cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
     await rec.deploy()
-    # NOT clamped down to 7000: relaxed cap = max(7000, 10000/1) = 10000.
+    assert ex.submitted == []
     assert tracker.deployed("fUST_p2") == D("9000")
 
 
@@ -1379,9 +1434,8 @@ _LADDER = LadderPolicy(spike_fraction=0.15, rung_multipliers=(1.5, 3.0), min_run
 
 
 async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
-    # cap=10000, single active cell (fUST_p2) -> relaxed cap_per_cell = cap ->
-    # full 10000 gap deploys to that one cell. budget = 10000*0.15 = 1500 ->
-    # 750/rung >= 153 -> two rungs get logged from the exact-period ask.
+    # One cell remains bounded to 7000. Observe-only rung budget=7000*0.15
+    # yields two 525 rungs, each above the 153 minimum.
     rec, ex, _, _ = _build(
         exposure=D("0"), quotes=[_post_quote("fUST_p2")],
         cap=D("10000"), book_provider=_SnapshotProvider(_ask_snapshot()), ladder=_LADDER,

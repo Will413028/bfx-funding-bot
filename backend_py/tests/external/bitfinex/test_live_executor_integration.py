@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -29,7 +30,7 @@ def _make_decision(*, symbol: str = "fUST") -> DecisionPayload:
         decision_outcome=DecisionOutcome.POST,
         signal_correlation_id=uuid4(),
         offer_rate=0.0005,
-        offer_amount_usdt=100.0,
+        offer_amount_usdt=150.0,
         offer_duration_days=2,
         symbol=symbol,
     )
@@ -44,10 +45,12 @@ def _make_ctx() -> AccountContext:
 
 
 def _ready(decision: DecisionPayload) -> ReadyToSubmit:
+    from tests.external.bitfinex.test_funding_rules import evidence
     return ReadyToSubmit(
         decision=decision, decision_id="d-live-test", policy=ExecutionPolicy.PAPER,
         market_snapshot_id="snapshot-live-test", model_version=None,
         evidence={}, safety=GuardResult(allowed=True, guard_name="test"),
+        funding_amount_evidence=evidence(now=int(time.time() * 1000)),
     )
 
 
@@ -57,10 +60,62 @@ class _EventCapture:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing", "changed", "below_minimum", "precision"])
+async def test_submit_without_authoritative_amount_rule_is_not_sent(fault):
+    from dataclasses import replace
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=SUCCESS)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}), cell="C-1")
+        amount = {"missing": 150.0, "changed": 150.0, "below_minimum": 2.0, "precision": 150.000000001}[fault]
+        ready = _ready(_make_decision().model_copy(update={"offer_amount_usdt": amount}))
+        if fault == "missing":
+            ready = replace(ready, funding_amount_evidence=None)
+        elif fault == "changed":
+            ready = replace(ready, funding_amount_evidence=replace(ready.funding_amount_evidence,
+                                                                  rule_digest="old"))
+        result = await executor.submit(ready, _make_ctx())
+    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+    assert requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expiring", ["book", "fx"])
+async def test_submit_rechecks_original_book_after_local_signing_work(expiring):
+    from dataclasses import replace
+
+    from tests.external.bitfinex.test_funding_rules import evidence
+
+    now = 1100
+    requests = []
+    def nonce():
+        nonlocal now
+        now = 3100
+        return 1000
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(500)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+            phase=Phase.PAPER, strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}), cell="C-1", nonce_provider=nonce, clock=lambda: now)
+        ready = replace(_ready(_make_decision()),
+                        funding_amount_evidence=evidence(now=-27900 if expiring == "fx" else 1000))
+        result = await executor.submit(ready,
+            replace(_make_ctx(), before_submit_transport=lambda: expiring == "fx" or now <= 2100))
+    assert result.outcome_kind is SubmitOutcomeKind.NOT_SENT
+    assert requests == []
+
+
+@pytest.mark.asyncio
 async def test_submit_returns_submitted_on_success() -> None:
     success_response = [
         1716383500000, "fon-req", None, None,
-        [42, "fUSD", 0, 0, 100.0, 0, "REQ", None, None, 0, "ACTIVE",
+        [42, "fUSD", 0, 0, 150.0, 0, "REQ", None, None, 0, "ACTIVE",
          None, None, None, 0.0005, 2, 0, 0, None, 0, None, None, None, 12345],
         None, "SUCCESS", None, "Submitting",
     ]
