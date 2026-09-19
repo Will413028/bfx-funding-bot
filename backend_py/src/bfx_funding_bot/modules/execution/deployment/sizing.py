@@ -40,7 +40,7 @@ def allocate_capital(*, views: dict[str, CapitalView], min_fill: Decimal) -> dic
 
 
 def effective_min_usdt(venue_floor_usd: Decimal, buffer_pct: Decimal) -> Decimal:
-    """Smallest offer (in USDT) that clears the venue's USD-equiv minimum.
+    """Historical simulation helper, never live funding-rule authority.
 
     v1: static — the buffer absorbs USDT de-peg + precision (assumes
     USDT >= 1 - buffer). No USDT/USD ticker fetch (deferred, future venue-call).

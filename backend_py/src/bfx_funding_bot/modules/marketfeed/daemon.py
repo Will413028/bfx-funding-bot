@@ -48,6 +48,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
     RestPollingFillTracker,
 )
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
+from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
 from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
@@ -88,7 +89,6 @@ from bfx_funding_bot.modules.execution.deployment.ladder import ladder_policy_fr
 from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPricer
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment.reprice import policy_from_env
-from bfx_funding_bot.modules.execution.deployment.sizing import effective_min_usdt
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
@@ -1817,6 +1817,7 @@ async def build_daemon(
         )
         assert verified_release is not None
         config_hash = verified_release.config_digest
+        funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
         deployment_reconciler = DeploymentReconciler(
             capital_runtime=capital_runtime,
             store=quote_store,
@@ -1826,10 +1827,7 @@ async def build_daemon(
             executor=wrapped_executor,
             account_ctx=account_ctx,
             cells=config.cells,
-            venue_floor_usd=Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
-            min_offer_buffer_pct=Decimal(
-                os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02"),
-            ),
+            funding_rules=funding_rules,
             clock=now_ms_utc,
             event_sink=stdout_sink,
             phase=config.phase,
@@ -1861,8 +1859,7 @@ async def build_daemon(
 
         release_worker = build_release_worker(runtime=release_runtime, capital=capital_runtime,
             writer_lock=writer_lock, halt_store=halt_store,
-            minimum_amount=effective_min_usdt(Decimal(os.environ.get("BFX_VENUE_FLOOR_USD", "150")),
-                Decimal(os.environ.get("BFX_MIN_OFFER_BUFFER_PCT", "0.02"))),
+            funding_rules=funding_rules,
             configured_cells=tuple((c.strategy.value, c.symbol, c.cell_id) for c in config.cells),
             halt_authorization=canary_halt_authorization, planner=_release_plan,
             config_artifact=safety_cfg_path,

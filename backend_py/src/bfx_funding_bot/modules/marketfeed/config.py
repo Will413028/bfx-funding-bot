@@ -67,6 +67,10 @@ class AdaptivePeriodParams(BaseModel):
         return self
 
 
+def canonical_cell_id(symbol: str, period_agg: str) -> str:
+    return f"{symbol}_{period_agg}"
+
+
 class CellConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     strategy: StrategyName
@@ -79,7 +83,7 @@ class CellConfig(BaseModel):
 
     @property
     def cell_id(self) -> str:
-        return f"{self.symbol}_{self.period_agg}"
+        return canonical_cell_id(self.symbol, self.period_agg)
 
     @property
     def pair_id(self) -> str:
@@ -140,6 +144,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if phase_str == "live":
         legacy = [name for name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+            "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
         ) if name in os.environ]
         if legacy:
             raise ValueError(

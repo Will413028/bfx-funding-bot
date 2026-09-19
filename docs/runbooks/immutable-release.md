@@ -257,6 +257,34 @@ policy. Status failure hides money and disables preparation; no legacy fallback.
 
 Choose strategy/period and a positive Decimal maximum plus expiry. **Prepare**
 creates a durable session only. Inspect returned minimum, binding and evidence.
+
+The displayed minimum is a **local inferred minimum**, not a guarantee of venue
+acceptance. The versioned adapter combines the [official USD 150 funding rule](https://support.bitfinex.com/hc/en-us/articles/213918949-What-is-the-minimum-offer-for-Funding),
+[eight-decimal amount precision](https://docs.bitfinex.com/docs/introduction), and
+the [public FX calculator](https://docs.bitfinex.com/reference/rest-public-foreign-exchange-rate)
+(`POST /v2/calc/fx`, JSON `ccy1=UST`, `ccy2=USD`, response `[CURRENT_RATE]`).
+This use of FX for funding equivalence is an inference: Bitfinex does not document
+that the calculator matches its funding engine's valuation. No USDT/USD parity,
+native 150, 153 or environment floor/buffer fallback is accepted. Remove
+`BFX_VENUE_FLOOR_USD` and `BFX_MIN_OFFER_BUFFER_PCT` from live inputs.
+
+FX is fetched outside account DB transactions. Evidence binds the observed rate,
+symbol, rule digest and request/receive timestamps to the original decision.
+The local 30,000ms age bound starts at request start, includes lock/hash/guard
+delays, and is rechecked before transport; it is not a venue timestamp or a
+venue freshness promise. Missing/invalid/stale/rule-mismatched evidence blocks.
+Rule/source/precision changes alter executable/config identity; ordinary FX
+observations do not create a new release artifact. The original pricing book is
+also bound through READY and checked after all waits.
+
+Preview computes the smallest eight-decimal native amount worth at least USD 150
+under that observation; e.g. 0.999865 USD/UST implies 150.02025274 UST. Offered
+amounts only round down inside available capital/cell headroom/session max.
+Authorization retains its exact amount: a later adverse FX observation blocks
+instead of increasing it. A decision expiring after permit consumption becomes
+durable NOT_SENT and keeps that permit consumed. A venue rejection is terminal
+and may still happen because internal valuation differs; never retry that
+one-shot automatically. Keep halt and review the evidence.
 Human separately checks the one-off real-money confirmation and **Authorize**;
 the existing daemon worker alone acts through its single-writer command path.
 Poll the same session (ID is saved per account; can be restored explicitly).

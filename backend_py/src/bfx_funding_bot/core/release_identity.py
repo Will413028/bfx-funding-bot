@@ -19,6 +19,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from bfx_funding_bot.external.bitfinex.funding_rules import RULE
+
 INVENTORY_ROOTS = ("src", "scripts", "alembic", "configs",
                    ".venv/lib/python3.13/site-packages")
 INVENTORY_FILES = ("uv.lock", "pyproject.toml", "alembic.ini", ".venv/bin/bfx-shadow", ".venv/pyvenv.cfg")
@@ -31,7 +33,7 @@ NONSECRET_ENV_KEYS = frozenset({
     "BFX_FILL_MODEL_ARTIFACT", "BFX_FILL_TRACKER_ENABLED", "BFX_HALT2_EVIDENCE_REPORT",
     "BFX_HALT2_MAX_SNAPSHOT_AGE_SECONDS", "BFX_HEALTHZ_HOST", "BFX_HEALTHZ_PORT",
     "BFX_KILL_SWITCH", "BFX_LADDER_MIN_RUNG_USDT", "BFX_LADDER_MULTIPLIERS",
-    "BFX_LADDER_OBSERVE", "BFX_LADDER_SPIKE_FRACTION", "BFX_MIN_OFFER_BUFFER_PCT",
+    "BFX_LADDER_OBSERVE", "BFX_LADDER_SPIKE_FRACTION",
     "BFX_OPERATOR_ROLE", "BFX_OPERATOR_USER_ID", "BFX_OPTIMIZER_FEE_RATE",
     "BFX_OTEL_ENABLED", "BFX_OTEL_EXPORTER_ENDPOINT", "BFX_PHASE", "BFX_PROJECTOR_VERSION",
     "BFX_PUBLIC_EXCHANGE_ACCOUNT_ID", "BFX_QUOTE_TTL_MS", "BFX_RATE_LIMIT_READ_PER_MIN",
@@ -39,7 +41,7 @@ NONSECRET_ENV_KEYS = frozenset({
     "BFX_REPRICE_ENABLED", "BFX_REPRICE_MAX_CANCELS_PER_TICK", "BFX_REPRICE_MIN_AGE_S",
     "BFX_REPRICE_TOLERANCE_PCT", "BFX_RESYNC_MIN_INTERVAL_S", "BFX_RUN_DURATION_HOURS",
     "BFX_SAFETY_CONFIG", "BFX_SCHEDULER_BUFFER_S", "BFX_SERVICE_VERSION",
-    "BFX_STALENESS_BUDGET_HOURS_DEFAULT", "BFX_VENUE_FLOOR_USD", "BFX_WS_CLIENT_ENABLED",
+    "BFX_STALENESS_BUDGET_HOURS_DEFAULT", "BFX_WS_CLIENT_ENABLED",
 })
 _SHA = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _IMAGE = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -215,6 +217,7 @@ class ReleaseRuntime:
             return VerifiedRelease(
                 manifest=manifest, release_digest=digest,
                 config_digest=canonical_digest({
+                    "funding_rule_digest": RULE.digest,
                     "environment": manifest.environment,
                     "files": {key: value for key, value in inventory.items()
                               if key.startswith("configs/")},

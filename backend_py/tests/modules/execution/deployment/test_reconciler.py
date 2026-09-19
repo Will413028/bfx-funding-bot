@@ -50,8 +50,46 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
     Phase,
     StrategyName,
 )
+from tests.external.bitfinex.test_funding_rules import FixedRules
 
 D = Decimal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["missing", "expensive", "headroom", "changed"])
+async def test_planner_requires_current_adapter_amount_evidence(fault):
+    from dataclasses import replace
+
+    from tests.external.bitfinex.test_funding_rules import FixedRules, evidence
+    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    class Rules(FixedRules):
+        async def observe(self, symbol):
+            proof = evidence(rate="0.1" if fault == "headroom" else "1")
+            if fault == "expensive":
+                proof = replace(proof, requested_at_ms=-30000)
+            if fault == "changed":
+                proof = replace(proof, rule_digest="old")
+            return proof
+    rec._funding_rules = None if fault == "missing" else Rules()
+    await rec.deploy()
+    assert venue.ready_submissions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate,blocked", [("0.5", True), ("2", False)])
+async def test_release_preserves_exact_preview_amount_when_fx_changes(rate, blocked):
+    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    rec._funding_rules = FixedRules(rate=rate)
+    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("150"), object())
+    if blocked:
+        with pytest.raises(ValueError, match="minimum"):
+            await rec.deploy(release=command)
+        assert venue.ready_submissions == []
+    else:
+        await rec.deploy(release=command)
+        assert venue.ready_submissions[0].decision.offer_amount_usdt == 150
+        assert venue.ready_submissions[0].funding_amount_evidence.usd_per_unit == D("2")
 
 
 def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
@@ -446,7 +484,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         store=store, tracker=tracker,
         ledger=fixture_ledger,
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.CANARY,
@@ -1084,8 +1122,8 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=_FakeExecutor(),
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
-        account_ctx=ctx, cells=cells, venue_floor_usd=D("150"),
-        min_offer_buffer_pct=D("0.02"), clock=lambda: 1_000,
+        account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
+        clock=lambda: 1_000,
         event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
@@ -1112,7 +1150,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        funding_rules=FixedRules(),
         clock=lambda: 1_000,
         capital_runtime=_simulated_capital(ledger, tracker),
         event_sink=_CapturingSink(), phase=Phase.CANARY,
@@ -1170,7 +1208,7 @@ async def test_headroom_uses_cell_symbol_available():
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
         capital_runtime=_simulated_capital(ledger, tracker),
-        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )
@@ -1204,7 +1242,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
     rec = DeploymentReconciler(
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
-        venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        funding_rules=FixedRules(),
         capital_runtime=_simulated_capital(ledger, tracker, totals=caps, reserves=buffers),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
@@ -1377,7 +1415,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
         store=store, tracker=tracker, ledger=ledger,
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
-        cells=cells, venue_floor_usd=D("150"), min_offer_buffer_pct=D("0.02"),
+        cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
         **_eligibility_kwargs(),
     )

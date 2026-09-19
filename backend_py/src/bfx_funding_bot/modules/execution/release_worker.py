@@ -17,6 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.core.release_identity import ReleaseRuntime, assert_protected_file
 from bfx_funding_bot.core.settings import AuthSettings
 from bfx_funding_bot.core.writer_lock import WriterLock
+from bfx_funding_bot.external.bitfinex.funding_rules import (
+    RULE,
+    FundingAmountEvidence,
+    FundingRuleProvider,
+    minimum_amount,
+    validate_amount,
+)
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
@@ -40,7 +47,7 @@ RELEASE_SCHEMA_HEAD = "b4e6f8a0c203"
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
                          writer_lock: WriterLock, halt_store: HaltStateStore,
-                         minimum_amount: Decimal, configured_cells: tuple[tuple[str, str, str], ...],
+                         funding_rules: FundingRuleProvider | None, configured_cells: tuple[tuple[str, str, str], ...],
                          halt_authorization: object, planner: Callable[[ReleaseCommand], Awaitable[None]],
                          config_artifact: Path, evidence_path: Path,
                          clock: Callable[[], int]) -> ReleaseWorker:
@@ -66,7 +73,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
         return {"release_digest": proof.release_digest, "config_digest": proof.config_digest,
                 "source_revision": proof.manifest.source_revision,
                 "schema_head": RELEASE_SCHEMA_HEAD, "projector_version": DEFAULT_PROJECTOR_VERSION,
-                "policies": policies}
+                "policies": policies, "funding_rule_digest": RULE.digest}
 
     async def operator(session: AsyncSession, user: str) -> bool:
         settings = AuthSettings()
@@ -81,9 +88,11 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
         max_age = int(proof.manifest.environment.get("BFX_HALT2_MAX_SNAPSHOT_AGE_SECONDS", "300"))
         if not 1 <= max_age <= 300:
             raise ReleaseBlocked("release_snapshot_age_out_of_bounds")
+        if row.minimum_amount is None:
+            raise ReleaseBlocked("session_minimum_missing")
         profile = CanaryProfile(account_id=repo.account_id, environment=repo.environment,
             symbol=row.symbol, cell=row.cell, strategy=row.strategy,
-            amount_usdt=minimum_amount, cap_usdt=Decimal(row.max_amount), max_evidence_age_seconds=max_age)
+            amount_usdt=Decimal(row.minimum_amount), cap_usdt=Decimal(row.max_amount), max_evidence_age_seconds=max_age)
         selector = None
         if observe:
             if row.permit_id is None or row.attempt_id is None or row.decision_id is None:
@@ -103,7 +112,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
 
     authority = ReleaseCommandAuthority(repo=repo, capital=capital, binding_reader=binding_reader,
         ownership=writer_lock.verify_held, authority_reader=operator, preflight=preflight, clock=clock)
-    return ReleaseWorker(authority=authority, halt_store=halt_store, minimum_amount=minimum_amount,
+    return ReleaseWorker(authority=authority, halt_store=halt_store, funding_rules=funding_rules,
         configured_cells=configured_cells, halt_authorization=halt_authorization,
         planner=planner, observation=observation)
 
@@ -174,11 +183,11 @@ class ReleaseHaltError(RuntimeError):
 class ReleaseWorker:
     """Session-row handoff, supervised inside the existing account daemon."""
     def __init__(self, *, authority: ReleaseCommandAuthority, halt_store: HaltStateStore,
-                 minimum_amount: Decimal, configured_cells: tuple[tuple[str, str, str], ...],
+                 funding_rules: FundingRuleProvider | None, configured_cells: tuple[tuple[str, str, str], ...],
                  halt_authorization: object, planner: Callable[[ReleaseCommand], Awaitable[None]],
                  observation: Callable[[AsyncSession, ReleaseSessionRow], Awaitable[object]]) -> None:
         self.authority, self.halt_store = authority, halt_store
-        self.minimum_amount, self.configured_cells = minimum_amount, configured_cells
+        self.funding_rules, self.configured_cells = funding_rules, configured_cells
         self.halt_authorization, self.planner, self.observation = halt_authorization, planner, observation
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -213,7 +222,18 @@ class ReleaseWorker:
                         await self.authority.check_normal(session)
                     return
                 session_id = row.id
-                command = await self._apply(session, row)
+                needs_preparation, symbol = row.state == "requested", row.symbol
+            # Public FX observation outside any DB transaction. Reacquire the
+            # same account lock and reload the row before applying authority.
+            amount_evidence = None
+            if needs_preparation:
+                if self.funding_rules is None:
+                    raise ReleaseBlocked("funding_rule_unavailable")
+                amount_evidence = await self.funding_rules.observe(symbol)
+            async with factory.begin() as session:
+                await repo.lock(session)
+                row = await repo.get(session, session_id)
+                command = await self._apply(session, row, amount_evidence=amount_evidence)
             if command is not None:
                 try:
                     await self.planner(command)
@@ -242,7 +262,8 @@ class ReleaseWorker:
                 repo.audit(session, row, action="blocked", actor="worker", now_ms=self.authority.clock(),
                            evidence={"reason": row.reason})
 
-    async def _apply(self, session: AsyncSession, row: ReleaseSessionRow) -> ReleaseCommand | None:
+    async def _apply(self, session: AsyncSession, row: ReleaseSessionRow, *,
+                     amount_evidence: FundingAmountEvidence | None = None) -> ReleaseCommand | None:
         repo, now = self.authority.repo, self.authority.clock()
         binding = await self.authority.binding(session)
         pending = row.request_revision > row.processed_revision
@@ -252,16 +273,24 @@ class ReleaseWorker:
             if self.configured_cells.count((row.strategy, row.symbol, row.cell)) != 1:
                 raise ReleaseBlocked("session_cell_not_configured")
             view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell, session=session)
-            if view.budget.max_new_offer < self.minimum_amount:
+            minimum = minimum_amount(amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
+            if view.budget.max_new_offer < minimum:
                 raise ReleaseBlocked("session_insufficient_capital")
+            if minimum > row.max_amount:
+                raise ReleaseBlocked("session_minimum_or_expiry")
+            # Readiness validates the exact locally inferred preview amount.
+            # Any failure rolls this transaction back before recording preview.
+            row.minimum_amount = minimum
             await self.authority.preflight(session, row)
             halt = await repo.halt(session)
+            validate_amount(minimum, amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
             row = await repo.prepare(session, row.id, binding=binding, halt_id=halt.id,
-                               minimum_amount=self.minimum_amount, now_ms=now)
+                               minimum_amount=minimum, now_ms=self.authority.clock())
             row.evidence = {"preparation": {
                 "available_amount": str(view.snapshot.available_amount),
                 "max_new_offer": str(view.budget.max_new_offer),
-                "minimum_amount": str(self.minimum_amount),
+                "minimum_amount": str(minimum),
+                "funding_amount": amount_evidence.payload() if amount_evidence is not None else None,
                 "snapshot_seq": view.snapshot_seq,
                 "policy_revision": view.applied.revision,
             }}

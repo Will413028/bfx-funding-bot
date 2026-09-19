@@ -100,8 +100,18 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         assert status["halt"]["halted"]
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
+        # The only allowed POST is the public read-only FX calculation, never
+        # a financial command. Keep unknown requests fatal in this fixture.
+        fx_url = "https://api-pub.bitfinex.com/v2/calc/fx"
+        httpx_mock.add_response(url=fx_url, method="POST", json=[0.999865],
+                                match_json={"ccy1": "UST", "ccy2": "USD"})
         await daemon.periodic_reconcile._deployment.deploy()
-        assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(posts) == 1 and str(posts[0].url) == fx_url
+        assert not any(name in posts[0].headers for name in (
+            "authorization", "bfx-apikey", "bfx-signature", "cookie",
+        ))
+        assert (await halt.current()).halted
     finally:
         await engine.dispose()
 

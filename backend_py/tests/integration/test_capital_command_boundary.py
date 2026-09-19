@@ -160,6 +160,8 @@ async def boundary(factory, account):
     runtime = CapitalRuntime(repository=repo, session_factory=factory, clock=lambda: 1100)
     view = await runtime.read(symbol="fUST", cell_id="a30")
     event, row = intent(account, "500", 10)
+    from tests.external.bitfinex.test_funding_rules import evidence
+    from tests.modules.execution.deployment.test_reconciler import _valid_snapshot
     async with factory.begin() as session:
         session.add(row)
     ready = ReadyToSubmit(
@@ -169,6 +171,8 @@ async def boundary(factory, account):
         decision_id=row.decision_id, policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="book", model_version=None, evidence={},
         safety=GuardResult(True, "test"), capital_view=view,
+        market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
+        funding_amount_evidence=evidence(),
     )
     halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
     await halt.set_halted(False, reason="isolated test only", actor="test", now_ms=1200)

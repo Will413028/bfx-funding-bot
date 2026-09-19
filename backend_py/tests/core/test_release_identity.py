@@ -85,6 +85,19 @@ def test_measured_release_survives_fresh_container_launch(artifact):
     assert first.launch_id != second.launch_id
 
 
+def test_amount_rule_revision_changes_config_identity_but_fx_does_not(artifact, monkeypatch):
+    from dataclasses import replace
+
+    from tests.external.bitfinex.test_funding_rules import evidence
+    runtime, *_ = artifact
+    first = runtime.verify()
+    # Market observations never become release configuration.
+    assert evidence(rate="1").payload() != evidence(rate="0.5").payload()
+    assert runtime.verify().config_digest == first.config_digest
+    monkeypatch.setattr(ri, "RULE", replace(ri.RULE, version="future-rule"))
+    assert runtime.verify().config_digest != first.config_digest
+
+
 @pytest.mark.parametrize("inventory_path", ["src/fixture.txt", "scripts/fixture.txt",
     "alembic/fixture.txt", "configs/fixture.txt", ".venv/lib/python3.13/site-packages/fixture.txt",
     "uv.lock", "pyproject.toml"])

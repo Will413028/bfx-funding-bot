@@ -28,6 +28,7 @@ from bfx_funding_bot.core.errors import (
 )
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
+from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
@@ -230,6 +231,7 @@ class BitfinexLiveExecutor:
         nonce_provider: Callable[[], int] | None = None,
         date_provider: Callable[[], date] | None = None,
         base_url: str = BITFINEX_REST_BASE,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         self._http = http
         self._events = event_sink
@@ -241,6 +243,7 @@ class BitfinexLiveExecutor:
         self._nonce_provider = nonce_provider or (lambda: int(time.time() * 1_000_000))
         self._date_provider = date_provider or (lambda: date.today())
         self._base_url = base_url.rstrip("/")
+        self._clock = clock or (lambda: int(time.time() * 1000))
 
     async def submit(
         self, ready: ReadyToSubmit, ctx: AccountContext, *, cid: int | None = None,
@@ -318,6 +321,17 @@ class BitfinexLiveExecutor:
                 outcome=SubmitNotSent("local_validation_failed"),
             )
 
+        try:
+            validate_amount(Decimal(str(amount)), ready.funding_amount_evidence,
+                            symbol=decision.symbol, now_ms=self._clock())
+        except (ValueError, ArithmeticError):
+            return _order_from_outcome(cid=cid, reference=reference,
+                outcome=SubmitNotSent("funding_rule_or_amount_invalid"))
+        # Final synchronous predicates after payload/signing work. No await may
+        # separate the bound amount/book checks from starting the request.
+        if ctx.before_submit_transport is not None and not ctx.before_submit_transport():
+            return _order_from_outcome(cid=cid, reference=reference,
+                outcome=SubmitNotSent("decision_book_invalid_or_expired"))
         transport_started = True
         try:
             resp = await self._http.post(

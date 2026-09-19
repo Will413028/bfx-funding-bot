@@ -9,6 +9,7 @@ from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+from tests.external.bitfinex.test_funding_rules import FixedRules
 from tests.integration.test_capital_command_boundary import boundary
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
@@ -133,7 +134,7 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
     async def no_submit(command):
         pytest.fail("consumed session retried submit")
 
-    worker = ReleaseWorker(authority=authority, halt_store=halt, minimum_amount=Decimal("150"),
+    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=token,
         planner=no_submit, observation=observe)
     await worker.tick()
