@@ -207,6 +207,9 @@ Alembic，避免 role 不存在時讓 migration 失敗：
 
 ```sql
 GRANT USAGE ON SCHEMA public TO bfx_webapi;
+-- /ready compares the database revision with the image's Alembic graph.
+-- Read the version column only; no migration/write authority is granted.
+GRANT SELECT (version_num) ON TABLE public.alembic_version TO bfx_webapi;
 GRANT SELECT ON TABLE
   public.user_profiles,
   public.exchange_accounts,
@@ -231,6 +234,12 @@ RESET ROLE;
 
 預期結果為 `can_read_position=t`、`can_write_event=f`、
 `can_update_credentials=t`；任何其他 privilege 都停止 release，先修正 role。
+
+啟動後另驗 webapi `/ready` 回 200。只驗 `SELECT 1` 不足以證明 schema
+readiness：以 `bfx_webapi` 實際讀取 `alembic_version.version_num`，並確認仍無
+`alembic_version` UPDATE、`event_log` INSERT 與 `capital_policy_revisions` INSERT
+權限（後者於 capital migration 後檢查）。不要用 database-owner URL 代替受限
+角色，也不要因 readiness 失敗而授予全部表讀寫權限。
 
 <a id="post-identity-dr-gate"></a>
 
