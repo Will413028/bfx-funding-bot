@@ -69,7 +69,7 @@ new_offer_amount <= min(spendable, cell_headroom)
 
 這是「新增可放貸金額」，不是要求每輪重新送出全部帳戶總額。分配器與 pre-submit guard 共用同一 `CapitalPolicy` evaluator；不能由兩套公式分別決定 target 和安全上限。
 
-L 的扣抵必須有 snapshot fence、attempt identity 與 event sequence 的對應證據。不能用「時間較新」猜測某筆已被反映；無法分類時 block，不能清零，也不能同時從 A 與 E 重複扣抵。snapshot ingestion 需保存查詢前 command fence，接受時在相同 account lock 下確認查詢期間沒有衝突命令；snapshot append 序號不能充當查詢前 fence。人工掛單／外部 auto-renew 產生的未知活動沿用 quarantine/uncertainty 流程，不能默認可管理。已確認 credit 僅缺 cell provenance 與 execution UNKNOWN 必須區分：前者採上述保守 concentration，後者阻擋送單。
+L 的扣抵必須有 snapshot fence、attempt identity 與 event sequence 的對應證據。不能用「時間較新」猜測某筆已被反映；無法分類時 block，不能清零，也不能同時從 A 與 E 重複扣抵。snapshot ingestion 需保存查詢前 command fence，接受時在相同 account lock 下確認查詢期間沒有衝突命令；snapshot append 序號不能充當查詢前 fence。本機 command fence 不涵蓋交易所自主成交，因此 capital authority 另需兩次有界、連續、完整觀測的 normalized offers／credits／available 相符證據；查詢期間與比對失敗時不沿用舊額度。這是保守的穩定觀測檢查，不宣稱 REST endpoints 有原子快照保證。人工掛單／外部 auto-renew 產生的未知活動沿用 quarantine/uncertainty 流程，不能默認可管理。已確認 credit 僅缺 cell provenance 與 execution UNKNOWN 必須區分：前者採上述保守 concentration，後者阻擋送單。
 
 命令執行延用 account-scoped single writer 與 AccountCommandGate：
 
