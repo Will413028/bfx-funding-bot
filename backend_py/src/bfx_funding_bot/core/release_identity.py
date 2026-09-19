@@ -15,7 +15,7 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,35 +51,58 @@ class ReleaseIdentityError(RuntimeError):
     pass
 
 
+class PackagedImageIdentity(BaseModel):
+    """Content roles remain stable even when Docker's engine ID changes."""
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    config_digest: _IMAGE
+    manifest_digest: _IMAGE
+    platform: Literal["linux/arm64", "linux/amd64"]
+
+
 class ReleaseManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: Literal[1]
+    version: Literal[2]
     release_id: str = Field(min_length=1)
     source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
-    platform: Literal["linux/arm64", "linux/amd64"]
-    docker_image_id: _IMAGE
-    oci_manifest_digest: _IMAGE | None
+    image: PackagedImageIdentity
     inventory: dict[str, _SHA]
     python_inventory: dict[str, _SHA]
     environment: dict[str, str]
     schema_head: str = Field(min_length=1)
     projector_version: str = Field(min_length=1)
 
+    @property
+    def platform(self) -> str:
+        return self.image.platform
+
 
 class LaunchReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: Literal[1]
+    version: Literal[2]
     launch_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     hostname: str
     container_id: _SHA
     manifest_digest: _SHA
-    docker_image_id: _IMAGE
+    image: PackagedImageIdentity
+    actual_image_id: _IMAGE
     platform: Literal["linux/arm64", "linux/amd64"]
 
 
 def canonical_digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      allow_nan=False).encode()).hexdigest()
+
+
+def identity_json(raw: bytes) -> Any:
+    """JSON evidence must not contain multiple meanings for the same key."""
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate_identity_key")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique)
 
 
 def measure_inventory(root: Path, *, require_protected: bool = False) -> dict[str, str]:
@@ -149,6 +172,7 @@ class VerifiedRelease:
     release_digest: str
     config_digest: str
     launch_id: str
+    actual_image_id: str
 
 
 @dataclass
@@ -187,12 +211,13 @@ class ReleaseRuntime:
         try:
             assert_protected_file(self.manifest_path)
             assert_protected_file(self.receipt_path)
-            manifest = ReleaseManifest.model_validate_json(self.manifest_path.read_bytes())
-            receipt = LaunchReceipt.model_validate_json(self.receipt_path.read_bytes())
+            manifest = ReleaseManifest.model_validate(identity_json(self.manifest_path.read_bytes()))
+            receipt = LaunchReceipt.model_validate(identity_json(self.receipt_path.read_bytes()))
             digest = canonical_digest(manifest.model_dump(mode="json"))
             if (
                 receipt.manifest_digest != digest
-                or receipt.docker_image_id != manifest.docker_image_id
+                or receipt.image != manifest.image
+                or receipt.actual_image_id not in (manifest.image.config_digest, manifest.image.manifest_digest)
                 or receipt.platform != manifest.platform
                 or self.platform() != manifest.platform
                 or receipt.hostname != "bfx-" + receipt.launch_id
@@ -223,6 +248,7 @@ class ReleaseRuntime:
                               if key.startswith("configs/")},
                 }),
                 launch_id=receipt.launch_id,
+                actual_image_id=receipt.actual_image_id,
             )
         except ReleaseIdentityError:
             raise

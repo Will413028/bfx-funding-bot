@@ -23,16 +23,18 @@ TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 def configure_release_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Synthetic measured identity for construction-only tests; never production fallback."""
     from bfx_funding_bot.core.release_identity import (
+        PackagedImageIdentity,
         ReleaseManifest,
         ReleaseRuntime,
         VerifiedRelease,
     )
-    manifest = ReleaseManifest(version=1, release_id="fixture", source_revision="a" * 40,
-        platform="linux/arm64", docker_image_id="sha256:" + "b" * 64,
-        oci_manifest_digest=None, inventory={}, python_inventory={}, environment={}, schema_head="b4e6f8a0c203",
+    manifest = ReleaseManifest(version=2, release_id="fixture", source_revision="a" * 40,
+        image=PackagedImageIdentity(platform="linux/arm64", config_digest="sha256:" + "b" * 64,
+            manifest_digest="sha256:" + "f" * 64),
+        inventory={}, python_inventory={}, environment={}, schema_head="b4e6f8a0c203",
         projector_version="execution-state-v1")
     proof = VerifiedRelease(manifest=manifest, release_digest="c" * 64,
-        config_digest="d" * 64, launch_id="e" * 32)
+        config_digest="d" * 64, launch_id="e" * 32, actual_image_id=manifest.image.manifest_digest)
     monkeypatch.setattr(ReleaseRuntime, "from_environment", classmethod(lambda cls: SimpleNamespace(verify=lambda: proof)))
 
 

@@ -2,7 +2,6 @@
 import asyncio
 import json
 import subprocess
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -18,7 +17,9 @@ from scripts.release_package import run
 
 
 @pytest.mark.integration
-async def test_image_migration_then_restricted_runtime_check_without_sync_or_policy_seed(pg_engine, pg_container, tmp_path):
+async def test_image_migration_then_restricted_runtime_check_without_sync_or_policy_seed(
+    pg_engine, pg_container, tmp_path, unapproved_release_image,
+):
     # Test-owned PG only; actual migration, not ORM create_all, owns this schema.
     async with pg_engine.begin() as connection:
         await connection.execute(text("DROP SCHEMA public CASCADE"))
@@ -28,7 +29,9 @@ async def test_image_migration_then_restricted_runtime_check_without_sync_or_pol
         await connection.execute(text("GRANT USAGE ON SCHEMA public TO bfx_bot"))
         await connection.execute(text("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO bfx_bot"))
         await connection.execute(text("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE,SELECT ON SEQUENCES TO bfx_bot"))
-    image = run(["docker", "build", "-q", "--platform", "linux/arm64", str(Path(__file__).resolve().parents[2])]).decode().strip()
+    image, identity = unapproved_release_image
+    from scripts.image_artifact import resolve_image
+    assert resolve_image(identity, run) == image
     network = "task5-migration-" + uuid4().hex
     pg_id = pg_container.get_wrapped_container().id
     run(["docker", "network", "create", "--internal", network])

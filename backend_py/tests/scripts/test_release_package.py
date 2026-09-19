@@ -5,32 +5,42 @@ from pathlib import Path
 
 import pytest
 
-from bfx_funding_bot.core.release_identity import ReleaseManifest
+from bfx_funding_bot.core.release_identity import PackagedImageIdentity, ReleaseManifest
 
 IMAGE = "sha256:" + "a" * 64
+IDENTITY = PackagedImageIdentity(config_digest=IMAGE, manifest_digest="sha256:" + "f" * 64,
+                                platform="linux/arm64")
 
 
 def manifest() -> ReleaseManifest:
-    return ReleaseManifest(version=1, release_id="fixture", source_revision="b" * 40,
-        platform="linux/arm64", docker_image_id=IMAGE, oci_manifest_digest=None,
+    return ReleaseManifest(version=2, release_id="fixture", source_revision="b" * 40,
+        image=IDENTITY,
         inventory={"configs/cells.yaml": "c" * 64}, python_inventory={},
         environment={"BFX_PHASE": "live"}, schema_head="b4e6f8a0c203",
         projector_version="execution-state-v1")
 
 
 class Docker:
-    def __init__(self, mutation: str | None = None) -> None:
+    def __init__(self, mutation: str | None = None, store: str = "classic") -> None:
         self.calls: list[list[str]] = []
         self.mutation = mutation
         self.container: dict = {}
+        self.image = IMAGE if store == "classic" else IDENTITY.manifest_digest
 
     def __call__(self, args: list[str], *, data: bytes | None = None) -> bytes:
         self.calls.append(args)
         if args[:3] == ["docker", "image", "inspect"]:
-            return json.dumps([{"Id": IMAGE, "Os": "linux", "Architecture": "arm64"}]).encode()
+            from scripts.image_artifact import ImageNotFound
+            if args[-1] != self.image:
+                raise ImageNotFound("image_not_found")
+            record = {"Id": self.image, "Os": "linux", "Architecture": "arm64"}
+            if self.image != IMAGE:
+                record["Descriptor"] = {"digest": self.image,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            return json.dumps([record]).encode()
         if args[:2] == ["docker", "create"]:
             self.container = {
-                "Id": "d" * 64, "Image": IMAGE, "Platform": "linux",
+                "Id": "d" * 64, "Image": self.image, "Platform": "linux",
                 "Config": {"Hostname": args[args.index("--hostname") + 1],
                     "User": "1000:1000", "WorkingDir": "/app",
                     "Entrypoint": None, "Cmd": ["/app/.venv/bin/python", "-m",
@@ -65,11 +75,12 @@ class Docker:
         raise AssertionError(f"unanticipated command: {args[:3]}")
 
 
-def test_deploy_starts_only_measured_image_after_publishing_receipt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("store", ["classic", "containerd"])
+def test_deploy_starts_only_measured_image_after_publishing_receipt(tmp_path: Path, store) -> None:
     """A moving tag, implicit build or start-before-receipt must fail this test."""
     from scripts.release_package import create_launch
 
-    docker = Docker()
+    docker = Docker(store=store)
     receipts = []
     def runner(args, *, data=None):
         if args[:2] == ["docker", "start"]:
@@ -78,19 +89,22 @@ def test_deploy_starts_only_measured_image_after_publishing_receipt(tmp_path: Pa
     result = create_launch(manifest(), release_dir=tmp_path, env_files=[], network="fixture",
         runner=runner, publish=receipts.append)
     assert receipts[0].container_id == "d" * 64
-    assert receipts[0].docker_image_id == IMAGE
+    assert receipts[0].actual_image_id == docker.image
+    assert receipts[0].image == IDENTITY
     assert result == "d" * 64
     assert not any("build" in call or "pull" in call for call in docker.calls)
     assert docker.calls[-1] == ["docker", "start", "d" * 64]
-    assert "--read-only" in docker.calls[1]
-    assert IMAGE in docker.calls[1]
+    create = next(call for call in docker.calls if call[:2] == ["docker", "create"])
+    assert "--read-only" in create
+    assert docker.image in create
 
 
+@pytest.mark.parametrize("store", ["classic", "containerd"])
 @pytest.mark.parametrize("mutation", ["image", "config", "writable", "command", "capability", "security"])
-def test_deploy_rejects_inspected_drift_before_start(tmp_path: Path, mutation: str) -> None:
+def test_deploy_rejects_inspected_drift_before_start(tmp_path: Path, mutation: str, store) -> None:
     from scripts.release_package import PackagingBlocked, create_launch
 
-    docker = Docker(mutation)
+    docker = Docker(mutation, store)
     receipts = []
     with pytest.raises(PackagingBlocked):
         create_launch(manifest(), release_dir=tmp_path, env_files=[], network="fixture",
@@ -103,7 +117,7 @@ def test_platform_mismatch_never_creates_container(tmp_path: Path) -> None:
     from scripts.release_package import PackagingBlocked, create_launch
 
     docker = Docker()
-    release = manifest().model_copy(update={"platform": "linux/amd64"})
+    release = manifest().model_copy(update={"image": IDENTITY.model_copy(update={"platform": "linux/amd64"})})
     with pytest.raises(PackagingBlocked):
         create_launch(release, release_dir=tmp_path, env_files=[], network="fixture",
             runner=docker, publish=lambda _: None)
@@ -125,25 +139,36 @@ def test_launch_mounts_dr_receipts_readonly_without_shadowing_inventory(tmp_path
 
 def test_prepare_builds_clean_tracked_archive_and_measures_actual_image(tmp_path: Path) -> None:
     from scripts.release_package import prepare_backend
+    from tests.scripts.test_image_artifact import archive_fixture
+    archive = tmp_path / "backend.tar"
+    expected = archive_fixture(tmp_path / "expected.tar")
+    image = expected["config_digest"]
 
     calls = []
 
     def runner(args, *, data=None):
         calls.append((args, data))
-        if args[:3] == ["git", "status", "--porcelain"]:
+        if "status" in args:
             return b""
-        if args[:2] == ["git", "rev-parse"]:
+        if args[0] == "git" and "rev-parse" in args:
             return ("b" * 40).encode()
-        if args[:2] == ["git", "archive"]:
+        if args[0] == "git" and "show" in args:
+            return b"1700000000"
+        if args[0] == "git" and "archive" in args:
             return b"tracked-source-tar"
         if args[:2] == ["docker", "build"]:
             assert data == b"tracked-source-tar"
-            return IMAGE.encode()
+            return image.encode()
+        if args[:2] == ["docker", "save"]:
+            assert args[-1] == image
+            assert args[-2] == str(archive)
+            archive_fixture(archive)
+            return b""
         if args[:3] == ["docker", "image", "inspect"]:
-            return json.dumps([{"Id": IMAGE, "Os": "linux", "Architecture": "arm64",
+            return json.dumps([{"Id": image, "Os": "linux", "Architecture": "arm64",
                                 "RepoDigests": []}]).encode()
         if args[:2] == ["docker", "run"]:
-            assert IMAGE in args
+            assert image in args
             return json.dumps({"inventory": {"src/app.py": "f" * 64},
                 "python_inventory": {"bin/python3.13": "e" * 64},
                 "environment": {"BFX_PHASE": "live"}, "schema_head": "b4e6f8a0c203",
@@ -151,9 +176,9 @@ def test_prepare_builds_clean_tracked_archive_and_measures_actual_image(tmp_path
         raise AssertionError(args)
 
     release, receipt = prepare_backend(release_id="fixture", platform="linux/arm64",
-        config_file=tmp_path / "nonsecret.env", runner=runner)
-    assert release.docker_image_id == IMAGE
-    assert release.oci_manifest_digest is None
+        config_file=tmp_path / "nonsecret.env", archive_path=archive, runner=runner)
+    assert release.image.model_dump() == expected
+    assert receipt["archive_filename"] == "backend.tar"
     assert release.python_inventory == {"bin/python3.13": "e" * 64}
     assert receipt["measurement_seconds"] == 2.5
     assert sum(args[:2] == ["docker", "build"] for args, _ in calls) == 1
@@ -169,35 +194,46 @@ def test_prepare_refuses_dirty_source_before_build(tmp_path: Path) -> None:
 
     with pytest.raises(PackagingBlocked, match="source_not_clean"):
         prepare_backend(release_id="fixture", platform="linux/arm64",
-            config_file=tmp_path / "nonsecret.env", runner=runner)
-    assert len(calls) == 1
+            config_file=tmp_path / "nonsecret.env", archive_path=tmp_path / "backend.tar", runner=runner)
+    assert not any(call[:2] == ["docker", "build"] for call in calls)
 
 
 def test_prepare_frontend_binds_public_build_configuration(tmp_path):
     from scripts.release_package import prepare_frontend
+    from tests.scripts.test_image_artifact import archive_fixture
+    archive = tmp_path / "frontend.tar"
+    expected = archive_fixture(tmp_path / "expected.tar", component="frontend")
+    image = expected["config_digest"]
     calls = []
     public = {"NEXT_PUBLIC_APP_URL": "https://example.test", "NEXT_PUBLIC_APP_NAME": "fixture",
               "NEXT_PUBLIC_BETTER_AUTH_URL": "https://example.test"}
     def runner(args, *, data=None):
         calls.append(args)
-        if args[:2] == ["git", "archive"]:
+        if args[0] == "git" and "archive" in args:
             return b"frontend-archive"
+        if args[0] == "git":
+            return b"1700000000"
+        if args[:2] == ["docker", "save"]:
+            archive_fixture(archive, component="frontend")
+            return b""
         if args[:2] == ["docker", "build"]:
             assert data == b"frontend-archive"
-            return IMAGE.encode()
-        return json.dumps([{"Id": IMAGE, "Os": "linux", "Architecture": "arm64"}]).encode()
-    receipt = prepare_frontend(revision="b" * 40, platform="linux/arm64", public=public, runner=runner)
+            return image.encode()
+        return json.dumps([{"Id": image, "Os": "linux", "Architecture": "arm64"}]).encode()
+    receipt = prepare_frontend(revision="b" * 40, platform="linux/arm64", public=public,
+                               archive_path=archive, runner=runner)
     assert receipt["public_environment"] == public
-    assert receipt["docker_image_id"] == IMAGE
-    build = calls[1]
+    assert receipt["image"] == expected
+    build = next(call for call in calls if call[:2] == ["docker", "build"])
     assert "NEXT_PUBLIC_APP_URL=https://example.test" in build
     assert "NEXT_PUBLIC_BETTER_AUTH_URL=https://example.test" in build
 
 
-def test_frontend_preparation_rejects_secret_or_incomplete_build_configuration():
+def test_frontend_preparation_rejects_secret_or_incomplete_build_configuration(tmp_path):
     from scripts.release_package import PackagingBlocked, prepare_frontend
     with pytest.raises(PackagingBlocked, match="public_configuration"):
-        prepare_frontend(revision="b" * 40, platform="linux/arm64", public={"SECRET": "do-not-print"})
+        prepare_frontend(revision="b" * 40, platform="linux/arm64", public={"SECRET": "do-not-print"},
+                         archive_path=tmp_path / "frontend.tar")
 
 
 @pytest.mark.parametrize("bad", ["operator", "role", "public_url", "principal", "legacy", "admin_token", "injection"])
@@ -262,3 +298,62 @@ def test_migration_dry_run_never_applies_and_stale_digest_blocks(monkeypatch):
     with pytest.raises(PackagingBlocked, match="migration_plan_changed"):
         cli.migrate(args, manifest())
     assert all("alembic" not in call for call in calls)
+
+
+@pytest.mark.parametrize("corrupt", [None, "backend", "frontend"])
+def test_prepare_publishes_only_after_two_independent_verified_exports(tmp_path, monkeypatch, corrupt):
+    from types import SimpleNamespace
+
+    from scripts import immutable_release as cli
+    from scripts import release_package as producer
+    from tests.scripts.test_image_artifact import archive_fixture
+    expected = {component: archive_fixture(tmp_path / (component + "-expected.tar"), component=component)
+                for component in ("backend", "frontend")}
+    args = SimpleNamespace(output=tmp_path / "release", config=tmp_path / "config.env",
+        frontend_public=tmp_path / "public.json", release_id="fixture", platform="linux/arm64")
+    args.config.write_text("BFX_PHASE=live\nBFX_EXECUTOR=bitfinex_live\n")
+    args.frontend_public.write_text(json.dumps({"NEXT_PUBLIC_APP_URL": "https://example.test",
+        "NEXT_PUBLIC_APP_NAME": "fixture", "NEXT_PUBLIC_BETTER_AUTH_URL": "https://example.test"}))
+    calls = []
+    def runner(command, *, data=None):
+        calls.append(command)
+        if command[0] == "git":
+            if "status" in command:
+                return b""
+            if "show" in command:
+                return b"1700000000"
+            if "archive" in command:
+                return command[-1].encode()
+            return ("b"*40).encode()
+        if command[:2] == ["docker", "build"]:
+            component = "backend" if data.endswith(b":backend_py") else "frontend"
+            return expected[component]["config_digest"].encode()
+        if command[:2] == ["docker", "save"]:
+            assert len(command) == 5  # exactly one component, never a pair export
+            component = next(name for name, item in expected.items() if item["config_digest"] == command[-1])
+            archive_fixture(Path(command[-2]), mutation="lossy_pair" if corrupt == component else None,
+                            component=component)
+            return b""
+        if command[:3] == ["docker", "image", "inspect"]:
+            return json.dumps([{"Id": command[-1], "Os": "linux", "Architecture": "arm64"}]).encode()
+        if command[:2] == ["docker", "run"]:
+            return json.dumps({"inventory": {}, "python_inventory": {},
+                "environment": {"BFX_PHASE": "live", "BFX_EXECUTOR": "bitfinex_live"},
+                "schema_head": "b4e6f8a0c203", "projector_version": "execution-state-v1",
+                "measurement_seconds": 1}).encode()
+        raise AssertionError(command)
+    monkeypatch.setattr(cli, "prepare_backend", lambda **kw: producer.prepare_backend(**kw, runner=runner))
+    monkeypatch.setattr(cli, "prepare_frontend", lambda **kw: producer.prepare_frontend(**kw, runner=runner))
+    if corrupt:
+        with pytest.raises(producer.PackagingBlocked, match="invalid_image_archive"):
+            cli.prepare(args)
+        assert not (args.output / "bundle.json").exists()
+        assert not (args.output / "manifest.json").exists()
+    else:
+        assert cli.prepare(args)["status"] == "prepared_not_deployed"
+        bundle = json.loads((args.output / "bundle.json").read_bytes())
+        assert bundle["version"] == 2
+        assert bundle["manifest"]["image"] == expected["backend"]
+        assert bundle["frontend"]["image"] == expected["frontend"]
+        assert {p.name for p in args.output.iterdir()} == {"backend.tar", "frontend.tar", "bundle.json", "manifest.json"}
+        assert sum(call[:2] == ["docker", "build"] for call in calls) == 2
