@@ -469,3 +469,100 @@ async def test_capital_probe_does_not_commit_projection_replay(capital_db):
     assert result.allowed
     async with factory() as session:
         assert (await session.scalar(select(ProjectionHeadRow))).last_event_seq == 0
+
+
+async def cancel_http_boundary(factory, account, http):
+    """Real gate/guards/adapter; only HTTP transport is supplied by the test."""
+    from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.execution.safety.hard_guards import (
+        CapitalPolicyGuard,
+        DatabaseUncertaintyReader,
+        UncertaintyGuard,
+    )
+    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
+    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink
+
+    gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
+    await gate.submit(ready, ctx)  # Establish a known managed offer, no HTTP.
+    gate._safety_evaluator = SafetyGuardChain(
+        guards=[ManualKillGuard(halt_store=halt), UncertaintyGuard(
+            reader=DatabaseUncertaintyReader(factory), deployment_environment="ci"),
+            CapitalPolicyGuard(runtime=runtime)],
+        probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
+    gate._inner = BitfinexLiveExecutor(
+        http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
+        cell="a30", nonce_provider=lambda: 123456789,
+    )
+    return gate, ctx, runtime
+
+
+async def append_cancel_race_unknown(factory, account, *, symbol="fUST", environment="ci"):
+    """Recovery-like immutable UNKNOWN, projected through the actual writer."""
+    from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+    from bfx_funding_bot.modules.execution.events import ReservationUnknown
+
+    event, decision = intent(account, amount="10", cid=77, symbol=symbol)
+    event = replace(event, submission_attempt=replace(event.submission_attempt, environment=environment))
+    decision.deployment_environment = environment
+    repo = repository(account, environment=environment)
+    async with factory.begin() as session:
+        if await session.get(ExchangeAccount, account) is None:
+            session.add(ExchangeAccount(id=account, venue="bitfinex", label="adjacent-test"))
+            await session.flush()
+        session.add(decision)
+        await session.flush()
+        await repo.writer.append(session, event)
+        await repo.writer.append(session, ReservationUnknown(
+            symbol=symbol, cid=event.cid, amount=Decimal("10"),
+            signal_correlation_id=event.signal_correlation_id, account_id=str(account),
+            is_simulated=True, reservation_ref=event.reservation_ref,
+            reason="synthetic recovery during cancel", occurred_at_ms=1200,
+        ))
+
+
+@pytest.mark.parametrize("fault", ["unknown", "unreadable"])
+async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(capital_db, monkeypatch, fault):
+    import asyncio
+
+    import httpx
+
+    from bfx_funding_bot.modules.execution.safety.hard_guards import DatabaseUncertaintyReader
+
+    factory, account = capital_db
+    requests = []
+
+    async def transport(request):
+        requests.append(request)
+        return httpx.Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        gate, ctx, _ = await cancel_http_boundary(factory, account, http)
+        original_guard = gate._guard
+        injected = False
+
+        async def after_admission(decision, context, *, transport=False):
+            nonlocal injected
+            if context.command_session is None and not injected:
+                injected = True
+                async with factory() as observer:
+                    assert await observer.scalar(select(EventLogRow.event_seq).where(
+                        EventLogRow.event_type == "CANCEL_REQUESTED")) is not None
+                if fault == "unknown":
+                    await append_cancel_race_unknown(factory, account)
+                else:
+                    async def unavailable(*args, **kwargs):
+                        raise RuntimeError("synthetic uncertainty read failure")
+                    monkeypatch.setattr(DatabaseUncertaintyReader, "list_open", unavailable)
+            # Scheduling hook only: never fake a guard verdict.
+            return await original_guard(decision, context, transport=transport)
+
+        monkeypatch.setattr(gate, "_guard", after_admission)
+        with pytest.raises(CommandGateBlocked, match="uncertainty"):
+            await asyncio.wait_for(gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                account_id=str(account), ctx=ctx), timeout=10)
+    assert injected
+    assert requests == []

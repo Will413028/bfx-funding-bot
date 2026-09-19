@@ -146,7 +146,10 @@ class SafetyGuardChain:
             self.probe.record_heartbeat("safety_chain")
 
     async def evaluate_transport(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
-        """Post-commit halt/ownership fencing; capital is already reserved durably."""
+        """Write eligibility without new spending (reserved submit or cancel).
+
+        Keep the write-shaped probe: SKIP would also bypass uncertainty checks.
+        """
         for guard in self.guards:
             if guard.name == "capital_policy":
                 continue
