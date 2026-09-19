@@ -485,6 +485,7 @@ class ExecutionGate:
             deployment_environment=audit_context.deployment_environment,
             reconcile_id=reconcile_id,
             cell_id=audit_context.cell_id,
+            strategy=audit_context.strategy,
             symbol=audit_context.symbol,
             signal_correlation_id=audit_context.signal_correlation_id,
             outcome=outcome,

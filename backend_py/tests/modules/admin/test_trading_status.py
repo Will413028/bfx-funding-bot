@@ -519,6 +519,16 @@ async def test_halt_writes_a_persisted_transition() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_resume_requires_release_promotion() -> None:
+    store = _FakeHaltStore(_halt_state(True))
+    service = _service(halt_store=store)
+    service._phase = Phase.LIVE
+    with pytest.raises(ValueError, match="release_promotion_required"):
+        await service.resume(reason="static bearer", actor="admin-api")
+    assert store.state.halted
+    assert store.writes == []
+
+
 async def test_resume_writes_a_persisted_transition() -> None:
     store = _FakeHaltStore(_halt_state(True))
     svc = _service(halt_store=store)

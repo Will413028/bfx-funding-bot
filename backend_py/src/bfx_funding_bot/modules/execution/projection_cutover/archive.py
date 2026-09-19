@@ -199,7 +199,7 @@ async def capture_archive(
             )
         ).scalars()
     )
-    if heads not in {("f8c2d4e6a901",), ("a9d3e5f7b102",)}:
+    if heads not in {("f8c2d4e6a901",), ("a9d3e5f7b102",), ("b4e6f8a0c203",)}:
         raise ValueError("archive migration not ready")
     stream = await _stream_identity(session, scope)
     entries: list[dict[str, object]] = []

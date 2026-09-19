@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, fields
+from dataclasses import asdict, dataclass, fields, replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -45,6 +45,8 @@ from bfx_funding_bot.modules.marketfeed.daemon import (
     assert_canary_guard_invariant,
     assert_canary_pre_command,
     assert_canary_startup,
+    assert_release_observation,
+    assert_release_pre_command,
     collect_canary_readiness,
     load_canary_evidence,
 )
@@ -72,6 +74,14 @@ from scripts.verify_projection_replay import (
 EXIT_SUCCESS = 0
 EXIT_PRECONDITION_FAILED = 2
 EXIT_VERIFICATION_FAILED = 3
+
+
+@dataclass(frozen=True)
+class CanaryAttemptSelector:
+    """IDs from the consumed session, never a human-supplied outcome claim."""
+    permit_id: str
+    attempt_id: str
+    command_decision_id: str
 
 
 def _assert_claim_matches_server(
@@ -127,7 +137,7 @@ async def _derive_canary_evidence_from_durable_rows(
     profile: CanaryProfile,
     projector_version: str,
     now_ms: int,
-    claim: CanaryEvidence,
+    claim: CanaryEvidence | CanaryAttemptSelector,
 ) -> CanaryEvidence:
     """Build canary facts from the attempt, outcome event, replay, and snapshots."""
     # The report's IDs are only selectors.  Every admitted value below is read
@@ -175,7 +185,7 @@ async def _derive_canary_evidence_from_durable_rows(
         raise CanaryStartupBlocked("canary_durable_outcome_incomplete")
 
     decision_result = await session.execute(
-        select(ExecutionDecisionRow.cell_id, ExecutionDecisionRow.amount_usdt).where(
+        select(ExecutionDecisionRow.cell_id, ExecutionDecisionRow.amount_usdt, ExecutionDecisionRow.strategy).where(
             ExecutionDecisionRow.decision_id == attempt.execution_decision_id,
             ExecutionDecisionRow.exchange_account_id == profile.account_id,
             ExecutionDecisionRow.deployment_environment == profile.environment,
@@ -201,6 +211,7 @@ async def _derive_canary_evidence_from_durable_rows(
         or amount > profile.cap_usdt
         or Decimal(str(decision.amount_usdt)) != amount
         or decision.cell_id != profile.cell
+        or (isinstance(claim, CanaryAttemptSelector) and decision.strategy != profile.strategy)
     ):
         raise CanaryStartupBlocked("canary_durable_scope_mismatch")
 
@@ -472,6 +483,61 @@ async def verify_canary_preflight(
         allocation_cap_usdt=allocation_cap_usdt,
     )
     return server_evidence
+
+
+async def verify_release_preflight(
+    *, session: AsyncSession, profile: CanaryProfile, halt2_evidence: Halt2Evidence,
+    config_artifact: Path, image_digest: str, projector_version: str, now_ms: int,
+    selector: CanaryAttemptSelector | None = None,
+) -> CanaryEvidence | None:
+    """Typed session admission/observation with unchanged DR and replay gates.
+
+The restored baseline is an immutable PREFIX of a now-advancing account stream.
+Verify that prefix independently before checking current snapshots. Exact-head
+equality would permanently invalidate evidence as soon as reconciliation ran.
+"""
+    from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+
+    if (halt2_evidence.exchange_account_id != str(profile.account_id)
+        or halt2_evidence.deployment_environment != profile.environment):
+        raise CanaryStartupBlocked("halt2_identity_or_environment_mismatch")
+    _require_halt2_artifacts(halt2_evidence, config_artifact)
+    report = await collect_preflight_report(session, account_id=profile.account_id,
+        environment=profile.environment, artifact_hashes=_artifact_hashes(halt2_evidence, config_artifact=config_artifact),
+        image_digest=image_digest, projector_version=projector_version)
+    if halt2_evidence.event_head is None:
+        raise CanaryStartupBlocked("halt2_baseline_head_missing")
+    prefix = list(await session.scalars(select(EventLogRow).where(
+        EventLogRow.exchange_account_id == profile.account_id,
+        EventLogRow.deployment_environment == profile.environment,
+        EventLogRow.event_seq <= halt2_evidence.event_head,
+    ).order_by(EventLogRow.event_seq)))
+    if (not prefix or prefix[-1].event_seq != halt2_evidence.event_head
+        or canonical_event_hash(prefix) != halt2_evidence.event_hash):
+        raise CanaryStartupBlocked("halt2_event_continuity_mismatch")
+    # Only current stream/snapshot fields advance after independently proven
+    # continuity. DR/config/image/schema/projector identities are NOT replaced.
+    continued = replace(halt2_evidence, event_head=report.event_head, event_hash=report.event_hash,
+        venue_snapshot_fence=report.venue_snapshot_fence,
+        venue_snapshot_observed_at_ms=report.venue_snapshot_observed_at_ms,
+        venue_snapshot_complete=report.venue_snapshot_complete)
+    result = verify_preflight(report, continued, environ={
+        "BFX_HALT2_MAX_SNAPSHOT_AGE_SECONDS": str(profile.max_evidence_age_seconds),
+    })
+    if result.stop_reasons:
+        raise CanaryStartupBlocked("halt2_preflight:" + ",".join(result.stop_reasons))
+    if selector is None:
+        assert_release_pre_command(await collect_canary_readiness(session,
+            account_id=profile.account_id, environment=profile.environment,
+            now_ms=now_ms, minimum_snapshot_count=1))
+        return None
+    evidence = await _derive_canary_evidence_from_durable_rows(session=session, profile=profile,
+        projector_version=projector_version, now_ms=now_ms, claim=selector)
+    readiness = await collect_canary_readiness(session, account_id=profile.account_id,
+        environment=profile.environment, now_ms=now_ms, after_event_seq=evidence.outcome_event_seq,
+        minimum_snapshot_count=2)
+    assert_release_observation(profile=profile, evidence=evidence, readiness=readiness)
+    return evidence
 
 
 def _parser() -> argparse.ArgumentParser:

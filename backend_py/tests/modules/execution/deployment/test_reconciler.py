@@ -592,8 +592,28 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     assert len(executor.ready_submissions) == 1
     ready = executor.ready_submissions[0]
     assert ready.decision_id == audit.last.decision_id
+    assert audit.last.strategy == "mean_reversion"
     order_submit = next(event for event in sink.events if event["event_type"] == "order_submit")
     assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
+
+
+async def test_release_selection_uses_minimum_without_reconfiguring_normal_cells():
+    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+    audit = _Audit()
+    rec, executor, _, _ = _build(exposure=D("0"), cap=D("2000"),
+        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")], audit=audit)
+    token = object()
+    from uuid import uuid4
+    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("153"), token)
+    await rec.deploy(release=command)
+    assert len(executor.ready_submissions) == 1
+    assert executor.ready_submissions[0].decision.offer_amount_usdt == 153
+    assert audit.last.cell_id == "fUST_a30"
+    assert audit.last.strategy == "mean_reversion"
+    # Normal scheduler still has both configured cells and the normal budget.
+    await rec.deploy()
+    assert len(executor.ready_submissions) == 3
+    assert any(ready.decision.offer_amount_usdt > 153 for ready in executor.ready_submissions[1:])
 
 
 async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():

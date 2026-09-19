@@ -12,6 +12,7 @@ def test_execution_decision_table_is_registered_with_audit_columns() -> None:
         "deployment_environment",
         "reconcile_id",
         "cell_id",
+        "strategy",
         "symbol",
         "signal_correlation_id",
         "outcome",
@@ -38,6 +39,7 @@ def test_execution_decision_table_is_registered_with_audit_columns() -> None:
     }
 
     assert set(table.columns.keys()) == expected_columns
+    assert table.c.strategy.nullable is True  # Historical decisions are not rewritten.
     assert [column.name for column in table.primary_key.columns] == ["decision_id"]
     assert ExecutionDecisionRow.__tablename__ == "execution_decisions"
 
