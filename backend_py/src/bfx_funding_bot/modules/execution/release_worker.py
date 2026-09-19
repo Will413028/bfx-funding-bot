@@ -101,7 +101,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
                                               command_decision_id=row.decision_id)
         return await verify_release_preflight(session=session, profile=profile,
             halt2_evidence=_load_evidence(Path(evidence_path)), config_artifact=config_artifact,
-            image_digest=proof.manifest.docker_image_id, projector_version=DEFAULT_PROJECTOR_VERSION,
+            image_digest=proof.actual_image_id, projector_version=DEFAULT_PROJECTOR_VERSION,
             now_ms=clock(), selector=selector)
 
     async def preflight(session: AsyncSession, row: ReleaseSessionRow) -> object:

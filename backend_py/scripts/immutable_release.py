@@ -20,14 +20,16 @@ from uuid import uuid4
 
 from bfx_funding_bot.core.release_identity import (
     NONSECRET_ENV_KEYS,
+    PackagedImageIdentity,
     ReleaseManifest,
     canonical_digest,
+    identity_json,
     runtime_environment,
 )
+from scripts.image_artifact import inspect_archive, resolve_image
 from scripts.release_package import (
     PackagingBlocked,
     create_launch,
-    inspect_image,
     prepare_backend,
     prepare_frontend,
     run,
@@ -102,44 +104,56 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if args.output.exists():
         raise PackagingBlocked("new_output_directory_required")
     args.output.mkdir(mode=0o755)
-    manifest, backend = prepare_backend(release_id=args.release_id, platform=args.platform, config_file=args.config)
+    manifest, backend = prepare_backend(release_id=args.release_id, platform=args.platform,
+        config_file=args.config, archive_path=args.output / "backend.tar")
     frontend = prepare_frontend(revision=manifest.source_revision, platform=args.platform,
-                                public=json.loads(args.frontend_public.read_bytes()))
-    archive = args.output / "images.tar"
-    run(["docker", "save", "--output", str(archive), manifest.docker_image_id, frontend["docker_image_id"]])
-    with archive.open("rb") as handle:
-        archive_digest = hashlib.file_digest(handle, "sha256").hexdigest()
-    archive.chmod(0o444)
-    bundle = {"version": 1, "manifest": manifest.model_dump(mode="json"),
-        "backend_preparation": backend, "frontend": frontend, "images_sha256": archive_digest,
+                                public=json.loads(args.frontend_public.read_bytes()),
+                                archive_path=args.output / "frontend.tar")
+    bundle = {"version": 2, "manifest": manifest.model_dump(mode="json"),
+        "backend_preparation": backend, "frontend": frontend,
         "migration": {"status": "not_applied", "target_head": manifest.schema_head,
                       "policy_conversion": "explicit_dry_run_then_digest_apply_required", "resumed": False}}
     write_new(args.output / "bundle.json", bundle)
     write_new(args.output / "manifest.json", manifest.model_dump(mode="json"))
     return {"status": "prepared_not_deployed", "bundle_digest": canonical_digest(bundle),
-            "docker_image_id": manifest.docker_image_id, "frontend_image_id": frontend["docker_image_id"]}
+            "backend_image": backend["image"], "frontend_image": frontend["image"]}
 
 
 def read_bundle(path: Path) -> tuple[dict[str, Any], ReleaseManifest]:
     protected(path)
-    bundle = json.loads(path.read_bytes())
+    bundle = identity_json(path.read_bytes())
+    if bundle["version"] != 2:
+        raise PackagingBlocked("unsupported_bundle_version")
     manifest = ReleaseManifest.model_validate(bundle["manifest"])
     backend, frontend = bundle["backend_preparation"], bundle["frontend"]
-    if (bundle["version"] != 1
-        or backend["manifest_digest"] != canonical_digest(manifest.model_dump(mode="json"))
+    if (backend["manifest_digest"] != canonical_digest(manifest.model_dump(mode="json"))
         or backend["source_revision"] != manifest.source_revision
-        or backend["docker_image_id"] != manifest.docker_image_id
+        or PackagedImageIdentity.model_validate(backend["image"]) != manifest.image
         or frontend["source_revision"] != manifest.source_revision
-        or frontend["platform"] != manifest.platform):
+        or frontend["image"]["platform"] != manifest.platform):
         raise PackagingBlocked("manifest_preparation_mismatch")
-    inspect_image(manifest.docker_image_id, manifest.platform, run)
-    inspect_image(bundle["frontend"]["docker_image_id"], manifest.platform, run)
+    for component, artifact in (("backend", backend), ("frontend", frontend)):
+        if artifact["archive_filename"] != component + ".tar":
+            raise PackagingBlocked("artifact_filename_mismatch")
+        archive = path.parent / artifact["archive_filename"]
+        protected(archive)
+        with archive.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != artifact["archive_sha256"]:
+            raise PackagingBlocked("artifact_digest_mismatch")
+        identity = PackagedImageIdentity.model_validate(artifact["image"])
+        if inspect_archive(archive) != identity:
+            raise PackagingBlocked("artifact_identity_mismatch")
+    # Both artifacts pass before any host execution.
+    resolve_image(manifest.image, run)
+    resolve_image(PackagedImageIdentity.model_validate(frontend["image"]), run)
     return bundle, manifest
 
 
 def one_shot(manifest: ReleaseManifest, *, env: Path, network: str, command: list[str],
              extra_env: dict[str, str] | None = None, mounts: list[str] | None = None) -> bytes:
     protected(env, secret=True)
+    image = resolve_image(manifest.image, run)
     args = ["docker", "run", "--rm", "--pull=never", "--read-only", "--user", "1000:1000",
         "--workdir", "/app", "--network", network, "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--env-file", str(env)]
@@ -147,7 +161,7 @@ def one_shot(manifest: ReleaseManifest, *, env: Path, network: str, command: lis
         args += ["--env", f"{key}={value}"]
     for mount in mounts or []:
         args += ["--mount", mount]
-    return run([*args, manifest.docker_image_id, *command])
+    return run([*args, image, *command])
 
 
 def migrate(args: argparse.Namespace, manifest: ReleaseManifest) -> dict[str, Any]:
@@ -155,7 +169,7 @@ def migrate(args: argparse.Namespace, manifest: ReleaseManifest) -> dict[str, An
         return json.loads(one_shot(manifest, env=args.env, network=args.network,
             command=["/app/.venv/bin/python", "-m", "scripts.release_database", "schema"]))
     before = schema()
-    plan = {"version": 1, "image_id": manifest.docker_image_id, "before": before,
+    plan = {"version": 2, "image": manifest.image.model_dump(mode="json"), "before": before,
             "command": ["uv", "run", "alembic", "upgrade", "head"], "resumed": False}
     digest = canonical_digest(plan)
     if args.apply_digest:
@@ -170,9 +184,9 @@ def migrate(args: argparse.Namespace, manifest: ReleaseManifest) -> dict[str, An
     return {**plan, "status": "dry_run", "digest": digest}
 
 
-def start_service(*, image: str, platform: str, name: str, user: str, env: Path,
+def start_service(*, identity: PackagedImageIdentity, name: str, user: str, env: Path,
                   network: str, command: list[str], port: str | None = None) -> str:
-    inspect_image(image, platform, run)
+    image = resolve_image(identity, run)
     args = ["docker", "create", "--pull=never", "--read-only", "--user", user, "--entrypoint", "",
         "--workdir", "/app", "--name", name, "--network", network,
         "--cap-drop=ALL", "--security-opt=no-new-privileges", "--env-file", str(env)]
@@ -252,10 +266,10 @@ def deploy(args: argparse.Namespace, bundle: dict[str, Any], manifest: ReleaseMa
         evidence_mounts=evidence_mounts,
         publish=lambda receipt: write_new(launch_dir / "launch.json", receipt.model_dump(mode="json")))
     run(["docker", "rename", bot_id, "bfx-bot"])
-    api_id = start_service(image=manifest.docker_image_id, platform=manifest.platform,
+    api_id = start_service(identity=manifest.image,
         name="bfx-webapi", user="1000:1000", env=args.webapi_env, network=args.network,
         command=["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.main:app", "--host", "0.0.0.0", "--port", "8000"])
-    frontend_id = start_service(image=bundle["frontend"]["docker_image_id"], platform=manifest.platform,
+    frontend_id = start_service(identity=PackagedImageIdentity.model_validate(bundle["frontend"]["image"]),
         name="bfx-frontend", user="nextjs", env=args.frontend_env, network=args.network,
         command=["node", "server.js"], port="127.0.0.1:3001:3000")
     after = json.loads(run(["docker", "inspect", "bfx-postgres", "bfx-redis"]))

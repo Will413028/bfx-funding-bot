@@ -599,6 +599,12 @@ snapshot bootstrap（初次安裝無 policy 時）→ unchanged policy conversio
 apply → fresh DR → same-image technical start with existing halt. Host root 由
 Docker inspect 產生 root-owned RO launch proof；actual daemon module、UID1000、RO
 code/Python、no writable executable mounts。新的 container 需要新的 launch proof。
+v2 manifest/receipt 以 typed `image={config_digest,manifest_digest,platform}`
+區分 config 與 OCI manifest content identity；backend/frontend 分開 save 並驗證完整
+archive。Host resolver 只接受這兩種已驗證 digest role，核對 platform 與實際 inspect ID，
+container.Image 一致才 start；receipt 額外綁定 `actual_image_id`，Halt2 沿用這個
+host ID 與 restore verifier 比對。v1 不相容且 fail closed，canonical release/config
+session binding 不改用 host ID；不換 Docker store、不信任 tag、不重寫舊 bundle。
 既有 PG18/Redis/volumes/runtime files 不重建。`deploy-vm.sh --bundle ...` 只是 wrapper；
 舊 moving-main/phase/canary-confirm/whole-stack build 指令已退役，歷史見 git。
 完整 CLI、ownership、首裝順序與 recovery 見

@@ -167,7 +167,7 @@ async def test_production_worker_rejects_unprotected_halt2_source(tmp_path):
     async def planner(command):
         pytest.fail("readiness must never submit")
     worker = build_release_worker(
-        runtime=SimpleNamespace(verify=lambda: SimpleNamespace(manifest=SimpleNamespace(docker_image_id="sha256:" + "a"*64))),
+        runtime=SimpleNamespace(verify=lambda: SimpleNamespace(actual_image_id="sha256:" + "a"*64)),
         capital=SimpleNamespace(repository=SimpleNamespace(account_id=uuid4(), environment="ci")),
         writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
@@ -175,3 +175,34 @@ async def test_production_worker_rejects_unprotected_halt2_source(tmp_path):
     row = SimpleNamespace(symbol="fUST", cell="a30", strategy="mean_reversion", max_amount=Decimal("200"))
     with pytest.raises(ReleaseIdentityError, match=r"unprotected|writable"):
         await worker.authority.preflight(None, row)
+
+
+async def test_worker_binds_halt2_to_actual_host_id_not_source_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from bfx_funding_bot.modules.execution import release_worker as module
+    from scripts import halt2_cutover, run_canary_preflight
+    source_config = "sha256:" + "a"*64
+    actual_manifest = "sha256:" + "b"*64
+    proof = SimpleNamespace(actual_image_id=actual_manifest,
+        manifest=SimpleNamespace(docker_image_id=source_config, environment={}))
+    monkeypatch.setattr(module, "assert_protected_file", lambda _: None)
+    monkeypatch.setattr(halt2_cutover, "_load_evidence", lambda _: object())
+    async def preflight(**kwargs):
+        return kwargs["image_digest"]
+    monkeypatch.setattr(run_canary_preflight, "verify_release_preflight", preflight)
+    async def owned():
+        return True
+    async def planner(command):
+        pytest.fail("preflight must never submit")
+    worker = module.build_release_worker(
+        runtime=SimpleNamespace(verify=lambda: proof),
+        capital=SimpleNamespace(repository=SimpleNamespace(account_id=uuid4(), environment="ci")),
+        writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, funding_rules=FixedRules(),
+        configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
+        planner=planner, config_artifact=tmp_path / "config", evidence_path=tmp_path / "evidence",
+        clock=lambda: 1100)
+    row = SimpleNamespace(symbol="fUST", cell="a30", strategy="mean_reversion",
+                          max_amount=Decimal("200"), minimum_amount=Decimal("150"))
+    assert await worker.authority.preflight(None, row) == actual_manifest

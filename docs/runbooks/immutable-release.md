@@ -9,8 +9,11 @@ trust boundary; the application never receives a Docker socket.
 ## 1. Review and build once
 
 Finish review/tests and commit first. Use a clean tracked revision; preparation
-rejects tracked dirt and builds `git archive HEAD:backend_py` and `HEAD:frontend`,
-not an arbitrary working directory. Untracked/ignored runtime envs cannot enter
+resolves `git rev-parse --show-toplevel`, checks tracked dirt at that root, and
+builds `git -C ROOT archive REV:backend_py` and `REV:frontend`, with
+`--format=tar --mtime=@COMMIT_TIMESTAMP` from `git show -s --format=%ct REV`.
+Source archive bytes therefore reproduce from repo root or `backend_py/`;
+content comes only from the reviewed commit. Untracked/ignored runtime envs cannot enter
 these archives. Local integration builds are **unapproved fixtures**, not the
 artifact later approved for deployment. Never rebuild an approved release on VM.
 
@@ -37,11 +40,42 @@ uv run --frozen python -m scripts.immutable_release prepare \
   --output /absolute/new-release-directory
 ```
 
-Output: `images.tar`, `bundle.json`, `manifest.json`. The bundle records archive
-SHA256, source revision, exact image IDs, public build config, shared manifest
-digest, inventory measurement time, and migration status **not_applied**.
-`docker_image_id` is the local image/config ID; `oci_manifest_digest` is separately
-nullable (usually null for a local build), never a synonym. Manifest inventory,
+Output: `backend.tar`, `frontend.tar`, `bundle.json`, `manifest.json`. Each
+component is built once, saved separately and verified before final metadata is
+published. A pair export is forbidden: classic Docker can emit two entries in
+`manifest.json` but only one in OCI `index.json`, losing an image on containerd.
+Never repair an old bundle by replacing an ID or overwrite a failed candidate.
+
+Version2 schema (v1 is rejected without migration/fallback):
+
+- `PackagedImageIdentity`: `config_digest` and `manifest_digest` are required
+  `sha256:<64 lowercase hex>`; `platform` is exactly `linux/arm64` or
+  `linux/amd64`. These name image config content and OCI manifest content.
+- `manifest.json`: `version:2`, `release_id`, `source_revision`, `image`
+  (the backend typed identity), `inventory`, `python_inventory`, `environment`,
+  `schema_head`, `projector_version`. No local engine ID is canonical content.
+- `bundle.json`: `version:2`, `manifest`, `backend_preparation`, `frontend`,
+  and the existing `migration` status **not_applied**. Each preparation records
+  `image`, `source_revision`, `source_archive_sha256`, `archive_filename`
+  (fixed `backend.tar` or `frontend.tar`) and `archive_sha256` (bare 64 hex).
+  Backend additionally records `measurement_seconds` and canonical
+  `manifest_digest`; frontend records `public_environment`.
+- `launch.json`: `version:2`, fresh `launch_id`, `hostname`, `container_id`,
+  canonical `manifest_digest`, `image`, `actual_image_id`, and inspected
+  `platform`. The actual ID must be exactly the packaged config or manifest
+  digest, with its role proven by host inspection before container start.
+
+Archive verification reads tar members without extraction, bounds member count
+and JSON size, and streams SHA256 of layer content. It verifies exactly one OCI
+manifest and matching Docker entry, descriptor sizes/media types/hashes, config
+platform and rootfs diff IDs, all raw tar layers and Docker layer linkage.
+Unsafe/duplicate members, duplicate JSON keys, PAX/extensions, trailing archives,
+compressed layers and multi-platform indexes fail closed. Classic Docker's
+content-addressed legacy per-layer JSON is accepted only as a single complete
+chain whose top config/platform matches the canonical image; it never selects
+an image or supplies execution authority.
+
+Manifest inventory,
 Python inventory, runtime environment and hashes use the candidate's shared
 `release_identity` functions, schema head and projector version exactly.
 
@@ -53,11 +87,25 @@ tag or a GIT_SHA label alone. Preserve its review/test/provenance receipts.
 Transfer only the approved nonsecret artifacts through the existing operator
 channel. Install under an absolute root-controlled directory such as
 `/opt/bfx/releases/REVIEWED-ID`; all ancestors root-owned, no group/world writes,
-no symlinks. Protect the bundle/manifest/archive read-only. Confirm the approved
-bundle digest out of band, compare `images.tar` SHA256 with `images_sha256`, then
-load **that archive** with `docker load --input /absolute/images.tar`. Loading is
-not rebuilding or pulling. The deployer subsequently inspects both exact IDs and
-platforms; a missing/mismatched local image blocks.
+no symlinks. Protect the bundle/manifest/archives read-only. Confirm the approved
+bundle digest out of band, compare each archive SHA256 with its preparation
+record, then load both:
+
+```bash
+docker load --input /absolute/new-release-directory/backend.tar
+docker load --input /absolute/new-release-directory/frontend.tar
+```
+
+Loading is not rebuilding or pulling. Every host CLI consumer rechecks both
+archive hashes/content identities before resolving immutable references. Classic
+Docker normally exposes the config digest as `Id`; containerd can expose the
+manifest digest instead, with an OCI manifest `Descriptor`. Only these bound
+roles with the exact platform are accepted; only classified image-not-found can
+try the other digest. Unknown Docker errors fail closed without raw output.
+No mutable tag or caller-supplied actual ID is proof. Inspect both actual target
+IDs after load and retain the evidence before any migration. Created bot/API/FE
+containers must report that resolved `Image` before start. Never change Docker's
+storage driver or use export/import to make the IDs appear equal.
 
 Keep PostgreSQL18, Redis, container IDs, networks, volume mounts, WAL/pgBackRest
 configuration, runtime files and recovery copies unchanged. Do not use broad
@@ -182,7 +230,7 @@ post-policy backup, quiescent source baseline, event replay/hash and isolated
 restore. Keep RPO≤300s/RTO≤3600s on unchanged hardware; prior/pre-change receipts
 are not acceptance. Keep existing backup/status timers and configuration intact.
 The existing restore verifier resolves `bfx-bot:local`: if used, the human must
-point that local tag at the approved exact ID and bind baseline to that ID; no
+point that local tag at the resolved actual host ID and bind baseline to that ID; no
 rebuild. Confirm weekly-report and other writers remain quiescent through capture.
 
 Generate the existing typed Halt2 evidence (no invented fields) for this account,
@@ -194,7 +242,9 @@ receipts are root-owned mode0600 in a protected directory. Deployer copies their
 bytes into the new launch evidence directory, sets runtime UID1000 mode0600 and
 mounts individual files read-only at those exact paths. It runs the existing
 artifact consumer in the candidate UID before starting apps. The worker still
-performs the complete Halt2/continuity/freshness/DR bound checks at human action.
+performs the complete Halt2/continuity/freshness/DR bound checks at human action,
+using `VerifiedRelease.actual_image_id` to match the restore verifier's actual
+deployed image evidence. Session release/config binding remains canonical.
 Existing DR measurement receipts also expire after900s. Schedule acceptance
 accordingly; never change timestamps to revive stale evidence. A long restore
 may require a fresh matching evidence cycle before a human session can proceed.

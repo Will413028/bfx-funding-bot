@@ -32,18 +32,18 @@ def artifact(tmp_path: Path, monkeypatch):
     (python_prefix / "bin/python3.13").write_bytes(b"fixture python")
     (python_prefix / "lib/libpython3.13.so.1.0").write_bytes(b"fixture libpython")
     manifest = {
-        "version": 1, "release_id": "release-test", "source_revision": "a" * 40,
-        "platform": "linux/arm64", "docker_image_id": "sha256:" + "b" * 64,
-        "oci_manifest_digest": None, "inventory": ri.measure_inventory(root),
+        "version": 2, "release_id": "release-test", "source_revision": "a" * 40,
+        "image": {"platform": "linux/arm64", "config_digest": "sha256:" + "b" * 64,
+                  "manifest_digest": "sha256:" + "f" * 64}, "inventory": ri.measure_inventory(root),
         "python_inventory": ri.measure_python_inventory(python_prefix),
         "environment": {"BFX_PHASE": "live", "BFX_EXECUTOR": "bitfinex_live"},
         "schema_head": "test-head", "projector_version": "test-projector",
     }
     launch_id = uuid4().hex
     launch = {
-        "version": 1, "launch_id": launch_id, "hostname": "bfx-" + launch_id,
+        "version": 2, "launch_id": launch_id, "hostname": "bfx-" + launch_id,
         "container_id": "c" * 64, "manifest_digest": digest(manifest),
-        "docker_image_id": manifest["docker_image_id"], "platform": "linux/arm64",
+        "image": manifest["image"], "actual_image_id": manifest["image"]["config_digest"], "platform": "linux/arm64",
     }
     manifest_path = tmp_path / "manifest.json"
     receipt_path = tmp_path / "launch.json"
@@ -57,6 +57,40 @@ def artifact(tmp_path: Path, monkeypatch):
         environment=lambda: dict(manifest["environment"]),
     )
     return runtime, root, manifest_path, receipt_path, manifest, launch
+
+
+@pytest.mark.parametrize("role", ["config_digest", "manifest_digest"])
+def test_runtime_exposes_actual_host_id_separately(artifact, role):
+    runtime, _, _, receipt_path, manifest, receipt = artifact
+    receipt["actual_image_id"] = manifest["image"][role]
+    receipt_path.write_text(json.dumps(receipt))
+    assert runtime.verify().actual_image_id == manifest["image"][role]
+
+
+@pytest.mark.parametrize("bad", ["v1", "missing_proof", "config", "manifest", "platform"])
+def test_runtime_rejects_unsupported_or_tampered_receipt(artifact, bad):
+    runtime, _, _, receipt_path, _, receipt = artifact
+    if bad == "v1":
+        receipt["version"] = 1
+    elif bad == "missing_proof":
+        del receipt["actual_image_id"]
+    else:
+        receipt["image"] = dict(receipt["image"])
+        receipt["image"][bad + "_digest" if bad != "platform" else bad] = (
+            "sha256:" + "e" * 64 if bad != "platform" else "linux/amd64")
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ri.ReleaseIdentityError):
+        runtime.verify()
+
+
+@pytest.mark.parametrize("target", ["manifest", "receipt"])
+def test_duplicate_identity_fields_cannot_override_proof(artifact, target):
+    runtime, _, manifest_path, receipt_path, *_ = artifact
+    path = manifest_path if target == "manifest" else receipt_path
+    # A permissive JSON parser would silently select the last version.
+    path.write_text('{"version":1,' + path.read_text()[1:])
+    with pytest.raises(ri.ReleaseIdentityError):
+        runtime.verify()
 
 
 def test_interpreter_and_standard_library_are_measured(tmp_path):
@@ -135,7 +169,7 @@ def test_environment_change_blocks_and_secrets_are_not_manifest_inputs(artifact)
 
 def test_wrong_image_kind_and_missing_receipt_block(artifact):
     runtime, _, _, receipt_path, _, launch = artifact
-    launch["docker_image_id"] = "sha256:" + "e" * 64
+    launch["actual_image_id"] = "sha256:" + "e" * 64
     receipt_path.write_text(json.dumps(launch))
     with pytest.raises(ri.ReleaseIdentityError, match="launch"):
         runtime.verify()

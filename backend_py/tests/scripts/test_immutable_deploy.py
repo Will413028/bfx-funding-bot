@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.scripts.test_release_package import IMAGE, manifest
+from tests.scripts.test_release_package import IDENTITY, IMAGE, manifest
 
 
 def fixture(tmp_path, monkeypatch):
@@ -52,13 +52,14 @@ def fixture(tmp_path, monkeypatch):
     launches = []
     def launch(release, **kwargs):
         from bfx_funding_bot.core.release_identity import LaunchReceipt
-        launches.append((release.docker_image_id, kwargs))
-        kwargs["publish"](LaunchReceipt(version=1, launch_id="a"*32, hostname="bfx-"+"a"*32,
-            container_id="b"*64, manifest_digest="c"*64, docker_image_id=IMAGE, platform="linux/arm64"))
+        launches.append((release.image, kwargs))
+        kwargs["publish"](LaunchReceipt(version=2, launch_id="a"*32, hostname="bfx-"+"a"*32,
+            container_id="b"*64, manifest_digest="c"*64, image=IDENTITY,
+            actual_image_id=IMAGE, platform="linux/arm64"))
         return "new-bot"
     monkeypatch.setattr(cli, "create_launch", launch)
-    monkeypatch.setattr(cli, "start_service", lambda **kw: launches.append((kw["image"],kw)) or kw["name"])
-    bundle = {"frontend": {"docker_image_id": IMAGE, "public_environment": public}}
+    monkeypatch.setattr(cli, "start_service", lambda **kw: launches.append((kw["identity"],kw)) or kw["name"])
+    bundle = {"frontend": {"image": IDENTITY.model_dump(), "public_environment": public}}
     return cli, args, bundle, release, calls, checks, launches
 
 
@@ -68,7 +69,7 @@ def test_deploy_preserves_infrastructure_and_halt_and_publishes_dr_before_start(
     assert result["resumed"] is False
     assert result["halt_before"]["halt_id"] == result["halt_after"]["halt_id"] == 17
     assert result["human_activation_required"] is True
-    assert [image for image, _ in launches] == [IMAGE, IMAGE, IMAGE]
+    assert [image for image, _ in launches] == [IDENTITY, IDENTITY, IDENTITY]
     evidence = launches[0][1]["evidence_mounts"]
     assert set(evidence) == {"/run/bfx-dr/backup.json", "/run/bfx-dr/restore.json"}
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence.values())
@@ -108,20 +109,29 @@ def test_dr_destination_cannot_override_application_or_root_receipt(tmp_path, mo
     assert not launches
 
 
-@pytest.mark.parametrize("drift", [None, "environment", "privileged", "network"])
-def test_service_inspection_rejects_config_drift_before_start(tmp_path, monkeypatch, drift):
+@pytest.mark.parametrize("store", ["classic", "containerd"])
+@pytest.mark.parametrize("drift", [None, "environment", "privileged", "network", "image"])
+def test_service_inspection_rejects_config_drift_before_start(tmp_path, monkeypatch, drift, store):
     from scripts import immutable_release as cli
+    from scripts.image_artifact import ImageNotFound
+    image = IMAGE if store == "classic" else IDENTITY.manifest_digest
     env = tmp_path / "api.env"
     env.write_text("BFX_OPERATOR_USER_ID=operator\n")
     calls = []
     def runner(command, *, data=None):
         calls.append(command)
         if command[:3] == ["docker", "image", "inspect"]:
-            return json.dumps([{"Id": IMAGE, "Os": "linux", "Architecture": "arm64"}]).encode()
+            if command[-1] != image:
+                raise ImageNotFound("image_not_found")
+            record = {"Id": image, "Os": "linux", "Architecture": "arm64"}
+            if store == "containerd":
+                record["Descriptor"] = {"digest": image, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            return json.dumps([record]).encode()
         if command[:2] == ["docker", "create"]:
+            assert image in command
             return b"c" * 64
         if command[:2] == ["docker", "inspect"]:
-            return json.dumps([{"Id": "c"*64, "Image": IMAGE, "Platform": "linux",
+            return json.dumps([{"Id": "c"*64, "Image": image if drift != "image" else "sha256:"+"e"*64, "Platform": "linux",
                 "State": {"Running": False}, "Mounts": [],
                 "Config": {"Cmd": ["python", "-m", "uvicorn"], "User": "1000:1000", "Entrypoint": None,
                     "WorkingDir": "/app", "Env": ["BFX_OPERATOR_USER_ID=" + ("other" if drift == "environment" else "operator")]},
@@ -132,7 +142,7 @@ def test_service_inspection_rejects_config_drift_before_start(tmp_path, monkeypa
             return b""
         raise AssertionError(command)
     monkeypatch.setattr(cli, "run", runner)
-    kwargs = {"image": IMAGE, "platform": "linux/arm64", "name": "fixture", "user": "1000:1000", "env": env,
+    kwargs = {"identity": IDENTITY, "name": "fixture", "user": "1000:1000", "env": env,
         "network": "existing", "command": ["python", "-m", "uvicorn"]}
     if drift:
         with pytest.raises(cli.PackagingBlocked, match="service_launch_mismatch"):
@@ -165,18 +175,92 @@ def test_bundle_rejects_inconsistent_provenance(tmp_path, monkeypatch, drift):
     from scripts import immutable_release as cli
     release = manifest()
     backend = {"manifest_digest": canonical_digest(release.model_dump(mode="json")),
-        "source_revision": release.source_revision, "docker_image_id": IMAGE}
-    frontend = {"source_revision": release.source_revision, "platform": "linux/arm64", "docker_image_id": IMAGE}
+        "source_revision": release.source_revision, "image": IDENTITY.model_dump()}
+    frontend = {"source_revision": release.source_revision, "image": IDENTITY.model_dump()}
     if drift == "source":
         frontend["source_revision"] = "d"*40
     elif drift == "platform":
-        frontend["platform"] = "linux/amd64"
+        frontend["image"]["platform"] = "linux/amd64"
     else:
-        backend["docker_image_id"] = "sha256:" + "d"*64
+        backend["image"]["config_digest"] = "sha256:" + "d"*64
     path = tmp_path / "bundle.json"
-    path.write_text(json.dumps({"version": 1, "manifest": release.model_dump(mode="json"),
+    path.write_text(json.dumps({"version": 2, "manifest": release.model_dump(mode="json"),
         "backend_preparation": backend, "frontend": frontend}))
     monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "inspect_image", lambda *a: {})
     with pytest.raises(cli.PackagingBlocked, match="preparation_mismatch"):
         cli.read_bundle(path)
+
+
+@pytest.mark.parametrize("bad", [None, "v1", "digest", "config", "manifest", "path", "platform"])
+def test_bundle_verifies_both_archives_before_host_execution(tmp_path, monkeypatch, bad):
+    import hashlib
+
+    from bfx_funding_bot.core.release_identity import PackagedImageIdentity, canonical_digest
+    from scripts import immutable_release as cli
+    from tests.scripts.test_image_artifact import archive_fixture
+    artifacts = {}
+    for component in ("backend", "frontend"):
+        path = tmp_path / (component + ".tar")
+        image = archive_fixture(path, component=component)
+        artifacts[component] = {"image": image, "archive_filename": path.name,
+            "archive_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "source_revision": "b"*40}
+    release = manifest().model_copy(update={
+        "image": PackagedImageIdentity.model_validate(artifacts["backend"]["image"])})
+    artifacts["backend"]["manifest_digest"] = canonical_digest(release.model_dump(mode="json"))
+    bundle = {"version": 2, "manifest": release.model_dump(mode="json"),
+        "backend_preparation": artifacts["backend"], "frontend": artifacts["frontend"]}
+    if bad == "v1":
+        bundle["version"] = 1
+    elif bad == "digest":
+        artifacts["frontend"]["archive_sha256"] = "e"*64
+    elif bad in {"config", "manifest"}:
+        artifacts["frontend"]["image"][bad + "_digest"] = "sha256:" + "e"*64
+    elif bad == "path":
+        artifacts["frontend"]["archive_filename"] = "../frontend.tar"
+    elif bad == "platform":
+        artifacts["frontend"]["image"]["platform"] = "linux/amd64"
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps(bundle))
+    monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
+    calls = []
+    def runner(args, *, data=None):
+        calls.append(args)
+        assert args[:3] == ["docker", "image", "inspect"]
+        return json.dumps([{"Id": args[-1], "Os": "linux", "Architecture": "arm64"}]).encode()
+    monkeypatch.setattr(cli, "run", runner)
+    if bad:
+        with pytest.raises(cli.PackagingBlocked):
+            cli.read_bundle(path)
+        assert calls == []
+    else:
+        assert cli.read_bundle(path)[1] == release
+        assert [call[-1] for call in calls] == [
+            artifacts["backend"]["image"]["config_digest"],
+            artifacts["frontend"]["image"]["config_digest"]]
+
+
+@pytest.mark.parametrize("store", ["classic", "containerd"])
+def test_one_shot_resolves_immutable_host_id_for_migration_bootstrap_policy(tmp_path, monkeypatch, store):
+    from scripts import immutable_release as cli
+    from scripts.image_artifact import ImageNotFound
+    image = IMAGE if store == "classic" else IDENTITY.manifest_digest
+    def runner(args, *, data=None):
+        if args[:3] == ["docker", "image", "inspect"]:
+            if args[-1] != image:
+                raise ImageNotFound("image_not_found")
+            record = {"Id": image, "Os": "linux", "Architecture": "arm64"}
+            if store == "containerd":
+                record["Descriptor"] = {"digest": image, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            return json.dumps([record]).encode()
+        assert args[:2] == ["docker", "run"]
+        assert image in args
+        assert "--pull=never" in args
+        return b"verified"
+    monkeypatch.setattr(cli, "protected", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "run", runner)
+    for command in (["uv", "run", "alembic", "upgrade", "head"],
+                    ["python", "-m", "scripts.bootstrap_capital"],
+                    ["python", "-m", "scripts.convert_capital_policy"],
+                    ["python", "-m", "scripts.release_database", "startup"]):
+        assert cli.one_shot(manifest(), env=tmp_path / "env", network="fixture", command=command) == b"verified"

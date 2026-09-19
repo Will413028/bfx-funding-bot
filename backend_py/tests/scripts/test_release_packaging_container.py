@@ -7,7 +7,6 @@ import subprocess
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -69,14 +68,9 @@ asyncio.run(main())
 
 
 @pytest.mark.integration
-def test_candidate_inventory_is_protected_and_launch_does_not_migrate() -> None:
+def test_candidate_inventory_is_protected_and_launch_does_not_migrate(unapproved_release_image) -> None:
     """Catch writable installed code and accidentally starting a second migration."""
-    root = Path(__file__).resolve().parents[2]
-    built = subprocess.run(
-        ["docker", "build", "-q", "--platform", "linux/arm64", str(root)],
-        capture_output=True, text=True, check=True,
-    )
-    image = built.stdout.strip().splitlines()[-1]
+    image, _ = unapproved_release_image
     inspected = json.loads(subprocess.check_output(["docker", "image", "inspect", image]))[0]
     expected = ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"]
     measured = subprocess.run([
@@ -92,10 +86,18 @@ def test_candidate_inventory_is_protected_and_launch_does_not_migrate() -> None:
 
 
 @pytest.mark.integration
-async def test_actual_candidate_module_launch_verifies_producer_receipt(
-    tmp_path, pg_session_factory, pg_container,
+async def test_actual_readonly_consumer_verifies_producer_receipt(
+    tmp_path, pg_session_factory, pg_container, unapproved_release_image, monkeypatch,
 ) -> None:
-    """Real app/consumer, synthetic PG/vault, internal network: no venue access."""
+    """Real consumer/PG, test command only: never start a venue-capable daemon."""
+    from scripts import release_package
+    # Exercise real create/inspect/publish/start and runtime proof without
+    # starting marketfeed. The default daemon entrypoint is checked separately.
+    monkeypatch.setattr(release_package, "LAUNCH", ["/app/.venv/bin/python", "-c",
+        "from pathlib import Path; from bfx_funding_bot.core.release_identity import ReleaseRuntime; "
+        "p=ReleaseRuntime(root=Path('/app'),manifest_path=Path('/run/bfx-release/manifest.json'),"
+        "receipt_path=Path('/run/bfx-release/launch.json')).verify(); "
+        "print('release_identity_verified:'+p.actual_image_id)"])
     from bfx_funding_bot.core.crypto import encrypt_secret_with_aad
     from bfx_funding_bot.modules.accounts.exchange_accounts import (
         create_exchange_account_credential,
@@ -120,8 +122,7 @@ async def test_actual_candidate_module_launch_verifies_producer_receipt(
                 policy=CapitalPolicy(enabled=symbol == "fUST"), source={"fixture": True})
     halt = HaltStateStore(pg_session_factory, account_id=str(account), deployment_environment="prod")
     epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
-    root = Path(__file__).resolve().parents[2]
-    image = run(["docker", "build", "-q", "--platform", "linux/arm64", str(root)]).decode().strip()
+    image, identity = unapproved_release_image
     network = "task5-fixture-" + uuid4().hex
     release_dir = tmp_path.resolve() / "release"
     release_dir.mkdir()
@@ -140,9 +141,8 @@ async def test_actual_candidate_module_launch_verifies_producer_receipt(
     measurement = json.loads(run(["docker", "run", "--rm", "--network", "none", "--read-only",
         "--env-file", str(env_file), image, "/app/.venv/bin/python", "-c", MEASURE]))
     seconds = measurement.pop("measurement_seconds")
-    manifest = ReleaseManifest(version=1, release_id="unapproved-fixture",
-        source_revision="a" * 40, platform="linux/arm64", docker_image_id=image,
-        oci_manifest_digest=None, **measurement)
+    manifest = ReleaseManifest(version=2, release_id="unapproved-fixture",
+        source_revision="a" * 40, image=identity, **measurement)
 
     def publish_file(name, value, uid=0, mode=0o444):
         run(["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--user", "0",
@@ -201,12 +201,11 @@ async def test_actual_candidate_module_launch_verifies_producer_receipt(
             if json.loads(run(["docker", "inspect", container]))[0]["State"]["Status"] == "exited":
                 break
             await asyncio.sleep(0.2)
-        assert "release_identity_verified" in logs, logs[-4000:]
+        assert "release_identity_verified:" + image in logs, logs[-4000:]
         assert (await halt.current()).id == epoch.id
         assert (await halt.current()).halted
         startup_seconds = time.monotonic() - started
-        # The network-isolated daemon exits when venue startup fails. A separate
-        # process measures hashes on the SAME image, not a substituted daemon.
+        # A separate read-only process measures hashes on the SAME image.
         measured = await asyncio.to_thread(subprocess.run, ["docker", "run", "--rm", "--pull=never",
             "--read-only", "--network", network, "--env-file", str(env_file),
             "--mount", f"type=bind,src={release_dir},dst=/run/bfx-release,readonly", image,
