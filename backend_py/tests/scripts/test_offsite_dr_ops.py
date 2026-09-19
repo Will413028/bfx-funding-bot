@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -775,273 +774,98 @@ def test_services_are_one_shot_and_do_not_call_compose_run_or_autoheal() -> None
         assert forbidden not in combined.lower()
 
 
-def _run_deploy_through_secret_preflight(
-    tmp_path: Path, secret_bytes: bytes,
-) -> subprocess.CompletedProcess[str]:
-    repo = tmp_path / "repo"
-    home = tmp_path / "home"
-    bin_dir = tmp_path / "bin"
-    for directory in (
-        repo / "scripts",
-        repo / "deploy/vm/pgbackrest",
-        home / "bfx/pgbackrest/conf.d",
-        bin_dir,
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy2(ROOT / "scripts/deploy-vm.sh", repo / "scripts/deploy-vm.sh")
-    shutil.copy2(SECRET_VALIDATION_PATH, repo / "deploy/vm/pgbackrest/secret_validation.py")
-    shutil.copy2(PG_BACKREST_DIR / "pgbackrest.conf", repo / "deploy/vm/pgbackrest/pgbackrest.conf")
-    (repo / "deploy/vm/paper.env").write_text(
-        "BFX_PHASE=paper\nBFX_DEPLOYMENT_ENV=paper\nBFX_EXECUTION_POLICY=paper\n",
-        encoding="utf-8",
-    )
-    (home / "bfx/bot.env").write_text(
-        "DATABASE_URL=postgresql://local/test\n"
-        "BFX_EXCHANGE_ACCOUNT_ID=3f19d046-5030-494c-9a0a-9573bb890c1f\n"
-        "BFX_VAULT_KEK=opaque\n",
-        encoding="utf-8",
-    )
-    (home / "bfx/migrate.env").write_text(
-        "DATABASE_URL=postgresql://local/operator\n",
-        encoding="utf-8",
-    )
-    (home / "bfx/webapi.env").write_text(
-        "DATABASE_URL=postgresql://local/test\n"
-        "BETTER_AUTH_JWKS_URL=https://local.invalid/jwks\n"
-        "BFX_VAULT_KEK=opaque\n"
-        "BFX_OPERATOR_ROLE=admin\n"
-        "BFX_OPERATOR_USER_ID=operator\n",
-        encoding="utf-8",
-    )
-    (home / "bfx/frontend.env").write_text(
-        "NEXT_PUBLIC_APP_URL=https://local.invalid\n"
-        "NEXT_PUBLIC_BETTER_AUTH_URL=https://local.invalid\n"
-        "API_URL=http://webapi\n"
-        "BETTER_AUTH_SECRET=opaque\n"
-        "BETTER_AUTH_URL=https://local.invalid\n"
-        "DATABASE_URL=postgresql://local/test\n"
-        "REDIS_URL=redis://local\n"
-        "PASSKEY_RP_ID=local.invalid\n"
-        "BFX_OPERATOR_USER_ID=operator\n"
-        "BFX_OPERATOR_ROLE=admin\n",
-        encoding="utf-8",
-    )
-    secret_dir = home / "bfx/pgbackrest/conf.d"
-    secret_file = secret_dir / "r2.conf"
-    secret_file.write_bytes(secret_bytes)
-    secret_dir.chmod(0o700)
-    secret_file.chmod(0o600)
-
-    real_git = shutil.which("git")
-    assert real_git is not None
-    subprocess.run((real_git, "init", "-q", str(repo)), check=True)
-    subprocess.run((real_git, "-C", str(repo), "add", "deploy/vm/pgbackrest/pgbackrest.conf"), check=True)
-    subprocess.run(
-        (
-            real_git,
-            "-C",
-            str(repo),
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@invalid",
-            "commit",
-            "-qm",
-            "fixture",
-        ),
-        check=True,
-    )
-    git_shim = bin_dir / "git"
-    git_shim.write_text(
-        "#!/usr/bin/env bash\n"
-        "if [[ \"$*\" == \"pull --ff-only origin main\" ]]; then exit 0; fi\n"
-        f"exec {shlex.quote(real_git)} \"$@\"\n",
-        encoding="utf-8",
-    )
-    git_shim.chmod(0o755)
-
-    python_shim = bin_dir / "python3"
-    python_shim.write_text(
-        f"#!{sys.executable}\n"
-        "import functools, os, pathlib, sys\n"
-        f"real_python = {sys.executable!r}\n"
-        "if len(sys.argv) > 1 and sys.argv[1].endswith('/secret_validation.py'):\n"
-        "    module_dir = str(pathlib.Path(sys.argv[1]).parent)\n"
-        "    sys.path.insert(0, module_dir)\n"
-        "    import secret_validation as validator\n"
-        "    validator.validate_secret_dir = functools.partial(\n"
-        "        validator.validate_secret_dir, postgres_uid=os.getuid(), postgres_gid=os.getgid()\n"
-        "    )\n"
-        "    status = validator.main(sys.argv[2:])\n"
-        "    raise SystemExit(42 if status == 0 else status)\n"
-        "os.execv(real_python, [real_python, *sys.argv[1:]])\n",
-        encoding="utf-8",
-    )
-    python_shim.chmod(0o755)
-
-    return subprocess.run(
-        (str(repo / "scripts/deploy-vm.sh"), "paper"),
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-    )
-
-
-@pytest.mark.parametrize(
-    "invalid_bytes",
-    (
-        _secret_text().encode("utf-8").replace(b"\n", b"\r"),
-        _secret_text().replace("# VM-only values", "; not-a-pgbackrest-comment").encode(),
-    ),
-    ids=("bare-cr", "semicolon-comment"),
-)
-def test_deploy_caller_rejects_pgbackrest_incompatible_secret_lines(
-    tmp_path: Path, invalid_bytes: bytes,
+# Task5 replaces whole-stack build/preflight with app-only immutable deployment.
+# pgBackRest validators/wrappers above remain independently exercised. These
+# tests catch accidental infrastructure mutation or reintroduction of legacy CLI.
+@pytest.mark.parametrize("profile", ["paper", "canary", "live", ""])
+def test_legacy_deploy_rejects_before_reading_secrets_or_invoking_tools(
+    tmp_path: Path, profile: str,
 ) -> None:
-    completed = _run_deploy_through_secret_preflight(tmp_path, invalid_bytes)
-
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    for tool in ("git", "docker", "uv", "python3", "ssh"):
+        shim = bin_dir / tool
+        shim.write_text(f"#!/bin/bash\necho invoked >> {shlex.quote(str(calls))}\nexit 99\n")
+        shim.chmod(0o755)
+    completed = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts/deploy-vm.sh"), *([profile] if profile else [])],
+        capture_output=True, text=True, check=False,
+        env={"PATH": str(bin_dir), "PGBACKREST_SECRET_DIR": str(tmp_path / "must-not-read")},
+    )
     assert completed.returncode == 2
     assert completed.stdout == ""
-    assert completed.stderr == "secret_config_invalid\n"
-    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+    assert "--bundle" in completed.stderr
+    assert not calls.exists()
+    assert not (tmp_path / "must-not-read").exists()
 
 
-def test_deploy_preflight_checks_secret_boundary_and_custom_image_labels() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    for required in (
-        "deploy/vm/pgbackrest/pgbackrest.conf",
-        "pgbackrest/conf.d",
-        "bfx-postgres:local",
-        "org.opencontainers.image",
-        "docker compose -f docker-compose.bot.yml config --quiet",
-        'git -C "$ROOT" ls-files --error-unmatch',
-    ):
-        assert required in source
-    assert "BFX_VAULT_KEK" in source
-
-
-def test_deploy_preflight_is_ordered_and_creates_only_non_secret_runtime_dirs() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    environment_checks = source.index(
-        "set -a; . ./.env.frontend.runtime; set +a"
-    )
-    config_check = source.index('[ -r "$PGBACKREST_CONFIG" ]')
-    tracked_config_check = source.index(
-        'git -C "$ROOT" ls-files --error-unmatch'
-    )
-    runtime_install = source.index("install -d", config_check)
-    compose_parse = source.index(
-        "docker compose -f docker-compose.bot.yml config --quiet"
-    )
-    compose_build = source.index(
-        "docker compose -f docker-compose.bot.yml build --build-arg"
-    )
-    image_inspect = source.index("docker image inspect", compose_build)
-    compose_up = source.index("docker compose -f docker-compose.bot.yml up", image_inspect)
-    assert (
-        environment_checks
-        < config_check
-        < tracked_config_check
-        < runtime_install
-        < compose_parse
-        < compose_build
-        < image_inspect
-        < compose_up
-    )
-
-    for runtime_dir in (
-        '"$HOME/bfx/pgbackrest/spool"',
-        '"$HOME/bfx/pgbackrest/log"',
-        '"$HOME/bfx/dr-evidence"',
-    ):
-        assert runtime_dir in source
-    assert 'install -d "$PGBACKREST_SECRET_DIR"' not in source
-    assert 'mkdir -p "$PGBACKREST_SECRET_DIR"' not in source
-
-
-def test_deploy_preflight_fails_closed_for_untracked_or_modified_config() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    assert (
-        'git -C "$ROOT" ls-files --error-unmatch -- "$PGBACKREST_CONFIG_REL"'
-        in source
-    )
-    assert 'git -C "$ROOT" diff --quiet -- "$PGBACKREST_CONFIG_REL"' in source
-    assert (
-        'git -C "$ROOT" diff --cached --quiet -- "$PGBACKREST_CONFIG_REL"'
-        in source
-    )
-    assert "pgBackRest config must be a clean tracked artifact" in source
-
-
-def test_deploy_preflight_uses_shared_secret_validator_without_leaking() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    assert (
-        'python3 "$ROOT/deploy/vm/pgbackrest/secret_validation.py" --secret-dir '
-        '"$PGBACKREST_SECRET_DIR"'
-    ) in source.replace("\\\n", "")
-    assert "git grep -q -E" in source
-    assert "':!docs/superpowers/specs/**'" in source
-    for option in ("endpoint", "bucket", "key", "key-secret", "cipher-pass"):
-        assert option in source
-    assert 'find "$PGBACKREST_SECRET_DIR"' not in source
-    assert 'cat "$secret_file"' not in source
-    assert 'echo "$secret_value"' not in source
-
-
-def test_deploy_tracked_secret_scan_fails_closed_on_command_errors() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    assert "unable to scan tracked pgBackRest options" in source
-    assert "PGBACKREST_TRACKED_SECRET_STATUS=$?" in source
-    assert 'if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -eq 0 ]' in source
-    assert 'if [ "$PGBACKREST_TRACKED_SECRET_STATUS" -ne 1 ]' in source
-
-
-@pytest.mark.parametrize("option", ("repo1-s3-endpoint", "repo1-s3-bucket", "repo1-s3-key", "repo1-s3-key-secret", "repo1-cipher-pass"))
-@pytest.mark.parametrize("value", (TOKEN_SENTINEL, "", " \t"), ids=("nonempty", "empty", "whitespace"))
-def test_deploy_tracked_secret_scan_checks_only_nonempty_assignments(
-    tmp_path: Path, option: str, value: str,
+def test_app_deploy_leaves_existing_pgbackrest_files_and_infrastructure_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    subprocess.run(("git", "init", "-q", str(tmp_path)), check=True, capture_output=True)
-    (tmp_path / "tracked.conf").write_text(f"  {option} = {value}\n", encoding="utf-8")
-    subprocess.run(("git", "-C", str(tmp_path), "add", "tracked.conf"), check=True, capture_output=True)
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    scan = "PGBACKREST_SECRET_OPTION_PATTERN=" + source.split("PGBACKREST_SECRET_OPTION_PATTERN=", 1)[1]
-    scan = scan.split("# The bind-mounted spool/log", 1)[0]
+    from tests.scripts.test_immutable_deploy import fixture
 
-    completed = subprocess.run(
-        ("bash", "-c", "set -eu\n" + scan), cwd=tmp_path, capture_output=True, text=True,
-    )
+    cli, args, bundle, release, calls, _, _ = fixture(tmp_path, monkeypatch)
+    secret_dir, secret_file = _write_secret_dir(tmp_path)
+    original_secret = secret_file.read_bytes()
+    original_mode = secret_file.stat().st_mode
+    monkeypatch.setenv("PGBACKREST_SECRET_DIR", str(secret_dir))
+    original_open = Path.open
 
-    assert completed.returncode == (1 if value.strip() else 0)
-    assert completed.stdout == ""
-    assert completed.stderr == ("ERROR: secret pgBackRest option is tracked\n" if value.strip() else "")
-    assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
+    def guarded_open(path, *a, **kw):
+        if path == secret_dir or secret_dir in path.parents:
+            raise AssertionError("application deploy must not access pgBackRest secrets")
+        return original_open(path, *a, **kw)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "open", guarded_open)
+        result = cli.deploy(args, bundle, release)
+    assert result["status"] == "technical_start_only"
+    assert secret_file.read_bytes() == original_secret
+    assert secret_file.stat().st_mode == original_mode
+    for command in calls:
+        if "bfx-postgres" in command or "bfx-redis" in command:
+            assert command == ["docker", "inspect", "bfx-postgres", "bfx-redis"]
+        assert command[:2] not in (["docker", "build"], ["docker", "pull"], ["docker", "compose"])
+    assert TOKEN_SENTINEL not in json.dumps(result)
+    assert len(list(args.bundle.parent.glob("launch-*/deployment.json"))) == 1
 
 
-def test_deploy_requires_exact_task_1_image_labels_after_build() -> None:
-    source = (ROOT / "scripts/deploy-vm.sh").read_text(encoding="utf-8")
-    for expected in (
-        "org.bfx.postgresql.base-digest",
-        "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
-        "org.bfx.pgbackrest.version",
-        "2.59.1",
-        "org.bfx.pgbackrest.source-sha256",
-        "1cd522afc33b8ff846ef88c55dc238717c9c8817a4f6ca7c9f64887de9c7402d",
-    ):
-        assert expected in source
-    assert "docker exec" not in source
-    for forbidden_script in (
-        "backup.sh",
-        "status.sh",
-        "smoke.sh",
-        "restore-drill.sh",
-    ):
-        assert forbidden_script not in source
+@pytest.mark.parametrize("role", [0, 1], ids=["postgres", "redis"])
+@pytest.mark.parametrize("drift", ["stopped", "identity", "mounts"])
+def test_app_deploy_requires_running_infrastructure_and_rejects_post_start_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: int, drift: str,
+) -> None:
+    from tests.scripts.test_immutable_deploy import fixture
+
+    cli, args, bundle, release, calls, _, launches = fixture(tmp_path, monkeypatch)
+    original_run = cli.run
+    inspections = 0
+
+    def changed_infrastructure(command, *, data=None):
+        nonlocal inspections
+        response = original_run(command, data=data)
+        if command == ["docker", "inspect", "bfx-postgres", "bfx-redis"]:
+            inspections += 1
+            rows = json.loads(response)
+            if drift == "stopped":
+                rows[role]["State"]["Running"] = False
+            elif inspections == 2:
+                if drift == "identity":
+                    rows[role]["Id"] = "unexpected-replacement"
+                else:
+                    rows[role]["Mounts"] = [{"Name": "unexpected-volume"}]
+            return json.dumps(rows).encode()
+        return response
+
+    monkeypatch.setattr(cli, "run", changed_infrastructure)
+    reason = "existing_postgres_and_redis_required" if drift == "stopped" else "infrastructure_changed"
+    with pytest.raises(cli.PackagingBlocked, match=reason):
+        cli.deploy(args, bundle, release)
+    assert not list(args.bundle.parent.glob("launch-*/deployment.json"))
+    if drift == "stopped":
+        assert not launches
+        assert not any(command[:2] == ["docker", "rename"] for command in calls)
 
 
 def _assert_ordered(text: str, markers: tuple[str, ...]) -> None:

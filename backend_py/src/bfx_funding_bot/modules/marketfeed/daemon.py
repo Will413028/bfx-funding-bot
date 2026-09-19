@@ -313,38 +313,8 @@ class CanaryProfile:
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> CanaryProfile:
-        def required(name: str) -> str:
-            value = environ.get(name, "").strip()
-            if not value:
-                raise CanaryStartupBlocked(f"missing_canary_setting:{name}")
-            return value
-
-        try:
-            account_id = UUID(required("BFX_CANARY_ACCOUNT_ID"))
-        except ValueError as exc:
-            raise CanaryStartupBlocked("invalid_canary_account_id") from exc
-        try:
-            amount = Decimal(required("BFX_CANARY_AMOUNT_USDT"))
-            cap = Decimal(required("BFX_CANARY_CAP_USDT"))
-            max_age = int(required("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS"))
-        except (ArithmeticError, ValueError) as exc:
-            raise CanaryStartupBlocked("invalid_canary_numeric_setting") from exc
-        if not amount.is_finite() or not cap.is_finite() or amount <= 0 or cap <= 0:
-            raise CanaryStartupBlocked("invalid_canary_amount_or_cap")
-        if amount > cap:
-            raise CanaryStartupBlocked("canary_amount_exceeds_cap")
-        if max_age <= 0:
-            raise CanaryStartupBlocked("invalid_canary_evidence_age")
-        return cls(
-            account_id=account_id,
-            environment=required("BFX_CANARY_ENVIRONMENT"),
-            symbol=required("BFX_CANARY_SYMBOL"),
-            cell=required("BFX_CANARY_CELL"),
-            strategy=required("BFX_CANARY_STRATEGY"),
-            amount_usdt=amount,
-            cap_usdt=cap,
-            max_evidence_age_seconds=max_age,
-        )
+        """Retired compatibility entrypoint; env cannot create session authority."""
+        raise CanaryStartupBlocked("legacy_canary_requires_authenticated_release_session")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1377,7 +1347,10 @@ async def build_daemon(
                 for symbol in configured_symbols(config.cells):
                     await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
             release_runtime = ReleaseRuntime.from_environment()
+            identity_started = time.perf_counter()
             verified_release = await asyncio.to_thread(release_runtime.verify)
+            log.info("release_identity_verified digest=%s inventory_seconds=%.6f",
+                     verified_release.release_digest, time.perf_counter() - identity_started)
         except Exception:
             await HaltStateStore(session_factory,
                 account_id=str(account_bootstrap.exchange_account_id),

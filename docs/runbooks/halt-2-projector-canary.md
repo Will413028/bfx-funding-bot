@@ -1,5 +1,11 @@
 # Halt 2 projector cutover and bounded canary
 
+> Historical evidence: the env-scoped permit/canary/deploy commands below are
+> superseded and must not be run for capital-policy releases. Use
+> [immutable release](immutable-release.md) and its authenticated human session
+> workflow. Existing Halt2 evidence/DR invariants remain authoritative; historical
+> observations are retained here, not new release authorization.
+
 This is an operator runbook. The coding agent does not execute production operations.
 Its prohibited actions are: no remote migration; no deployment; no restart; no resume; no cap increase; and no Bitfinex write. A named production operator
 performs each confirmation point below and records only redacted evidence.

@@ -21,13 +21,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.core.db import make_engine, make_session_factory
-from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_stored_event
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import ReservationClaimed, VenueSnapshotObserved
-from bfx_funding_bot.modules.execution.safety.config import load_safety_config
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitOutcomeKind,
@@ -37,20 +34,16 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     CanaryCommandPermitRow,
     SubmissionAttemptRow,
 )
-from bfx_funding_bot.modules.marketfeed.config import load_config
 from bfx_funding_bot.modules.marketfeed.daemon import (
     CanaryEvidence,
     CanaryProfile,
     CanaryStartupBlocked,
-    assert_canary_guard_invariant,
     assert_canary_pre_command,
     assert_canary_startup,
     assert_release_observation,
     assert_release_pre_command,
     collect_canary_readiness,
-    load_canary_evidence,
 )
-from bfx_funding_bot.modules.marketfeed.scheduler import now_ms_utc
 
 # Direct ``python scripts/...`` execution otherwise exposes scripts/ rather
 # than its parent package. This only resolves local source imports; it does not
@@ -61,7 +54,6 @@ if __package__ in {None, ""}:  # pragma: no cover - operator CLI path.
 from scripts.halt2_cutover import (
     Halt2Evidence,
     _artifact_hashes,
-    _load_evidence,
     collect_preflight_report,
     verify_preflight,
 )
@@ -359,48 +351,9 @@ def _require_halt2_artifacts(evidence: Halt2Evidence, config_artifact: Path) -> 
 
 
 async def _run(args: argparse.Namespace) -> CanaryEvidence:
-    profile = CanaryProfile.from_environ(args.environ)
-    config = load_config(cells_yaml_path=args.cells)
-    safety_config_path = Path(args.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"))
-    safety_config = load_safety_config(safety_config_path)
-    assert_canary_guard_invariant(config.phase, safety_config)
-    try:
-        allocation_cap_usdt = Decimal(args.environ["BFX_ALLOCATION_CAP_USDT"])
-    except (ArithmeticError, KeyError, ValueError) as exc:
-        raise CanaryStartupBlocked("invalid_canary_allocation_cap") from exc
-    if config.deployment_environment.value != profile.environment:
-        raise CanaryStartupBlocked("canary_config_environment_mismatch")
-    halt2_evidence = _load_evidence(args.halt2_evidence)
-    if (
-        halt2_evidence.exchange_account_id != str(profile.account_id)
-        or halt2_evidence.deployment_environment != profile.environment
-    ):
-        raise CanaryStartupBlocked("halt2_identity_or_environment_mismatch")
-    evidence = load_canary_evidence(args.evidence)
-    engine = make_engine(Settings())
-    factory = make_session_factory(engine)
-    try:
-        async with factory() as session:
-            server_evidence = await verify_canary_preflight(
-                session=session,
-                profile=profile,
-                halt2_evidence=halt2_evidence,
-                config_artifact=args.config_artifact,
-                image_digest=args.environ.get("BFX_EXPECTED_IMAGE_DIGEST", ""),
-                projector_version=args.environ.get("BFX_PROJECTOR_VERSION", ""),
-                environ=args.environ,
-                evidence=evidence,
-                configured_cells=tuple(
-                    (cell.strategy.value, cell.symbol, cell.cell_id) for cell in config.cells
-                ),
-                configured_caps=safety_config.hard_guards.allocation_cap.caps,
-                allocation_cap_usdt=allocation_cap_usdt,
-                now_ms=now_ms_utc(),
-            )
-        assert server_evidence is not None
-        return server_evidence
-    finally:
-        await engine.dispose()
+    # Keep typed verifier functions for the authenticated worker and historical
+    # fixtures. Legacy CLI/env money and scope are no longer runtime inputs.
+    raise CanaryStartupBlocked("legacy_canary_requires_authenticated_release_session")
 
 
 async def verify_canary_preflight(

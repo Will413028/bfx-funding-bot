@@ -46,7 +46,7 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
    BFX_OPERATOR_ROLE=admin
    ```
 
-   `scripts/deploy-vm.sh` 會在 Docker build 前拒絕缺值、非 admin role 或 ID
+   現行 [immutable release](immutable-release.md) 工具在啟動前拒絕缺值、非 admin role 或 ID
    不一致。
 
 ## 1. Inventory first (read-only)

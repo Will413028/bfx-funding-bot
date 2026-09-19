@@ -89,7 +89,21 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
         cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
         phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), halt_store=halt, capital_runtime=runtime)
-    status = (await service.snapshot())["symbols"]["fUST"]
+    snapshot = await service.snapshot()
+    assert snapshot["account_id"] == str(account)
+    assert snapshot["deployment_environment"] == "ci"
+    status = snapshot["symbols"]["fUST"]
+    missing = (await service.snapshot())["symbols"]["fUSD"]
+    assert missing == {"capital_available": False, "reason": "policy_unavailable"}
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    async with factory.begin() as session:
+        await runtime.repository.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
+            expected_revision=0, source={"operator": "test"})
+    disabled = (await service.snapshot())["symbols"]["fUSD"]
+    assert disabled["reason"] == "policy_disabled"
+    assert disabled["policy_revision"] == 1
+    assert disabled["policy"]["enabled"] is False
+    assert "available_balance" not in disabled
     assert status["policy_revision"] == 1
     assert status["cells"]["fUST_a30"]["max_new_offer"] == "700.00"
     assert status["cells"]["fUST_p2"]["max_new_offer"] == "700.00"
@@ -97,6 +111,8 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     async with factory() as session:
         before = len((await session.scalars(select(EventLogRow))).all())
     result = await service.dry_run(symbol="fUST", amount=701)
+    assert result["account_id"] == str(account)
+    assert result["deployment_environment"] == "ci"
     assert not result["would_submit_any"]
     async with factory() as session:
         assert len((await session.scalars(select(EventLogRow))).all()) == before
