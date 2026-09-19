@@ -100,6 +100,7 @@ def test_normal_live_accepts_two_cells_without_canary_env(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("name", [
     "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+    "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT",
 ])
 def test_live_rejects_legacy_money_env(tmp_path, monkeypatch, name):
     _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")

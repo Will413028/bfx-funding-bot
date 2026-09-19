@@ -26,6 +26,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
     CapitalPolicyRevisionRow,
 )
 from bfx_funding_bot.modules.execution.safety.hard_guards import resolve_for_symbol_with_source
+from bfx_funding_bot.modules.marketfeed.config import canonical_cell_id
 
 _KEYS = {"schema_version", "caps", "default_cap", "env_fallback_cap", "buffers",
          "default_buffer", "env_fallback_buffer", "max_cell_fraction"}
@@ -139,7 +140,8 @@ async def convert_capital_policy(
         values: dict[str, Any] = {"old_effective": old, "new_policy": policy_payload(policy),
             "expected_revision": previous.revision if previous is not None else 0,
             "old_applied_policy": previous.policy if previous is not None else None, "cells": {}}
-        for cell in ("a30", "p2"):
+        for period in ("a30", "p2"):
+            cell = canonical_cell_id(symbol, period)
             try:
                 view = await repository.preview_policy(session, symbol=symbol, cell_id=cell,
                                                        now_ms=now_ms, policy=policy)

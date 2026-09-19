@@ -11,8 +11,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from bfx_funding_bot.external.bitfinex.funding_rules import FundingAmountEvidence
+
 if TYPE_CHECKING:
     from bfx_funding_bot.modules.execution.capital_repository import CapitalView
+    from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
 
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionPayload
 
@@ -99,6 +102,8 @@ class ReadyToSubmit:
     evidence: Mapping[str, object]
     safety: GuardResult
     capital_view: CapitalView | None = None
+    market_snapshot: MarketSnapshot | None = None
+    funding_amount_evidence: FundingAmountEvidence | None = None
 
     def __post_init__(self) -> None:
         if not self.decision_id.strip():
@@ -107,6 +112,17 @@ class ReadyToSubmit:
     @property
     def outcome(self) -> DecisionOutcome:
         return DecisionOutcome.READY
+
+    def book_valid_at(self, now_ms: int) -> bool:
+        snapshot = self.market_snapshot
+        return (
+            snapshot is not None
+            and snapshot.snapshot_id == self.market_snapshot_id
+            and snapshot.max_age_ms is not None
+            and snapshot.max_age_ms > 0
+            and snapshot.is_fresh(symbol=self.decision.symbol, now_ms=now_ms,
+                                  max_age_ms=snapshot.max_age_ms)
+        )
 
 
 @dataclass(frozen=True, slots=True)

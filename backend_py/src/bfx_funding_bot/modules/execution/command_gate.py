@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
+from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -291,12 +292,22 @@ class AccountCommandGate:
                     if self.release_authority is not None:
                         await self.release_authority.before_transport(ready, context)
                     await self._guard(decision, context, transport=True)
+                    if not ready.book_valid_at(self._clock()):
+                        raise CommandGateBlocked("decision_book_invalid_or_expired")
+                    try:
+                        validate_amount(size, ready.funding_amount_evidence,
+                                        symbol=decision.symbol, now_ms=self._clock())
+                    except (ValueError, ArithmeticError) as exc:
+                        raise CommandGateBlocked(str(exc)) from exc
             except CommandGateBlocked as exc:
                 result = SubmittedOrder(cid=cid, venue_offer_id=None,
                     outcome=SubmitNotSent(reason=str(exc)), reservation_ref=reference)
             else:
                 result = await self._inner.submit(
-                    ready, context, cid=cid, reservation_ref=reference,
+                    ready, replace(context, before_submit_transport=(
+                        lambda: ready.book_valid_at(self._clock())
+                    )) if self._capital is not None else context,
+                    cid=cid, reservation_ref=reference,
                 )
         except BaseException:
             self._latch(decision.symbol, canonical_account, "submit ended without durable outcome")

@@ -17,6 +17,11 @@ from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.funding_rules import (
+    FundingRuleProvider,
+    minimum_amount,
+    validate_amount,
+)
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
@@ -44,7 +49,6 @@ from bfx_funding_bot.modules.execution.deployment.reprice import (
 )
 from bfx_funding_bot.modules.execution.deployment.sizing import (
     allocate_capital,
-    effective_min_usdt,
 )
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
@@ -124,8 +128,7 @@ class DeploymentReconciler:
         account_ctx: AccountContext,
         capital_runtime: CapitalRuntime,
         cells: list[CellConfig],
-        venue_floor_usd: Decimal,
-        min_offer_buffer_pct: Decimal,
+        funding_rules: FundingRuleProvider | None,
         clock: Callable[[], int],
         event_sink: _EventSinkProtocol,
         phase: Phase,
@@ -150,7 +153,7 @@ class DeploymentReconciler:
         self._executor = executor
         self._ctx = account_ctx
         self._cells = cells
-        self._min_fill = effective_min_usdt(venue_floor_usd, min_offer_buffer_pct)
+        self._funding_rules = funding_rules
         if capital_runtime is None:
             raise ValueError("deployment requires explicit applied capital runtime")
         self._capital = capital_runtime
@@ -201,7 +204,7 @@ class DeploymentReconciler:
         if release is not None:
             matches = [cell for cell in self._cells if (cell.symbol, cell.cell_id, cell.strategy.value)
                        == (release.symbol, release.cell, release.strategy)]
-            if len(matches) != 1 or release.amount != self._min_fill:
+            if len(matches) != 1:
                 raise ValueError("release_command_scope_or_minimum_mismatch")
             ctx = replace(ctx, release_session_id=release.session_id,
                           canary_halt_authorization=release.halt_authorization)
@@ -271,17 +274,24 @@ class DeploymentReconciler:
             active = [c.cell_id for c in symbol_cells
                       if self._store.get_active(c.cell_id, now_ms=now) is not None]
             try:
+                if self._funding_rules is None:
+                    raise ValueError("funding_rule_unavailable")
+                amount_evidence = await self._funding_rules.observe(symbol)
                 # One account lock and transaction for the whole symbol's plan.
                 async with self._capital.session_factory() as session:
                     views = {cell: await self._capital.read(
                         symbol=symbol, cell_id=cell, session=session,
                     ) for cell in active}
-                fills = allocate_capital(views=views, min_fill=self._min_fill)
+                min_fill = minimum_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
+                fills = allocate_capital(views=views, min_fill=min_fill)
                 if release is not None:
+                    validate_amount(release.amount, amount_evidence, symbol=symbol, now_ms=self._clock())
                     view = views.get(release.cell)
                     fills = ({release.cell: release.amount}
                              if view is not None and view.budget.max_new_offer >= release.amount else {})
             except Exception as exc:
+                if release is not None:
+                    raise
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
                 continue
 
@@ -301,6 +311,7 @@ class DeploymentReconciler:
                 continue  # this symbol has no gap to fill; other symbols still deploy
 
             for cell_id, amount in fills.items():
+                now = self._clock()
                 # Legacy adapters re-check their local gate.  DB-backed chains
                 # instead re-evaluate their uncertainty guard below for each
                 # offer, which catches an UNKNOWN opened by the prior submit.
@@ -327,6 +338,7 @@ class DeploymentReconciler:
                 )
                 cell_ctx = replace(ctx, capital_cell_id=cell_id)
                 guard = await self._safety.evaluate(decision, cell_ctx)
+                now = self._clock()
                 snapshot = self._book_provider.snapshot(symbol, now_ms=now)
                 decision_id = str(uuid5(
                     NAMESPACE_URL,
@@ -410,7 +422,8 @@ class DeploymentReconciler:
                     audit_context=replace(self._audit_context_factory.build(
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
                     ), strategy=self._cell_strategy[cell_id].value),
-                    optimizer_evidence=optimizer_evidence,
+                    optimizer_evidence={**(optimizer_evidence or {}),
+                                        "funding_amount": amount_evidence.payload()},
                     optimizer_block_reason=optimizer_block_reason,
                     expected_period_agg=period_agg,
                     expected_horizon_h=expected_horizon_h,
@@ -452,7 +465,8 @@ class DeploymentReconciler:
                                 [(round(a, 2), r) for a, r in rungs], ask_rate,
                             )
                 try:
-                    outcome = replace(outcome, capital_view=views[cell_id])
+                    outcome = replace(outcome, capital_view=views[cell_id],
+                                      funding_amount_evidence=amount_evidence)
                     result = await self._executor.submit(outcome, cell_ctx)
                 except Exception as exc:
                     if release is not None:

@@ -5,9 +5,81 @@ import pytest
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.release_session import ReleaseSessions
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from tests.external.bitfinex.test_funding_rules import FixedRules
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
 from tests.integration.test_capital_repository import repository, setup_policy, snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_amount,rate,expected,fault", [("200", "0.5", "blocked", None),
+    ("400", "0.5", "prepared", None), ("2000", "0.1", "blocked", None),
+    ("400", "0.5", "blocked", "delay"), ("400", "0.5", "blocked", "missing"),
+    ("400", "0.5", "blocked", "changed")])
+async def test_preview_uses_fx_minimum_and_respects_max_amount(capital_db, max_amount, rate, expected, fault):
+    from bfx_funding_bot.modules.execution.release_worker import (
+        ReleaseCommandAuthority,
+        ReleaseWorker,
+    )
+    from tests.external.bitfinex.test_funding_rules import FixedRules
+    factory, account = capital_db
+    repo = repository(account)
+    await setup_policy(factory, repo, reserve="0", fraction="0.70")
+    await snapshot(factory, repo)
+    capital = CapitalRuntime(repository=repo, session_factory=factory, clock=lambda: 1100)
+    sessions = ReleaseSessions(account, "ci")
+    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
+    await halt.set_halted(True, reason="fixture", actor="operator")
+    now = 1100
+    async def yes(*args):
+        return True
+    async def preflight(*args):
+        nonlocal now
+        if fault == "delay":
+            now = 32000
+    async def binding(session):
+        return {"fixture": "versioned-rule"}
+    authority = ReleaseCommandAuthority(repo=sessions, capital=capital, binding_reader=binding,
+        ownership=yes, authority_reader=yes, preflight=preflight, clock=lambda: now)
+    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
+        configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
+        planner=yes, observation=yes)
+    worker.funding_rules = FixedRules(rate=rate, clock=lambda: 1100)
+    async with factory.begin() as session:
+        row = await sessions.request(session, operator="operator", symbol="fUST", cell="a30",
+            strategy="mean_reversion", max_amount=Decimal(max_amount), expires_at_ms=5000, now_ms=1000)
+        sid = row.id
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+    active = set()
+    def begin(session, transaction, connection):
+        active.add(id(session))
+    def end(session, transaction):
+        if transaction.parent is None:
+            active.discard(id(session))
+    observe = worker.funding_rules.observe
+    async def outside_transaction(symbol):
+        assert not active, "FX request must not run inside any account DB transaction"
+        proof = await observe(symbol)
+        if fault == "changed":
+            from dataclasses import replace
+            proof = replace(proof, rule_digest="old-rule")
+        return proof
+    worker.funding_rules.observe = outside_transaction
+    if fault == "missing":
+        worker.funding_rules = None
+    event.listen(Session, "after_begin", begin)
+    event.listen(Session, "after_transaction_end", end)
+    try:
+        await worker.tick()
+    finally:
+        event.remove(Session, "after_begin", begin)
+        event.remove(Session, "after_transaction_end", end)
+    async with factory() as session:
+        row = await sessions.get(session, sid)
+        assert row.state == expected
+        if expected == "prepared":
+            assert row.minimum_amount == Decimal("300")
 
 
 @pytest.mark.asyncio
@@ -45,7 +117,7 @@ async def test_worker_prepares_then_rechecks_revoked_authorization(capital_db, h
 
     authority = ReleaseCommandAuthority(repo=sessions, capital=capital, binding_reader=binding,
         ownership=ownership, authority_reader=operator, preflight=preflight, clock=lambda: 1100)
-    worker = ReleaseWorker(authority=authority, halt_store=halt, minimum_amount=Decimal("153"),
+    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=planner, observation=preflight)
     async with factory.begin() as session:
@@ -97,7 +169,7 @@ async def test_production_worker_rejects_unprotected_halt2_source(tmp_path):
     worker = build_release_worker(
         runtime=SimpleNamespace(verify=lambda: SimpleNamespace(manifest=SimpleNamespace(docker_image_id="sha256:" + "a"*64))),
         capital=SimpleNamespace(repository=SimpleNamespace(account_id=uuid4(), environment="ci")),
-        writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, minimum_amount=Decimal("153"),
+        writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=planner, config_artifact=path, evidence_path=path, clock=lambda: 1100)
     row = SimpleNamespace(symbol="fUST", cell="a30", strategy="mean_reversion", max_amount=Decimal("200"))
