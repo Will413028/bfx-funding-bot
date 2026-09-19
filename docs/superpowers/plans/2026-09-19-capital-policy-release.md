@@ -47,7 +47,7 @@ assert budget.max_new_offer == Decimal('670')
 
 ## Task 2: Applied policy, canonical snapshots and durable commitments
 
-**Files:** create `backend_py/src/bfx_funding_bot/modules/execution/capital_repository.py`, associated `capital_tables.py`, an Alembic migration at the actual single head, and `backend_py/tests/integration/test_capital_repository.py`. Modify ORM registration, `modules/accounts/config_service.py` only where needed to validate draft-to-applied conversion. Do not change daemon or deployment yet.
+**Files:** create `backend_py/src/bfx_funding_bot/modules/execution/capital_repository.py`, associated `capital_tables.py`, an Alembic migration at the actual single head, and `backend_py/tests/integration/test_capital_repository.py`. Modify ORM registration, `modules/accounts/config_service.py` only where needed to validate draft-to-applied conversion. Update migration readiness consumers `event_store/writer.py` and `projection_cutover/archive.py` alongside new heads; neither may reject the new valid descendant or accept unknown schema. Do not change daemon or deployment yet.
 
 **Consumes:** Task 1 types. **Produces:** account/environment/symbol-scoped applied revision reader and transaction-based authorize/reserve operation with compare-on-revision/snapshot fence. Exact signatures are defined in repository code and reported for Task 3. Immutable revision rows plus active-pointer/version ensure applied is distinct from draft. Commitment state must connect to existing immutable attempt/intent identity, not become a parallel untraceable ledger.
 
