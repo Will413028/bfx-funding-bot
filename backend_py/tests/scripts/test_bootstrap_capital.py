@@ -8,16 +8,27 @@ import bfx_funding_bot.modules.marketfeed.daemon  # noqa: F401
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRevisionRow
+from bfx_funding_bot.modules.execution.capital_repository import (
+    CapitalBlockedError,
+    CapitalRepository,
+)
+from bfx_funding_bot.modules.execution.capital_tables import (
+    CapitalPolicyRevisionRow,
+    CapitalSnapshotRow,
+)
+from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.uncertainty_tables import CanaryCommandPermitRow
 from tests.modules.accounts.test_capital_conversion import legacy
 
 
 class ReadOnlyVenue:
-    def __init__(self):
+    def __init__(self, *, include_usd=True):
         self.calls = []
+        self.wallets = {"fUST": Decimal("1000.123456789")}
+        if include_usd:
+            self.wallets["fUSD"] = Decimal("0")
 
     async def get_active_funding_offers(self, **kwargs):
         self.calls.append("offers")
@@ -31,7 +42,7 @@ class ReadOnlyVenue:
 
     async def get_funding_available_all(self, **kwargs):
         self.calls.append("wallets")
-        return {"fUST": Decimal("1000.123456789"), "fUSD": Decimal("0")}
+        return self.wallets.copy()
 
     async def submit(self, *args, **kwargs):
         pytest.fail("bootstrap must never submit")
@@ -41,7 +52,10 @@ class ReadOnlyVenue:
 
 
 @pytest.mark.integration
-async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_seed(pg_session_factory, pg_container):
+@pytest.mark.parametrize("include_usd", [False, True], ids=["ust_only", "both_wallets"])
+async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_seed(
+    pg_session_factory, pg_container, include_usd, monkeypatch,
+):
     from scripts.bootstrap_capital import bootstrap_snapshot
 
     factory, account = pg_session_factory, uuid4()
@@ -50,23 +64,69 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
     repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=300000)
     halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
     epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
-    venue = ReadOnlyVenue()
+    venue = ReadOnlyVenue(include_usd=include_usd)
+    preview_cells = []
+    preview = CapitalRepository.preview_policy
+
+    async def track_preview(self, session, **kwargs):
+        preview_cells.append((kwargs["symbol"], kwargs["cell_id"]))
+        return await preview(self, session, **kwargs)
+
+    monkeypatch.setattr(CapitalRepository, "preview_policy", track_preview)
     async def credentials(session):
         return Credentials("fixture-key", "fixture-secret")
     receipt = await bootstrap_snapshot(database_url=pg_container.get_connection_url().replace("+psycopg2", "+asyncpg"),
         account_id=account, environment="ci", venue=venue, credentials=credentials, clock=lambda: 1100)
+    assert receipt["status"] == "snapshot_ready"
+    assert receipt["resumed"] is False
+    assert receipt["policies_applied"] is False
+    assert preview_cells == [("fUST", "fUST_a30")]
     assert receipt["halt_id"] == epoch.id
     assert receipt["snapshot_seq"] > 0
     assert venue.calls == ["offers", "credits", "wallets"] * 2
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 0
+        stored = await session.get(CapitalSnapshotRow, receipt["snapshot_seq"])
+        assert set(stored.classification["symbols"]) == set(venue.wallets)
+        logged = await session.get(EventLogRow, receipt["snapshot_seq"])
+        assert set(logged.payload["wallet_available"]) == set(venue.wallets)
+        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
         dry_run = await convert_capital_policy(session, repository=repo, legacy=legacy(), now_ms=1100, apply_digest=None)
-        assert dry_run["symbols"]["fUST"]["cells"]["a30"]["available"] == "1000.123456789"
+        assert dry_run["symbols"]["fUST"]["cells"]["fUST_a30"]["available"] == "1000.123456789"
+        assert dry_run["symbols"]["fUSD"]["cells"]["fUSD_a30"] == {
+            "status": "disabled", "capital_evaluated": False,
+        }
     async with factory.begin() as session:
         applied = await convert_capital_policy(session, repository=repo, legacy=legacy(), now_ms=1100,
             apply_digest=dry_run["conversion_digest"])
         assert applied["status"] == "applied"
         assert (await repo.read_applied(session, symbol="fUSD")).policy.enabled is False
+        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
+    assert (await halt.current()).id == epoch.id
+    assert (await halt.current()).halted
+
+
+@pytest.mark.integration
+async def test_bootstrap_rejects_missing_enabled_wallet_without_policy_or_resume(pg_session_factory, pg_container):
+    from scripts.bootstrap_capital import bootstrap_snapshot
+
+    factory, account = pg_session_factory, uuid4()
+    async with factory.begin() as session:
+        session.add(ExchangeAccount(id=account, venue="bitfinex", label="missing-ust-fixture"))
+    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
+    epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
+    venue = ReadOnlyVenue()
+    del venue.wallets["fUST"]
+
+    async def credentials(session):
+        return Credentials("fixture-key", "fixture-secret")
+
+    with pytest.raises(CapitalBlockedError, match="snapshot_symbol_missing"):
+        await bootstrap_snapshot(database_url=pg_container.get_connection_url().replace("+psycopg2", "+asyncpg"),
+            account_id=account, environment="ci", venue=venue, credentials=credentials, clock=lambda: 1100)
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 0
+        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
     assert (await halt.current()).id == epoch.id
     assert (await halt.current()).halted
 

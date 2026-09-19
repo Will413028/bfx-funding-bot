@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.execution.capital_repository import CapitalReposito
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.marketfeed.config import canonical_cell_id
 
 
 async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment: str,
@@ -70,9 +71,9 @@ async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment
             # Validate canonical snapshot availability WITHOUT applying any policy.
             # Recovery can preserve an observation while declining capital acceptance.
             async with factory() as session:
-                for symbol in ("fUST", "fUSD"):
-                    await repository.preview_policy(session, symbol=symbol, cell_id="a30",
-                        now_ms=clock(), policy=CapitalPolicy(enabled=symbol == "fUST"))
+                await repository.preview_policy(session, symbol="fUST",
+                    cell_id=canonical_cell_id("fUST", "a30"),
+                    now_ms=clock(), policy=CapitalPolicy(enabled=True))
             current = await halt.current()
             if not await writer.verify_held() or current is None or current.id != epoch.id or not current.halted:
                 raise ValueError("bootstrap_writer_or_halt_changed")
