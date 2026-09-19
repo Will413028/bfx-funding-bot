@@ -665,3 +665,201 @@ async def test_unknown_active_credit_status_does_not_authorize(capital_db):
                                    "future-unknown-status")
     with pytest.raises(CapitalBlockedError, match="snapshot_invalid_active_credit"):
         await snapshot(factory, repo, "800", credits=(credit,))
+
+
+@pytest.mark.parametrize("fault", ["missing", "account", "environment", "symbol", "cid", "payload"])
+async def test_current_cursor_cannot_hide_durable_commitment(capital_db, fault):
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.event_store.tables import ProjectionHeadRow
+    from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo)
+    seq = await snapshot(factory, repo)
+    result = await authorize(factory, repo, policy, seq)
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        assert (view.snapshot.unreflected_commitments, view.budget.spendable) == (200, 700)
+        head = await session.scalar(select(ProjectionHeadRow))
+        assert head.last_event_seq == result.event_seq
+        attempt = await session.get(SubmissionAttemptRow, result.intent.submission_attempt.attempt_id)
+        if fault == "missing":
+            await session.delete(attempt)
+        elif fault == "account":
+            other = ExchangeAccount(id=uuid4(), venue="bitfinex", label="other")
+            session.add(other)
+            await session.flush()
+            attempt.exchange_account_id = other.id
+        elif fault == "environment":
+            attempt.deployment_environment = "elsewhere"
+        elif fault == "symbol":
+            attempt.symbol = "fUSD"
+        elif fault == "cid":
+            attempt.cid = 999
+        else:
+            attempt.normalized_payload = dict(attempt.normalized_payload, period=30)
+    # Cursor remains current: gap replay cannot silently repair this corruption.
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match=r"attempt_.*(missing|conflict)"):
+            await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    with pytest.raises(CapitalBlockedError, match=r"attempt_.*(missing|conflict)"):
+        await authorize(factory, repo, policy, seq, cid=2)
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match=r"attempt_.*(missing|conflict)"):
+            await repo.begin_snapshot(session, now_ms=1200)
+        assert await session.scalar(select(func.count()).select_from(EventLogRow).where(
+            EventLogRow.event_type == "RESERVATION_INTENT")) == 1
+
+
+async def seed_historical_cycles(factory, account, *, reused, terminal="ORDER_FILL", pending=False):
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+    rows = historical_rows(first_amount="7", environment="ci")
+    if not reused:
+        rows = rows[:2 if pending else 3]
+    next_signal = str(uuid4())
+    for index, row in enumerate(rows):
+        row.account_id = row.payload["account_id"] = str(account)
+        row.exchange_account_id = account
+        if index >= 3:
+            row.payload["signal_correlation_id"] = next_signal
+        if row.event_type == "ORDER_FILL":
+            row.event_type = terminal
+            row.payload["reason"] = "venue_cancel"
+    async with factory.begin() as session:
+        session.add_all(rows)
+        await session.flush()
+        await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+            session, account_id=str(account), deployment_environment="ci")
+    return [row.event_seq for row in rows]
+
+
+@pytest.mark.parametrize("reused", [False, True])
+@pytest.mark.parametrize("terminal", ["ORDER_FILL", "RESERVATION_RELEASED"])
+async def test_completed_historical_cycles_allow_capital(capital_db, reused, terminal):
+    from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+    factory, account = capital_db
+    repo = repository(account)
+    sequences = await seed_historical_cycles(factory, account, reused=reused, terminal=terminal)
+    async with factory.begin() as session:
+        rows = (await session.scalars(select(EventLogRow).where(
+            EventLogRow.event_seq.in_(sequences)).order_by(EventLogRow.event_seq))).all()
+        before = canonical_event_hash(rows)
+    policy = await setup_policy(factory, repo)
+    seq = await snapshot(factory, repo)
+    for _ in range(2):  # Recreate repository: no process-local cycle cache.
+        async with factory.begin() as session:
+            view = await repository(account).read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+            assert view.snapshot.unreflected_commitments == 0
+            assert view.budget.spendable == 900
+            rows = (await session.scalars(select(EventLogRow).where(
+                EventLogRow.event_seq.in_(sequences)).order_by(EventLogRow.event_seq))).all()
+            assert canonical_event_hash(rows) == before
+    await authorize(factory, repo, policy, seq, cid=2)
+
+
+@pytest.mark.parametrize("fault", ["partial_fill", "correlation", "venue", "row_cid", "scope"])
+@pytest.mark.parametrize("terminal", ["ORDER_FILL", "RESERVATION_RELEASED"])
+async def test_historical_terminal_requires_exact_cycle_evidence(capital_db, fault, terminal):
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    factory, account = capital_db
+    repo = repository(account)
+    sequences = await seed_historical_cycles(factory, account, reused=False, terminal=terminal)
+    async with factory.begin() as session:
+        row = await session.get(EventLogRow, sequences[-1])
+        payload = dict(row.payload)
+        if fault == "partial_fill":
+            payload.update(amount="2", size_usdt="2")
+        elif fault == "correlation":
+            payload["signal_correlation_id"] = str(uuid4())
+        elif fault == "venue":
+            row.venue_offer_id = payload["venue_offer_id"] = "unrelated"
+        elif fault == "row_cid":
+            row.cid = 999
+        else:
+            row.deployment_environment = "elsewhere"
+        row.payload = payload
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="unclassifiable_legacy_intent"):
+            await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+
+
+async def test_historical_completion_after_query_fence_cannot_release_capital(capital_db):
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+    factory, account = capital_db
+    repo = repository(account)
+    await seed_historical_cycles(factory, account, reused=False, pending=True)
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+    terminal = historical_rows(first_amount="7", environment="ci")[2]
+    terminal.account_id = terminal.payload["account_id"] = str(account)
+    terminal.exchange_account_id = account
+    async with factory.begin() as session:
+        session.add(terminal)
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="unclassifiable_legacy_intent"):
+            await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+
+
+async def test_snapshot_acceptance_rechecks_complete_attempt_inventory(capital_db):
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo)
+    seq = await snapshot(factory, repo)
+    result = await authorize(factory, repo, policy, seq)
+    async with factory.begin() as session:
+        await repo.writer.append(session, ReservationClaimed(
+            symbol="fUST", cid=1, signal_correlation_id=result.intent.signal_correlation_id,
+            account_id=str(account), is_simulated=True, amount=Decimal("200"), venue_offer_id="offer-1",
+            reservation_ref=replace(result.intent.reservation_ref, venue_offer_id="offer-1"),
+            occurred_at_ms=1100))
+        fence = await repo.begin_snapshot(session, now_ms=1200)
+    async with factory.begin() as session:
+        attempt = await session.get(SubmissionAttemptRow, result.intent.submission_attempt.attempt_id)
+        await session.delete(attempt)
+    event = VenueSnapshotObserved(account_id=str(account), environment="ci",
+        query_started_at_ms=1200, query_finished_at_ms=1250, offers=(), credits=(),
+        wallet_available={"fUST": Decimal("1000")}, coverage=SnapshotCoverage(True, True, True))
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="attempt_projection_missing"):
+            await repo.accept_snapshot(session, fence=fence, event=event,
+                confirmation=replace(event, query_started_at_ms=1250, query_finished_at_ms=1260),
+                now_ms=1260)
+
+
+@pytest.mark.parametrize("shared_venue", [False, True])
+async def test_historical_cycles_validate_venue_ownership_across_cids(capital_db, shared_venue):
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+    factory, account = capital_db
+    repo = repository(account)
+    await seed_historical_cycles(factory, account, reused=False)
+    rows = historical_rows(environment="ci")[3:]
+    for row in rows:
+        row.account_id = row.payload["account_id"] = str(account)
+        row.exchange_account_id = account
+        row.cid = row.payload["cid"] = 82
+    async with factory.begin() as session:
+        session.add_all(rows)
+        await session.flush()
+        await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+            session, account_id=str(account), deployment_environment="ci")
+        if shared_venue:
+            for row in rows[1:]:
+                row.venue_offer_id = "old-a"
+                row.payload = dict(row.payload, venue_offer_id="old-a")
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+    async with factory.begin() as session:
+        if shared_venue:
+            with pytest.raises(CapitalBlockedError, match="unclassifiable_legacy_intent"):
+                await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        else:
+            view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+            assert view.budget.spendable == 900

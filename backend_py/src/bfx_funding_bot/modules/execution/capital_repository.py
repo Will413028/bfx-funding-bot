@@ -34,6 +34,9 @@ from bfx_funding_bot.modules.execution.capital_tables import (
 from bfx_funding_bot.modules.execution.event_store.entities import (
     is_terminal_offer_status,
 )
+from bfx_funding_bot.modules.execution.event_store.historical_claims import (
+    historical_claim_reset_sequences,
+)
 from bfx_funding_bot.modules.execution.event_store.serialization import (
     deserialize_event,
     deserialize_stored_event,
@@ -251,6 +254,7 @@ class CapitalRepository:
         until it has a typed outcome. Existing no-policy reconciliation is unchanged.
         """
         await self._prepare(session)
+        await self._attempt_inventory(session)
         await self._assert_no_unknown(session)
         pending = await session.scalar(select(SubmissionAttemptRow.attempt_id).where(
             *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.outcome_kind.is_(None)).limit(1))
@@ -390,13 +394,12 @@ class CapitalRepository:
             values = totals[credit.symbol]
             values["credits"] = str(_amount(values["credits"]) + amount)
             values["unattributed_credits"] = values["credits"]
-        attempts = (await session.scalars(select(SubmissionAttemptRow).where(
-            *self._scope(SubmissionAttemptRow)))).all()
+        inventory = await self._attempt_inventory(session)
         previous = await session.scalar(select(CapitalSnapshotRow).where(
             *self._scope(CapitalSnapshotRow)).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
         prior_reflected = previous.classification["reflected"] if previous is not None else {}
         history = {offer.venue_offer_id: offer for offer in event.offer_history}
-        for attempt in attempts:
+        for _, _, attempt in inventory.values():
             key = str(attempt.attempt_id)
             if await self._effective_outcome(session, attempt) in {"rejected", "not_sent"}:
                 continue
@@ -484,28 +487,20 @@ class CapitalRepository:
         shared = _amount(values["unattributed_credits"])
         exposure = _amount(values["cells"].get(cell_id, "0")) + shared
         pending = ZERO
-        attempts = (await session.scalars(select(SubmissionAttemptRow).where(
-            *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.symbol == symbol))).all()
+        inventory = await self._attempt_inventory(session)
         intents = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
-        by_attempt: dict[str, tuple[EventLogRow, ReservationIntent]] = {}
         for logged_intent in intents:
             decoded = deserialize_stored_event(logged_intent)
             if not isinstance(decoded, ReservationIntent) or decoded.symbol != symbol:
                 continue
             if not isinstance(decoded.submission_attempt, SubmissionAttemptPayload):
-                await self._check_historical_intent(session, decoded, event, row.command_fence)
+                await self._check_historical_intent(session, logged_intent, event, row.command_fence)
                 continue
-            key = str(decoded.submission_attempt.attempt_id)
-            if key in by_attempt:
-                raise CapitalBlockedError("duplicate_attempt_intent")
-            by_attempt[key] = logged_intent, decoded
-        for attempt in attempts:
+        for logged_intent, decoded, attempt in inventory.values():
+            if decoded.symbol != symbol:
+                continue
             key = str(attempt.attempt_id)
-            pair = by_attempt.get(key)
-            if pair is None:
-                raise CapitalBlockedError("attempt_intent_missing")
-            logged_intent, decoded = pair
             if await self._effective_outcome(session, attempt) in {"rejected", "not_sent"}:
                 continue
             if key in row.classification["reflected"]:
@@ -526,25 +521,109 @@ class CapitalRepository:
         return CapitalView(applied, row.event_seq, snapshot, evaluate_capital(applied.policy, snapshot),
                            shared, row.classification)
 
-    async def _check_historical_intent(self, session: AsyncSession, intent: ReservationIntent,
-                                       snapshot: VenueSnapshotObserved, fence: int) -> None:
-        """Old completed event identities are history, never legacy capital settings.
+    async def _attempt_inventory(self, session: AsyncSession) -> dict[
+        str, tuple[EventLogRow, ReservationIntent, SubmissionAttemptRow]
+    ]:
+        """Immutable intents define the universe, even with a current replay cursor.
 
-        Ambiguous historical pending/unknown still block. Cancellation alone is
-        not cash: its terminal event must precede the accepted query fence.
+        Verify both directions before deriving capital or accepting observations;
+        missing/moved projections are corruption, never evidence of released cash.
         """
+        rows = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
+            EventLogRow.event_type == "RESERVATION_INTENT"))).all()
+        attempts = {str(a.attempt_id): a for a in (await session.scalars(
+            select(SubmissionAttemptRow).where(*self._scope(SubmissionAttemptRow)))).all()}
+        inventory: dict[str, tuple[EventLogRow, ReservationIntent, SubmissionAttemptRow]] = {}
+        for row in rows:
+            event = deserialize_stored_event(row)
+            if not isinstance(event, ReservationIntent):
+                raise CapitalBlockedError("attempt_intent_conflict")
+            payload = event.submission_attempt
+            if not isinstance(payload, SubmissionAttemptPayload):
+                continue
+            key = str(payload.attempt_id)
+            if key in inventory:
+                raise CapitalBlockedError("duplicate_attempt_intent")
+            attempt = attempts.get(key)
+            if attempt is None:
+                raise CapitalBlockedError("attempt_projection_missing")
+            if (event.account_id, row.cid, event.execution_decision_id, event.symbol, event.cid) != (
+                str(self.account_id), event.cid, payload.execution_decision_id, payload.symbol, payload.cid
+            ) or (payload.account_id, payload.environment) != (self.account_id, self.environment):
+                raise CapitalBlockedError("attempt_intent_scope_conflict")
+            if (attempt.execution_decision_id, attempt.symbol, attempt.cid,
+                attempt.normalized_payload, attempt.payload_sha256, attempt.started_at_ms) != (
+                payload.execution_decision_id, payload.symbol, payload.cid,
+                payload.as_storage_dict()["normalized_payload"], payload.payload_fingerprint,
+                payload.started_at_ms
+            ) or _amount(event.amount) != _amount(attempt.normalized_payload.get("amount")):
+                raise CapitalBlockedError("attempt_projection_conflict")
+            decision = await session.get(ExecutionDecisionRow, payload.execution_decision_id)
+            if decision is None or (decision.exchange_account_id, decision.deployment_environment,
+                decision.symbol, decision.signal_correlation_id, decision.amount_usdt) != (
+                self.account_id, self.environment, event.symbol, str(event.signal_correlation_id),
+                _amount(event.amount)
+            ):
+                raise CapitalBlockedError("attempt_decision_conflict")
+            inventory[key] = row, event, attempt
+        if inventory.keys() != attempts.keys():
+            raise CapitalBlockedError("attempt_intent_missing")
+        return inventory
+
+    async def _check_historical_intent(self, session: AsyncSession, logged_intent: EventLogRow,
+                                       snapshot: VenueSnapshotObserved, fence: int) -> None:
+        """Prove THIS immutable cycle, not the latest mutable claim for its CID.
+
+        Reuse the historical replay validator for scope, identity and reset
+        boundaries. Even a single cycle needs complete, full-amount evidence
+        before the query fence; partial fills never establish a terminal cycle.
+        """
+        rows = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow))
+            .order_by(EventLogRow.event_seq))).all()
+        try:
+            resets = historical_claim_reset_sequences(rows, account_id=str(self.account_id),
+                                                       environment=self.environment)
+        except (ValueError, TypeError) as exc:
+            raise CapitalBlockedError("unclassifiable_legacy_intent") from exc
+        # Validate the whole scope first: different CIDs cannot share a venue
+        # identity. Only then slice this intent's immutable cycle.
+        rows = [r for r in rows if r.cid == logged_intent.cid]
+        end = next((r.event_seq for r in rows if r.event_seq > logged_intent.event_seq
+                    and r.event_seq in resets), None)
+        kinds = {"RESERVATION_INTENT", "RESERVATION_CLAIMED", "RESERVATION_FAILED",
+                 "ORDER_FILL", "RESERVATION_RELEASED", "SUBMIT_OUTCOME_UNKNOWN",
+                 "SUBMIT_MATCHED_TO_VENUE_OFFER"}
+        cycle = [r for r in rows if r.event_seq >= logged_intent.event_seq
+                 and (end is None or r.event_seq < end) and r.event_type in kinds]
+        intent = deserialize_stored_event(logged_intent)
+        assert isinstance(intent, ReservationIntent)
+        if not cycle or cycle[0].event_seq != logged_intent.event_seq or cycle[-1].event_seq > fence:
+            raise CapitalBlockedError("unclassifiable_legacy_intent")
+        for row in cycle:
+            decoded = deserialize_stored_event(row)
+            ref = getattr(decoded, "reservation_ref", None)
+            decision = ref.execution_decision_id if ref else getattr(decoded, "execution_decision_id", None)
+            if (row.schema_version != logged_intent.schema_version
+                    or decision != intent.execution_decision_id
+                    or _amount(getattr(decoded, "amount", None)) <= ZERO):
+                raise CapitalBlockedError("unclassifiable_legacy_intent")
+        shape = [r.event_type for r in cycle]
+        if (shape == ["RESERVATION_INTENT", "RESERVATION_FAILED"]
+                and all(r.venue_offer_id is None for r in cycle)):
+            return
+        if (shape in (["RESERVATION_INTENT", "RESERVATION_CLAIMED", "ORDER_FILL"],
+                      ["RESERVATION_INTENT", "RESERVATION_CLAIMED", "RESERVATION_RELEASED"])
+                and cycle[0].venue_offer_id is None and cycle[1].venue_offer_id):
+            return  # Validator proved same venue, amount, symbol and correlation.
+        if shape != ["RESERVATION_INTENT", "RESERVATION_CLAIMED"]:
+            raise CapitalBlockedError("unclassifiable_legacy_intent")
         claim = await session.scalar(select(OfferClaimRow).where(*self._scope(OfferClaimRow),
             OfferClaimRow.cid == intent.cid, OfferClaimRow.symbol == intent.symbol))
-        if claim is None or (claim.execution_decision_id, claim.signal_correlation_id) != (
-                intent.execution_decision_id, str(intent.signal_correlation_id)):
+        if claim is None or (claim.execution_decision_id, claim.signal_correlation_id,
+                claim.venue_offer_id, claim.size_usdt, claim.last_event_seq) != (
+                intent.execution_decision_id, str(intent.signal_correlation_id),
+                cycle[-1].venue_offer_id, _amount(intent.amount), cycle[-1].event_seq):
             raise CapitalBlockedError("unclassifiable_legacy_intent")
-        terminal = await session.get(EventLogRow, claim.last_event_seq)
-        if terminal is None or terminal.event_seq > fence:
-            raise CapitalBlockedError("unclassifiable_legacy_intent")
-        if claim.state == "failed" and terminal.event_type == "RESERVATION_FAILED":
-            return
-        if claim.state == "released" and terminal.event_type == "RESERVATION_RELEASED":
-            return
         if claim.state == "claimed" and any(
                 offer.venue_offer_id == claim.venue_offer_id and offer.symbol == intent.symbol
                 for offer in snapshot.offers):
