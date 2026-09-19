@@ -70,8 +70,8 @@ def configure_canary_wiring_env(
     monkeypatch.setattr(canary_preflight, "verify_canary_preflight", _preflight_stub)
 
 
-async def seed_exchange_account(engine: AsyncEngine) -> None:
-    """Provision the account/credential rows after a test schema is created."""
+async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
+    """Provision synthetic identity and explicit applied policies, never an env fallback."""
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
     )
@@ -100,6 +100,17 @@ async def seed_exchange_account(engine: AsyncEngine) -> None:
                 verified_at=datetime.now(UTC),
             )
         )
+    if capital_policies:
+        from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+        from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+        for environment in ("ci", "prod", "shadow"):
+            repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID,
+                                     environment=environment, max_snapshot_age_ms=10000)
+            async with factory.begin() as session:
+                for symbol in ("fUST", "fUSD"):
+                    await repo.apply_policy(session, symbol=symbol,
+                        policy=CapitalPolicy(enabled=symbol == "fUST"), expected_revision=0,
+                        source={"synthetic_fixture": True})
 
 
 __all__ = [

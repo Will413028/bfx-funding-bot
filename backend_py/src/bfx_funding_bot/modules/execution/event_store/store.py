@@ -100,7 +100,7 @@ _DEDUP_TYPES = frozenset({
 # Audit/attribution-only events: appended to event_log but NEVER projected onto
 # position_state (live or rebuild tail) — realized/reserved stay reconcile-owned
 # (single-writer invariant, ADR 2026-05-29).
-_AUDIT_ONLY_TYPES = frozenset({"CREDIT_CLOSED"})
+_AUDIT_ONLY_TYPES = frozenset({"CREDIT_CLOSED", "CANCEL_REQUESTED", "CANCEL_ACKNOWLEDGED"})
 
 # offer_claims FSM state by event_type — cid-keyed projection. The voi-keyed
 # transition() (registry_offers.py) is reserved for the in-memory OfferRegistry's

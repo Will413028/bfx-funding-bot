@@ -48,7 +48,7 @@ def test_concentration_cap_limits_a_single_cell():
     # sizing.allocate_gap's cap_per_cell relaxation for >=2 active cells the
     # 0.70*target cap still binds, see test_fills_emptiest_cell_first_then_next).
     out = _alloc(D("570"), D("0"), {}, ["a"])
-    assert out == {"a": D("570")}
+    assert out == {"a": D("399")}
 
 
 def test_fills_emptiest_cell_first_then_next():
@@ -137,8 +137,8 @@ def test_allocate_gap_default_headroom_is_unbounded():
     assert fills == {"fUST_a30": Decimal("200")}
 
 
-class TestSingleActiveCellRelaxation:
-    def test_single_active_cell_absorbs_full_gap(self):
+class TestFixedCellLimit:
+    def test_single_active_cell_keeps_policy_limit(self):
         # 1 active cell of 2 configured: 70% cap would strand 3000 — relaxed
         # cap (target / n_active = 10000) lets the lone cell take everything.
         fills = allocate_gap(
@@ -149,7 +149,7 @@ class TestSingleActiveCellRelaxation:
             concentration_pct=Decimal("0.70"),
             min_fill=Decimal("153"),
         )
-        assert fills == {"fUST_p2": Decimal("10000")}
+        assert fills == {"fUST_p2": Decimal("7000")}
 
     def test_two_active_cells_unchanged(self):
         # max(0.70*10000, 10000/2) = 7000 — byte-identical to pre-change split.

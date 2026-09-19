@@ -27,6 +27,69 @@ from tests.modules.marketfeed.account_test_helpers import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_policy", [False, True])
+async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_path, httpx_mock, with_policy):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
+    configure_account_env(monkeypatch)
+    import os
+    for name in list(os.environ):
+        if name.startswith("BFX_CANARY_") or name in (
+            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+        ):
+            monkeypatch.delenv(name)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'normal.db'}"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine, capital_policies=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    halt = HaltStateStore(factory, account_id=str(TEST_EXCHANGE_ACCOUNT_ID), deployment_environment="ci")
+    await halt.set_halted(True, reason="retained halt", actor="test")
+    if with_policy:
+        repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+        async with factory.begin() as session:
+            await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
+                                    expected_revision=0, source={"fixture": True})
+    httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+                            method="GET", json=[], is_reusable=True, is_optional=True)
+    path = _write_cells_yaml(tmp_path)
+    import yaml
+    doc = yaml.safe_load(path.read_text())
+    doc["cells"].append({**doc["cells"][0], "period_agg": "p2"})
+    path.write_text(yaml.safe_dump(doc))
+    try:
+        if not with_policy:
+            with pytest.raises(ValueError, match="policy_unavailable"):
+                await build_daemon(cells_yaml_path=path, skip_ws=True)
+            return
+        daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
+        assert len(daemon.config.cells) == 2
+        assert (await halt.current()).halted
+        status = await daemon.trading_status.snapshot()
+        assert status["halt"]["halted"]
+        assert "capital_policy" in {g["name"] for g in status["guards"]}
+        assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
+        await daemon.periodic_reconcile._deployment.deploy()
+        assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+    finally:
+        await engine.dispose()
+
+
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
     # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several
