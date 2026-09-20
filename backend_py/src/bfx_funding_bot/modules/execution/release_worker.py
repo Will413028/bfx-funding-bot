@@ -225,11 +225,20 @@ class ReleaseWorker:
                         await self.authority.check_normal(session)
                     return
                 session_id = row.id
-                needs_preparation, symbol = row.state == "requested", row.symbol
+                symbol = row.symbol
+                # Observe FX for whichever transition sets the amount: preparing the
+                # session, and again when the human authorises it. The venue rule is
+                # USD-denominated, so its UST equivalent drifts; deriving at the click
+                # rather than at the preview is what keeps the gap to submission down
+                # to seconds instead of however long someone took to read the screen.
+                needs_amount = row.state == "requested" or (
+                    row.request_revision > row.processed_revision
+                    and row.requested_action == "authorize"
+                )
             # Public FX observation outside any DB transaction. Reacquire the
             # same account lock and reload the row before applying authority.
             amount_evidence = None
-            if needs_preparation:
+            if needs_amount:
                 if self.funding_rules is None:
                     raise ReleaseBlocked("funding_rule_unavailable")
                 amount_evidence = await self.funding_rules.observe(symbol)
@@ -307,12 +316,27 @@ class ReleaseWorker:
         if pending and row.requested_action == "authorize":
             await self.authority.preflight(session, row)
             row = await repo.authorize(session, row.id, binding=binding, now_ms=now)
+            # Re-derive against FX observed for this authorisation, not the preview
+            # taken when the session was prepared. The preview is what the operator
+            # saw; this is what the rule requires at the moment they committed.
+            minimum = minimum_amount(amount_evidence, symbol=row.symbol,
+                                     now_ms=self.authority.clock())
+            view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell,
+                                                     session=session)
+            if view.budget.max_new_offer < minimum:
+                raise ReleaseBlocked("session_insufficient_capital")
+            if minimum > row.max_amount:
+                raise ReleaseBlocked("session_minimum_or_expiry")
+            validate_amount(minimum, amount_evidence, symbol=row.symbol,
+                            now_ms=self.authority.clock())
+            row.minimum_amount = minimum
         if row.state == "authorized":
             await repo.check_current(session, row, binding, now_ms=now, submit=True)
             if row.minimum_amount is None:
                 raise ReleaseBlocked("session_minimum_missing")
             return ReleaseCommand(row.id, row.symbol, row.cell, row.strategy,
-                                  row.minimum_amount, self.halt_authorization)
+                                  row.minimum_amount, row.max_amount,
+                                  self.halt_authorization)
         if row.state == "consumed":
             attempt = await session.get(SubmissionAttemptRow, row.attempt_id)
             if attempt is None or attempt.completed_at_ms is None:

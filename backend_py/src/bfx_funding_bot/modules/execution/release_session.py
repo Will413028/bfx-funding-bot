@@ -31,6 +31,9 @@ class ReleaseCommand:
     cell: str
     strategy: str
     amount: Decimal
+    # The ceiling the human authorised. A revision between authorisation and
+    # submission may move the amount, but never past what they capped.
+    max_amount: Decimal
     halt_authorization: object
 
 
