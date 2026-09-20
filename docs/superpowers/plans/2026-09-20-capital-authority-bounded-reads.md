@@ -148,20 +148,34 @@ without it**).
 
 ## Task 3: Bounded hot-path read
 
-> **Blocked on Task 2's second half, and the order matters.** Attempted 2026-09-20 and
-> reverted. Skipping intents at or before the fence also skips
-> `_check_historical_intent`, which proves a legacy intent's cycle terminated before the
-> fence. Without that proof, capital that is still committed reads as available, and the
-> account overspends. The prefix hash does not cover this: it detects a *mutated* prefix,
-> while this is about a prefix that was never provably settled. So acceptance must run the
-> historical proof before any read is allowed to skip it.
+> **Both preconditions are now met; one piece is still unsolved.** Acceptance proves
+> legacy intents settled (commit below) and the snapshot names its prefix (68e88cb), so
+> the two reasons this was blocked are gone. The bounded body was enabled, and the
+> differential test and the strict xfail both flipped as designed -- the read really is
+> bounded and really does agree with the full re-derivation.
 >
-> The scaffolding is in place and green: `_snapshot_basis` is shared by both paths,
-> `_read_capital_full` is the audit definition, `_attempt_inventory` takes
-> `after_event_seq` and `reflected`, and `test_bounded_read_agrees_with_full_rederivation`
-> guards the switch. Enabling the bounded body without the acceptance proof is the one
-> thing that must not happen.
-
+> What is not solved: narrowing the intent side to the tail also requires narrowing the
+> attempt side, or a settled attempt reads as unaccounted (`unclassifiable_commitment`).
+> Narrowing it by effective outcome is wrong twice over. It broke
+> `test_current_cursor_cannot_hide_durable_commitment`, whose name states the failure
+> mode, and it calls `_effective_outcome` once per attempt per read, which is the
+> unbounded work this whole change exists to remove -- the suite went from 12s to 158s.
+>
+> The attempt side has to narrow by its intent's position relative to the fence. That is
+> not derivable from `submission_attempts` today, so this needs either that link recorded
+> on the attempt, or the accepted snapshot's `reflected` set extended to cover attempts
+> that ended without spending.
+>
+> **Worked solution, unimplemented.** An attempt outside the tail is one of three things:
+> reflected in the classification (accounted), unreflected (which is exactly the
+> `unclassifiable_commitment` the check exists to raise), or settled without spending
+> (the only false positive). Acceptance already walks the attempts to build `reflected`,
+> so let it record the third set too -- `classification["settled"]`, the attempt keys
+> whose effective outcome is `rejected` or `not_sent`. The read then narrows by
+> `reflected | settled`, which is set arithmetic on already-loaded content and does no
+> per-attempt work. Note this changes the classification shape and therefore
+> `capital_classification_digest`; snapshots accepted before it use `.get("settled", ())`
+> and stay unusable anyway, since their `covered_prefix_hash` is NULL.
 
 **Files:** `.../execution/capital_repository.py`, `.../execution/capital_runtime.py`,
 `backend_py/tests/integration/test_capital_repository.py`.

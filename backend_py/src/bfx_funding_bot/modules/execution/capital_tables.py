@@ -94,3 +94,8 @@ class CapitalSnapshotRow(Base):
     # only for rows accepted before this column existed; a read treats NULL as
     # unproven and blocks, and the next accepted snapshot supplies it.
     covered_prefix_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Why this snapshot cannot authorize, decided at acceptance. NULL means it
+    # can. Recorded rather than raised because acceptance is how the system
+    # records reality: refusing to record an observation because history is
+    # unsettled would also remove the observations needed to settle it.
+    authorization_blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
