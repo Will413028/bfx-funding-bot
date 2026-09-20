@@ -16,6 +16,10 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+from bfx_funding_bot.modules.execution.event_store.canonical import (
+    GENESIS_PREFIX_HASH,
+    rolling_prefix_hash,
+)
 from bfx_funding_bot.modules.execution.event_store.entities import (
     is_terminal_credit_status,
     is_terminal_offer_status,
@@ -277,6 +281,9 @@ class PostgresEventStore:
         )
         session.add(row)
         await session.flush()  # assigns row.event_seq
+        row.prefix_hash = rolling_prefix_hash(
+            await self._previous_prefix_hash(session, row), row
+        )
         await self._project_event_unlocked(
             session,
             event,
@@ -284,6 +291,34 @@ class PostgresEventStore:
             event_seq=row.event_seq,
         )
         return StoreAppendResult(persisted=True, event_seq=row.event_seq)
+
+    async def _previous_prefix_hash(
+        self, session: AsyncSession, row: EventLogRow
+    ) -> str:
+        """Return the chain value this row extends, under the held account lock.
+
+        A stream with no earlier row starts from the genesis constant. An earlier
+        row carrying no hash is a gap, not a starting point: continuing from genesis
+        there would mint a chain that silently excludes real events, so it fails
+        closed and the caller wraps it as a projection write error.
+        """
+        previous = await session.scalar(
+            select(EventLogRow)
+            .where(
+                EventLogRow.exchange_account_id == row.exchange_account_id,
+                EventLogRow.deployment_environment == row.deployment_environment,
+                EventLogRow.event_seq < row.event_seq,
+            )
+            .order_by(EventLogRow.event_seq.desc())
+            .limit(1)
+        )
+        if previous is None:
+            return GENESIS_PREFIX_HASH
+        if previous.prefix_hash is None:
+            raise ValueError(
+                f"event prefix chain is incomplete at event_seq={previous.event_seq}"
+            )
+        return previous.prefix_hash
 
     async def _project_event_unlocked(
         self,

@@ -9,7 +9,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
-from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
+from bfx_funding_bot.modules.execution.event_store.canonical import (
+    canonical_event_hash,
+    rolling_prefix_hashes,
+)
 from bfx_funding_bot.modules.execution.event_store.historical_claims import (
     historical_claim_reset_sequences,
 )
@@ -53,6 +56,24 @@ def historical_rows(*, first_amount: str = "5", environment: str = "prod") -> li
             ))
     return rows
 
+
+async def seal_prefix_chain(session) -> None:
+    """Give seeded rows the prefix chain a real append would have written.
+
+    Synthetic history has to be chain-consistent for the same reason real history
+    is: the writer treats a predecessor with no hash as a gap, not as a place to
+    start from. Seeding rows straight into the table skips the writer, so the test
+    has to do what the writer would have done.
+    """
+    rows = (await session.scalars(select(EventLogRow).order_by(EventLogRow.event_seq))).all()
+    streams: dict[tuple, list] = {}
+    for row in rows:
+        key = (row.exchange_account_id, row.deployment_environment)
+        streams.setdefault(key, []).append(row)
+    for stream in streams.values():
+        for row, value in zip(stream, rolling_prefix_hashes(stream), strict=True):
+            row.prefix_hash = value
+    await session.flush()
 
 @pytest.mark.parametrize("symbol", [None, "fUST"])
 @pytest.mark.parametrize("first_amount,realized", [("5", "10"), ("7", "12")])
@@ -312,6 +333,7 @@ async def test_reset_does_not_leak_to_strict_append(sqlite_session: AsyncSession
     rows = historical_rows()
     sqlite_session.add_all(rows)
     await sqlite_session.flush()
+    await seal_prefix_chain(sqlite_session)
     store = PostgresEventStore(deployment_environment="prod")
     await store.rebuild_snapshot_from_log(
         sqlite_session, account_id=str(ACCOUNT), deployment_environment="prod", symbol=symbol,

@@ -67,6 +67,13 @@ class EventLogRow(Base):
         DateTime(timezone=True), nullable=False, server_default=_NOW
     )
 
+    # Rolling hash of every event up to and including this one, per account
+    # stream. Lets a derived projection name the prefix it covers and have that
+    # claim checked by reading one row, instead of rehashing the prefix. Nullable
+    # only so historical rows exist before the backfill migration; the writer
+    # never leaves it unset and readers must treat NULL as unproven, not absent.
+    prefix_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     __table_args__ = (
         Index(
             "idx_event_log_acct_env_seq",

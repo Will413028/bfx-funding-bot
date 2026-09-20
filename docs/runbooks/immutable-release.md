@@ -185,7 +185,7 @@ image and `uv run alembic upgrade head`. Review the digest and pending migration
 then explicitly repeat with `--apply-digest REVIEWED_DIGEST` and a new receipt
 `schema-apply.json`. A changed plan blocks. Alembic runs inside the approved
 image with UV_NO_SYNC=1, RO rootfs and a bounded /tmp tmpfs; no application starts.
-The post-check must report `b4e6f8a0c203`. Keep both receipts. Startup never runs
+The post-check must report `c3f5a1d7e204`. Keep both receipts. Startup never runs
 migrations implicitly. An error means inspect state; do not blindly reapply.
 
 ## 4. First-install observation bootstrap, then policy conversion

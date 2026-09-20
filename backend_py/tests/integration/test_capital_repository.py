@@ -26,6 +26,9 @@ from bfx_funding_bot.modules.execution.events import (
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
+from tests.modules.execution.event_store.test_historical_claim_cycles import (
+    seal_prefix_chain,
+)
 
 
 @pytest.fixture(params=["sqlite", pytest.param("pg", marks=pytest.mark.integration)])
@@ -729,6 +732,7 @@ async def seed_historical_cycles(factory, account, *, reused, terminal="ORDER_FI
     async with factory.begin() as session:
         session.add_all(rows)
         await session.flush()
+        await seal_prefix_chain(session)
         await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
             session, account_id=str(account), deployment_environment="ci")
     return [row.event_seq for row in rows]
@@ -848,6 +852,7 @@ async def test_historical_cycles_validate_venue_ownership_across_cids(capital_db
     async with factory.begin() as session:
         session.add_all(rows)
         await session.flush()
+        await seal_prefix_chain(session)
         await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
             session, account_id=str(account), deployment_environment="ci")
         if shared_venue:
@@ -890,6 +895,7 @@ async def test_historical_capital_read_has_bounded_scope_queries_and_validation(
     async with factory.begin() as session:
         session.add_all(rows)
         await session.flush()
+        await seal_prefix_chain(session)
         await module.PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
             session, account_id=str(account), deployment_environment="ci",
         )
@@ -959,6 +965,7 @@ async def test_capital_read_work_does_not_grow_with_history(capital_db, monkeypa
         async with factory.begin() as session:
             session.add_all(rows)
             await session.flush()
+            await seal_prefix_chain(session)
             await module.PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
                 session, account_id=str(account), deployment_environment="ci",
             )

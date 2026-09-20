@@ -22,6 +22,9 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     ProjectionWriteError,
 )
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from tests.modules.execution.event_store.test_historical_claim_cycles import (
+    seal_prefix_chain,
+)
 
 _ENV = "ci"
 _ACCOUNT = UUID("00000000-0000-0000-0000-00000000a101")
@@ -162,6 +165,9 @@ async def test_append_replays_event_log_gap_before_advancing_projection_head(
         )
     )
     await sqlite_session.flush()
+    # A row that was durable before its projection transaction completed still
+    # carries its chain link; only rows that bypassed the writer entirely do not.
+    await seal_prefix_chain(sqlite_session)
 
     current = _claimed(cid=31, venue_seq=31)
     result = await writer.append(sqlite_session, current)
