@@ -104,7 +104,7 @@ once at acceptance, when the fence is set, and continuously in reconcile.
 the existing halt store with actor `reconcile`, reason `capital_position_diverged:<detail>`.
 Divergence is a halt condition, not a retry condition.
 
-## Task 1: Rolling prefix hash so verification is O(1)
+## Task 1: Rolling prefix hash so verification is O(1) — **done**
 
 **Files:** `backend_py/src/bfx_funding_bot/modules/execution/event_store/canonical.py`,
 `.../event_store/writer.py`, `backend_py/tests/modules/execution/test_canonical.py`.
@@ -126,7 +126,7 @@ reads one row.
 **Caution:** the backfill must be deterministic and run inside the migration, not lazily at
 runtime. A NULL `prefix_hash` must block, never be treated as "not yet computed".
 
-## Task 2: Persist the capital position at snapshot acceptance
+## Task 2: Persist the capital position at snapshot acceptance — **done**
 
 **Files:** `.../execution/capital_tables.py`, `.../execution/capital_repository.py`,
 `backend_py/alembic/versions/`, `backend_py/tests/integration/test_capital_repository.py`.
@@ -146,36 +146,19 @@ without it**).
       (restricted role test, following `test_release_migration.py`'s pattern).
 - [ ] GREEN: implement, with migration via `alembic revision --autogenerate` then reviewed by hand.
 
-## Task 3: Bounded hot-path read
+## Task 3: Bounded hot-path read — **done**
 
-> **Both preconditions are now met; one piece is still unsolved.** Acceptance proves
-> legacy intents settled (commit below) and the snapshot names its prefix (68e88cb), so
-> the two reasons this was blocked are gone. The bounded body was enabled, and the
-> differential test and the strict xfail both flipped as designed -- the read really is
-> bounded and really does agree with the full re-derivation.
+> **Done** (f922b2f). The read folds only commitments after the accepted fence.
+> `test_capital_read_work_does_not_grow_with_history` went from 25 vs 769
+> deserializations across a 32x history increase to bounded, its strict xfail flipped to
+> XPASS, and the marker is removed.
 >
-> What is not solved: narrowing the intent side to the tail also requires narrowing the
-> attempt side, or a settled attempt reads as unaccounted (`unclassifiable_commitment`).
-> Narrowing it by effective outcome is wrong twice over. It broke
-> `test_current_cursor_cannot_hide_durable_commitment`, whose name states the failure
-> mode, and it calls `_effective_outcome` once per attempt per read, which is the
-> unbounded work this whole change exists to remove -- the suite went from 12s to 158s.
->
-> The attempt side has to narrow by its intent's position relative to the fence. That is
-> not derivable from `submission_attempts` today, so this needs either that link recorded
-> on the attempt, or the accepted snapshot's `reflected` set extended to cover attempts
-> that ended without spending.
->
-> **Worked solution, unimplemented.** An attempt outside the tail is one of three things:
-> reflected in the classification (accounted), unreflected (which is exactly the
-> `unclassifiable_commitment` the check exists to raise), or settled without spending
-> (the only false positive). Acceptance already walks the attempts to build `reflected`,
-> so let it record the third set too -- `classification["settled"]`, the attempt keys
-> whose effective outcome is `rejected` or `not_sent`. The read then narrows by
-> `reflected | settled`, which is set arithmetic on already-loaded content and does no
-> per-attempt work. Note this changes the classification shape and therefore
-> `capital_classification_digest`; snapshots accepted before it use `.get("settled", ())`
-> and stay unusable anyway, since their `covered_prefix_hash` is NULL.
+> The attempt-side narrowing that blocked two earlier attempts is solved by
+> `classification["settled"]`: `_classify`'s existing loop already calls
+> `_effective_outcome` and skips `rejected`/`not_sent`, so recording those keys costs
+> nothing at acceptance, and the read narrows by `reflected | settled` -- set membership,
+> no per-attempt work. Deriving it in the read is what put the unbounded work back and
+> broke `test_current_cursor_cannot_hide_durable_commitment`.
 
 **Files:** `.../execution/capital_repository.py`, `.../execution/capital_runtime.py`,
 `backend_py/tests/integration/test_capital_repository.py`.
