@@ -110,9 +110,15 @@ Divergence is a halt condition, not a retry condition.
 `.../event_store/writer.py`, `backend_py/tests/modules/execution/test_canonical.py`.
 
 `canonical_event_hash(rows)` currently hashes a whole sequence, so verifying a prefix would
-itself be O(history). Add a rolling form persisted on `event_log`: each appended row stores
-`prefix_hash = H(previous_prefix_hash || canonical_event_record(row))`. Verifying a prefix then
-reads one row.
+itself be O(history). Add a rolling form, `prefix_hash = H(previous_prefix_hash ||
+canonical_event_record(row))`, so verifying a prefix reads one row.
+
+**Store it beside the ledger, never on it.** `event_log` is append-only and
+`guard_capital_event()` enforces that in PL/pgSQL for any row carrying
+`capital_authorization` or `capital_query_id`. A chain written as an UPDATE after INSERT is
+refused for exactly the snapshot events capital reads depend on, and historical rows can
+never be sealed at all. The chain lives in an insert-only `event_prefix_hashes` table keyed
+by `event_seq`; verification is still one indexed row.
 
 - [ ] RED: test that `prefix_hash` on the last row of a sequence is reproducible from
       `canonical_event_record` alone, and that reordering or mutating any earlier row changes it.
@@ -124,7 +130,18 @@ reads one row.
       untouched. Do not redefine the release evidence contract in this task.
 
 **Caution:** the backfill must be deterministic and run inside the migration, not lazily at
-runtime. A NULL `prefix_hash` must block, never be treated as "not yet computed".
+runtime. A missing chain link must block, never be treated as "not yet computed".
+
+**Also update `_READY_PROJECTOR_MIGRATIONS`.** Its docstring says the allow-list is updated
+alongside each migration that preserves the seeded cursor contract, and nothing enforces
+that. Omitting a revision makes the writer refuse every append after deployment -- a total
+halt. sqlite has no `alembic_version`, so the check is skipped and the suite stays green.
+
+**Neither hazard is reachable from the default suite**: integration fixtures build the
+schema with `create_all`, so none of the 22 production triggers exist.
+`tests/integration/test_event_log_immutability.py` runs the real migrations and appends a
+capital-bearing event through the real writer, and asserts its own premises so it cannot
+quietly stop discriminating.
 
 ## Task 2: Persist the capital position at snapshot acceptance — **done**
 
