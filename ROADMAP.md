@@ -53,6 +53,16 @@ canary 真錢 daemon 上線後（2026-05-25），帳戶於 **2026-05-26 入金 ~
   decision 時 bump），不該當 liveness。修法：移出 liveness，HeartbeatGuard 改 watch `ws`（安靜市場靠 hb
   frame 保持 fresh）。見 `docs/superpowers/plans/2026-05-26-executor-liveness-health-refactor.md`。
 
+- 🔄 **capital 授權讀取無界（2026-09-20，未修，blocker）**：`capital_policy` guard 每次評估都
+  `eval_timeout >2.0s` 並 fail closed → **即使解除 halt，每一張單仍會被擋**。Root cause =
+  `_read_capital` 每次讀取全量反序列化 3,703 筆 `RESERVATION_INTENT`（掃兩次），`_historical_cycles`
+  每次載入整個 event log；成本是 O(全部歷史)，已越過 2 秒預算。量測：guard 執行期間 PG 為
+  `idle in transaction/ClientRead`（DB 已完成在等應用）、bot 吃滿單核、payload 僅 1,918 bytes。
+  失敗模式的嚴重性在於**無聲**：工作量隨歷史成長，系統某天起變成「全部擋掉」且無任何告警。
+  修法 = 把稽核移出授權熱路徑（物化 capital position + prefix-hash 綁定 + 尾端 fold；全量重推移到
+  snapshot acceptance / boot recovery / periodic reconcile，不一致就寫 durable halt）。
+  plan `docs/superpowers/plans/2026-09-20-capital-authority-bounded-reads.md`。
+
 **已知未收尾（loose ends，非 blocker）：**
 - `realized_loss_24h` / `drawdown_from_peak` 兩個 calibrated guard 目前接 `_StubPnLSource`（回傳 0）→
   空轉；真 PnLLedger（aggregates realized P&L from order_fill events）待接。放貸利息恆正、本金有平台

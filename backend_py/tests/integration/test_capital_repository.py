@@ -918,3 +918,80 @@ async def test_historical_capital_read_has_bounded_scope_queries_and_validation(
             assert len(statements) < 30, statements
     finally:
         sql_event.remove(capital_engine.sync_engine, "before_cursor_execute", record_sql)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="capital read is O(history); fixed by Task 3 of "
+           "docs/superpowers/plans/2026-09-20-capital-authority-bounded-reads.md. "
+           "strict=True so landing that task forces removing this marker.",
+)
+async def test_capital_read_work_does_not_grow_with_history(capital_db, monkeypatch):
+    """Authorization work must be bounded by construction, not by a wall-clock timeout.
+
+    The sibling bounded-scope test counts SQL *statements*, which stayed flat while the
+    work per read grew with every intent ever recorded — so it never discriminated. Count
+    the work itself: deserialization is what consumed the guard budget in production on
+    2026-09-20 (3,703 RESERVATION_INTENT rows, `capital_policy eval_timeout >2.0s`, every
+    offer blocked regardless of halt state, with no signal that anything had degraded).
+
+    Pins guarantee: authorization is bounded. Completeness is pinned separately by the
+    prefix-hash and historical-cycle tests; this one must fail on unbounded work alone.
+    """
+    import bfx_funding_bot.modules.execution.capital_repository as module
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+
+    factory, small_account = capital_db
+    large_account = uuid4()
+    async with factory.begin() as session:
+        session.add(ExchangeAccount(id=large_account, venue="bitfinex", label="capital-large"))
+
+    async def seed(account, cycle_pairs):
+        rows = []
+        for index in range(cycle_pairs):
+            for row in historical_rows(environment="ci"):
+                row.account_id = row.payload["account_id"] = str(account)
+                row.exchange_account_id = account
+                row.cid = row.payload["cid"] = 1000 + index
+                if row.venue_offer_id:
+                    row.venue_offer_id = row.payload["venue_offer_id"] = f"{index}-{row.venue_offer_id}"
+                rows.append(row)
+        async with factory.begin() as session:
+            session.add_all(rows)
+            await session.flush()
+            await module.PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+                session, account_id=str(account), deployment_environment="ci",
+            )
+        repo = repository(account)
+        await setup_policy(factory, repo)
+        await snapshot(factory, repo)
+        return repo
+
+    async def deserializations(repo):
+        calls = 0
+        real = module.deserialize_stored_event
+
+        def counting(row):
+            nonlocal calls
+            calls += 1
+            return real(row)
+
+        monkeypatch.setattr(module, "deserialize_stored_event", counting)
+        try:
+            async with factory.begin() as session:
+                view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+                assert view.budget.spendable == 900
+        finally:
+            monkeypatch.setattr(module, "deserialize_stored_event", real)
+        return calls
+
+    small, large = 2, 64
+    small_calls = await deserializations(await seed(small_account, small))
+    large_calls = await deserializations(await seed(large_account, large))
+
+    # History grew by (64-2)*6 = 372 events. A bounded read re-derives nothing from the
+    # proven prefix, so its work must not track that growth.
+    assert large_calls - small_calls <= 2, (
+        f"read work grew with history: {small} pairs -> {small_calls} deserializations, "
+        f"{large} pairs -> {large_calls}"
+    )
