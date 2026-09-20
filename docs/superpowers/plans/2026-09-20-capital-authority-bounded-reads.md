@@ -133,8 +133,9 @@ runtime. A NULL `prefix_hash` must block, never be treated as "not yet computed"
 
 `accept_snapshot` already runs under `_prepare` (writer lock), already validates the observation
 and already computes the classification. Extend it to record `covered_prefix_hash` from the
-evidence event's `event_log.prefix_hash`, and to run the full historical validation once here,
-where the fence is set.
+evidence event's `event_log.prefix_hash` (**done**, commit 68e88cb), and to run the full
+historical validation once here, where the fence is set (**not done, and Task 3 is unsafe
+without it**).
 
 - [ ] RED: a read after acceptance returns exactly what the current full-scan `_read_capital`
       returns for the same state (differential test against the old implementation, which stays
@@ -146,6 +147,21 @@ where the fence is set.
 - [ ] GREEN: implement, with migration via `alembic revision --autogenerate` then reviewed by hand.
 
 ## Task 3: Bounded hot-path read
+
+> **Blocked on Task 2's second half, and the order matters.** Attempted 2026-09-20 and
+> reverted. Skipping intents at or before the fence also skips
+> `_check_historical_intent`, which proves a legacy intent's cycle terminated before the
+> fence. Without that proof, capital that is still committed reads as available, and the
+> account overspends. The prefix hash does not cover this: it detects a *mutated* prefix,
+> while this is about a prefix that was never provably settled. So acceptance must run the
+> historical proof before any read is allowed to skip it.
+>
+> The scaffolding is in place and green: `_snapshot_basis` is shared by both paths,
+> `_read_capital_full` is the audit definition, `_attempt_inventory` takes
+> `after_event_seq` and `reflected`, and `test_bounded_read_agrees_with_full_rederivation`
+> guards the switch. Enabling the bounded body without the acceptance proof is the one
+> thing that must not happen.
+
 
 **Files:** `.../execution/capital_repository.py`, `.../execution/capital_runtime.py`,
 `backend_py/tests/integration/test_capital_repository.py`.
