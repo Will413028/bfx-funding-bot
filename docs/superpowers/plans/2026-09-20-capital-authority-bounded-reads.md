@@ -213,7 +213,7 @@ the full intent scan live here, with no 2s budget.
 
 **Rationale:** today's incident had no warning signal. The only symptom was total blockage.
 
-## Task 6: Rewrite affected regressions and contracts
+## Task 6: Rewrite affected regressions and contracts — **done**
 
 **Files:** `backend_py/tests/integration/test_capital_repository.py`,
 `backend_py/ARCHITECTURE.md`, `AGENTS.local.md` (ignored, personal lookup section).
@@ -222,11 +222,15 @@ the full intent scan live here, with no 2s budget.
 tests currently assert *per-read full validation*. Their intent — completeness cannot be assumed —
 must be re-expressed against the new contract, not deleted.
 
-- [ ] Each rewritten test states in a comment which of the four guarantees it pins.
-- [ ] `ARCHITECTURE.md` documents the position projection, the prefix-hash binding, and that
-      full re-derivation is an audit-path responsibility.
-- [ ] Update the `AGENTS.local.md` "Capital authority regression lookup" commands, which currently
-      point at `_attempt_inventory` and the cross-read-cache wording.
+- [x] The rewritten tests name the guarantee they pin, and the bounded-scope test now pins that
+      full validation is renewed per acceptance and never per read, with the reason it cannot be
+      per read: its scope is all of history.
+- [x] `ARCHITECTURE.md` documents the authorization/audit split, the three facts acceptance
+      persists, why the prefix hash does not cover the historical proof, and why an unsettled
+      history records a verdict instead of refusing the observation.
+- [x] `AGENTS.local.md` no longer tells the next reader to verify per read and never cache across
+      reads -- that guidance became wrong the moment completeness moved to a prefix hash. It now
+      names both traps hit on the way here.
 
 ## Deployment note
 

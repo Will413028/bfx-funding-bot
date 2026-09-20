@@ -259,6 +259,33 @@ cell_limit 為 `max(0, total_capital - reserve) ×0.70`，cell_headroom 扣除�
 spendable/headroom 的最小值。只有一個 active cell 也不放寬為100%。USD 明確
 disabled，但所有 USD wallet/offers/credits 仍納入 full-account reconciliation。
 未知/過期 snapshot、pending query、缺少 policy 全部 block，無 env/YAML fallback。
+
+**授權與稽核分離（2026-09-20）**：授權讀取（每筆決策、`capital_policy` guard，預算
+`GUARD_EVAL_TIMEOUT_SECONDS=2.0s`）**結構上有界**，只 fold accepted fence 之後的承諾；
+稽核（全量重推整段歷史）留在沒有時間預算的地方。fence 以下的承諾不可能改變答案——
+snapshot 不是已計入就是讓 fold 拒絕；重掃它們問的是完整性問題，屬於稽核。
+
+讓讀取有資格跳過已證明的前綴，靠三件在 **acceptance** 決定並持久化的事實：
+
+1. `capital_snapshots.covered_prefix_hash` — 該 classification 推導自哪段 ledger 前綴。
+   驗證是免費的：讀取本來就會載入該 evidence event，而 `event_log.prefix_hash` 由
+   `AccountEventWriter` 在唯一 append 入口以 rolling hash 維護（`H(prev ‖ record)`），
+   所以驗證一段前綴只需讀一列，不是重算整段。NULL 視為**未證明**而非不存在。
+2. 每筆 legacy intent 已被證明在 fence 或之前終結（`_assert_historical_intents_settled`）。
+   少了它，仍被佔用的資金會被讀成可動用。**prefix hash 蓋不到這件事**——它偵測「前綴被竄改」，
+   這裡的問題是「前綴從未被證明已結清」。
+3. `classification["settled"]` — 未花費即結束的 attempt。少了它，已結清的 attempt 在尾端
+   沒有對應 intent，會被誤報成未計入的承諾。
+
+acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
+（`capital_snapshots.authorization_blocked_reason`，讀取以相同錯誤碼 fail closed）。
+拒絕記錄觀測會連帶擋掉「解開該狀態所需的觀測」，會死鎖自己的復原。
+
+**通則**：任何需要走訪歷史的判斷都在 acceptance 做完並存下結論，授權路徑只讀結論。
+把這類判斷留在授權路徑上，等於讓工作量隨歷史成長，而 fail-closed timeout 會把它
+**無聲地**變成「全部擋掉」——2026-09-20 即如此（`capital_policy` 2.31s vs 2.0s 預算，
+每張單被擋，第一個訊號就是全面阻斷）。因此 guard 用掉 `GUARD_EVAL_WARN_FRACTION`
+預算即記錄 `guard_slow` 並**仍放行**；timeout 是病態偵測，不是正確性邊界。
 以下舊 gap/tracker 步驟僅說明 simulation helper／歷史演算法，不是 live 金額權限。
 
 逐步流程（一個完整 decision-to-redeploy 週期）：
