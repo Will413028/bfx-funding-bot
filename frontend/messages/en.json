@@ -56,8 +56,13 @@
     "twoFactorTitle": "Two-factor verification",
     "twoFactorDescription": "Enter the authentication code from your authenticator app.",
     "authenticationCode": "Authentication code",
+    "backupCode": "Backup code",
+    "backupCodeDescription": "Enter one of your saved backup codes.",
+    "useBackupCode": "Use a backup code",
+    "useAuthenticationCode": "Use an authentication code",
     "verify": "Verify",
-    "invalidTwoFactorCode": "Invalid authentication code"
+    "invalidTwoFactorCode": "Invalid authentication code",
+    "invalidBackupCode": "Invalid backup code"
   },
   "overview": {
     "title": "Dashboard",
@@ -162,6 +167,7 @@
   },
   "settings": {
     "title": "Settings",
+    "security": "Security",
     "account": "Account",
     "email": "Email",
     "statusLabel": "Status",
@@ -176,6 +182,29 @@
     "passwordChanged": "Password Changed!",
     "changePasswordFailed": "Failed to change password",
     "loadFailed": "Failed to load user data"
+  },
+  "securityEnrollment": {
+    "title": "Two-factor authentication",
+    "description": "Protect the operator account with an authenticator app and recovery codes.",
+    "enabled": "Two-factor authentication is enabled",
+    "currentPassword": "Current password",
+    "start": "Set up two-factor authentication",
+    "startFailed": "Could not start two-factor setup. Check your password and try again.",
+    "scanTitle": "Scan the authenticator QR code",
+    "scanDescription": "Scan this code locally with your authenticator app, then save every backup code.",
+    "qrTitle": "Authenticator QR code",
+    "backupCodesTitle": "Backup codes",
+    "backupCodesDescription": "Store these codes somewhere safe. Each code can be used once.",
+    "savedCodes": "I saved my backup codes",
+    "continue": "Continue to verification",
+    "verifyTitle": "Verify your authenticator",
+    "verifyDescription": "Enter the current six-digit code from your authenticator app.",
+    "authenticationCode": "Six-digit authentication code",
+    "sixDigitCodeRequired": "Enter a six-digit code.",
+    "invalidCode": "Invalid authentication code. Try again.",
+    "confirmationFailed": "Verification could not be confirmed. Sign in again and retry.",
+    "verify": "Verify and finish",
+    "cancel": "Cancel setup"
   },
   "history": {
     "title": "Executions",
