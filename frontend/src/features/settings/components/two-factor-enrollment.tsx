@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
 
-type EnrollmentStep = "password" | "verify" | "complete";
+type EnrollmentStep = "password" | "verify" | "recovery" | "complete";
 
 interface EnrollmentSecrets {
   totpURI: string;
@@ -91,6 +91,14 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
     setError(null);
   }
 
+  function requireFreshSignIn() {
+    setCode("");
+    setSecrets(null);
+    setSavedCodes(false);
+    setError(null);
+    setStep("recovery");
+  }
+
   async function verify(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const submittedCode = code.trim();
@@ -104,31 +112,43 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
     const currentOperation = ++operation.current;
     setIsSubmitting(true);
     try {
-      const result = await authClient.twoFactor.verifyTotp({
-        code: submittedCode,
-        trustDevice: false,
-      });
+      let result: Awaited<ReturnType<typeof authClient.twoFactor.verifyTotp>>;
+      try {
+        result = await authClient.twoFactor.verifyTotp({
+          code: submittedCode,
+          trustDevice: false,
+        });
+      } catch {
+        if (currentOperation === operation.current) {
+          requireFreshSignIn();
+        }
+        return;
+      }
       if (currentOperation !== operation.current) return;
       if (result.error) {
         setError(t("invalidCode"));
         return;
       }
 
-      const refreshed = await authClient.getSession({
-        query: { disableCookieCache: true },
-      });
+      let refreshed: Awaited<ReturnType<typeof authClient.getSession>>;
+      try {
+        refreshed = await authClient.getSession({
+          query: { disableCookieCache: true },
+        });
+      } catch {
+        if (currentOperation === operation.current) {
+          requireFreshSignIn();
+        }
+        return;
+      }
       if (currentOperation !== operation.current) return;
       if (refreshed.error || refreshed.data?.user.twoFactorEnabled !== true) {
-        setError(t("confirmationFailed"));
+        requireFreshSignIn();
         return;
       }
 
       setSecrets(null);
       setStep("complete");
-    } catch {
-      if (currentOperation === operation.current) {
-        setError(t("invalidCode"));
-      }
     } finally {
       if (currentOperation === operation.current) {
         setIsSubmitting(false);
@@ -177,6 +197,17 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
             </Button>
           </div>
         </form>
+      </section>
+    );
+  }
+
+  if (step === "recovery") {
+    return (
+      <section className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
+        <h1 className="font-semibold text-xl">{t("verifyTitle")}</h1>
+        <p role="alert" className="mt-2 text-sm text-destructive">
+          {t("confirmationFailed")}
+        </p>
       </section>
     );
   }
@@ -261,7 +292,12 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
             {isSubmitting && <Loader2 className="animate-spin" />}
             {t("verify")}
           </Button>
-          <Button type="button" variant="outline" onClick={cancel}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={cancel}
+            disabled={isSubmitting}
+          >
             {t("cancel")}
           </Button>
         </div>
