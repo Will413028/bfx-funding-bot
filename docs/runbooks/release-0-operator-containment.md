@@ -124,11 +124,19 @@ node /app/scripts/bootstrap-operator.mjs --apply \
 apply 先 reserve mode `0600` audit，才開始 bounded DB transaction；鎖住 authority
 後只將 configured ID 的 `role` 改為 exact `admin`，不改 enrollment/auth flags。
 commit 後只依 operator inventory 刪除其 list、exact session tokens 與對應
-`bfx:mfa-verified:<token>`。`partial_failure` 必須保持 halt；修復 dependency 後用
-新的 audit path 重跑同一 sole admin，直到 `completed`。既有 audit path 永不覆寫。
+`bfx:mfa-verified:<token>`。若 COMMIT acknowledgement 遺失，receipt 會標示
+`status=outcome_unknown`、unknown database outcome 與 required reconciliation；不得
+把它解讀為未提交或繼續 Redis 階段。若 Redis batch acknowledgement 遺失，receipt
+只記錄已確認刪除數的 lower bound、unknown batch 與 inventory 狀態；inventory 在
+所有 session-key batches 確認前保留，供安全重試。以上情況或 `partial_failure` 都必須
+保持 halt；核對 receipt、修復 dependency 後用新的 audit path 重跑同一 sole admin，
+直到 `completed`。既有 audit path 永不覆寫。
 
-Bootstrap 會撤銷 enrollment session。完成後必須重新登入並完成 TOTP，確認新的
-fresh operator session；不得以舊 cookie 或人工 Redis marker 作 proof。
+Bootstrap 會撤銷 enrollment session。完成後瀏覽器先回 Overview，使用既有 desktop
+sidebar 或 mobile menu 的 Logout 清除舊 cookie，再 fresh sign-in 並完成 TOTP，確認
+新的 fresh operator session；不得以舊 cookie 或人工 Redis marker 作 proof。若撤銷後
+stale cookie 令 Security page 顯示 404，不要在該頁重試或手改資料，仍依上述 Overview
+Logout 路徑重新登入。
 
 ## 3. Non-operator inventory first (read-only)
 

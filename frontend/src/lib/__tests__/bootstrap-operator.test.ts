@@ -46,6 +46,7 @@ function makeFixture(
     finalAuditError?: string;
     redisGetFailures?: number;
     redisDeleteFailureCall?: number;
+    commitAcknowledgementFailures?: number;
   } = {},
 ) {
   const users = structuredClone(
@@ -109,6 +110,8 @@ function makeFixture(
     after: string;
   }> = [];
   let redisGetFailures = overrides.redisGetFailures ?? 0;
+  let commitAcknowledgementFailures =
+    overrides.commitAcknowledgementFailures ?? 0;
   let redisDeleteCalls = 0;
   let inTransaction = false;
   let snapshots: UserRow[] | undefined;
@@ -126,6 +129,10 @@ function makeFixture(
       if (normalized === "COMMIT") {
         inTransaction = false;
         snapshots = undefined;
+        if (commitAcknowledgementFailures > 0) {
+          commitAcknowledgementFailures -= 1;
+          throw new Error("synthetic COMMIT acknowledgement failure");
+        }
         return { rowCount: null, rows: [] };
       }
       if (normalized === "ROLLBACK") {
@@ -545,6 +552,58 @@ describe("audited first-admin bootstrap", () => {
     expect(fixture.changedRoles()).toEqual([]);
   });
 
+  it("records an unknown database outcome when COMMIT applies before acknowledgement is lost", async () => {
+    const fixture = makeFixture({ commitAcknowledgementFailures: 1 });
+
+    const first = await main(
+      [
+        "--apply",
+        "--confirm-bootstrap-admin",
+        "--audit-file",
+        "/audit/commit-unknown.json",
+      ],
+      successfulEnv(),
+      fixture.dependencies,
+    );
+
+    expect(first).toMatchObject({
+      status: "outcome_unknown",
+      failureCode: "database_outcome_unknown",
+      transactionPhase: "commit_acknowledgement_unknown",
+      databaseOutcome: "unknown",
+      dbCommitted: null,
+      roleChanged: null,
+      reconciliationRequired: true,
+    });
+    expect(fixture.users.find((row) => row.id === OPERATOR_ID)?.role).toBe(
+      "admin",
+    );
+    expect(fixture.events.some((event) => event.startsWith("redis:"))).toBe(
+      false,
+    );
+    expect(fixture.auditWrites.at(-1)).toEqual(first);
+
+    const retry = await main(
+      [
+        "--apply",
+        "--confirm-bootstrap-admin",
+        "--audit-file",
+        "/audit/commit-retry.json",
+      ],
+      successfulEnv(),
+      fixture.dependencies,
+    );
+
+    expect(retry).toMatchObject({
+      status: "completed",
+      databaseOutcome: "committed",
+      dbCommitted: true,
+      roleChanged: false,
+      reconciliationRequired: false,
+      revokedSessionCount: 1,
+    });
+  });
+
   it("fails closed on malformed session inventory without deleting any Redis key", async () => {
     const redis = new Map([
       [`active-sessions-${OPERATOR_ID}`, '[{"token":"missing-expiry"}]'],
@@ -621,7 +680,7 @@ describe("audited first-admin bootstrap", () => {
     );
   });
 
-  it("keeps the inventory until every bounded session-delete batch succeeds", async () => {
+  it("records acknowledged Redis progress and keeps inventory when a later batch acknowledgement is lost", async () => {
     const inventory = Array.from({ length: 60 }, (_, index) => ({
       token: `operator-session-${index}`,
       expiresAt: 4_102_444_800_000,
@@ -648,8 +707,18 @@ describe("audited first-admin bootstrap", () => {
 
     expect(first).toMatchObject({
       status: "partial_failure",
-      failureCode: "redis_operation_failed",
+      failureCode: "redis_outcome_unknown",
       dbCommitted: true,
+      activeSessionCount: 60,
+      revokedSessionCount: null,
+      revokedKeyCount: 100,
+      revokedKeyCountIsLowerBound: true,
+      redisAcknowledgedBatchCount: 1,
+      redisUnknownBatchNumber: 2,
+      redisUnknownBatchKind: "session_keys",
+      redisDeletionOutcome: "batch_acknowledgement_unknown",
+      redisInventoryRetained: true,
+      reconciliationRequired: true,
     });
     expect(redis.has(`active-sessions-${OPERATOR_ID}`)).toBe(true);
 
@@ -664,7 +733,14 @@ describe("audited first-admin bootstrap", () => {
       fixture.dependencies,
     );
 
-    expect(retry).toMatchObject({ status: "completed", roleChanged: false });
+    expect(retry).toMatchObject({
+      status: "completed",
+      roleChanged: false,
+      revokedSessionCount: 60,
+      revokedKeyCountIsLowerBound: false,
+      redisDeletionOutcome: "completed",
+      reconciliationRequired: false,
+    });
     expect(redis.size).toBe(0);
   });
 
