@@ -80,6 +80,13 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 
 log = logging.getLogger(__name__)
 
+# How far the live minimum may move past the authorised amount before the
+# submission is no longer the action that was approved. A reviewed system
+# constant, not a per-session field: this absorbs seconds of stablecoin-pair
+# noise, it is not a risk preference anyone would tune per offer. Revisions are
+# logged, so a tolerance that starts being used routinely is visible.
+RELEASE_MINIMUM_TOLERANCE = Decimal("0.01")
+
 
 class _LedgerProtocol(Protocol):
     def current_exposure(self, symbol: str) -> Decimal: ...
@@ -285,10 +292,31 @@ class DeploymentReconciler:
                 min_fill = minimum_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
                 if release is not None:
-                    validate_amount(release.amount, amount_evidence, symbol=symbol, now_ms=self._clock())
+                    amount = release.amount
+                    if min_fill > amount:
+                        # The venue rule is USD-denominated, so its UST equivalent
+                        # drifts with FX between authorisation and submission.
+                        # Revising to the live minimum is the same economic action;
+                        # discarding the session costs a whole DR window. The rule
+                        # itself is never fudged -- min_fill is exact, and
+                        # validate_amount below still has the final word.
+                        ceiling = min(
+                            amount * (Decimal(1) + RELEASE_MINIMUM_TOLERANCE),
+                            release.max_amount,
+                        )
+                        if min_fill > ceiling:
+                            raise ValueError(
+                                "funding_amount_below_minimum_or_invalid_precision"
+                            )
+                        log.warning(
+                            "release_amount_revised symbol=%s authorized=%s submitted=%s",
+                            symbol, amount, min_fill,
+                        )
+                        amount = min_fill
+                    validate_amount(amount, amount_evidence, symbol=symbol, now_ms=self._clock())
                     view = views.get(release.cell)
-                    fills = ({release.cell: release.amount}
-                             if view is not None and view.budget.max_new_offer >= release.amount else {})
+                    fills = ({release.cell: amount}
+                             if view is not None and view.budget.max_new_offer >= amount else {})
             except Exception as exc:
                 if release is not None:
                     raise
