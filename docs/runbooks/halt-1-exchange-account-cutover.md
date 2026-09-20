@@ -217,6 +217,8 @@ GRANT SELECT ON TABLE
   public.position_state,
   public.offer_claims,
   public.event_log,
+  public.execution_uncertainties,
+  public.submission_attempts,
   public.attribution_weekly,
   public.funding_candles
 TO bfx_webapi;
@@ -227,13 +229,21 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bf
 -- Run as the role owner and retain the output as release evidence.
 SET ROLE bfx_webapi;
 SELECT has_table_privilege(current_user, 'public.position_state', 'SELECT') AS can_read_position,
+       has_table_privilege(current_user, 'public.execution_uncertainties', 'SELECT') AS can_read_uncertainties,
+       has_table_privilege(current_user, 'public.submission_attempts', 'SELECT') AS can_read_attempts,
        has_table_privilege(current_user, 'public.event_log', 'INSERT') AS can_write_event,
        has_table_privilege(current_user, 'public.exchange_account_credentials', 'UPDATE') AS can_update_credentials;
 RESET ROLE;
 ```
 
-預期結果為 `can_read_position=t`、`can_write_event=f`、
+預期結果為 `can_read_position=t`、`can_read_uncertainties=t`、`can_read_attempts=t`、`can_write_event=f`、
 `can_update_credentials=t`；任何其他 privilege 都停止 release，先修正 role。
+
+`uncertainties` list/detail 需要讀取 uncertainty projection 與 submission attempt
+才能建立 server-derived resolution context；空表也需要 SELECT 權限。這兩張表
+只授予 SELECT，不授予 INSERT/UPDATE/DELETE/TRUNCATE。既有環境若缺少這兩項
+讀取權限，可由 role owner 補授相同的 SELECT，無須重啟服務或更動 schema head。
+以受限角色驗證 API 的空集合與含 UNKNOWN 情境，不能只用 database owner 測試。
 
 啟動後另驗 webapi `/ready` 回 200。只驗 `SELECT 1` 不足以證明 schema
 readiness：以 `bfx_webapi` 實際讀取 `alembic_version.version_num`，並確認仍無

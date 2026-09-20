@@ -88,6 +88,49 @@ def test_missing_policy_stops_before_renaming_or_starting_apps(tmp_path, monkeyp
     assert not any(cmd[:2] == ["docker", "rename"] for cmd in calls)
 
 
+@pytest.mark.parametrize("drift", [None, "Id", "Source", "Destination", "RW", "missing", "duplicate"])
+def test_deploy_mount_order_is_not_drift_but_mount_changes_are(tmp_path, monkeypatch, drift):
+    cli, args, bundle, release, _, _, _ = fixture(tmp_path, monkeypatch)
+    original_runner = cli.run
+    inspections = 0
+
+    def runner(command, *, data=None):
+        nonlocal inspections
+        raw = original_runner(command, data=data)
+        if command != ["docker", "inspect", "bfx-postgres", "bfx-redis"]:
+            return raw
+        inspections += 1
+        rows = json.loads(raw)
+        mounts = [
+            {"Type": "volume", "Name": "bfx_pgdata", "Source": "/volumes/pg", "Destination": "/var/lib/postgresql", "RW": True},
+            {"Type": "bind", "Source": "/config/pg.conf", "Destination": "/etc/pg.conf", "RW": False},
+        ]
+        if inspections == 2:
+            if drift == "Id":
+                rows[0]["Id"] = "recreated-pg"
+            elif drift in {"Source", "Destination", "RW"}:
+                mounts[0][drift] = False if drift == "RW" else "/different"
+            elif drift == "missing":
+                mounts.pop()
+            elif drift == "duplicate":
+                mounts.append(dict(mounts[0]))
+            mounts.reverse()
+        rows[0]["Mounts"] = mounts
+        return json.dumps(rows).encode()
+
+    monkeypatch.setattr(cli, "run", runner)
+    if drift:
+        with pytest.raises(cli.PackagingBlocked, match="infrastructure_changed"):
+            cli.deploy(args, bundle, release)
+        assert not list(tmp_path.glob("launch-*/deployment.json"))
+    else:
+        result = cli.deploy(args, bundle, release)
+        assert result["resumed"] is False
+        receipts = list(tmp_path.glob("launch-*/deployment.json"))
+        assert len(receipts) == 1
+        assert json.loads(receipts[0].read_text()) == result
+
+
 @pytest.mark.parametrize("realm", [None, "ci"])
 def test_webapi_realm_missing_or_mismatched_blocks_before_rename_or_start(tmp_path, monkeypatch, realm):
     cli, args, bundle, release, calls, checks, launches = fixture(tmp_path, monkeypatch)
