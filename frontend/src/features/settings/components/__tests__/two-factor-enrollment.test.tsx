@@ -204,7 +204,11 @@ describe("TwoFactorEnrollment", () => {
   it("keeps verification active after failure without redisplaying secrets", async () => {
     auth.verifyTotp.mockResolvedValue({
       data: null,
-      error: { message: "fixture-sensitive-verification-error" },
+      error: {
+        code: "INVALID_CODE",
+        status: 401,
+        message: "fixture-sensitive-verification-error",
+      },
     });
     render(<TwoFactorEnrollment enrolled={false} />);
     await advanceToCodeEntry();
@@ -317,6 +321,39 @@ describe("TwoFactorEnrollment", () => {
       screen.getByRole("button", { name: "Sign out and sign in again" }),
     ).toBeDefined();
   });
+
+  it.each([
+    { status: 500 },
+    { status: 502 },
+    { status: 503 },
+    { status: 401, code: "INVALID_SESSION" },
+    { status: 400, code: "UNKNOWN" },
+  ])(
+    "requires fresh sign-in for resolved verification error %j",
+    async (error) => {
+      auth.verifyTotp.mockResolvedValue({ data: null, error });
+      render(<TwoFactorEnrollment enrolled={false} />);
+      await advanceToCodeEntry();
+      submitCode();
+
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "Verification could not be confirmed. Sign in again and retry.",
+      );
+      expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Verify and finish" }),
+      ).toBeNull();
+      expect(screen.queryByLabelText("Current password")).toBeNull();
+      expect(
+        screen.queryByLabelText("Six-digit authentication code"),
+      ).toBeNull();
+      expect(screen.queryByText("fixture-backup-code")).toBeNull();
+      expect(screen.queryByTitle("Authenticator QR code")).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Sign out and sign in again" }),
+      ).toBeDefined();
+    },
+  );
 
   it("requires a fresh sign-in when verification transport outcome is unknown", async () => {
     auth.verifyTotp.mockRejectedValue(new Error("fixture-verify-transport"));

@@ -103,13 +103,50 @@ describe("operator enrollment with real Better Auth endpoints", () => {
         code: invalidCode,
         trustDevice: false,
       });
-      expect(failed.error).not.toBeNull();
+      expect(failed.error?.code).toBe("INVALID_CODE");
       expect(redis.set).not.toHaveBeenCalled();
       const afterFailure = await instance.auth.api.getSession({
         headers,
         query: { disableCookieCache: true },
       });
       expect(afterFailure?.user.twoFactorEnabled).not.toBe(true);
+    });
+  });
+
+  it("resolves HTTP 500 after enrollment commits when the production marker hook fails", async () => {
+    const { instance, signedIn } = await createEnrollmentInstance();
+    await signedIn.runWithUser(async (headers) => {
+      const initial = await instance.auth.api.getSession({ headers });
+      if (!initial) throw new Error("synthetic session missing");
+      const generated = await enableAndGenerateCode(instance);
+      redis.set.mockRejectedValueOnce(new Error("synthetic marker outage"));
+
+      const result = await instance.client.twoFactor.verifyTotp({
+        code: generated.code,
+        trustDevice: false,
+      });
+
+      expect(result.error?.status).toBe(500);
+      expect(result.data).toBeNull();
+      expect(
+        await instance.db.findOne({
+          model: "user",
+          where: [{ field: "id", value: initial.user.id }],
+        }),
+      ).toMatchObject({ twoFactorEnabled: true });
+      expect(
+        await instance.db.findOne({
+          model: "twoFactor",
+          where: [{ field: "userId", value: initial.user.id }],
+        }),
+      ).toMatchObject({ verified: true });
+      expect(
+        await instance.auth.api.getSession({
+          headers,
+          query: { disableCookieCache: true },
+        }),
+      ).toBeNull();
+      expect(redis.values.size).toBe(0);
     });
   });
 
