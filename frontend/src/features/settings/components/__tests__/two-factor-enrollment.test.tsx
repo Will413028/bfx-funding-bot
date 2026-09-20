@@ -48,6 +48,17 @@ async function advanceToCodeEntry() {
   );
 }
 
+function submitCode(code = "012345") {
+  fireEvent.change(screen.getByLabelText("Six-digit authentication code"), {
+    target: { value: code },
+  });
+  fireEvent.submit(
+    screen
+      .getByRole("button", { name: "Verify and finish" })
+      .closest("form") as HTMLFormElement,
+  );
+}
+
 describe("TwoFactorEnrollment", () => {
   afterEach(cleanup);
 
@@ -202,14 +213,7 @@ describe("TwoFactorEnrollment", () => {
     render(<TwoFactorEnrollment enrolled={false} />);
     await advanceToCodeEntry();
 
-    fireEvent.change(screen.getByLabelText("Six-digit authentication code"), {
-      target: { value: "012345" },
-    });
-    fireEvent.submit(
-      screen
-        .getByRole("button", { name: "Verify and finish" })
-        .closest("form") as HTMLFormElement,
-    );
+    submitCode();
 
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Verification could not be confirmed. Sign in again and retry.",
@@ -217,6 +221,94 @@ describe("TwoFactorEnrollment", () => {
     expect(
       screen.queryByText("Two-factor authentication is enabled"),
     ).toBeNull();
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Set up two-factor authentication",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Verify and finish" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
+  });
+
+  it("blocks cancellation while verification is in flight and honors the committed result", async () => {
+    let resolveVerify:
+      | ((value: { data: { status: true }; error: null }) => void)
+      | undefined;
+    auth.verifyTotp.mockReturnValue(
+      new Promise((resolve) => {
+        resolveVerify = resolve;
+      }),
+    );
+    auth.getSession.mockResolvedValue({
+      data: { user: { twoFactorEnabled: true } },
+      error: null,
+    });
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToCodeEntry();
+
+    submitCode();
+    await waitFor(() => expect(auth.verifyTotp).toHaveBeenCalledOnce());
+
+    const cancel = screen.getByRole("button", { name: "Cancel setup" });
+    expect((cancel as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(cancel);
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+
+    resolveVerify?.({ data: { status: true }, error: null });
+
+    expect(
+      await screen.findByText("Two-factor authentication is enabled"),
+    ).toBeDefined();
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+  });
+
+  it("requires a fresh sign-in when session confirmation rejects after successful verification", async () => {
+    auth.verifyTotp.mockResolvedValue({ data: { status: true }, error: null });
+    auth.getSession.mockRejectedValue(new Error("fixture-session-transport"));
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToCodeEntry();
+
+    submitCode();
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Verification could not be confirmed. Sign in again and retry.",
+    );
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Set up two-factor authentication",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Verify and finish" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
+  });
+
+  it("requires a fresh sign-in when verification transport outcome is unknown", async () => {
+    auth.verifyTotp.mockRejectedValue(new Error("fixture-verify-transport"));
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToCodeEntry();
+
+    submitCode();
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Verification could not be confirmed. Sign in again and retry.",
+    );
+    expect(screen.queryByLabelText("Current password")).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Set up two-factor authentication",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Verify and finish" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
+    expect(auth.getSession).not.toHaveBeenCalled();
   });
 
   it("ignores an in-flight enable result after cancellation", async () => {
