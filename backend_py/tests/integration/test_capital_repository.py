@@ -1002,3 +1002,59 @@ async def test_capital_read_work_does_not_grow_with_history(capital_db, monkeypa
         f"read work grew with history: {small} pairs -> {small_calls} deserializations, "
         f"{large} pairs -> {large_calls}"
     )
+
+
+async def test_snapshot_records_the_prefix_it_was_derived_from(capital_db):
+    """Acceptance names the ledger prefix; a read checks that claim for free.
+
+    Pins guarantee (2): completeness is proved by a content hash of the covered
+    prefix, never by a cursor having advanced.
+    """
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
+
+    factory, account = capital_db
+    repo = repository(account)
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(CapitalSnapshotRow).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1)
+        )
+        evidence = await session.get(EventLogRow, row.event_seq)
+        assert row.covered_prefix_hash is not None
+        assert row.covered_prefix_hash == evidence.prefix_hash
+        # And the read accepts it.
+        view = await repository(account).read_capital(
+            session, symbol="fUST", cell_id="a30", now_ms=1100,
+        )
+        assert view.budget.spendable == 900
+
+
+@pytest.mark.parametrize("fault", ["mismatch", "unproven"])
+async def test_snapshot_whose_prefix_no_longer_matches_cannot_authorize(capital_db, fault):
+    """A classification derived from a prefix that is no longer the ledger's blocks.
+
+    NULL is unproven rather than absent: a snapshot accepted before the binding
+    existed has made no checkable claim, so it cannot authorize either.
+    """
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
+
+    factory, account = capital_db
+    repo = repository(account)
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(CapitalSnapshotRow).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1)
+        )
+        row.covered_prefix_hash = None if fault == "unproven" else "0" * 64
+        await session.flush()
+
+    async with factory.begin() as session:
+        with pytest.raises(CapitalBlockedError, match="snapshot_prefix_diverged"):
+            await repository(account).read_capital(
+                session, symbol="fUST", cell_id="a30", now_ms=1100,
+            )

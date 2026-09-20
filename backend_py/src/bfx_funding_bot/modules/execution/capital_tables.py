@@ -88,3 +88,9 @@ class CapitalSnapshotRow(Base):
     command_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Fixed canonical classification derived from THIS event, never mutable buckets.
     classification: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
+    # event_log.prefix_hash of THIS snapshot's evidence event, recorded at
+    # acceptance. Names the ledger prefix the classification was derived from, so a
+    # read can check that claim against the evidence row it already loads. Nullable
+    # only for rows accepted before this column existed; a read treats NULL as
+    # unproven and blocks, and the next accepted snapshot supplies it.
+    covered_prefix_hash: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -45,7 +45,7 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 log = logging.getLogger(__name__)
 
-RELEASE_SCHEMA_HEAD = "c3f5a1d7e204"
+RELEASE_SCHEMA_HEAD = "d1b7c2e4a305"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
