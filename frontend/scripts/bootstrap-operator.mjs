@@ -163,13 +163,15 @@ function validateTotp(rows, operatorId) {
   }
 }
 
-async function inspectAndAssign(pool, operatorId, mode) {
+async function inspectAndAssign(pool, operatorId, mode, operation) {
   const client = await pool.connect();
   let transactionOpen = false;
-  let committed = false;
+  let discardConnection = false;
+  let roleChangeIssued = false;
   try {
     await client.query(mode === "dry-run" ? "BEGIN READ ONLY" : "BEGIN");
     transactionOpen = true;
+    operation.transactionPhase = "validating_authority";
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
     if (mode === "apply") {
@@ -203,11 +205,13 @@ async function inspectAndAssign(pool, operatorId, mode) {
     if (mode === "dry-run") {
       await client.query("ROLLBACK");
       transactionOpen = false;
-      return { dbCommitted: false, roleChanged: false };
+      operation.transactionPhase = "rolled_back";
+      operation.databaseOutcome = "not_committed";
+      return;
     }
 
-    let roleChanged = false;
     if (operator.role !== "admin") {
+      operation.transactionPhase = "updating_role";
       const update = await client.query(
         `UPDATE auth."user"
             SET role = 'admin', "updatedAt" = CURRENT_TIMESTAMP
@@ -215,24 +219,38 @@ async function inspectAndAssign(pool, operatorId, mode) {
         [operatorId],
       );
       if (update.rowCount !== 1) fail("operator_update_failed");
-      roleChanged = true;
+      roleChangeIssued = true;
     }
+    operation.transactionPhase = "commit_sent";
     await client.query("COMMIT");
     transactionOpen = false;
-    committed = true;
-    return { dbCommitted: true, roleChanged };
+    operation.transactionPhase = "committed";
+    operation.databaseOutcome = "committed";
+    operation.dbCommitted = true;
+    operation.roleChanged = roleChangeIssued;
   } catch (error) {
-    if (transactionOpen && !committed) {
+    if (operation.transactionPhase === "commit_sent") {
+      discardConnection = true;
+      operation.transactionPhase = "commit_acknowledgement_unknown";
+      operation.databaseOutcome = "unknown";
+      operation.dbCommitted = null;
+      operation.roleChanged = roleChangeIssued ? null : false;
+      operation.reconciliationRequired = true;
+      fail("database_outcome_unknown");
+    }
+    if (transactionOpen) {
       try {
         await client.query("ROLLBACK");
       } catch {
         // Preserve the bounded validation failure; no mutation was committed.
       }
+      operation.transactionPhase = "rolled_back";
+      operation.databaseOutcome = "not_committed";
     }
     if (error instanceof BootstrapError) throw error;
     fail("database_operation_failed");
   } finally {
-    client.release();
+    client.release(discardConnection);
   }
 }
 
@@ -270,7 +288,7 @@ function parseSessionInventory(raw) {
   return [...tokens];
 }
 
-async function inspectOrRevokeSessions(redis, operatorId, mode) {
+async function inspectOrRevokeSessions(redis, operatorId, mode, operation) {
   const listKey = `${SESSION_LIST_PREFIX}${operatorId}`;
   let tokens;
   try {
@@ -279,36 +297,57 @@ async function inspectOrRevokeSessions(redis, operatorId, mode) {
     if (error instanceof BootstrapError) throw error;
     fail("redis_operation_failed");
   }
+  operation.activeSessionCount = tokens.length;
 
   if (mode === "dry-run") {
-    return {
-      activeSessionCount: tokens.length,
-      revokedSessionCount: 0,
-      revokedKeyCount: 0,
-    };
+    operation.redisDeletionOutcome = "not_requested";
+    return;
   }
 
-  const keys = [
-    ...tokens.flatMap((token) => [token, `${MFA_MARKER_PREFIX}${token}`]),
-    // Keep the only bounded inventory until every token/marker batch succeeds.
-    // A retry can then resolve and safely re-delete keys from earlier batches.
-    listKey,
-  ];
-  let revokedKeyCount = 0;
-  try {
-    for (let index = 0; index < keys.length; index += DELETE_BATCH_SIZE) {
-      revokedKeyCount += await redis.del(
-        ...keys.slice(index, index + DELETE_BATCH_SIZE),
+  const sessionKeys = tokens.flatMap((token) => [
+    token,
+    `${MFA_MARKER_PREFIX}${token}`,
+  ]);
+  operation.redisDeletionOutcome = "in_progress";
+  operation.redisInventoryRetained = true;
+  for (
+    let index = 0, batchNumber = 1;
+    index < sessionKeys.length;
+    index += DELETE_BATCH_SIZE, batchNumber += 1
+  ) {
+    try {
+      operation.revokedKeyCount += await redis.del(
+        ...sessionKeys.slice(index, index + DELETE_BATCH_SIZE),
       );
+      operation.redisAcknowledgedBatchCount += 1;
+    } catch {
+      operation.revokedSessionCount = null;
+      operation.revokedKeyCountIsLowerBound = true;
+      operation.redisUnknownBatchNumber = batchNumber;
+      operation.redisUnknownBatchKind = "session_keys";
+      operation.redisDeletionOutcome = "batch_acknowledgement_unknown";
+      operation.reconciliationRequired = true;
+      fail("redis_outcome_unknown");
     }
-  } catch {
-    fail("redis_operation_failed");
   }
-  return {
-    activeSessionCount: tokens.length,
-    revokedSessionCount: tokens.length,
-    revokedKeyCount,
-  };
+
+  try {
+    operation.revokedKeyCount += await redis.del(listKey);
+    operation.redisAcknowledgedBatchCount += 1;
+  } catch {
+    operation.revokedSessionCount = null;
+    operation.revokedKeyCountIsLowerBound = true;
+    operation.redisUnknownBatchNumber =
+      operation.redisAcknowledgedBatchCount + 1;
+    operation.redisUnknownBatchKind = "inventory";
+    operation.redisInventoryRetained = null;
+    operation.redisDeletionOutcome = "batch_acknowledgement_unknown";
+    operation.reconciliationRequired = true;
+    fail("redis_outcome_unknown");
+  }
+  operation.revokedSessionCount = tokens.length;
+  operation.redisInventoryRetained = false;
+  operation.redisDeletionOutcome = "completed";
 }
 
 async function reserveAuditFile(path, initial) {
@@ -451,16 +490,30 @@ function initialRecord(dependencies, mode, operatorUserId) {
     mode,
     operatorUserId,
     status: "reserved",
+    transactionPhase: "not_started",
+    databaseOutcome: "not_started",
     dbCommitted: false,
     roleChanged: false,
+    reconciliationRequired: false,
     activeSessionCount: 0,
     revokedSessionCount: 0,
     revokedKeyCount: 0,
+    revokedKeyCountIsLowerBound: false,
+    redisAcknowledgedBatchCount: 0,
+    redisUnknownBatchNumber: null,
+    redisUnknownBatchKind: null,
+    redisInventoryRetained: null,
+    redisDeletionOutcome: "not_started",
   };
 }
 
 function failureCode(error, fallback) {
   return error instanceof BootstrapError ? error.code : fallback;
+}
+
+function failureStatus(operation) {
+  if (operation.databaseOutcome === "unknown") return "outcome_unknown";
+  return operation.dbCommitted ? "partial_failure" : "failed";
 }
 
 /**
@@ -506,9 +559,7 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
     }
 
     pool = dependencies.createPool(databaseUrl);
-    const database = await inspectAndAssign(pool, operatorId, options.mode);
-    operation.dbCommitted = database.dbCommitted;
-    operation.roleChanged = database.roleChanged;
+    await inspectAndAssign(pool, operatorId, options.mode, operation);
 
     redis = dependencies.createRedis(redisUrl);
     try {
@@ -516,10 +567,10 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
     } catch {
       fail("redis_operation_failed");
     }
-    const sessions = await inspectOrRevokeSessions(redis, operatorId, options.mode);
-    operation = { ...operation, ...sessions, status: "completed" };
+    await inspectOrRevokeSessions(redis, operatorId, options.mode, operation);
+    operation.status = "completed";
   } catch (error) {
-    operation.status = operation.dbCommitted ? "partial_failure" : "failed";
+    operation.status = failureStatus(operation);
     operation.failureCode = failureCode(error, "dependency_unavailable");
   } finally {
     if (redis) {
@@ -537,13 +588,13 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
     try {
       await audit.write(operation);
     } catch {
-      operation.status = operation.dbCommitted ? "partial_failure" : "failed";
+      operation.status = failureStatus(operation);
       operation.failureCode = "audit_write_failed";
     } finally {
       try {
         await audit.close();
       } catch {
-        operation.status = operation.dbCommitted ? "partial_failure" : "failed";
+        operation.status = failureStatus(operation);
         operation.failureCode = "audit_write_failed";
       }
     }

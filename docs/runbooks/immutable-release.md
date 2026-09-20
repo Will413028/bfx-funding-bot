@@ -330,10 +330,13 @@ frontend remains read-only and gets no audit/tmp mount, so do not `docker exec`
 into it; legacy Compose run is not release authority. Bootstrap independently
 requires the production DB's exact credential account, `twoFactorEnabled=true`
 and one verified TOTP row before assigning only the configured role. It then
-revokes only that operator's inventoried sessions. Sign in again and complete
-TOTP, then run the existing non-operator containment as a separate reviewed
-one-shot. Preserve both receipt chains and keep durable halt throughout. None of
-these steps authorizes a canary, permit, financial action, promotion or resume.
+revokes only that operator's inventoried sessions. Return to Overview, use the
+existing desktop-sidebar or mobile-menu Logout to clear the revoked session,
+then sign in fresh and complete TOTP; a stale-cookie 404 on Security is not a
+reason to modify auth state. Then run the existing non-operator containment as
+a separate reviewed one-shot. Preserve both receipt chains and keep durable halt
+throughout. None of these steps authorizes a canary, permit, financial action,
+promotion or resume.
 
 In Overview choose the existing account. Applied funding status shows revision,
 available/unreflected/reserve/spendable/total/unattributed values as server Decimal
