@@ -900,9 +900,11 @@ async def test_historical_capital_read_has_bounded_scope_queries_and_validation(
             session, account_id=str(account), deployment_environment="ci",
         )
     await setup_policy(factory, repo)
-    await snapshot(factory, repo)
     validator = Mock(wraps=module.historical_claim_reset_sequences)
     monkeypatch.setattr(module, "historical_claim_reset_sequences", validator)
+    await snapshot(factory, repo)
+    accepted = validator.call_count
+    assert accepted >= 1, "acceptance must run the full-scope validation"
     statements = []
 
     def record_sql(conn, cursor, statement, parameters, context, executemany):
@@ -911,27 +913,22 @@ async def test_historical_capital_read_has_bounded_scope_queries_and_validation(
 
     sql_event.listen(capital_engine.sync_engine, "before_cursor_execute", record_sql)
     try:
-        for read_number in (1, 2):
+        for _ in (1, 2):
             statements.clear()
             async with factory.begin() as session:
                 view = await repository(account).read_capital(
                     session, symbol="fUST", cell_id="a30", now_ms=1100,
                 )
                 assert view.budget.spendable == 900
-            # Full-scope validation is renewed for each locked read, not cached
-            # across transactions, and never repeated for each legacy intent.
-            assert validator.call_count == read_number
+            # Full-scope validation is renewed for each acceptance, where the fence
+            # is set, and never repeated per read or per legacy intent. A read that
+            # renewed it could not be bounded, because the scope is all of history.
+            assert validator.call_count == accepted
             assert len(statements) < 30, statements
     finally:
         sql_event.remove(capital_engine.sync_engine, "before_cursor_execute", record_sql)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="capital read is O(history); fixed by Task 3 of "
-           "docs/superpowers/plans/2026-09-20-capital-authority-bounded-reads.md. "
-           "strict=True so landing that task forces removing this marker.",
-)
 async def test_capital_read_work_does_not_grow_with_history(capital_db, monkeypatch):
     """Authorization work must be bounded by construction, not by a wall-clock timeout.
 
