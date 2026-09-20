@@ -307,10 +307,16 @@ class CapitalRepository:
             capital_classification_digest=_digest(classification))
         appended = await self._store.append_snapshot(session, observed)
         assert appended.event_seq is not None
+        # Bind the classification to the ledger prefix it was derived from. The
+        # writer sealed this row's chain link on append; an absent one means the
+        # evidence event did not go through the writer, which cannot be trusted.
+        evidence = await session.get(EventLogRow, appended.event_seq)
+        if evidence is None or evidence.prefix_hash is None:
+            raise CapitalBlockedError("snapshot_prefix_unavailable")
         session.add(CapitalSnapshotRow(event_seq=appended.event_seq, query_id=query.id,
             exchange_account_id=self.account_id, deployment_environment=self.environment,
             schema_version=SCHEMA_VERSION, command_fence=query.command_fence,
-            classification=classification))
+            classification=classification, covered_prefix_hash=evidence.prefix_hash))
         await session.flush()
         return appended
 
@@ -455,6 +461,10 @@ class CapitalRepository:
         logged = await session.get(EventLogRow, row.event_seq)
         if logged is None:
             raise CapitalBlockedError("snapshot_evidence_missing")
+        # Free check: the prefix this classification was derived from must still be
+        # the prefix in the ledger. NULL is unproven, not absent.
+        if row.covered_prefix_hash is None or logged.prefix_hash != row.covered_prefix_hash:
+            raise CapitalBlockedError("snapshot_prefix_diverged")
         event = deserialize_stored_event(logged)
         if not isinstance(event, VenueSnapshotObserved):
             raise CapitalBlockedError("snapshot_evidence_invalid")
