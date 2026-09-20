@@ -28,10 +28,11 @@ def configure_release_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         ReleaseRuntime,
         VerifiedRelease,
     )
+    from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
     manifest = ReleaseManifest(version=2, release_id="fixture", source_revision="a" * 40,
         image=PackagedImageIdentity(platform="linux/arm64", config_digest="sha256:" + "b" * 64,
             manifest_digest="sha256:" + "f" * 64),
-        inventory={}, python_inventory={}, environment={}, schema_head="b4e6f8a0c203",
+        inventory={}, python_inventory={}, environment={}, schema_head=RELEASE_SCHEMA_HEAD,
         projector_version="execution-state-v1")
     proof = VerifiedRelease(manifest=manifest, release_digest="c" * 64,
         config_digest="d" * 64, launch_id="e" * 32, actual_image_id=manifest.image.manifest_digest)
