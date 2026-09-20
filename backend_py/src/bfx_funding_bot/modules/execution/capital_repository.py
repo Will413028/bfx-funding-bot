@@ -8,7 +8,7 @@ any transport; never retry a committed intent after a crash.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -313,6 +313,20 @@ class CapitalRepository:
             raise CapitalBlockedError("snapshot_unstable")
         await self._assert_no_unknown(session)
         classification = await self._classify(session, event)
+        # Prove the legacy intents here, where the fence is set, for every symbol a
+        # read can later ask about. Doing it once at acceptance is what lets an
+        # authorization read skip re-deriving the prefix without ever reporting
+        # still-committed capital as available. A failure is recorded, not raised:
+        # the observation itself still has to be stored, or the state that needs
+        # settling can never be observed again.
+        blocked: str | None = None
+        try:
+            await self._assert_historical_intents_settled(
+                session, event=event, fence=query.command_fence,
+                symbols=tuple(classification["symbols"]),
+            )
+        except CapitalBlockedError as exc:
+            blocked = str(exc)
         observed = replace(event, capital_query_id=str(query.id),
             capital_command_fence=query.command_fence,
             capital_confirmation=serialize_event(confirmation),
@@ -328,7 +342,8 @@ class CapitalRepository:
         session.add(CapitalSnapshotRow(event_seq=appended.event_seq, query_id=query.id,
             exchange_account_id=self.account_id, deployment_environment=self.environment,
             schema_version=SCHEMA_VERSION, command_fence=query.command_fence,
-            classification=classification, covered_prefix_hash=evidence.prefix_hash))
+            classification=classification, covered_prefix_hash=evidence.prefix_hash,
+            authorization_blocked_reason=blocked))
         await session.flush()
         return appended
 
@@ -465,17 +480,18 @@ class CapitalRepository:
                             now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:
         """Authorization read. Delegates to the full re-derivation for now.
 
-        The bounded implementation is NOT safe to enable yet. Skipping intents at
-        or before the fence also skips ``_check_historical_intent``, which proves a
-        legacy intent's cycle terminated before the fence. Without that proof,
-        capital that is still committed reads as available, which overspends.
+        The bounded body is written and reverted twice; both preconditions it
+        needs are now real (acceptance proves legacy intents settled, and the
+        snapshot names its prefix), but one piece is unsolved.
 
-        Enabling it requires that proof to run at snapshot acceptance, where the
-        fence is set -- see Task 2 of
-        docs/superpowers/plans/2026-09-20-capital-authority-bounded-reads.md. The
-        scaffolding it needs is in place: ``_snapshot_basis`` is shared,
-        ``_attempt_inventory`` takes a fence and the reflected set, and
-        ``test_bounded_read_agrees_with_full_rederivation`` guards the switch.
+        Narrowing the intent side to the tail also has to narrow the attempt side,
+        or a settled attempt reads as unaccounted. Narrowing that side by effective
+        outcome is wrong twice over: it broke
+        ``test_current_cursor_cannot_hide_durable_commitment``, whose name is the
+        failure mode, and it calls ``_effective_outcome`` per attempt per read,
+        which is the unbounded work this change exists to remove. The attempt side
+        has to narrow by the intent's position relative to the fence, which is not
+        derivable from the attempt row today.
         """
         return await self._read_capital_full(
             session, symbol=symbol, cell_id=cell_id, now_ms=now_ms, applied=applied,
@@ -502,6 +518,10 @@ class CapitalRepository:
         # the prefix in the ledger. NULL is unproven, not absent.
         if row.covered_prefix_hash is None or logged.prefix_hash != row.covered_prefix_hash:
             raise CapitalBlockedError("snapshot_prefix_diverged")
+        if row.authorization_blocked_reason is not None:
+            # Acceptance already decided this, with the same code the live proof
+            # would raise. Reads keep failing closed without re-deriving it.
+            raise CapitalBlockedError(row.authorization_blocked_reason)
         event = deserialize_stored_event(logged)
         if not isinstance(event, VenueSnapshotObserved):
             raise CapitalBlockedError("snapshot_evidence_invalid")
@@ -550,19 +570,9 @@ class CapitalRepository:
         shared, exposure = basis.shared, basis.exposure
         pending = ZERO
         inventory = await self._attempt_inventory(session)
-        intents = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
-            EventLogRow.event_type == "RESERVATION_INTENT"))).all()
-        historical_cycles: dict[int, list[EventLogRow]] | None = None
-        for logged_intent in intents:
-            decoded = deserialize_stored_event(logged_intent)
-            if not isinstance(decoded, ReservationIntent) or decoded.symbol != symbol:
-                continue
-            if not isinstance(decoded.submission_attempt, SubmissionAttemptPayload):
-                if historical_cycles is None:
-                    historical_cycles = await self._historical_cycles(session)
-                await self._check_historical_intent(session, logged_intent, event, row.command_fence,
-                    historical_cycles.get(logged_intent.event_seq, ()))
-                continue
+        await self._assert_historical_intents_settled(
+            session, event=event, fence=row.command_fence, symbols=(symbol,),
+        )
         for logged_intent, decoded, attempt in inventory.values():
             if decoded.symbol != symbol:
                 continue
@@ -678,6 +688,31 @@ class CapitalRepository:
             if row.event_type in kinds and row.cid in current:
                 current[row.cid].append(row)
         return cycles
+
+    async def _assert_historical_intents_settled(
+        self, session: AsyncSession, *, event: VenueSnapshotObserved, fence: int,
+        symbols: Collection[str],
+    ) -> None:
+        """Prove every legacy intent's cycle terminated at or before the fence.
+
+        Legacy intents predate the attempt projection, so nothing else accounts for
+        them. Capital they still hold must not read as available. This is the proof
+        a bounded read is allowed to skip -- but only because it ran when the fence
+        was set, which is why acceptance calls it too.
+        """
+        intents = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
+            EventLogRow.event_type == "RESERVATION_INTENT"))).all()
+        historical_cycles: dict[int, list[EventLogRow]] | None = None
+        for logged_intent in intents:
+            decoded = deserialize_stored_event(logged_intent)
+            if not isinstance(decoded, ReservationIntent) or decoded.symbol not in symbols:
+                continue
+            if isinstance(decoded.submission_attempt, SubmissionAttemptPayload):
+                continue
+            if historical_cycles is None:
+                historical_cycles = await self._historical_cycles(session)
+            await self._check_historical_intent(session, logged_intent, event, fence,
+                historical_cycles.get(logged_intent.event_seq, ()))
 
     async def _check_historical_intent(self, session: AsyncSession, logged_intent: EventLogRow,
                                        snapshot: VenueSnapshotObserved, fence: int,
