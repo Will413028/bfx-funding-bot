@@ -4,9 +4,9 @@
 re-derivation to the audit paths that already exist, without weakening any guarantee the
 current full-scan provides.
 
-**Architecture:** A durable capital position projection carries the `event_seq` fence it covers
-and the `canonical_event_hash` of that covered prefix. The hot path verifies the prefix hash and
-folds only events after the fence. Full re-derivation runs at snapshot acceptance, boot recovery
+**Architecture:** The existing `capital_snapshots` row is the materialized position; it gains a
+binding to the ledger prefix it was derived from. The hot path verifies that binding on the
+evidence row it already loads, then folds only intents after the snapshot's `command_fence`. Full re-derivation runs at snapshot acceptance, boot recovery
 and periodic reconcile; divergence writes the durable halt. This is the pattern
 `verify_release_preflight` already uses for release evidence, applied to capital.
 
@@ -58,40 +58,49 @@ against the ledger on every read, it just does not re-derive from zero.
 
 ## Stable interfaces
 
-### `capital_positions` (new table)
+### Snapshot binding (no new table)
 
-One row per `(exchange_account_id, deployment_environment, symbol, cell_id)`:
+`capital_snapshots` already materializes the position: `classification` carries the
+per-symbol available/offered/credits/cells and the `reflected` set, and the row already
+carries `event_seq` and `command_fence`. Reading it costs one indexed row today. What is
+missing is only the binding to the ledger prefix it was derived from.
+
+Add to `capital_snapshots`:
 
 | column | meaning |
 |---|---|
-| `covered_event_seq` | the prefix fence this row was derived from |
-| `covered_event_hash` | `canonical_event_hash` of events `event_seq <= covered_event_seq` |
-| `pending_amount` | unreflected commitments folded into this prefix |
-| `cell_exposure` | per-cell exposure folded into this prefix |
-| `unattributed_credits` | shared exposure at this prefix |
-| `schema_version` | rejected when it does not match the code constant |
+| `covered_prefix_hash` | `event_log.prefix_hash` of the snapshot's evidence event at acceptance |
 
-Written only by the writer under the account lock, in the same transaction that advances the
-prefix. Never written by a read path.
+Verification is free: `_read_capital` already loads that evidence row
+(`session.get(EventLogRow, row.event_seq)`), and the row now carries its prefix hash. A
+mismatch means the prefix the snapshot was derived from is no longer the prefix in the
+ledger, which blocks.
+
+Rejected: a separate `capital_positions` table. It would duplicate `classification` and
+introduce a second thing that can disagree with the snapshot, which is the failure mode
+this work exists to remove.
 
 ### `read_capital` hot path
 
+Intents at or before `command_fence` cannot contribute: the loop either skips them
+(already reflected) or refuses (`unclassifiable_commitment`). Scanning them detects
+unreflected history, which is an integrity question, not an authorization one. So the
+hot path folds only `event_seq > command_fence`:
+
 ```python
-position = load_position(session, symbol=symbol, cell_id=cell_id)   # 1 indexed row
-if position is None or position.schema_version != SCHEMA_VERSION:
-    raise CapitalBlockedError("position_unavailable")
-prefix_hash = await prefix_hash_at(session, position.covered_event_seq)
-if prefix_hash != position.covered_event_hash:
-    raise CapitalBlockedError("position_prefix_diverged")
-tail = await events_after(session, position.covered_event_seq)      # normally 0..few rows
-snapshot = fold_tail(position, tail, symbol=symbol, cell_id=cell_id)
+logged = await session.get(EventLogRow, row.event_seq)      # already done today
+if logged.prefix_hash != row.covered_prefix_hash:
+    raise CapitalBlockedError("snapshot_prefix_diverged")
+tail = await intents_after(session, row.command_fence)      # normally 0..few rows
+snapshot = fold_tail(row.classification, tail, symbol=symbol, cell_id=cell_id)
 ```
 
-`prefix_hash_at` must not hash the prefix row-by-row on the hot path; see Task 2.
+`_historical_cycles` and the full intent scan move to the audit path (Task 4). They run
+once at acceptance, when the fence is set, and continuously in reconcile.
 
 ### Divergence
 
-`CapitalBlockedError("position_prefix_diverged")` and any audit-path mismatch are reported to
+`CapitalBlockedError("snapshot_prefix_diverged")` and any audit-path mismatch are reported to
 the existing halt store with actor `reconcile`, reason `capital_position_diverged:<detail>`.
 Divergence is a halt condition, not a retry condition.
 
@@ -123,17 +132,17 @@ runtime. A NULL `prefix_hash` must block, never be treated as "not yet computed"
 `backend_py/alembic/versions/`, `backend_py/tests/integration/test_capital_repository.py`.
 
 `accept_snapshot` already runs under `_prepare` (writer lock), already validates the observation
-and already computes the classification. Extend it to also derive and persist `capital_positions`
-for every configured `(symbol, cell)` at the accepted fence, with `covered_event_seq` and the
-Task 1 `prefix_hash`.
+and already computes the classification. Extend it to record `covered_prefix_hash` from the
+evidence event's `event_log.prefix_hash`, and to run the full historical validation once here,
+where the fence is set.
 
-- [ ] RED: accepting a snapshot writes positions whose folded values equal what the current
-      full-scan `_read_capital` returns for the same state (differential test against the old
-      implementation, which stays available as `_read_capital_full` for Task 4).
-- [ ] RED: a position row whose `covered_event_hash` does not match the ledger blocks with
-      `position_prefix_diverged`.
-- [ ] RED: writing a position from a read path is impossible — reads use a session that cannot
-      write these rows (restricted role test, following `test_release_migration.py`'s pattern).
+- [ ] RED: a read after acceptance returns exactly what the current full-scan `_read_capital`
+      returns for the same state (differential test against the old implementation, which stays
+      available as `_read_capital_full` for Task 4).
+- [ ] RED: a snapshot whose `covered_prefix_hash` does not match the evidence row blocks with
+      `snapshot_prefix_diverged`.
+- [ ] RED: a read path cannot write the binding — reads use a session without that privilege
+      (restricted role test, following `test_release_migration.py`'s pattern).
 - [ ] GREEN: implement, with migration via `alembic revision --autogenerate` then reviewed by hand.
 
 ## Task 3: Bounded hot-path read
@@ -163,7 +172,8 @@ handle exactly the event kinds that can change capital after a fence:
 
 Keep the existing full derivation as `_read_capital_full` and call it where a full proof belongs:
 boot recovery, snapshot acceptance, and the periodic reconcile tick (which already runs ~90s).
-Compare against the materialized position; on mismatch write the durable halt.
+Compare against the bounded read; on mismatch write the durable halt. `_historical_cycles` and
+the full intent scan live here, with no 2s budget.
 
 - [ ] RED: an injected divergence (a position row edited to disagree with the ledger) is detected
       by the reconcile tick and writes a halt with `capital_position_diverged`.
