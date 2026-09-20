@@ -178,21 +178,36 @@ handle exactly the event kinds that can change capital after a fence:
 - [ ] RED: UNKNOWN outcomes in the tail still fail closed.
 - [ ] GREEN: implement; measure a read against the production-sized history and record the number.
 
-## Task 4: Move full re-derivation to the audit path
+## Task 4: Move full re-derivation to the audit path — **re-scoped, mostly obsolete**
 
 **Files:** `.../execution/periodic_reconcile.py`, `.../execution/boot_recovery.py`,
 `.../execution/capital_repository.py`, `backend_py/tests/integration/`.
 
-Keep the existing full derivation as `_read_capital_full` and call it where a full proof belongs:
-boot recovery, snapshot acceptance, and the periodic reconcile tick (which already runs ~90s).
-Compare against the bounded read; on mismatch write the durable halt. `_historical_cycles` and
-the full intent scan live here, with no 2s budget.
+Written before Task 2 landed, and Task 2 landed somewhere better than planned. Reconcile
+already calls `accept_snapshot` roughly every 90s, and acceptance now runs the full
+historical settlement proof and re-derives the classification from scratch. **The audit
+path is already running continuously; it is acceptance.** Adding a second full
+re-derivation to the reconcile tick would repeat that work, and would need a halt store
+threaded through `BootRecovery`, which has none.
 
-- [ ] RED: an injected divergence (a position row edited to disagree with the ledger) is detected
-      by the reconcile tick and writes a halt with `capital_position_diverged`.
-- [ ] RED: divergence detection does not depend on the guard chain and runs while halted.
-- [ ] RED: a clean account produces no halt and no spurious writes.
-- [ ] GREEN: implement. The audit path has no 2s budget and may take seconds.
+What is genuinely missing is narrower: acceptance *re-derives*, it does not *compare*. A
+drift check would carry the previous snapshot's accounting forward over the tail and
+require it to equal the freshly derived classification. That is a real runtime
+differential, it needs no new dependency because both values are in hand inside
+`accept_snapshot`, and a mismatch is a halt condition.
+
+Bounding the residual risk honestly: the bounded read and the full re-derivation share a
+basis and differ only in which commitments they fold, and everything before the fence is
+proved accounted at acceptance. `_assert_no_unknown` blocks acceptance while an
+uncertainty is open, so an unresolved attempt cannot be inside an accepted state. The
+window for divergence is therefore one reconcile interval, and the CI differential test
+pins that the two folds agree. This is defence in depth, not a gap.
+
+- [ ] Compare carried-forward accounting against the freshly derived classification inside
+      `accept_snapshot`, and write the durable halt with actor `reconcile` and reason
+      `capital_position_diverged:<detail>` on mismatch.
+- [ ] RED first: an injected classification edit must be detected and must halt.
+- [ ] Do **not** add a second full re-derivation to the reconcile tick.
 
 ## Task 5: Guard timeout becomes a backstop, not a correctness boundary — **partly done**
 
