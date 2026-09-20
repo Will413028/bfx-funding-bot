@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.event_store.serialization import serializ
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
+    EventPrefixHashRow,
     OfferClaimRow,
     PositionStateRow,
 )
@@ -66,13 +67,23 @@ async def seal_prefix_chain(session) -> None:
     has to do what the writer would have done.
     """
     rows = (await session.scalars(select(EventLogRow).order_by(EventLogRow.event_seq))).all()
+    # Idempotent: a test may seed more history and seal again, and a link already
+    # written is immutable evidence, not something to rewrite.
+    sealed = set((await session.scalars(select(EventPrefixHashRow.event_seq))).all())
     streams: dict[tuple, list] = {}
     for row in rows:
         key = (row.exchange_account_id, row.deployment_environment)
         streams.setdefault(key, []).append(row)
     for stream in streams.values():
         for row, value in zip(stream, rolling_prefix_hashes(stream), strict=True):
-            row.prefix_hash = value
+            if row.event_seq in sealed:
+                continue
+            session.add(EventPrefixHashRow(
+                event_seq=row.event_seq,
+                exchange_account_id=row.exchange_account_id,
+                deployment_environment=row.deployment_environment,
+                prefix_hash=value,
+            ))
     await session.flush()
 
 @pytest.mark.parametrize("symbol", [None, "fUST"])

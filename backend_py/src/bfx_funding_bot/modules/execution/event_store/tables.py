@@ -37,6 +37,38 @@ _NOW = func.current_timestamp()
 _BIG_PK = BigInteger().with_variant(Integer(), "sqlite")
 
 
+class EventPrefixHashRow(Base):
+    """Rolling hash of the event prefix ending at ``event_seq``.
+
+    Kept beside the ledger rather than on it. ``event_log`` is append-only and a
+    database trigger enforces that for capital-bearing rows, so a chain written as
+    an UPDATE after INSERT would be refused for exactly the events capital reads
+    depend on -- and historical rows could never be sealed at all. Insert-only here
+    keeps the ledger immutable and the chain complete.
+
+    Verification stays one indexed row: a projection names the prefix it covers,
+    and the check reads that prefix's hash by ``event_seq``.
+    """
+
+    __tablename__ = "event_prefix_hashes"
+
+    event_seq: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("event_log.event_seq", ondelete="RESTRICT"), primary_key=True,
+    )
+    exchange_account_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    prefix_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "idx_event_prefix_scope_seq",
+            "exchange_account_id", "deployment_environment", "event_seq",
+        ),
+    )
+
+
 class EventLogRow(Base):
     """Append-only domain-event log. SoT. No UPDATE/DELETE."""
 
@@ -67,12 +99,6 @@ class EventLogRow(Base):
         DateTime(timezone=True), nullable=False, server_default=_NOW
     )
 
-    # Rolling hash of every event up to and including this one, per account
-    # stream. Lets a derived projection name the prefix it covers and have that
-    # claim checked by reading one row, instead of rehashing the prefix. Nullable
-    # only so historical rows exist before the backfill migration; the writer
-    # never leaves it unset and readers must treat NULL as unproven, not absent.
-    prefix_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(

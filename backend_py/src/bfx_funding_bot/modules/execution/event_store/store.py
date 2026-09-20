@@ -31,6 +31,7 @@ from bfx_funding_bot.modules.execution.event_store.serialization import (
 )
 from bfx_funding_bot.modules.execution.event_store.tables import (
     EventLogRow,
+    EventPrefixHashRow,
     OfferClaimRow,
     PositionStateRow,
     ProjectionHeadRow,
@@ -281,9 +282,17 @@ class PostgresEventStore:
         )
         session.add(row)
         await session.flush()  # assigns row.event_seq
-        row.prefix_hash = rolling_prefix_hash(
-            await self._previous_prefix_hash(session, row), row
-        )
+        # Insert-only: event_log is append-only and a trigger enforces that for
+        # capital-bearing rows, so the chain cannot be an UPDATE after INSERT.
+        session.add(EventPrefixHashRow(
+            event_seq=row.event_seq,
+            exchange_account_id=row.exchange_account_id,
+            deployment_environment=row.deployment_environment,
+            prefix_hash=rolling_prefix_hash(
+                await self._previous_prefix_hash(session, row), row
+            ),
+        ))
+        await session.flush()
         await self._project_event_unlocked(
             session,
             event,
@@ -302,8 +311,8 @@ class PostgresEventStore:
         there would mint a chain that silently excludes real events, so it fails
         closed and the caller wraps it as a projection write error.
         """
-        previous = await session.scalar(
-            select(EventLogRow)
+        previous_seq = await session.scalar(
+            select(EventLogRow.event_seq)
             .where(
                 EventLogRow.exchange_account_id == row.exchange_account_id,
                 EventLogRow.deployment_environment == row.deployment_environment,
@@ -312,11 +321,12 @@ class PostgresEventStore:
             .order_by(EventLogRow.event_seq.desc())
             .limit(1)
         )
-        if previous is None:
+        if previous_seq is None:
             return GENESIS_PREFIX_HASH
-        if previous.prefix_hash is None:
+        previous = await session.get(EventPrefixHashRow, previous_seq)
+        if previous is None:
             raise ValueError(
-                f"event prefix chain is incomplete at event_seq={previous.event_seq}"
+                f"event prefix chain is incomplete at event_seq={previous_seq}"
             )
         return previous.prefix_hash
 

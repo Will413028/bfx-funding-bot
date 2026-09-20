@@ -1008,6 +1008,7 @@ async def test_snapshot_records_the_prefix_it_was_derived_from(capital_db):
     prefix, never by a cursor having advanced.
     """
     from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
+    from bfx_funding_bot.modules.execution.event_store.tables import EventPrefixHashRow
 
     factory, account = capital_db
     repo = repository(account)
@@ -1018,9 +1019,11 @@ async def test_snapshot_records_the_prefix_it_was_derived_from(capital_db):
         row = await session.scalar(
             select(CapitalSnapshotRow).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1)
         )
-        evidence = await session.get(EventLogRow, row.event_seq)
+        # The chain lives beside the ledger: event_log is append-only and a trigger
+        # refuses to have a capital-bearing row updated after insert.
+        chain = await session.get(EventPrefixHashRow, row.event_seq)
         assert row.covered_prefix_hash is not None
-        assert row.covered_prefix_hash == evidence.prefix_hash
+        assert chain is not None and row.covered_prefix_hash == chain.prefix_hash
         # And the read accepts it.
         view = await repository(account).read_capital(
             session, symbol="fUST", cell_id="a30", now_ms=1100,
