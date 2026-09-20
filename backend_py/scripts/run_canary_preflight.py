@@ -341,7 +341,13 @@ async def _assert_issued_canary_permit(
 def _require_halt2_artifacts(evidence: Halt2Evidence, config_artifact: Path) -> None:
     # Task 2 owns the artifact schema and its digest implementation. Reusing it
     # here prevents this canary check from creating a weaker parallel contract.
-    observed = _artifact_hashes(evidence, config_artifact=config_artifact)
+    try:
+        observed = _artifact_hashes(evidence, config_artifact=config_artifact)
+    except ValueError as exc:
+        # Same bounded refusal codes an operator already sees through
+        # stop_reasons; only the raise site differs. Leaving them as a bare
+        # ValueError blocks a session with nothing but a class name to read.
+        raise CanaryStartupBlocked("halt2_artifact_measurement:" + str(exc)) from exc
     if (
         observed["backup_evidence_hash"] != evidence.backup_evidence_hash
         or observed["isolated_restore_evidence_hash"] != evidence.isolated_restore_evidence_hash
