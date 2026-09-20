@@ -1715,6 +1715,7 @@ async def build_daemon(
             symbols=configured_symbols(config.cells),
             action_grace_ms=120_000,
             uncertainty_handler=ledger.on_reservation_unknown,
+            capital_repository=capital_runtime.repository if capital_runtime else None,
         )
 
     fill_tracker: RestPollingFillTracker | None = None

@@ -112,6 +112,62 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
             "authorization", "bfx-apikey", "bfx-signature", "cookie",
         ))
         assert (await halt.current()).halted
+
+        # A later periodic observation must not supersede the boot snapshot
+        # without updating canonical capital. Exercise the assembled recovery
+        # chain and real DB; only the venue HTTP boundary is simulated.
+        httpx_mock.add_response(
+            url=re.compile(r"https://api\.bitfinex\.com/v2/auth/r/funding/(offers|credits).*"),
+            method="POST", json=[], is_reusable=True,
+        )
+        httpx_mock.add_response(
+            url="https://api.bitfinex.com/v2/auth/r/wallets",
+            method="POST", json=[["funding", "UST", 1000, 0, 1000]], is_reusable=True,
+        )
+        from time import time_ns
+
+        from sqlalchemy import func, select
+
+        from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+
+        previous_seq = 0
+        for recovery in (daemon.boot_recovery, daemon.periodic_reconcile._recovery,
+                         daemon.periodic_reconcile._recovery):
+            await recovery.run()
+            async with factory.begin() as session:
+                capital = await repo.read_capital(
+                    session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
+                )
+                latest = await session.scalar(select(func.max(EventLogRow.event_seq)).where(
+                    EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
+                ))
+                assert capital.snapshot_seq == latest
+                assert capital.snapshot_seq > previous_seq
+                assert capital.budget.spendable == Decimal("1000")
+                previous_seq = capital.snapshot_seq
+            assert (await halt.current()).halted
+
+        # One changed wallet observation must invalidate authority, not reuse
+        # the previous successful snapshot or turn the persistent halt off.
+        from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+
+        httpx_mock.add_response(
+            url="https://api.bitfinex.com/v2/auth/r/wallets",
+            method="POST", json=[["funding", "UST", 800, 0, 800]],
+        )
+        httpx_mock.add_response(
+            url="https://api.bitfinex.com/v2/auth/r/wallets",
+            method="POST", json=[["funding", "UST", 1000, 0, 1000]],
+        )
+        with pytest.raises(CapitalBlockedError, match="snapshot_unstable"):
+            await daemon.periodic_reconcile._recovery.run()
+        async with factory.begin() as session:
+            with pytest.raises(CapitalBlockedError, match="snapshot_query_pending"):
+                await repo.read_capital(
+                    session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
+                )
+        assert (await halt.current()).halted
+        assert all("/auth/w/" not in str(r.url) for r in httpx_mock.get_requests())
     finally:
         await engine.dispose()
 
