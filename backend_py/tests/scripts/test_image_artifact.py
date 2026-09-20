@@ -19,8 +19,11 @@ def archive_fixture(path, mutation=None, component="backend"):
         members["blobs/sha256/" + digest] = raw
         return {"digest": "sha256:" + digest, "size": len(raw), "mediaType": OCI + media}
     layer = blob((component + " layer").encode(), "layer.v1.tar")
-    config = blob(json.dumps({"os": "linux", "architecture": "arm64", "config": {},
-        "rootfs": {"type": "layers", "diff_ids": [layer["digest"]]}}).encode(), "config.v1+json")
+    config_doc = {"os": "linux", "architecture": "arm64", "config": {},
+        "rootfs": {"type": "layers", "diff_ids": [layer["digest"]]}}
+    if mutation in {"legacy_builder_fields", "legacy_variant_mismatch"}:
+        config_doc["variant"] = "v8"
+    config = blob(json.dumps(config_doc).encode(), "config.v1+json")
     layers = [dict(layer)]
     if mutation == "layer_size":
         layers[0]["size"] += 1
@@ -42,13 +45,17 @@ def archive_fixture(path, mutation=None, component="backend"):
         docker[0]["Config"] = "blobs/sha256/" + "e" * 64
     members.update({"index.json": json.dumps(index).encode(),
         "manifest.json": json.dumps(docker).encode(), "oci-layout": b'{"imageLayoutVersion":"1.0.0"}'})
-    if mutation in {"classic_legacy", "legacy_defaults", "extra_config", "legacy_corrupt", "legacy_wrong_config"}:
+    if mutation in {"classic_legacy", "legacy_defaults", "extra_config", "legacy_corrupt",
+                    "legacy_wrong_config", "legacy_builder_fields", "legacy_variant_mismatch"}:
         legacy = {"id": "a"*64, "created": "1970-01-01T00:00:00Z",
             "container_config": {}, "config": {}, "os": "linux", "architecture": "arm64"}
         if mutation == "extra_config":
             legacy["rootfs"] = {"type": "layers", "diff_ids": [layer["digest"]]}
         if mutation == "legacy_wrong_config":
             legacy["config"] = {"Cmd": ["wrong"]}
+        if mutation in {"legacy_builder_fields", "legacy_variant_mismatch"}:
+            legacy["container"] = "c" * 64
+            legacy["variant"] = "v8" if mutation == "legacy_builder_fields" else "v7"
         if mutation == "legacy_defaults":
             legacy["config"] = {"Hostname": "", "Domainname": "", "Image": "",
                 "AttachStdin": False, "AttachStdout": False, "AttachStderr": False,
@@ -100,7 +107,7 @@ def test_archive_verifies_distinct_config_and_manifest(tmp_path, component):
 @pytest.mark.parametrize("mutation", ["lossy_pair", "double_index", "config_content",
     "manifest_content", "layer_content", "missing_layer", "layer_size", "manifest_size",
     "docker_config", "unsafe", "duplicate_json", "duplicate_member", "symlink", "layer_role",
-    "extra_config", "legacy_corrupt", "legacy_wrong_config"])
+    "extra_config", "legacy_corrupt", "legacy_wrong_config", "legacy_variant_mismatch"])
 def test_archive_rejects_unproven_or_ambiguous_content(tmp_path, mutation):
     from scripts.image_artifact import inspect_archive
     path = tmp_path / "image.tar"
@@ -109,7 +116,7 @@ def test_archive_rejects_unproven_or_ambiguous_content(tmp_path, mutation):
         inspect_archive(path)
 
 
-@pytest.mark.parametrize("mutation", ["classic_legacy", "legacy_defaults"])
+@pytest.mark.parametrize("mutation", ["classic_legacy", "legacy_defaults", "legacy_builder_fields"])
 def test_classic_save_legacy_layer_json_is_not_an_additional_image(tmp_path, mutation):
     from scripts.image_artifact import inspect_archive
     path = tmp_path / "image.tar"

@@ -153,13 +153,21 @@ def inspect_archive(path: Path) -> PackagedImageIdentity:
                 # Still require content hashes, a single chain, and the exact
                 # canonical top config; never accept a second OCI config/index.
                 legacy = {}
-                allowed = {"id", "parent", "created", "container_config", "config", "architecture", "os"}
+                # Some Docker builds also write the build container id and the CPU
+                # variant into the v1 blob; the release that established this
+                # allowlist did not. Neither selects an image, so both are
+                # tolerated -- but a variant is a platform claim, so when one is
+                # present it must agree with the canonical config rather than
+                # merely be ignored.
+                allowed = {"id", "parent", "created", "container_config", "config",
+                           "architecture", "os", "container", "variant"}
                 for name in extras:
                     value = read(name)
                     if (hashes[name] != name.removeprefix("blobs/sha256/")
                         or not isinstance(value, dict) or set(value) - allowed
                         or not re.fullmatch(r"[0-9a-f]{64}", value["id"])
                         or value["id"] in legacy or value["os"] != config["os"]
+                        or ("variant" in value and value["variant"] != config.get("variant"))
                         or not isinstance(value["container_config"], dict)):
                         raise ValueError("legacy_metadata")
                     legacy[value["id"]] = value
