@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.safety.chain import (
     GUARD_EVAL_TIMEOUT_SECONDS,
+    GUARD_EVAL_WARN_FRACTION,
     SafetyGuardChain,
 )
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
@@ -182,3 +184,49 @@ async def test_chain_block_emits_safety_trigger() -> None:
     assert len(triggers) == 1
     assert triggers[0]["payload"]["guard_name"] == "cap"
     assert triggers[0]["level"] == "warn"  # hard block = warn; critical only for internal error
+
+
+class _SlowGuard:
+    """Allows, but uses most of its budget -- degrading, not yet failing."""
+
+    name = "slow"
+    is_calibrated = False
+
+    async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
+        await asyncio.sleep(GUARD_EVAL_TIMEOUT_SECONDS * GUARD_EVAL_WARN_FRACTION + 0.05)
+        return GuardResult(allowed=True, guard_name=self.name)
+
+
+@pytest.mark.asyncio
+async def test_chain_reports_a_guard_approaching_its_budget(caplog) -> None:
+    """Work that grows with history must be visible before it blocks everything.
+
+    A timeout alone is a cliff: capital_policy crossed it on 2026-09-20 and every
+    offer started failing closed, with total blockage as the first and only signal.
+    A guard that still allows but is nearly out of budget has to say so.
+    """
+    chain = SafetyGuardChain(
+        guards=[_SlowGuard()], probe=HealthProbe(), diagnostics=_EventCapture(),
+        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        account_id="default",
+    )
+    with caplog.at_level(logging.WARNING):
+        result = await chain.evaluate(_post(), _ctx())
+
+    assert result.allowed is True, "a slow guard still allows; this is a signal, not a block"
+    slow = [r for r in caplog.records if "guard_slow" in r.getMessage()]
+    assert len(slow) == 1, caplog.text
+    assert "name=slow" in slow[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_chain_stays_quiet_for_a_guard_well_inside_its_budget(caplog) -> None:
+    """The signal has to be rare enough to mean something."""
+    chain = SafetyGuardChain(
+        guards=[_AllowGuard("fast")], probe=HealthProbe(), diagnostics=_EventCapture(),
+        phase=Phase.PAPER, strategy=StrategyName.MEAN_REVERSION, cell="fUSD_a30",
+        account_id="default",
+    )
+    with caplog.at_level(logging.WARNING):
+        await chain.evaluate(_post(), _ctx())
+    assert not [r for r in caplog.records if "guard_slow" in r.getMessage()]
