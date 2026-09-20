@@ -194,7 +194,7 @@ the full intent scan live here, with no 2s budget.
 - [ ] RED: a clean account produces no halt and no spurious writes.
 - [ ] GREEN: implement. The audit path has no 2s budget and may take seconds.
 
-## Task 5: Guard timeout becomes a backstop, not a correctness boundary
+## Task 5: Guard timeout becomes a backstop, not a correctness boundary — **partly done**
 
 **Files:** `.../execution/safety/chain.py`, `.../execution/safety/hard_guards.py`,
 `backend_py/tests/modules/execution/`.
@@ -202,9 +202,14 @@ the full intent scan live here, with no 2s budget.
 - [ ] RED: a guard whose work is unbounded is a test failure — assert `capital_policy` issues a
       bounded query count, rather than asserting it finishes within a wall-clock budget.
 - [ ] RED: an eval timeout still fails closed and still surfaces a named reason.
-- [ ] GREEN: keep `GUARD_EVAL_TIMEOUT_SECONDS` as a pathology backstop. Emit a distinct log/metric
-      when a guard exceeds a warning fraction of its budget, so growth is visible **before** it
-      becomes "everything is blocked".
+- [x] GREEN: `GUARD_EVAL_TIMEOUT_SECONDS` stays a pathology backstop, and a guard that uses
+      `GUARD_EVAL_WARN_FRACTION` of its budget logs `guard_slow name=... elapsed=... budget=...`
+      while still allowing. Two regressions pin it: a slow guard reports and still allows, a fast
+      one stays quiet, because a signal that fires often means nothing.
+- [ ] Still open: the bounded-work assertion for `capital_policy` lives in
+      `test_capital_read_work_does_not_grow_with_history`, which counts deserializations. Wiring
+      the same idea into the guard layer (assert query/work counts rather than wall clock) is not
+      done.
 
 **Rationale:** today's incident had no warning signal. The only symptom was total blockage.
 

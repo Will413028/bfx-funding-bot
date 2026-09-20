@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
@@ -32,6 +33,12 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 log = logging.getLogger(__name__)
 
 GUARD_EVAL_TIMEOUT_SECONDS = 2.0
+# Fraction of the budget a guard may use before it is reported as degrading.
+# The timeout alone is a cliff: work that grows with history crosses it one day
+# and every decision starts failing closed, with nothing having said it was
+# getting closer. 2026-09-20: capital_policy reached 2.31s against this budget
+# and blocked every offer, and the first signal was total blockage.
+GUARD_EVAL_WARN_FRACTION = 0.5
 
 
 class _DiagnosticsProtocol(Protocol):
@@ -213,14 +220,20 @@ class SafetyGuardChain:
         is_internal_error=False covers both allow and clean hard-block paths —
         caller emits warn only on hard block.
         """
+        started = time.monotonic()
         try:
             result = await asyncio.wait_for(
                 guard.evaluate(decision, ctx),
                 timeout=GUARD_EVAL_TIMEOUT_SECONDS,
             )
+            elapsed = time.monotonic() - started
+            if elapsed >= GUARD_EVAL_TIMEOUT_SECONDS * GUARD_EVAL_WARN_FRACTION:
+                log.warning("guard_slow name=%s elapsed=%.3fs budget=%.1fs",
+                            guard.name, elapsed, GUARD_EVAL_TIMEOUT_SECONDS)
             return result, False
         except TimeoutError:
-            log.error("guard_timeout name=%s", guard.name)
+            log.error("guard_timeout name=%s budget=%.1fs", guard.name,
+                      GUARD_EVAL_TIMEOUT_SECONDS)
             return (
                 GuardResult(
                     allowed=False, guard_name=guard.name,
