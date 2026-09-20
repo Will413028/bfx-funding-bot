@@ -1,4 +1,4 @@
-"""Bind each event to the rolling hash of the prefix it completes."""
+"""Record the rolling prefix hash of each event beside the append-only ledger."""
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,8 +12,22 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("event_log", sa.Column("prefix_hash", sa.Text(), nullable=True))
-    # Seal every existing row here. A reader treats a missing hash as unproven
+    # Beside the ledger, not on it. event_log is append-only and
+    # guard_capital_event() enforces that for capital-bearing rows, so sealing
+    # existing events with an UPDATE is refused for exactly the events capital
+    # reads depend on. Inserting keeps the ledger immutable and the chain whole.
+    op.create_table(
+        "event_prefix_hashes",
+        sa.Column("event_seq", sa.BigInteger(),
+                  sa.ForeignKey("event_log.event_seq", ondelete="RESTRICT"), primary_key=True),
+        sa.Column("exchange_account_id", sa.Uuid(), nullable=True),
+        sa.Column("deployment_environment", sa.Text(), nullable=False),
+        sa.Column("prefix_hash", sa.Text(), nullable=False),
+    )
+    op.create_index("idx_event_prefix_scope_seq", "event_prefix_hashes",
+                    ["exchange_account_id", "deployment_environment", "event_seq"])
+
+    # Seal every existing event here. A reader treats a missing link as unproven
     # rather than absent, and the writer refuses to extend a chain whose
     # predecessor has none, so a partial backfill would block the next append.
     # The hash is derived with the same record contract the writer uses; deriving
@@ -22,7 +36,10 @@ def upgrade() -> None:
         GENESIS_PREFIX_HASH,
         rolling_prefix_hash,
     )
-    from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
+    from bfx_funding_bot.modules.execution.event_store.tables import (
+        EventLogRow,
+        EventPrefixHashRow,
+    )
 
     session = Session(bind=op.get_bind())
     rows = session.scalars(
@@ -39,10 +56,15 @@ def upgrade() -> None:
         if key != previous_key:
             previous_key, previous_hash = key, GENESIS_PREFIX_HASH
         previous_hash = rolling_prefix_hash(previous_hash, row)
-        row.prefix_hash = previous_hash
+        session.add(EventPrefixHashRow(
+            event_seq=row.event_seq,
+            exchange_account_id=row.exchange_account_id,
+            deployment_environment=row.deployment_environment,
+            prefix_hash=previous_hash,
+        ))
     session.flush()
-    session.commit()
 
 
 def downgrade() -> None:
-    op.drop_column("event_log", "prefix_hash")
+    op.drop_index("idx_event_prefix_scope_seq", table_name="event_prefix_hashes")
+    op.drop_table("event_prefix_hashes")
