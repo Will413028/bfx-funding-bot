@@ -256,7 +256,11 @@ def deploy(args: argparse.Namespace, bundle: dict[str, Any], manifest: ReleaseMa
         name="bfx-frontend", user="nextjs", env=args.frontend_env, network=args.network,
         command=["node", "server.js"], port="127.0.0.1:3001:3000")
     after = json.loads(run(["docker", "inspect", "bfx-postgres", "bfx-redis"]))
-    if [(r["Id"], r["Mounts"]) for r in infrastructure] != [(r["Id"], r["Mounts"]) for r in after]:
+    # Docker does not promise mount enumeration order. Compare every complete
+    # mount record (including duplicates), without treating order as identity.
+    before_mounts = [(r["Id"], sorted(r["Mounts"], key=canonical_digest)) for r in infrastructure]
+    after_mounts = [(r["Id"], sorted(r["Mounts"], key=canonical_digest)) for r in after]
+    if before_mounts != after_mounts:
         raise PackagingBlocked("infrastructure_changed")
     halt_after = json.loads(one_shot(manifest, env=args.bot_env, network=args.network,
         extra_env=manifest.environment,
