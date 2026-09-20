@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from decimal import Decimal
@@ -41,6 +42,8 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     CanaryCommandPermitRow,
     SubmissionAttemptRow,
 )
+
+log = logging.getLogger(__name__)
 
 RELEASE_SCHEMA_HEAD = "b4e6f8a0c203"
 
@@ -244,6 +247,10 @@ class ReleaseWorker:
         except ReleaseHaltError:
             raise
         except Exception as exc:
+            # ``reason`` below stays a bounded code, so an unexpected exception
+            # would otherwise leave no readable trace anywhere. Log it here,
+            # before halt persistence can raise over it.
+            log.exception("release_session_blocked session_id=%s", session_id)
             await self._reassert_halt("release_blocked")
             if session_id is None:
                 # Runtime/proof failure with an unhalted account must stop the
