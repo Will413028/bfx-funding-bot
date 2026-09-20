@@ -314,11 +314,26 @@ incident process, inspect UNKNOWN/audit records, and reconcile before recovery.
 
 ## 7. Human authenticated workflow
 
-Use the existing operator login and real TOTP verification. Enrollment is a
-separate acceptance prerequisite: this application has verification UI but no
-enrollment UI. Use the existing first-party authenticated enrollment process;
-never fake twoFactorEnabled/emailVerified/role flags or put passwords/TOTP secrets
-in chat. Technical frontend health does not satisfy enrollment or containment.
+Use the exact configured operator's session-only
+`/{locale}/settings/security` route to perform the real Better Auth TOTP
+enrollment and fresh-session proof. Never fake role, twoFactorEnabled,
+twoFactor.verified, emailVerified or MFA markers, and never put passwords, TOTP
+secrets or backup codes in chat, CLI arguments, output or receipts. Technical
+frontend health does not satisfy enrollment or containment.
+
+After enrollment, follow
+[Release 0 operator containment](release-0-operator-containment.md): resolve the
+approved actual frontend image from the reviewed bundle and run the host-controlled
+audited bootstrap as a separate create → inspect → attached-start one-shot with
+`/opt/bfx/runtime/frontend.env` and a private writable audit bind. The runtime
+frontend remains read-only and gets no audit/tmp mount, so do not `docker exec`
+into it; legacy Compose run is not release authority. Bootstrap independently
+requires the production DB's exact credential account, `twoFactorEnabled=true`
+and one verified TOTP row before assigning only the configured role. It then
+revokes only that operator's inventoried sessions. Sign in again and complete
+TOTP, then run the existing non-operator containment as a separate reviewed
+one-shot. Preserve both receipt chains and keep durable halt throughout. None of
+these steps authorizes a canary, permit, financial action, promotion or resume.
 
 In Overview choose the existing account. Applied funding status shows revision,
 available/unreflected/reserve/spendable/total/unattributed values as server Decimal

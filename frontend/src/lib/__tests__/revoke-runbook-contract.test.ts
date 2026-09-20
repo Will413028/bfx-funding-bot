@@ -26,10 +26,9 @@ describe("Release 0 operator containment runbook", () => {
     expect(source).toContain("audit-file");
     expect(source).not.toMatch(/FLUSH(?:ALL|DB)/i);
     expect(dockerfile).toContain("/app/scripts ./scripts");
-    expect(runbook).toContain(
-      "docker compose --env-file .env.frontend.runtime -f docker-compose.bot.yml run",
-    );
-    expect(runbook).toContain("--env-file .env.frontend.runtime");
-    expect(runbook).toContain('--user "$(id -u):$(id -g)"');
+    expect(runbook).toContain("docker create --pull=never --read-only");
+    expect(runbook).toContain("--env-file /opt/bfx/runtime/frontend.env");
+    expect(runbook).toContain("docker start --attach");
+    expect(runbook).toContain("Legacy Compose app/run profile");
   });
 });
