@@ -1058,3 +1058,55 @@ async def test_snapshot_whose_prefix_no_longer_matches_cannot_authorize(capital_
             await repository(account).read_capital(
                 session, symbol="fUST", cell_id="a30", now_ms=1100,
             )
+
+
+@pytest.mark.parametrize("with_history", [False, True])
+async def test_bounded_read_agrees_with_full_rederivation(capital_db, with_history):
+    """The authorization read and the audit re-derivation must give one answer.
+
+    Tautological while _read_capital delegates to _read_capital_full, and load
+    bearing the moment it stops: the bounded path may skip re-deriving the proven
+    prefix, but it may not reach a different conclusion about spendable capital.
+
+    Pins guarantee (1): the bounded path still accounts for every commitment the
+    full scan accounts for.
+    """
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+
+    factory, account = capital_db
+    repo = repository(account)
+    if with_history:
+        rows = []
+        for index in range(3):
+            for row in historical_rows(environment="ci"):
+                row.account_id = row.payload["account_id"] = str(account)
+                row.exchange_account_id = account
+                row.cid = row.payload["cid"] = 2000 + index
+                if row.venue_offer_id:
+                    row.venue_offer_id = row.payload["venue_offer_id"] = f"d{index}-{row.venue_offer_id}"
+                rows.append(row)
+        async with factory.begin() as session:
+            session.add_all(rows)
+            await session.flush()
+            await seal_prefix_chain(session)
+            await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
+                session, account_id=str(account), deployment_environment="ci",
+            )
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+
+    async with factory.begin() as session:
+        reader = repository(account)
+        applied = await reader.read_applied(session, symbol="fUST")
+        bounded = await reader._read_capital(
+            session, symbol="fUST", cell_id="a30", now_ms=1100, applied=applied,
+        )
+        full = await reader._read_capital_full(
+            session, symbol="fUST", cell_id="a30", now_ms=1100, applied=applied,
+        )
+
+    assert bounded.snapshot == full.snapshot
+    assert bounded.budget == full.budget
+    assert bounded.snapshot_seq == full.snapshot_seq
+    assert bounded.applied == full.applied

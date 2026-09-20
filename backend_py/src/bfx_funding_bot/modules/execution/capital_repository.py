@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -58,6 +58,18 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 ZERO = Decimal("0")
 SCHEMA_VERSION = 1
+
+
+class _SnapshotBasis(NamedTuple):
+    """The validated accepted snapshot, before any commitment fold."""
+
+    row: Any
+    event: VenueSnapshotObserved
+    available: Decimal
+    offered: Decimal
+    credits: Decimal
+    shared: Decimal
+    exposure: Decimal
 LockedGuard = Callable[[AsyncSession], Awaitable[None]]
 
 
@@ -451,6 +463,31 @@ class CapitalRepository:
 
     async def _read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
                             now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:
+        """Authorization read. Delegates to the full re-derivation for now.
+
+        The bounded implementation is NOT safe to enable yet. Skipping intents at
+        or before the fence also skips ``_check_historical_intent``, which proves a
+        legacy intent's cycle terminated before the fence. Without that proof,
+        capital that is still committed reads as available, which overspends.
+
+        Enabling it requires that proof to run at snapshot acceptance, where the
+        fence is set -- see Task 2 of
+        docs/superpowers/plans/2026-09-20-capital-authority-bounded-reads.md. The
+        scaffolding it needs is in place: ``_snapshot_basis`` is shared,
+        ``_attempt_inventory`` takes a fence and the reflected set, and
+        ``test_bounded_read_agrees_with_full_rederivation`` guards the switch.
+        """
+        return await self._read_capital_full(
+            session, symbol=symbol, cell_id=cell_id, now_ms=now_ms, applied=applied,
+        )
+
+    async def _snapshot_basis(self, session: AsyncSession, *, symbol: str, cell_id: str,
+                              now_ms: int) -> _SnapshotBasis:
+        """Validate the accepted snapshot both reads derive their answer from.
+
+        Every check here is a single indexed row or an equality on already-loaded
+        content, so this part is bounded no matter how long the account has run.
+        """
         await self._assert_no_unknown(session)
         row = await session.scalar(select(CapitalSnapshotRow).where(*self._scope(CapitalSnapshotRow))
             .order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
@@ -496,6 +533,21 @@ class CapitalRepository:
         offered, credits = _amount(values["offered"]), _amount(values["credits"])
         shared = _amount(values["unattributed_credits"])
         exposure = _amount(values["cells"].get(cell_id, "0")) + shared
+        return _SnapshotBasis(row, event, available, offered, credits, shared, exposure)
+
+    async def _read_capital_full(self, session: AsyncSession, *, symbol: str, cell_id: str,
+                                 now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:
+        """Audit definition: re-derive from the whole immutable history.
+
+        No wall-clock budget applies here. This is what the bounded read is
+        checked against, and what detects a prefix that stopped being true.
+        """
+        basis = await self._snapshot_basis(
+            session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
+        )
+        row, event = basis.row, basis.event
+        available, offered, credits = basis.available, basis.offered, basis.credits
+        shared, exposure = basis.shared, basis.exposure
         pending = ZERO
         inventory = await self._attempt_inventory(session)
         intents = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
@@ -535,18 +587,29 @@ class CapitalRepository:
         return CapitalView(applied, row.event_seq, snapshot, evaluate_capital(applied.policy, snapshot),
                            shared, row.classification)
 
-    async def _attempt_inventory(self, session: AsyncSession) -> dict[
-        str, tuple[EventLogRow, ReservationIntent, SubmissionAttemptRow]
-    ]:
+    async def _attempt_inventory(
+        self, session: AsyncSession, *, after_event_seq: int | None = None,
+        reflected: frozenset[str] | None = None,
+    ) -> dict[str, tuple[EventLogRow, ReservationIntent, SubmissionAttemptRow]]:
         """Immutable intents define the universe, even with a current replay cursor.
 
         Verify both directions before deriving capital or accepting observations;
         missing/moved projections are corruption, never evidence of released cash.
+
+        Unbounded by default: that is the audit reading. Given a fence and the
+        commitments the accepted snapshot already reflects, both sides narrow to
+        the same tail, so the two directions still have to agree -- over what is
+        not yet accounted for rather than over all of history.
         """
-        rows = (await session.scalars(select(EventLogRow).where(*self._scope(EventLogRow),
-            EventLogRow.event_type == "RESERVATION_INTENT"))).all()
+        intents = select(EventLogRow).where(*self._scope(EventLogRow),
+            EventLogRow.event_type == "RESERVATION_INTENT")
+        if after_event_seq is not None:
+            intents = intents.where(EventLogRow.event_seq > after_event_seq)
+        rows = (await session.scalars(intents)).all()
         attempts = {str(a.attempt_id): a for a in (await session.scalars(
             select(SubmissionAttemptRow).where(*self._scope(SubmissionAttemptRow)))).all()}
+        if reflected is not None:
+            attempts = {key: value for key, value in attempts.items() if key not in reflected}
         inventory: dict[str, tuple[EventLogRow, ReservationIntent, SubmissionAttemptRow]] = {}
         for row in rows:
             event = deserialize_stored_event(row)
@@ -581,7 +644,13 @@ class CapitalRepository:
                 raise CapitalBlockedError("attempt_decision_conflict")
             inventory[key] = row, event, attempt
         if inventory.keys() != attempts.keys():
-            raise CapitalBlockedError("attempt_intent_missing")
+            # Bounded: an unaccounted attempt whose intent is not in the tail has an
+            # intent at or before the fence that the snapshot never reflected, which
+            # is the same condition the full scan names unclassifiable_commitment.
+            raise CapitalBlockedError(
+                "unclassifiable_commitment" if after_event_seq is not None
+                else "attempt_intent_missing"
+            )
         return inventory
 
     async def _historical_cycles(self, session: AsyncSession) -> dict[int, list[EventLogRow]]:
