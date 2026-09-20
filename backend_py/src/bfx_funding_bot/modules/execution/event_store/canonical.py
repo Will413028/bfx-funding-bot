@@ -49,4 +49,53 @@ def canonical_event_hash(rows: Sequence[EventLogRow]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-__all__ = ["canonical_event_hash", "canonical_event_record"]
+GENESIS_PREFIX_HASH = hashlib.sha256(b"bfx-event-prefix-v1").hexdigest()
+
+
+def _encode_record(row: EventLogRow) -> bytes:
+    return json.dumps(
+        canonical_event_record(row),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode()
+
+
+def rolling_prefix_hash(previous: str, row: EventLogRow) -> str:
+    """Extend an immutable prefix hash by exactly one event.
+
+    Binding a projection to ``canonical_event_hash`` of its covered prefix would
+    re-read that prefix on every check, which is the O(history) cost the capital
+    read exists to avoid. This carries the same evidence one link at a time, so a
+    stored prefix hash is verified by reading a single row.
+
+    The separator is unambiguous: a prefix hash is fixed-width lowercase hex, so no
+    record encoding can be confused with a chain boundary.
+    """
+    return hashlib.sha256(previous.encode("ascii") + b"\x00" + _encode_record(row)).hexdigest()
+
+
+def rolling_prefix_hashes(
+    rows: Sequence[EventLogRow], *, previous: str = GENESIS_PREFIX_HASH,
+) -> list[str]:
+    """Return the prefix hash after each row, in order.
+
+    ``previous`` lets a caller continue an existing chain rather than re-deriving
+    it. An unsequenced row raises through ``canonical_event_record`` instead of
+    contributing an ambiguous link.
+    """
+    chain = []
+    for row in rows:
+        previous = rolling_prefix_hash(previous, row)
+        chain.append(previous)
+    return chain
+
+
+__all__ = [
+    "GENESIS_PREFIX_HASH",
+    "canonical_event_hash",
+    "canonical_event_record",
+    "rolling_prefix_hash",
+    "rolling_prefix_hashes",
+]
