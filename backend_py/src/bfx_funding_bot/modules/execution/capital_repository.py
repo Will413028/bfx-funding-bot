@@ -432,9 +432,14 @@ class CapitalRepository:
             *self._scope(CapitalSnapshotRow)).order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
         prior_reflected = previous.classification["reflected"] if previous is not None else {}
         history = {offer.venue_offer_id: offer for offer in event.offer_history}
+        # An attempt that ended without spending holds no capital, but is never
+        # reflected either. Record it, so a bounded read can tell it apart from an
+        # unaccounted commitment by set membership instead of re-deriving it.
+        settled: list[str] = []
         for _, _, attempt in inventory.values():
             key = str(attempt.attempt_id)
             if await self._effective_outcome(session, attempt) in {"rejected", "not_sent"}:
+                settled.append(key)
                 continue
             if key in reflected:
                 continue
@@ -460,7 +465,7 @@ class CapitalRepository:
                 reflected[key] = terminal.venue_offer_id
                 continue
             raise CapitalBlockedError("unclassifiable_commitment")
-        return {"symbols": totals, "reflected": reflected,
+        return {"symbols": totals, "reflected": reflected, "settled": sorted(settled),
                 "credit_attribution": "U is conservative shared exposure for every cell; counted once in T"}
 
     async def read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
@@ -478,24 +483,50 @@ class CapitalRepository:
 
     async def _read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
                             now_ms: int, applied: AppliedCapitalPolicy) -> CapitalView:
-        """Authorization read. Delegates to the full re-derivation for now.
+        """Authorization read, bounded by construction.
 
-        The bounded body is written and reverted twice; both preconditions it
-        needs are now real (acceptance proves legacy intents settled, and the
-        snapshot names its prefix), but one piece is unsolved.
+        Commitments at or before the accepted fence cannot change the answer: the
+        snapshot either accounts for them, or the fold below refuses. Re-deriving
+        them asks an integrity question, which belongs to ``_read_capital_full`` on
+        the audit path, not to a decision with a budget.
 
-        Narrowing the intent side to the tail also has to narrow the attempt side,
-        or a settled attempt reads as unaccounted. Narrowing that side by effective
-        outcome is wrong twice over: it broke
-        ``test_current_cursor_cannot_hide_durable_commitment``, whose name is the
-        failure mode, and it calls ``_effective_outcome`` per attempt per read,
-        which is the unbounded work this change exists to remove. The attempt side
-        has to narrow by the intent's position relative to the fence, which is not
-        derivable from the attempt row today.
+        Three things earn the right to skip that work, all decided when the fence
+        was set: the classification names the ledger prefix it came from, every
+        legacy intent was proved settled, and attempts that ended without spending
+        were recorded. Without the third, a settled attempt has no intent in the
+        tail and reads as an unaccounted commitment; deriving it here instead would
+        put the unbounded work straight back.
         """
-        return await self._read_capital_full(
-            session, symbol=symbol, cell_id=cell_id, now_ms=now_ms, applied=applied,
+        basis = await self._snapshot_basis(
+            session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
         )
+        row, exposure, pending = basis.row, basis.exposure, ZERO
+        accounted = frozenset(row.classification["reflected"]) | frozenset(
+            row.classification.get("settled", ())
+        )
+        inventory = await self._attempt_inventory(
+            session, after_event_seq=row.command_fence, reflected=accounted,
+        )
+        for _logged_intent, decoded, attempt in inventory.values():
+            if decoded.symbol != symbol:
+                continue
+            if await self._effective_outcome(session, attempt) in {"rejected", "not_sent"}:
+                continue
+            amount = _amount(decoded.amount)
+            if amount != _amount(attempt.normalized_payload.get("amount")):
+                raise CapitalBlockedError("attempt_amount_conflict")
+            pending += amount
+            decision = await session.get(ExecutionDecisionRow, attempt.execution_decision_id)
+            if decision is None or (decision.exchange_account_id, decision.deployment_environment,
+                    decision.symbol) != (self.account_id, self.environment, symbol):
+                raise CapitalBlockedError("attempt_decision_conflict")
+            if decision.cell_id == cell_id:
+                exposure += amount
+        snapshot = CapitalSnapshot(basis.available, pending,
+                                   basis.available + basis.offered + basis.credits, exposure)
+        return CapitalView(applied, row.event_seq, snapshot,
+                           evaluate_capital(applied.policy, snapshot), basis.shared,
+                           row.classification)
 
     async def _snapshot_basis(self, session: AsyncSession, *, symbol: str, cell_id: str,
                               now_ms: int) -> _SnapshotBasis:
