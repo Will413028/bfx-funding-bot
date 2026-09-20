@@ -356,6 +356,25 @@ def _artifact_hashes(evidence: Halt2Evidence, *, config_artifact: Path) -> dict[
     }
 
 
+# How old each DR measurement may be, by what it measures rather than by one clock.
+#
+# Backup lag changes with every WAL segment, so evidence of it is worth minutes.
+# Restore time is a capability: it moves when hardware, data volume or
+# configuration move -- each of which re-runs the drill -- not minute to minute.
+# Holding both to the backup window meant every authorisation needed a fresh
+# isolated restore, and the drill plus deployment left the operator a fraction of
+# it. Five windows were opened on 2026-09-20; four expired before anyone could act.
+# Validating restore capability periodically rather than per transaction is also
+# what DR practice outside this repository does.
+#
+# The RTO *threshold* is unchanged and still enforced: HALT2_MAX_RESTORE_RTO_SECONDS
+# in verify_preflight. This bounds only how stale the measurement of it may be.
+_MEASUREMENT_MAX_AGE_MS = {
+    "rpo_seconds": 900_000,
+    "rto_seconds": 86_400_000,
+}
+
+
 def _read_dr_measurement(path: Path, *, key: str) -> int:
     """Read an explicit measured DR result; a file hash alone is not evidence."""
     try:
@@ -395,7 +414,7 @@ def _read_dr_measurement(path: Path, *, key: str) -> int:
     observed = value.get("observed_at_ms")
     if type(observed) is not int or observed < 0:
         raise ValueError(f"{key}_measurement_invalid")
-    if not 0 <= int(time.time() * 1000) - observed <= 900_000:
+    if not 0 <= int(time.time() * 1000) - observed <= _MEASUREMENT_MAX_AGE_MS[key]:
         raise ValueError(f"{key}_measurement_stale")
     return seconds
 
