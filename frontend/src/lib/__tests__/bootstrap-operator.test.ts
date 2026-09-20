@@ -1,3 +1,6 @@
+import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { main } from "../../../scripts/bootstrap-operator.mjs";
@@ -47,6 +50,8 @@ function makeFixture(
     redisGetFailures?: number;
     redisDeleteFailureCall?: number;
     commitAcknowledgementFailures?: number;
+    poolEndFailure?: boolean;
+    redisCleanupFailure?: boolean;
   } = {},
 ) {
   const users = structuredClone(
@@ -171,17 +176,19 @@ function makeFixture(
     },
   };
 
-  const pool = {
+  const pool = Object.assign(new EventEmitter(), {
     async connect() {
       events.push("db:connect");
       return client;
     },
     async end() {
       events.push("db:end");
+      if (overrides.poolEndFailure)
+        throw new Error("synthetic-private-pool-end");
     },
-  };
+  });
 
-  const redisClient = {
+  const redisClient = Object.assign(new EventEmitter(), {
     async connect() {
       events.push("redis:connect");
     },
@@ -207,11 +214,15 @@ function makeFixture(
     },
     async quit() {
       events.push("redis:quit");
+      if (overrides.redisCleanupFailure)
+        throw new Error("synthetic-private-quit");
     },
     disconnect() {
       events.push("redis:disconnect");
+      if (overrides.redisCleanupFailure)
+        throw new Error("synthetic-private-disconnect");
     },
-  };
+  });
 
   const dependencies = {
     randomUUID: () => "00000000-0000-4000-8000-000000000001",
@@ -255,6 +266,92 @@ function makeFixture(
 }
 
 describe("audited first-admin bootstrap", () => {
+  it.each(["redis-error-connect", "redis-error-late"])(
+    "normalizes actual ioredis silentEmit at %s without raw stderr",
+    (scenario) => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          resolve("src/lib/__tests__/fixtures/bootstrap-pool-event.mjs"),
+          scenario,
+        ],
+        { encoding: "utf8", timeout: 10000, env: { NODE_ENV: "test" } },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.stderr).not.toContain("synthetic-private");
+      expect(child.stderr).not.toContain("Unhandled error event");
+      expect(child.status).toBe(1);
+      const output = JSON.parse(child.stdout);
+      expect(output.result).toMatchObject({
+        status: "partial_failure",
+        databaseOutcome: "committed",
+        dbCommitted: true,
+        failureCode: "redis_operation_failed",
+        revokedKeyCount: scenario === "redis-error-connect" ? 0 : 3,
+        revokedSessionCount: scenario === "redis-error-connect" ? 0 : 1,
+      });
+      expect(output.receipts).toHaveLength(2);
+      expect(output.receipts[1]).toEqual(output.result);
+    },
+  );
+
+  it.each(["release", "redis"])(
+    "contains actual Pool idle errors at %s in an isolated child",
+    (scenario) => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          resolve("src/lib/__tests__/fixtures/bootstrap-pool-event.mjs"),
+          scenario,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 10000,
+          env: { NODE_ENV: "test" },
+        },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.stderr).not.toContain("synthetic-private-disconnect");
+      expect(child.stderr).not.toContain("Unhandled");
+      const output = JSON.parse(child.stdout);
+      expect(output.committed).toBe(true);
+      expect(output.closedBeforeRedis).toBe(true);
+      expect(output.poolEvents).toBe(scenario === "release" ? 1 : 0);
+      expect(child.status).toBe(scenario === "release" ? 1 : 0);
+      expect(output.result).toMatchObject({
+        status: scenario === "release" ? "partial_failure" : "completed",
+        databaseOutcome: "committed",
+        dbCommitted: true,
+        revokedKeyCount: 3,
+        revokedSessionCount: 1,
+      });
+      if (scenario === "release")
+        expect(output.result.failureCode).toBe("database_pool_failed");
+      expect(output.receipts).toHaveLength(2);
+      expect(output.receipts[1]).toEqual(output.result);
+    },
+  );
+
+  it.each(["poolEndFailure", "redisCleanupFailure"] as const)(
+    "finalizes committed audit despite %s",
+    async (failure) => {
+      const fixture = makeFixture({ [failure]: true });
+      const result = await main(
+        ["--apply", "--confirm-bootstrap-admin", "--audit-file", "memory"],
+        successfulEnv(),
+        fixture.dependencies,
+      );
+      expect(result).toMatchObject({
+        status: "partial_failure",
+        dbCommitted: true,
+        databaseOutcome: "committed",
+        revokedKeyCount: 3,
+      });
+      expect(fixture.auditWrites.at(-1)).toEqual(result);
+      expect(fixture.stderr.join("\n")).not.toContain("synthetic-private");
+    },
+  );
+
   it("defaults to a read-only dry run and changes no role or Redis key", async () => {
     const fixture = makeFixture();
 

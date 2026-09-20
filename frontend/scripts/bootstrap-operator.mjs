@@ -531,6 +531,18 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
   let audit;
   let pool;
   let redis;
+  let resourceFailure;
+
+  async function closePool() {
+    if (!pool) return;
+    const closingPool = pool;
+    pool = undefined;
+    try {
+      await closingPool.end();
+    } catch {
+      resourceFailure ??= "database_pool_close_failed";
+    }
+  }
 
   try {
     options = parseArgs(argv);
@@ -559,9 +571,20 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
     }
 
     pool = dependencies.createPool(databaseUrl);
+    // Idle errors are EventEmitter events, outside the query Promise chain.
+    // Never throw or log raw dependency errors from this listener.
+    pool.on("error", () => {
+      resourceFailure ??= "database_pool_failed";
+    });
     await inspectAndAssign(pool, operatorId, options.mode, operation);
+    await closePool();
 
     redis = dependencies.createRedis(redisUrl);
+    // ioredis otherwise writes silentEmit errors directly to raw stderr,
+    // even when the corresponding connect/command rejection is caught.
+    redis.on("error", () => {
+      resourceFailure ??= "redis_operation_failed";
+    });
     try {
       await redis.connect();
     } catch {
@@ -577,10 +600,19 @@ export async function main(argv = [], env = process.env, dependencies = defaultD
       try {
         await redis.quit();
       } catch {
-        redis.disconnect();
+        resourceFailure ??= "redis_close_failed";
+        try {
+          redis.disconnect();
+        } catch {
+          // Final audit must still capture DB outcome and Redis progress.
+        }
       }
     }
-    if (pool) await pool.end();
+    await closePool();
+  }
+  if (resourceFailure) {
+    operation.status = failureStatus(operation);
+    operation.failureCode ??= resourceFailure;
   }
 
   operation.finishedAt = dependencies.now().toISOString();

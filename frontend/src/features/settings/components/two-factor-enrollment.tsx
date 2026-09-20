@@ -130,7 +130,14 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
       }
       if (currentOperation !== operation.current) return;
       if (result.error) {
-        setError(t("invalidCode"));
+        if (
+          result.error.code === "INVALID_CODE" &&
+          result.error.status === 401
+        ) {
+          setError(t("invalidCode"));
+        } else {
+          requireFreshSignIn();
+        }
         return;
       }
 
