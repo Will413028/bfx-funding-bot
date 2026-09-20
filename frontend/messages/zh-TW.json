@@ -56,8 +56,13 @@
     "twoFactorTitle": "雙因素驗證",
     "twoFactorDescription": "請輸入驗證器 App 顯示的驗證碼。",
     "authenticationCode": "驗證碼",
+    "backupCode": "備用碼",
+    "backupCodeDescription": "請輸入一組已儲存的備用碼。",
+    "useBackupCode": "使用備用碼",
+    "useAuthenticationCode": "使用驗證碼",
     "verify": "驗證",
-    "invalidTwoFactorCode": "驗證碼無效"
+    "invalidTwoFactorCode": "驗證碼無效",
+    "invalidBackupCode": "備用碼無效"
   },
   "overview": {
     "title": "儀表板",
@@ -162,6 +167,7 @@
   },
   "settings": {
     "title": "帳戶設定",
+    "security": "安全性",
     "account": "帳戶資訊",
     "email": "電子郵件",
     "statusLabel": "狀態",
@@ -176,6 +182,29 @@
     "passwordChanged": "密碼已變更！",
     "changePasswordFailed": "變更密碼失敗",
     "loadFailed": "載入使用者資料失敗"
+  },
+  "securityEnrollment": {
+    "title": "雙因素驗證",
+    "description": "使用驗證器 App 與復原碼保護操作員帳戶。",
+    "enabled": "雙因素驗證已啟用",
+    "currentPassword": "目前密碼",
+    "start": "設定雙因素驗證",
+    "startFailed": "無法開始雙因素驗證設定。請檢查密碼後再試一次。",
+    "scanTitle": "掃描驗證器 QR code",
+    "scanDescription": "請使用驗證器 App 在本機掃描此 QR code，並儲存所有備用碼。",
+    "qrTitle": "驗證器 QR code",
+    "backupCodesTitle": "備用碼",
+    "backupCodesDescription": "請將這些備用碼保存在安全的位置。每組備用碼只能使用一次。",
+    "savedCodes": "我已儲存備用碼",
+    "continue": "繼續驗證",
+    "verifyTitle": "驗證您的驗證器",
+    "verifyDescription": "請輸入驗證器 App 目前顯示的六位數驗證碼。",
+    "authenticationCode": "六位數驗證碼",
+    "sixDigitCodeRequired": "請輸入六位數驗證碼。",
+    "invalidCode": "驗證碼無效，請再試一次。",
+    "confirmationFailed": "無法確認驗證狀態。請重新登入後再試一次。",
+    "verify": "驗證並完成",
+    "cancel": "取消設定"
   },
   "history": {
     "title": "執行事件",
