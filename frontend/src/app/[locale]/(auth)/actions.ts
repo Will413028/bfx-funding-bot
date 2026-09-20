@@ -45,3 +45,29 @@ export async function logout(locale: string = "en") {
   }
   redirect(`/${safeLocale}/login`);
 }
+
+export async function logoutForEnrollmentRecovery(
+  locale: string = "en",
+): Promise<{ success: true; redirectTo: string } | { success: false }> {
+  const safeLocale = routing.locales.includes(
+    locale as (typeof routing.locales)[number],
+  )
+    ? locale
+    : routing.defaultLocale;
+
+  try {
+    const response = await auth.api.signOut({
+      headers: await headers(),
+      asResponse: true,
+    });
+    if (!response.ok) return { success: false };
+    const result = (await response.json().catch(() => null)) as {
+      success?: boolean;
+    } | null;
+    if (result?.success !== true) return { success: false };
+  } catch {
+    return { success: false };
+  }
+
+  return { success: true, redirectTo: `/${safeLocale}/login` };
+}

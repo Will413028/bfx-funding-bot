@@ -12,7 +12,6 @@ const redis = vi.hoisted(() => ({
   }),
   del: vi.fn(async (key: string) => (redis.values.delete(key) ? 1 : 0)),
 }));
-
 vi.mock("ioredis", () => ({
   default: class InMemoryRedis {
     get(key: string) {
@@ -151,6 +150,35 @@ describe("operator enrollment with real Better Auth endpoints", () => {
         `bfx:mfa-verified:${authoritative?.session.token}`,
         "1",
       );
+    });
+  });
+
+  it("returns an expired session cookie and invalidates the session on server-action sign-out", async () => {
+    const { instance, signedIn } = await createEnrollmentInstance();
+    await signedIn.runWithUser(async (headers) => {
+      expect(
+        await instance.auth.api.getSession({
+          headers,
+          query: { disableCookieCache: true },
+        }),
+      ).not.toBeNull();
+      const response = await instance.auth.api.signOut({
+        headers,
+        asResponse: true,
+      });
+
+      expect(response.ok).toBe(true);
+      await expect(response.json()).resolves.toEqual({ success: true });
+      expect(response.headers.get("set-cookie")).toContain(
+        "better-auth.session_token=",
+      );
+      expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
+      await expect(
+        instance.auth.api.getSession({
+          headers,
+          query: { disableCookieCache: true },
+        }),
+      ).resolves.toBeNull();
     });
   });
 });

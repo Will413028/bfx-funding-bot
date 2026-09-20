@@ -203,6 +203,8 @@
     "sixDigitCodeRequired": "請輸入六位數驗證碼。",
     "invalidCode": "驗證碼無效，請再試一次。",
     "confirmationFailed": "無法確認驗證狀態。請重新登入後再試一次。",
+    "restartSignIn": "登出並重新登入",
+    "recoveryFailed": "無法登出，請再試一次。",
     "verify": "驗證並完成",
     "cancel": "取消設定"
   },

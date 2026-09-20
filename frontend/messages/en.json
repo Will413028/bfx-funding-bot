@@ -203,6 +203,8 @@
     "sixDigitCodeRequired": "Enter a six-digit code.",
     "invalidCode": "Invalid authentication code. Try again.",
     "confirmationFailed": "Verification could not be confirmed. Sign in again and retry.",
+    "restartSignIn": "Sign out and sign in again",
+    "recoveryFailed": "Could not sign out. Try again.",
     "verify": "Verify and finish",
     "cancel": "Cancel setup"
   },

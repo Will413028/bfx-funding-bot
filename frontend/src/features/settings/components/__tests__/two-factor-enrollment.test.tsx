@@ -6,6 +6,20 @@ const auth = vi.hoisted(() => ({
   verifyTotp: vi.fn(),
   getSession: vi.fn(),
 }));
+const recovery = vi.hoisted(() => ({
+  logout: vi.fn(),
+}));
+const navigation = vi.hoisted(() => ({
+  refresh: vi.fn(),
+  replace: vi.fn(),
+}));
+
+vi.mock("@/app/[locale]/(auth)/actions", () => ({
+  logoutForEnrollmentRecovery: recovery.logout,
+}));
+vi.mock("next/navigation", () => ({
+  useRouter: () => navigation,
+}));
 
 vi.mock("@/lib/auth-client", () => ({
   authClient: {
@@ -48,6 +62,16 @@ async function advanceToCodeEntry() {
   );
 }
 
+async function advanceToRecovery() {
+  auth.verifyTotp.mockResolvedValue({ data: { status: true }, error: null });
+  auth.getSession.mockRejectedValue(new Error("fixture-session-transport"));
+  await advanceToCodeEntry();
+  submitCode();
+  await screen.findByText(
+    "Verification could not be confirmed. Sign in again and retry.",
+  );
+}
+
 function submitCode(code = "012345") {
   fireEvent.change(screen.getByLabelText("Six-digit authentication code"), {
     target: { value: code },
@@ -66,6 +90,9 @@ describe("TwoFactorEnrollment", () => {
     auth.enable.mockReset();
     auth.verifyTotp.mockReset();
     auth.getSession.mockReset();
+    recovery.logout.mockReset();
+    navigation.refresh.mockReset();
+    navigation.replace.mockReset();
   });
 
   it("shows status without offering enrollment when already enrolled", () => {
@@ -286,6 +313,9 @@ describe("TwoFactorEnrollment", () => {
       screen.queryByRole("button", { name: "Verify and finish" }),
     ).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Sign out and sign in again" }),
+    ).toBeDefined();
   });
 
   it("requires a fresh sign-in when verification transport outcome is unknown", async () => {
@@ -309,6 +339,79 @@ describe("TwoFactorEnrollment", () => {
     ).toBeNull();
     expect(screen.queryByRole("button", { name: "Cancel setup" })).toBeNull();
     expect(auth.getSession).not.toHaveBeenCalled();
+  });
+
+  it("prevents repeated recovery actions while sign-out is pending and keeps secrets cleared", async () => {
+    let resolveRecovery: ((value: { success: false }) => void) | undefined;
+    recovery.logout.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRecovery = resolve;
+      }),
+    );
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToRecovery();
+
+    const restart = screen.getByRole("button", {
+      name: "Sign out and sign in again",
+    });
+    fireEvent.click(restart);
+    fireEvent.click(restart);
+
+    await waitFor(() => expect(recovery.logout).toHaveBeenCalledOnce());
+    expect(recovery.logout).toHaveBeenCalledWith("en");
+    expect((restart as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText("fixture-backup-code")).toBeNull();
+    expect(screen.queryByText(enrollmentData.totpURI)).toBeNull();
+    expect(screen.queryByTitle("Authenticator QR code")).toBeNull();
+
+    resolveRecovery?.({ success: false });
+    await waitFor(() =>
+      expect((restart as HTMLButtonElement).disabled).toBe(false),
+    );
+  });
+
+  it("navigates to fresh sign-in only after recovery sign-out succeeds", async () => {
+    recovery.logout.mockResolvedValue({
+      success: true,
+      redirectTo: "/en/login",
+    });
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToRecovery();
+
+    const restart = screen.getByRole("button", {
+      name: "Sign out and sign in again",
+    });
+    fireEvent.click(restart);
+
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledOnce());
+    expect(navigation.replace).toHaveBeenCalledWith("/en/login");
+    expect(navigation.refresh).toHaveBeenCalledOnce();
+    expect((restart as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows a safe retryable error when recovery sign-out fails", async () => {
+    recovery.logout.mockRejectedValue(
+      new Error("fixture-sensitive-sign-out-error"),
+    );
+    render(<TwoFactorEnrollment enrolled={false} />);
+    await advanceToRecovery();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Sign out and sign in again" }),
+    );
+
+    expect(
+      await screen.findByText("Could not sign out. Try again."),
+    ).toBeDefined();
+    expect(screen.queryByText("fixture-sensitive-sign-out-error")).toBeNull();
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Sign out and sign in again",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+    expect(screen.queryByLabelText("Current password")).toBeNull();
   });
 
   it("ignores an in-flight enable result after cancellation", async () => {

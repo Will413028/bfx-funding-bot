@@ -1,9 +1,11 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { useRouter } from "next/navigation";
+import { useLocale, useTranslations } from "next-intl";
 import { QRCodeSVG } from "qrcode.react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import { logoutForEnrollmentRecovery } from "@/app/[locale]/(auth)/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +20,8 @@ interface EnrollmentSecrets {
 
 export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
   const t = useTranslations("securityEnrollment");
+  const locale = useLocale();
+  const router = useRouter();
   const [step, setStep] = useState<EnrollmentStep>(
     enrolled ? "complete" : "password",
   );
@@ -156,6 +160,28 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
     }
   }
 
+  async function restartSignIn() {
+    const currentOperation = ++operation.current;
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      const result = await logoutForEnrollmentRecovery(locale);
+      if (currentOperation !== operation.current) return;
+      if (!result.success) {
+        setError(t("recoveryFailed"));
+        setIsSubmitting(false);
+        return;
+      }
+      router.replace(result.redirectTo);
+      router.refresh();
+    } catch {
+      if (currentOperation === operation.current) {
+        setError(t("recoveryFailed"));
+        setIsSubmitting(false);
+      }
+    }
+  }
+
   if (step === "complete") {
     return (
       <section className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
@@ -208,6 +234,20 @@ export function TwoFactorEnrollment({ enrolled }: { enrolled: boolean }) {
         <p role="alert" className="mt-2 text-sm text-destructive">
           {t("confirmationFailed")}
         </p>
+        {error && (
+          <p role="alert" className="mt-2 text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        <Button
+          type="button"
+          className="mt-5"
+          onClick={restartSignIn}
+          disabled={isSubmitting}
+        >
+          {isSubmitting && <Loader2 className="animate-spin" />}
+          {t("restartSignIn")}
+        </Button>
       </section>
     );
   }
