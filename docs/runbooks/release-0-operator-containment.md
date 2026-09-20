@@ -10,7 +10,9 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
   UUID 或 Bitfinex account ID。
 - Frontend 與 backend 必須使用同一個 non-empty ID；backend
   `BFX_OPERATOR_ROLE` 必須是 `admin`。
-- operator 必須已完成 TOTP enrollment；非 operator 帳號會被永久標記為
+- operator 必須先以實際 Better Auth 流程完成並驗證 TOTP，再由 audited
+  first-admin bootstrap 指派唯一 `admin` role；不得手改任何 enrollment flag。
+  非 operator 帳號會被永久標記為
   `banned=true`，並撤銷其 Better Auth secondary-storage session 與
   `bfx:mfa-verified:<session-token>` marker。
 - 公開 proof/funding endpoints 只走 exact public allowlist；其他 proxy path
@@ -36,10 +38,14 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
    cd backend_py && uv run alembic upgrade head
    ```
 
-4. 由受控管理流程建立唯一 operator user，設定 `role=admin`，完成並驗證
-   TOTP。把 user ID（不記錄 password、TOTP secret、JWT 或 connection URL）
-   寫入受控 secret store。
-5. 確認 `~/bfx/webapi.env` 與 `~/bfx/frontend.env` 都有：
+4. 由既有受控管理流程建立唯一 operator user，但先維持非 admin role。以該
+   exact configured user 的 session 進入 `/{locale}/settings/security`，使用實際
+   Better Auth enrollment 完成 TOTP 驗證與 fresh-session proof。不得手改
+   `role`、`twoFactorEnabled`、`twoFactor.verified`、email verification 或 Redis
+   MFA marker。把 user ID（不記錄 password、TOTP secret、backup code、JWT 或
+   connection URL）寫入受控 secret store。
+5. 確認 protected `/opt/bfx/runtime/webapi.env` 與
+   `/opt/bfx/runtime/frontend.env` 都有：
 
    ```dotenv
    BFX_OPERATOR_USER_ID=<same Better Auth user id>
@@ -49,24 +55,89 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
    現行 [immutable release](immutable-release.md) 工具在啟動前拒絕缺值、非 admin role 或 ID
    不一致。
 
-## 1. Inventory first (read-only)
+## 1. Approved-image one-shot boundary
 
-在 planned halt 中、stack host 的 repository root 執行。Revocation tool 已隨
-frontend standalone image 放在 `/app/scripts`，`pg`/`ioredis` 也由 image 的
-server dependency trace 提供；Compose `env_file` 會注入 frontend 的 DB、Redis
-與 operator 設定。先建立只有 release operator 可讀的 evidence 目錄，再把
-audit path 指向新的、尚未存在的檔案（工具使用 `O_EXCL`，不會覆蓋舊 evidence）：
+現行 frontend 是 read-only rootfs，且沒有 audit/tmp mount；**不得 `docker exec`
+進 runtime container 寫 evidence**。Legacy Compose app/run profile 也不是本次
+release authority。Bootstrap 與後續 containment 都必須是 stack host 上的獨立
+one-shot，使用 reviewed bundle 經 `image_artifact.resolve_image` 解析且已核對的
+actual frontend image、現行 protected `/opt/bfx/runtime/frontend.env`、既有
+`bfx_default` network，以及 root-owned mode `0700` 的 private audit bind。
+
+以下是 controller 必須落實的 manual one-shot contract；`COMMAND...` 每次只換成
+下節列出的單一命令，`AUDIT_DIR`／container name／audit filename 每次皆為新的：
 
 ```bash
-cd ~/bfx
-mkdir -p release-evidence
-chmod 700 release-evidence
-docker compose --env-file .env.frontend.runtime -f docker-compose.bot.yml run --rm --no-deps \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD/release-evidence:/evidence" \
-  frontend node /app/scripts/revoke-non-operators.mjs \
-  --dry-run \
-  --audit-file /evidence/containment-dry-run-$(date +%s).json
+ACTUAL_FRONTEND_IMAGE=sha256:<resolved-approved-actual-id>
+AUDIT_DIR=/opt/bfx/receipts/operator-onboarding/<new-run-id>
+CONTAINER_NAME=bfx-operator-one-shot-<new-run-id>
+install -d -o root -g root -m 0700 "$AUDIT_DIR"
+
+docker create --pull=never --read-only --user 0:0 --entrypoint "" \
+  --workdir /app --name "$CONTAINER_NAME" --network bfx_default \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --env-file /opt/bfx/runtime/frontend.env \
+  --mount "type=bind,src=$AUDIT_DIR,dst=/evidence" \
+  "$ACTUAL_FRONTEND_IMAGE" COMMAND...
+```
+
+這不是可直接略過 inspection 的 `docker run`。記下 create 回傳的 exact container
+ID，**在任何執行前**用不輸出 env values 的受控檢查確認：container ID/Image
+等於本次 create 與 resolved actual ID；state=`created`；command 完全相等；
+user=`0:0`、cwd=`/app`、read-only rootfs、非 privileged、cap-drop ALL、
+no-new-privileges、network=`bfx_default`；env keys/values 與 protected env file
+逐項相等；唯一 mount 是上述 `/evidence` writable bind，來源與目的 exact。
+不符立即停止，不 start。符合才 `docker start --attach <exact-id>`，檢查 container
+process exit 0；失敗不重試同一命令，保留 receipt/state 調查。完成檢查後只移除
+本次已驗證的 stopped container。不得 pull/build、把 secrets 放在 command line、
+dump raw inspect/env、掃描 Redis 或把 audit 寫到 container rootfs。
+
+CLI audit 自身以 exclusive create 保留新 path 並固定 mode `0600`。one-shot 使用
+root 僅為了在 root-owned private bind 建立 root-owned receipt；rootfs 仍 read-only、
+capabilities 全移除，且 container 不持有 Docker socket。
+
+## 2. Audited first-admin bootstrap
+
+人工 enrollment 與 fresh-session proof 完成後，先用上述 one-shot contract 執行
+預設 dry-run（audit filename 必須尚不存在）：
+
+```text
+node /app/scripts/bootstrap-operator.mjs --dry-run \
+  --audit-file /evidence/bootstrap-dry-run.json
+```
+
+工具在 read-only transaction 中獨立驗證 DB，不信任 browser claims：configured
+user 必須 exact 唯一、未 banned、`twoFactorEnabled=true`；必須有 exact 一筆
+canonical credential account 與 exact 一筆 `verified=true` TOTP；不得已有其他
+exact 或 comma-separated admin authority。它同時解析 operator 的 bounded
+`active-sessions-<user-id>` inventory，但 dry-run 不 lock table、不 UPDATE、不 DEL。
+確認 redacted JSON 的 `operatorUserId`、`dbCommitted=false`、role/session counts。
+
+review dry-run receipt 後，以全新的 audit directory/container/path 執行 apply：
+
+```text
+node /app/scripts/bootstrap-operator.mjs --apply \
+  --confirm-bootstrap-admin \
+  --audit-file /evidence/bootstrap-apply.json
+```
+
+apply 先 reserve mode `0600` audit，才開始 bounded DB transaction；鎖住 authority
+後只將 configured ID 的 `role` 改為 exact `admin`，不改 enrollment/auth flags。
+commit 後只依 operator inventory 刪除其 list、exact session tokens 與對應
+`bfx:mfa-verified:<token>`。`partial_failure` 必須保持 halt；修復 dependency 後用
+新的 audit path 重跑同一 sole admin，直到 `completed`。既有 audit path 永不覆寫。
+
+Bootstrap 會撤銷 enrollment session。完成後必須重新登入並完成 TOTP，確認新的
+fresh operator session；不得以舊 cookie 或人工 Redis marker 作 proof。
+
+## 3. Non-operator inventory first (read-only)
+
+first-admin bootstrap 完成且 fresh sign-in proof 通過後，existing revocation tool
+仍是獨立 one-shot。以第 1 節同一 contract（新的 audit dir/container/path）執行：
+
+```text
+node /app/scripts/revoke-non-operators.mjs --dry-run \
+  --audit-file /evidence/containment-dry-run.json
 ```
 
 工具會 fail closed，並驗證：
@@ -80,20 +151,15 @@ docker compose --env-file .env.frontend.runtime -f docker-compose.bot.yml run --
 `activeSessionCount`。若 operator ID、數量或 session inventory 不符合預期，
 停止並修正資料，不得直接 apply。
 
-## 2. Apply (explicit, audited)
+## 4. Non-operator apply (explicit, audited)
 
 只有在 planned halt、backup/evidence 與 dry-run review 都完成後才可執行。這個
 命令要求兩個旗標，避免把 apply 當成一般 dry-run：
 
-```bash
-cd ~/bfx
-docker compose --env-file .env.frontend.runtime -f docker-compose.bot.yml run --rm --no-deps \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD/release-evidence:/evidence" \
-  frontend node /app/scripts/revoke-non-operators.mjs \
-  --apply \
+```text
+node /app/scripts/revoke-non-operators.mjs --apply \
   --confirm-release-0 \
-  --audit-file /evidence/containment-apply-$(date +%s).json
+  --audit-file /evidence/containment-apply.json
 ```
 
 執行順序固定為：
@@ -109,7 +175,7 @@ docker compose --env-file .env.frontend.runtime -f docker-compose.bot.yml run --
    用同一個 operator ID 重跑 apply（操作具 idempotency），直到得到
    `status=completed`。
 
-## 3. Evidence and direct boundary checks
+## 5. Evidence and direct boundary checks
 
 保存以下不含 secrets 的 evidence：apply audit JSON、release SHA、migration
 結果、部署 preflight stdout，以及測試結果。Release gate 至少包含：
@@ -138,19 +204,23 @@ Full-stack Playwright 必須直接確認：
 - exact public proof/funding path 可匿名讀取，path traversal 與其他 private
   path 仍被拒絕。
 
-## 4. Rollback / rotation
+## 6. Rollback / rotation
 
 - 不要用全域 `banned=false` 作為 rollback。若誤選 operator，維持 planned halt，
   由兩人 review 後用 targeted backup/forward-fix 恢復正確 user row，並重新撤銷
   受影響 session；所有決定寫入 incident evidence。
-- 若要 rotation，先建立並完成新 operator 的 TOTP，再同步兩邊 env、重新執行
-  dry-run/apply；舊 operator 會被視為 non-operator 並撤銷 session。
+- 若要 rotation，先建立並完成新 configured operator 的 TOTP，再同步兩邊 env、
+  對新 ID 重走 audited first-admin/authority change review，最後才重新執行
+  non-operator dry-run/apply；不得讓 bootstrap 繞過既有 admin conflict。
 - 若 apply 在 DB commit 後失敗，不能回復 authorization policy 來「繞過」問題；
   修復 Redis connectivity 後重跑同一工具。
 
-## 5. Scope boundary
+## 7. Scope boundary
 
 Release 0 只保證 operator-only containment、signup 關閉、session/MFA/JWT
 邊界與 deployment readiness。它不宣稱 Halt 1 membership/account isolation；
 多使用者 SaaS、account membership、billing 與 tenant isolation 仍由後續
 architecture plan 處理。
+
+完成 bootstrap、fresh sign-in 與 containment 只建立 authenticated control plane；
+持續保持 durable halt。它們不授權 canary、permit、submit/cancel、promote 或 resume。

@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit && biome check src/",
     "format": "biome format --write",
     "knip": "knip",
+    "auth:bootstrap-operator": "node scripts/bootstrap-operator.mjs",
     "auth:revoke-non-operators": "node scripts/revoke-non-operators.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
