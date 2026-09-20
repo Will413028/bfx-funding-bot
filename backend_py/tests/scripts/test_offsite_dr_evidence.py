@@ -729,3 +729,4 @@ def test_backup_cli_writes_atomic_bounded_failure(tmp_path: Path) -> None:
     assert report["error_code"] == "archiver_output_invalid"
     assert TOKEN_SENTINEL not in json.dumps(report)
     assert not list(tmp_path.glob(".backup.json.*.tmp"))
+

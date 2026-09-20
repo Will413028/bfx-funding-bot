@@ -72,11 +72,26 @@ def test_receipt_reader_requires_private_bounded_versioned_evidence(tmp_path, mo
 
 
 @pytest.mark.parametrize("key", ["rpo_seconds", "rto_seconds"])
-@pytest.mark.parametrize("observed", [None, True, 1000000.0, "1000000", -1, 1000001, 99999])
+@pytest.mark.parametrize("observed", [None, True, 1000000.0, "1000000", -1, 1000001, "stale"])
 def test_dr_freshness_rejects_missing_invalid_future_and_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, observed: object) -> None:
-    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+    # Far enough from the epoch that a day-old measurement is still a positive
+    # timestamp: otherwise the stale case would be refused for being negative and
+    # would pass whatever the freshness bound said.
+    now_ms = 100_000_000
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: now_ms / 1000)
     path = tmp_path / "dr.json"
     report = {"schema_version": 1, "kind": "backup" if key == "rpo_seconds" else "restore", "measured": True, key: 30}
+    if observed == "stale":
+        # Just past this measurement's own window. Backup lag expires in minutes;
+        # restore capability does not, and holding both to one clock is what forced
+        # a fresh isolated restore before every authorisation.
+        observed = now_ms - (900_001 if key == "rpo_seconds" else 86_400_001)
+    elif observed == 1000001:
+        observed = now_ms + 1          # still the "future" case
+    elif observed == 1000000.0:
+        observed = float(now_ms)       # still the "wrong type" case
+    elif observed == "1000000":
+        observed = str(now_ms)
     if observed is not None:
         report["observed_at_ms"] = observed
     path.write_text(json.dumps(report))
@@ -86,11 +101,15 @@ def test_dr_freshness_rejects_missing_invalid_future_and_stale(tmp_path: Path, m
 
 
 @pytest.mark.parametrize("key", ["rpo_seconds", "rto_seconds"])
-@pytest.mark.parametrize("age_ms", [0, 900000])
-def test_dr_freshness_accepts_window_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, age_ms: int) -> None:
-    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1000)
+@pytest.mark.parametrize("age_ms", [0, 900000, "own_bound"])
+def test_dr_freshness_accepts_window_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, age_ms: object) -> None:
+    """Each measurement is accepted right up to its own bound, not a shared one."""
+    now_ms = 100_000_000
+    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: now_ms / 1000)
+    if age_ms == "own_bound":
+        age_ms = 900_000 if key == "rpo_seconds" else 86_400_000
     path = tmp_path / "dr.json"
-    path.write_text(json.dumps({"schema_version": 1, "kind": "backup" if key == "rpo_seconds" else "restore", "measured": True, key: 30, "observed_at_ms": 1000000 - age_ms}))
+    path.write_text(json.dumps({"schema_version": 1, "kind": "backup" if key == "rpo_seconds" else "restore", "measured": True, key: 30, "observed_at_ms": now_ms - age_ms}))
     path.chmod(0o600)
     assert _read_dr_measurement(path, key=key) == 30
 
