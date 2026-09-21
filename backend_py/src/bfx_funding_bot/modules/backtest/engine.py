@@ -1,4 +1,5 @@
 import math
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Literal, NoReturn
 
@@ -17,6 +18,26 @@ from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 BacktestIncompleteReason = Literal[
     "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
 ]
+
+_MS_PER_DAY = Decimal(86_400_000)
+_AGGREGATE_SERIES_KEY = "a30"
+
+
+def resolve_market_series_key(period_days: int, available: Mapping[str, object]) -> str:
+    """Pick the market series that prices a lock of `period_days`.
+
+    Exact tenor first (`p2`, `p30`, ...); otherwise Bitfinex's 2-30d aggregate
+    (`a30`) as the stated approximation. Raises KeyError when neither exists so a
+    missing series cannot silently degrade to the observed candle.
+    """
+    exact = f"p{period_days}"
+    if exact in available:
+        return exact
+    if _AGGREGATE_SERIES_KEY in available:
+        return _AGGREGATE_SERIES_KEY
+    raise KeyError(
+        f"no market series for period {period_days}: have {sorted(available)}"
+    )
 
 
 class BacktestIncomplete(RuntimeError):  # noqa: N818 - contract name is prescribed
@@ -117,6 +138,7 @@ def run_backtest(
     record_end_mts: int | None = None,
     fill_model: FillRateModel | None = None,
     market_candles: list[FundingCandle] | None = None,
+    market_series_by_agg: Mapping[str, list[FundingCandle]] | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -135,7 +157,16 @@ def run_backtest(
     venue later revised, and quoted from it, while fills settled against the true
     rate. Passing one series to both sides makes `spread_pct` collapse to 0 and
     the distortion appear harmless — the artifact that invalidated the first L4 run.
+
+    `market_series_by_agg` (optional, exclusive with `market_candles`) prices each
+    fill off the series matching the decision's lock tenor — `p2` for 2-day
+    offers, `p30` for 30-day, `a30` as the aggregate fallback — via
+    `resolve_market_series_key`. A strategy that observes the a30 series but
+    posts 2-day offers is then scored against the 2-day market it actually
+    competes in, instead of being credited the aggregate rate for a 2-day lock.
     """
+    if market_candles is not None and market_series_by_agg is not None:
+        raise ValueError("pass market_candles or market_series_by_agg, not both")
     if config.fill_model == "empirical":
         _preflight_empirical_model(candles, config.fill_horizon_h, fill_model)
     if not candles:
@@ -157,6 +188,12 @@ def run_backtest(
     market_by_mts = (
         {c.mts: c for c in market_candles} if market_candles is not None else None
     )
+    series_maps: dict[str, dict[int, FundingCandle]] | None = (
+        {key: {c.mts: c for c in series} for key, series in market_series_by_agg.items()}
+        if market_series_by_agg is not None
+        else None
+    )
+    series_used: dict[str, int] = {}
     symbol = sorted_candles[0].symbol
     full_start_mts = sorted_candles[0].mts
     full_end_mts = sorted_candles[-1].mts
@@ -193,13 +230,21 @@ def run_backtest(
         if decision is None:
             continue
 
-        pricing_candle = (
-            market_by_mts.get(candle.mts, candle) if market_by_mts is not None else candle
-        )
+        if series_maps is not None:
+            series_key = resolve_market_series_key(decision.period_days, series_maps)
+            pricing_candle = series_maps[series_key].get(candle.mts, candle)
+            series_used[series_key] = series_used.get(series_key, 0) + 1
+        else:
+            pricing_candle = (
+                market_by_mts.get(candle.mts, candle) if market_by_mts is not None else candle
+            )
         gross_rate, fill_prob = _apply_friction(
             decision, pricing_candle, config, fill_model
         )
         period = Decimal(decision.period_days)
+        if config.truncate_at_window_end:
+            remaining_days = Decimal(effective_end - candle.mts) / _MS_PER_DAY
+            period = min(period, max(remaining_days, Decimal("0")))
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee
         net_equity = net_equity * (Decimal("1") + net_rate * period)
@@ -250,6 +295,7 @@ def run_backtest(
         model_sample_count=(
             fill_model.artifact.sample_count if fill_model and fill_model.artifact else None
         ),
+        pricing_series_used=series_used if series_maps is not None else None,
     )
 
 
