@@ -8,6 +8,7 @@ import pytest
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 from bfx_funding_bot.modules.marketfeed.funding_book import (
+    BookUnavailable,
     FundingBookService,
     FundingBookStore,
     MarketSnapshot,
@@ -174,6 +175,25 @@ def test_rest_rebase_is_priceable_evidence_of_its_own() -> None:
     snapshot = store.snapshot("fUST", now_ms=1_000)
     assert snapshot is not None
     assert snapshot.source == "rest_reconciled"
+
+
+def test_unavailable_reason_names_which_fault_withheld_the_book() -> None:
+    """Each cause needs its own operator response, so each keeps its own name."""
+    store = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+    assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.NO_BASELINE
+
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    assert store.unavailable_reason("fUST", now_ms=1_000) is None
+
+    assert store.unavailable_reason("fUST", now_ms=41_000) is BookUnavailable.STALE
+
+    store.apply_checksum("fUST", checksum=123, expected=456, sequence=11)
+    assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.CHECKSUM_MISMATCH
+
+    gapped = FundingBookStore(max_age_seconds=30, clock=lambda: 1_000)
+    gapped.apply_snapshot("fUST", _book_snapshot(), sequence=10)
+    gapped.apply_sequence("fUST", 12)  # frame 11 never arrived
+    assert gapped.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.SEQUENCE_GAP
 
 
 def test_exact_period_requires_depth_and_uses_absolute_bid_amount() -> None:

@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Literal, Protocol
 
 from bfx_funding_bot.external.bitfinex.funding_book_ws import funding_book_checksum
@@ -79,8 +80,24 @@ class MarketSnapshot:
         return ExactPeriodBook(bids=bids, asks=asks)
 
 
+class BookUnavailable(StrEnum):
+    """Why a book cannot price right now, kept distinct for the operator.
+
+    Collapsing these into one reason is what made the venue-checksum fault take
+    a full investigation: the block said the book was stale when in truth it had
+    never once qualified, and nothing in the event said which.
+    """
+
+    NO_BASELINE = "no_baseline"
+    SEQUENCE_GAP = "sequence_gap"
+    CHECKSUM_MISMATCH = "checksum_mismatch"
+    STALE = "stale"
+
+
 class FundingBookProvider(Protocol):
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None: ...
+
+    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None: ...
 
 
 @dataclass(slots=True)
@@ -271,6 +288,22 @@ class FundingBookStore(FundingBookProvider):
             return None
         return snapshot
 
+    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
+        """Name what is withholding this book, or None when it is priceable."""
+        state = self._states.get(symbol)
+        if state is None or state.captured_at_ms is None or state.received_at_ms is None:
+            return BookUnavailable.NO_BASELINE
+        # A detected inconsistency outranks the missing baseline it caused.
+        if state.checksum_mismatch:
+            return BookUnavailable.CHECKSUM_MISMATCH
+        if state.sequence_gap:
+            return BookUnavailable.SEQUENCE_GAP
+        if self.needs_reconciliation(symbol):
+            return BookUnavailable.NO_BASELINE
+        if self.snapshot(symbol, now_ms=now_ms) is None:
+            return BookUnavailable.STALE
+        return None
+
     def _establish_baseline(self, state: _BookState) -> None:
         """Adopt a whole book from the venue and clear what it supersedes."""
         state.has_baseline = True
@@ -418,6 +451,9 @@ class FundingBookService(FundingBookProvider):
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         return self._store.snapshot(symbol, now_ms=now_ms)
+
+    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
+        return self._store.unavailable_reason(symbol, now_ms=now_ms)
 
     def _on_snapshot(
         self, symbol: str, raw_levels: list[list[object]], sequence: int | None
