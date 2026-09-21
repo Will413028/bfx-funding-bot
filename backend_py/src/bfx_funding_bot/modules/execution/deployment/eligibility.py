@@ -81,6 +81,18 @@ class _NormalizedFillEvidence:
     cutoff_ms: int
 
 
+
+# Reasons a caller's own book lookup may report; anything else is not a book
+# fault and must not pass through this path.
+_BOOK_BLOCK_REASONS = frozenset(
+    {
+        BlockReason.BOOK_NOT_INITIALIZED,
+        BlockReason.BOOK_SEQUENCE_INVALID,
+        BlockReason.BOOK_CHECKSUM_INVALID,
+        BlockReason.BOOK_STALE,
+    }
+)
+
 class ExecutionGate:
     """Audit every candidate and release only a committed READY decision."""
 
@@ -344,6 +356,18 @@ class ExecutionGate:
                 {"guard_reason": safety.reason},
             )
         if snapshot is None:
+            # The caller that looked the book up knows which fault withheld it;
+            # a single collapsed "stale" here would throw that away and leave
+            # the operator unable to tell a book that never qualified from one
+            # that aged out.
+            if isinstance(price, BlockedExecution) and price.reason in _BOOK_BLOCK_REASONS:
+                return _blocked(
+                    decision_id,
+                    candidate,
+                    price.reason,
+                    price.failed_dependency,
+                    price.evidence,
+                )
             return _blocked(
                 decision_id,
                 candidate,

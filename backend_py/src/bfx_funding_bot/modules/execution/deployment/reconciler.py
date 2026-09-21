@@ -70,7 +70,10 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelUnavailable,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookProvider
+from bfx_funding_bot.modules.marketfeed.funding_book import (
+    BookUnavailable,
+    FundingBookProvider,
+)
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     DecisionPayload,
@@ -86,6 +89,16 @@ log = logging.getLogger(__name__)
 # noise, it is not a risk preference anyone would tune per offer. Revisions are
 # logged, so a tolerance that starts being used routinely is visible.
 RELEASE_MINIMUM_TOLERANCE = Decimal("0.01")
+
+
+# A book that never qualified and a book that went stale are different faults
+# with different operator responses; the event must say which.
+_BOOK_BLOCK_REASONS: dict[BookUnavailable | None, BlockReason] = {
+    BookUnavailable.NO_BASELINE: BlockReason.BOOK_NOT_INITIALIZED,
+    BookUnavailable.SEQUENCE_GAP: BlockReason.BOOK_SEQUENCE_INVALID,
+    BookUnavailable.CHECKSUM_MISMATCH: BlockReason.BOOK_CHECKSUM_INVALID,
+    BookUnavailable.STALE: BlockReason.BOOK_STALE,
+}
 
 
 class _LedgerProtocol(Protocol):
@@ -373,12 +386,16 @@ class DeploymentReconciler:
                     f"{reconcile_id}:{cell_id}:{decision.signal_correlation_id}:{amount}",
                 ))
                 if snapshot is None:
+                    unavailable = self._book_provider.unavailable_reason(symbol, now_ms=now)
                     price: PriceDecision | BlockedExecution = BlockedExecution(
                         decision_id=decision_id,
                         candidate=decision,
-                        reason=BlockReason.BOOK_STALE,
+                        reason=_BOOK_BLOCK_REASONS.get(unavailable, BlockReason.BOOK_STALE),
                         failed_dependency="market_snapshot",
-                        evidence={"symbol": symbol},
+                        evidence={
+                            "symbol": symbol,
+                            "book_state": unavailable.value if unavailable else "unknown",
+                        },
                     )
                 else:
                     price = self._period_pricer.price(candidate=decision, snapshot=snapshot)

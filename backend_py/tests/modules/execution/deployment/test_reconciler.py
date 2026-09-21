@@ -43,7 +43,7 @@ from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelUnavailable,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
-from bfx_funding_bot.modules.marketfeed.funding_book import MarketSnapshot
+from bfx_funding_bot.modules.marketfeed.funding_book import BookUnavailable, MarketSnapshot
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
     EventType,
@@ -242,11 +242,19 @@ class _Readiness:
 
 
 class _SnapshotProvider:
-    def __init__(self, snapshot: MarketSnapshot | None) -> None:
+    def __init__(
+        self,
+        snapshot: MarketSnapshot | None,
+        unavailable: BookUnavailable | None = BookUnavailable.STALE,
+    ) -> None:
         self._snapshot = snapshot
+        self._unavailable = unavailable
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
         return self._snapshot
+
+    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
+        return None if self._snapshot is not None else self._unavailable
 
 
 class _FillModelProvider:
@@ -592,6 +600,29 @@ async def test_unknown_opens_gate_for_remaining_cells_in_same_tick() -> None:
     await rec.deploy()
 
     assert executor.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("unavailable", "expected"),
+    [
+        (BookUnavailable.NO_BASELINE, BlockReason.BOOK_NOT_INITIALIZED),
+        (BookUnavailable.SEQUENCE_GAP, BlockReason.BOOK_SEQUENCE_INVALID),
+        (BookUnavailable.CHECKSUM_MISMATCH, BlockReason.BOOK_CHECKSUM_INVALID),
+        (BookUnavailable.STALE, BlockReason.BOOK_STALE),
+    ],
+)
+async def test_block_reason_names_which_book_fault_stopped_the_candidate(unavailable, expected):
+    """One collapsed reason is what hid a permanent checksum fault as staleness."""
+    audit = _Audit()
+    rec, executor, _tracker, _safety = _build(
+        exposure=D("370"), quotes=[_post_quote("fUST_a30")],
+        book_provider=_SnapshotProvider(None, unavailable), audit=audit,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.reason_code is expected
 
 
 async def test_book_failure_never_submits_original_quote():
