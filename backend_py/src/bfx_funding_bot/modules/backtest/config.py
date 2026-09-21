@@ -25,6 +25,12 @@ class BacktestConfig:
     # "linear-baseline" is an explicit offline sensitivity baseline only.
     fill_model: Literal["empirical", "linear-baseline"] = "empirical"
     fill_horizon_h: int = 4
+    # Credit only the part of a lock that falls inside the record window. Off by
+    # default so existing gate/derivation numbers are byte-stable; the
+    # period-structure research runner turns it on because fresh-per-window WFO
+    # would otherwise credit a 14d/30d lock opened late in a month in full and
+    # then let the next window trade again from hour 0 (double counting).
+    truncate_at_window_end: bool = False
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.fee_rate <= Decimal("1")):

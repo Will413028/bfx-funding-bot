@@ -72,3 +72,6 @@ class BacktestResult(BaseModel):
     incomplete_reason: Literal[
         "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
     ] | None = None
+    # Which market series priced each fill when `market_series_by_agg` was used
+    # (key -> trade count); None for single-series runs.
+    pricing_series_used: dict[str, int] | None = None
