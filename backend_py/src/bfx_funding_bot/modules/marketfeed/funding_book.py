@@ -36,6 +36,12 @@ class MarketSnapshot:
     captured_at_ms: int
     received_at_ms: int
     source: Literal["ws", "rest_reconciled"]
+    # Both assert the absence of a detected inconsistency, not the presence of
+    # a proof. A book the venue handed over whole is consistent until the venue
+    # says otherwise: it numbers every frame, so a gap is visible, and it sends
+    # a checksum on its own schedule -- tens of seconds apart, sometimes over
+    # two minutes. Waiting for that proof before pricing would idle the book
+    # for most of its life while nothing was ever wrong with it.
     sequence_valid: bool
     checksum_valid: bool
     sequence: int | None
@@ -44,10 +50,21 @@ class MarketSnapshot:
     max_age_ms: int | None = None
 
     def is_fresh(self, *, symbol: str, now_ms: int, max_age_ms: int) -> bool:
+        """Age the book by when the venue last confirmed it, not by its content.
+
+        A quiet funding book can go minutes without a level changing while the
+        venue keeps confirming, per heartbeat, that nothing has. Measuring from
+        `captured_at_ms` would retire such a book for being correct and
+        unchanged; `received_at_ms` measures the thing that actually decays --
+        how long since the venue last spoke to us about it.
+        """
         return (
             symbol == self.symbol
+            # Neither timestamp may sit in the future: that is a broken clock,
+            # not a fresh book.
             and self.captured_at_ms <= now_ms
-            and now_ms - self.captured_at_ms <= max_age_ms
+            and self.received_at_ms <= now_ms
+            and now_ms - self.received_at_ms <= max_age_ms
             and self.sequence_valid
             and self.checksum_valid
         )
@@ -72,11 +89,14 @@ class _BookState:
     asks: dict[tuple[float, int], FundingBookLevel] = field(default_factory=dict)
     captured_at_ms: int | None = None
     received_at_ms: int | None = None
-    sequence: int | None = None
     generation: int = 0
-    ws_snapshot_received: bool = False
-    sequence_valid: bool = False
-    checksum_valid: bool = False
+    # A full book to apply increments onto: a WS snapshot or a REST rebase.
+    has_baseline: bool = False
+    # Inconsistencies observed since that baseline was established.
+    sequence_gap: bool = False
+    checksum_mismatch: bool = False
+    # Observability only: when the venue last positively confirmed this book.
+    checksum_verified_at_ms: int | None = None
     requires_reconciliation: bool = False
     reconciliation_epoch: int = 0
     source: Literal["ws", "rest_reconciled"] = "ws"
@@ -90,6 +110,10 @@ class FundingBookStore(FundingBookProvider):
         self._clock = clock or (lambda: int(time.time() * 1_000))
         self._states: dict[str, _BookState] = {}
         self._reconciliation_epoch = 0
+        # Bitfinex numbers public frames once per connection, across every
+        # subscribed channel, so continuity is a connection-wide fact: a gap
+        # means this connection dropped frames and no symbol can be trusted.
+        self._connection_sequence: int | None = None
 
     def apply_snapshot(
         self,
@@ -102,20 +126,21 @@ class FundingBookStore(FundingBookProvider):
         state.bids, state.asks = self._split_levels(levels)
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
-        state.ws_snapshot_received = True
         state.source = "ws"
-        state.sequence = sequence
-        # The snapshot only establishes a sequence baseline. A subsequent
-        # continuous sequence and matching checksum are required before use.
-        state.sequence_valid = False
-        state.checksum_valid = False
+        # Settle the connection's continuity first: a gap here voids the other
+        # symbols' books. This one is exempt -- it is a whole book, correct
+        # whatever the connection missed before it arrived. The venue resends
+        # it only on resubscribe, which is the sole way a book is rebuilt over
+        # WS, so nothing else could re-qualify it.
+        self._observe_sequence(sequence)
+        self._establish_baseline(state)
         state.generation += 1
 
     def apply_update(
         self, symbol: str, level: FundingBookLevel, *, sequence: int | None = None
     ) -> None:
         state = self._state_for(symbol)
-        self._apply_sequence(state, sequence)
+        self._observe_sequence(sequence)
         side = state.asks if level.amount > 0 else state.bids
         key = (level.rate, level.period)
         if level.count == 0:
@@ -126,12 +151,18 @@ class FundingBookStore(FundingBookProvider):
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
         state.source = "ws"
-        state.checksum_valid = False
+        # The increment is authoritative and arrived in sequence, so the book
+        # it produces is still the venue's. Retiring the book here would demand
+        # a fresh `cs` frame per increment; the venue sends those tens of
+        # seconds apart, so the book would be ineligible almost always. A
+        # checksum that disagrees still voids it -- see apply_checksum.
         state.generation += 1
 
     def apply_sequence(self, symbol: str, sequence: int) -> None:
         state = self._state_for(symbol)
-        self._apply_sequence(state, sequence)
+        self._observe_sequence(sequence)
+        # A heartbeat changes no level but does say the book is still current.
+        state.received_at_ms = self._clock()
         state.generation += 1
 
     def apply_checksum(
@@ -143,7 +174,7 @@ class FundingBookStore(FundingBookProvider):
         sequence: int | None = None,
     ) -> None:
         state = self._state_for(symbol)
-        self._apply_sequence(state, sequence)
+        self._observe_sequence(sequence)
         computed = (
             expected
             if expected is not None
@@ -152,9 +183,11 @@ class FundingBookStore(FundingBookProvider):
             )
         )
         if checksum != computed:
+            state.checksum_mismatch = True
             self._invalidate(state)
-        elif state.sequence_valid and state.ws_snapshot_received:
-            state.checksum_valid = True
+        elif state.has_baseline:
+            state.checksum_verified_at_ms = self._clock()
+            state.received_at_ms = self._clock()
         state.generation += 1
 
     def apply_rest_snapshot(
@@ -177,23 +210,33 @@ class FundingBookStore(FundingBookProvider):
         state.captured_at_ms = self._clock()
         state.received_at_ms = self._clock()
         state.source = "rest_reconciled"
-        # REST levels replace the book, so all prior WS evidence is stale. A
-        # new WS snapshot, contiguous sequence, and matching checksum must
-        # establish eligibility after this rebase.
-        state.sequence = None
-        state.ws_snapshot_received = False
-        state.sequence_valid = False
-        state.checksum_valid = False
-        state.requires_reconciliation = False
-        state.reconciliation_epoch = self._reconciliation_epoch
+        # REST returns the same venue's book, whole, over an HTTP 200.
+        # It is a baseline on the same footing as a WS snapshot: later WS
+        # increments apply onto it, and it is priceable within the freshness
+        # bound. Demanding a *WS* snapshot to re-qualify it would never be
+        # satisfiable -- the venue sends one only on subscribe -- so the book
+        # would stay dead for as long as the process lived.
+        self._establish_baseline(state)
         state.generation += 1
         return True
 
     def mark_disconnected(self) -> None:
         self._reconciliation_epoch += 1
+        self._connection_sequence = None
         for state in self._states.values():
             self._invalidate(state)
             state.generation += 1
+
+    def needs_reconciliation(self, symbol: str) -> bool:
+        """Whether this symbol has no trustworthy book to apply increments to."""
+        state = self._states.get(symbol)
+        if state is None:
+            return True
+        return (
+            state.requires_reconciliation
+            or not state.has_baseline
+            or state.reconciliation_epoch != self._reconciliation_epoch
+        )
 
     def generation(self, symbol: str) -> int:
         state = self._states.get(symbol)
@@ -214,18 +257,28 @@ class FundingBookStore(FundingBookProvider):
             captured_at_ms=state.captured_at_ms,
             received_at_ms=state.received_at_ms,
             source=state.source,
-            sequence_valid=state.sequence_valid,
-            checksum_valid=state.checksum_valid,
-            sequence=state.sequence,
+            sequence_valid=not state.sequence_gap,
+            checksum_valid=not state.checksum_mismatch,
+            sequence=self._connection_sequence,
             max_age_ms=self._max_age_ms,
         )
         if (
             state.requires_reconciliation
+            or not state.has_baseline
             or state.reconciliation_epoch != self._reconciliation_epoch
             or not snapshot.is_fresh(symbol=symbol, now_ms=now_ms, max_age_ms=self._max_age_ms)
         ):
             return None
         return snapshot
+
+    def _establish_baseline(self, state: _BookState) -> None:
+        """Adopt a whole book from the venue and clear what it supersedes."""
+        state.has_baseline = True
+        state.sequence_gap = False
+        state.checksum_mismatch = False
+        state.checksum_verified_at_ms = None
+        state.requires_reconciliation = False
+        state.reconciliation_epoch = self._reconciliation_epoch
 
     def _state_for(self, symbol: str) -> _BookState:
         state = self._states.get(symbol)
@@ -252,24 +305,25 @@ class FundingBookStore(FundingBookProvider):
     @staticmethod
     def _invalidate(state: _BookState) -> None:
         state.requires_reconciliation = True
-        state.sequence_valid = False
-        state.checksum_valid = False
-        state.ws_snapshot_received = False
+        state.checksum_verified_at_ms = None
+        state.has_baseline = False
 
-    @staticmethod
-    def _apply_sequence(state: _BookState, sequence: int | None) -> None:
+    def _observe_sequence(self, sequence: int | None) -> None:
+        """Track connection-wide frame continuity; a gap voids every book."""
         if sequence is None:
             return
-        if state.sequence is None or sequence != state.sequence + 1:
-            FundingBookStore._invalidate(state)
-        else:
-            state.sequence_valid = True
-        state.sequence = sequence
+        previous = self._connection_sequence
+        self._connection_sequence = sequence
+        if previous is None or sequence == previous + 1:
+            # First numbered frame on this connection, or an unbroken run.
+            return
+        for state in self._states.values():
+            state.sequence_gap = True
+            self._invalidate(state)
 
-    @staticmethod
-    def _snapshot_id(symbol: str, state: _BookState) -> str:
+    def _snapshot_id(self, symbol: str, state: _BookState) -> str:
         material = (
-            f"{symbol}:{state.captured_at_ms}:{state.sequence}:"
+            f"{symbol}:{state.captured_at_ms}:{self._connection_sequence}:"
             f"{state.source}:"
             f"{[(level.rate, level.period, level.amount) for level in state.bids.values()]}:"
             f"{[(level.rate, level.period, level.amount) for level in state.asks.values()]}"
@@ -336,7 +390,16 @@ class FundingBookService(FundingBookProvider):
             await self.stop()
 
     async def reconcile_once(self) -> None:
+        """Rebuild only the books that have no trustworthy baseline left.
+
+        A periodic rebase over a healthy book would retire the sequence and
+        checksum evidence the venue just confirmed, and the next confirmation
+        arrives only with the next ``cs`` frame -- so the book would spend most
+        of its life ineligible for no gain.
+        """
         for symbol in self._symbols:
+            if not self._store.needs_reconciliation(symbol):
+                continue
             generation = self._store.generation(symbol)
             reconciliation_epoch = self._store.reconciliation_epoch()
             try:
