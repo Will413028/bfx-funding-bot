@@ -25,8 +25,33 @@ BOOK_CONF_FLAGS = SEQ_ALL | OB_CHECKSUM
 BookLevels = Sequence[object]
 
 
+def _number_token(value: object) -> str:
+    """Render one number the way the venue renders it inside its own checksum.
+
+    Bitfinex builds the checksum string from the JSON numbers it sent, so an
+    integral amount such as 3600 carries no ``.0`` and a rate keeps its
+    shortest round-trip form. Formatting a parsed float with ``str`` would
+    write ``3600.0`` and every checksum would then disagree.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        text = repr(float(value))
+        if text.endswith(".0"):
+            return text[:-2]
+        if "e" in text:
+            mantissa, _, exponent = text.partition("e")
+            sign, digits = exponent[0], exponent[1:].lstrip("0") or "0"
+            return f"{mantissa}e{sign}{digits}"
+        return text
+    return str(value)
+
+
 def funding_book_checksum(*, bids: BookLevels, asks: BookLevels) -> int:
-    """Return Bitfinex's signed CRC32 for the top 25 funding-book levels."""
+    """Return Bitfinex's signed CRC32 for the top 25 funding-book levels.
+
+    The funding token is ``RATE:AMOUNT``. The period is deliberately absent:
+    the venue's checksum covers rate and amount only, verified against live
+    ``cs`` frames on fUSD and fUST.
+    """
 
     def value(level: object, index: int, attribute: str) -> object:
         if (
@@ -39,8 +64,8 @@ def funding_book_checksum(*, bids: BookLevels, asks: BookLevels) -> int:
 
     def token(level: object) -> str:
         return ":".join(
-            str(value(level, index, attribute))
-            for index, attribute in ((0, "rate"), (1, "period"), (3, "amount"))
+            _number_token(value(level, index, attribute))
+            for index, attribute in ((0, "rate"), (3, "amount"))
         )
 
     ordered_bids = sorted(
