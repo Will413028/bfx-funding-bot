@@ -116,7 +116,7 @@
 - 判讀（預登記，跑前寫進 registry）：
   - CI 全在 0 之上 → 保留 bot 為預設模式；cap 加碼 gate 的 FRR benchmark 改用 B 臂實測值。
   - CI 全在 0 之下 → bot 對零操作使用者無附加值；產品預設模式改為「FRR + spike overlay」（ladder enforce 路徑），MR 擇時降級為選配。
-  - 跨 0 → 延長 4 週一次；仍跨 0 則結論「不劣於 FRR」，價值在便利性與 period/spike overlay。
+  - 跨 0 → 延長 4 週一次；仍跨 0 則結案 **INCONCLUSIVE**（2026-09-23 修正：沒有 non-inferiority margin 不得宣稱「不劣於 FRR」；margin 另議並預登記）。
 - 停損：任一臂出現未解 UNKNOWN 或 orphan 以外的 reconcile 異常，暫停實驗（不影響 halt 語意）。
 
 **Honesty caveats**：n = 8 週；單一 symbol（fUST）；金額極小無 market impact，結論不外推到 10k 規模；regime 單一。
