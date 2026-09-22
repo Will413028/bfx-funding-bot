@@ -19,7 +19,7 @@ from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
-    minimum_amount,
+    submit_amount,
     validate_amount,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
@@ -302,7 +302,7 @@ class DeploymentReconciler:
                     views = {cell: await self._capital.read(
                         symbol=symbol, cell_id=cell, session=session,
                     ) for cell in active}
-                min_fill = minimum_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
+                min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
                 if release is not None:
                     amount = release.amount
