@@ -38,6 +38,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     "d1b7c2e4a305",
     "e5c9a3f10b62",
     "b4e6f8a0c203",
+    # Adds trading_halt.kind and relaxes one release_sessions transition guard.
+    # Touches neither projection_heads, the seeded cursor, nor the projector.
+    "a7f3c1d9e204",
 })
 
 __all__ = [
