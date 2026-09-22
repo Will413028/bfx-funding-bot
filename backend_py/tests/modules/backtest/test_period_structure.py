@@ -1,4 +1,5 @@
 """Period-structure arms: hourly grid, per-window evaluation, report assembly."""
+from dataclasses import dataclass
 from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
@@ -16,6 +17,8 @@ from bfx_funding_bot.modules.backtest.strategies.always_market_rate import (
 )
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
+from bfx_funding_bot.modules.lending.tracking.artifact import FillModelArtifact
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
@@ -105,3 +108,55 @@ def test_build_report_pairs_only_arms_that_ran_and_renders() -> None:
     assert "| always_30d |" in md and "always_30d_vs_always_2d" in md and "- c1" in md
     js = report_to_json([report], fill_alpha=Decimal("5.0"))
     assert js["symbols"][0]["arms"]["always_30d"]["n_windows"] == len(windows)  # type: ignore[index]
+
+
+@dataclass
+class _Row:
+    source: str
+    symbol: str
+    period_agg: str
+    horizon_h: int
+    spread_bucket_bps: int
+    fill_prob: float
+    n_samples: int
+    mean_ttf_ms: int | None
+    artifact_hash: str | None
+
+
+def _book_model(period_agg: str, at_par: float) -> FillRateModel:
+    h = f"book-{period_agg}"
+    artifact = FillModelArtifact(
+        symbol="fUST", period_agg=period_agg, horizon_h=4, source="book",
+        model_version="book-replay-v1", schema_version=1, artifact_hash=h,
+        training_start_ms=0, training_end_ms=1, cutoff_ms=1, sample_count=100,
+        confidence_min_samples=30,
+    )
+    return FillRateModel.from_rows(
+        [_Row("book", "fUST", period_agg, 4, -100, 1.0, 100, None, h),
+         _Row("book", "fUST", period_agg, 4, 0, at_par, 100, None, h),
+         _Row("book", "fUST", period_agg, 4, 100, 0.0, 100, None, h)],
+        artifact=artifact,
+    )
+
+
+def test_book_models_score_each_tenor_and_leave_unmodelled_arms_unscored() -> None:
+    series = _five_months()
+    windows = compute_wfo_windows(series["p2"])
+    arms = [
+        ArmSpec("always_2d", "p2", lambda: AlwaysMarketRateStrategy(period_days=2)),
+        ArmSpec("always_30d", "p30", lambda: AlwaysMarketRateStrategy(period_days=30)),
+        ArmSpec("fourteen_on_a30", "a30", lambda: AlwaysMarketRateStrategy(period_days=14)),
+        ArmSpec("a30_legacy", "a30", lambda: AlwaysMarketRateStrategy(period_days=2), period_aware=False),
+    ]
+    models = {"p2": _book_model("p2", 0.6), "p30": _book_model("p30", 0.3)}
+    runs = evaluate_period_arms(
+        series, windows, arms, BacktestConfig(fill_model="empirical", fill_horizon_h=4),
+        fill_models_by_agg=models,
+    )
+    assert all(o.fill_rate == Decimal("0.6") for o in runs["always_2d"].outcomes)
+    assert all(o.fill_rate == Decimal("0.3") for o in runs["always_30d"].outcomes)
+    assert runs["fourteen_on_a30"].incomplete_reason == "fill_model_missing"
+    assert runs["a30_legacy"].incomplete_reason == "fill_model_missing"
+    report = build_report(symbol="fUST", runs=runs, data_window="x..y")
+    assert set(report.arm_summaries) == {"always_2d", "always_30d"}
+    assert any("fourteen_on_a30 not scored: fill_model_missing" in n for n in report.notes)

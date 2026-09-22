@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy import delete
@@ -56,8 +57,14 @@ def build_fill_model_artifact(
     training_start_ms: int,
     training_end_ms: int,
     timeframe: str,
+    model_version: str = _MODEL_VERSION,
+    metadata_extra: Mapping[str, object] | None = None,
 ) -> FillModelArtifact:
-    """Build a stable artifact identity from canonical learned evidence."""
+    """Build a stable artifact identity from canonical learned evidence.
+
+    `model_version` / `metadata_extra` let sibling learners (book replay) share the
+    same artifact contract; the defaults leave every candle artifact hash unchanged.
+    """
     canonical_stats = [
         {
             "spread_bucket_bps": stat.spread_bucket_bps,
@@ -69,16 +76,17 @@ def build_fill_model_artifact(
         }
         for stat in sorted(stats, key=lambda value: value.spread_bucket_bps)
     ]
-    metadata = {
+    metadata: dict[str, object] = {
         "bucket_grid_bps": [stat["spread_bucket_bps"] for stat in canonical_stats],
         "timeframe": timeframe,
+        **dict(metadata_extra or {}),
     }
     canonical = {
         "source": source,
         "symbol": symbol,
         "period_agg": period_agg,
         "horizon_h": horizon_h,
-        "model_version": _MODEL_VERSION,
+        "model_version": model_version,
         "schema_version": _SCHEMA_VERSION,
         "training_start_ms": training_start_ms,
         "training_end_ms": training_end_ms,
@@ -95,7 +103,7 @@ def build_fill_model_artifact(
         period_agg=period_agg,
         horizon_h=horizon_h,
         source=source,
-        model_version=_MODEL_VERSION,
+        model_version=model_version,
         schema_version=_SCHEMA_VERSION,
         artifact_hash=artifact_hash,
         training_start_ms=training_start_ms,

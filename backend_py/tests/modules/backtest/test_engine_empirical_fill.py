@@ -107,7 +107,9 @@ def test_empirical_backtest_rejects_artifact_symbol_scope_mismatch():
         )
 
 
-def test_empirical_backtest_rejects_non_candle_artifact_source():
+def test_empirical_backtest_rejects_unknown_artifact_source():
+    # "candle" and "book" are the accepted evidence sources (engine.EMPIRICAL_SOURCES);
+    # anything else is a scope mismatch, never a silent pass-through.
     cfg = BacktestConfig(fill_model="empirical", fill_horizon_h=4)
 
     with pytest.raises(BacktestIncomplete, match="fill_model_scope_mismatch"):
@@ -115,7 +117,7 @@ def test_empirical_backtest_rejects_non_candle_artifact_source():
             [_candle()],
             AlwaysMarketRateStrategy(period_days=2),
             cfg,
-            fill_model=_model(source="book"),
+            fill_model=_model(source="own_fill"),
         )
 
 

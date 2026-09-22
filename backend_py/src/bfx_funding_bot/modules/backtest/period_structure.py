@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import run_backtest
+from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
 from bfx_funding_bot.modules.backtest.oos_profitability import (
     ActiveReturnSummary,
     OosSummary,
@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.backtest.strategies.base import Strategy
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 _MS_PER_HOUR = 3_600_000
 
@@ -122,6 +123,9 @@ class ArmSpec:
 class ArmRun:
     outcomes: list[WindowOutcome]
     series_used: dict[str, int] = field(default_factory=dict)
+    # Set when the fill evidence could not score this arm (e.g. no book model for the
+    # series its tiers are priced on). Such arms are reported, never silently scored.
+    incomplete_reason: str | None = None
 
 
 def _outcome(month_mts: int, result_net: Decimal, n_trades: int, fill_rate: Decimal) -> WindowOutcome:
@@ -135,8 +139,15 @@ def evaluate_period_arms(
     windows: Sequence[WfoWindow],
     arms: Sequence[ArmSpec],
     config: BacktestConfig,
+    *,
+    fill_models_by_agg: Mapping[str, FillRateModel] | None = None,
 ) -> dict[str, ArmRun]:
-    """Fresh strategy per window per arm; period-aware arms price fills by tenor."""
+    """Fresh strategy per window per arm; period-aware arms price fills by tenor.
+
+    With `fill_models_by_agg` (empirical mode) each trade is scored by the model of
+    the series that priced it; an arm whose trades hit a series without a model is
+    returned with `incomplete_reason` and no outcomes rather than scored linearly.
+    """
     runs: dict[str, ArmRun] = {arm.name: ArmRun(outcomes=[]) for arm in arms}
     for w in windows:
         sliced = {
@@ -144,12 +155,28 @@ def evaluate_period_arms(
             for key, cs in series.items()
         }
         for arm in arms:
+            if runs[arm.name].incomplete_reason is not None:
+                continue
             observed = sliced[arm.observe_key]
-            r = run_backtest(
-                observed, arm.make_strategy(), config,
-                w.test_start_mts, w.test_end_mts,
-                market_series_by_agg=sliced if arm.period_aware else None,
-            )
+            try:
+                if arm.period_aware:
+                    r = run_backtest(
+                        observed, arm.make_strategy(), config,
+                        w.test_start_mts, w.test_end_mts,
+                        market_series_by_agg=sliced, fill_models_by_agg=fill_models_by_agg,
+                    )
+                else:
+                    r = run_backtest(
+                        observed, arm.make_strategy(), config,
+                        w.test_start_mts, w.test_end_mts,
+                        fill_model=(
+                            fill_models_by_agg.get(arm.observe_key)
+                            if fill_models_by_agg is not None else None
+                        ),
+                    )
+            except BacktestIncomplete as error:
+                runs[arm.name] = ArmRun(outcomes=[], incomplete_reason=error.reason)
+                continue
             run = runs[arm.name]
             run.outcomes.append(
                 _outcome(w.test_start_mts, r.net_monthly_return_pct, r.n_trades, r.fill_rate)
@@ -170,6 +197,8 @@ class PeriodStructureReport:
     pair_mean_ci: dict[str, tuple[Decimal, Decimal]]
     per_year_mean_monthly: dict[str, dict[int, Decimal]]
     notes: tuple[str, ...]
+    # arm -> [(month_mts, net_monthly)] chronological; feeds the weekly drift rule.
+    windows: dict[str, list[tuple[int, Decimal]]] = field(default_factory=dict)
 
 
 def build_report(
@@ -181,6 +210,10 @@ def build_report(
     notes: Sequence[str] = (),
     bootstrap_seed: int = 20260922,
 ) -> PeriodStructureReport:
+    incomplete = {name: run.incomplete_reason for name, run in runs.items()
+                  if run.incomplete_reason is not None}
+    runs = {name: run for name, run in runs.items() if run.incomplete_reason is None}
+    notes = [*notes, *(f"{name} not scored: {reason}" for name, reason in incomplete.items())]
     arm_summaries = {name: summarize_oos(run.outcomes) for name, run in runs.items()}
     pair_summaries: dict[str, ActiveReturnSummary] = {}
     pair_mean_ci: dict[str, tuple[Decimal, Decimal]] = {}
@@ -207,6 +240,8 @@ def build_report(
         series_used={name: dict(run.series_used) for name, run in runs.items()},
         pair_summaries=pair_summaries, pair_mean_ci=pair_mean_ci,
         per_year_mean_monthly=per_year, notes=tuple(notes),
+        windows={name: [(o.month_mts, o.net_monthly) for o in run.outcomes]
+                 for name, run in runs.items()},
     )
 
 
@@ -301,6 +336,9 @@ def report_to_json(reports: Sequence[PeriodStructureReport], *, fill_alpha: Deci
                 },
                 "per_year_mean_monthly": {
                     a: {str(y): str(v) for y, v in d.items()} for a, d in r.per_year_mean_monthly.items()
+                },
+                "windows": {
+                    a: [[m, str(v)] for m, v in ws] for a, ws in r.windows.items()
                 },
             }
             for r in reports
