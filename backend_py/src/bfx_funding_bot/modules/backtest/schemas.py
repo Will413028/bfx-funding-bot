@@ -75,3 +75,5 @@ class BacktestResult(BaseModel):
     # Which market series priced each fill when `market_series_by_agg` was used
     # (key -> trade count); None for single-series runs.
     pricing_series_used: dict[str, int] | None = None
+    # series key -> artifact hash when per-series fill models priced the run.
+    fill_models_by_series: dict[str, str] | None = None

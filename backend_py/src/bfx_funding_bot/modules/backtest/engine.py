@@ -21,6 +21,10 @@ BacktestIncompleteReason = Literal[
 
 _MS_PER_DAY = Decimal(86_400_000)
 _AGGREGATE_SERIES_KEY = "a30"
+# Empirical evidence sources the engine accepts. "candle" = G13 path-crossing,
+# "book" = queue-position replay over recorded funding books. Rows and artifacts
+# of different sources never mix: the artifact hash binds each stat row to one.
+EMPIRICAL_SOURCES = frozenset({"candle", "book"})
 
 
 def resolve_market_series_key(period_days: int, available: Mapping[str, object]) -> str:
@@ -66,7 +70,7 @@ def _preflight_empirical_model(
 
     artifact = fill_model.artifact
     if (
-        artifact.source != "candle"
+        artifact.source not in EMPIRICAL_SOURCES
         or artifact.horizon_h != fill_horizon_h
         or any(
             candle.symbol != artifact.symbol
@@ -82,9 +86,24 @@ def _validate_candle_artifact_scope(
 ) -> None:
     artifact = fill_model.artifact
     if artifact is not None and (
-        artifact.source != "candle" or artifact.symbol != candle.symbol
+        artifact.source not in EMPIRICAL_SOURCES or artifact.symbol != candle.symbol
     ):
         _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
+
+
+def _preflight_series_models(
+    series: Mapping[str, list[FundingCandle]],
+    fill_horizon_h: int,
+    models: Mapping[str, FillRateModel],
+) -> None:
+    """Each per-series model must be scoped to exactly the series it will price."""
+    for key, model in models.items():
+        if key not in series:
+            _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
+        _preflight_empirical_model(series[key], fill_horizon_h, model)
+        artifact = model.artifact
+        if artifact is not None and artifact.period_agg != key:
+            _raise_for_unavailable(FillModelUnavailable("scope_mismatch"))
 
 
 def _resolve_market_rate(candle: FundingCandle, source: str) -> Decimal | None:
@@ -139,6 +158,7 @@ def run_backtest(
     fill_model: FillRateModel | None = None,
     market_candles: list[FundingCandle] | None = None,
     market_series_by_agg: Mapping[str, list[FundingCandle]] | None = None,
+    fill_models_by_agg: Mapping[str, FillRateModel] | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -167,8 +187,16 @@ def run_backtest(
     """
     if market_candles is not None and market_series_by_agg is not None:
         raise ValueError("pass market_candles or market_series_by_agg, not both")
+    if fill_models_by_agg is not None and fill_model is not None:
+        raise ValueError("pass fill_model or fill_models_by_agg, not both")
+    if fill_models_by_agg is not None and market_series_by_agg is None:
+        raise ValueError("fill_models_by_agg requires market_series_by_agg")
     if config.fill_model == "empirical":
-        _preflight_empirical_model(candles, config.fill_horizon_h, fill_model)
+        if fill_models_by_agg is not None:
+            assert market_series_by_agg is not None  # guarded above
+            _preflight_series_models(market_series_by_agg, config.fill_horizon_h, fill_models_by_agg)
+        else:
+            _preflight_empirical_model(candles, config.fill_horizon_h, fill_model)
     if not candles:
         return BacktestResult(
             strategy_name=strategy.name, symbol="",
@@ -238,8 +266,14 @@ def run_backtest(
             pricing_candle = (
                 market_by_mts.get(candle.mts, candle) if market_by_mts is not None else candle
             )
+        trade_model = fill_model
+        if fill_models_by_agg is not None:
+            trade_model = fill_models_by_agg.get(pricing_candle.period_agg)
+            if trade_model is None and config.fill_model == "empirical":
+                # Strict: a series without book evidence cannot borrow another's.
+                raise BacktestIncomplete("fill_model_missing")
         gross_rate, fill_prob = _apply_friction(
-            decision, pricing_candle, config, fill_model
+            decision, pricing_candle, config, trade_model
         )
         period = Decimal(decision.period_days)
         if config.truncate_at_window_end:
@@ -296,6 +330,14 @@ def run_backtest(
             fill_model.artifact.sample_count if fill_model and fill_model.artifact else None
         ),
         pricing_series_used=series_used if series_maps is not None else None,
+        fill_models_by_series=(
+            {
+                key: (m.artifact.artifact_hash if m.artifact is not None else "unversioned")
+                for key, m in fill_models_by_agg.items()
+            }
+            if fill_models_by_agg is not None
+            else None
+        ),
     )
 
 

@@ -19,6 +19,9 @@ Two data modes:
         --output /reports/<date>-period-structure.md
 
 Run twice: default `--fill-alpha 5.0` and `--fill-alpha 1e-9` (always-fill bound).
+`--fill-model book` (DB mode only) scores each tenor with its book-replay artifact
+(`scripts.learn_book_fill_rate`); arms whose tiers price off a series without a
+book model (AP's 7/14 via a30) are reported as not scored, never linearly filled.
 """
 from __future__ import annotations
 
@@ -70,6 +73,12 @@ from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.repository import get_in_range
+from bfx_funding_bot.modules.lending.tracking.book_replay import BOOK_SOURCE
+from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
+from bfx_funding_bot.modules.lending.tracking.repository import (
+    load_fill_model_artifact,
+    load_fill_rate_stats,
+)
 from bfx_funding_bot.modules.live_validation.live_attribution import (
     FRR_ANNUALIZATION,
     assert_market_rate_band,
@@ -207,6 +216,8 @@ def run_symbol(
     ap: ApParams,
     fill_alpha: Decimal,
     p30_staleness_hours: int,
+    fill_models_by_agg: dict[str, FillRateModel] | None = None,
+    fill_horizon_h: int = 4,
 ) -> PeriodStructureReport:
     series = dict(raw_series)
     if "p30" in series:
@@ -222,10 +233,30 @@ def run_symbol(
         symbol=symbol, series=series, cells=cells, ap_cells=ap_cells, ap=ap,
         frr_at=frr_series.at if frr_series is not None else None,
     )
-    config = BacktestConfig(
-        fill_model="linear-baseline", fill_alpha=fill_alpha, truncate_at_window_end=True
-    )
-    runs = evaluate_period_arms(series, windows, arms, config)
+    if fill_models_by_agg is None:
+        config = BacktestConfig(
+            fill_model="linear-baseline", fill_alpha=fill_alpha, truncate_at_window_end=True
+        )
+    else:
+        config = BacktestConfig(
+            fill_model="empirical", fill_horizon_h=fill_horizon_h, truncate_at_window_end=True
+        )
+        notes.append(
+            "fill model: book-replay artifacts "
+            + ", ".join(
+                f"{k}={m.artifact.artifact_hash[:12] if m.artifact else 'unversioned'}"
+                for k, m in sorted(fill_models_by_agg.items())
+            )
+        )
+    runs = evaluate_period_arms(series, windows, arms, config, fill_models_by_agg=fill_models_by_agg)
+    scored = [r for r in runs.values() if r.incomplete_reason is None and r.outcomes]
+    if scored and all(
+        all(o.fill_rate == Decimal("1") for o in r.outcomes if o.n_trades) for r in scored
+    ):
+        notes.append(
+            "DEGENERATE: every scored arm filled 100% of its trades — this fill model did not "
+            "discriminate between arms; treat rate/tenor differences as unverified"
+        )
     p2 = series["p2"]
     first = datetime.fromtimestamp(p2[0].mts / 1000, UTC)
     last = datetime.fromtimestamp(p2[-1].mts / 1000, UTC)
@@ -266,9 +297,34 @@ async def _load_db_series(
     return series, frr
 
 
+async def load_book_models(
+    session: AsyncSession, *, symbol: str, horizon_h: int, keys: Sequence[str] = ("p2", "p30")
+) -> dict[str, FillRateModel]:
+    """One book-replay model per period series that has stats at `horizon_h`."""
+    rows = await load_fill_rate_stats(session, source=BOOK_SOURCE, symbol=symbol)
+    models: dict[str, FillRateModel] = {}
+    for key in keys:
+        scoped = [r for r in rows if r.period_agg == key and r.horizon_h == horizon_h]
+        hashes = {r.artifact_hash for r in scoped}
+        if not scoped or len(hashes) != 1:
+            continue
+        artifact_hash = next(iter(hashes))
+        if artifact_hash is None:
+            continue
+        artifact = await load_fill_model_artifact(session, artifact_hash=artifact_hash)
+        if artifact is None:
+            continue
+        model = FillRateModel.from_rows(scoped, artifact=artifact)  # type: ignore[arg-type]
+        if model.unavailable_reason is None:
+            models[key] = model
+    return models
+
+
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--output", required=True, help="markdown path (.json sibling auto)")
+    p.add_argument("--fill-model", default="linear-baseline", choices=["linear-baseline", "book"])
+    p.add_argument("--fill-horizon-h", type=int, default=4)
     p.add_argument("--symbols", default=DEFAULT_SYMBOLS)
     p.add_argument("--fixtures", type=Path, default=None, help="frozen candle dir (offline mode)")
     p.add_argument("--cells", type=Path, default=DEFAULT_CELLS)
@@ -297,14 +353,19 @@ async def _amain(argv: Sequence[str]) -> int:
     fill_alpha = Decimal(args.fill_alpha)
 
     def _run(
-        symbol: str, raw: dict[str, list[FundingCandle]], frr: FrrSeries | None
+        symbol: str, raw: dict[str, list[FundingCandle]], frr: FrrSeries | None,
+        models: dict[str, FillRateModel] | None = None,
     ) -> PeriodStructureReport:
         return run_symbol(
             symbol=symbol, raw_series=raw, frr_series=frr, cells=cells, ap_cells=ap_cells,
             ap=ap, fill_alpha=fill_alpha, p30_staleness_hours=args.p30_staleness_hours,
+            fill_models_by_agg=models, fill_horizon_h=args.fill_horizon_h,
         )
 
     reports: list[PeriodStructureReport] = []
+    if args.fixtures is not None and args.fill_model == "book":
+        logger.error("--fill-model book needs the database (book artifacts live there)")
+        return 2
     if args.fixtures is not None:
         for symbol in symbols:
             raw = _load_fixture_series(args.fixtures, symbol)
@@ -319,14 +380,24 @@ async def _amain(argv: Sequence[str]) -> int:
         session_factory = make_session_factory(engine)
         try:
             for symbol in symbols:
+                models: dict[str, FillRateModel] | None = None
                 async with session_scope(session_factory) as session:
                     raw, frr = await _load_db_series(
                         session, symbol=symbol, start_mts=start_mts, end_mts=end_mts
                     )
+                    if args.fill_model == "book":
+                        models = await load_book_models(
+                            session, symbol=symbol, horizon_h=args.fill_horizon_h
+                        )
+                        if not models:
+                            logger.error("%s: no book-replay artifacts at horizon %dh; run "
+                                         "scripts.learn_book_fill_rate first", symbol,
+                                         args.fill_horizon_h)
+                            return 2
                 if not raw:
                     logger.warning("%s: no candles in DB, skipping", symbol)
                     continue
-                reports.append(_run(symbol, raw, frr))
+                reports.append(_run(symbol, raw, frr, models))
         finally:
             await engine.dispose()
 
@@ -335,7 +406,13 @@ async def _amain(argv: Sequence[str]) -> int:
         return 2
     out = Path(args.output).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_markdown(reports, fill_alpha=fill_alpha, caveats=STANDING_CAVEATS))
+    caveats = STANDING_CAVEATS if args.fill_model != "book" else (
+        "Book-replay fill model: queue position from recorded top-25 asks + traded volume; "
+        "newcomer undercuts after the snapshot are not modelled (optimistic); calibrate "
+        "against live fills (plan C4) before trusting absolute levels.",
+        *STANDING_CAVEATS[1:],
+    )
+    out.write_text(render_markdown(reports, fill_alpha=fill_alpha, caveats=caveats))
     out.with_suffix(".json").write_text(
         json.dumps(report_to_json(reports, fill_alpha=fill_alpha), indent=2)
     )
