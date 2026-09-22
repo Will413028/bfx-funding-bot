@@ -25,6 +25,17 @@ def next_candle_close_mts(*, timeframe: str, now_ms: int) -> int:
     return ((now_ms // step) + 1) * step
 
 
+def last_candle_close_mts(*, timeframe: str, now_ms: int) -> int:
+    """The most recent boundary already past — exactly the one a cold start skips.
+
+    `register_from_now` arms the NEXT boundary, so a process that starts at 07:01
+    will not run the signal layer until 08:00. This names the boundary in that
+    gap, so a boot can replay it instead of leaving the interval unserved.
+    """
+    step = _TIMEFRAME_MS[timeframe]
+    return next_candle_close_mts(timeframe=timeframe, now_ms=now_ms) - step
+
+
 def now_ms_utc() -> int:
     """Current UTC time in ms (timezone-independent: based on epoch)."""
     return int(time.time() * 1000)

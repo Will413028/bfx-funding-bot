@@ -177,6 +177,7 @@ from bfx_funding_bot.modules.marketfeed.healthz import run_healthz_server
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
 from bfx_funding_bot.modules.marketfeed.scheduler import (
     Scheduler,
+    last_candle_close_mts,
     now_ms_utc,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -1951,7 +1952,9 @@ async def build_daemon(
         clock=lambda: int(time.time() * 1000),
     )
 
-    async def on_scheduler_tick(cell: CellConfig, mts: int) -> None:
+    async def on_scheduler_tick(
+        cell: CellConfig, mts: int, *, quote_created_at_ms: int | None = None,
+    ) -> None:
         # Scheduler fires AT the period boundary T (e.g. 11:00 UTC), but
         # Bitfinex's candle at mts=T is the OPEN of period [T, T+timeframe) —
         # only the FIRST tick of the new period creates it, which may not
@@ -2059,6 +2062,7 @@ async def build_daemon(
             registry=registry,
             is_stale=latest.is_stale,
             stale_seconds=latest.stale_seconds,
+            quote_created_at_ms=quote_created_at_ms,
         )
 
     scheduler = Scheduler(
@@ -2066,6 +2070,38 @@ async def build_daemon(
         probe=probe,
         buffer_s=config.scheduler_buffer_s,
     )
+
+    # Replay the boundary a cold start would otherwise skip.
+    #
+    # StandingQuoteStore is in-memory, so a restart empties it, and the scheduler
+    # arms the NEXT boundary -- a process that comes up at 07:01 deploys nothing
+    # until 08:00. That is up to a full timeframe of idle capital bought by a
+    # restart, and it is what makes a deployment and its release ceremony
+    # mutually exclusive: the DR receipt the ceremony needs lives 900 seconds,
+    # and refreshing it costs a restart that costs an hour of quote.
+    #
+    # Nothing about the boundary just closed is unavailable here. Its candle is
+    # sealed and in Postgres, the strategy registry is already warmed above, and
+    # the tick is a pure function of the two. So run the real tick for exactly
+    # the boundary `register_from_now` skips -- the same code path, because a
+    # rebuild that could diverge from the live one would be worse than none.
+    #
+    # The signal layer writes no ledger: its SIGNAL/DECISION events go to the
+    # stdout sink. Replaying a boundary therefore adds telemetry, not history.
+    for cell in config.cells:
+        boundary = last_candle_close_mts(timeframe=cell.timeframe, now_ms=now_ms_utc())
+        try:
+            await on_scheduler_tick(cell, boundary, quote_created_at_ms=boundary)
+        except Exception:
+            # Fail open: a quote that cannot be rebuilt is the cold start we
+            # already had, and is never a reason to refuse to boot.
+            log.exception(
+                "standing_quote_rehydrate_failed cell=%s mts=%d", cell.pair_id, boundary,
+            )
+        else:
+            log.info(
+                "standing_quote_rehydrated cell=%s boundary_mts=%d", cell.pair_id, boundary,
+            )
     writer = CandleWriter(queue=candle_q, session_factory=session_factory, probe=probe)
 
     ws_client: BitfinexWSClient | None = None
