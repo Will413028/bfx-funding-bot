@@ -1,12 +1,14 @@
 [Unit]
-Description=bfx weekly measurement chain (funding_stats ingest + attribution + G3 report)
+Description=bfx weekly measurement chain (funding_stats ingest + attribution + G3 report + research re-validation)
 Requires=docker.service
 After=docker.service
 
 [Service]
 Type=oneshot
-# 整條 chain 上限 30min（ingest 步驟另有 timeout 600；防 systemd 端無限掛住）
-TimeoutStartSec=1800
+# 整條 chain 上限 90min：營運三步（ingest 600 + attribution + G3）之後接研究步驟
+# （perp 900 + liquidations 1200 + book learn 600 + 兩次 period-structure 600 + OOS 600 +
+# diff），每步 fail-soft；防 systemd 端無限掛住。
+TimeoutStartSec=5400
 User=ubuntu
 WorkingDirectory=/home/ubuntu/bfx-funding-bot
 ExecStart=/usr/bin/docker compose -f docker-compose.bot.yml --profile ops run --rm weekly-report
