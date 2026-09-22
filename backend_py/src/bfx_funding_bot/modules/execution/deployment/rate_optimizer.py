@@ -124,34 +124,36 @@ class RateOptimizer:
                 candidates=(),
             )
 
+        # A candidate is scored only on evidence estimated at ITS price. Sharing the
+        # signal's evidence with a higher-priced maker candidate ranked the maker
+        # first on rate alone (2026-09-22 strategy-correctness plan).
         scores: dict[str, Decimal] = {
-            candidate.source: _score(
-                candidate.rate,
-                candidate.fill_evidence or fill_evidence,
-                fee_rate,
-            )
+            candidate.source: _score(candidate.rate, candidate.fill_evidence, fee_rate)
             for candidate in eligible
+            if candidate.fill_evidence is not None
         }
         selected = max(
             eligible,
             key=lambda candidate: (
                 scores[candidate.source],
-                (candidate.fill_evidence or fill_evidence).fill_prob,
+                candidate.fill_evidence.fill_prob if candidate.fill_evidence else Decimal(0),
                 -candidate.rate,
             ),
         )
+        selected_evidence = selected.fill_evidence or fill_evidence
         return OptimizationResult(
             selected=selected,
             candidates=eligible,
             scores=scores,
-            model_version=fill_evidence.model_version,
-            artifact_hash=fill_evidence.artifact_hash,
+            model_version=selected_evidence.model_version,
+            artifact_hash=selected_evidence.artifact_hash,
         )
 
 
 def _is_eligible(candidate: RateCandidate, signal_rate: Decimal) -> bool:
     return (
-        candidate.rate.is_finite()
+        candidate.fill_evidence is not None
+        and candidate.rate.is_finite()
         and signal_rate.is_finite()
         and candidate.rate > 0
         and signal_rate > 0

@@ -1,11 +1,14 @@
 # tests/modules/execution/deployment/test_reprice.py
 from decimal import Decimal
 
+import pytest
+
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
     policy_from_env,
     stale_offers,
+    stale_offers_with_refs,
 )
 
 _NOW = 10_000_000
@@ -91,3 +94,19 @@ def test_policy_from_env_overrides():
     assert p.tolerance_pct == 0.05
     assert p.min_age_ms == 600_000
     assert p.max_cancels_per_tick == 1
+
+
+def test_with_refs_judges_each_offer_against_its_own_reference():
+    offers = [_offer(voi="a", rate=0.001), _offer(voi="b", rate=0.001), _offer(voi="c", rate=0.001)]
+    refs = {"a": 0.0002, "b": 0.00095}  # c has no reference -> no evidence, no cancel
+    got = stale_offers_with_refs(
+        offers=offers, ref_rate_by_offer=refs, now_ms=_NOW, policy=_POLICY,
+    )
+    assert [o.venue_offer_id for o in got] == ["a"]
+
+
+def test_policy_from_env_reference_defaults_to_quote_and_validates():
+    assert policy_from_env({}).reference == "quote"
+    assert policy_from_env({"BFX_REPRICE_REFERENCE": "Book"}).reference == "book"
+    with pytest.raises(ValueError):
+        policy_from_env({"BFX_REPRICE_REFERENCE": "ticker"})
