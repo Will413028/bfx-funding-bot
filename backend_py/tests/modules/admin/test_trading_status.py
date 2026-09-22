@@ -113,7 +113,7 @@ class _FakeHaltStore:
 
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
-        kind: str = "safety",
+        kind: str = "safety", renew: bool = False,
     ) -> HaltState:
         self.writes.append((halted, reason, actor))
         self.kinds.append(kind)

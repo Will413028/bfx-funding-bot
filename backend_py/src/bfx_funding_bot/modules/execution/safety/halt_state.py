@@ -84,24 +84,26 @@ class HaltStateStore:
 
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
-        kind: str = "safety",
+        kind: str = "safety", renew: bool = False,
     ) -> HaltState:
         """Append a transition; reasserting a halt retains its authorization epoch.
 
         `kind` decides how the halt may later be cleared, so it defaults to the
         closed posture: a caller that does not say it is a maintenance pause does
         not get the cheaper exit.
+
+        `renew` is the one way to advance the epoch without first leaving the
+        halt. It exists because the epoch is what a canary permit is bound to,
+        and the permit is spent the moment a command is issued -- necessarily,
+        since an ambiguous outcome must never be retried automatically. An
+        attempt that is later proven to have placed nothing therefore leaves the
+        epoch spent and the halt with no exit: promotion needs a canary, the
+        canary needs a permit, the permit needs an epoch, and reasserting the
+        halt is a no-op. Renewing says, in one audited row, "that attempt bought
+        nothing; I authorise another". It never weakens the posture -- the kind
+        is carried over from the halt being renewed, not taken from the caller,
+        so this cannot be used to turn a safety halt into a resumable one.
         """
-        row = TradingHaltRow(
-            account_id=self._account_id,
-            exchange_account_id=account_id_uuid_or_none(self._account_id),
-            deployment_environment=self._env,
-            halted=halted,
-            kind=kind,
-            reason=reason,
-            actor=actor,
-            created_at_ms=now_ms if now_ms is not None else int(time.time() * 1000),
-        )
         async with self._sf() as session:
             if account_id_uuid_or_none(self._account_id) is not None:
                 await acquire_transaction_lock(
@@ -109,7 +111,19 @@ class HaltStateStore:
                 )
             current = await self.current(session)
             if halted and current is not None and current.halted:
-                return current
+                if not renew:
+                    return current
+                kind = current.kind
+            row = TradingHaltRow(
+                account_id=self._account_id,
+                exchange_account_id=account_id_uuid_or_none(self._account_id),
+                deployment_environment=self._env,
+                halted=halted,
+                kind=kind,
+                reason=reason,
+                actor=actor,
+                created_at_ms=now_ms if now_ms is not None else int(time.time() * 1000),
+            )
             session.add(row)
             await session.commit()
             return _to_state(row)
