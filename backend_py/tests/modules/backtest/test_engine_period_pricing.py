@@ -10,6 +10,7 @@ import pytest
 
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
+    BacktestIncomplete,
     resolve_market_series_key,
     run_backtest,
 )
@@ -78,16 +79,30 @@ def test_mid_tenor_falls_back_to_aggregate_and_records_it() -> None:
     assert r.fill_rate == Decimal("1"), "aggregate prices itself: spread 0"
 
 
-def test_missing_mts_in_resolved_series_degrades_to_observed_candle() -> None:
+def test_missing_market_print_is_incomplete_not_a_fill() -> None:
+    """A decision with no market print at its mts must never price off the observed
+    candle: that collapses spread to 0 and reports a 100% fill on missing data."""
     a30 = _series("a30", "0.0002")
     p2_first_hour_only = _series("p2", "0.0001")[:1]
-    r = run_backtest(a30, AlwaysMarketRateStrategy(period_days=2), _LINEAR,
+    with pytest.raises(BacktestIncomplete, match="market_series_gap"):
+        run_backtest(a30, AlwaysMarketRateStrategy(period_days=2), _LINEAR,
                      market_series_by_agg={"p2": p2_first_hour_only, "a30": a30})
-    # Trade 1 hits the p2 slot (100% above market -> fill 0); the other four have no p2
-    # print at their mts and degrade to the observed candle (spread 0 -> fill 1).
-    assert r.n_trades == 5
-    assert r.fill_rate == Decimal(4) / Decimal(5)
-    assert r.pricing_series_used == {"p2": 5}
+
+
+def test_market_print_without_close_is_incomplete() -> None:
+    a30 = _series("a30", "0.0002")
+    p2 = _series("p2", "0.0001")
+    p2[0] = p2[0].model_copy(update={"close": None})
+    with pytest.raises(BacktestIncomplete, match="market_series_gap"):
+        run_backtest(a30, AlwaysMarketRateStrategy(period_days=2), _LINEAR,
+                     market_series_by_agg={"p2": p2, "a30": a30})
+
+
+def test_market_candles_gap_is_incomplete_too() -> None:
+    observed = _series("p2", "0.0002")
+    market = _series("p2", "0.0001")[1:]  # first hour missing
+    with pytest.raises(BacktestIncomplete, match="market_series_gap"):
+        run_backtest(observed, AlwaysMarketRateStrategy(period_days=2), _LINEAR, market_candles=market)
 
 
 def test_market_candles_and_series_by_agg_are_mutually_exclusive() -> None:

@@ -12,6 +12,7 @@ import bfx_funding_bot.modules.lending.tracking.tables
 import bfx_funding_bot.modules.marketfeed.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.lending.tracking.book_replay import BOOK_MODEL_VERSION
 from bfx_funding_bot.modules.lending.tracking.fill_rate import BucketStat
 from bfx_funding_bot.modules.lending.tracking.tables import (
     FillRateModelArtifactRow,
@@ -19,7 +20,7 @@ from bfx_funding_bot.modules.lending.tracking.tables import (
 )
 from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
 from scripts.learn_book_fill_rate import learn_book_and_store
-from scripts.learn_fill_rate import build_fill_model_artifact
+from scripts.learn_fill_rate import _MODEL_VERSION, build_fill_model_artifact
 
 _H = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
@@ -62,13 +63,14 @@ async def test_learn_book_and_store_writes_book_rows_and_artifact(sf) -> None:
         rows = (await s.execute(select(FillRateStatsRow))).scalars().all()
         artifacts = (await s.execute(select(FillRateModelArtifactRow))).scalars().all()
     assert rows and all(r.source == "book" and r.period_agg == "p2" for r in rows)
-    assert {a.model_version for a in artifacts} == {"book-replay-v1"}
+    assert {a.model_version for a in artifacts} == {BOOK_MODEL_VERSION}
     assert {a.source for a in artifacts} == {"book"}
     assert {r.artifact_hash for r in rows} == {a.artifact_hash for a in artifacts}
     assert all(a.metadata_json["period_days"] == 2 for a in artifacts)
-    # At par the offer sits behind 2500 of asks with 1000/h of volume: 1h never, 4h yes.
+    # Snapshots are 10 minutes past the hour: no candle fits inside a 1h horizon, so
+    # no 1h rows; at par the offer needs 2650 of volume at 1000/h -> filled within 4h.
     by_key = {(r.horizon_h, r.spread_bucket_bps): r for r in rows}
-    assert by_key[(1, 0)].fill_prob == 0.0
+    assert not any(h == 1 for h, _ in by_key)
     assert by_key[(4, 0)].fill_prob == 1.0
 
 
@@ -92,7 +94,7 @@ def test_candle_artifact_hash_is_unchanged_by_the_new_parameters() -> None:
         "stats": stats, "training_start_ms": 0, "training_end_ms": 1, "timeframe": "1h",
     }
     default = build_fill_model_artifact(**kwargs)  # type: ignore[arg-type]
-    explicit = build_fill_model_artifact(model_version="g13-candle-v1", metadata_extra=None, **kwargs)  # type: ignore[arg-type]
+    explicit = build_fill_model_artifact(model_version=_MODEL_VERSION, metadata_extra=None, **kwargs)  # type: ignore[arg-type]
     book = build_fill_model_artifact(model_version="book-replay-v1", metadata_extra={"period_days": 2}, **kwargs)  # type: ignore[arg-type]
     assert default.artifact_hash == explicit.artifact_hash
     assert book.artifact_hash != default.artifact_hash and book.model_version == "book-replay-v1"

@@ -45,13 +45,27 @@ def test_fill_requires_volume_to_consume_the_queue_ahead() -> None:
     learner = BookReplayLearner(period_days=2, offer_amount=Decimal("150"),
                                 bucket_grid=[-100, 0], horizons=[1, 4])
     stats = {(s.horizon_h, s.spread_bucket_bps): s for s in learner.learn([snap], candles)}
-    # -100 bps undercuts the whole queue: needs 150 of volume -> first candle after t (03:00).
-    assert stats[(1, -100)].fill_prob == Decimal("1")
-    assert stats[(1, -100)].ttf_p50_ms == (_T0 + 4 * _H) - t  # filled inside the 03:00 hour
-    # +0 bps: needs 2650 -> third candle after t (05:00) -> beyond 1h, within 4h.
-    assert stats[(1, 0)].fill_prob == Decimal("0")
+    # 1h horizon from 02:37 ends 03:37; the 03:00 candle runs to 04:00 and straddles it,
+    # so the horizon is unresolvable: no sample, not a miss (the old code counted the
+    # 04:00 fill as "within 1h" and reported an 83-minute time-to-fill).
+    assert not any(h == 1 for h, _ in stats)
+    # -100 bps undercuts the whole queue: needs 150 of volume -> 03:00 candle, done by 04:00.
+    assert stats[(4, -100)].fill_prob == Decimal("1")
+    assert stats[(4, -100)].ttf_p50_ms == (_T0 + 4 * _H) - t
+    # +0 bps: needs 2650 -> 03:00+04:00+05:00 candles (3000), done by 06:00 <= 06:37.
     assert stats[(4, 0)].fill_prob == Decimal("1")
     assert stats[(4, 0)].n_samples == 1
+
+
+def test_horizon_counts_only_candles_wholly_inside_the_window() -> None:
+    # Snapshot on the hour: the 02:00 candle starts at t and ends at 03:00 = t+1h -> in.
+    t = _T0 + 2 * _H
+    candles = _hours(8)
+    learner = BookReplayLearner(bucket_grid=[-100], horizons=[1])
+    (s,) = learner.learn([_snap(t, [("0.0002", 2, "10")])], candles)
+    assert (s.horizon_h, s.fill_prob, s.ttf_p50_ms) == (1, Decimal("1"), _H)
+    # One minute later the same candle straddles t+1h -> no 1h sample at all.
+    assert learner.learn([_snap(t + 60_000, [("0.0002", 2, "10")])], candles) == []
 
 
 def test_snapshot_without_completed_reference_hour_is_skipped() -> None:

@@ -43,7 +43,7 @@ SERIES_MATRIX: list[tuple[str, str, str]] = [
 _SOURCE = "candle"
 _FAR_PAST_MS = 0
 _FAR_FUTURE_MS = 4_102_444_800_000  # 2100-01-01
-_MODEL_VERSION = "g13-candle-v1"
+_MODEL_VERSION = "g13-candle-v2"  # v2: horizon counts only candles wholly inside the window
 _SCHEMA_VERSION = 1
 
 

@@ -16,7 +16,8 @@ from bfx_funding_bot.modules.lending.tracking.artifact import FillModelUnavailab
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
 
 BacktestIncompleteReason = Literal[
-    "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+    "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
+    "market_series_gap",
 ]
 
 _MS_PER_DAY = Decimal(86_400_000)
@@ -123,8 +124,11 @@ def _apply_friction(
     fill_model: FillRateModel | None = None,
 ) -> tuple[Decimal, Decimal]:
     market_rate = _resolve_market_rate(candle, config.market_rate_source)
-    if market_rate is None or market_rate == 0:
-        return decision.rate, Decimal("1")
+    if market_rate is None or market_rate <= 0:
+        # No usable market print for this fill: refuse rather than assume a 100%
+        # fill at the quoted rate (that assumption is exactly what a research run
+        # must not smuggle in).
+        raise BacktestIncomplete("market_series_gap")
     spread_pct = (decision.rate - market_rate) / market_rate
 
     if config.fill_model == "empirical":
@@ -211,8 +215,8 @@ def run_backtest(
 
     sorted_candles = sorted(candles, key=lambda c: c.mts)
     # Fills price off the market series; absent one, the observed series is the
-    # market (unchanged behaviour). Matched by mts so a gap in either series
-    # degrades to "use the observed candle" rather than silently misaligning.
+    # market (unchanged behaviour). Matched by mts; a decision whose mts has no
+    # market print is `market_series_gap`, never a fallback to the observed candle.
     market_by_mts = (
         {c.mts: c for c in market_candles} if market_candles is not None else None
     )
@@ -260,12 +264,18 @@ def run_backtest(
 
         if series_maps is not None:
             series_key = resolve_market_series_key(decision.period_days, series_maps)
-            pricing_candle = series_maps[series_key].get(candle.mts, candle)
+            priced = series_maps[series_key].get(candle.mts)
+            if priced is None:
+                raise BacktestIncomplete("market_series_gap")
+            pricing_candle = priced
             series_used[series_key] = series_used.get(series_key, 0) + 1
+        elif market_by_mts is not None:
+            priced = market_by_mts.get(candle.mts)
+            if priced is None:
+                raise BacktestIncomplete("market_series_gap")
+            pricing_candle = priced
         else:
-            pricing_candle = (
-                market_by_mts.get(candle.mts, candle) if market_by_mts is not None else candle
-            )
+            pricing_candle = candle
         trade_model = fill_model
         if fill_models_by_agg is not None:
             trade_model = fill_models_by_agg.get(pricing_candle.period_agg)

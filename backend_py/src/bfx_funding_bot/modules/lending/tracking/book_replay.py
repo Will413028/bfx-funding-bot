@@ -14,7 +14,10 @@ with probability 1. This learner replays the self-recorded funding book
 `ref` is the close of the last *completed* hour before t (`ref_lag_hours`), so
 the spread axis matches what the engine passes as `reference_rate` and no
 in-progress candle leaks into the reference. Volume is the funding candle's
-`volume` for the same period series (p2 for period 2).
+`volume` for the same period series (p2 for period 2). Only candles lying
+wholly inside (t, t+H] count towards horizon H; with hourly candles a 1h
+horizon is therefore resolvable only for snapshots taken on the hour, and an
+unresolvable horizon yields no sample rather than a miss.
 
 Known optimism: newcomers who undercut after t are not modelled, and traded
 volume is assumed to consume the book from the best ask upward. Calibrate
@@ -39,7 +42,7 @@ from bfx_funding_bot.modules.lending.tracking.fill_rate import (
 from bfx_funding_bot.modules.marketfeed.book_period_coverage import BookAskSnapshot
 
 BOOK_SOURCE = "book"
-BOOK_MODEL_VERSION = "book-replay-v1"
+BOOK_MODEL_VERSION = "book-replay-v2"  # v2: horizon counts only candles wholly inside the window
 DEFAULT_OFFER_AMOUNT = Decimal("150")  # venue minimum; queue math is depth-relative
 _MS_PER_HOUR = 3_600_000
 
@@ -100,7 +103,9 @@ class BookReplayLearner:
                 continue
             ref = ref_candle.close
             max_horizon_ms = max(self.horizons) * _MS_PER_HOUR
-            window = [c for c in ordered if t < c.mts <= t + max_horizon_ms]
+            # Only candles that start at or after the snapshot and end within the
+            # longest horizon; per-horizon membership is re-checked below.
+            window = [c for c in ordered if c.mts >= t and c.mts + _MS_PER_HOUR <= t + max_horizon_ms]
             if not window:
                 continue
             for bps in self.bucket_grid:
@@ -115,13 +120,14 @@ class BookReplayLearner:
                         fill_at_ms = c.mts + _MS_PER_HOUR  # filled somewhere inside that hour
                         break
                 for horizon_h in self.horizons:
-                    if not any(t < c.mts <= t + horizon_h * _MS_PER_HOUR for c in window):
-                        continue
+                    deadline = t + horizon_h * _MS_PER_HOUR
+                    if not any(c.mts + _MS_PER_HOUR <= deadline for c in window):
+                        continue  # no candle resolvable inside this horizon: unknown, not a sample
                     a = acc.setdefault((horizon_h, bps), _Acc())
                     a.total += 1
-                    if fill_at_ms is not None and fill_at_ms - _MS_PER_HOUR <= t + horizon_h * _MS_PER_HOUR:
+                    if fill_at_ms is not None and fill_at_ms <= deadline:
                         a.filled += 1
-                        a.ttfs.append(max(fill_at_ms - t, 0))
+                        a.ttfs.append(fill_at_ms - t)
 
         out: list[BucketStat] = []
         for (horizon_h, bps), a in sorted(acc.items()):

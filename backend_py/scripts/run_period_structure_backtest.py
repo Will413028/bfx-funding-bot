@@ -53,6 +53,7 @@ from bfx_funding_bot.modules.backtest.period_structure import (
     ARM_MR_P2,
     ArmSpec,
     PeriodStructureReport,
+    align_series,
     build_report,
     clamp_to_joint_coverage,
     evaluate_period_arms,
@@ -223,6 +224,7 @@ def run_symbol(
     if "p30" in series:
         series["p30"] = to_hourly_grid(series["p30"], max_gap_hours=p30_staleness_hours)
     series = clamp_to_joint_coverage(series)
+    series, dropped = align_series(series)
     if "p2" not in series:
         raise SystemExit(f"{symbol}: p2 series is required")
     windows = compute_wfo_windows(series["p2"])
@@ -260,7 +262,9 @@ def run_symbol(
     p2 = series["p2"]
     first = datetime.fromtimestamp(p2[0].mts / 1000, UTC)
     last = datetime.fromtimestamp(p2[-1].mts / 1000, UTC)
-    notes.append("series: " + ", ".join(f"{k}={len(v)} candles" for k, v in sorted(series.items())))
+    notes.append("series: " + ", ".join(f"{k}={len(v)} candles" for k, v in sorted(series.items()))
+                 + (f"; dropped {dropped} slots not present in every series (engine refuses "
+                    "to price a decision without a market print)" if dropped else ""))
     logger.info("%s: %d windows, %d arms", symbol, len(windows), len(arms))
     return build_report(
         symbol=symbol, runs=runs, data_window=f"{first:%Y-%m-%d} .. {last:%Y-%m-%d}", notes=notes,

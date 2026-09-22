@@ -68,7 +68,8 @@ class WindowOutcome:
     baseline_net: Decimal | None
     baseline_sortino: Decimal | None
     incomplete_reason: Literal[
-        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
+        "market_series_gap",
     ] | None = None
 
 

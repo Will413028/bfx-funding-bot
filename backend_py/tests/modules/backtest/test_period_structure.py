@@ -5,6 +5,7 @@ from decimal import Decimal
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.period_structure import (
     ArmSpec,
+    align_series,
     build_report,
     clamp_to_joint_coverage,
     evaluate_period_arms,
@@ -160,3 +161,14 @@ def test_book_models_score_each_tenor_and_leave_unmodelled_arms_unscored() -> No
     report = build_report(symbol="fUST", runs=runs, data_window="x..y")
     assert set(report.arm_summaries) == {"always_2d", "always_30d"}
     assert any("fourteen_on_a30 not scored: fill_model_missing" in n for n in report.notes)
+
+
+def test_align_series_keeps_only_common_slots_and_counts_dropped() -> None:
+    p2 = _series("p2", "0.0001", n=6)
+    a30 = _series("a30", "0.0002", n=6)
+    a30 = a30[:3] + a30[4:]  # a30 lacks hour 3
+    aligned, dropped = align_series({"p2": p2, "a30": a30})
+    assert dropped == 1
+    assert [c.mts for c in aligned["p2"]] == [c.mts for c in aligned["a30"]]
+    assert len(aligned["p2"]) == 5
+    assert align_series({"p2": []}) == ({}, 0)

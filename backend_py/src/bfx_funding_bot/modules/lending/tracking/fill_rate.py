@@ -72,13 +72,16 @@ class FillRateLearner:
             ref = c.close
             if ref is None or ref <= 0:
                 continue
+            decision_ms = c.mts + _MS_PER_HOUR  # the close is known when its candle ends
             for horizon_h in self.horizons:
-                window_end = c.mts + horizon_h * _MS_PER_HOUR
-                # Window = candles strictly after t, up to t+H (gap-safe, by mts).
+                deadline = decision_ms + horizon_h * _MS_PER_HOUR
+                # Only candles lying wholly inside (decision, deadline] count. A
+                # candle straddling the deadline cannot say on which side its
+                # trades happened, so that sample is unknown, not a fill or a miss.
                 window: list[FundingCandle] = []
                 j = idx + 1
-                while j < len(sorted_c) and sorted_c[j].mts <= window_end:
-                    if sorted_c[j].mts > c.mts:
+                while j < len(sorted_c) and sorted_c[j].mts + _MS_PER_HOUR <= deadline:
+                    if sorted_c[j].mts >= decision_ms:
                         window.append(sorted_c[j])
                     j += 1
                 if not window:
@@ -94,7 +97,9 @@ class FillRateLearner:
                     a.total += 1
                     if hit_mts is not None:
                         a.filled += 1
-                        a.ttfs.append(hit_mts - c.mts)
+                        # Time to fill is bounded by the hit candle's end, never by
+                        # its start: the fill happened somewhere inside that hour.
+                        a.ttfs.append(hit_mts + _MS_PER_HOUR - decision_ms)
 
         out: list[BucketStat] = []
         for (horizon_h, bps), a in sorted(acc.items()):
