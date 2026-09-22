@@ -45,7 +45,10 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 log = logging.getLogger(__name__)
 
-RELEASE_SCHEMA_HEAD = "e5c9a3f10b62"
+# The single schema this build is willing to run against. Startup compares it
+# with the database's actual alembic heads, so it must move with every
+# migration or the daemon refuses to boot.
+RELEASE_SCHEMA_HEAD = "a7f3c1d9e204"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
