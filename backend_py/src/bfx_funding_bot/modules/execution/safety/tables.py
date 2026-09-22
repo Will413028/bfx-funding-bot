@@ -67,6 +67,11 @@ class TradingHaltRow(Base):
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     halted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Why trading stopped, which decides how it may start again: `maintenance`
+    # is an operator-requested pause and clears by an authenticated resume;
+    # `safety` and `release` require the release-promotion path. Defaults to the
+    # closed posture, never inferred from `reason`.
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="safety")
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     # Who made the transition (admin endpoint, bootstrap, an operator name).
     actor: Mapped[str] = mapped_column(Text, nullable=False)

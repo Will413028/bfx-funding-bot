@@ -201,3 +201,13 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
             with pytest.raises(ReleaseBlocked, match="promotion_required"):
                 await authority.check_normal(session)
     assert (await halt.current()).halted is (promotion_fault is not None)
+    if promotion_fault is None:
+        # A maintenance pause and its resume do not retire this promotion: nothing
+        # about the build changed, so nothing needs re-proving. While the promotion
+        # was matched to the live halt id, this cycle alone forced another
+        # real-money canary before lending could resume.
+        binding = dict(expected_binding)  # undo the deliberate corruption above
+        await halt.set_halted(True, reason="pg upgrade", actor="operator", kind="maintenance")
+        await halt.set_halted(False, reason="upgrade finished", actor="operator", kind="maintenance")
+        async with factory() as cycled:
+            await authority.check_normal(cycled)

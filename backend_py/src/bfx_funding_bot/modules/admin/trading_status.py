@@ -73,6 +73,7 @@ class _HaltStoreProtocol(Protocol):
     async def current(self) -> HaltState | None: ...
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
+        kind: str = "safety",
     ) -> HaltState: ...
     async def history(self, *, limit: int = 20) -> list[HaltState]: ...
 
@@ -86,6 +87,10 @@ def _halt_state_dict(state: HaltState | None) -> dict[str, Any] | None:
         return None
     return {
         "halted": state.halted,
+        "kind": state.kind,
+        # Whether this halt can be cleared without a real-money canary. Shown so
+        # the operator does not have to read the reason text and guess.
+        "resumable_without_release": state.kind == "maintenance",
         "reason": state.reason,
         "actor": state.actor,
         "at_ms": state.created_at_ms,
@@ -236,9 +241,12 @@ class TradingStatusService:
 
     # ------------------------------------------------------------ halt/resume
 
-    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
+    async def halt(self, *, reason: str, actor: str, kind: str = "maintenance") -> dict[str, Any]:
+        """Stop trading. An operator asking through this endpoint is, by default,
+        pausing for maintenance -- that is the only thing this endpoint is for.
+        Guards and boot failures record their own halts as `safety` directly."""
         state = await self._require_store().set_halted(
-            True, reason=reason, actor=actor,
+            True, reason=reason, actor=actor, kind=kind,
         )
         return {**_halt_state_dict(state), "still_halted_by_env": _env_kill_switch_set()}  # type: ignore[dict-item]
 
@@ -249,10 +257,16 @@ class TradingStatusService:
         response says so explicitly — reporting "resumed" while nothing resumed
         is exactly the class of lie this endpoint exists to prevent.
         """
-        if self._phase is Phase.LIVE or self._capital is not None:
+        store = self._require_store()
+        current = await store.current()
+        if current is not None and current.halted and current.kind != "maintenance":
+            # A safety halt or a release halt states that something about the
+            # system is unproven, and no amount of operator intent makes it
+            # proven. Those still exit through release promotion, which submits
+            # a bounded real-money canary and observes the outcome.
             raise ValueError("release_promotion_required")
-        state = await self._require_store().set_halted(
-            False, reason=reason, actor=actor,
+        state = await store.set_halted(
+            False, reason=reason, actor=actor, kind="maintenance",
         )
         env_holds = _env_kill_switch_set()
         return {
