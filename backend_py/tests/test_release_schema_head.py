@@ -13,6 +13,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from bfx_funding_bot.modules.execution.event_store.writer import _READY_PROJECTOR_MIGRATIONS
 from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -37,3 +38,22 @@ def test_migrations_have_exactly_one_head() -> None:
     """Two heads mean a branched history, which the startup check cannot express."""
     heads = _alembic_heads()
     assert len(heads) == 1, f"expected a single migration head, found {heads!r}"
+
+
+def test_head_is_classified_for_the_projector_cursor() -> None:
+    """The head a deployment lands on must be judged against the cursor contract.
+
+    `_assert_projector_migration_ready` fails closed when the database's current
+    revision is missing from the allow-list, so a migration that lands without
+    being classified stops the daemon at startup -- after a release has been
+    built and shipped. The list is hand-maintained on purpose: whether a
+    migration preserves the seeded cursor contract is a judgement, not something
+    a test can infer. What the test can do is refuse to let it be skipped.
+    """
+    heads = _alembic_heads()
+    unclassified = set(heads) - set(_READY_PROJECTOR_MIGRATIONS)
+    assert not unclassified, (
+        f"migration head {sorted(unclassified)} is not classified in "
+        f"_READY_PROJECTOR_MIGRATIONS. Decide whether it preserves the seeded "
+        f"cursor contract, then add it to the allow-list in writer.py."
+    )
