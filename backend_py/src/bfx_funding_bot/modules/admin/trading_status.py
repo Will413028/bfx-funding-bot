@@ -73,7 +73,7 @@ class _HaltStoreProtocol(Protocol):
     async def current(self) -> HaltState | None: ...
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
-        kind: str = "safety",
+        kind: str = "safety", renew: bool = False,
     ) -> HaltState: ...
     async def history(self, *, limit: int = 20) -> list[HaltState]: ...
 
@@ -241,12 +241,18 @@ class TradingStatusService:
 
     # ------------------------------------------------------------ halt/resume
 
-    async def halt(self, *, reason: str, actor: str, kind: str = "maintenance") -> dict[str, Any]:
+    async def halt(self, *, reason: str, actor: str, kind: str = "maintenance",
+                   renew: bool = False) -> dict[str, Any]:
         """Stop trading. An operator asking through this endpoint is, by default,
         pausing for maintenance -- that is the only thing this endpoint is for.
-        Guards and boot failures record their own halts as `safety` directly."""
+        Guards and boot failures record their own halts as `safety` directly.
+
+        `renew` asks for a new authorization epoch while staying halted, which
+        is how an operator grants another canary attempt after one was spent
+        without placing an order. It carries the current halt's kind forward, so
+        it grants an attempt and never a cheaper exit."""
         state = await self._require_store().set_halted(
-            True, reason=reason, actor=actor, kind=kind,
+            True, reason=reason, actor=actor, kind=kind, renew=renew,
         )
         return {**_halt_state_dict(state), "still_halted_by_env": _env_kill_switch_set()}  # type: ignore[dict-item]
 
