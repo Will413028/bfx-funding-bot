@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.release_session import (
     ReleaseBlocked,
     ReleaseCommand,
+    ReleasePromotionRequired,
     ReleaseSessions,
 )
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
@@ -164,7 +165,7 @@ class ReleaseCommandAuthority:
             .limit(1)
         )
         if halt.halted or promoted is None or promoted.binding != binding:
-            raise ReleaseBlocked("release_promotion_required")
+            raise ReleasePromotionRequired("release_promotion_required")
 
     async def admit(self, session: AsyncSession, *, ready: ReadyToSubmit,
                     context: AccountContext, attempt_id: UUID) -> None:
@@ -280,6 +281,12 @@ class ReleaseWorker:
             log.exception("release_session_blocked session_id=%s", session_id)
             await self._reassert_halt("release_blocked")
             if session_id is None:
+                if isinstance(exc, ReleasePromotionRequired):
+                    # The halt above is the whole response: an unverified build
+                    # must not lend, but it is not a reason to kill the writer.
+                    # Stopping here left the daemon dead with no operator path
+                    # back except restarting it by hand.
+                    return
                 # Runtime/proof failure with an unhalted account must stop the
                 # writer after persisting halt. No blanket retry loop.
                 raise
