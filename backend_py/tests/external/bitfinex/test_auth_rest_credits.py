@@ -1,9 +1,10 @@
 """ActiveFundingCredit parse + REST fetch unit tests.
 
 Parallels test_auth_rest.py pattern for the credits endpoint.
-Bitfinex /v2/auth/r/funding/credits/{symbol} positional array layout:
+Bitfinex /v2/auth/r/funding/credits/{symbol} and /loans/{symbol} share one
+positional layout:
   [0]=ID [1]=SYMBOL [2]=SIDE [3]=MTS_CREATE [4]=MTS_UPDATE [5]=AMOUNT
-  [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=RATE [10]=PERIOD ...
+  [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=_ [10]=_ [11]=RATE [12]=PERIOD ...
 """
 from __future__ import annotations
 
@@ -40,9 +41,30 @@ def _credit_row(
     row[4] = 1_700_000_001_000    # MTS_UPDATE
     row[5] = amount               # AMOUNT (positive for lender)
     row[7] = status               # STATUS
-    row[9] = rate                 # RATE
-    row[10] = period              # PERIOD
+    row[11] = rate                # RATE
+    row[12] = period              # PERIOD
     return row
+
+
+# Verbatim rows returned by Bitfinex on 2026-09-23. [9] and [10] are null; a
+# parser reading rate/period there silently produced 0 for both.
+_LIVE_LOAN_ROW = [61621685, "fUST", 1, 1790100510000, 1790100510000, 150.77638588, 0,
+                  "ACTIVE", "FIXED", None, None, 0.0001482, 2, 1790100510000,
+                  1790100510000, None, 0, None, 0, None, 0]
+_LIVE_CREDIT_ROW = [464746163, "fUST", 1, 1787933444000, 1788088327000, 392.30178005,
+                    None, "CLOSED (expired)", "FIXED", None, None, 0.000178, 2,
+                    1787933444000, 1788106423000, None, 0, None, 0, None, 0, "tBTCUST"]
+
+
+def test_parse_reads_rate_and_period_where_the_venue_puts_them():
+    loan, credit = parse_active_funding_credits([_LIVE_LOAN_ROW, _LIVE_CREDIT_ROW])
+    assert (loan.rate, loan.period_days, loan.amount) == (0.0001482, 2, Decimal("150.77638588"))
+    assert (credit.rate, credit.period_days) == (0.000178, 2)
+
+
+def test_a_row_too_short_to_hold_the_period_is_rejected():
+    with pytest.raises(BitfinexShapeError):
+        parse_active_funding_credits([_LIVE_LOAN_ROW[:12]])
 
 
 def _ctx() -> AccountContext:
@@ -166,3 +188,24 @@ async def test_get_active_funding_credits_without_symbol_fetches_all():
 
     assert len(credits) == 1
     assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/credits"
+
+
+@pytest.mark.asyncio
+async def test_loans_are_read_from_their_own_endpoint_and_namespaced():
+    """A filled offer is a loan until a borrower draws it into a position, and
+    Bitfinex lists it only under /loans until then. The id is namespaced because
+    loan and credit ids are separate venue sequences."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=[_LIVE_LOAN_ROW])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BitfinexAuthREST(http=http, nonce_provider=lambda: 1)
+        loans = await client.get_active_funding_loans(ctx=_ctx(), symbol="fUST")
+
+    assert captured["url"] == "https://api.bitfinex.com/v2/auth/r/funding/loans/fUST"
+    assert [loan.credit_id for loan in loans] == ["loan:61621685"]
+    assert loans[0].amount == Decimal("150.77638588")
+    assert loans[0].status == "ACTIVE"

@@ -35,6 +35,10 @@ class ReadOnlyVenue:
         assert kwargs.get("symbol") is None
         return []
 
+    async def get_active_funding_loans(self, **kwargs):
+        # Lent but not yet drawn into a position; none in this fixture.
+        return []
+
     async def get_active_funding_credits(self, **kwargs):
         self.calls.append("credits")
         assert kwargs.get("symbol") is None

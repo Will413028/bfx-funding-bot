@@ -41,6 +41,7 @@ from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
 )
+from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditObservation,
@@ -323,6 +324,10 @@ class _ActiveOffersQuery(Protocol):
 
 class _ActiveCreditsQuery(Protocol):
     async def get_active_funding_credits(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+    ) -> list[ActiveFundingCredit]: ...
+
+    async def get_active_funding_loans(
         self, *, ctx: AccountContext, symbol: str | None = None,
     ) -> list[ActiveFundingCredit]: ...
 
@@ -766,11 +771,21 @@ class BootRecovery:
         )
 
     async def _load_history_start_ms(self) -> int | None:
-        """Read the oldest unresolved durable attempt before any venue call."""
+        """Read the oldest attempt whose fate the next snapshot must explain.
+
+        Two kinds need venue offer history. An UNKNOWN submit, obviously. But
+        also an ACKNOWLEDGED one that no accepted capital snapshot has reflected
+        yet: if the offer filled before the next snapshot it is gone from the
+        active book, and its terminal history row is the only evidence of where
+        the money went. Covering UNKNOWN alone made every offer that filled
+        between snapshots -- which a competitively priced offer usually does --
+        an unclassifiable commitment.
+        """
         try:
             canonical = UUID(self._ctx.account_id)
         except ValueError:
             return None
+        acknowledged_unreflected = await self._unreflected_acknowledged_starts(canonical)
         async with self._session_factory() as session:
             values = (
                 await session.execute(
@@ -791,7 +806,40 @@ class BootRecovery:
                     )
                 )
             ).scalars().all()
-        return min(values) if values else None
+        starts = [*values, *acknowledged_unreflected]
+        return min(starts) if starts else None
+
+    async def _unreflected_acknowledged_starts(self, canonical: UUID) -> list[int]:
+        """Start times of acknowledged attempts the latest capital snapshot has
+        neither reflected nor settled. Once reflected, an attempt is carried
+        forward by every later snapshot, so this set stays small."""
+        async with self._session_factory() as session:
+            latest = await session.scalar(
+                select(CapitalSnapshotRow)
+                .where(
+                    CapitalSnapshotRow.exchange_account_id == canonical,
+                    CapitalSnapshotRow.deployment_environment == self._env,
+                )
+                .order_by(CapitalSnapshotRow.event_seq.desc())
+                .limit(1)
+            )
+            accounted: set[str] = set()
+            if latest is not None:
+                classification = latest.classification or {}
+                accounted |= set((classification.get("reflected") or {}).keys())
+                accounted |= set(classification.get("settled") or [])
+            rows = (
+                await session.execute(
+                    select(SubmissionAttemptRow.attempt_id, SubmissionAttemptRow.started_at_ms)
+                    .where(
+                        SubmissionAttemptRow.exchange_account_id == canonical,
+                        SubmissionAttemptRow.deployment_environment == self._env,
+                        SubmissionAttemptRow.outcome_kind == SubmitOutcomeKind.ACKNOWLEDGED.value,
+                    )
+                )
+            ).all()
+        return [started for attempt_id, started in rows
+                if str(attempt_id) not in accounted and started is not None]
 
     async def _fetch_history(
         self,
@@ -975,15 +1023,26 @@ class BootRecovery:
         raise last_exc
 
     async def _fetch_credits(self, symbol: str | None) -> list[ActiveFundingCredit]:
-        """Fetch venue credits with bounded retry on TRANSIENT failures only.
-        4xx re-raises immediately; transient exhaustion re-raises too.
-        Fail-fast: never trade without knowing realized exposure."""
+        """Fetch every fund currently lent out, with bounded retry on TRANSIENT
+        failures only. 4xx re-raises immediately; transient exhaustion re-raises.
+        Fail-fast: never trade without knowing realized exposure.
+
+        Lent funds live in two venue lists: credits (drawn into a borrower's
+        position) and loans (lent, not yet drawn). An offer that fills lands in
+        loans first, so reading credits alone lost the first live fill on
+        2026-09-23 -- 150.78 left the wallet's available balance and appeared in
+        neither offers nor credits, and the capital classifier correctly refused
+        to account for money it could not see."""
         last_exc: BitfinexAPIError | None = None
         for attempt in range(self._max_attempts):
             try:
-                return await self._auth_rest.get_active_funding_credits(
+                credits = await self._auth_rest.get_active_funding_credits(
                     ctx=self._ctx, symbol=symbol,
                 )
+                loans = await self._auth_rest.get_active_funding_loans(
+                    ctx=self._ctx, symbol=symbol,
+                )
+                return [*credits, *loans]
             except BitfinexAPIError as e:
                 if not _is_transient_status(e.status_code):
                     log.error(

@@ -63,6 +63,10 @@ class _Auth:
         del ctx, symbol
         return self.offers
 
+    async def get_active_funding_loans(self, **kwargs):
+        # Lent but not yet drawn into a position; none in this fixture.
+        return []
+
     async def get_active_funding_credits(self, *, ctx, symbol=None):
         del ctx, symbol
         return []
