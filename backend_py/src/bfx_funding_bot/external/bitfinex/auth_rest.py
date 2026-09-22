@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
@@ -108,15 +108,19 @@ class ActiveFundingCredit:
     flags: dict[str, Any] | int | None = None
 
 
-_CREDIT_MIN_ROW_LEN = 11  # period is at index 10
+_CREDIT_MIN_ROW_LEN = 13  # period is at index 12
 
 
 def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
-    """Parse Bitfinex auth funding-credits response -> list[ActiveFundingCredit].
+    """Parse a Bitfinex funding-credits or funding-loans response.
 
-    Credits array layout (0-indexed):
+    Both endpoints return the same array layout (0-indexed):
       [0]=ID [1]=SYMBOL [2]=SIDE [3]=MTS_CREATE [4]=MTS_UPDATE [5]=AMOUNT
-      [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=RATE [10]=PERIOD ...
+      [6]=FLAGS [7]=STATUS [8]=RATE_TYPE [9]=_ [10]=_ [11]=RATE [12]=PERIOD ...
+
+    Rate and period were once read from [9] and [10], which the venue leaves
+    null; that went unnoticed because they are audit fields, and was caught on
+    2026-09-23 against a live loan row whose rate sat at [11] and period at [12].
     """
     if not isinstance(raw, list):
         raise BitfinexShapeError(
@@ -126,8 +130,8 @@ def parse_active_funding_credits(raw: Any) -> list[ActiveFundingCredit]:
     for o in raw:
         if not isinstance(o, list) or len(o) < _CREDIT_MIN_ROW_LEN:
             raise BitfinexShapeError(f"funding credit row malformed: {o!r}")
-        rate = o[9]
-        period = o[10]
+        rate = o[11]
+        period = o[12]
         out.append(ActiveFundingCredit(
             credit_id=str(o[0]),
             symbol=str(o[1]),
@@ -211,6 +215,12 @@ def parse_key_permissions(raw: Any) -> KeyPermissions:
 BITFINEX_AUTH_REST_BASE = "https://api.bitfinex.com"
 _FUNDING_OFFERS_PATH = "v2/auth/r/funding/offers"  # /{symbol} appended; no leading slash (sign_request prepends /api/)
 _FUNDING_CREDITS_PATH = "v2/auth/r/funding/credits"
+# Lent funds that no borrower has drawn into a position yet. Bitfinex lists
+# them here and NOT under credits, and moves them across once they are used.
+_FUNDING_LOANS_PATH = "v2/auth/r/funding/loans"
+# Loan and credit ids are separate venue sequences; keep them from ever being
+# mistaken for one another by an id-keyed projection.
+LOAN_ID_PREFIX = "loan:"
 _WALLETS_PATH = "v2/auth/r/wallets"  # no /{symbol}; sign_request prepends /api/
 _PERMISSIONS_PATH = "v2/auth/r/permissions"  # no body args; sign_request prepends /api/
 
@@ -400,6 +410,28 @@ class BitfinexAuthREST:
         """POST /v2/auth/r/funding/credits/{symbol} (signed). Returns parsed
         active credits. Raises BitfinexAPIError / BitfinexShapeError."""
         path = _FUNDING_CREDITS_PATH if symbol is None else f"{_FUNDING_CREDITS_PATH}/{symbol}"
+        return await self._post_funding_lent(ctx=ctx, path=path)
+
+    async def get_active_funding_loans(
+        self, *, ctx: AccountContext, symbol: str | None = None,
+    ) -> list[ActiveFundingCredit]:
+        """POST /v2/auth/r/funding/loans/{symbol} (signed).
+
+        Money that has been lent is under credits only once a borrower uses it
+        in a position; until then Bitfinex lists it here. Reading credits alone
+        makes every freshly filled offer vanish from the books -- the wallet's
+        available balance drops and nothing explains where it went. Ids carry
+        LOAN_ID_PREFIX so they can never collide with a credit id.
+        """
+        path = _FUNDING_LOANS_PATH if symbol is None else f"{_FUNDING_LOANS_PATH}/{symbol}"
+        return [
+            replace(loan, credit_id=LOAN_ID_PREFIX + loan.credit_id)
+            for loan in await self._post_funding_lent(ctx=ctx, path=path)
+        ]
+
+    async def _post_funding_lent(
+        self, *, ctx: AccountContext, path: str,
+    ) -> list[ActiveFundingCredit]:
         body_bytes = json.dumps({}).encode("utf-8")
         nonce = self._nonce_provider()
         headers = sign_request(
@@ -423,7 +455,7 @@ class BitfinexAuthREST:
         try:
             raw = resp.json()
         except json.JSONDecodeError as e:
-            raise BitfinexShapeError(f"invalid JSON in funding-credits response: {e}") from e
+            raise BitfinexShapeError(f"invalid JSON in {path} response: {e}") from e
         return parse_active_funding_credits(raw)
 
     async def get_funding_available(

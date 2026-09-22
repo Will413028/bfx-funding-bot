@@ -117,7 +117,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         # without updating canonical capital. Exercise the assembled recovery
         # chain and real DB; only the venue HTTP boundary is simulated.
         httpx_mock.add_response(
-            url=re.compile(r"https://api\.bitfinex\.com/v2/auth/r/funding/(offers|credits).*"),
+            url=re.compile(r"https://api\.bitfinex\.com/v2/auth/r/funding/(offers|credits|loans).*"),
             method="POST", json=[], is_reusable=True,
         )
         httpx_mock.add_response(

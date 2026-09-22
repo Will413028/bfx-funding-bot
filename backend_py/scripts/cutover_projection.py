@@ -650,7 +650,8 @@ async def collect_snapshot(
             ) for o in offers),
             credits=tuple(VenueCreditObservation(
                 credit_id=c.credit_id, symbol=c.symbol, amount=c.amount,
-                rate=Decimal(str(row[9])) if row[9] is not None else None,
+                # Rate is at [11]; [9] and [10] are null in live venue rows.
+                rate=Decimal(str(row[11])) if row[11] is not None else None,
                 period_days=c.period_days, status=c.status,
                 mts_created=c.mts_created, mts_updated=c.mts_updated,
                 flags=c.flags if isinstance(c.flags, dict) else {} if c.flags is None else {"raw": c.flags},
