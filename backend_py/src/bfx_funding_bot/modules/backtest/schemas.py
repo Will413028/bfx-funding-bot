@@ -70,7 +70,8 @@ class BacktestResult(BaseModel):
     model_cutoff_ms: int | None = None
     model_sample_count: int | None = None
     incomplete_reason: Literal[
-        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch"
+        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
+        "market_series_gap",
     ] | None = None
     # Which market series priced each fill when `market_series_by_agg` was used
     # (key -> trade count); None for single-series runs.

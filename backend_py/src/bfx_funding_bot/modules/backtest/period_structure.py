@@ -111,6 +111,25 @@ def clamp_to_joint_coverage(
     return {k: [c for c in v if lo <= c.mts <= hi] for k, v in non_empty.items()}
 
 
+def align_series(
+    series: Mapping[str, list[FundingCandle]],
+) -> tuple[dict[str, list[FundingCandle]], int]:
+    """Keep only the mts present in every series; return (aligned, dropped_slots).
+
+    Period-aware pricing looks up the market print at the decision's mts in another
+    series; the engine refuses (`market_series_gap`) rather than fall back to the
+    observed candle. Dropping the few slots a series lacks keeps that strictness
+    while letting the run proceed, and the count goes into the report notes.
+    """
+    non_empty = {k: v for k, v in series.items() if v}
+    if not non_empty:
+        return {}, 0
+    common = set.intersection(*({c.mts for c in v} for v in non_empty.values()))
+    aligned = {k: [c for c in v if c.mts in common] for k, v in non_empty.items()}
+    dropped = sum(len(v) for v in non_empty.values()) - sum(len(v) for v in aligned.values())
+    return aligned, dropped
+
+
 @dataclass(frozen=True)
 class ArmSpec:
     name: str
