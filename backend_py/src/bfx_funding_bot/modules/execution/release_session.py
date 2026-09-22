@@ -24,6 +24,17 @@ class ReleaseBlocked(RuntimeError):  # noqa: N818
     pass
 
 
+class ReleasePromotionRequired(ReleaseBlocked):
+    """This build has not been proven by a canary yet.
+
+    A state, not a fault: the writer should stay halted and keep running, not
+    stop. Distinguished from its parent because the worker treats an unexpected
+    failure on an unhalted account as fatal, and that is the right posture for a
+    genuine runtime or proof failure -- just not for a build awaiting its first
+    verification.
+    """
+
+
 @dataclass(frozen=True)
 class ReleaseCommand:
     session_id: UUID
@@ -35,6 +46,29 @@ class ReleaseCommand:
     # submission may move the amount, but never past what they capped.
     max_amount: Decimal
     halt_authorization: object
+
+
+def _within_authorised_amount(submitted: Decimal, row: ReleaseSessionRow) -> bool:
+    """Accept the same revision the reconciler is allowed to make, and no more.
+
+    The venue minimum is USD-denominated, so its UST equivalent drifts with FX
+    between authorisation and submission. The reconciler may revise up to
+    RELEASE_MINIMUM_TOLERANCE above the authorised amount and logs it; requiring
+    exact equality here rejected precisely those submissions, so any FX movement
+    at all -- which is to say, any real session -- died as
+    `session_decision_mismatch` after the offer had already been priced. Both
+    sides now read the same constant.
+    """
+    from bfx_funding_bot.modules.execution.deployment.reconciler import (
+        RELEASE_MINIMUM_TOLERANCE,
+    )
+
+    if row.minimum_amount is None:
+        return False
+    ceiling = min(
+        row.minimum_amount * (Decimal(1) + RELEASE_MINIMUM_TOLERANCE), row.max_amount
+    )
+    return Decimal(0) < submitted <= row.max_amount and row.minimum_amount <= submitted <= ceiling
 
 
 class ReleaseSessions:
@@ -155,7 +189,7 @@ class ReleaseSessions:
             actual.outcome != "ready" or actual.exchange_account_id != self.account_id
             or actual.deployment_environment != self.environment or actual.symbol != row.symbol
             or actual.cell_id != row.cell or actual.strategy != row.strategy
-            or actual.amount_usdt != row.minimum_amount or not 0 < actual.amount_usdt <= row.max_amount
+            or not _within_authorised_amount(actual.amount_usdt, row)
             or actual.config_hash != binding.get("config_digest")
             or actual.service_version != binding.get("source_revision")
         ):
