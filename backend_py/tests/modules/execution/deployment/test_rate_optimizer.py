@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
+    OptimizationResult,
     OptimizerNoRecommendation,
     RateCandidate,
     RateOptimizer,
@@ -102,7 +103,8 @@ def test_breaks_equal_score_ties_by_fill_probability_then_lower_quote_rate() -> 
 def test_copies_candidate_provenance_before_returning_frozen_result() -> None:
     """Caller mutation cannot rewrite an optimizer result already selected for audit."""
     evidence = {"snapshot_id": "book-1", "levels": ["0.00021"]}
-    candidate = _candidate("0.00021", "maker", book_evidence=evidence)
+    # Candidates carry their own fill evidence; without it they are not scored.
+    candidate = _candidate("0.00021", "maker", fill_probability="1.0", book_evidence=evidence)
 
     result = RateOptimizer().select(
         signal_rate=Decimal("0.00020"),
@@ -139,7 +141,7 @@ def test_accepts_task7_canonical_fill_model_evidence() -> None:
 
     result = RateOptimizer().select(
         signal_rate=Decimal("0.00020"),
-        maker=_candidate("0.00021", "maker"),
+        maker=_candidate("0.00021", "maker", fill_probability="0.95"),
         taker=None,
         fill_evidence=evidence,
         fee_rate=Decimal("0.15"),
@@ -216,3 +218,32 @@ def test_rejects_unsupported_mutable_provenance() -> None:
             fill_evidence=None,
             book_evidence={"raw": bytearray(b"mutable")},
         )
+
+
+def test_candidates_score_on_their_own_evidence_not_the_signals() -> None:
+    """A higher maker rate with a worse own fill estimate must not beat the signal
+    just because it used to inherit the signal's fill probability."""
+    result = RateOptimizer().select(
+        signal_rate=Decimal("0.00030"),
+        maker=_candidate("0.00033", "maker", fill_probability="0.50"),
+        taker=None,
+        fill_evidence=_evidence(fill_probability="0.80"),
+        fee_rate=Decimal("0.15"),
+    )
+    assert isinstance(result, OptimizationResult)
+    assert result.selected.source == "signal"
+    assert result.scores["signal"] > result.scores["maker"]
+
+
+def test_candidate_without_its_own_evidence_is_not_scored() -> None:
+    result = RateOptimizer().select(
+        signal_rate=Decimal("0.00030"),
+        maker=_candidate("0.00033", "maker"),  # no fill evidence at this price
+        taker=None,
+        fill_evidence=_evidence(fill_probability="0.80"),
+        fee_rate=Decimal("0.15"),
+    )
+    assert isinstance(result, OptimizationResult)
+    assert result.selected.source == "signal"
+    assert set(result.scores) == {"signal"}
+    assert all(candidate.source != "maker" for candidate in result.candidates)

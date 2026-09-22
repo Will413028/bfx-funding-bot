@@ -46,11 +46,15 @@ from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
 from bfx_funding_bot.modules.execution.deployment.reprice import (
     RepricePolicy,
     stale_offers,
+    stale_offers_with_refs,
 )
 from bfx_funding_bot.modules.execution.deployment.sizing import (
     allocate_capital,
 )
-from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuoteStore
+from bfx_funding_bot.modules.execution.deployment.standing_quote import (
+    StandingQuote,
+    StandingQuoteStore,
+)
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
@@ -73,6 +77,7 @@ from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_sym
 from bfx_funding_bot.modules.marketfeed.funding_book import (
     BookUnavailable,
     FundingBookProvider,
+    MarketSnapshot,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
@@ -414,10 +419,22 @@ class DeploymentReconciler:
                         ExecutionPolicy.OPTIMIZER_LIVE,
                     }
                 ):
+                    # Evidence is estimated per candidate price: the exact-period
+                    # book price gates the submit, the signal price competes in the
+                    # optimizer on its own estimate.
                     fill_evidence = self._fill_evidence_for(
                         candidate=decision,
                         snapshot=snapshot,
                         price=price,
+                        offer_rate=price.rate,
+                        now_ms=now,
+                        period_agg=period_agg,
+                    )
+                    signal_evidence = self._fill_evidence_for(
+                        candidate=decision,
+                        snapshot=snapshot,
+                        price=price,
+                        offer_rate=Decimal(str(decision.offer_rate)),
                         now_ms=now,
                         period_agg=period_agg,
                     )
@@ -425,7 +442,8 @@ class DeploymentReconciler:
                         optimization = self._optimize(
                             candidate=decision,
                             price=price,
-                            fill_evidence=fill_evidence,
+                            signal_evidence=signal_evidence,
+                            price_evidence=fill_evidence,
                         )
                     except Exception:
                         log.exception(
@@ -444,6 +462,10 @@ class DeploymentReconciler:
                                 branch=price.branch,
                                 evidence=price.evidence,
                             )
+                            # The submit gate must see the evidence of the price it
+                            # is about to send, not the book price's.
+                            if optimization.selected.fill_evidence is not None:
+                                fill_evidence = optimization.selected.fill_evidence
                     elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
                         # Never reinterpret a failed optimizer as an implicit signal
                         # fallback.  Valid fill evidence remains visible in audit.
@@ -577,6 +599,7 @@ class DeploymentReconciler:
         candidate: DecisionPayload,
         snapshot: object,
         price: PriceDecision,
+        offer_rate: Decimal,
         now_ms: int,
         period_agg: str,
     ) -> FillModelEvidence | FillModelUnavailable | None:
@@ -589,7 +612,7 @@ class DeploymentReconciler:
         try:
             evidence = self._fill_model_provider.estimate_fill(
                 reference_rate=reference_rate,
-                offer_rate=price.rate,
+                offer_rate=offer_rate,
                 period_agg=period_agg,
                 horizon_h=requested_horizon_h,
             )
@@ -620,10 +643,15 @@ class DeploymentReconciler:
         *,
         candidate: DecisionPayload,
         price: PriceDecision,
-        fill_evidence: FillModelEvidence | FillModelUnavailable | None,
+        signal_evidence: FillModelEvidence | FillModelUnavailable | None,
+        price_evidence: FillModelEvidence | FillModelUnavailable | None,
     ) -> OptimizationResult | OptimizerNoRecommendation | None:
-        if not isinstance(fill_evidence, FillModelEvidence):
+        if not isinstance(signal_evidence, FillModelEvidence):
             return None
+        fill_evidence = signal_evidence
+        exact_period_evidence = (
+            price_evidence if isinstance(price_evidence, FillModelEvidence) else None
+        )
         signal_rate = Decimal(str(candidate.offer_rate))
         book_evidence = {
             "snapshot_id": price.evidence.get("snapshot_id"),
@@ -633,7 +661,7 @@ class DeploymentReconciler:
         exact_period_candidate = RateCandidate(
             rate=price.rate,
             source=("taker" if price.branch is PriceBranch.TAKER else "maker"),
-            fill_evidence=fill_evidence,
+            fill_evidence=exact_period_evidence,
             book_evidence=book_evidence,
         ) if price.branch in {PriceBranch.TAKER, PriceBranch.UNDERCUT} else None
         return self._rate_optimizer.select(
@@ -738,6 +766,31 @@ class DeploymentReconciler:
         except Exception:
             log.debug("execution_submitted_event_failed", exc_info=True)
 
+    def _book_reprice_references(
+        self,
+        *,
+        symbol: str,
+        quotes: list[StandingQuote],
+        offers: list[ActiveFundingOffer],
+        now: int,
+    ) -> dict[str, float]:
+        snapshot = self._book_provider.snapshot(symbol, now_ms=now)
+        if snapshot is None:
+            log.info(
+                "reprice_reference_unavailable symbol=%s reason=%s",
+                symbol, self._book_provider.unavailable_reason(symbol, now_ms=now),
+            )
+            return {}
+        refs: dict[str, float] = {}
+        for offer in offers:
+            ref_rate = _book_reprice_reference_for(
+                pricer=self._period_pricer, snapshot=snapshot, symbol=symbol,
+                quotes=quotes, offer=offer,
+            )
+            if ref_rate is not None:
+                refs[offer.venue_offer_id] = ref_rate
+        return refs
+
     async def _reprice_sweep(
         self,
         *,
@@ -765,15 +818,26 @@ class DeploymentReconciler:
             return 0
         ref = max(quotes, key=lambda q: q.rate or 0.0)
         assert ref.rate is not None  # POST quote 的 rate 必非 None
-        ref_rate = ref.rate
-        candidates = stale_offers(
-            offers=[o for o in venue_offers if o.symbol == symbol],
-            ref_rate=ref_rate,
-            now_ms=now,
-            policy=self._reprice,
-        )
+        symbol_offers = [o for o in venue_offers if o.symbol == symbol]
+        ref_by_offer: dict[str, float]
+        if self._reprice.reference == "book":
+            ref_by_offer = self._book_reprice_references(
+                symbol=symbol, quotes=quotes, offers=symbol_offers, now=now,
+            )
+            if not ref_by_offer:
+                return 0
+            candidates = stale_offers_with_refs(
+                offers=symbol_offers, ref_rate_by_offer=ref_by_offer,
+                now_ms=now, policy=self._reprice,
+            )
+        else:
+            ref_by_offer = {o.venue_offer_id: ref.rate for o in symbol_offers}
+            candidates = stale_offers(
+                offers=symbol_offers, ref_rate=ref.rate, now_ms=now, policy=self._reprice,
+            )
         issued = 0
         for offer in candidates:
+            ref_rate = ref_by_offer[offer.venue_offer_id]
             age_min = (now - offer.mts_created) / 60_000
             if not self._reprice.enabled or self._canceller is None:
                 log.info(
@@ -807,6 +871,36 @@ class DeploymentReconciler:
                 offer.venue_offer_id, symbol, offer.rate, ref_rate, age_min,
             )
         return issued
+
+
+def _book_reprice_reference_for(
+    *,
+    pricer: PeriodPricer,
+    snapshot: MarketSnapshot,
+    symbol: str,
+    quotes: list[StandingQuote],
+    offer: ActiveFundingOffer,
+) -> float | None:
+    """The rate the bot would post now for this offer's period and remaining amount:
+    max over the active quotes of that period, priced by the same PeriodPricer that
+    prices submissions. None when nothing prices (no quote for the period, or the
+    book blocks every candidate) — and None means "do not cancel"."""
+    priced: list[float] = []
+    for quote in quotes:
+        if quote.period_days != offer.period_days or quote.rate is None:
+            continue
+        candidate = DecisionPayload(
+            decision_outcome=DecisionOutcome.POST,
+            signal_correlation_id=quote.signal_correlation_id,
+            offer_rate=quote.rate,
+            offer_amount_usdt=float(offer.amount),
+            offer_duration_days=offer.period_days,
+            symbol=symbol,
+        )
+        price = pricer.price(candidate=candidate, snapshot=snapshot)
+        if isinstance(price, PriceDecision):
+            priced.append(float(price.rate))
+    return max(priced) if priced else None
 
 
 def _optimizer_evidence(

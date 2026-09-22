@@ -1613,3 +1613,66 @@ async def test_release_never_revises_past_the_authorized_ceiling():
     with pytest.raises(ValueError, match="minimum"):
         await rec.deploy(release=command)
     assert venue.ready_submissions == []
+
+
+
+# ── E1 reprice reference = book (2026-09-22 strategy-correctness plan, item 2) ──
+
+
+def _book_with_ask(rate: float) -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
+
+    return MarketSnapshot(
+        snapshot_id="book-ask-ref", symbol="fUST", bids=(),
+        asks=(FundingBookLevel(rate=rate, period=2, count=1, amount=100_000),),
+        captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+_REPRICE_BOOK = RepricePolicy(
+    enabled=True, tolerance_pct=0.10, min_age_ms=1_800_000, max_cancels_per_tick=3,
+    reference="book",
+)
+
+
+async def test_book_reference_keeps_an_offer_the_book_would_price_today():
+    # Signal quote 0.00012, but the exact-period book asks 0.0011: E2 itself would
+    # post ~0.0011, so a resting 0.001 offer is not stale although it is 8x the quote.
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+        reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == []
+
+
+async def test_quote_reference_cancels_that_same_offer_although_the_market_did_not_move():
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+        reprice=_REPRICE, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.001),))
+    assert canc.cancelled == ["42"]  # the inconsistency the book reference removes
+
+
+async def test_book_reference_still_cancels_a_truly_stale_offer():
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+        reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(_book_with_ask(0.0011)),
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.002),))  # > 0.0011 x 1.10
+    assert canc.cancelled == ["42"]
+
+
+async def test_book_reference_without_a_book_never_cancels():
+    canc = _FakeCanceller()
+    rec, _, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+        reprice=_REPRICE_BOOK, book_provider=_SnapshotProvider(None),
+    )
+    await rec.deploy(venue_offers=(_venue_offer("42", 0.002),))
+    assert canc.cancelled == []
