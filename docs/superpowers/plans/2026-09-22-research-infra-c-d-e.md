@@ -32,13 +32,13 @@ container for DB-backed runs.
 | D5 fixture run (fUSD full, fUST without p30/FRR) + report | ✅ 2026-09-22 | `backend_py/docs/research/2026-09-22-period-structure-fixtures{,-fill1e-9}.md` — always_30d +0.47%/mo over always_2d (fUSD, CI [0.34, 0.61] both bounds); mr_a30 legacy inflation +0.08/+0.13%/mo; mr_a30 vs always_2d straddles 0 at alpha 5 → fill-dependent |
 | D6 VM run with p30 + funding_stats (all arms, full history) | ⏳ operator | same |
 | C0 `BFX_BOOK_SNAPSHOT_INTERVAL_S=300` in `deploy/vm/live.env` | ✅ 2026-09-22 | rides next release |
-| C1 book-replay learner → `FillModelArtifact(source="book")` | ⏳ | unit tests on synthetic books |
-| C2 artifact scope contract accepts `source="book"` (eligibility + engine preflight) | ⏳ | `test_engine_empirical_fill.py` extension |
-| C3 runner flag `--fill-model book`; degenerate fill==1.0 warning | ⏳ | |
+| C1 book-replay learner → `FillModelArtifact(source="book")` | ✅ 2026-09-22 | `book_replay.py` + `test_book_replay.py`; `scripts/learn_book_fill_rate.py` + sqlite test |
+| C2 engine accepts `EMPIRICAL_SOURCES = {candle, book}`; `fill_models_by_agg` per-series scoring; unknown source still rejected | ✅ 2026-09-22 | `test_engine_fill_models_by_agg.py`, `test_engine_empirical_fill.py` (eligibility untouched: it never hard-coded the source) |
+| C3 runner `--fill-model book` (DB only) + DEGENERATE note; unmodelled arms reported not scored | ✅ 2026-09-22 | `test_period_structure.py::test_book_models_score_each_tenor…`; VM run pending (needs `learn_book_fill_rate` first) |
 | C4 calibration vs live fills (`report_execution_quality` latencies) | ⏳ needs live fills | |
-| E1 `diff_research_report.py` (week-over-week JSON diff, drift/challenger rules) | ⏳ | unit tests |
-| E2 compose `weekly-report` chain extension (ops first, research after, per-step exit codes) | ⏳ | VM dry run |
-| E3 registry rules pre-registered (champion p25 breach, challenger 3-week CI) | ⏳ | registry |
+| E1 `diff_research_report.py` + `research_diff.py` (drift / overtake rules; per-window data added to both JSON sidecars) | ✅ 2026-09-22 | `test_research_diff.py` |
+| E2 compose `weekly-report` chain: ops first, then perp/liquidations topup → book learn → period-structure (book + linear) → OOS → two diffs, each fail-soft; systemd budget 1800→5400s | ✅ code 2026-09-22 | VM dry run pending (next release picks up compose + unit) |
+| E3 registry rules pre-registered (champion p25 breach, challenger 3-week CI) | ✅ 2026-09-22 | registry「Weekly re-validation rules」段 |
 
 ## D — period-aware four-arm backtest
 

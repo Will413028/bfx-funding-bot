@@ -73,6 +73,9 @@ class CellReport:
     median_ci: tuple[Decimal, Decimal]
     deflated_sharpe: Decimal
     n_trials: int
+    # (month_mts, net_monthly) per window; feeds scripts.diff_research_report's drift rule.
+    strat_windows: tuple[tuple[int, Decimal], ...] = ()
+    base_windows: tuple[tuple[int, Decimal], ...] = ()
 
 
 def build_cell_report(
@@ -102,6 +105,8 @@ def build_cell_report(
         median_ci=median_ci,
         deflated_sharpe=dsr,
         n_trials=n_trials,
+        strat_windows=tuple((o.month_mts, o.net_monthly) for o in strat_outcomes),
+        base_windows=tuple((o.month_mts, o.net_monthly) for o in base_outcomes),
     )
 
 
@@ -210,6 +215,10 @@ def _report_to_json(reports: list[CellReport]) -> dict:  # type: ignore[type-arg
                 "median_ci": [str(r.median_ci[0]), str(r.median_ci[1])],
                 "deflated_sharpe": str(r.deflated_sharpe),
                 "n_trials": r.n_trials,
+                "windows": {
+                    "strategy": [[m, str(v)] for m, v in r.strat_windows],
+                    "baseline": [[m, str(v)] for m, v in r.base_windows],
+                },
             }
             for r in reports
         ]

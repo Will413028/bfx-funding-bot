@@ -106,6 +106,17 @@ services:
         timeout 600 python -m scripts.ingest_funding_stats --symbols fUST,fUSD || echo "WARN ingest_funding_stats failed/timed out (frr arm may be stale — non-blocking)"
         python -m scripts.run_weekly_attribution
         python -m scripts.run_g3_live_validation --out "/reports/$$(date +%F)-g3-live-validation.md"
+        # ── research re-validation (Proposal E, 2026-09-22): runs AFTER the operational
+        # report, every step fail-soft, nothing here promotes anything. Budget: see
+        # deploy/vm/systemd/bfx-weekly-report.service TimeoutStartSec.
+        timeout 900 python -m scripts.ingest_perp_funding --skip-binance || echo "WARN ingest_perp_funding failed/timed out (non-blocking)"
+        timeout 1200 python -m scripts.ingest_liquidations || echo "WARN ingest_liquidations failed/timed out (non-blocking)"
+        timeout 600 python -m scripts.learn_book_fill_rate || echo "WARN learn_book_fill_rate failed/timed out (non-blocking)"
+        timeout 600 python -m scripts.run_period_structure_backtest --fill-model book --output "/reports/$$(date +%F)-period-structure-book.md" || echo "WARN period-structure (book) failed (non-blocking)"
+        timeout 600 python -m scripts.run_period_structure_backtest --output "/reports/$$(date +%F)-period-structure-linear.md" || echo "WARN period-structure (linear) failed (non-blocking)"
+        timeout 600 python -m scripts.run_oos_profitability --output "/reports/$$(date +%F)-oos-profitability.md" || echo "WARN run_oos_profitability failed (non-blocking)"
+        python -m scripts.diff_research_report --kind period-structure --glob "/reports/*-period-structure-book.json" --out "/reports/$$(date +%F)-weekly-research-book.md" || echo "WARN diff (book) failed (non-blocking)"
+        python -m scripts.diff_research_report --kind oos --glob "/reports/*-oos-profitability.json" --out "/reports/$$(date +%F)-weekly-research-oos.md" || echo "WARN diff (oos) failed (non-blocking)"
     depends_on:
       postgres:
         condition: service_healthy
