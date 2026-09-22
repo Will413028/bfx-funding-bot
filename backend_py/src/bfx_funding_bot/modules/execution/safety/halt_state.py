@@ -39,6 +39,7 @@ class HaltState:
     actor: str
     created_at_ms: int
     id: int
+    kind: str = "safety"
 
 
 class HaltStateStore:
@@ -83,13 +84,20 @@ class HaltStateStore:
 
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
+        kind: str = "safety",
     ) -> HaltState:
-        """Append a transition; reasserting a halt retains its authorization epoch."""
+        """Append a transition; reasserting a halt retains its authorization epoch.
+
+        `kind` decides how the halt may later be cleared, so it defaults to the
+        closed posture: a caller that does not say it is a maintenance pause does
+        not get the cheaper exit.
+        """
         row = TradingHaltRow(
             account_id=self._account_id,
             exchange_account_id=account_id_uuid_or_none(self._account_id),
             deployment_environment=self._env,
             halted=halted,
+            kind=kind,
             reason=reason,
             actor=actor,
             created_at_ms=now_ms if now_ms is not None else int(time.time() * 1000),
@@ -130,5 +138,5 @@ class HaltStateStore:
 def _to_state(row: TradingHaltRow) -> HaltState:
     return HaltState(
         halted=row.halted, reason=row.reason, actor=row.actor,
-        created_at_ms=row.created_at_ms, id=row.id,
+        created_at_ms=row.created_at_ms, id=row.id, kind=row.kind,
     )

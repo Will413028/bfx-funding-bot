@@ -137,14 +137,29 @@ class ReleaseCommandAuthority:
         return await self.binding_reader(session)
 
     async def check_normal(self, session: AsyncSession) -> None:
+        """Normal lending needs a promotion for *this build*, not for this pause.
+
+        The canary proves one thing: that this exact artifact, config, policy,
+        schema and projector can place a real offer. `binding` already names all
+        of those, so comparing it is the whole test. Matching the promotion to
+        the current `halt.id` as well tied the proof to a pause count instead --
+        every maintenance stop advanced the id and retired a promotion that
+        nothing had invalidated, so undoing a database upgrade demanded a fresh
+        real-money submit. The promotion is retained across halt cycles and
+        retired by a changed binding, which is what actually changes the risk.
+        """
         binding = await self.binding(session)
         halt = await self.repo.halt(session)
-        promoted = await session.scalar(select(ReleaseSessionRow).where(
-            ReleaseSessionRow.exchange_account_id == self.repo.account_id,
-            ReleaseSessionRow.deployment_environment == self.repo.environment,
-            ReleaseSessionRow.state == "promoted",
-            ReleaseSessionRow.promoted_halt_id == halt.id,
-        ))
+        promoted = await session.scalar(
+            select(ReleaseSessionRow)
+            .where(
+                ReleaseSessionRow.exchange_account_id == self.repo.account_id,
+                ReleaseSessionRow.deployment_environment == self.repo.environment,
+                ReleaseSessionRow.state == "promoted",
+            )
+            .order_by(ReleaseSessionRow.promoted_halt_id.desc())
+            .limit(1)
+        )
         if halt.halted or promoted is None or promoted.binding != binding:
             raise ReleaseBlocked("release_promotion_required")
 

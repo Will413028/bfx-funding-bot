@@ -106,17 +106,20 @@ class _FakeHaltStore:
     def __init__(self, state: HaltState | None = None) -> None:
         self.state = state
         self.writes: list[tuple[bool, str, str]] = []
+        self.kinds: list[str] = []
 
     async def current(self) -> HaltState | None:
         return self.state
 
     async def set_halted(
         self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
+        kind: str = "safety",
     ) -> HaltState:
         self.writes.append((halted, reason, actor))
+        self.kinds.append(kind)
         self.state = HaltState(
             halted=halted, reason=reason, actor=actor,
-            created_at_ms=now_ms or 1000, id=len(self.writes),
+            created_at_ms=now_ms or 1000, id=len(self.writes), kind=kind,
         )
         return self.state
 
@@ -124,9 +127,11 @@ class _FakeHaltStore:
         return [self.state] if self.state is not None else []
 
 
-def _halt_state(halted: bool, reason: str = "candle distortion") -> HaltState:
+def _halt_state(
+    halted: bool, reason: str = "candle distortion", kind: str = "maintenance"
+) -> HaltState:
     return HaltState(
-        halted=halted, reason=reason, actor="admin", created_at_ms=1000, id=7,
+        halted=halted, reason=reason, actor="admin", created_at_ms=1000, id=7, kind=kind,
     )
 
 
@@ -526,14 +531,47 @@ async def test_halt_writes_a_persisted_transition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_resume_requires_release_promotion() -> None:
-    store = _FakeHaltStore(_halt_state(True))
+@pytest.mark.parametrize("kind", ["safety", "release"])
+async def test_live_resume_of_an_unproven_halt_requires_release_promotion(kind: str) -> None:
+    """A halt the system imposed says something is unproven; intent cannot prove it."""
+    store = _FakeHaltStore(_halt_state(True, kind=kind))
     service = _service(halt_store=store)
     service._phase = Phase.LIVE
     with pytest.raises(ValueError, match="release_promotion_required"):
         await service.resume(reason="static bearer", actor="admin-api")
     assert store.state.halted
     assert store.writes == []
+
+
+@pytest.mark.asyncio
+async def test_live_resume_clears_a_maintenance_halt_without_a_canary() -> None:
+    """An operator-requested pause exits the way it was entered.
+
+    Before halts carried a kind, undoing a database upgrade needed the
+    release-promotion path -- a real-money canary submit to clear a pause that
+    never had anything to do with execution correctness.
+    """
+    store = _FakeHaltStore(_halt_state(True, reason="pg 18.6 upgrade", kind="maintenance"))
+    service = _service(halt_store=store)
+    service._phase = Phase.LIVE
+
+    out = await service.resume(reason="upgrade finished", actor="admin-api")
+
+    assert out["halted"] is False
+    assert store.writes == [(False, "upgrade finished", "admin-api")]
+
+
+@pytest.mark.asyncio
+async def test_operator_halt_is_recorded_as_maintenance() -> None:
+    """This endpoint exists for operator pauses; guards record their own halts."""
+    store = _FakeHaltStore(None)
+    service = _service(halt_store=store)
+
+    out = await service.halt(reason="pg 18.6 upgrade", actor="admin")
+
+    assert store.kinds == ["maintenance"]
+    assert out["kind"] == "maintenance"
+    assert out["resumable_without_release"] is True
 
 
 async def test_resume_writes_a_persisted_transition() -> None:
