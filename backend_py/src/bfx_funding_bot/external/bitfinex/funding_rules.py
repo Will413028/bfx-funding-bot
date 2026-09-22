@@ -21,6 +21,17 @@ import httpx
 class FundingRule:
     version: str = "bitfinex-funding-usd-fx-v1"
     minimum_usd: Decimal = Decimal("150")
+    # How far above the converted floor an offer is actually sent.
+    #
+    # The floor is denominated in USD "or equivalent", so the venue converts it
+    # again, at its own instant with its own rate. An amount sized exactly to
+    # OUR conversion therefore lands on either side of THEIRS by coin toss, and
+    # losing that toss costs a canary, a DR window and an operator adjudication.
+    # Half a percent is two orders of magnitude wider than any plausible
+    # stablecoin conversion discrepancy while leaving the canary at its intended
+    # size. It does not relax the rule: `minimum_amount` stays exact and
+    # `validate_amount` still has the final word.
+    submit_margin: Decimal = Decimal("0.005")
     amount_quantum: Decimal = Decimal("0.00000001")
     fx_max_age_ms: int = 30000
     sources: tuple[str, ...] = (
@@ -63,6 +74,20 @@ def minimum_amount(evidence: FundingAmountEvidence | None, *, symbol: str, now_m
         or now_ms - evidence.requested_at_ms > RULE.fx_max_age_ms):
         raise ValueError("funding_rule_or_fx_unavailable")
     return (RULE.minimum_usd / evidence.usd_per_unit).quantize(RULE.amount_quantum, rounding=ROUND_CEILING)
+
+
+def submit_amount(evidence: FundingAmountEvidence | None, *, symbol: str, now_ms: int) -> Decimal:
+    """The smallest amount worth sending, which is not the smallest allowed.
+
+    `minimum_amount` is the venue's floor as we convert it; this is that floor
+    plus the margin that survives the venue converting it again. Every amount
+    this system actually submits should come from here -- `minimum_amount`
+    remains the exact rule, for validating what was sent.
+    """
+    minimum = minimum_amount(evidence, symbol=symbol, now_ms=now_ms)
+    return (minimum * (Decimal(1) + RULE.submit_margin)).quantize(
+        RULE.amount_quantum, rounding=ROUND_CEILING
+    )
 
 
 def validate_amount(amount: Decimal, evidence: FundingAmountEvidence | None, *, symbol: str, now_ms: int) -> None:

@@ -1582,7 +1582,10 @@ async def test_recorder_is_optional_and_absent_changes_nothing():
     # drift between the human's click and the submit must not discard the session:
     # revising to the live minimum is the same economic action, and discarding costs
     # a whole DR window (2026-09-20: a canary died on exactly this, at 150.00450014).
-    ("0.995", "150.75376885"),
+    # Both figures carry the submit margin: 150.75 is what an authorisation at
+    # parity would have sent, 151.50753770 what this FX sends. The drift the
+    # band absorbs is unchanged -- the margin scales both sides alike.
+    ("0.995", "151.50753770"),
     # Beyond the tolerance it is no longer the action that was authorized.
     ("0.9", None),
 ])
@@ -1591,7 +1594,7 @@ async def test_release_revises_to_the_live_minimum_only_within_tolerance(rate, s
     rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
     rec._funding_rules = FixedRules(rate=rate)
     command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion",
-                             D("150"), D("10000"), object())
+                             D("150.75"), D("10000"), object())
     if submitted is None:
         with pytest.raises(ValueError, match="minimum"):
             await rec.deploy(release=command)

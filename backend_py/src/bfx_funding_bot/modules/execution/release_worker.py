@@ -22,7 +22,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     RULE,
     FundingAmountEvidence,
     FundingRuleProvider,
-    minimum_amount,
+    submit_amount,
     validate_amount,
 )
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -314,7 +314,7 @@ class ReleaseWorker:
             if self.configured_cells.count((row.strategy, row.symbol, row.cell)) != 1:
                 raise ReleaseBlocked("session_cell_not_configured")
             view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell, session=session)
-            minimum = minimum_amount(amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
+            minimum = submit_amount(amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
             if view.budget.max_new_offer < minimum:
                 raise ReleaseBlocked("session_insufficient_capital")
             if minimum > row.max_amount:
@@ -344,8 +344,8 @@ class ReleaseWorker:
             # Re-derive against FX observed for this authorisation, not the preview
             # taken when the session was prepared. The preview is what the operator
             # saw; this is what the rule requires at the moment they committed.
-            minimum = minimum_amount(amount_evidence, symbol=row.symbol,
-                                     now_ms=self.authority.clock())
+            minimum = submit_amount(amount_evidence, symbol=row.symbol,
+                                    now_ms=self.authority.clock())
             view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell,
                                                      session=session)
             if view.budget.max_new_offer < minimum:

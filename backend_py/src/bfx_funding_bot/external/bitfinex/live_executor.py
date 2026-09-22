@@ -52,6 +52,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmitOutcomeUnknown,
     classify_submit_response,
     response_digest,
+    venue_error,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
@@ -345,17 +346,35 @@ class BitfinexLiveExecutor:
             # typed classifier still receives the parsed body in-process.
             body = e.response.text[:1000] if e.response is not None else ""
             status = e.response.status_code if e.response is not None else None
+            parsed_body: Any = None
+            if e.response is not None:
+                parsed_body, _ = _response_json_or_text(e.response)
+            # Bitfinex answers a business rejection with a 5xx and states the
+            # reason in the body, so without these two fields a refusal and an
+            # outage produce the same line -- and telling them apart afterwards
+            # costs an operator adjudication. Only the shape-checked code and a
+            # bounded message are taken, and the message is dropped whole if it
+            # echoes either credential, which is the concern that put the rest
+            # of this response behind a digest.
+            venue = venue_error(parsed_body)
+            venue_code = venue[0] if venue is not None else None
+            venue_message = venue[1] if venue is not None else None
+            if venue_message is not None and (
+                ctx.credentials.api_key in venue_message
+                or ctx.credentials.api_secret in venue_message
+            ):
+                venue_message = "<redacted:credential_echo>"
             log.warning(
-                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s response_digest=%s",
+                "bitfinex_submit_http_error status=%s symbol=%s rate=%s amount=%s "
+                "venue_error_code=%s venue_error_message=%s response_digest=%s",
                 status,
                 payload["symbol"],
                 payload["rate"],
                 payload["amount"],
+                venue_code,
+                venue_message,
                 response_digest(body),
             )
-            parsed_body: Any = None
-            if e.response is not None:
-                parsed_body, _ = _response_json_or_text(e.response)
             outcome = classify_submit_response(
                 status,
                 parsed_body,
