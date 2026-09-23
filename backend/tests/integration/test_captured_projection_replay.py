@@ -17,7 +17,10 @@ from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnap
 from bfx_funding_bot.modules.execution.projection_cutover.contracts import Difference
 from scripts.verify_projection_replay import replay_one_account
 from tests.integration.test_projection_cutover_diagnostics import _seed, _source_state
-from tests.modules.execution.event_store.test_historical_claim_cycles import ACCOUNT
+from tests.modules.execution.event_store.test_historical_claim_cycles import (
+    ACCOUNT,
+    seal_prefix_chain,
+)
 from tests.modules.execution.event_store.test_replay_verification import runtime
 
 pytestmark = pytest.mark.integration
@@ -63,6 +66,11 @@ async def _captured(session):
 async def test_uncommitted_snapshot_replays_without_public_writes_or_source_commit(pg_session_factory):
     kernel = runtime()
     await _seed(pg_session_factory)
+    # _seed writes event_log directly; give it the prefix chain an append writes,
+    # or the snapshot append below stops at the first unsealed event.
+    async with pg_session_factory() as setup:
+        await seal_prefix_chain(setup)
+        await setup.commit()
     # The diagnostic fixture deliberately corrupts the cursor. A real append
     # needs the original valid cursor, not a replay of already-completed claims.
     async with pg_session_factory() as setup:
