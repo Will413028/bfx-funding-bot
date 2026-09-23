@@ -48,7 +48,7 @@ _BATCH = 256
 # archive records. Hand-maintained like the projector's allow-list -- whether a
 # migration touches archived state is a judgement -- and a guard test fails when
 # a new head lands unclassified.
-_ARCHIVE_READY_MIGRATIONS = frozenset({
+ARCHIVE_READY_MIGRATIONS = frozenset({
     "f8c2d4e6a901",
     "a9d3e5f7b102",
     "b4e6f8a0c203",
@@ -216,7 +216,7 @@ async def capture_archive(
             )
         ).scalars()
     )
-    if len(heads) != 1 or heads[0] not in _ARCHIVE_READY_MIGRATIONS:
+    if len(heads) != 1 or heads[0] not in ARCHIVE_READY_MIGRATIONS:
         raise ValueError("archive migration not ready")
     stream = await _stream_identity(session, scope)
     entries: list[dict[str, object]] = []
