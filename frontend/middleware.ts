@@ -1,8 +1,8 @@
 import { getSessionCookie } from "better-auth/cookies";
 import createMiddleware from "next-intl/middleware";
-import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { routing } from "@/i18n/routing";
+import { buildContentSecurityPolicy, generateNonce } from "@/lib/csp";
 
 const intlMiddleware = createMiddleware(routing);
 
@@ -19,20 +19,7 @@ const authPaths = ["/login"];
 
 const isDev = process.env.NODE_ENV === "development";
 
-const cspDirectives = [
-	"default-src 'self'",
-	`script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
-	"style-src 'self' 'unsafe-inline'",
-	"img-src 'self' data: blob:",
-	"font-src 'self'",
-	"connect-src 'self' *.sentry.io *.ingest.sentry.io",
-	"frame-ancestors 'none'",
-	"base-uri 'self'",
-	"form-action 'self'",
-].join("; ");
-
 const securityHeaders: Record<string, string> = {
-	"Content-Security-Policy": cspDirectives,
 	"X-Frame-Options": "DENY",
 	"X-Content-Type-Options": "nosniff",
 	"Referrer-Policy": "strict-origin-when-cross-origin",
@@ -41,7 +28,11 @@ const securityHeaders: Record<string, string> = {
 		"max-age=63072000; includeSubDomains; preload",
 };
 
-function applySecurityHeaders(response: NextResponse): NextResponse {
+function applySecurityHeaders(
+	response: NextResponse,
+	contentSecurityPolicy: string,
+): NextResponse {
+	response.headers.set("Content-Security-Policy", contentSecurityPolicy);
 	for (const [key, value] of Object.entries(securityHeaders)) {
 		response.headers.set(key, value);
 	}
@@ -50,6 +41,8 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
 
 export default function middleware(request: NextRequest) {
 	const { pathname } = request.nextUrl;
+	const nonce = generateNonce();
+	const contentSecurityPolicy = buildContentSecurityPolicy(nonce, isDev);
 	const pathnameWithoutLocale = pathname.replace(localePrefix, "") || "/";
 
 	const sessionCookie = getSessionCookie(request);
@@ -67,7 +60,10 @@ export default function middleware(request: NextRequest) {
 		const loginUrl = new URL(`/${locale}/login`, request.url);
 		const callbackPath = pathnameWithoutLocale + request.nextUrl.search;
 		loginUrl.searchParams.set("callbackUrl", callbackPath);
-		return applySecurityHeaders(NextResponse.redirect(loginUrl));
+		return applySecurityHeaders(
+			NextResponse.redirect(loginUrl),
+			contentSecurityPolicy,
+		);
 	}
 
 	if (isAuthPage && isAuthenticated) {
@@ -75,10 +71,19 @@ export default function middleware(request: NextRequest) {
 			pathname.match(localePrefix)?.[1] || routing.defaultLocale;
 		return applySecurityHeaders(
 			NextResponse.redirect(new URL(`/${locale}/overview`, request.url)),
+			contentSecurityPolicy,
 		);
 	}
 
-	return applySecurityHeaders(intlMiddleware(request));
+	// next-intl forwards the request headers it is given, so the nonce reaches
+	// rendering, where Next.js applies it to its own scripts.
+	const requestHeaders = new Headers(request.headers);
+	requestHeaders.set("x-nonce", nonce);
+	requestHeaders.set("Content-Security-Policy", contentSecurityPolicy);
+	return applySecurityHeaders(
+		intlMiddleware(new NextRequest(request, { headers: requestHeaders })),
+		contentSecurityPolicy,
+	);
 }
 
 export const config = {
