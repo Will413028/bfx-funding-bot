@@ -129,7 +129,6 @@ NEXT_PUBLIC_APP_URL          # 前端 URL
 NEXT_PUBLIC_APP_NAME         # App 名稱
 NEXT_PUBLIC_BETTER_AUTH_URL  # Better Auth base URL（client SDK 用）
 NEXT_PUBLIC_SENTRY_DSN       # Sentry（optional）
-NEXT_PUBLIC_AXIOM_DATASET    # Axiom（optional）
 
 # Server-only
 API_URL                    # Python web-API URL（proxy + server actions 用）
@@ -147,7 +146,6 @@ BFX_OPERATOR_ROLE          # Release 0 固定為 admin
 ## 監控
 
 - **Sentry**: Client + Server error tracking（optional）
-- **Axiom**: 日誌（via next-axiom，optional）
 
 ## 部署
 
