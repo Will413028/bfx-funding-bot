@@ -5,7 +5,7 @@
 > 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
 
 > **現行後端為 `backend/`（Python）。** 下方「已完成功能」「DB Schema」「API Endpoints」
-> 等大表是 Go `backend/` MVP 時代的紀錄（**已封存**，見 CLAUDE.md），保留作歷史。
+> 等大表是 Go 後端 MVP 時代的紀錄（**已封存**，見 AGENTS.md），保留作歷史。
 > 當前實際開發軌道見下節。
 
 ---
