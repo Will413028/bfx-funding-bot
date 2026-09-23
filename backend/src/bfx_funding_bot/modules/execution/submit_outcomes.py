@@ -108,9 +108,24 @@ class SubmitOutcomeUnknown:
     reason: str
     transport_started: bool
     raw_response_digest: str | None = None
+    # What the venue said, when it said anything structured. Absent for a
+    # timeout or a reset, which is exactly the distinction that matters.
+    venue_error_code: int | None = None
+    venue_error_message: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reason", _require_reason(self.reason))
+        if self.venue_error_code is not None and (
+            isinstance(self.venue_error_code, bool)
+            or not isinstance(self.venue_error_code, int)
+        ):
+            raise TypeError("venue_error_code must be an int")
+        if self.venue_error_message is not None:
+            if not isinstance(self.venue_error_message, str):
+                raise TypeError("venue_error_message must be a str")
+            object.__setattr__(
+                self, "venue_error_message", self.venue_error_message[:_VENUE_ERROR_TEXT_MAX]
+            )
         if not isinstance(self.transport_started, bool):
             raise TypeError("transport_started must be a bool")
         if not self.transport_started:
@@ -321,6 +336,35 @@ def _bounded_text(value: object, *, limit: int = 256) -> str | None:
     return text[:limit]
 
 
+_VENUE_ERROR_TEXT_MAX = 200
+
+
+def venue_error(body: Any) -> tuple[int, str] | None:
+    """The venue's own refusal, as it states it: ``["error", CODE, MESSAGE]``.
+
+    Bitfinex delivers business rejections in this shape *with an HTTP 5xx*, so a
+    classifier that reads only the status cannot tell "the venue refused, and
+    here is why" from "the venue fell over and I have no idea what it did". Both
+    become UNKNOWN, which halts the symbol and costs an operator adjudication --
+    for an event the venue had already explained.
+
+    Only the parsed, shape-checked pair is ever returned, never response text.
+    That is what makes this safe where keeping the body is not: an upstream echo
+    of a credential is neither an int in slot 1 nor a bounded message in slot 2,
+    so it cannot reach a caller through here.
+    """
+    if (
+        not isinstance(body, list)
+        or len(body) < 3
+        or body[0] != "error"
+        or isinstance(body[1], bool)
+        or not isinstance(body[1], int)
+        or not isinstance(body[2], str)
+    ):
+        return None
+    return body[1], body[2][:_VENUE_ERROR_TEXT_MAX]
+
+
 def _structured_rejection_reason(body: Any) -> str | None:
     """Extract a bounded reason only from known Bitfinex error shapes."""
     if isinstance(body, list):
@@ -471,10 +515,13 @@ def _unknown(
     transport_started: bool,
     parsed_body: Any = None,
 ) -> SubmitOutcomeUnknown:
+    venue = venue_error(parsed_body)
     return SubmitOutcomeUnknown(
         reason=reason,
         transport_started=transport_started,
         raw_response_digest=(response_digest(parsed_body) if parsed_body is not None else None),
+        venue_error_code=None if venue is None else venue[0],
+        venue_error_message=None if venue is None else venue[1],
     )
 
 

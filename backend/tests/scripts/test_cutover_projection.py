@@ -718,7 +718,9 @@ async def test_real_parser_nonempty_offer_and_credit_records_and_safe_failure():
         if request.url.path.endswith("offers"):
             return httpx.Response(200, json=[_row(offer_id=1, symbol="fUST", mts=1000, amount=-1.25)])
         if request.url.path.endswith("credits"):
-            return httpx.Response(200, json=[[2, "fUSD", 1, 1000, 1000, "2.5", 0, "ACTIVE", 0, "0.0002", 2]])
+            # Venue layout: [9] and [10] are null, rate at [11], period at [12].
+            return httpx.Response(200, json=[[2, "fUSD", 1, 1000, 1000, "2.5", 0, "ACTIVE",
+                                              "FIXED", None, None, "0.0002", 2]])
         return httpx.Response(200, json=[["funding", "UST", "1", "0", "1"], ["funding", "USD", "0", "0", "0"]])
 
     kwargs = {

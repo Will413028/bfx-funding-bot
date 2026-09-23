@@ -8,6 +8,7 @@ same values without contacting the venue.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -196,8 +197,21 @@ _TERMINAL_CREDIT_STATUSES = frozenset({
 })
 
 
+# Bitfinex appends detail to a status: "EXECUTED at 0.0148% (150.78)",
+# "PARTIALLY FILLED at ...", "CANCELED was: PARTIALLY FILLED at ...". The state
+# is the leading phrase; everything after the first separator is narrative.
+# Without this, an offer that filled is recorded as the unknown status
+# "executed_at_0.0148%_(150.78)" and can never be recognised as terminal.
+_STATUS_DETAIL = re.compile(r"\s+(?:at|@)\s|\s+was:", re.IGNORECASE)
+
+
 def _normalize_status(status: str) -> str:
-    return str(status).strip().lower().replace(" ", "_")
+    head = _STATUS_DETAIL.split(str(status).strip(), maxsplit=1)[0]
+    return head.strip().lower().replace(" ", "_")
+
+
+def normalize_venue_status(status: str) -> str:
+    return _normalize_status(status)
 
 
 def is_terminal_offer_status(status: str) -> bool:

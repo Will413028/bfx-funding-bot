@@ -79,7 +79,10 @@ async def test_preview_uses_fx_minimum_and_respects_max_amount(capital_db, max_a
         row = await sessions.get(session, sid)
         assert row.state == expected
         if expected == "prepared":
-            assert row.minimum_amount == Decimal("300")
+            # The prepared amount is what will be SENT, so it carries the margin
+            # over the converted floor (300) that survives the venue reconverting
+            # the same USD minimum at its own instant.
+            assert row.minimum_amount == Decimal("301.5")
 
 
 @pytest.mark.asyncio
