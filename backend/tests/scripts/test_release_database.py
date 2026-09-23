@@ -8,6 +8,7 @@ import bfx_funding_bot.modules.marketfeed.daemon  # noqa: F401
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 
 
@@ -19,7 +20,8 @@ async def test_deployment_requires_explicit_applied_policies_and_preserves_halt(
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="deploy-fixture"))
         await session.execute(text("CREATE TABLE alembic_version(version_num varchar(32))"))
-        await session.execute(text("INSERT INTO alembic_version VALUES ('b4e6f8a0c203')"))
+        await session.execute(text("INSERT INTO alembic_version VALUES (:head)"),
+                              {"head": RELEASE_SCHEMA_HEAD})
     halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
     epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
     repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=300000)
