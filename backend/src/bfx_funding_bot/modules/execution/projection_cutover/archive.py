@@ -43,6 +43,23 @@ from .tables import ArchiveRow, ArchiveRun
 
 _BATCH = 256
 
+# Schema heads a capture may run on: the projection_audit tables exist, and no
+# later migration changed the TABLE_NAMES rows or the event_log stream this
+# archive records. Hand-maintained like the projector's allow-list -- whether a
+# migration touches archived state is a judgement -- and a guard test fails when
+# a new head lands unclassified.
+_ARCHIVE_READY_MIGRATIONS = frozenset({
+    "f8c2d4e6a901",
+    "a9d3e5f7b102",
+    "b4e6f8a0c203",
+    # Prefix-hash side table, two capital_snapshots columns, then trading_halt.kind:
+    # none of them touches an archived table or event_log itself.
+    "c3f5a1d7e204",
+    "d1b7c2e4a305",
+    "e5c9a3f10b62",
+    "a7f3c1d9e204",
+})
+
 
 @contextmanager
 def _source_spool() -> Iterator[sqlite3.Connection]:
@@ -199,7 +216,7 @@ async def capture_archive(
             )
         ).scalars()
     )
-    if heads not in {("f8c2d4e6a901",), ("a9d3e5f7b102",), ("b4e6f8a0c203",)}:
+    if len(heads) != 1 or heads[0] not in _ARCHIVE_READY_MIGRATIONS:
         raise ValueError("archive migration not ready")
     stream = await _stream_identity(session, scope)
     entries: list[dict[str, object]] = []

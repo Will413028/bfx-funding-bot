@@ -585,7 +585,10 @@ async def _release_history(factory, *, stale_head):
         PositionStateRow,
         ProjectionHeadRow,
     )
-    from tests.modules.execution.event_store.test_historical_claim_cycles import historical_rows
+    from tests.modules.execution.event_store.test_historical_claim_cycles import (
+        historical_rows,
+        seal_prefix_chain,
+    )
 
     account, other = UUID(int=100), UUID(int=101)
     async with factory.begin() as session:
@@ -603,6 +606,9 @@ async def _release_history(factory, *, stale_head):
                          "is_simulated": True}, occurred_at_ms=7000,
             ))
         await session.flush()
+        # Seeded straight into event_log, so write the prefix chain an append would
+        # have; the cutover's own append otherwise finds a gap at the first event.
+        await seal_prefix_chain(session)
         await PostgresEventStore(deployment_environment="ci").rebuild_snapshot_from_log(
             session, account_id=str(account), deployment_environment="ci",
         )
