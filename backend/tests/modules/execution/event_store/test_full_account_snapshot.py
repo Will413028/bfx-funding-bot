@@ -360,6 +360,10 @@ class _Session:
     async def execute(self, _statement: object) -> _EmptyResult:
         return _EmptyResult()
 
+    async def scalar(self, _statement: object) -> None:
+        # No capital snapshot exists yet in this empty-database fixture.
+        return None
+
     async def commit(self) -> None:
         return None
 
