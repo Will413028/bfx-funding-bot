@@ -120,7 +120,13 @@ class SignalEngine:
         registry: StrategyRegistry,
         is_stale: bool = False,
         stale_seconds: int = 0,
+        quote_created_at_ms: int | None = None,
     ) -> None:
+        # quote_created_at_ms: the quote's age is measured from the boundary it
+        # speaks for, not from when this ran. Identical at a live tick, where the
+        # two are seconds apart; it matters when a boundary is replayed at boot,
+        # because dating that quote "now" would silently extend a TTL the
+        # boundary had already spent.
         correlation_id = uuid4()
         strategy = registry.get(cell)
 
@@ -179,7 +185,7 @@ class SignalEngine:
                 rate=decision.offer_rate,
                 period_days=decision.offer_duration_days,
                 signal_correlation_id=correlation_id,
-                created_at_ms=self._clock(),
+                created_at_ms=self._clock() if quote_created_at_ms is None else quote_created_at_ms,
             ))
 
     async def _emit_signal(

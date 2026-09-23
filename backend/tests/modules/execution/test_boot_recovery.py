@@ -252,6 +252,10 @@ class _StubAuthRest:
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
 
+    async def get_active_funding_loans(self, **kwargs):
+        # Lent but not yet drawn into a position; none in this fixture.
+        return []
+
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         return self._credits
 
@@ -412,6 +416,10 @@ class _StubAuthRestFull:
     async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
         return self._offers
 
+    async def get_active_funding_loans(self, **kwargs):
+        # Lent but not yet drawn into a position; none in this fixture.
+        return []
+
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         return self._credits
 
@@ -504,6 +512,10 @@ async def test_run_credits_fetch_failure_raises():
     """Credits fetch failure at boot → fail-fast (same as offers-fetch failure)."""
     class _FailCredits:
         async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
+            return []
+
+        async def get_active_funding_loans(self, **kwargs):
+            # Lent but not yet drawn into a position; none in this fixture.
             return []
 
         async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
@@ -622,6 +634,10 @@ async def test_fetch_available_does_not_retry_4xx():
             self.calls = 0
         async def get_active_funding_offers(self, *, ctx, symbol="fUSD"):
             return []
+        async def get_active_funding_loans(self, **kwargs):
+            # Lent but not yet drawn into a position; none in this fixture.
+            return []
+
         async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
             return []
         async def get_funding_available(self, *, ctx, currency):
@@ -816,6 +832,10 @@ class _StubAuthPerSymbol:
         if symbol is None:
             return [offer for rows in self._offers.values() for offer in rows]
         return self._offers.get(symbol, [])
+
+    async def get_active_funding_loans(self, **kwargs):
+        # Lent but not yet drawn into a position; none in this fixture.
+        return []
 
     async def get_active_funding_credits(self, *, ctx, symbol="fUSD"):
         self.credit_calls.append(symbol)

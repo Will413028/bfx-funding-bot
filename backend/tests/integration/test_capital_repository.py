@@ -305,6 +305,10 @@ async def test_boot_recovery_stable_capital_ingestion(capital_db, unstable):
         async def get_active_funding_offers(self, **kwargs):
             return []
 
+        async def get_active_funding_loans(self, **kwargs):
+            # Lent but not yet drawn into a position; none in this fixture.
+            return []
+
         async def get_active_funding_credits(self, **kwargs):
             return []
 
@@ -1110,3 +1114,83 @@ async def test_bounded_read_agrees_with_full_rederivation(capital_db, with_histo
     assert bounded.budget == full.budget
     assert bounded.snapshot_seq == full.snapshot_seq
     assert bounded.applied == full.applied
+
+
+@pytest.mark.asyncio
+async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db):
+    """The first live fill, 2026-09-23, reproduced with the venue's own shapes.
+
+    The canary was acknowledged at 02:08:25 and filled on the spot, so by the
+    next snapshot it was gone from the active book. Three things then hid it:
+    offer history was only fetched for UNKNOWN submits, so none was fetched;
+    had it been, the status "EXECUTED at 0.0148% (150.78)" did not read as
+    terminal, which discards the whole history page; and the lent money sat
+    under /funding/loans, which nothing read. The wallet's available balance
+    had dropped and nothing on the books explained it, so every snapshot after
+    it failed as unclassifiable_commitment and funding status went dark.
+    """
+    from bfx_funding_bot.external.bitfinex.auth_rest import (
+        ActiveFundingCredit,
+        ActiveFundingOffer,
+        FundingOfferHistory,
+        FundingOfferHistoryCoverage,
+    )
+    from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
+    from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+    from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo)
+    seq = await snapshot(factory, repo)
+    result = await authorize(factory, repo, policy, seq)
+    async with factory.begin() as session:
+        await repo.writer.append(session, ReservationClaimed(
+            symbol="fUST", cid=1, signal_correlation_id=result.intent.signal_correlation_id,
+            account_id=str(account), is_simulated=True, amount=Decimal("200"), venue_offer_id="offer-1",
+            reservation_ref=replace(result.intent.reservation_ref, venue_offer_id="offer-1"),
+            occurred_at_ms=1100))
+
+    class Venue:
+        async def get_active_funding_offers(self, **kwargs):
+            return []                                   # filled: not in the book
+
+        async def get_active_funding_credits(self, **kwargs):
+            return []                                   # not drawn into a position
+
+        async def get_active_funding_loans(self, **kwargs):
+            return [ActiveFundingCredit(credit_id="loan:61621685", symbol="fUST",
+                amount=Decimal("200"), rate=0.0001, period_days=2, status="ACTIVE",
+                mts_created=1150, mts_updated=1150)]
+
+        async def get_funding_available_all(self, **kwargs):
+            return {"fUST": Decimal("800")}             # 200 left the wallet
+
+        async def get_funding_offer_history(self, *, ctx, start_ms, end_ms, symbol=None):
+            assert start_ms <= 1100, "history must reach back to the acknowledged attempt"
+            return FundingOfferHistory(
+                offers=(ActiveFundingOffer(
+                    venue_offer_id="offer-1", symbol="fUST", amount=Decimal("0"),
+                    rate=0.0001, period_days=2, mts_created=1150,
+                    status="EXECUTED at 0.0100% (200.0)",   # the venue's own wording
+                    amount_original=Decimal("200"), mts_updated=1150, offer_type="LIMIT"),),
+                coverage=FundingOfferHistoryCoverage(
+                    requested_start_ms=start_ms, requested_end_ms=end_ms,
+                    oldest_mts_created=1150, newest_mts_created=1150, pages=1, complete=True))
+
+    class Bus:
+        async def publish(self, event):
+            pass
+
+    recovery = BootRecovery(store=PostgresEventStore(deployment_environment="ci"),
+        session_factory=factory, auth_rest=Venue(), account_ctx=AccountContext(
+            str(account), Credentials("fixture", "fixture"), Decimal("0")),
+        deployment_environment="ci", bus=Bus(), symbols=["fUST"], is_simulated=True,
+        clock=lambda: 1200, capital_repository=repo)
+    await recovery.run()
+
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1250)
+        assert view.snapshot.unreflected_commitments == 0
+        assert view.snapshot.cell_exposure == Decimal("200")   # the loan is on the books
+        assert view.budget.spendable == Decimal("700")          # 800 available less 100 reserve

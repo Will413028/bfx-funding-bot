@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueCreditState,
     VenueOfferState,
     is_terminal_offer_status,
+    normalize_venue_status,
 )
 
 __all__ = [
@@ -116,7 +117,9 @@ _NON_TERMINAL_STATUS_ALIASES = frozenset({
 
 
 def _normalize_status(status: str) -> str:
-    return str(status).strip().lower().replace(" ", "_")
+    # One definition: a second copy that forgot the venue's detail suffix
+    # would disagree with entities about whether an offer is finished.
+    return normalize_venue_status(status)
 
 
 def _status_is_known(status: str) -> bool:

@@ -154,8 +154,8 @@ class _HaltableStatus(_FakeStatus):
         self.halts: list[dict[str, Any]] = []
         self.resumes: list[dict[str, Any]] = []
 
-    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
-        self.halts.append({"reason": reason, "actor": actor})
+    async def halt(self, *, reason: str, actor: str, renew: bool = False) -> dict[str, Any]:
+        self.halts.append({"reason": reason, "actor": actor, "renew": renew})
         return {"halted": True, "reason": reason, "actor": actor}
 
     async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
@@ -185,7 +185,10 @@ def test_halt_records_the_reason_and_actor() -> None:
         headers={"Authorization": "Bearer secret"},
     )
     assert resp.status_code == 200
-    assert status.halts == [{"reason": "candle distortion", "actor": "will"}]
+    # renew defaults off: an ordinary halt must never advance the epoch.
+    assert status.halts == [
+        {"reason": "candle distortion", "actor": "will", "renew": False}
+    ]
 
 
 def test_halt_requires_a_reason() -> None:

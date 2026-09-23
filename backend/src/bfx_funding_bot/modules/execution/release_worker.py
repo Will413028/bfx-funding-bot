@@ -22,7 +22,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     RULE,
     FundingAmountEvidence,
     FundingRuleProvider,
-    minimum_amount,
+    submit_amount,
     validate_amount,
 )
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -33,6 +33,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.release_session import (
     ReleaseBlocked,
     ReleaseCommand,
+    ReleasePromotionRequired,
     ReleaseSessions,
 )
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
@@ -45,7 +46,10 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 log = logging.getLogger(__name__)
 
-RELEASE_SCHEMA_HEAD = "e5c9a3f10b62"
+# The single schema this build is willing to run against. Startup compares it
+# with the database's actual alembic heads, so it must move with every
+# migration or the daemon refuses to boot.
+RELEASE_SCHEMA_HEAD = "a7f3c1d9e204"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
@@ -137,16 +141,31 @@ class ReleaseCommandAuthority:
         return await self.binding_reader(session)
 
     async def check_normal(self, session: AsyncSession) -> None:
+        """Normal lending needs a promotion for *this build*, not for this pause.
+
+        The canary proves one thing: that this exact artifact, config, policy,
+        schema and projector can place a real offer. `binding` already names all
+        of those, so comparing it is the whole test. Matching the promotion to
+        the current `halt.id` as well tied the proof to a pause count instead --
+        every maintenance stop advanced the id and retired a promotion that
+        nothing had invalidated, so undoing a database upgrade demanded a fresh
+        real-money submit. The promotion is retained across halt cycles and
+        retired by a changed binding, which is what actually changes the risk.
+        """
         binding = await self.binding(session)
         halt = await self.repo.halt(session)
-        promoted = await session.scalar(select(ReleaseSessionRow).where(
-            ReleaseSessionRow.exchange_account_id == self.repo.account_id,
-            ReleaseSessionRow.deployment_environment == self.repo.environment,
-            ReleaseSessionRow.state == "promoted",
-            ReleaseSessionRow.promoted_halt_id == halt.id,
-        ))
+        promoted = await session.scalar(
+            select(ReleaseSessionRow)
+            .where(
+                ReleaseSessionRow.exchange_account_id == self.repo.account_id,
+                ReleaseSessionRow.deployment_environment == self.repo.environment,
+                ReleaseSessionRow.state == "promoted",
+            )
+            .order_by(ReleaseSessionRow.promoted_halt_id.desc())
+            .limit(1)
+        )
         if halt.halted or promoted is None or promoted.binding != binding:
-            raise ReleaseBlocked("release_promotion_required")
+            raise ReleasePromotionRequired("release_promotion_required")
 
     async def admit(self, session: AsyncSession, *, ready: ReadyToSubmit,
                     context: AccountContext, attempt_id: UUID) -> None:
@@ -262,6 +281,12 @@ class ReleaseWorker:
             log.exception("release_session_blocked session_id=%s", session_id)
             await self._reassert_halt("release_blocked")
             if session_id is None:
+                if isinstance(exc, ReleasePromotionRequired):
+                    # The halt above is the whole response: an unverified build
+                    # must not lend, but it is not a reason to kill the writer.
+                    # Stopping here left the daemon dead with no operator path
+                    # back except restarting it by hand.
+                    return
                 # Runtime/proof failure with an unhalted account must stop the
                 # writer after persisting halt. No blanket retry loop.
                 raise
@@ -289,7 +314,7 @@ class ReleaseWorker:
             if self.configured_cells.count((row.strategy, row.symbol, row.cell)) != 1:
                 raise ReleaseBlocked("session_cell_not_configured")
             view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell, session=session)
-            minimum = minimum_amount(amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
+            minimum = submit_amount(amount_evidence, symbol=row.symbol, now_ms=self.authority.clock())
             if view.budget.max_new_offer < minimum:
                 raise ReleaseBlocked("session_insufficient_capital")
             if minimum > row.max_amount:
@@ -319,8 +344,8 @@ class ReleaseWorker:
             # Re-derive against FX observed for this authorisation, not the preview
             # taken when the session was prepared. The preview is what the operator
             # saw; this is what the rule requires at the moment they committed.
-            minimum = minimum_amount(amount_evidence, symbol=row.symbol,
-                                     now_ms=self.authority.clock())
+            minimum = submit_amount(amount_evidence, symbol=row.symbol,
+                                    now_ms=self.authority.clock())
             view = await self.authority.capital.read(symbol=row.symbol, cell_id=row.cell,
                                                      session=session)
             if view.budget.max_new_offer < minimum:
