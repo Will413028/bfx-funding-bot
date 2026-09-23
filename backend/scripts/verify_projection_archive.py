@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_record
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.projection_cutover.archive import (
+    ARCHIVE_READY_MIGRATIONS,
     _stream_identity,
     verify_archive,
 )
@@ -108,8 +109,10 @@ async def verify_archives(
             "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname='projection_audit')"
         ))
         if not schema_exists:
+            # alembic_version holds only the current head, so "has the archive
+            # migration run" means "is the head one at or after it".
             heads = set(await session.scalars(text("SELECT version_num FROM public.alembic_version")))
-            if expected or "f8c2d4e6a901" in heads:
+            if expected or heads & ARCHIVE_READY_MIGRATIONS:
                 raise ValueError("archive inventory absent")
             return []
         inventory = set(await session.scalars(

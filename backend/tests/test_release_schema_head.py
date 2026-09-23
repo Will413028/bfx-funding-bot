@@ -14,7 +14,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from bfx_funding_bot.modules.execution.event_store.writer import _READY_PROJECTOR_MIGRATIONS
-from bfx_funding_bot.modules.execution.projection_cutover.archive import _ARCHIVE_READY_MIGRATIONS
+from bfx_funding_bot.modules.execution.projection_cutover.archive import ARCHIVE_READY_MIGRATIONS
 from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -68,9 +68,9 @@ def test_head_is_classified_for_the_projection_archive() -> None:
     whether the migration changes an archived table or event_log, then add it.
     """
     heads = _alembic_heads()
-    unclassified = set(heads) - set(_ARCHIVE_READY_MIGRATIONS)
+    unclassified = set(heads) - set(ARCHIVE_READY_MIGRATIONS)
     assert not unclassified, (
         f"migration head {sorted(unclassified)} is not classified in "
-        f"_ARCHIVE_READY_MIGRATIONS. Decide whether it changes an archived table "
+        f"ARCHIVE_READY_MIGRATIONS. Decide whether it changes an archived table "
         f"or event_log, then add it to the allow-list in projection_cutover/archive.py."
     )
