@@ -22,12 +22,15 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     ProjectionWriteError,
 )
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
+from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
+from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
 
 pytestmark = pytest.mark.integration
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-_REVISION = "f8c2d4e6a901"
+# The declared head, which tests/test_release_schema_head.py pins to alembic's.
+_REVISION = RELEASE_SCHEMA_HEAD
 _ENV = "ci"
 
 
@@ -363,6 +366,8 @@ async def test_writer_replays_postgres_event_log_gap_before_new_append(
             )
         )
         await session.flush()
+        # Logged by a real append (so sealed) but never projected: the gap under test.
+        await seal_prefix_chain(session)
         result = await AccountEventWriter(store=store).append(
             session,
             _claimed(account_id, cid=101, venue_seq=101),
@@ -428,7 +433,7 @@ async def test_archive_revision_strict_append_and_unknown_revision_rejection(
     await _seed_accounts(pg_session_factory, account)
     writer = AccountEventWriter(store=PostgresEventStore(deployment_environment=_ENV))
     async with pg_session_factory() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "f8c2d4e6a901"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == _REVISION
         result = await writer.append(session, _claimed(account, cid=123, venue_seq=123))
         assert result.persisted and result.projection_head == result.event_seq
         await session.commit()

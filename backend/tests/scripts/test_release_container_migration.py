@@ -11,6 +11,7 @@ from bfx_funding_bot.core.db import make_async_engine_from_url
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from scripts.release_package import PackagingBlocked, run, run_one_shot
 
@@ -50,7 +51,7 @@ async def test_image_migration_then_restricted_runtime_check_without_sync_or_pol
         assert initial["system_identifier"].isdigit()
         await command("test:test", ["uv", "run", "alembic", "upgrade", "head"])
         schema = await command("test:test", ["/app/.venv/bin/python", "-m", "scripts.release_database", "schema"])
-        assert json.loads(schema)["schema_heads"] == ["b4e6f8a0c203"]
+        assert json.loads(schema)["schema_heads"] == [RELEASE_SCHEMA_HEAD]
         with pytest.raises(PackagingBlocked, match="one_shot_exit_nonzero:2"):
             await command("test:test", ["/app/.venv/bin/python", "-m", "scripts.release_database", "startup"])
         url = pg_container.get_connection_url().replace("+psycopg2", "")
