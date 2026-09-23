@@ -10,9 +10,9 @@ trust boundary; the application never receives a Docker socket.
 
 Finish review/tests and commit first. Use a clean tracked revision; preparation
 resolves `git rev-parse --show-toplevel`, checks tracked dirt at that root, and
-builds `git -C ROOT archive REV:backend_py` and `REV:frontend`, with
+builds `git -C ROOT archive REV:backend` and `REV:frontend`, with
 `--format=tar --mtime=@COMMIT_TIMESTAMP` from `git show -s --format=%ct REV`.
-Source archive bytes therefore reproduce from repo root or `backend_py/`;
+Source archive bytes therefore reproduce from repo root or `backend/`;
 content comes only from the reviewed commit. Untracked/ignored runtime envs cannot enter
 these archives. Local integration builds are **unapproved fixtures**, not the
 artifact later approved for deployment. Never rebuild an approved release on VM.
@@ -30,7 +30,7 @@ Review frontend public build inputs (example at
 `deploy/vm/frontend-public.example.json`), including the actual Funnel origin.
 Build-time and runtime public values must match. No secret is a build argument.
 
-From the reviewed checkout's `backend_py/`:
+From the reviewed checkout's `backend/`:
 
 ```bash
 uv run --frozen python -m scripts.immutable_release prepare \
@@ -96,6 +96,14 @@ docker load --input /absolute/new-release-directory/backend.tar
 docker load --input /absolute/new-release-directory/frontend.tar
 ```
 
+**Checkouts that predate the `backend_py/` → `backend/` rename (2026-09-23).**
+Host tooling provisioned under the old path does not follow the rename: its
+virtualenv is untracked and stays behind in `backend_py/`, and `uv run
+--frozen --no-sync` never creates one. Provision the tooling below under
+`backend/`, confirm `backend/.env` still resolves to `../.env`, and move any
+host-only file you still need out of the leftover `backend_py/` before removing
+it by hand.
+
 Loading is not rebuilding or pulling. Every host CLI consumer rechecks both
 archive hashes/content identities before resolving immutable references. Classic
 Docker normally exposes the config digest as `Id`; containerd can expose the
@@ -129,7 +137,8 @@ The host CLI itself must come from the reviewed commit in a protected checkout
 with its frozen tooling environment. **Do not assume this already exists:**
 controller's read-only VM preparation found network `bfx_default` and working
 `sudo -n`, but no uv in remote/root PATH or the checked standard/local locations,
-and no existing repository `backend_py/.venv/bin/python`.
+and no existing repository `backend_py/.venv/bin/python` (the directory was
+renamed to `backend/` on 2026-09-23).
 After artifact transfer, the controller must provision protected host tooling
 from the reviewed source, the candidate's uv binary and frozen Python3.13
 dependencies, then verify that interpreter/dependency/source combination before
@@ -137,7 +146,7 @@ invocation. This is host tooling bootstrap, **not** an application image rebuild
 dependency upgrade, new installer/service, or permission to change the approved
 artifact/runtime. Do not execute an unreviewed bootstrap download as root.
 
-Once tooling is provisioned, invoke from its reviewed `backend_py/` as host root
+Once tooling is provisioned, invoke from its reviewed `backend/` as host root
 using `uv run --frozen --no-sync python -m scripts.immutable_release` with that
 protected uv on PATH (or its protected venv's Python directly with `-m
 scripts.immutable_release`). All commands below assume this explicit prerequisite

@@ -32,7 +32,7 @@ The proxy forwards authenticated requests to the FastAPI web-API, which
 verifies the Better-Auth-minted JWT against the Next app's JWKS endpoint.
 
 ```bash
-cd backend_py && \
+cd backend && \
 BETTER_AUTH_JWKS_URL=http://localhost:3000/api/auth/jwks \
 uv run uvicorn bfx_funding_bot.main:app
 ```
@@ -53,7 +53,7 @@ Apply the Better Auth + `user_profile` migration to a **dev / throwaway**
 Postgres (NOT live Neon):
 
 ```bash
-cd backend_py && uv run alembic upgrade head   # against a dev DB, never prod
+cd backend && uv run alembic upgrade head   # against a dev DB, never prod
 ```
 
 ### 3. Frontend env

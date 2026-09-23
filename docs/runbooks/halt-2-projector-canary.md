@@ -61,7 +61,7 @@ not bypass it with an environment override.
 ## Exact command sequence
 
 Run the following from the repository root unless the command first changes to
-`backend_py`. Replace angle-bracket values only with the already approved,
+`backend`. Replace angle-bracket values only with the already approved,
 account-scoped production evidence; do not print their contents. The commands
 are deliberately ordered and every **Operator confirmation** is a hard pause.
 
@@ -71,7 +71,7 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    `BFX_ACCOUNT_ID`; use `BFX_EXCHANGE_ACCOUNT_ID` only.
 
    ```bash
-   cd backend_py
+   cd backend
    uv run python scripts/halt2_cutover.py assert-halt \
      --account-id "$BFX_EXCHANGE_ACCOUNT_ID" \
      --environment "$BFX_DEPLOYMENT_ENV" \
@@ -172,7 +172,7 @@ are deliberately ordered and every **Operator confirmation** is a hard pause.
    one durable outcome and then two full-account reconcile cycles. It cannot auto-ramp; no report can increase a cap or expand symbols. Start a separate shell session at the repository root and deploy only after the separate authority confirmation:
 
    ```bash
-   cd backend_py
+   cd backend
    cd ..
    BFX_CANARY_CONFIRM=yes ./scripts/deploy-vm.sh canary
    ```
@@ -265,7 +265,7 @@ of the following as passing evidence:
   treat an environment prerequisite as a pass.
 
   ```bash
-  cd backend_py
+  cd backend
   uv run pytest -m "not integration" -q
   uv run pytest tests/integration/test_halt2_replay_cutover.py \
     tests/integration/test_unknown_submit_pg.py \
@@ -280,6 +280,6 @@ of the following as passing evidence:
   pnpm build
   ```
 
-The implementation evidence is [Plan 2 gate tests](../../backend_py/tests/scripts/test_halt2_cutover.py),
-[Plan 3 replay/conversion tests](../../backend_py/tests/integration/test_halt2_replay_cutover.py),
-and [Plan 4 daemon/canary tests](../../backend_py/tests/modules/marketfeed/test_daemon.py).
+The implementation evidence is [Plan 2 gate tests](../../backend/tests/scripts/test_halt2_cutover.py),
+[Plan 3 replay/conversion tests](../../backend/tests/integration/test_halt2_replay_cutover.py),
+and [Plan 4 daemon/canary tests](../../backend/tests/modules/marketfeed/test_daemon.py).

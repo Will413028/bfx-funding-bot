@@ -13,7 +13,7 @@ count/head/hash、classified differences、rollback evidence 與維護時窗。
 私有 rehearsal 必須另有資料存取授權，使用 isolated restore，禁止 venue writes。
 不要因目前可用的 company tailnet 自動切換機器全域 Tailscale profile。
 
-- Schema 套用只能在核准目標的 `backend_py/` 執行 `uv run alembic upgrade head`。
+- Schema 套用只能在核准目標的 `backend/` 執行 `uv run alembic upgrade head`。
   Archive migration 不代表 runtime role 已安全；不得順帶更改 production grants。
 - 實際 bot、webapi、frontend、weekly-report roles 必須逐一證明 archive
   INSERT/UPDATE/DELETE/TRUNCATE、column grants、ownership、schema CREATE 均不可達。
@@ -66,7 +66,7 @@ backup repository、production volume 或 `projection_audit`；不可用 broad p
 
 ## 1. Diagnose 與人工分類
 
-以下 cutover commands 都從 `backend_py/` 執行。`DATABASE_URL` 只取 explicit process
+以下 cutover commands 都從 `backend/` 執行。`DATABASE_URL` 只取 explicit process
 environment；以核准的 secret channel 注入，不寫命令列、文件或 log。`$CUTOVER_DIR`
 為 private absolute path；每個 output 是尚不存在的新路徑。
 

@@ -46,7 +46,7 @@ jobs:
       - name: Unit tests
         run: pnpm vitest run
 
-  backend_py_unit:
+  backend_unit:
     name: Backend (Python) — unit
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -54,7 +54,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: backend_py
+        working-directory: backend
     steps:
       # NOTE: Actions @v4/@v3 acceptable per OpenSSF transitional guidance.
       # Dependabot (.github/dependabot.yml) auto-bumps these to commit SHA via
@@ -68,16 +68,16 @@ jobs:
       - run: uv run mypy --strict src
       - run: uv run pytest -m "not integration and not gate" -q
 
-  backend_py_gate:
+  backend_gate:
     name: Backend (Python) — deploy gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
-    needs: backend_py_unit
+    needs: backend_unit
     defaults:
       run:
-        working-directory: backend_py
+        working-directory: backend
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -89,19 +89,19 @@ jobs:
       - name: Deploy sanity gate (deployed cells beat AlwaysMarketRate)
         run: uv run pytest -m gate -q
 
-  backend_py_integration:
+  backend_integration:
     name: Backend (Python) — integration
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    needs: backend_py_unit
+    needs: backend_unit
     # Fork PRs cannot read secrets (GitHub security model); skip them. Same-repo
     # PRs and main pushes run the PG event_log read-your-writes integration tests.
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
     defaults:
       run:
-        working-directory: backend_py
+        working-directory: backend
     env:
       BFX_DEPLOYMENT_ENV: ci
       BFX_SERVICE_VERSION: ${{ github.sha }}

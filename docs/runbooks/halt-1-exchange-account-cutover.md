@@ -64,7 +64,7 @@ legacy realm／environment counts、event head 與完整 event row integrity。
 
 ```bash
 git rev-parse HEAD > release-evidence/release-sha.txt
-cd backend_py
+cd backend
 uv run alembic current
 ```
 
@@ -117,7 +117,7 @@ docker exec --user postgres bfx-postgres psql -U bfx -d bfx -Atc \
 gate，而 contract 必須等 application backfill verify 後才可執行：
 
 ```bash
-cd ~/bfx/backend_py
+cd ~/bfx/backend
 uv run alembic upgrade 8a1b2c3d4e5f
 uv run alembic current
 ```
@@ -130,7 +130,7 @@ dry-run，review aggregate counts/hash 後才 apply；apply 可安全重跑，�
 保留 report：
 
 ```bash
-cd ~/bfx/backend_py
+cd ~/bfx/backend
 MANIFEST=../release-evidence/identity-realm-map.json
 
 uv run python scripts/cutover_identity.py --manifest "$MANIFEST"
@@ -155,7 +155,7 @@ application verify 與 backup evidence 通過後才執行。migration 自己會�
 preflight，因此在 DDL 前仍可安全拒絕：
 
 ```bash
-cd ~/bfx/backend_py
+cd ~/bfx/backend
 uv run alembic upgrade head
 uv run alembic current
 uv run alembic check
@@ -182,7 +182,7 @@ fresh full-account venue snapshot。預設 dry-run 會實際查詢 Bitfinex perm
 在 DB transaction 內建立／驗證後 rollback，並非完全沒有外部請求。
 
 ```bash
-cd backend_py
+cd backend
 # UUID 與 OWNER_USER_ID 是非秘密的已核對 manifest 值；秘密由 operator 安全注入。
 uv run python scripts/bootstrap_account_credential.py \
   --exchange-account-id "$UUID" --owner-user-id "$OWNER_USER_ID"

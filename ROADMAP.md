@@ -1,10 +1,10 @@
 # 開發路線圖
 
 > 最後更新：2026-05-29（canary 已入金 ~$450 USDT、實際放貸中（3 筆 fUST credit）；近期真錢 incident 修復鏈見「當前位置」）
-> 參考文件：`backend_py/ARCHITECTURE.md`（runtime 架構）, `frontend_architecture.md`, `strategy_specification.md`
+> 參考文件：`backend/ARCHITECTURE.md`（runtime 架構）, `frontend_architecture.md`, `strategy_specification.md`
 > 各 phase 設計/計畫：`docs/superpowers/specs/` 與 `docs/superpowers/plans/`
 
-> **現行後端為 `backend_py/`（Python）。** 下方「已完成功能」「DB Schema」「API Endpoints」
+> **現行後端為 `backend/`（Python）。** 下方「已完成功能」「DB Schema」「API Endpoints」
 > 等大表是 Go `backend/` MVP 時代的紀錄（**已封存**，見 CLAUDE.md），保留作歷史。
 > 當前實際開發軌道見下節。
 
@@ -289,7 +289,7 @@ marketfeed/service.go (C1)
 - [x] G11 Idle Capital Urgency（`e5825aa`）
 - [x] G12 FRR Trend Tracking — FRR EMA 趨勢判斷（`03f63ad`）
 - [x] G13 Historical Fill Rate Learning — 數據驅動定價（candle path-crossing 經驗 fill 模型 + `fill_rate_stats` 表 + backtest engine 整合；spec `docs/superpowers/specs/2026-05-26-g13-fill-rate-learning-design.md`）
-  - ⚠️ 啟用待辦：① 刷新本地 `.env` Neon 密碼後 `cd backend_py && uv run alembic upgrade head`（建表）② 跑 `uv run python -m scripts.learn_fill_rate`（填 stats）③ 把 `FillRateModel` 接進 WFO/matrix runner（目前 engine 已能消費 empirical，但 matrix.py 尚未載入 stats → 實際仍 fallback linear）
+  - ⚠️ 啟用待辦：① 刷新本地 `.env` Neon 密碼後 `cd backend && uv run alembic upgrade head`（建表）② 跑 `uv run python -m scripts.learn_fill_rate`（填 stats）③ 把 `FillRateModel` 接進 WFO/matrix runner（目前 engine 已能消費 empirical，但 matrix.py 尚未載入 stats → 實際仍 fallback linear）
 - [x] G14 Auto-Renew Re-pricing — 到期走 pipeline 重新定價（`12829a2`）
 - [x] G15 Smart Wall Positioning — price just below wall（`03f63ad`）
 - [x] G16 Order Book Gap Detection — book 空隙報價（`12829a2`）

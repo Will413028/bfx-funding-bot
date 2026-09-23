@@ -124,7 +124,7 @@ services:
   bot:
     profiles: ["legacy-app"]
     build:
-      context: backend_py
+      context: backend
       dockerfile: Dockerfile
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
