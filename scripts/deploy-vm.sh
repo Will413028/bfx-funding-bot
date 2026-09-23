@@ -6,5 +6,5 @@ if [ "${1:-}" != --bundle ]; then
   exit 2
 fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT/backend_py"
+cd "$ROOT/backend"
 exec uv run --frozen --no-sync python -m scripts.immutable_release deploy "$@"

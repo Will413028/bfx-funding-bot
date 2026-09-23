@@ -452,7 +452,7 @@ existing canonical hash (including historical UUID derivation) and replay
 identity validation instead of hashing SQL/JSON text or using a different
 serialization. It opens no database connection and makes no venue request.
 
-Run from `backend_py/` using its existing Python 3.13 environment:
+Run from `backend/` using its existing Python 3.13 environment:
 
 The current verifier registry supports `execution-state-v1`; use that exact
 value for `PROJECTOR_VERSION` and the drill request. A label such as

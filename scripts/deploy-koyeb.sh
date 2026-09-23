@@ -188,7 +188,7 @@ else
     --git-branch "$GIT_BRANCH" \
     --git-builder docker \
     --git-docker-dockerfile Dockerfile \
-    --git-workdir backend_py \
+    --git-workdir backend \
     --regions "$REGION" \
     --instance-type "$INSTANCE" \
     "${ENV_ARGS[@]}" >/dev/null

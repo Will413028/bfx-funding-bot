@@ -2,7 +2,7 @@
 
 > **現行狀態（2026-08-31）**：本文件保留早期 Go/WebSocket SaaS 藍本的細節，
 > 不是目前 runtime contract。現行實作以 `frontend/src`、
-> [`backend_py/ARCHITECTURE.md`](backend_py/ARCHITECTURE.md)、
+> [`backend/ARCHITECTURE.md`](backend/ARCHITECTURE.md)、
 > [`docs/runbooks/release-0-operator-containment.md`](docs/runbooks/release-0-operator-containment.md)
 > 與測試為準；下方標示為 historical/deferred 的段落不可直接照抄。
 >

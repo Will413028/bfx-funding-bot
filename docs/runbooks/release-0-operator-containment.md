@@ -28,14 +28,14 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
 
    ```bash
    git rev-parse HEAD
-   cd backend_py && uv run alembic check
+   cd backend && uv run alembic check
    ```
 
 3. 以 dev/staging database 先套用 migration，再確認 production migration
    policy；正式套用一律使用：
 
    ```bash
-   cd backend_py && uv run alembic upgrade head
+   cd backend && uv run alembic upgrade head
    ```
 
 4. 由既有受控管理流程建立唯一 operator user，但先維持非 admin role。以該
@@ -195,7 +195,7 @@ pnpm lint
 pnpm build
 E2E_FULL_STACK=1 pnpm test:e2e --project=chromium
 
-cd ../backend_py
+cd ../backend
 uv run pytest -m "not integration" -q
 uv run mypy src/
 uv run ruff check

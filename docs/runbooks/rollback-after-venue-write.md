@@ -34,7 +34,7 @@ is no automatic retry.
 Once a submit may have reached the venue, a database image cannot establish the
 venue's truth. Follow this sequence and do not skip a step:
 
-1. Assert and retain the persistent halt. From `backend_py/`, run
+1. Assert and retain the persistent halt. From `backend/`, run
    `uv run python scripts/halt2_cutover.py assert-halt` with the approved
    account/environment/evidence arguments. Require exit 0; a nonzero exit is
    a stop and the process must not be restarted into an active state.
@@ -90,8 +90,8 @@ full-account diff, persistent halt effectiveness, and no automatic retry.
 
 ## Command and rehearsal contract
 
-All commands above run from `backend_py/` unless they explicitly begin with
-`cd backend_py`; `deploy-vm.sh` runs from the repository root. Exit 0 is a
+All commands above run from `backend/` unless they explicitly begin with
+`cd backend`; `deploy-vm.sh` runs from the repository root. Exit 0 is a
 successful read-only check or explicitly named append-only action; exit 2 is a
 precondition refusal; exit 3 is verification unavailable or failed. Any other
 exit, malformed output, missing durable permit binding, or process crash is a
