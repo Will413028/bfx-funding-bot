@@ -13,6 +13,9 @@ export default defineConfig({
 	test: {
 		include: ["src/**/*.test.{ts,tsx}"],
 		environment: "jsdom",
+		// next-intl's ESM imports "next/server" without an extension, which
+		// Node's resolver rejects; let Vite resolve it instead.
+		server: { deps: { inline: ["next-intl"] } },
 		env: {
 			API_URL: "http://localhost:8000",
 		},

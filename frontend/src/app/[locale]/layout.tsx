@@ -1,5 +1,6 @@
 import { Inter } from "next/font/google";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
 import { hasLocale, NextIntlClientProvider } from "next-intl";
 import { setRequestLocale } from "next-intl/server";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
@@ -17,11 +18,10 @@ type Props = {
   params: Promise<{ locale: string }>;
 };
 
-export function generateStaticParams() {
-  return routing.locales.map((locale) => ({ locale }));
-}
-
 export default async function LocaleLayout({ children, params }: Props) {
+  // Render per request: the CSP nonce only exists at request time, and a page
+  // prerendered at build time would ship scripts the policy then blocks.
+  await connection();
   const { locale } = await params;
 
   if (!hasLocale(routing.locales, locale)) {
