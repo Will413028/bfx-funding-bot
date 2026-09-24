@@ -7,13 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.test_projection_cutover_archive import (
-    archive_db as archive_db,
-)
-from tests.integration.test_projection_cutover_archive import (
-    archive_pg,  # noqa: F401
-)
-
 ROOT = Path(__file__).resolve().parents[3]
 WIZARD_PATH = ROOT / "scripts/setup-pgbackrest-r2.sh"
 INSTALLER_PATH = ROOT / "scripts/install-pgbackrest-timers.sh"

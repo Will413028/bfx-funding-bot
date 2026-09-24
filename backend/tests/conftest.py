@@ -126,3 +126,114 @@ def _reset_rate_limits():
 
     reset_shared_rate_limits()
     yield
+
+
+# ---------------------------------------------------------------------------
+# Projection-archive fixtures (PostgreSQL 18).
+#
+# Building the archive schema means migrating to e7b1c2d3e4f5, seeding legacy
+# rows, then migrating to head -- seconds per test, across ~100 test cases. It is
+# done once into a template database; each test gets a byte-identical copy via
+# CREATE DATABASE ... TEMPLATE. Roles are cluster-wide and so shared, as they
+# already were between tests of one module.
+# ---------------------------------------------------------------------------
+
+_ARCHIVE_TEMPLATE = "archive_template"
+# Matches ACCOUNT in tests/integration/test_projection_cutover_archive.py.
+_ARCHIVE_ACCOUNT = "00000000-0000-0000-0000-000000000064"
+_ALEMBIC_INI = __import__("pathlib").Path(__file__).resolve().parents[1] / "alembic.ini"
+
+
+def _database_url(url: str, database: str) -> str:
+    from sqlalchemy.engine import make_url
+
+    return make_url(url).set(database=database).render_as_string(hide_password=False)
+
+
+def _build_archive_database(url: str) -> None:
+    """Migrate, seed and verify one database exactly as each test used to."""
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+
+    from alembic import command
+
+    engine = create_engine(url)
+    try:
+        command.upgrade(Config(str(_ALEMBIC_INI)), "e7b1c2d3e4f5")
+        with engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','synthetic')"),
+                {"id": _ARCHIVE_ACCOUNT},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'ci','fUST',1.2300,123), (:s,:id,'shadow','fUSD',9.000,999)"
+                ),
+                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO reconcile_observation(account_id,exchange_account_id,deployment_environment,reserved_usdt,realized_usdt,n_offers,n_credits,observed_at_ms,event_seq_fence,recorded_at) VALUES (:s,:id,'ci',1.2300,0.000,2,3,123,0,'2001-02-03T04:05:06.123456Z')"
+                ),
+                {"s": _ARCHIVE_ACCOUNT, "id": _ARCHIVE_ACCOUNT},
+            )
+            before = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
+        command.upgrade(Config(str(_ALEMBIC_INI)), "head")
+        with engine.begin() as conn:
+            after = conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
+            assert after == before
+            conn.exec_driver_sql("CREATE SCHEMA unrelated")
+            conn.exec_driver_sql("CREATE TABLE unrelated.keep_me(id integer)")
+        command.check(Config(str(_ALEMBIC_INI)))
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def archive_pg():
+    """Session-wide PostgreSQL 18; tests always see the container's own database."""
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:18-alpine") as container:
+        yield container.get_connection_url().replace("+psycopg2", "+psycopg")
+
+
+@pytest.fixture(scope="session")
+def _archive_template(archive_pg: str) -> str:
+    from sqlalchemy import create_engine
+
+    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"CREATE DATABASE {_ARCHIVE_TEMPLATE}")
+    finally:
+        admin.dispose()
+    with pytest.MonkeyPatch.context() as patch:
+        template_url = _database_url(archive_pg, _ARCHIVE_TEMPLATE)
+        patch.setenv("DATABASE_URL", template_url)
+        _build_archive_database(template_url)
+    return _ARCHIVE_TEMPLATE
+
+
+@pytest_asyncio.fixture
+async def archive_db(archive_pg: str, _archive_template: str, monkeypatch: pytest.MonkeyPatch):
+    """A fresh copy of the migrated, seeded archive database for one test."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    database = make_url(archive_pg).database
+    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+            conn.exec_driver_sql(f'CREATE DATABASE "{database}" TEMPLATE {_archive_template}')
+    finally:
+        admin.dispose()
+    monkeypatch.setenv("DATABASE_URL", archive_pg)
+    engine = create_engine(archive_pg)
+    async_engine = create_async_engine(archive_pg.replace("+psycopg", "+asyncpg"))
+    try:
+        yield async_sessionmaker(async_engine, expire_on_commit=False), engine
+    finally:
+        await async_engine.dispose()
+        engine.dispose()

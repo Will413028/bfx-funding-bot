@@ -29,8 +29,6 @@ from scripts.projection_cutover_operations import (
     verify_local_operations,
 )
 from scripts.verify_projection_archive import verify_restore_archives
-from tests.integration.test_projection_cutover_archive import archive_db as archive_db
-from tests.integration.test_projection_cutover_archive import archive_pg as archive_pg
 from tests.scripts.test_cutover_projection import _prepare_kwargs, prepare_fixture
 
 pytestmark = pytest.mark.integration

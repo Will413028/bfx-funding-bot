@@ -13,11 +13,6 @@ from bfx_funding_bot.modules.execution.projection_cutover.evidence import (
     VerifiedCutoverEvidence,
 )
 from scripts.verify_projection_replay import _archive_projection_rows
-from tests.integration.test_projection_cutover_archive import archive_db as _archive_db
-from tests.integration.test_projection_cutover_archive import archive_pg as _archive_pg
-
-archive_db = _archive_db
-archive_pg = _archive_pg
 
 
 def cli():

@@ -6,10 +6,8 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import pytest_asyncio
 from alembic.config import Config
-from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import text
 
 from alembic import command
 from bfx_funding_bot.modules.execution.projection_cutover.archive import (
@@ -24,64 +22,6 @@ pytestmark = pytest.mark.integration
 ACCOUNT = UUID(int=100)
 SCOPE = Scope(ACCOUNT, "ci")
 INI = Path(__file__).resolve().parents[2] / "alembic.ini"
-
-
-@pytest.fixture(scope="module")
-def archive_pg():
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:18-alpine") as container:
-        yield container.get_connection_url().replace("+psycopg2", "+psycopg")
-
-
-@pytest_asyncio.fixture
-async def archive_db(archive_pg, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", archive_pg)
-    engine = create_engine(archive_pg)
-    with engine.begin() as conn:
-        for schema in ("projection_audit", "auth", "public", "unrelated"):
-            conn.exec_driver_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-        conn.exec_driver_sql("CREATE SCHEMA public")
-    command.upgrade(Config(str(INI)), "e7b1c2d3e4f5")
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','synthetic')"
-            ),
-            {"id": ACCOUNT},
-        )
-        conn.execute(
-            text(
-                "INSERT INTO position_state(account_id,exchange_account_id,deployment_environment,symbol,reserved,last_updated_ms) VALUES (:s,:id,'ci','fUST',1.2300,123), (:s,:id,'shadow','fUSD',9.000,999)"
-            ),
-            {"s": str(ACCOUNT), "id": ACCOUNT},
-        )
-        conn.execute(
-            text(
-                "INSERT INTO reconcile_observation(account_id,exchange_account_id,deployment_environment,reserved_usdt,realized_usdt,n_offers,n_credits,observed_at_ms,event_seq_fence,recorded_at) VALUES (:s,:id,'ci',1.2300,0.000,2,3,123,0,'2001-02-03T04:05:06.123456Z')"
-            ),
-            {"s": str(ACCOUNT), "id": ACCOUNT},
-        )
-        before = conn.execute(
-            text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")
-        ).all()
-    command.upgrade(Config(str(INI)), "head")
-    with engine.begin() as conn:
-        assert (
-            conn.execute(text("SELECT to_jsonb(p) FROM position_state p ORDER BY symbol")).all()
-            == before
-        )
-        conn.exec_driver_sql("CREATE SCHEMA unrelated")
-        conn.exec_driver_sql("CREATE TABLE unrelated.keep_me(id integer)")
-    command.check(Config(str(INI)))
-    async_engine = create_async_engine(archive_pg.replace("+psycopg", "+asyncpg"))
-    try:
-        yield async_sessionmaker(async_engine, expire_on_commit=False), engine
-    finally:
-        await async_engine.dispose()
-        with engine.begin() as conn:
-            conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
-        engine.dispose()
 
 
 async def capture(factory):
