@@ -130,4 +130,5 @@ jobs:
       - run: uv sync --all-groups
       # Keep third-party live smoke tests out of deterministic CI; run them
       # explicitly with `uv run pytest -m 'integration and live'`.
-      - run: uv run pytest -m "integration and not live" -q --maxfail=3
+      # --durations: the suite is near its timeout; each run lists the slowest tests.
+      - run: uv run pytest -m "integration and not live" -q --maxfail=3 --durations=25
