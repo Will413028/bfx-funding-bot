@@ -22,7 +22,7 @@ import httpx
 from bfx_funding_bot.core.db import make_engine, make_session_factory, session_scope
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
-from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
+from bfx_funding_bot.external.bitfinex.rest import BATCH_RATE_LIMIT_BACKOFF, BitfinexREST
 from bfx_funding_bot.modules.funding_stats.service import (
     backfill_funding_stats_to_latest,
 )
@@ -60,6 +60,7 @@ async def _amain() -> int:
                 http=http,
                 base_url=settings.bitfinex_api_base_url,
                 limiter=FundingRateLimiter(),
+                rate_limit_backoff=BATCH_RATE_LIMIT_BACKOFF,
             )
             for symbol in symbols:
                 logger.info("→ forward-filling funding_stats for %s", symbol)

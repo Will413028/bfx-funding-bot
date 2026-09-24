@@ -309,3 +309,54 @@ async def test_get_funding_candles_a30_uses_extended_path(
     # period_agg in the returned object stays as user-facing 'a30',
     # not URL form 'a30:p2:p30'
     assert all(c.period_agg == "a30" for c in candles)
+
+
+_CANDLES_URL = "https://api-pub.bitfinex.com/v2/candles/trade:1h:fUST:p2/hist?limit=10&start=0&end=0"
+_RATE_LIMITED = {"status_code": 429, "text": '["error", 11010, "ratelimit: error"]'}
+
+
+def _batch_client(http: httpx.AsyncClient, waits: list[float], backoff: tuple[float, ...]) -> BitfinexREST:
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    return BitfinexREST(
+        http=http,
+        base_url="https://api-pub.bitfinex.com",
+        limiter=FundingRateLimiter(max_rate=1000, time_period=1.0),
+        rate_limit_backoff=backoff,
+        sleep=sleep,
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_backoff_waits_out_a_429_then_returns_the_page(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(url=_CANDLES_URL, headers={"Retry-After": "90"}, **_RATE_LIMITED)
+    httpx_mock.add_response(url=_CANDLES_URL, **_RATE_LIMITED)
+    httpx_mock.add_response(url=_CANDLES_URL, json=[[0, 0.0001, 0.0001, 0.0001, 0.0001, 1.0]])
+    waits: list[float] = []
+
+    async with httpx.AsyncClient() as http:
+        candles = await _batch_client(http, waits, (60.0, 120.0)).get_funding_candles(
+            symbol="fUST", timeframe="1h", period_agg="p2", start=0, end=0, limit=10,
+        )
+
+    assert len(candles) == 1
+    # Retry-After wins when it is longer than the scheduled delay.
+    assert waits == [90.0, 120.0]
+
+
+@pytest.mark.asyncio
+async def test_batch_backoff_gives_up_after_its_schedule(httpx_mock: HTTPXMock) -> None:
+    for _ in range(3):
+        httpx_mock.add_response(url=_CANDLES_URL, headers={"Retry-After": "5"}, **_RATE_LIMITED)
+    waits: list[float] = []
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(BitfinexRateLimited) as exc_info:
+            await _batch_client(http, waits, (60.0, 120.0)).get_funding_candles(
+                symbol="fUST", timeframe="1h", period_agg="p2", start=0, end=0, limit=10,
+            )
+
+    assert waits == [60.0, 120.0]
+    assert exc_info.value.retry_after_seconds == 5.0
+    assert len(httpx_mock.get_requests()) == 3

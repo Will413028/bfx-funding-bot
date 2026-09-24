@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +17,13 @@ from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.funding_stats.schemas import FundingStat
 
 logger = logging.getLogger(__name__)
+
+# For batch jobs only (backfill, stats ingest). Bitfinex blocks an IP for about a
+# minute after a 429, and research jobs share that IP with the live bot, so wait
+# it out rather than fail the run. Each wait is the larger of Retry-After and
+# the scheduled delay. The live daemon keeps the default (no retry): a blocked
+# book fetch fails closed and the next cycle tries again.
+BATCH_RATE_LIMIT_BACKOFF: tuple[float, ...] = (60.0, 120.0, 240.0, 240.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +70,45 @@ class BitfinexREST:
         http: httpx.AsyncClient,
         base_url: str,
         limiter: FundingRateLimiter,
+        rate_limit_backoff: tuple[float, ...] = (),
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._http = http
         self._base_url = base_url.rstrip("/")
         self._limiter = limiter
+        self._rate_limit_backoff = rate_limit_backoff
+        self._sleep = sleep
+
+    async def _get(self, path: str, params: dict[str, Any]) -> httpx.Response:
+        """GET one public endpoint, waiting out 429s per `rate_limit_backoff`.
+
+        Only idempotent public reads come through here. With the default empty
+        backoff a 429 raises immediately, as it always has.
+        """
+        delays = iter(self._rate_limit_backoff)
+        while True:
+            async with self._limiter.acquire():
+                try:
+                    resp = await self._http.get(
+                        f"{self._base_url}{path}", params=params, timeout=30.0
+                    )
+                except httpx.HTTPError as e:
+                    raise BitfinexAPIError(
+                        status_code=0, message=f"transport error: {e}", raw=None
+                    ) from e
+            if resp.status_code != 429:
+                return resp
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                retry_after_seconds = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after_seconds = None
+            delay = next(delays, None)
+            if delay is None:
+                raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+            wait = max(delay, retry_after_seconds or 0.0)
+            logger.warning("bitfinex rate limited on %s; retrying in %.0fs", path, wait)
+            await self._sleep(wait)
 
     async def get_funding_candles(
         self,
@@ -97,23 +141,7 @@ class BitfinexREST:
         path = f"/v2/candles/trade:{timeframe}:f{sym}:{url_period_agg}/hist"
         params = {"limit": limit, "start": start, "end": end}
 
-        async with self._limiter.acquire():
-            try:
-                resp = await self._http.get(
-                    f"{self._base_url}{path}", params=params, timeout=30.0
-                )
-            except httpx.HTTPError as e:
-                raise BitfinexAPIError(
-                    status_code=0, message=f"transport error: {e}", raw=None
-                ) from e
-
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                retry_after_seconds = float(retry_after) if retry_after else None
-            except ValueError:
-                retry_after_seconds = None
-            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+        resp = await self._get(path, params)
 
         if resp.status_code >= 400:
             raise BitfinexAPIError(
@@ -181,23 +209,7 @@ class BitfinexREST:
         path = f"/v2/funding/stats/{sym}/hist"
         params = {"limit": limit, "end": end}
 
-        async with self._limiter.acquire():
-            try:
-                resp = await self._http.get(
-                    f"{self._base_url}{path}", params=params, timeout=30.0
-                )
-            except httpx.HTTPError as e:
-                raise BitfinexAPIError(
-                    status_code=0, message=f"transport error: {e}", raw=None
-                ) from e
-
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                retry_after_seconds = float(retry_after) if retry_after else None
-            except ValueError:
-                retry_after_seconds = None
-            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+        resp = await self._get(path, params)
 
         if resp.status_code >= 400:
             raise BitfinexAPIError(
@@ -246,23 +258,7 @@ class BitfinexREST:
         sym = symbol[1:] if symbol.startswith("f") else symbol
         path = f"/v2/book/f{sym}/P0"
 
-        async with self._limiter.acquire():
-            try:
-                resp = await self._http.get(
-                    f"{self._base_url}{path}", params={"len": length}, timeout=30.0
-                )
-            except httpx.HTTPError as e:
-                raise BitfinexAPIError(
-                    status_code=0, message=f"transport error: {e}", raw=None
-                ) from e
-
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                retry_after_seconds = float(retry_after) if retry_after else None
-            except ValueError:
-                retry_after_seconds = None
-            raise BitfinexRateLimited(retry_after_seconds=retry_after_seconds)
+        resp = await self._get(path, {"len": length})
         if resp.status_code != 200:
             raise BitfinexAPIError(
                 status_code=resp.status_code, message=resp.text, raw=None
