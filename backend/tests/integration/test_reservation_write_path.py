@@ -20,7 +20,6 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     OfferClaimRow,
     PositionStateRow,
 )
-from bfx_funding_bot.modules.execution.events import ReservationUnknown
 from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
     ReservationEmittingMiddleware,
 )
@@ -66,10 +65,6 @@ def _ready(decision: DecisionPayload, decision_id: str) -> ReadyToSubmit:
     )
 
 
-async def _ignore_unknown(_event: ReservationUnknown) -> None:
-    return None
-
-
 class _AllowSafety:
     async def evaluate(
         self, decision: DecisionPayload, context: AccountContext,
@@ -78,7 +73,10 @@ class _AllowSafety:
         return GuardResult(allowed=True, guard_name="integration-test")
 
 
-def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> ReservationEmittingMiddleware:
+def _mw(inner, pg_session_factory) -> ReservationEmittingMiddleware:
+    # Simulated: a live gate also needs an applied capital runtime, which is a
+    # separate authority (tests/integration/test_capital_command_boundary.py).
+    # The durable intent/outcome write path under test is the same in both.
     store = PostgresEventStore(deployment_environment=_ENV)
     persister = EventStorePersister(
         store=store,
@@ -89,8 +87,7 @@ def _mw(inner, pg_session_factory, *, account_simulated: bool = True) -> Reserva
         inner,
         bus=DomainEventBus(),
         persister=persister,
-        is_simulated=account_simulated,
-        uncertainty_handler=None if account_simulated else _ignore_unknown,
+        is_simulated=True,
         safety_evaluator=_AllowSafety(),
     )
 
@@ -133,7 +130,7 @@ async def test_claimed_updates_same_cid_row(pg_session_factory) -> None:
         async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
             return SubmittedOrder(cid=cid or 0, venue_offer_id="v_claim", status="submitted", raw_response=None)
 
-    mw = _mw(_Inner(), pg_session_factory, account_simulated=False)
+    mw = _mw(_Inner(), pg_session_factory)
     await mw.submit(_ready(_decision(), "wp-claim-decision"), _ctx(acct))
     async with pg_session_factory() as s:
         rows = (await s.execute(select(OfferClaimRow).where(
@@ -158,7 +155,7 @@ async def test_failed_marks_failed_reserved_zero(pg_session_factory) -> None:
         async def submit(self, ready, ctx, *, cid=None, reservation_ref=None) -> SubmittedOrder:
             return SubmittedOrder(cid=cid or 0, venue_offer_id=None, status="failed", raw_response=None)
 
-    mw = _mw(_Inner(), pg_session_factory, account_simulated=False)
+    mw = _mw(_Inner(), pg_session_factory)
     await mw.submit(_ready(_decision(), "wp-failed-decision"), _ctx(acct))
     async with pg_session_factory() as s:
         claim = (await s.execute(select(OfferClaimRow).where(

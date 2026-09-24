@@ -7,10 +7,24 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
+_IMAGE = "python:3.12-alpine"
+
+
+def _local_image_id(reference: str) -> str:
+    """Resolve a local image ID, pulling it first on a runner that lacks it.
+
+    The test binds receipts to the ID of an image already on the host, as a real
+    launch does; any small image with python will do, so fetch it like the
+    testcontainers images rather than fail on a fresh CI runner.
+    """
+    inspect = ["docker", "image", "inspect", reference, "--format", "{{.Id}}"]
+    if subprocess.run(inspect, capture_output=True, check=False).returncode != 0:
+        subprocess.run(["docker", "pull", "--quiet", reference], check=True, capture_output=True)
+    return subprocess.check_output(inspect, text=True).strip()
+
 
 def test_created_container_receipt_binds_actual_hostname_and_readonly_root():
-    image = subprocess.check_output(["docker", "image", "inspect", "python:3.12-alpine",
-                                     "--format", "{{.Id}}"], text=True).strip()
+    image = _local_image_id(_IMAGE)
     identities = []
     for _ in range(2):
         hostname = "bfx-" + uuid4().hex
