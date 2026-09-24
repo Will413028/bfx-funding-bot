@@ -10,11 +10,7 @@ from sqlalchemy import text
 
 from tests.integration.test_projection_cutover_archive import (
     SCOPE,
-    archive_pg,  # noqa: F401
     capture,
-)
-from tests.integration.test_projection_cutover_archive import (
-    archive_db as archive_db,
 )
 
 pytestmark = pytest.mark.integration
