@@ -27,7 +27,7 @@ policy is all_available/reserve0/fixed70%, fUSD disabled with full venue coverag
 `BFX_KILL_SWITCH` remains independent break-glass, not a deployment default.
 
 Review frontend public build inputs (example at
-`deploy/vm/frontend-public.example.json`), including the actual Funnel origin.
+`deploy/vm/frontend-public.json`), including the actual Funnel origin.
 Build-time and runtime public values must match. No secret is a build argument.
 
 From the reviewed checkout's `backend/`:
