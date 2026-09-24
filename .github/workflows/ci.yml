@@ -92,7 +92,9 @@ jobs:
   backend_integration:
     name: Backend (Python) — integration
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The PG/testcontainers suite took ~17 min locally on 2026-09-24; 10 min
+    # cancelled it mid-run, which reads as "cancelled", not as a failure.
+    timeout-minutes: 30
     permissions:
       contents: read
     needs: backend_unit
