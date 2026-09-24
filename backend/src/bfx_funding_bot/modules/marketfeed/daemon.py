@@ -128,7 +128,11 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-from bfx_funding_bot.modules.execution.release_worker import ReleaseWorker, build_release_worker
+from bfx_funding_bot.modules.execution.release_worker import (
+    ReleaseWorker,
+    build_release_worker,
+    operator_authorized,
+)
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -154,6 +158,10 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+    ResolutionScope,
+    UncertaintyResolutionWorker,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
@@ -760,6 +768,8 @@ class Daemon:
     writer_lock: WriterLock | None = None
     command_gate: AccountCommandGate | None = None
     release_worker: ReleaseWorker | None = None
+    # Applies operator adjudications the web API queued (ADR D4'); live only.
+    uncertainty_worker: UncertaintyResolutionWorker | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
     metrics: DaemonMetrics | None = None
     # OTel traces (wiki pending #4) — default-off (BFX_OTEL_ENABLED), fail-open.
@@ -787,6 +797,10 @@ class Daemon:
         async with asyncio.TaskGroup() as tg:
             if self.release_worker is not None:
                 tg.create_task(self.release_worker.run(self._stop_event), name="release_session")
+            if self.uncertainty_worker is not None:
+                tg.create_task(
+                    self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",
+                )
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
             tg.create_task(self._scheduler_loop(),     name="scheduler")
             tg.create_task(self._monitor_loop(),       name="monitor")
@@ -1802,6 +1816,7 @@ async def build_daemon(
 
     deployment_reconciler = None
     release_worker = None
+    uncertainty_worker = None
     if not spec.is_simulated:
         if funding_book_service is None:
             raise ValueError(
@@ -1869,6 +1884,15 @@ async def build_daemon(
             clock=now_ms_utc)
         assert reservation_middleware.command_gate is not None
         reservation_middleware.command_gate.release_authority = release_worker.authority
+        # The web API queues operator adjudications; only this writer appends them.
+        uncertainty_worker = UncertaintyResolutionWorker(
+            session_factory=capital_runtime.session_factory,
+            scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
+            # The same operator authority release sessions apply under.
+            authority=operator_authorized,
+            clock=now_ms_utc,
+            ownership=writer_lock.verify_held,
+        )
         # Execution-policy regime telemetry: one row per boot (flags are
         # boot-immutable, so boots are the regime boundaries). Best-effort —
         # record_config_regime never raises.
@@ -2235,6 +2259,7 @@ async def build_daemon(
         writer_lock=writer_lock,
         command_gate=reservation_middleware.command_gate,
         release_worker=release_worker,
+        uncertainty_worker=uncertainty_worker,
         metrics=metrics,
         tracing=tracing,
     )

@@ -651,6 +651,13 @@ account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 d
 缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
 ReleaseSessions 由人分開 prepare/authorize/validate/promote，expected_revision 防止
 stale request；既有單一 daemon worker 與 command gate 執行，沒有另一個 executor。
+Uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution）同型（ADR D4'）：
+webapi（`require_operator` 只放行設定的 operator）預檢後只寫 `uncertainty_resolution_requests`
+的請求欄位並回 202，不取帳戶鎖（單一 pending 由 partial unique index 保證）；daemon 的
+`UncertaintyResolutionWorker` 在帳戶鎖內以 `operator_authorized`（與 release 共用）重驗權限與證據後
+才 append＋project，結果（applied／rejected／failed＋原因碼）記回請求列，寫不進去的請求另以獨立交易
+標 failed，不擋佇列。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger／
+projection 表零寫權限，授權與收回都在 migration `b8e2d4f6a013`。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 

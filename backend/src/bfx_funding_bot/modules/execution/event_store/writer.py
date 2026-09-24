@@ -41,6 +41,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Adds trading_halt.kind and relaxes one release_sessions transition guard.
     # Touches neither projection_heads, the seeded cursor, nor the projector.
     "a7f3c1d9e204",
+    # Adds the operator adjudication outbox beside the ledger and revokes web API
+    # writes; the rows, the cursor and the projector contract are unchanged.
+    "b8e2d4f6a013",
 })
 
 __all__ = [
