@@ -5,6 +5,7 @@ import json
 import time as time_module
 from typing import Any
 
+import pytest
 import websockets
 
 from bfx_funding_bot.external.bitfinex.ws import (
@@ -177,3 +178,56 @@ def test_reconnect_attempts_resets_after_5min_alive():
     client._connected_at = time_module.monotonic() - 301
     client.maybe_reset_backoff()
     assert client.reconnect_attempts == 0
+
+
+class _VenueNoticeServer:
+    """Sends one candle, then a venue notice, and keeps the connection open."""
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+    async def handler(self, websocket):
+        await websocket.send(json.dumps({"event": "info", "version": 2}))
+        async for raw in websocket:
+            msg = json.loads(raw)
+            if msg.get("event") == "subscribe":
+                await websocket.send(json.dumps({
+                    "event": "subscribed", "channel": "candles",
+                    "chanId": 101, "key": msg["key"],
+                }))
+                await websocket.send(json.dumps([101, [
+                    [1747584000000, 0.0001, 0.0001, 0.0001, 0.0001, 100.0],
+                ]]))
+                await websocket.send(json.dumps({"event": "info", "code": self.code}))
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"), [(20051, "venue_restart"), (20061, "venue_maintenance_ended")]
+)
+async def test_venue_restart_or_maintenance_end_reconnects(
+    unused_tcp_port: int, code: int, reason: str
+):
+    """The venue asks for a fresh connection but keeps this one open (and may keep
+    heartbeating). candles() must end on its own so the daemon resubscribes and
+    gap-fills; hb_timeout_s is high so neither the watchdog nor a peer close can
+    be what ends it."""
+    server = _VenueNoticeServer(code)
+    reasons: list[str] = []
+    async with websockets.serve(server.handler, "127.0.0.1", unused_tcp_port):
+        client = BitfinexWSClient(
+            url=f"ws://127.0.0.1:{unused_tcp_port}",
+            channels=[ChannelSpec(symbol="fUSD", timeframe="1h", period_agg="a30")],
+            hb_timeout_s=30.0,
+            on_disconnect=reasons.append,
+        )
+        seen = 0
+
+        async def consume() -> None:
+            nonlocal seen
+            async for _ in client.candles():
+                seen += 1
+
+        await asyncio.wait_for(consume(), timeout=3.0)
+        assert seen == 1
+        assert reasons == [reason]
+        await client.close()

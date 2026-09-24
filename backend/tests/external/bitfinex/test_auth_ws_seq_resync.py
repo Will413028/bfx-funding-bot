@@ -138,3 +138,36 @@ async def test_public_seq_gap_fires_seq_gap_resync():
     await s.wait_closed()
 
     assert "seq_gap" in reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [20051, 20061])
+async def test_venue_reconnect_notice_reconnects_and_resyncs(code: int):
+    """The venue asks for a fresh connection without closing this one; the client
+    must reconnect on its own, and the reconnect resyncs the ledger."""
+    server = _SeqServer(frames=[{"event": "info", "code": code}])  # type: ignore[list-item]
+    s, url = await _serve(server)
+    reasons: list[str] = []
+    client = BitfinexAuthWSClient(
+        creds=Credentials(api_key="k", api_secret="s"), url=url,
+        nonce_provider=lambda: 1, on_resync_needed=reasons.append,
+    )
+
+    async def run():
+        with contextlib.suppress(Exception):
+            async for _ in client.events():
+                pass
+
+    task = asyncio.create_task(run())
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while "reconnect" not in reasons and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+
+    await client.close()
+    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    s.close()
+    await s.wait_closed()
+
+    assert "reconnect" in reasons
+    assert len(server.connections) >= 2

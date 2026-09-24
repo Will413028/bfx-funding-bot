@@ -471,3 +471,25 @@ async def test_run_restarts_the_ws_client_after_each_reconcile_interval() -> Non
 
     assert ws.start_calls == 2
     assert ws.stopped
+
+
+def test_venue_maintenance_withholds_the_book_until_a_new_baseline() -> None:
+    """Bitfinex may keep heartbeating a book it stopped updating for maintenance."""
+    store = _valid_ws_store()
+    assert store.snapshot("fUST", now_ms=1_000) is not None
+
+    store.set_venue_maintenance(True)
+    assert store.snapshot("fUST", now_ms=1_000) is None
+    assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.VENUE_MAINTENANCE
+    # REST during maintenance is no fresher than the paused WS book.
+    assert not store.apply_rest_snapshot("fUST", _book_snapshot())
+    # A resubscribe during maintenance can still deliver a snapshot frame.
+    store.apply_snapshot("fUST", _book_snapshot(), sequence=20)
+    assert store.snapshot("fUST", now_ms=1_000) is None
+    assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.VENUE_MAINTENANCE
+
+    store.set_venue_maintenance(False)
+    # Neither the pre-maintenance book nor one seen during it comes back.
+    assert store.unavailable_reason("fUST", now_ms=1_000) is BookUnavailable.NO_BASELINE
+    assert store.apply_rest_snapshot("fUST", _book_snapshot())
+    assert store.snapshot("fUST", now_ms=1_000) is not None

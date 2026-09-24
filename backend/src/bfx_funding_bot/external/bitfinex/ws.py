@@ -108,6 +108,8 @@ class BitfinexWSClient:
         # loop (driven by the iterator returning) can run.
         self._candle_q: asyncio.Queue[CandleMessage | None] = asyncio.Queue()
         self._stop = False
+        # Set when the venue asks for a fresh connection (info 20051 / 20061).
+        self._reconnect_reason: str | None = None
         self.reconnect_attempts = 0
         self._reconnect_history: deque[float] = deque(maxlen=1000)
         self._recv_task: asyncio.Task[None] | None = None
@@ -207,6 +209,15 @@ class BitfinexWSClient:
         try:
             async for raw in self._ws:
                 self._handle_raw(raw)
+                if self._reconnect_reason is not None:
+                    # Same path as a heartbeat timeout: signal, close, and let the
+                    # daemon's reconnect loop resubscribe and gap-fill.
+                    reason, self._reconnect_reason = self._reconnect_reason, None
+                    self._fire_disconnect(reason)
+                    ws, self._ws = self._ws, None
+                    if ws is not None:
+                        await ws.close()
+                    break
         except asyncio.CancelledError:
             # Shutdown (close() cancels this task) — no reconnect signal; close()
             # sets _stop and the consumer is being torn down.
@@ -246,7 +257,17 @@ class BitfinexWSClient:
             if state is not None:
                 state.chan_id = msg["chanId"]
         elif ev == "info":
-            log.debug("bitfinex_ws_info %s", msg)
+            # 20051: server restarting. 20061: maintenance over, and Bitfinex
+            # advises resubscribing. Both mean: start a fresh connection.
+            code = msg.get("code")
+            if code == 20051:
+                log.warning("bitfinex_ws_server_restart %s", msg)
+                self._reconnect_reason = "venue_restart"
+            elif code == 20061:
+                log.warning("bitfinex_ws_maintenance_ended %s", msg)
+                self._reconnect_reason = "venue_maintenance_ended"
+            else:
+                log.debug("bitfinex_ws_info %s", msg)
         elif ev == "error":
             log.error("bitfinex_ws_error %s", msg)
 

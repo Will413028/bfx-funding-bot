@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import zlib
 
+import pytest
+
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
 
@@ -162,3 +164,89 @@ def test_parser_treats_an_empty_first_book_frame_as_a_snapshot() -> None:
     client.handle_raw(json.dumps([9, [], 10]))
 
     assert snapshots == [("fUST", [], 10)]
+
+
+def _info_client(maintenance: list[bool], sequences: list[int]) -> FundingBookWSClient:
+    client = FundingBookWSClient(
+        symbols=("fUST",),
+        on_sequence=lambda _symbol, sequence: sequences.append(sequence),
+        on_disconnect=lambda: None,
+        on_maintenance=maintenance.append,
+    )
+    client.handle_raw(
+        json.dumps({"event": "subscribed", "channel": "book", "chanId": 9, "symbol": "fUST"})
+    )
+    return client
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [{"event": "info", "code": 20060}, {"event": "info", "version": 2, "platform": {"status": 0}}],
+)
+def test_maintenance_notice_stops_heartbeats_counting_as_confirmation(notice) -> None:
+    maintenance: list[bool] = []
+    sequences: list[int] = []
+    client = _info_client(maintenance, sequences)
+
+    client.handle_raw(json.dumps(notice))
+    client.handle_raw(json.dumps([9, "hb", 13]))
+
+    assert maintenance == [True]
+    assert sequences == []
+
+
+def test_platform_up_on_connect_clears_a_stale_maintenance_flag() -> None:
+    maintenance: list[bool] = []
+    client = _info_client(maintenance, [])
+
+    client.handle_raw(json.dumps({"event": "info", "version": 2, "platform": {"status": 1}}))
+
+    assert maintenance == [False]
+
+
+class _Connection:
+    """A connection that serves frames until the client stops reading."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = frames
+        self.served = 0
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        if self.served == len(self._frames):
+            raise StopAsyncIteration
+        self.served += 1
+        return self._frames[self.served - 1]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.parametrize(("code", "expected_maintenance"), [(20061, [False]), (20051, [])])
+@pytest.mark.asyncio
+async def test_restart_and_maintenance_end_close_the_connection_to_resubscribe(
+    code, expected_maintenance
+) -> None:
+    maintenance: list[bool] = []
+    disconnects: list[None] = []
+    client = FundingBookWSClient(
+        symbols=("fUST",),
+        on_disconnect=lambda: disconnects.append(None),
+        on_maintenance=maintenance.append,
+    )
+    connection = _Connection([
+        json.dumps({"event": "info", "code": code}),
+        json.dumps({"event": "subscribed", "channel": "book", "chanId": 9, "symbol": "fUST"}),
+    ])
+    client._ws = connection  # type: ignore[assignment]
+
+    await client._recv_loop()
+
+    assert connection.closed
+    # Nothing after the notice is read: the owner's run loop reconnects.
+    assert connection.served == 1
+    assert disconnects == [None]
+    assert maintenance == expected_maintenance

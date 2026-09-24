@@ -92,6 +92,7 @@ class BookUnavailable(StrEnum):
     SEQUENCE_GAP = "sequence_gap"
     CHECKSUM_MISMATCH = "checksum_mismatch"
     STALE = "stale"
+    VENUE_MAINTENANCE = "venue_maintenance"
 
 
 class FundingBookProvider(Protocol):
@@ -131,6 +132,18 @@ class FundingBookStore(FundingBookProvider):
         # subscribed channel, so continuity is a connection-wide fact: a gap
         # means this connection dropped frames and no symbol can be trusted.
         self._connection_sequence: int | None = None
+        # Bitfinex announces maintenance (info 20060 / platform status 0) and its
+        # end (20061). In between it may keep heartbeating a book it no longer
+        # updates, and heartbeats count as venue confirmation, so the book must
+        # be withheld explicitly rather than left to age out.
+        self._venue_maintenance = False
+
+    def set_venue_maintenance(self, active: bool) -> None:
+        # Invalidate on both edges: nothing seen during maintenance, including a
+        # snapshot delivered by a resubscribe, may outlive it.
+        if active != self._venue_maintenance:
+            self.mark_disconnected()
+        self._venue_maintenance = active
 
     def apply_snapshot(
         self,
@@ -215,6 +228,9 @@ class FundingBookStore(FundingBookProvider):
         expected_generation: int | None = None,
         expected_reconciliation_epoch: int | None = None,
     ) -> bool:
+        if self._venue_maintenance:
+            # REST during maintenance is no fresher than the paused WS book.
+            return False
         if (
             expected_reconciliation_epoch is not None
             and self._reconciliation_epoch != expected_reconciliation_epoch
@@ -263,6 +279,8 @@ class FundingBookStore(FundingBookProvider):
         return self._reconciliation_epoch
 
     def snapshot(self, symbol: str, *, now_ms: int) -> MarketSnapshot | None:
+        if self._venue_maintenance:
+            return None
         state = self._states.get(symbol)
         if state is None or state.captured_at_ms is None or state.received_at_ms is None:
             return None
@@ -290,6 +308,8 @@ class FundingBookStore(FundingBookProvider):
 
     def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
         """Name what is withholding this book, or None when it is priceable."""
+        if self._venue_maintenance:
+            return BookUnavailable.VENUE_MAINTENANCE
         state = self._states.get(symbol)
         if state is None or state.captured_at_ms is None or state.received_at_ms is None:
             return BookUnavailable.NO_BASELINE
@@ -400,6 +420,7 @@ class FundingBookService(FundingBookProvider):
                 on_checksum=self._on_checksum,
                 on_sequence=self._store.apply_sequence,
                 on_disconnect=self._store.mark_disconnected,
+                on_maintenance=self._store.set_venue_maintenance,
             )
 
     async def start(self) -> None:

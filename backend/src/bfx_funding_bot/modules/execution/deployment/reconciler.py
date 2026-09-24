@@ -103,6 +103,7 @@ _BOOK_BLOCK_REASONS: dict[BookUnavailable | None, BlockReason] = {
     BookUnavailable.SEQUENCE_GAP: BlockReason.BOOK_SEQUENCE_INVALID,
     BookUnavailable.CHECKSUM_MISMATCH: BlockReason.BOOK_CHECKSUM_INVALID,
     BookUnavailable.STALE: BlockReason.BOOK_STALE,
+    BookUnavailable.VENUE_MAINTENANCE: BlockReason.BOOK_VENUE_MAINTENANCE,
 }
 
 

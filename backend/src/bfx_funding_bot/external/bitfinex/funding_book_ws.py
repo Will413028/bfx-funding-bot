@@ -96,6 +96,7 @@ class FundingBookWSClient:
         on_checksum: Callable[[str, int, int | None], None] | None = None,
         on_sequence: Callable[[str, int], None] | None = None,
         on_disconnect: Callable[[], None] | None = None,
+        on_maintenance: Callable[[bool], None] | None = None,
     ) -> None:
         self._symbols = tuple(symbols)
         self._length = length
@@ -105,6 +106,8 @@ class FundingBookWSClient:
         self._on_checksum = on_checksum
         self._on_sequence = on_sequence
         self._on_disconnect = on_disconnect
+        self._on_maintenance = on_maintenance
+        self._reconnect_requested = False
         self._channels: dict[int, str] = {}
         self._snapshot_channels: set[int] = set()
         self._ws: ClientConnection | None = None
@@ -135,12 +138,14 @@ class FundingBookWSClient:
         on_checksum: Callable[[str, int, int | None], None],
         on_sequence: Callable[[str, int], None],
         on_disconnect: Callable[[], None],
+        on_maintenance: Callable[[bool], None] | None = None,
     ) -> None:
         self._on_snapshot = on_snapshot
         self._on_update = on_update
         self._on_checksum = on_checksum
         self._on_sequence = on_sequence
         self._on_disconnect = on_disconnect
+        self._on_maintenance = on_maintenance
 
     def checksum(self, *, bids: BookLevels, asks: BookLevels) -> int:
         return funding_book_checksum(bids=bids, asks=asks)
@@ -165,13 +170,21 @@ class FundingBookWSClient:
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None
+        ws = self._ws
         try:
-            async for raw in self._ws:
+            async for raw in ws:
                 self.handle_raw(raw)
+                if self._reconnect_requested:
+                    # Closing is the only way back: the owner's run loop
+                    # resubscribes only once this connection is gone.
+                    break
         except websockets.ConnectionClosed:
             pass
         finally:
+            self._reconnect_requested = False
             self._ws = None
+            with contextlib.suppress(Exception):
+                await ws.close()
             self.mark_disconnected()
 
     def mark_disconnected(self) -> None:
@@ -199,9 +212,40 @@ class FundingBookWSClient:
             if isinstance(chan_id, int) and isinstance(symbol, str):
                 self._channels[chan_id] = symbol
                 self._snapshot_channels.discard(chan_id)
+        elif event == "info":
+            self._handle_info(frame)
         elif event == "error":
             log.error("bitfinex_funding_book_error %s", frame)
             self.mark_disconnected()
+
+    def _handle_info(self, frame: dict[str, Any]) -> None:
+        """Act on the venue's own connection notices.
+
+        20051: the server is restarting; reconnect. 20060: maintenance begins and
+        the book stops being maintained, though heartbeats may continue.
+        20061: maintenance is over; Bitfinex advises resubscribing, and a fresh
+        connection is how this client resubscribes. The first info frame of a
+        connection also carries platform status, 0 meaning maintenance.
+        """
+        code = frame.get("code")
+        platform = frame.get("platform")
+        if code == 20060 or (isinstance(platform, dict) and platform.get("status") == 0):
+            log.warning("bitfinex_funding_book_maintenance_started %s", frame)
+            self._set_maintenance(True)
+            self.mark_disconnected()
+        elif code == 20061:
+            log.warning("bitfinex_funding_book_maintenance_ended %s", frame)
+            self._set_maintenance(False)
+            self._reconnect_requested = True
+        elif code == 20051:
+            log.warning("bitfinex_funding_book_server_restart %s", frame)
+            self._reconnect_requested = True
+        elif isinstance(platform, dict) and platform.get("status") == 1:
+            self._set_maintenance(False)
+
+    def _set_maintenance(self, active: bool) -> None:
+        if self._on_maintenance is not None:
+            self._on_maintenance(active)
 
     def _handle_data(self, frame: list[object]) -> None:
         chan_id = frame[0]

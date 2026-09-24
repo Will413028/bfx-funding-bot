@@ -131,6 +131,7 @@ def test_execution_contract_enum_values_are_stable() -> None:
         "book_stale",
         "book_sequence_invalid",
         "book_checksum_invalid",
+        "book_venue_maintenance",
         "period_not_found",
         "insufficient_period_depth",
         "fill_model_missing",

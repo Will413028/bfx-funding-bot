@@ -481,6 +481,14 @@ class BitfinexAuthWSClient:
                                 event.status, event.raw,
                             )
                             return
+                    if isinstance(event, ChannelInfo) and event.raw.get("code") in (
+                        20051, 20061,
+                    ):
+                        # Server restart / maintenance over: Bitfinex asks for a
+                        # fresh connection. Returning closes this one; events()
+                        # reconnects and the reconnect fires a ledger resync.
+                        log.warning("bfx_auth_ws_venue_reconnect_requested raw=%r", event.raw)
+                        return
                     if self._seq.observe(_public_seq_of(event)) == "gap":
                         self._fire_resync("seq_gap")
                     yield event
