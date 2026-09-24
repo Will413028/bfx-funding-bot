@@ -49,7 +49,24 @@ log = logging.getLogger(__name__)
 # The single schema this build is willing to run against. Startup compares it
 # with the database's actual alembic heads, so it must move with every
 # migration or the daemon refuses to boot.
-RELEASE_SCHEMA_HEAD = "a7f3c1d9e204"
+RELEASE_SCHEMA_HEAD = "b8e2d4f6a013"
+
+
+async def operator_authorized(session: AsyncSession, *, account_id: UUID, user: str) -> bool:
+    """Whether ``user`` may act as this account's operator right now.
+
+    The one authority for every human-requested action the daemon applies:
+    release transitions and uncertainty adjudication alike. The configured sole
+    admin operator only, then the database's own verdict -- still an admin, not
+    banned, TOTP enrolled, an owner/operator member of a live account. Call it
+    in the transaction that applies the action: the function takes SHARE locks,
+    so the authority it read holds until that commit.
+    """
+    settings = AuthSettings()
+    if not user or user != settings.operator_user_id or settings.operator_role != "admin":
+        return False
+    return bool(await session.scalar(text("SELECT public.release_operator_authorized(:account, :actor)"),
+                                     {"account": account_id, "actor": user}))
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
@@ -83,11 +100,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
                 "policies": policies, "funding_rule_digest": RULE.digest}
 
     async def operator(session: AsyncSession, user: str) -> bool:
-        settings = AuthSettings()
-        if not user or user != settings.operator_user_id or settings.operator_role != "admin":
-            return False
-        return bool(await session.scalar(text("SELECT public.release_operator_authorized(:account, :actor)"),
-                                         {"account": repo.account_id, "actor": user}))
+        return await operator_authorized(session, account_id=repo.account_id, user=user)
 
     async def readiness(session: AsyncSession, row: ReleaseSessionRow, *, observe: bool) -> object:
         proof = await asyncio.to_thread(runtime.verify)

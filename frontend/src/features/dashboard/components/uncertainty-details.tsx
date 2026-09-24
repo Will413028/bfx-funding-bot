@@ -27,6 +27,16 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
   const resolution = useResolveUncertainty(
     uncertainty.blockedScope.exchangeAccountId,
   );
+  // The web API only queues the adjudication; the account daemon applies it.
+  // The row's newest request is the one status source -- this tab's, another
+  // tab's, or one found on reload -- and every action waits for its outcome.
+  const latestRequest = uncertainty.resolutionRequest ?? null;
+  const isQueued = latestRequest?.state === "requested";
+  const isAwaitingDaemon = resolution.isPending || isQueued;
+  const notApplied =
+    latestRequest?.state === "rejected" || latestRequest?.state === "failed"
+      ? (latestRequest.outcomeReason ?? latestRequest.state)
+      : null;
   const [manualDecision, setManualDecision] = useState("");
   const [manualReason, setManualReason] = useState("");
   const observedAt = uncertainty.evidenceSummary.observedAtMs;
@@ -40,7 +50,7 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
     context.unavailableReason === null &&
     typeof reconcileEventSeq === "number";
   const canSubmit =
-    hasFreshContext && Boolean(operatorUuid) && !resolution.isPending;
+    hasFreshContext && Boolean(operatorUuid) && !isAwaitingDaemon;
   const isSubmitUnknown = uncertainty.kind === "submit_outcome_unknown";
   const isManual =
     uncertainty.kind === "unattributed_venue_offer" ||
@@ -220,6 +230,17 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
         <output className="mt-3 block text-xs text-amber-300">
           {t("uncertaintyOperatorUnavailable")}
         </output>
+      ) : null}
+      {isQueued ? (
+        <output className="mt-3 block text-xs text-amber-200">
+          {t("uncertaintyResolutionPending")}
+        </output>
+      ) : null}
+      {notApplied ? (
+        <p className="mt-3 text-xs text-rose-400" role="alert">
+          {t("uncertaintyResolutionNotApplied")}:{" "}
+          {notApplied.replaceAll("_", " ")}
+        </p>
       ) : null}
       {resolution.isError ? (
         <p className="mt-3 text-xs text-rose-400" role="alert">

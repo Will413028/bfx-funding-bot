@@ -110,6 +110,8 @@
     "uncertaintyRecordManual": "Record manual resolution",
     "uncertaintyOperatorUnavailable": "Operator identity is unavailable.",
     "uncertaintyResolutionFailed": "Resolution could not be recorded.",
+    "uncertaintyResolutionPending": "Resolution requested. Waiting for the account daemon to apply it.",
+    "uncertaintyResolutionNotApplied": "Resolution was not applied",
     "uncertaintyNextAction": {
       "bind": "Confirm the exact venue offer ID from a fresh full-account reconcile, then bind it to this attempt.",
       "notAccepted": "Confirm complete offer-history coverage and zero exact candidates before marking this request not accepted.",

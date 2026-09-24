@@ -1,10 +1,17 @@
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@/lib/test-utils";
-import type { Uncertainty, UncertaintyResolutionContext } from "@/types";
+import type {
+  Uncertainty,
+  UncertaintyResolutionContext,
+  UncertaintyResolutionRequest,
+} from "@/types";
 import { UncertaintyBanner } from "../components/uncertainty-banner";
 
-const { resolve } = vi.hoisted(() => ({ resolve: vi.fn() }));
+const { resolve, mutation } = vi.hoisted(() => ({
+  resolve: vi.fn(),
+  mutation: { data: undefined as unknown, isPending: false },
+}));
 
 vi.mock("../hooks/use-uncertainties", async (importOriginal) => {
   const original =
@@ -13,7 +20,8 @@ vi.mock("../hooks/use-uncertainties", async (importOriginal) => {
     ...original,
     useResolveUncertainty: () => ({
       mutate: resolve,
-      isPending: false,
+      data: mutation.data,
+      isPending: mutation.isPending,
       isError: false,
       error: null,
     }),
@@ -54,9 +62,105 @@ const BLOCKED: Uncertainty = {
   resolutionContext: RESOLUTION_CONTEXT,
 };
 
+function request(
+  state: UncertaintyResolutionRequest["state"],
+  outcomeReason: string | null = null,
+): UncertaintyResolutionRequest {
+  return {
+    requestId: "req-1",
+    uncertaintyId: "u-1",
+    action: "bind_to_venue",
+    state,
+    reconcileEventSeq: 12,
+    createdAtMs: 1,
+    processedAtMs: state === "requested" ? null : 2,
+    resolvedEventSeq: state === "applied" ? 13 : null,
+    outcomeReason,
+  };
+}
+
+function bindButton() {
+  return screen.getByRole("button", { name: /bind to venue offer/i });
+}
+
 describe("uncertainty contract", () => {
-  beforeEach(() => resolve.mockReset());
+  beforeEach(() => {
+    resolve.mockReset();
+    mutation.data = undefined;
+    mutation.isPending = false;
+  });
   afterEach(cleanup);
+
+  it("holds every action while the row's request waits for the daemon", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          { ...BLOCKED, resolutionRequest: request("requested") },
+        ],
+      }),
+    );
+
+    expect(screen.getByText(/waiting for the account daemon/i)).toBeDefined();
+    expect(bindButton().hasAttribute("disabled")).toBe(true);
+    fireEvent.click(bindButton());
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("says why the daemon did not apply a request and allows a fresh one", () => {
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          {
+            ...BLOCKED,
+            resolutionRequest: request("rejected", "stale_reconcile_fence"),
+          },
+        ],
+      }),
+    );
+
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /not applied: stale reconcile fence/i,
+    );
+    expect(screen.queryByText(/waiting for the account daemon/i)).toBeNull();
+    expect(bindButton().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("follows the row, not an older result this tab's mutation returned", () => {
+    // Another tab queued a newer request after this tab's was applied.
+    mutation.data = { ...request("applied"), requestId: "req-old" };
+    render(
+      createElement(UncertaintyBanner, {
+        uncertainties: [
+          {
+            ...BLOCKED,
+            resolutionRequest: {
+              ...request("requested"),
+              requestId: "req-new",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(screen.getByText(/waiting for the account daemon/i)).toBeDefined();
+    expect(bindButton().hasAttribute("disabled")).toBe(true);
+  });
+
+  it("never waits on a status it has no record of", () => {
+    // No second read that can fail: without a queued request on the row and
+    // no submission in flight, the controls are live.
+    render(createElement(UncertaintyBanner, { uncertainties: [BLOCKED] }));
+
+    expect(screen.queryByText(/waiting for the account daemon/i)).toBeNull();
+    expect(bindButton().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("holds the controls while its own submission is in flight", () => {
+    mutation.isPending = true;
+    render(createElement(UncertaintyBanner, { uncertainties: [BLOCKED] }));
+
+    expect(bindButton().hasAttribute("disabled")).toBe(true);
+  });
 
   it("does not render a warning when visible symbols have no open uncertainty", () => {
     render(
