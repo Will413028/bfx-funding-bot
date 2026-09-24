@@ -114,6 +114,19 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      # tests/integration/test_operator_bootstrap.py imports the frontend's
+      # operator CLI, which needs its node dependencies (ioredis etc.).
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
       - run: uv sync --all-groups
       # Keep third-party live smoke tests out of deterministic CI; run them
       # explicitly with `uv run pytest -m 'integration and live'`.
