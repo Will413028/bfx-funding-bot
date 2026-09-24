@@ -1,0 +1,101 @@
+name: Release images
+
+# Builds the production images once, in CI, from a main commit whose CI run
+# passed, and publishes them to GHCR. The VM deploys by digest only; the `main`
+# tag exists so the VM can discover the newest release, never as deploy input.
+# See wiki ADR 2026-09-25-ci-registry-digest-deploy.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Releases publish in commit order; a newer one must not be cancelled midway.
+  group: release-images
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and push images (linux/arm64)
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    # Native arm64: production (OCI A1) is arm64, so no emulation.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REVISION: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Resolve image names
+        id: names
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "backend=${prefix}-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=${prefix}-frontend" >> "$GITHUB_OUTPUT"
+          # Public build inputs are reviewed config, not secrets.
+          jq -e 'keys == ["NEXT_PUBLIC_APP_NAME","NEXT_PUBLIC_APP_URL","NEXT_PUBLIC_BETTER_AUTH_URL"]' \
+            deploy/vm/frontend-public.json
+          {
+            echo "frontend_args<<EOF"
+            jq -r 'to_entries[] | "\(.key)=\(.value)"' deploy/vm/frontend-public.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend
+        id: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          platforms: linux/arm64
+          push: true
+          build-args: GIT_SHA=${{ env.REVISION }}
+          labels: org.opencontainers.image.revision=${{ env.REVISION }}
+          tags: |
+            ${{ steps.names.outputs.backend }}:sha-${{ env.REVISION }}
+            ${{ steps.names.outputs.backend }}:main
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build and push frontend
+        id: frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          platforms: linux/arm64
+          push: true
+          build-args: ${{ steps.names.outputs.frontend_args }}
+          labels: org.opencontainers.image.revision=${{ env.REVISION }}
+          tags: |
+            ${{ steps.names.outputs.frontend }}:sha-${{ env.REVISION }}
+            ${{ steps.names.outputs.frontend }}:main
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Record release
+        run: |
+          {
+            echo "### Release ${REVISION}"
+            echo ""
+            echo "| image | digest |"
+            echo "|---|---|"
+            echo "| ${{ steps.names.outputs.backend }} | \`${{ steps.backend.outputs.digest }}\` |"
+            echo "| ${{ steps.names.outputs.frontend }} | \`${{ steps.frontend.outputs.digest }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
