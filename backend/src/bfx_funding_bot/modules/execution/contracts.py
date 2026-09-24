@@ -39,6 +39,7 @@ class BlockReason(StrEnum):
     BOOK_STALE = "book_stale"
     BOOK_SEQUENCE_INVALID = "book_sequence_invalid"
     BOOK_CHECKSUM_INVALID = "book_checksum_invalid"
+    BOOK_VENUE_MAINTENANCE = "book_venue_maintenance"
     PERIOD_NOT_FOUND = "period_not_found"
     INSUFFICIENT_PERIOD_DEPTH = "insufficient_period_depth"
     FILL_MODEL_MISSING = "fill_model_missing"

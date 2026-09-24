@@ -90,6 +90,7 @@ _BOOK_BLOCK_REASONS = frozenset(
         BlockReason.BOOK_SEQUENCE_INVALID,
         BlockReason.BOOK_CHECKSUM_INVALID,
         BlockReason.BOOK_STALE,
+        BlockReason.BOOK_VENUE_MAINTENANCE,
     }
 )
 
