@@ -46,13 +46,19 @@ def archive_fixture(path, mutation=None, component="backend"):
     members.update({"index.json": json.dumps(index).encode(),
         "manifest.json": json.dumps(docker).encode(), "oci-layout": b'{"imageLayoutVersion":"1.0.0"}'})
     if mutation in {"classic_legacy", "legacy_defaults", "extra_config", "legacy_corrupt",
-                    "legacy_wrong_config", "legacy_builder_fields", "legacy_variant_mismatch"}:
+                    "legacy_wrong_config", "legacy_builder_fields", "legacy_variant_mismatch",
+                    "legacy_onbuild_null", "legacy_onbuild_set"}:
         legacy = {"id": "a"*64, "created": "1970-01-01T00:00:00Z",
             "container_config": {}, "config": {}, "os": "linux", "architecture": "arm64"}
         if mutation == "extra_config":
             legacy["rootfs"] = {"type": "layers", "diff_ids": [layer["digest"]]}
         if mutation == "legacy_wrong_config":
             legacy["config"] = {"Cmd": ["wrong"]}
+        # Docker 28 serializes an empty OnBuild as null; OCI config omits it.
+        if mutation == "legacy_onbuild_null":
+            legacy["config"] = {"OnBuild": None}
+        if mutation == "legacy_onbuild_set":
+            legacy["config"] = {"OnBuild": ["RUN echo not-in-the-image"]}
         if mutation in {"legacy_builder_fields", "legacy_variant_mismatch"}:
             legacy["container"] = "c" * 64
             legacy["variant"] = "v8" if mutation == "legacy_builder_fields" else "v7"
@@ -107,7 +113,8 @@ def test_archive_verifies_distinct_config_and_manifest(tmp_path, component):
 @pytest.mark.parametrize("mutation", ["lossy_pair", "double_index", "config_content",
     "manifest_content", "layer_content", "missing_layer", "layer_size", "manifest_size",
     "docker_config", "unsafe", "duplicate_json", "duplicate_member", "symlink", "layer_role",
-    "extra_config", "legacy_corrupt", "legacy_wrong_config", "legacy_variant_mismatch"])
+    "extra_config", "legacy_corrupt", "legacy_wrong_config", "legacy_variant_mismatch",
+    "legacy_onbuild_set"])
 def test_archive_rejects_unproven_or_ambiguous_content(tmp_path, mutation):
     from scripts.image_artifact import inspect_archive
     path = tmp_path / "image.tar"
@@ -116,7 +123,8 @@ def test_archive_rejects_unproven_or_ambiguous_content(tmp_path, mutation):
         inspect_archive(path)
 
 
-@pytest.mark.parametrize("mutation", ["classic_legacy", "legacy_defaults", "legacy_builder_fields"])
+@pytest.mark.parametrize("mutation", ["classic_legacy", "legacy_defaults", "legacy_builder_fields",
+                                      "legacy_onbuild_null"])
 def test_classic_save_legacy_layer_json_is_not_an_additional_image(tmp_path, mutation):
     from scripts.image_artifact import inspect_archive
     path = tmp_path / "image.tar"

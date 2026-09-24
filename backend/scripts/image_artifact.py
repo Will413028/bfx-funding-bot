@@ -174,11 +174,13 @@ def inspect_archive(path: Path) -> PackagedImageIdentity:
                 if len(legacy) != len(layers):
                     raise ValueError("legacy_layer_count")
                 tops = [value for value in legacy.values() if "config" in value]
-                # v1 serializes these zero values; OCI config omits them.
+                # v1 serializes these zero values; OCI config omits them. Docker
+                # 28 also writes an empty OnBuild as null (29 does not); a real
+                # OnBuild list still has to match the canonical config.
                 defaults = {"Hostname": "", "Domainname": "", "Image": "",
                     "AttachStdin": False, "AttachStdout": False, "AttachStderr": False,
                     "Tty": False, "OpenStdin": False, "StdinOnce": False,
-                    "Volumes": None, "Entrypoint": None, "Labels": None}
+                    "Volumes": None, "Entrypoint": None, "Labels": None, "OnBuild": None}
                 if (len(tops) != 1 or {**defaults, **tops[0]["config"]} != {**defaults, **config["config"]}
                     or tops[0]["architecture"] != config["architecture"]):
                     raise ValueError("legacy_top_config")
