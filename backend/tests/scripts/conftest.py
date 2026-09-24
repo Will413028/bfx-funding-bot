@@ -27,6 +27,8 @@ def _describe_rejected_archive(path: Path) -> None:
     the tar's index/manifest documents so a runner-specific rejection can be read
     from CI output instead of reproduced blind.
     """
+    version = run(["docker", "version", "--format", "{{.Server.Version}}"])
+    print("rejected_archive_docker_version=" + version.decode().strip())
     store = run(["docker", "info", "--format", "{{.Driver}} {{json .DriverStatus}}"])
     print("rejected_archive_docker_store=" + store.decode().strip())
     with tarfile.open(path) as archive:
@@ -34,6 +36,16 @@ def _describe_rejected_archive(path: Path) -> None:
         print("rejected_archive_members=" + json.dumps(
             [(m.name, m.size) for m in members if not m.name.startswith("blobs/")
              or m.size < 4096][:60]))
+        # Classic-store v1 compatibility JSON: which keys this engine writes.
+        for member in members:
+            if member.name.startswith("blobs/") and 0 < member.size < 4096:
+                stream = archive.extractfile(member)
+                try:
+                    value = json.loads(stream.read()) if stream is not None else None
+                except ValueError:
+                    continue
+                if isinstance(value, dict) and "id" in value:
+                    print(f"rejected_archive_legacy_keys={sorted(value)}")
         for name in ("index.json", "manifest.json", "oci-layout"):
             member = next((m for m in members if m.name == name), None)
             if member is not None and (stream := archive.extractfile(member)) is not None:
@@ -59,7 +71,10 @@ def unapproved_release_image(tmp_path_factory):
     try:
         try:
             identity = inspect_archive(path)
-        except PackagingBlocked:
+        except PackagingBlocked as exc:
+            # The verifier raises "from None" to keep output sanitized; the check
+            # that failed is still on __context__.
+            print(f"rejected_archive_cause={exc.__context__!r}")
             _describe_rejected_archive(path)
             raise
         assert resolve_image(identity, run) == image
