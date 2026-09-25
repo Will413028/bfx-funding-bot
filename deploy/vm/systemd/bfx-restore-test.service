@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly isolated restore test (existing pgBackRest restore drill)
+Documentation=file:///home/ubuntu/bfx-funding-bot/docs/runbooks/offsite-dr.md
+Requires=docker.service
+After=docker.service
+OnFailure=bfx-alert@%n.service
+
+[Service]
+Type=oneshot
+# Same principal as the pgBackRest units: the drill reads its secrets and writes
+# its evidence under this user's home. HOME is explicit, never inherited.
+User=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/home/ubuntu/bfx-funding-bot
+# The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
+TimeoutStartSec=7200
+ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_restore_test.py --config /home/ubuntu/bfx/restore-test.json --drill /home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check backup freshness one minute after each status collection
+
+[Timer]
+# bfx-pgbackrest-status.timer runs at *:0/5 and rewrites the evidence file.
+OnCalendar=*:1/5
+Persistent=false
+Unit=bfx-backup-check.service
+
+[Install]
+WantedBy=timers.target

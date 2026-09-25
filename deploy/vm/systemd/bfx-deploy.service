@@ -1,0 +1,23 @@
+[Unit]
+Description=Deploy the newest green main release by digest (bfx-deploy)
+Documentation=file:///usr/local/lib/bfx-ops/bfx_deploy.py
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: reads /opt/bfx/runtime (root 0600) and drives docker. git and backup.sh
+# run as the mirror owner through runuser inside the tool. HOME is explicit:
+# systemd does not set it for a root system service, and nothing here may fall
+# back to a guessed home directory (a transient root unit resolves ~ to /root).
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+StateDirectory=bfx-deploy
+StateDirectoryMode=0700
+# Backup (<=7200s) + pulls + migration + health/settle; never killed mid-migration.
+TimeoutStartSec=3h
+ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_deploy.py --mirror /home/ubuntu/bfx-funding-bot --state-dir /var/lib/bfx-deploy
+# No OnFailure=: bfx-deploy sends its own deploy/rollback/failure alerts, including
+# for unexpected crashes, and records every attempt in the deployments ledger.

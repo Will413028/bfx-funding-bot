@@ -1,0 +1,121 @@
+# Application services only (bot, webapi, frontend), deployed by bfx-deploy
+# (deploy/vm/ops/bfx_deploy.py) from the release's own commit:
+#
+#   docker compose -p bfx-app -f <release>/docker-compose.app.yml \
+#     up -d --no-deps bot webapi frontend
+#
+# PostgreSQL and Redis stay in docker-compose.bot.yml (project `bfx`) and are never
+# defined, recreated or touched here. This project only joins their existing
+# `bfx_default` network.
+#
+# Images: bfx-deploy supplies complete `<repository>@sha256:<digest>` references
+# resolved from GHCR; this file never names a tag and never builds. pull_policy
+# never mirrors the old `docker create --pull=never`: bfx-deploy pulls by digest
+# first, so `up` can only start what was already verified.
+#
+# Hardening kept from the immutable-release launcher (release_package.create_launch,
+# immutable_release.start_service): read-only root filesystem, bot/webapi UID 1000,
+# frontend user nextjs, all capabilities dropped, no-new-privileges, cwd /app, the
+# image's exact interpreter/module, bot DNS alias bfx-bot, frontend published on
+# host loopback 127.0.0.1:3001 only, no volumes, no writable mounts. Loader and
+# interpreter injection variables are forced empty here AND rejected in the env
+# files by bfx-deploy AND re-checked on the created containers.
+#
+# Env precedence: `environment` > later env_file > earlier env_file. Secrets stay in
+# /opt/bfx/runtime/*.env (root 0600, never in git); non-secret bot settings come
+# from live.env at the same commit as this file.
+
+name: bfx-app
+
+services:
+  bot:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    container_name: bfx-bot
+    entrypoint: []
+    command: ["/app/.venv/bin/python", "-m", "bfx_funding_bot.modules.marketfeed.daemon"]
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - /opt/bfx/runtime/bot.env
+      - live.env
+    environment:
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    networks:
+      bfx_default:
+        aliases: [bfx-bot]
+
+  webapi:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    container_name: bfx-webapi
+    entrypoint: []
+    command: ["/app/.venv/bin/python", "-m", "uvicorn", "bfx_funding_bot.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - /opt/bfx/runtime/webapi.env
+    environment:
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    networks:
+      bfx_default: {}
+
+  frontend:
+    image: ${BFX_FRONTEND_IMAGE:?BFX_FRONTEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    container_name: bfx-frontend
+    entrypoint: []
+    command: ["node", "server.js"]
+    user: nextjs
+    working_dir: /app
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - /opt/bfx/runtime/frontend.env
+    environment:
+      BFX_IMAGE_DIGEST: ${BFX_FRONTEND_DIGEST:?BFX_FRONTEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      NODE_OPTIONS: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    ports:
+      # Host 3000 is Grafana; Tailscale Funnel 443 -> 127.0.0.1:3001. Loopback only.
+      - "127.0.0.1:3001:3000"
+    networks:
+      bfx_default: {}
+
+networks:
+  bfx_default:
+    external: true
+    name: bfx_default
