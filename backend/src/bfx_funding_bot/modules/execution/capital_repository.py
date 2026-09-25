@@ -24,6 +24,7 @@ from bfx_funding_bot.modules.execution.capital_policy import (
     CapitalPolicy,
     CapitalProbation,
     CapitalSnapshot,
+    OfferEnvelope,
     evaluate_capital,
 )
 from bfx_funding_bot.modules.execution.capital_tables import (
@@ -83,25 +84,51 @@ class CapitalBlockedError(ValueError):
     """No authorization was issued; caller must not submit."""
 
 
-# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9).
-# Schema 1 stays readable (max_offer_amount None, which the pre-trade guard
-# refuses); every policy that sets the ceiling is written as schema 2.
-POLICY_KEYS = {1: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"}),
-               2: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction",
-                             "max_offer_amount"})}
+# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9);
+# 3 adds the offer envelope (lending envelope D1). Older schemas stay readable
+# with the missing parts None, which the offer-envelope guard refuses.
+_BASE_KEYS = frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"})
+ENVELOPE_KEYS = frozenset({"min_period_days", "max_period_days", "max_open_offers",
+                           "rate_floor_ratio", "min_rate_apr"})
+POLICY_KEYS = {1: _BASE_KEYS,
+               2: _BASE_KEYS | {"max_offer_amount"},
+               3: _BASE_KEYS | {"max_offer_amount", "envelope"}}
 
 
 def policy_schema_version(policy: CapitalPolicy) -> int:
+    if policy.envelope is not None:
+        return 3
     return 2 if policy.max_offer_amount is not None else SCHEMA_VERSION
 
 
+def envelope_payload(envelope: OfferEnvelope) -> dict[str, Any]:
+    return {"min_period_days": envelope.min_period_days,
+            "max_period_days": envelope.max_period_days,
+            "max_open_offers": envelope.max_open_offers,
+            "rate_floor_ratio": str(envelope.rate_floor_ratio),
+            "min_rate_apr": str(envelope.min_rate_apr)}
+
+
 def policy_payload(policy: CapitalPolicy) -> dict[str, Any]:
-    payload = {"enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
-               "allocation_mode": policy.allocation_mode,
-               "max_cell_fraction": str(policy.max_cell_fraction)}
+    payload: dict[str, Any] = {
+        "enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
+        "allocation_mode": policy.allocation_mode,
+        "max_cell_fraction": str(policy.max_cell_fraction)}
     if policy.max_offer_amount is not None:
         payload["max_offer_amount"] = str(policy.max_offer_amount)
+    if policy.envelope is not None:
+        payload["envelope"] = envelope_payload(policy.envelope)
     return payload
+
+
+def _envelope(raw: object) -> OfferEnvelope:
+    if not isinstance(raw, dict) or set(raw) != ENVELOPE_KEYS:
+        raise ValueError("envelope keys")
+    return OfferEnvelope(min_period_days=raw["min_period_days"],
+                         max_period_days=raw["max_period_days"],
+                         max_open_offers=raw["max_open_offers"],
+                         rate_floor_ratio=_amount(raw["rate_floor_ratio"]),
+                         min_rate_apr=_amount(raw["min_rate_apr"]))
 
 
 def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
@@ -117,7 +144,8 @@ def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
             allocation_mode=row.policy["allocation_mode"],
             max_cell_fraction=_amount(row.policy["max_cell_fraction"]),
             max_offer_amount=(_amount(row.policy["max_offer_amount"])
-                              if "max_offer_amount" in keys else None))
+                              if "max_offer_amount" in keys else None),
+            envelope=_envelope(row.policy["envelope"]) if "envelope" in keys else None)
     except (ValueError, TypeError, KeyError) as exc:
         raise CapitalBlockedError("invalid_policy") from exc
 

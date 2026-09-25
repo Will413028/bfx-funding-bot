@@ -23,6 +23,47 @@ def _validate_amount(name: str, value: Decimal) -> None:
         raise ValueError(f"{name} must be a finite, non-negative Decimal")
 
 
+# Bitfinex accepts funding offers of 2..120 days; a policy cannot widen this.
+VENUE_MIN_PERIOD_DAYS = 2
+VENUE_MAX_PERIOD_DAYS = 120
+
+
+@dataclass(frozen=True, slots=True)
+class OfferEnvelope:
+    """The terms every new offer must stay inside (ADR 2026-09-25 lending envelope D1).
+
+    A broken signal, sizing bug or new build can at worst lend at the floor rate for
+    the longest allowed period -- that bound is what replaces release probation.
+    The effective rate floor is max(min_rate_apr / 365, median live bid x ratio).
+    """
+
+    min_period_days: int
+    max_period_days: int
+    max_open_offers: int
+    rate_floor_ratio: Decimal
+    min_rate_apr: Decimal
+
+    def __post_init__(self) -> None:
+        for name in ("min_period_days", "max_period_days", "max_open_offers"):
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an int")
+        if not (VENUE_MIN_PERIOD_DAYS <= self.min_period_days <= self.max_period_days
+                <= VENUE_MAX_PERIOD_DAYS):
+            raise ValueError("periods must satisfy 2 <= min_period_days <= max_period_days <= 120")
+        if self.max_open_offers <= 0:
+            raise ValueError("max_open_offers must be positive")
+        _validate_amount("rate_floor_ratio", self.rate_floor_ratio)
+        if not _ZERO < self.rate_floor_ratio <= Decimal("1"):
+            raise ValueError("rate_floor_ratio must be greater than 0 and at most 1")
+        _validate_amount("min_rate_apr", self.min_rate_apr)
+        if not _ZERO < self.min_rate_apr < Decimal("1"):
+            raise ValueError("min_rate_apr must be a fraction greater than 0 and below 1")
+
+    @property
+    def min_daily_rate(self) -> Decimal:
+        return self.min_rate_apr / Decimal(365)
+
+
 @dataclass(frozen=True, slots=True)
 class CapitalPolicy:
     """Validated explicit policy; defaults never substitute for a missing policy."""
@@ -36,6 +77,9 @@ class CapitalPolicy:
     # every offer until an amended policy (schema 2) sets it. Not part of
     # evaluate_capital -- it bounds a single offer, not the budget.
     max_offer_amount: Decimal | None = None
+    # None means never set: the offer-envelope guard refuses every offer until an
+    # amended policy (schema 3) sets it together with max_offer_amount.
+    envelope: OfferEnvelope | None = None
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -50,6 +94,11 @@ class CapitalPolicy:
             _validate_amount("max_offer_amount", self.max_offer_amount)
             if self.max_offer_amount == _ZERO:
                 raise ValueError("max_offer_amount must be positive when set")
+        if self.envelope is not None:
+            if not isinstance(self.envelope, OfferEnvelope):
+                raise ValueError("envelope must be an OfferEnvelope")
+            if self.max_offer_amount is None:
+                raise ValueError("an envelope requires max_offer_amount")
 
 
 @dataclass(frozen=True, slots=True)

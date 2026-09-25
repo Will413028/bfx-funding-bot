@@ -1,4 +1,8 @@
-"""Explicit operator amendment of one applied CapitalPolicy (T9: max_offer_amount).
+"""Explicit operator amendment of one applied CapitalPolicy.
+
+Changes ``enabled``, ``max_offer_amount`` and the offer envelope (lending
+envelope ADR D1). Setting the envelope for the first time needs every envelope
+field; afterwards any subset may change.
 
 Same contract as the legacy conversion: a dry run returns a reviewable report
 and its digest; apply recomputes the report in the same transaction, refuses if
@@ -9,13 +13,14 @@ Nothing here writes a trading state, talks to the venue or resumes trading.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     CapitalRepository,
@@ -28,20 +33,63 @@ def _digest(value: object) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyChanges:
+    """Requested new values; None leaves a field as it is."""
+
+    enabled: bool | None = None
+    max_offer_amount: Decimal | None = None
+    min_period_days: int | None = None
+    max_period_days: int | None = None
+    max_open_offers: int | None = None
+    rate_floor_ratio: Decimal | None = None
+    min_rate_apr: Decimal | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        return {name: str(getattr(self, name)) for name in self.__slots__
+                if getattr(self, name) is not None}
+
+
+_ENVELOPE_FIELDS = ("min_period_days", "max_period_days", "max_open_offers",
+                    "rate_floor_ratio", "min_rate_apr")
+
+
+def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
+    requested = {name: getattr(changes, name) for name in _ENVELOPE_FIELDS
+                 if getattr(changes, name) is not None}
+    envelope = policy.envelope
+    if requested and envelope is None:
+        missing = [name for name in _ENVELOPE_FIELDS if name not in requested]
+        if missing:
+            raise CapitalBlockedError(f"envelope_incomplete: {','.join(missing)}")
+    try:
+        if requested:
+            envelope = (OfferEnvelope(**requested) if envelope is None
+                        else replace(envelope, **requested))
+        return replace(
+            policy,
+            enabled=policy.enabled if changes.enabled is None else changes.enabled,
+            max_offer_amount=(policy.max_offer_amount if changes.max_offer_amount is None
+                              else changes.max_offer_amount),
+            envelope=envelope)
+    except ValueError as exc:
+        raise CapitalBlockedError(f"invalid_policy: {exc}") from exc
+
+
 async def amend_capital_policy(
     session: AsyncSession, *, repository: CapitalRepository, symbol: str,
-    max_offer_amount: Decimal, apply_digest: str | None,
+    changes: PolicyChanges, apply_digest: str | None,
 ) -> dict[str, Any]:
     """Return the dry-run report, or apply exactly that report. The caller commits."""
-    if (not isinstance(max_offer_amount, Decimal) or not max_offer_amount.is_finite()
-            or max_offer_amount <= 0):
-        raise CapitalBlockedError("invalid_max_offer_amount")
+    if not changes.as_dict():
+        raise CapitalBlockedError("no_changes_requested")
     await repository.writer.prepare_locked(session, account_id=repository.account_id)
     applied = await repository.read_applied(session, symbol=symbol)
-    amended = replace(applied.policy, max_offer_amount=max_offer_amount)
+    amended = _amended(applied.policy, changes)
     report: dict[str, Any] = {
         "status": "dry_run", "account_id": str(repository.account_id),
         "environment": repository.environment, "symbol": symbol,
+        "changes": changes.as_dict(),
         "expected_revision": applied.revision, "current_policy_digest": applied.digest,
         "current_policy": policy_payload(applied.policy),
         "new_policy": policy_payload(amended),
@@ -59,7 +107,7 @@ async def amend_capital_policy(
     written = await repository.apply_policy(
         session, symbol=symbol, policy=amended, expected_revision=applied.revision,
         source={"amendment_digest": digest,
-                "changes": {"max_offer_amount": str(max_offer_amount)}},
+                "changes": changes.as_dict()},
     )
     report.update(status="applied", new_revision=written.revision,
                   new_policy_digest=written.digest)
