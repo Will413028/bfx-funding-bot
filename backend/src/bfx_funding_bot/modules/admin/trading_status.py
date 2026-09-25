@@ -140,6 +140,7 @@ class TradingStatusService:
         attempts: SubmitAttemptRecorder,
         trading_state: _TradingStateProtocol | None = None,
         kill_switch: _KillSwitchProtocol | None = None,
+        deployment: dict[str, Any] | None = None,
         readiness: TradingReadiness | None = None,
         capital_runtime: CapitalRuntime | None = None,
     ) -> None:
@@ -160,6 +161,7 @@ class TradingStatusService:
         self._attempts = attempts
         self._trading_state = trading_state
         self._kill_switch = kill_switch
+        self._deployment = deployment
         self._readiness = readiness
         self._symbols = sorted(configured_symbols(cells))
         # symbol → reference amount, so the probe's default size has a source.
@@ -186,6 +188,8 @@ class TradingStatusService:
                 "strategy": cell.strategy.value, "period": cell.period_agg} for cell in self._cells],
             "process_started_at": self._attempts.started_at.isoformat(),
             "halt": await self._halt_state(),
+            # This build's change class and what the boot gate did with it.
+            "deployment": self._deployment,
             "guards": [
                 {"name": g.name, "is_calibrated": g.is_calibrated}
                 for g in self._chain.guards

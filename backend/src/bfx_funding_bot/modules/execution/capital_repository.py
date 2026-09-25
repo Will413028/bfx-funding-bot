@@ -22,6 +22,7 @@ from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_policy import (
     CapitalBudget,
     CapitalPolicy,
+    CapitalProbation,
     CapitalSnapshot,
     evaluate_capital,
 )
@@ -54,6 +55,7 @@ from bfx_funding_bot.modules.execution.events import (
     UncertaintyMarkedNotAccepted,
     VenueSnapshotObserved,
 )
+from bfx_funding_bot.modules.execution.safety.trading_state import read_current
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
@@ -529,8 +531,9 @@ class CapitalRepository:
         snapshot = CapitalSnapshot(basis.available, pending,
                                    basis.available + basis.offered + basis.credits, exposure)
         return CapitalView(applied, row.event_seq, snapshot,
-                           evaluate_capital(applied.policy, snapshot), basis.shared,
-                           row.classification)
+                           evaluate_capital(applied.policy, snapshot,
+                                            await self._probation(session, symbol)),
+                           basis.shared, row.classification)
 
     async def _snapshot_basis(self, session: AsyncSession, *, symbol: str, cell_id: str,
                               now_ms: int) -> _SnapshotBasis:
@@ -632,8 +635,24 @@ class CapitalRepository:
             if decision.cell_id == cell_id:
                 exposure += amount
         snapshot = CapitalSnapshot(available, pending, available + offered + credits, exposure)
-        return CapitalView(applied, row.event_seq, snapshot, evaluate_capital(applied.policy, snapshot),
+        return CapitalView(applied, row.event_seq, snapshot,
+                           evaluate_capital(applied.policy, snapshot,
+                                            await self._probation(session, symbol)),
                            shared, row.classification)
+
+    async def _probation(self, session: AsyncSession, symbol: str) -> CapitalProbation | None:
+        """The probation in force, read in the same session as the capital.
+
+        Every consumer -- planner, guard, command admission, status -- reaches
+        the budget through this read, so the reduced limit binds all of them
+        at once. Only ACTIVE carries one; any other state already blocks.
+        """
+        state = await read_current(session, account_id=self.account_id,
+                                   environment=self.environment)
+        if state is None or state.state != "ACTIVE" or state.probation is None:
+            return None
+        return CapitalProbation(multiplier=state.probation.multiplier,
+                                floor=state.probation.floor_for(symbol))
 
     async def _attempt_inventory(
         self, session: AsyncSession, *, after_event_seq: int | None = None,

@@ -11,6 +11,7 @@ permits and release sessions to, and goes with that ceremony.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,10 +24,13 @@ from sqlalchemy import (
     Numeric,
     PrimaryKeyConstraint,
     Text,
+    UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON
 
 # Register the referenced account table for metadata-only fixtures.
 import bfx_funding_bot.modules.accounts.tables  # noqa: F401
@@ -126,6 +130,11 @@ class TradingStateRow(Base):
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     probation_multiplier: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
     probation_started_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Per-currency venue minimum (native units, with the submit margin) observed
+    # when the probation started: the floor of the probation cell limit.
+    probation_floor: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"), nullable=True,
+    )
     legacy_halt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
@@ -137,9 +146,10 @@ class TradingStateRow(Base):
             name="ck_trading_state_cause",
         ),
         CheckConstraint(
-            "(probation_multiplier IS NULL AND probation_started_at_ms IS NULL) OR "
+            "(probation_multiplier IS NULL AND probation_started_at_ms IS NULL "
+            "AND probation_floor IS NULL) OR "
             "(state = 'ACTIVE' AND probation_multiplier > 0 AND probation_multiplier <= 1 "
-            "AND probation_started_at_ms >= 0)",
+            "AND probation_started_at_ms >= 0 AND probation_floor IS NOT NULL)",
             name="ck_trading_state_probation",
         ),
         CheckConstraint(
@@ -208,4 +218,92 @@ class FundingCancelAllAuditRow(Base):
         Index("uq_funding_cancel_all_audit_outcome", "attempt_id", unique=True,
               postgresql_where=text("phase <> 'requested'"),
               sqlite_where=text("phase <> 'requested'")),
+    )
+
+
+class DeploymentApprovalRow(Base):
+    """An operator's one-time approval of a material backend image (ADR D2).
+
+    Append-only; one row per account/environment/digest. The digest and
+    revision format CHECKs use PostgreSQL regex and live in the migration.
+    """
+
+    __tablename__ = "deployment_approvals"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT",
+                   name="fk_deployment_approvals_account"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    source_revision: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_by: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("length(trim(approved_by)) > 0 AND approved_at_ms >= 0",
+                        name="ck_deployment_approvals_evidence"),
+        UniqueConstraint("exchange_account_id", "deployment_environment", "backend_digest",
+                         name="uq_deployment_approvals_digest"),
+    )
+
+
+class TradingControlRequestRow(Base):
+    """An operator's approve/resume request, applied by the account daemon.
+
+    The web API inserts only the request columns; the daemon writes one outcome
+    (``applied`` / ``rejected`` / ``failed``) and nothing rewrites it.
+    """
+
+    __tablename__ = "trading_control_requests"
+
+    request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT",
+                   name="fk_trading_control_requests_account"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'requested'"))
+    processed_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    outcome_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trading_state_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("trading_state.id", ondelete="RESTRICT",
+                   name="fk_trading_control_requests_trading_state"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("action IN ('approve', 'resume')", name="ck_trading_control_requests_action"),
+        CheckConstraint(
+            "length(trim(reason)) BETWEEN 1 AND 500 AND length(trim(requested_by)) > 0 "
+            "AND created_at_ms >= 0",
+            name="ck_trading_control_requests_evidence",
+        ),
+        CheckConstraint(
+            "(state = 'requested' AND processed_at_ms IS NULL AND outcome_reason IS NULL "
+            "AND trading_state_id IS NULL) OR "
+            "(state = 'applied' AND processed_at_ms IS NOT NULL) OR "
+            "(state IN ('rejected', 'failed') AND processed_at_ms IS NOT NULL "
+            "AND outcome_reason IS NOT NULL AND trading_state_id IS NULL)",
+            name="ck_trading_control_requests_outcome",
+        ),
+        Index("uq_trading_control_requests_pending", "exchange_account_id",
+              "deployment_environment", unique=True,
+              postgresql_where=text("state = 'requested'"), sqlite_where=text("state = 'requested'")),
+        Index("ix_trading_control_requests_queue", "exchange_account_id",
+              "deployment_environment", "state", "created_at_ms"),
     )
