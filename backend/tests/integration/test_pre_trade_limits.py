@@ -302,3 +302,32 @@ def test_migration_grants_the_runtime_role_only_read_insert_and_prune(pg_contain
         with engine.begin() as conn:
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM bfx_bot")
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabling_a_currency_pulls_only_its_managed_offers(capital_db):
+    """D4: the everyday per-currency stop. The planner skips the symbol and the
+    managed offers of that symbol are cancelled by id; a foreign offer, another
+    currency and an enabled currency are untouched."""
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+
+    from .test_kill_switch import Canceller, _offer_rows
+    factory, account = capital_db
+    _gate, _venue, _ready, ctx, runtime, _halt = await boundary(factory, account)
+    await _offer_rows(factory, account)   # managed 101 (fUST), 102 (fUSD); foreign 555 (fUST)
+    canceller = Canceller()
+    planner = object.__new__(DeploymentReconciler)
+    planner._capital = runtime
+    planner._disabled_sweep = ManagedOfferSweep(
+        session_factory=factory, account_id=account, environment=runtime.repository.environment,
+        canceller=canceller, ctx=ctx)
+
+    assert await planner._pull_if_disabled("fUST") is False    # enabled: nothing happens
+    assert canceller.cancelled == []
+    report = await _amend(factory, runtime, PolicyChanges(enabled=False))
+    await _amend(factory, runtime, PolicyChanges(enabled=False), digest=report["amendment_digest"])
+    assert await planner._pull_if_disabled("fUST") is True
+    assert canceller.cancelled == ["101"]
+    # No policy at all is not "disabled": the capital read fails closed on it instead.
+    assert await planner._pull_if_disabled("fBTC") is False

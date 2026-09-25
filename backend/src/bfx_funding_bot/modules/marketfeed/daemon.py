@@ -1540,6 +1540,10 @@ async def build_daemon(
                 config_hash=deployment_identity.backend_digest or "unidentified",
             ),
             protection=protection,
+            disabled_sweep=(ManagedOfferSweep(
+                session_factory=session_factory, account_id=UUID(account_id),
+                environment=env_str, canceller=reservation_middleware, ctx=account_ctx)
+                if isinstance(executor, CancelPort) else None),
         )
         assert writer_lock is not None
         # The web API queues operator adjudications; only this writer appends them.
