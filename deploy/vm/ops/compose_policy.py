@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """Policy for deploy/vm/docker-compose.app.yml, checked on what Compose renders.
 
-CI runs (see .github/workflows/ci.yml):
+CI runs (see .github/workflows/ci.yml), with placeholder digests for the deploy
+variables and BFX_RUNTIME_DIR pointing at empty stand-ins for the secret files:
 
-    BFX_RUNTIME_DIR=<dir with empty bot/webapi/frontend.env> \\
-    docker compose -f deploy/vm/docker-compose.app.yml config \\
-        --no-env-resolution --format json \\
-      | python3 deploy/vm/ops/compose_policy.py --source deploy/vm/docker-compose.app.yml
+    docker compose -f deploy/vm/docker-compose.app.yml config --no-interpolate \\
+        --format json > uninterpolated.json
+    docker compose -f deploy/vm/docker-compose.app.yml config --no-env-resolution \\
+        --format json | python3 deploy/vm/ops/compose_policy.py --uninterpolated uninterpolated.json
 
-with placeholder digests for the deploy variables. The rendered env files must
-sit in $BFX_RUNTIME_DIR (default /opt/bfx/runtime), and --source checks that the
-file's own default is still /opt/bfx/runtime, since a render with the variable
-set cannot show it. Checking Compose's own
-rendering rather than the YAML text means an anchor, an override or a changed
-Compose default cannot slip a property past the check. This replaces the
-per-container hardening inspection bfx-deploy used to run on the VM: the file
-that creates the containers is the one reviewed and checked here, and on the
-VM bfx-deploy only confirms each container runs the recorded digest and
-identity (bfx_deploy.container_mismatches).
+Two renderings, because Compose versions differ in one place: an interpolated
+`config --format json` lists `env_file` on Compose v5 but folds it into
+`environment` on 2.38. The env files are therefore checked only on the
+uninterpolated rendering, which every version prints the same way: each service
+names exactly its own `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env` (the
+production default) plus, for the bot, live.env -- all `required: true`, so a
+missing secret file stops `up` instead of starting without it. Every other
+hardening property is checked on the interpolated rendering. Checking Compose's
+own rendering rather than the YAML text means an anchor, an override or a
+changed Compose default cannot slip a property past the check. This replaces
+the per-container hardening inspection bfx-deploy used to run on the VM: on the
+VM bfx-deploy only confirms each container runs the recorded digest and identity
+(bfx_deploy.container_mismatches).
 
 Standard library only; exits 1 and lists every violation.
 """
@@ -26,8 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -45,9 +47,9 @@ USERS = {"bot": "1000:1000", "webapi": "1000:1000", "frontend": "nextjs"}
 PRODUCTION_RUNTIME_DIR = "/opt/bfx/runtime"
 RUNTIME_REFERENCE = "${BFX_RUNTIME_DIR:-" + PRODUCTION_RUNTIME_DIR + "}/"
 ENV_FILES = {
-    "bot": ["{runtime}/bot.env", "live.env"],
-    "webapi": ["{runtime}/webapi.env"],
-    "frontend": ["{runtime}/frontend.env"],
+    "bot": (f"/{RUNTIME_REFERENCE}bot.env", "/live.env"),
+    "webapi": (f"/{RUNTIME_REFERENCE}webapi.env",),
+    "frontend": (f"/{RUNTIME_REFERENCE}frontend.env",),
 }
 IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID")
 LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
@@ -58,17 +60,7 @@ FRONTEND_PORTS = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 3000,
                    "published": "3001", "protocol": "tcp"}]
 
 
-def _env_files(spec: Mapping[str, Any]) -> list[str]:
-    files = []
-    for entry in spec.get("env_file") or []:
-        path = entry.get("path") if isinstance(entry, dict) else entry
-        files.append(str(path))
-    return files
-
-
-def service_violations(
-    service: str, spec: Mapping[str, Any], runtime_dir: str = PRODUCTION_RUNTIME_DIR,
-) -> list[str]:
+def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     env = spec.get("environment") or {}
     found = []
 
@@ -95,11 +87,6 @@ def service_violations(
     if service == "bot":
         need(((networks.get(NETWORK) or {}).get("aliases") or []) == ["bfx-bot"], "bot_alias")
     need((spec.get("ports") or []) == (FRONTEND_PORTS if service == "frontend" else []), "ports")
-    files = _env_files(spec)
-    wanted = [w.format(runtime=runtime_dir.rstrip("/")) for w in ENV_FILES[service]]
-    need(len(files) == len(wanted) and all(
-        f == w if w.startswith("/") else f.endswith("/" + w) for f, w in zip(files, wanted, strict=False)
-    ), "env_files")
     need(all(env.get(key) for key in IDENTITY), "identity_env")
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
     if service == "frontend":
@@ -110,19 +97,23 @@ def service_violations(
     return found
 
 
-def source_violations(text: str) -> list[str]:
-    """The compose file itself: runtime env files default to /opt/bfx/runtime."""
+def env_file_violations(uninterpolated: Mapping[str, Any]) -> list[str]:
+    """Each service's env files, from `config --no-interpolate` (version-stable)."""
     found = []
-    references = re.findall(r"\$\{BFX_RUNTIME_DIR[^}]*\}/[A-Za-z0-9_.-]*", text)
-    expected = sorted(f"{RUNTIME_REFERENCE}{name}.env" for name in ("bot", "webapi", "frontend"))
-    if sorted(references) != expected:
-        found.append("source:runtime_dir_default")
-    if re.search(r"(?m)^\s*-?\s*(required|path)\s*:", text):
-        found.append("source:env_file_long_form")  # `required: false` would start without secrets
+    services = uninterpolated.get("services") or {}
+    for service in SERVICES:
+        entries = (services.get(service) or {}).get("env_file") or []
+        wanted = ENV_FILES[service]
+        paths = [str(e.get("path", "")) if isinstance(e, dict) else "" for e in entries]
+        if len(paths) != len(wanted) or not all(
+                path.endswith(end) for path, end in zip(paths, wanted, strict=False)):
+            found.append(f"{service}:env_files")
+        if any(not isinstance(e, dict) or e.get("required") is not True for e in entries):
+            found.append(f"{service}:env_files_required")
     return found
 
 
-def violations(rendered: Mapping[str, Any], runtime_dir: str = PRODUCTION_RUNTIME_DIR) -> list[str]:
+def violations(rendered: Mapping[str, Any]) -> list[str]:
     found = []
     if rendered.get("name") != "bfx-app":
         found.append("project_name")
@@ -137,23 +128,23 @@ def violations(rendered: Mapping[str, Any], runtime_dir: str = PRODUCTION_RUNTIM
     for service in SERVICES:
         spec = (rendered.get("services") or {}).get(service)
         if isinstance(spec, dict):
-            found += service_violations(service, spec, runtime_dir)
+            found += service_violations(service, spec)
     return found
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check a rendered docker-compose.app.yml.")
-    parser.add_argument("--source", help="the compose file, to check its runtime-dir default")
+    parser.add_argument("--uninterpolated", required=True,
+                        help="JSON of `docker compose config --no-interpolate --format json`")
     args = parser.parse_args(argv)
     try:
         rendered = json.load(sys.stdin)
-    except ValueError:
-        print("compose-policy: input is not JSON", file=sys.stderr)
+        with open(args.uninterpolated, encoding="utf-8") as stream:
+            uninterpolated = json.load(stream)
+    except (OSError, ValueError):
+        print("compose-policy: input is not readable JSON", file=sys.stderr)
         return 1
-    found = violations(rendered, os.environ.get("BFX_RUNTIME_DIR") or PRODUCTION_RUNTIME_DIR)
-    if args.source:
-        with open(args.source, encoding="utf-8") as stream:
-            found += source_violations(stream.read())
+    found = violations(rendered) + env_file_violations(uninterpolated)
     for item in found:
         print(f"compose-policy: violation {item}", file=sys.stderr)
     if not found:

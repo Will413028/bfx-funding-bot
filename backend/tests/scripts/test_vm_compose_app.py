@@ -54,10 +54,15 @@ policy = _load("vm_ops_compose_policy_under_test", ROOT / "deploy/vm/ops/compose
 bfx = _load("vm_ops_bfx_deploy_for_compose", ROOT / "deploy/vm/ops/bfx_deploy.py")
 
 
+# BFX_TEST_COMPOSE picks another Compose binary (e.g. a standalone 2.38 build) so
+# the policy can be checked against more than one Compose version.
+COMPOSE_CMD = os.environ.get("BFX_TEST_COMPOSE", "docker compose").split()
+
+
 def _compose_available() -> bool:
-    if shutil.which("docker") is None:
+    if shutil.which(COMPOSE_CMD[0]) is None:
         return False
-    return subprocess.run(["docker", "compose", "version"], capture_output=True,
+    return subprocess.run([*COMPOSE_CMD, "version"], capture_output=True,
                           check=False).returncode == 0
 
 
@@ -79,10 +84,10 @@ def runtime_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return directory
 
 
-def _render(runtime: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _render(runtime: Path, env: dict[str, str] | None = None, *, path: Path = COMPOSE_PATH,
+            mode: str = "--no-env-resolution") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--no-env-resolution",
-         "--format", "json"],
+        [*COMPOSE_CMD, "-f", str(path), "config", mode, "--format", "json"],
         capture_output=True, text=True, check=False,
         env={**_path_env(), **(FAKE_ENV if env is None else env), "BFX_RUNTIME_DIR": str(runtime)})
 
@@ -94,6 +99,19 @@ def rendered(runtime_dir: Path) -> dict[str, Any]:
     result = _render(runtime_dir)
     assert result.returncode == 0, result.stderr
     return dict(json.loads(result.stdout))
+
+
+def _uninterpolated(runtime: Path, path: Path = COMPOSE_PATH) -> dict[str, Any]:
+    result = _render(runtime, path=path, mode="--no-interpolate")
+    assert result.returncode == 0, result.stderr
+    return dict(json.loads(result.stdout))
+
+
+@pytest.fixture(scope="module")
+def uninterpolated(runtime_dir: Path) -> dict[str, Any]:
+    if not _compose_available():
+        pytest.skip("docker compose CLI unavailable")
+    return _uninterpolated(runtime_dir)
 
 
 # --------------------------------------------------------------------------- file shape
@@ -116,21 +134,32 @@ def test_no_image_tag_appears_anywhere_in_the_file() -> None:
     assert re.search(r"ghcr\.io/\S+:(main|sha-|latest)", COMPOSE_TEXT) is None
 
 
-def test_runtime_env_files_default_to_the_production_secret_directory() -> None:
-    assert policy.source_violations(COMPOSE_TEXT) == []
-    assert all(entry.startswith("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/") or entry == "live.env"
-               for spec in COMPOSE["services"].values() for entry in spec["env_file"])
+@needs_compose
+def test_env_files_are_the_required_production_defaults(uninterpolated: dict[str, Any]) -> None:
+    assert policy.env_file_violations(uninterpolated) == []
+    bot = [entry["path"] for entry in uninterpolated["services"]["bot"]["env_file"]]
+    assert bot[0].endswith("/${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env")
+    assert bot[1].endswith("/deploy/vm/live.env")
 
 
-@pytest.mark.parametrize("edit", [
-    lambda t: t.replace("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env", "${BFX_RUNTIME_DIR:-/tmp}/bot.env"),
-    lambda t: t.replace("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR}/webapi.env"),
-    lambda t: t.replace("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env",
-                        "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env\n"
-                        "        required: false"),
+@needs_compose
+@pytest.mark.parametrize(("old", "new", "violation"), [
+    ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env",
+     "webapi:env_files"),
+    ("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env", "${BFX_RUNTIME_DIR:-/tmp}/bot.env", "bot:env_files"),
+    ("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env",
+     "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env\n        required: false",
+     "frontend:env_files_required"),
+    ("      - live.env\n", "", "bot:env_files"),
 ])
-def test_changing_the_default_or_making_secrets_optional_is_detected(edit: Callable[[str], str]) -> None:
-    assert policy.source_violations(edit(COMPOSE_TEXT)) != []
+def test_wrong_or_optional_env_files_are_detected(
+    tmp_path: Path, runtime_dir: Path, old: str, new: str, violation: str,
+) -> None:
+    mutated = tmp_path / "docker-compose.app.yml"
+    assert COMPOSE_TEXT.count(old) == 1
+    mutated.write_text(COMPOSE_TEXT.replace(old, new))
+    shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
+    assert violation in policy.env_file_violations(_uninterpolated(runtime_dir, mutated))
 
 
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
@@ -144,16 +173,18 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
 
 
 @needs_compose
-def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any], runtime_dir: Path) -> None:
-    assert policy.violations(rendered, str(runtime_dir)) == []
-    # Rendered against the production directory, the stand-in paths are a violation.
-    assert {f"{s}:env_files" for s in ("bot", "webapi", "frontend")} <= set(policy.violations(rendered))
+def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any]) -> None:
+    assert policy.violations(rendered) == []
 
 
 @needs_compose
-def test_policy_cli_is_what_ci_runs(rendered: dict[str, Any], runtime_dir: Path) -> None:
-    argv = [sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py"), "--source", str(COMPOSE_PATH)]
-    env = {**_path_env(), "BFX_RUNTIME_DIR": str(runtime_dir)}
+def test_policy_cli_is_what_ci_runs(
+    rendered: dict[str, Any], uninterpolated: dict[str, Any], tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "uninterpolated.json"
+    snapshot.write_text(json.dumps(uninterpolated))
+    argv = [sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py"), "--uninterpolated", str(snapshot)]
+    env = _path_env()
     completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
                                check=False, env=env)
     assert completed.returncode == 0, completed.stderr
@@ -162,6 +193,12 @@ def test_policy_cli_is_what_ci_runs(rendered: dict[str, Any], runtime_dir: Path)
     completed = subprocess.run(argv, input=json.dumps(broken), capture_output=True, text=True,
                                check=False, env=env)
     assert completed.returncode == 1 and "bot:read_only" in completed.stderr
+    uninterpolated_broken = copy.deepcopy(uninterpolated)
+    uninterpolated_broken["services"]["webapi"]["env_file"][0]["required"] = False
+    snapshot.write_text(json.dumps(uninterpolated_broken))
+    completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
+                               check=False, env=env)
+    assert completed.returncode == 1 and "webapi:env_files_required" in completed.stderr
 
 
 REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -185,7 +222,6 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "no_tmpfs": lambda s: s.__setitem__("tmpfs", ["/tmp"]),
     "no_pid": lambda s: s.__setitem__("pid", "host"),
     "ports": lambda s: s.__setitem__("ports", [{"target": 3000, "published": "3001"}]),
-    "env_files": lambda s: s.__setitem__("env_file", [{"path": "/root/.env"}]),
     "identity_env": lambda s: s["environment"].pop("BFX_DEPLOYMENT_ID"),
     "loader_injection_blanked": lambda s: s["environment"].pop("LD_PRELOAD"),
     "interpreter_injection_blanked": lambda s: s["environment"].pop(
@@ -197,11 +233,11 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
 @pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
 @pytest.mark.parametrize("prop", sorted(REMOVALS))
 def test_dropping_a_property_is_detected_by_name(
-    rendered: dict[str, Any], runtime_dir: Path, service: str, prop: str,
+    rendered: dict[str, Any], service: str, prop: str,
 ) -> None:
     broken = copy.deepcopy(rendered)
     REMOVALS[prop](broken["services"][service])
-    assert f"{service}:{prop}" in policy.violations(broken, str(runtime_dir))
+    assert f"{service}:{prop}" in policy.violations(broken)
 
 
 @needs_compose
@@ -266,7 +302,7 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
            "BFX_BACKEND_IMAGE": image, "BFX_FRONTEND_IMAGE": image,
            "BFX_BACKEND_DIGEST": digest, "BFX_FRONTEND_DIGEST": digest}
     project = f"bfx-app-test-{suffix}"
-    compose = ["docker", "compose", "-p", project, "-f", str(tmp_path / "docker-compose.app.yml")]
+    compose = [*COMPOSE_CMD, "-p", project, "-f", str(tmp_path / "docker-compose.app.yml")]
     subprocess.run(["docker", "network", "create", network], check=True, capture_output=True)
     try:
         created = subprocess.run([*compose, "create", "--no-recreate"], capture_output=True,
