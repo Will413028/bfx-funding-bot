@@ -62,6 +62,7 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     "8e4f33517b10",
     # funding_cancel_all_audit is a new table outside TABLE_NAMES.
     "c2b7b04da604",
+    "c3a639388457",
 })
 
 
