@@ -342,3 +342,33 @@ def test_probation_needs_its_floor_and_the_operator_check_runs_for_the_bot(migra
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         assert conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'operator')"), {"a": _A})
         assert not conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'nobody')"), {"a": _A})
+
+
+def test_the_database_keeps_active_inside_an_unfinished_probation(migrated):
+    """ADR D3, enforced below the code: until a probation passes, a pause or an
+    operator's stop cannot lead back to ACTIVE without it; the lift can."""
+    _, engine, _ = migrated
+
+    def add(state: str, cause: str, *, probation: bool = False) -> None:
+        extra = (", probation_multiplier, probation_started_at_ms, probation_floor",
+                 ", 0.25, 1, '{\"fUST\": \"150.75\"}'") if probation else ("", "")
+        with engine.begin() as conn:
+            conn.execute(text(f"""INSERT INTO trading_state (exchange_account_id, deployment_environment,
+                state, cause, actor, reason, created_at_ms{extra[0]})
+                VALUES (:a, 'probation-ci', :s, :c, 'x', 'x', 1{extra[1]})"""),
+                {"a": _A, "s": state, "c": cause})
+
+    add("ACTIVE", "operator")
+    add("ACTIVE", "operator", probation=True)
+    add("REDUCING", "operator")
+    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
+        add("ACTIVE", "operator")
+    add("HALTED", "operator")
+    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
+        add("ACTIVE", "operator")
+    add("ACTIVE", "operator", probation=True)   # the same limits, restarted
+    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
+        add("ACTIVE", "operator")                # not the lift: only auto lifts
+    add("ACTIVE", "auto")                        # the lift
+    add("REDUCING", "operator")
+    add("ACTIVE", "operator")                    # passed: a pause resumes plainly
