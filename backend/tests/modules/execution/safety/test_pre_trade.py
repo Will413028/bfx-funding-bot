@@ -1,11 +1,13 @@
-"""Always-on pre-trade limits (T9): each guard, the throttle, config and policy schema 2.
+"""Always-on pre-trade limits: the offer envelope, the throttle, config and policy schema 3.
 
-Guards are exercised through their real ``evaluate`` and, where it matters,
-through the real ``SafetyGuardChain`` (cancel exemption). Anything missing --
-symbol configuration, policy ceiling, market reference -- refuses.
+The guard is exercised through its real ``evaluate`` (only the DB read is
+stubbed; the SQL path is in tests/integration/test_pre_trade_limits.py) and,
+where it matters, through the real ``SafetyGuardChain`` (cancel exemption).
+Anything missing -- envelope, policy ceiling, market reference -- refuses.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +18,7 @@ import pytest
 
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.external.bitfinex.rest import FundingBookLevel
-from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
 from bfx_funding_bot.modules.execution.capital_repository import (
     CapitalBlockedError,
     policy_from_row,
@@ -31,9 +33,8 @@ from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import load_safety_config
 from bfx_funding_bot.modules.execution.safety.pre_trade import (
     CommandThrottle,
-    PeriodBoundsGuard,
+    OfferEnvelopeGuard,
     PreTradeConfigurationError,
-    RateFloorGuard,
     build_pre_trade_guards,
     reference_bid_rate,
     require_pre_trade_limits,
@@ -84,31 +85,76 @@ class Book:
         return self.value
 
 
-# --------------------------------------------------------------------------- period
+ENVELOPE = OfferEnvelope(min_period_days=2, max_period_days=2, max_open_offers=6,
+                         rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
+POLICY = CapitalPolicy(enabled=True, max_offer_amount=Decimal("200"), envelope=ENVELOPE)
+MARKET = book((0.0003, 2), (0.0001, 2), (0.0002, 2))       # median bid 0.0002
+
+
+class Guard(OfferEnvelopeGuard):
+    """The real guard with its one DB read replaced."""
+
+    def __init__(self, *, policy: CapitalPolicy | Exception = POLICY, open_offers: int = 0,
+                 market: MarketSnapshot | None = MARKET) -> None:
+        super().__init__(runtime=SimpleNamespace(), book=Book(market),  # type: ignore[arg-type]
+                         clock=lambda: 1_000)
+        self.policy, self.open_offers = policy, open_offers
+
+    async def _policy_and_open(self, session: Any, symbol: str) -> tuple[CapitalPolicy, int]:
+        if isinstance(self.policy, Exception):
+            raise self.policy
+        return self.policy, self.open_offers
+
+
+SESSION_CTX = replace(CTX, command_session=object())  # type: ignore[arg-type]
+
+
+async def envelope(decision: DecisionPayload, **kwargs: Any) -> Any:
+    return await Guard(**kwargs).evaluate(decision, SESSION_CTX)
+
+
+@pytest.mark.asyncio
+async def test_an_offer_inside_the_envelope_passes_and_a_skip_is_never_judged() -> None:
+    assert (await envelope(post())).allowed
+    assert (await envelope(skip(), policy=RuntimeError("never read"))).allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("policy", "reason"), [
+    (CapitalPolicy(enabled=True), "envelope_unset"),                          # schema 1
+    (CapitalPolicy(enabled=True, max_offer_amount=Decimal("200")), "envelope_unset"),  # schema 2
+    (RuntimeError("db down"), "policy_unavailable: db down"),
+])
+async def test_no_envelope_or_no_policy_refuses(policy: Any, reason: str) -> None:
+    result = await envelope(post(), policy=policy)
+    assert (result.allowed, result.reason) == (False, reason)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("amount", "allowed"), [(200, True), (200.01, False)])
+async def test_amount_ceiling(amount: float, allowed: bool) -> None:
+    result = await envelope(post(amount=amount))
+    assert result.allowed is allowed
+    if not allowed:
+        assert result.reason.startswith("offer_amount 200.01 > max_offer_amount 200")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("period", "allowed"), [(1, False), (2, True), (3, False), (120, False)])
 async def test_period_bounds(period: int, allowed: bool) -> None:
-    guard = PeriodBoundsGuard(bounds={"fUST": (2, 2)})
-    result = await guard.evaluate(post(period=period), CTX)
+    result = await envelope(post(period=period))
     assert result.allowed is allowed
     if not allowed:
         assert result.reason == f"period {period} outside 2..2 days"
 
 
 @pytest.mark.asyncio
-async def test_period_bounds_never_exceed_the_venue_range_and_fail_closed() -> None:
-    wide = PeriodBoundsGuard(bounds={"fUST": (1, 500)})
-    assert not (await wide.evaluate(post(period=1), CTX)).allowed
-    assert not (await wide.evaluate(post(period=121), CTX)).allowed
-    assert (await wide.evaluate(post(period=120), CTX)).allowed
-    unconfigured = await PeriodBoundsGuard(bounds={}).evaluate(post(), CTX)
-    assert (unconfigured.allowed, unconfigured.reason) == (False, "period_limits_unconfigured: fUST")
-    assert (await PeriodBoundsGuard(bounds={}).evaluate(skip(), CTX)).allowed
-
-
-# --------------------------------------------------------------------------- rate floor
+@pytest.mark.parametrize(("open_offers", "allowed"), [(5, True), (6, False)])
+async def test_open_offer_limit(open_offers: int, allowed: bool) -> None:
+    result = await envelope(post(), open_offers=open_offers)
+    assert result.allowed is allowed
+    if not allowed:
+        assert result.reason == "open_offers 6 >= limit 6"
 
 
 def test_reference_is_the_exact_period_median_else_the_whole_book() -> None:
@@ -120,34 +166,49 @@ def test_reference_is_the_exact_period_median_else_the_whole_book() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("rate", "allowed"), [(0.0001, True), (0.0000999, False), (0.0005, True)])
-async def test_rate_floor_is_ratio_times_median_bid(rate: float, allowed: bool) -> None:
-    guard = RateFloorGuard(book=Book(book((0.0003, 2), (0.0001, 2), (0.0002, 2))),
-                           ratios={"fUST": Decimal("0.5")}, clock=lambda: 1_000)
-    result = await guard.evaluate(post(rate=rate), CTX)
+async def test_relative_floor_is_ratio_times_median_bid(rate: float, allowed: bool) -> None:
+    result = await envelope(post(rate=rate))
     assert result.allowed is allowed
     if not allowed:
         assert result.reason.startswith("offer_rate 0.0000999 < floor 0.00010")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("provider", "ratios", "decision", "reason"), [
-    (Book(None), {"fUST": Decimal("0.5")}, post(), "rate_reference_unavailable"),
-    (Book(book((0.0002, 2), valid=False)), {"fUST": Decimal("0.5")}, post(),
-     "rate_reference_unavailable"),
-    (Book(book((0.0002, 2), symbol="fUSD")), {"fUST": Decimal("0.5")}, post(),
-     "rate_reference_unavailable"),
-    (Book(book()), {"fUST": Decimal("0.5")}, post(), "rate_reference_unavailable: no bids"),
-    (Book(book((0.0002, 2))), {}, post(), "rate_floor_unconfigured: fUST"),
-    (Book(book((0.0002, 2))), {"fUST": Decimal("0.5")}, post(rate=0.0), "offer_rate_invalid"),
+async def test_absolute_floor_holds_when_the_whole_market_collapses() -> None:
+    """A market-wide collapse drags the relative floor down with it; min_rate_apr
+    (1% a year = 0.0000274 a day) does not move."""
+    collapsed = book((0.00002, 2), (0.00002, 2))            # relative floor 0.00001
+    below = await envelope(post(rate=0.000027), market=collapsed)
+    assert not below.allowed and "absolute 0.0000273972" in below.reason
+    assert (await envelope(post(rate=0.0000274), market=collapsed)).allowed
+
+
+@pytest.mark.asyncio
+async def test_floor_is_the_higher_of_absolute_and_relative() -> None:
+    high_apr = replace(POLICY, envelope=replace(ENVELOPE, min_rate_apr=Decimal("0.2")))
+    # relative floor 0.0001, absolute 0.2 / 365 = 0.000548; the absolute one wins
+    result = await envelope(post(rate=0.0005), policy=high_apr)
+    assert not result.allowed and "< floor 0.000547945" in result.reason
+    assert (await envelope(post(rate=0.00055), policy=high_apr)).allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("market", "decision", "reason"), [
+    (None, post(), "rate_reference_unavailable"),
+    (book((0.0002, 2), valid=False), post(), "rate_reference_unavailable"),
+    (book((0.0002, 2), symbol="fUSD"), post(), "rate_reference_unavailable"),
+    (book(), post(), "rate_reference_unavailable: no bids"),
+    (MARKET, post(rate=0.0), "offer_rate_invalid"),
+    (MARKET, post(amount=0), "offer_amount_invalid"),
 ])
-async def test_rate_floor_fails_closed(provider: Book, ratios: dict[str, Decimal],
-                                       decision: DecisionPayload, reason: str) -> None:
-    result = await RateFloorGuard(book=provider, ratios=ratios, clock=lambda: 1).evaluate(decision, CTX)
+async def test_envelope_fails_closed(market: MarketSnapshot | None, decision: DecisionPayload,
+                                     reason: str) -> None:
+    result = await envelope(decision, market=market)
     assert not result.allowed and result.reason.startswith(reason)
 
 
 @pytest.mark.asyncio
-async def test_rate_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -> None:
+async def test_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -> None:
     """Phase 0 gap: period_pricing's TAKER branch prices at the signal whenever a
     bid pays at least that much, so a broken, tiny signal would lend at it."""
     snapshot = book((0.00031, 2), (0.0003, 2), (0.00029, 2))
@@ -155,8 +216,8 @@ async def test_rate_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -
     priced = PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001")).price(
         candidate=candidate, snapshot=snapshot)
     assert priced.branch is PriceBranch.TAKER and priced.rate == Decimal("0.00001")
-    guard = RateFloorGuard(book=Book(snapshot), ratios={"fUST": Decimal("0.5")}, clock=lambda: 1)
-    result = await guard.evaluate(candidate.model_copy(update={"offer_rate": float(priced.rate)}), CTX)
+    result = await envelope(candidate.model_copy(update={"offer_rate": float(priced.rate)}),
+                            market=snapshot)
     assert not result.allowed and "floor 0.00015" in result.reason
 
 
@@ -173,10 +234,9 @@ class Refuse:
 
 
 @pytest.mark.asyncio
-async def test_pre_trade_limits_never_refuse_a_cancel() -> None:
-    names = ("period_bounds", "max_offer_amount", "open_offer_limit", "rate_floor")
+async def test_the_envelope_never_refuses_a_cancel() -> None:
     chain = SafetyGuardChain(
-        guards=[Refuse(name) for name in names], probe=HealthProbe(),  # type: ignore[misc]
+        guards=[Refuse("offer_envelope")], probe=HealthProbe(),  # type: ignore[misc]
         diagnostics=SimpleNamespace(emit=lambda event: _noop()), phase=Phase.LIVE,  # type: ignore[arg-type]
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=CTX.account_id)
     assert (await chain.evaluate_cancel(post(), CTX)).allowed
@@ -259,51 +319,33 @@ def test_isolated_refusals_below_the_threshold_do_not_trip(alert_log: Any) -> No
 # --------------------------------------------------------------------------- config
 
 
-def test_live_config_carries_the_limits_and_the_live_writer_requires_them() -> None:
+def test_live_config_carries_the_throttle_and_the_live_writer_requires_it() -> None:
     live = load_safety_config(CONFIGS / "safety.live.yaml")
     limits = require_pre_trade_limits(live.pre_trade_limits)
-    fust = limits.symbols["fUST"]
-    assert (fust.min_period_days, fust.max_period_days, fust.max_open_offers,
-            fust.rate_floor_ratio) == (2, 2, 6, Decimal("0.5"))
     assert limits.command_rate.capacity == 12 and limits.command_rate.trip_blocks == 6
     with pytest.raises(PreTradeConfigurationError) as missing:
         require_pre_trade_limits(None)
     assert isinstance(missing.value, ConfigurationError)
     with pytest.raises(PreTradeConfigurationError, match="funding book"):
-        build_pre_trade_guards(limits, runtime=SimpleNamespace(), book=None,  # type: ignore[arg-type]
-                               session_factory=SimpleNamespace(),  # type: ignore[arg-type]
-                               account_id=uuid4(), environment="prod", clock=lambda: 1)
-    guards = build_pre_trade_guards(limits, runtime=SimpleNamespace(),  # type: ignore[arg-type]
-                                    book=Book(None), session_factory=SimpleNamespace(),  # type: ignore[arg-type]
-                                    account_id=uuid4(), environment="prod", clock=lambda: 1)
-    assert [guard.name for guard in guards] == ["period_bounds", "max_offer_amount",
-                                                "open_offer_limit", "rate_floor"]
+        build_pre_trade_guards(runtime=SimpleNamespace(), book=None,  # type: ignore[arg-type]
+                               clock=lambda: 1)
+    guards = build_pre_trade_guards(runtime=SimpleNamespace(),  # type: ignore[arg-type]
+                                    book=Book(None), clock=lambda: 1)
+    assert [guard.name for guard in guards] == ["offer_envelope"]
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("min_period_days", 3),          # above max_period_days (2)
-    ("min_period_days", 1),          # below the venue minimum
-    ("max_period_days", 121),        # above the venue maximum
-    ("rate_floor_ratio", "1.5"),
-    ("max_open_offers", 0),
-    (None, None),                    # a symbol entry missing a field
-])
-def test_invalid_limits_refuse_to_load(tmp_path: Path, field: str | None, value: Any) -> None:
+def test_per_symbol_terms_no_longer_load_from_yaml(tmp_path: Path) -> None:
     import yaml
 
     raw = yaml.safe_load((CONFIGS / "safety.live.yaml").read_text())
-    entry = raw["pre_trade_limits"]["symbols"]["fUST"]
-    if field is None:
-        del entry["rate_floor_ratio"]
-    else:
-        entry[field] = value
+    raw["pre_trade_limits"]["symbols"] = {"fUST": {"min_period_days": 2}}
     path = tmp_path / "safety.yaml"
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError):
         load_safety_config(path)
 
 
-# --------------------------------------------------------------------------- policy schema 2
+# --------------------------------------------------------------------------- policy schemas
 
 
 @pytest.mark.parametrize("value", [Decimal("0"), Decimal("-1"), Decimal("NaN"), 200])
@@ -338,11 +380,50 @@ def test_policy_schema_2_round_trips_and_schema_1_stays_readable_without_a_ceili
     ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
       "max_cell_fraction": "0.7", "max_offer_amount": "0"}, 2),         # zero ceiling
     ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
-      "max_cell_fraction": "0.7"}, 3),                                  # unknown schema
+      "max_cell_fraction": "0.7"}, 4),                                  # unknown schema
+    ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
+      "max_cell_fraction": "0.7", "max_offer_amount": "200"}, 3),       # v3 without envelope
+    ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
+      "max_cell_fraction": "0.7", "max_offer_amount": "200",
+      "envelope": {"min_period_days": 2, "max_period_days": 2, "max_open_offers": 6,
+                   "rate_floor_ratio": "0.5"}}, 3),                     # envelope missing a key
+    ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
+      "max_cell_fraction": "0.7", "max_offer_amount": "200",
+      "envelope": {"min_period_days": 3, "max_period_days": 2, "max_open_offers": 6,
+                   "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"}}, 3),  # min > max
+    ({"enabled": True, "reserve_amount": "0", "allocation_mode": "all_available",
+      "max_cell_fraction": "0.7", "max_offer_amount": "200",
+      "envelope": {"min_period_days": True, "max_period_days": 2, "max_open_offers": 6,
+                   "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"}}, 3),  # bool is not int
 ])
 def test_malformed_policy_rows_are_refused(payload: dict[str, Any], schema: int) -> None:
     with pytest.raises(CapitalBlockedError):
         policy_from_row(_row(payload, schema))
+
+
+def test_policy_schema_3_round_trips_the_envelope() -> None:
+    assert policy_schema_version(POLICY) == 3
+    payload = policy_payload(POLICY)
+    assert payload["envelope"] == {"min_period_days": 2, "max_period_days": 2,
+                                   "max_open_offers": 6, "rate_floor_ratio": "0.5",
+                                   "min_rate_apr": "0.01"}
+    assert policy_from_row(_row(payload, 3)) == POLICY
+
+
+@pytest.mark.parametrize(("change", "value"), [
+    ("min_period_days", 1), ("max_period_days", 121), ("min_period_days", 3),
+    ("max_open_offers", 0), ("rate_floor_ratio", Decimal("1.5")),
+    ("rate_floor_ratio", Decimal("0")), ("min_rate_apr", Decimal("0")),
+    ("min_rate_apr", Decimal("1")), ("max_open_offers", 6.0),
+])
+def test_invalid_envelopes_are_refused(change: str, value: Any) -> None:
+    with pytest.raises(ValueError):
+        replace(ENVELOPE, **{change: value})
+
+
+def test_an_envelope_requires_the_amount_ceiling() -> None:
+    with pytest.raises(ValueError, match="requires max_offer_amount"):
+        CapitalPolicy(enabled=True, envelope=ENVELOPE)
 
 
 def _view(policy: CapitalPolicy, max_new_offer: str) -> Any:

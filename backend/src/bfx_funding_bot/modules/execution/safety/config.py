@@ -97,23 +97,6 @@ class CalibratedGuardsCfg(BaseModel):
     divergence_rate: _DivergenceCfg
 
 
-class _SymbolLimitsCfg(BaseModel):
-    """Always-on per-symbol pre-trade limits (T9). Every field is required."""
-    model_config = ConfigDict(extra="forbid")
-    # Bitfinex funding periods run 2..120 days; the guard enforces this range too.
-    min_period_days: Annotated[int, Field(ge=2, le=120)]
-    max_period_days: Annotated[int, Field(ge=2, le=120)]
-    max_open_offers: Annotated[int, Field(gt=0)]
-    # Offer rate must be at least this fraction of the median live bid rate.
-    rate_floor_ratio: Annotated[Decimal, Field(gt=0, le=1)]
-
-    @model_validator(mode="after")
-    def _check(self) -> _SymbolLimitsCfg:
-        if self.min_period_days > self.max_period_days:
-            raise ValueError("min_period_days must not exceed max_period_days")
-        return self
-
-
 class _CommandRateCfg(BaseModel):
     """Token bucket over submits and cancels at the command gate."""
     model_config = ConfigDict(extra="forbid")
@@ -125,8 +108,8 @@ class _CommandRateCfg(BaseModel):
 
 
 class PreTradeLimitsCfg(BaseModel):
+    """Platform limits; per-symbol offer terms live in the CapitalPolicy envelope."""
     model_config = ConfigDict(extra="forbid")
-    symbols: dict[str, _SymbolLimitsCfg]
     command_rate: _CommandRateCfg
 
 

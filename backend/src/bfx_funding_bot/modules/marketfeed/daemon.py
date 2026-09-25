@@ -1349,13 +1349,11 @@ async def build_daemon(
         ))
     if capital_runtime is not None:
         guards.append(CapitalPolicyGuard(runtime=capital_runtime))
-        # T9 always-on pre-trade limits: required for a live writer (fail-closed).
+        # Always-on offer envelope (fail-closed); the command throttle config is
+        # required for a live writer too.
+        require_pre_trade_limits(safety_cfg.pre_trade_limits)
         guards.extend(build_pre_trade_guards(
-            require_pre_trade_limits(safety_cfg.pre_trade_limits), runtime=capital_runtime,
-            book=funding_book_service, session_factory=session_factory,
-            account_id=capital_runtime.repository.account_id, environment=env_str,
-            clock=now_ms_utc,
-        ))
+            runtime=capital_runtime, book=funding_book_service, clock=now_ms_utc))
     elif hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(
             ledger=ledger,
