@@ -21,7 +21,7 @@ pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[3]
 BACKEND = ROOT / "backend"
-REVISION = "c3a639388457"
+REVISION = "c74d45a54e46"
 REV = "b" * 40
 ATTEMPT = "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f"
 DIGEST_B, DIGEST_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64

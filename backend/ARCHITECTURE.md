@@ -391,7 +391,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。live（`safety.live.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 PostgreSQL trigger 拒絕（權威）；Python 的 `check_transition` 只是較早、較清楚的錯誤，`test_trading_state_rule_parity` 在遷移後的 PG 上對全部轉換組合驗證兩邊判定一致。新表（trading_state、deployments、operator requests）的規則測試都跑在遷移後的 PG（`migrated_db`，template clone），不再有 SQLite 雙軌；model 帶回全部 CHECK（regex 只在 PG 建），`test_model_constraints` 比對 model 與 migration 的 CHECK。static admin token 只保留降低曝險的緊急備用：`POST /admin/halt`（kill）與 `POST /admin/pause`；任何恢復（resume、material 核准）都只能經 webapi 的 TOTP 請求（ADR D4，見下方 Release flow），static token 沒有 resume。
+**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 PostgreSQL trigger 拒絕（權威）；Python 的 `check_transition` 只是較早、較清楚的錯誤，`test_trading_state_rule_parity` 在遷移後的 PG 上對全部轉換組合驗證兩邊判定一致。新表（trading_state、deployments、operator requests）的規則測試都跑在遷移後的 PG（`migrated_db`，template clone），不再有 SQLite 雙軌（例外：daemon wiring 測試仍用 SQLite，它們驗證元件接線而非狀態規則，碰到 trading_state 時只經過 Python pre-check）；model 帶回全部 CHECK（regex 只在 PG 建），`test_model_constraints` 比對 model 與 migration 的 CHECK。static admin token 只保留降低曝險的緊急備用：`POST /admin/halt`（kill）與 `POST /admin/pause`；任何恢復（resume、material 核准）都只能經 webapi 的 TOTP 請求（ADR D4，見下方 Release flow），static token 沒有 resume。
 
 **自動保護（`safety/protection.py`，ADR D5）**：下列條件一律寫 `HALTED/auto` 並執行 kill path，且不自動解除：UNKNOWN submit（command gate，或 recovery 把中斷的 PENDING 轉 UNKNOWN）、orphan quarantine／capital classifier 的 `unattributed_offer`、`unclassifiable_commitment`（snapshot acceptance 或 planner 讀取）、`offer_amount_conflict`（受管 offer 的 venue 原始金額≠送出金額）、venue 借出額高於內部帳（見下）、loss limiter（24h loss 或 drawdown 超限；monitor 包住 NAV tracker）、writer lock 在 refresh 後仍未持有。觸發是同步記錄：guard 立即擋新單，kill 由受監督的 task 在所有鎖之外執行，因此在 command gate 的 account lock 或 recovery transaction 內觸發不會自鎖。「借出額高於內部帳」只判斷 capital authority 接受的 snapshot（兩次相同的 fetch，排除查詢中途成交造成的重複計算），逐幣別比較 snapshot 前的 ledger：lent 只能因借款結束而減少，或因我方 offer 成交（offered 減少）而增加，超出部分（>0.01）才觸發；未被接受的 snapshot 的差額會累計到下一個被接受的 snapshot；從未被 venue 觀測過的幣別只建立 baseline。借款結束、reconcile 補回 WS 漏掉的成交／撤單都不觸發。
 
@@ -465,13 +465,13 @@ execution_decisions    (append-only pre-trade audit；非 ledger projection)
 trading_state          (append-only 交易狀態；放貸與否的唯一權威)
   PK id（insert trigger 在 scope lock 下指派，id 序即決策序）
   exchange_account_id (FK RESTRICT), deployment_environment,
-  state{ACTIVE|REDUCING|HALTED}, cause{operator|kill_switch|auto|material_deploy},
+  state{ACTIVE|REDUCING|HALTED}, cause{operator|auto|material_deploy},
   actor, reason, created_at_ms,
   probation_multiplier / probation_started_at_ms / probation_floor（per-currency 最小單）, legacy_halt_id
   -- trigger 拒絕非法轉換與 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
   -- legacy_halt_id 指向 release_archive.trading_halt 的來源列（無 FK）。
 
-release_archive.*     (已退役 release ceremony 的真錢紀錄；migration 5d1c7e9a3b20)
+release_archive.*     (已退役 release ceremony 的真錢紀錄；migration c74d45a54e46)
   trading_halt, canary_command_permits, release_sessions, release_session_audit
   -- 原表連同欄位、約束、索引與指向 public 的 FK 整張移入（SET SCHEMA），statement-level
   -- trigger 拒絕任何寫入；manifest 記每表列數與依 PK 排序的 to_jsonb 內容 SHA-256，可重算驗證。
@@ -700,7 +700,7 @@ uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`un
 `operator_authorized`（SQL `public.operator_authorized`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
 failed＋根因）記回請求列；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
 需要在鎖外觀測的資料（限額期的 venue 最小單）以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger／
-projection 表零寫權限，授權與收回都在 migration `b8e2d4f6a013`。
+projection 表零寫權限，授權與收回都在 migration `1c435a35dcb4`。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 

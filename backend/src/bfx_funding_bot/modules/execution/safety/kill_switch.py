@@ -49,7 +49,6 @@ from bfx_funding_bot.modules.execution.protocols import (
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_AUTO,
-    CAUSE_KILL_SWITCH,
     CAUSE_OPERATOR,
     HALTED,
     TradingState,
@@ -60,7 +59,7 @@ from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-KILL_CAUSES = frozenset({CAUSE_OPERATOR, CAUSE_KILL_SWITCH, CAUSE_AUTO})
+KILL_CAUSES = frozenset({CAUSE_OPERATOR, CAUSE_AUTO})
 QUIESCE_TIMEOUT_S = 30.0
 _FUNDING_SYMBOL = re.compile(r"^f([A-Z0-9]{2,15})$")
 _DETAIL_LIMIT = 512

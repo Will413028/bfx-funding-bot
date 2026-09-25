@@ -323,7 +323,6 @@
     },
     "cause": {
       "operator": "operator",
-      "kill_switch": "kill switch",
       "auto": "automatic protection",
       "material_deploy": "material deploy"
     },

@@ -9,7 +9,7 @@ ADR 2026-09-25 D4 separates the trading state from releases:
   funding offers (see ``kill_switch``).
 
 Every transition is an appended row naming its ``cause`` (``operator``,
-``kill_switch``, ``auto``, ``material_deploy``), actor and reason, so "who
+``auto``, ``material_deploy``), actor and reason, so "who
 stopped or resumed trading, when and why" stays answerable. The current state
 is the highest id for the account/environment. PostgreSQL's insert trigger
 assigns that id under a per-scope lock and rejects the same illegal transitions
@@ -41,7 +41,6 @@ REDUCING: Final = "REDUCING"
 HALTED: Final = "HALTED"
 
 CAUSE_OPERATOR: Final = "operator"
-CAUSE_KILL_SWITCH: Final = "kill_switch"
 CAUSE_AUTO: Final = "auto"
 CAUSE_MATERIAL_DEPLOY: Final = "material_deploy"
 
@@ -52,7 +51,7 @@ PROBATION_LIFTED: Final = "probation_lifted"
 CAUSES_BY_STATE: Final[dict[str, frozenset[str]]] = {
     ACTIVE: frozenset({CAUSE_OPERATOR, CAUSE_AUTO}),
     REDUCING: frozenset({CAUSE_OPERATOR, CAUSE_MATERIAL_DEPLOY}),
-    HALTED: frozenset({CAUSE_OPERATOR, CAUSE_KILL_SWITCH, CAUSE_AUTO}),
+    HALTED: frozenset({CAUSE_OPERATOR, CAUSE_AUTO}),
 }
 
 
@@ -375,7 +374,6 @@ __all__ = [
     "ACTIVE",
     "CAUSES_BY_STATE",
     "CAUSE_AUTO",
-    "CAUSE_KILL_SWITCH",
     "CAUSE_MATERIAL_DEPLOY",
     "CAUSE_OPERATOR",
     "HALTED",
