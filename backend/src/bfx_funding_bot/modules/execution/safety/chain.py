@@ -45,7 +45,11 @@ GUARD_EVAL_WARN_FRACTION = 0.5
 _CAPITAL_POLICY = "capital_policy"
 _TRADING_STATE = "manual_kill"
 _TRANSPORT_EXEMPT = frozenset({_CAPITAL_POLICY})
-_CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE})
+# Pre-trade limits (T9, safety/pre_trade.py) judge a NEW offer's terms; a cancel's
+# probe carries the managed offer's old terms and must never be refused by them.
+_PRE_TRADE_LIMITS = frozenset({"period_bounds", "max_offer_amount", "open_offer_limit",
+                               "rate_floor"})
+_CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE}) | _PRE_TRADE_LIMITS
 
 
 class _DiagnosticsProtocol(Protocol):

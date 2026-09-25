@@ -209,3 +209,33 @@ class FundingCancelAllAuditRow(Base):
               postgresql_where=text("phase <> 'requested'"),
               sqlite_where=text("phase <> 'requested'")),
     )
+
+
+class NavWindowSampleRow(Base):
+    """Loss-limiter 24h window samples, so a restart does not forget a recent loss (T9).
+
+    ReconcileNavTracker computes realized_loss_pct_24h from the highest NAV seen
+    in the last 24h. Kept in memory only, a restart right after a loss rebuilt the
+    window from the post-loss NAV and the limiter read zero. Rows are written only
+    when NAV changes (or every few minutes), read back at boot, and pruned after
+    two days. Fail-permissive like nav_peak: the reconcile path never waits on it.
+    """
+
+    __tablename__ = "nav_window_samples"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    nav: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
+
+    __table_args__ = (
+        Index("ix_nav_window_samples_scope_symbol_time",
+              "exchange_account_id", "deployment_environment", "symbol", "occurred_at_ms"),
+    )

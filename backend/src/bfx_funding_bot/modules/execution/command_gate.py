@@ -86,6 +86,12 @@ class OpenUncertaintyReader(Protocol):
     ) -> bool: ...
 
 
+class CommandRateLimiter(Protocol):
+    """Admits or refuses one venue write; never blocks (safety/pre_trade.CommandThrottle)."""
+
+    def admit(self, kind: str) -> bool: ...
+
+
 class AuthoritativeSafetyEvaluator(Protocol):
     """Re-evaluate the complete safety chain at the locked money boundary."""
 
@@ -161,6 +167,8 @@ class AccountCommandGate:
         # to call here while this gate's account lock is held; the kill it
         # leads to waits for that lock from another task.
         self.protection: ProtectionPort | None = None
+        # Always-on venue write rate limit (T9); installed by the live daemon.
+        self.throttle: CommandRateLimiter | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._latched_scopes: dict[tuple[str, str, str], str] = {}
 
@@ -224,6 +232,7 @@ class AccountCommandGate:
         lock_key = (str(account_id), self._deployment_environment)
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
+            self._admit("submit")
             if self._capital is None:
                 await self.check(ready, context)
                 await self._guard(ready.decision, context)
@@ -423,6 +432,7 @@ class AccountCommandGate:
             raise CommandGateBlocked("cancel_account_conflict")
         lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
         async with lock:
+            self._admit("cancel")
             async with runtime.session_factory.begin() as session:
                 await runtime.repository.writer.prepare_locked(session, account_id=runtime.repository.account_id)
                 claim = await session.scalar(select(OfferClaimRow).where(
@@ -597,6 +607,11 @@ class AccountCommandGate:
         await self._safe_publish(claimed)
         if filled is not None:
             await self._safe_publish(filled)
+
+    def _admit(self, kind: str) -> None:
+        """Rate-limit venue writes before anything durable is written."""
+        if self.throttle is not None and not self.throttle.admit(kind):
+            raise CommandGateBlocked("command_rate_limited")
 
     def _latch(self, symbol: str, account_id: str, reason: str) -> None:
         self._latched_scopes[(account_id, self._deployment_environment, symbol)] = reason

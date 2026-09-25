@@ -63,6 +63,8 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     # funding_cancel_all_audit is a new table outside TABLE_NAMES.
     "c2b7b04da604",
     "c3a639388457",
+    # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
+    "9391a0f675d3",
 })
 
 
