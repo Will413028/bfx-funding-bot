@@ -162,6 +162,7 @@ def _service(
     cells: list[CellConfig] | None = None,
     recorder: SubmitAttemptRecorder | None = None,
     trading_state: Any = None,
+    kill_switch: Any = None,
 ) -> TradingStatusService:
     led = ledger if ledger is not None else _FakeLedger()
     chain = SafetyGuardChain(
@@ -184,6 +185,7 @@ def _service(
         phase=Phase.CANARY,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
         trading_state=trading_state,
+        kill_switch=kill_switch,
     )
 
 
@@ -539,13 +541,43 @@ async def test_never_configured_persisted_state_is_null_not_false(
 
 
 @pytest.mark.asyncio
-async def test_halt_writes_a_persisted_transition() -> None:
+async def test_pause_writes_a_reducing_transition() -> None:
     store = _FakeTradingState(None)
     svc = _service(trading_state=store)
-    out = await svc.halt(reason="candle distortion", actor="admin")
+    out = await svc.pause(reason="candle distortion", actor="admin")
     assert store.writes == [("REDUCING", "operator", "candle distortion", "admin")]
     assert out["halted"] is True
     assert out["state"] == "REDUCING"
+
+
+class _FakeKillSwitch:
+    def __init__(self, store: _FakeTradingState, *, complete: bool) -> None:
+        self.store, self.complete, self.calls = store, complete, []
+
+    async def engage(self, *, cause: str, actor: str, reason: str) -> Any:
+        from bfx_funding_bot.modules.execution.safety.kill_switch import (
+            CancelAllOutcome,
+            KillResult,
+        )
+        self.calls.append((cause, actor, reason))
+        result = await self.store.transition("HALTED", cause=cause, actor=actor, reason=reason)
+        phase = "acknowledged" if self.complete else "failed"
+        return KillResult(state=result.state, state_changed=result.changed,
+                          cancel_all=(CancelAllOutcome("UST", phase, None if self.complete else "down"),))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete", [True, False])
+async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bool) -> None:
+    store = _FakeTradingState(_trading("ACTIVE"))
+    kill = _FakeKillSwitch(store, complete=complete)
+    svc = _service(trading_state=store, kill_switch=kill)
+    out = await svc.halt(reason="venue incident", actor="will")
+    assert kill.calls == [("operator", "will", "venue incident")]
+    assert out["state"] == "HALTED" and out["cause"] == "operator"
+    assert out["cancel_all_complete"] is complete
+    assert out["cancel_all"][0]["currency"] == "UST"
+    assert out["resumable_without_approval"] is False
 
 
 @pytest.mark.asyncio
@@ -592,7 +624,7 @@ async def test_operator_halt_is_recorded_as_a_reducing_pause() -> None:
     store = _FakeTradingState(None)
     service = _service(trading_state=store)
 
-    out = await service.halt(reason="pg 18.6 upgrade", actor="admin")
+    out = await service.pause(reason="pg 18.6 upgrade", actor="admin")
 
     assert out["state"] == "REDUCING"
     assert out["cause"] == "operator"
@@ -604,7 +636,7 @@ async def test_operator_pause_cannot_relabel_a_halt() -> None:
     """HALTED ends only in an operator's authenticated resume, never in a pause."""
     store = _FakeTradingState(_trading("HALTED", cause="auto"))
     with pytest.raises(ValueError, match="HALTED -> REDUCING"):
-        await _service(trading_state=store).halt(reason="maintenance", actor="admin")
+        await _service(trading_state=store).pause(reason="maintenance", actor="admin")
     assert store.writes == []
 
 
@@ -649,6 +681,8 @@ async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None
     svc = _service(trading_state=None)
     with pytest.raises(ValueError, match="not configured"):
         await svc.halt(reason="x", actor="admin")
+    with pytest.raises(ValueError, match="not configured"):
+        await svc.pause(reason="x", actor="admin")
     with pytest.raises(ValueError, match="not configured"):
         await svc.resume(reason="x", actor="admin")
 

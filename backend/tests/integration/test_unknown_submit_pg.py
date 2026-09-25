@@ -818,3 +818,37 @@ async def test_history_5xx_after_visible_venue_side_effect_stays_one_submit_unkn
     assert quarantine_count == 0
     assert result.n_matched == 0
     assert result.n_quarantined == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["CANCELED", "CANCELED was: PARTIALLY FILLED at 0.031% (5.0)"])
+async def test_unknown_resolves_when_our_cancel_all_took_the_offer(pg_session_factory, status):
+    """The kill switch cancels an UNKNOWN symbol's offers without knowing which
+    one is ours. The accepted offer then exists only in history, cancelled:
+    that is still an exact match and a terminal outcome, never a reason to
+    keep the symbol UNKNOWN forever or to treat the amount as still offered."""
+    from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+
+    await _seed_attempt(pg_session_factory, unknown=True)
+    cancelled = _offer("venue-cancelled-by-kill", status=status)
+    history = _History((cancelled,), _Coverage(1_000, 5_000, 1_500, 1_500, 1, True))
+    result = await _recovery(pg_session_factory, _Auth(active=(), history=history)).run()
+    assert result.n_matched == 1
+
+    async with pg_session_factory() as session:
+        uncertainty = (await session.execute(select(ExecutionUncertaintyRow).where(
+            ExecutionUncertaintyRow.kind == "submit_outcome_unknown"))).scalar_one()
+        attempt = (await session.execute(select(SubmissionAttemptRow))).scalar_one()
+        claim = (await session.execute(select(OfferClaimRow))).scalar_one()
+        position = (await session.execute(select(PositionStateRow).where(
+            PositionStateRow.symbol == "fUST"))).scalar_one()
+        offer = (await session.execute(select(VenueOfferStateRow).where(
+            VenueOfferStateRow.venue_offer_id == "venue-cancelled-by-kill"))).scalar_one()
+    assert uncertainty.state == "resolved"
+    assert uncertainty.resolution_evidence["venue_status"] == status
+    assert attempt.outcome_kind == "acknowledged"
+    assert attempt.venue_offer_id == "venue-cancelled-by-kill"
+    assert claim.state == "released"
+    assert Decimal(str(position.uncertain_amount)) == 0
+    assert Decimal(str(position.offered_amount)) == 0
+    assert offer.is_terminal

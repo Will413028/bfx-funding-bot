@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     resolve_for_symbol_with_source,
 )
+from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     ACTIVE,
     CAUSE_OPERATOR,
@@ -83,6 +84,10 @@ class _TradingStateProtocol(Protocol):
         now_ms: int | None = None,
     ) -> TransitionResult: ...
     async def history(self, *, limit: int = 20) -> list[TradingState]: ...
+
+
+class _KillSwitchProtocol(Protocol):
+    async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult: ...
 
 
 def _env_kill_switch_set() -> bool:
@@ -134,6 +139,7 @@ class TradingStatusService:
         phase: Phase,
         attempts: SubmitAttemptRecorder,
         trading_state: _TradingStateProtocol | None = None,
+        kill_switch: _KillSwitchProtocol | None = None,
         readiness: TradingReadiness | None = None,
         capital_runtime: CapitalRuntime | None = None,
     ) -> None:
@@ -153,6 +159,7 @@ class TradingStatusService:
         self._phase = phase
         self._attempts = attempts
         self._trading_state = trading_state
+        self._kill_switch = kill_switch
         self._readiness = readiness
         self._symbols = sorted(configured_symbols(cells))
         # symbol → reference amount, so the probe's default size has a source.
@@ -261,11 +268,35 @@ class TradingStatusService:
     # ------------------------------------------------------------ halt/resume
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
-        """Pause trading for maintenance: REDUCING, cause operator.
+        """Kill: HALTED (cause operator), then the venue funding cancel-all.
 
-        An operator asking through this endpoint is pausing -- that is the only
-        thing it is for. Automatic protections and boot failures record their
-        own HALTED directly."""
+        The state is written first and stays written whatever the venue does;
+        ``cancel_all_complete`` says whether every currency's cancel-all was
+        acknowledged. Calling again retries the cancel-all.
+        """
+        if self._kill_switch is None:
+            raise ValueError(
+                "kill switch is not configured for this daemon; accepting the "
+                "request would report success while changing nothing",
+            )
+        result = await self._kill_switch.engage(cause=CAUSE_OPERATOR, actor=actor, reason=reason)
+        return {
+            **_trading_state_dict(result.state),  # type: ignore[dict-item]
+            "state_changed": result.state_changed,
+            "cancel_all_complete": result.complete,
+            "cancel_all": [
+                {"currency": o.currency, "phase": o.phase, "venue_status": o.venue_status,
+                 "detail": o.detail, "attempt_id": str(o.attempt_id) if o.attempt_id else None,
+                 "recorded": o.recorded}
+                for o in result.cancel_all
+            ],
+            "scope_error": result.scope_error,
+            "still_halted_by_env": _env_kill_switch_set(),
+        }
+
+    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
+        """Maintenance pause: REDUCING, cause operator. Cancels stay allowed,
+        nothing new is placed, and /admin/resume lifts it."""
         result = await self._require_store().transition(
             REDUCING, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
         )

@@ -60,6 +60,8 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     "a7f3c1d9e204",
     # trading_state is a new table outside TABLE_NAMES; event_log is untouched.
     "8e4f33517b10",
+    # funding_cancel_all_audit is a new table outside TABLE_NAMES.
+    "c2b7b04da604",
 })
 
 

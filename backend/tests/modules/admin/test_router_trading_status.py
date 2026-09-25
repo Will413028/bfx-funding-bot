@@ -149,14 +149,21 @@ def test_smoke_test_route_is_absent_when_no_runner_is_wired() -> None:
 
 
 class _HaltableStatus(_FakeStatus):
-    def __init__(self) -> None:
+    def __init__(self, *, cancel_all_complete: bool = True) -> None:
         super().__init__()
         self.halts: list[dict[str, Any]] = []
+        self.pauses: list[dict[str, Any]] = []
         self.resumes: list[dict[str, Any]] = []
+        self.cancel_all_complete = cancel_all_complete
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
         self.halts.append({"reason": reason, "actor": actor})
-        return {"halted": True, "reason": reason, "actor": actor}
+        return {"halted": True, "state": "HALTED", "reason": reason, "actor": actor,
+                "cancel_all_complete": self.cancel_all_complete}
+
+    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
+        self.pauses.append({"reason": reason, "actor": actor})
+        return {"halted": True, "state": "REDUCING", "reason": reason, "actor": actor}
 
     async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
         self.resumes.append({"reason": reason, "actor": actor})
@@ -165,6 +172,9 @@ class _HaltableStatus(_FakeStatus):
 
 class _UnconfiguredHaltStatus(_FakeStatus):
     async def halt(self, **kwargs: Any) -> dict[str, Any]:
+        raise ValueError("persisted halt is not configured for this daemon")
+
+    async def pause(self, **kwargs: Any) -> dict[str, Any]:
         raise ValueError("persisted halt is not configured for this daemon")
 
     async def resume(self, **kwargs: Any) -> dict[str, Any]:
@@ -186,6 +196,37 @@ def test_halt_records_the_reason_and_actor() -> None:
     )
     assert resp.status_code == 200
     assert status.halts == [{"reason": "candle distortion", "actor": "will"}]
+    assert status.pauses == []
+
+
+def test_halt_reports_502_while_the_venue_cancel_all_is_incomplete() -> None:
+    """HALTED is in force either way; a non-2xx makes an unfinished kill loud."""
+    status = _HaltableStatus(cancel_all_complete=False)
+    resp = TestClient(_app(status)).post(
+        "/admin/halt?reason=venue+incident", headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["state"] == "HALTED"
+    assert resp.json()["cancel_all_complete"] is False
+
+
+def test_pause_is_the_maintenance_stop() -> None:
+    status = _HaltableStatus()
+    resp = TestClient(_app(status)).post(
+        "/admin/pause?reason=pg+upgrade&actor=will", headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "REDUCING"
+    assert status.pauses == [{"reason": "pg upgrade", "actor": "will"}]
+    assert status.halts == []
+
+
+def test_pause_requires_authorization_and_a_reason() -> None:
+    status = _HaltableStatus()
+    assert TestClient(_app(status)).post("/admin/pause?reason=x").status_code == 401
+    assert TestClient(_app(status)).post(
+        "/admin/pause", headers={"Authorization": "Bearer secret"}).status_code == 422
+    assert status.pauses == []
 
 
 def test_halt_no_longer_renews_a_canary_epoch() -> None:

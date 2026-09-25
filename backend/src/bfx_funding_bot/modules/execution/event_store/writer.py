@@ -44,6 +44,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Adds the append-only trading_state table beside the ledger; no event,
     # projection or cursor is touched.
     "8e4f33517b10",
+    # Adds the append-only funding_cancel_all_audit table; no event, projection
+    # or cursor is touched.
+    "c2b7b04da604",
 })
 
 __all__ = [

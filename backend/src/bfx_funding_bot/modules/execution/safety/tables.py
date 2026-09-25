@@ -23,6 +23,7 @@ from sqlalchemy import (
     Numeric,
     PrimaryKeyConstraint,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -147,4 +148,64 @@ class TradingStateRow(Base):
             name="ck_trading_state_evidence",
         ),
         Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id"),
+    )
+
+
+class FundingCancelAllAuditRow(Base):
+    """Append-only record of each venue funding cancel-all the kill switch issued.
+
+    ``requested`` is written before the call; exactly one terminal row
+    (``acknowledged`` / ``rejected`` / ``failed`` / ``skipped``) follows for the
+    same ``attempt_id``. PostgreSQL rejects UPDATE/DELETE/TRUNCATE.
+    """
+
+    __tablename__ = "funding_cancel_all_audit"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT",
+                   name="fk_funding_cancel_all_audit_account"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    trading_state_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("trading_state.id", ondelete="RESTRICT",
+                   name="fk_funding_cancel_all_audit_trading_state"),
+        nullable=False,
+    )
+    attempt_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    venue_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ('requested', 'acknowledged', 'rejected', 'failed', 'skipped')",
+            name="ck_funding_cancel_all_audit_phase",
+        ),
+        CheckConstraint(
+            "(phase = 'requested' AND venue_status IS NULL AND detail IS NULL) OR phase <> 'requested'",
+            name="ck_funding_cancel_all_audit_request_shape",
+        ),
+        CheckConstraint(
+            "length(currency) BETWEEN 1 AND 16 AND length(trim(actor)) > 0 "
+            "AND (detail IS NULL OR length(detail) <= 512) "
+            "AND (venue_status IS NULL OR length(venue_status) <= 64) AND occurred_at_ms >= 0",
+            name="ck_funding_cancel_all_audit_evidence",
+        ),
+        Index("ix_funding_cancel_all_audit_scope_id",
+              "exchange_account_id", "deployment_environment", "id"),
+        Index("uq_funding_cancel_all_audit_request", "attempt_id", unique=True,
+              postgresql_where=text("phase = 'requested'"),
+              sqlite_where=text("phase = 'requested'")),
+        Index("uq_funding_cancel_all_audit_outcome", "attempt_id", unique=True,
+              postgresql_where=text("phase <> 'requested'"),
+              sqlite_where=text("phase <> 'requested'")),
     )

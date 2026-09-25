@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import date
@@ -38,6 +39,7 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
+    FundingCancelAllResult,
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.retry import (
@@ -61,6 +63,9 @@ log = logging.getLogger(__name__)
 BITFINEX_REST_BASE = "https://api.bitfinex.com"
 _OFFER_SUBMIT_PATH = "v2/auth/w/funding/offer/submit"
 _OFFER_CANCEL_PATH = "v2/auth/w/funding/offer/cancel"
+# Cancels every funding offer in one currency; idempotent, 90 req/min.
+_OFFER_CANCEL_ALL_PATH = "v2/auth/w/funding/offer/cancel/all"
+_CURRENCY = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
 def format_venue_decimal(x: float) -> str:
@@ -163,6 +168,24 @@ def classify_cancel_response(
         if "not found" in text_lower or "not active" in text_lower:
             return "already_terminal", text
     return "other", text
+
+
+def classify_cancel_all_response(raw: Any) -> FundingCancelAllResult:
+    """Classify ``[MTS, "foc_all-req", null, null, null, null, STATUS, TEXT]``.
+
+    Only ``SUCCESS`` is an acknowledgement; any other status is the venue
+    refusing, recorded with its own words. A shape that is not a notification
+    raises, so the caller records the attempt as failed rather than guessing.
+    """
+    if not isinstance(raw, list) or len(raw) < 7:
+        raise InvariantViolation(
+            f"unexpected Bitfinex cancel-all response shape: type={type(raw).__name__}",
+        )
+    status = raw[6] if isinstance(raw[6], str) else None
+    text = raw[7][:256] if len(raw) > 7 and isinstance(raw[7], str) else None
+    if status == "SUCCESS":
+        return FundingCancelAllResult(outcome="acknowledged", venue_status=status, text=text)
+    return FundingCancelAllResult(outcome="rejected", venue_status=status, text=text)
 
 
 class _EventSink(Protocol):
@@ -506,6 +529,41 @@ class BitfinexLiveExecutor:
                 "bitfinex_cancel_other_error voi=%s text=%s",
                 venue_offer_id, text,
             )
+
+    async def cancel_all_funding_offers(
+        self, *, currency: str, ctx: AccountContext,
+    ) -> FundingCancelAllResult:
+        """Cancel every funding offer in ``currency`` (e.g. "UST"), managed or not.
+
+        Idempotent at the venue, so transient failures are retried like a
+        single cancel. Auth and other non-retryable failures raise typed
+        executor errors for the caller to record; nothing here publishes a
+        domain event -- the next reconcile observes what was cancelled.
+        """
+        if not _CURRENCY.match(currency):
+            raise ValueError(f"invalid funding currency {currency!r}")
+        raw = await transient_retry(self._cancel_all_http_call)(currency, ctx)
+        return classify_cancel_all_response(raw)
+
+    async def _cancel_all_http_call(self, currency: str, ctx: AccountContext) -> Any:
+        body_bytes = json.dumps({"currency": currency}).encode("utf-8")
+        headers = sign_request(
+            body=body_bytes, nonce=self._nonce_provider(),
+            api_secret=ctx.credentials.api_secret,
+            path=_OFFER_CANCEL_ALL_PATH,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{_OFFER_CANCEL_ALL_PATH}",
+                content=body_bytes, headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise classify_httpx_exception(exc) from exc
+        if resp.status_code >= 400:
+            raise classify_httpx_response(resp)
+        return resp.json()
 
     async def _cancel_http_call(
         self,

@@ -172,6 +172,85 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("writer_lock_held", [True, False])
+async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, httpx_mock, writer_lock_held):
+    """BFX_KILL_SWITCH is a real kill at boot: the durable HALTED first, then the
+    venue funding cancel-all for each currency -- before any task can trade.
+    Without the writer lock the stop is still written and the venue untouched."""
+    import json as _json
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.core.writer_lock import WriterLock
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from tests.modules.marketfeed.account_test_helpers import (
+        TEST_EXCHANGE_ACCOUNT_ID,
+        configure_release_runtime,
+    )
+    configure_account_env(monkeypatch)
+    import os
+    for name in list(os.environ):
+        if name.startswith("BFX_CANARY_") or name in (
+            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+        ):
+            monkeypatch.delenv(name)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "BFX_KILL_SWITCH": "true",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'kill.db'}"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine, capital_policies=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    await trading.transition("ACTIVE", cause="operator", reason="trading before the kill", actor="test")
+    repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+    async with factory.begin() as session:
+        await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
+                                expected_revision=0, source={"fixture": True})
+        await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
+                                expected_revision=0, source={"fixture": True})
+    configure_release_runtime(monkeypatch)
+
+    async def held(self):
+        return writer_lock_held
+    monkeypatch.setattr(WriterLock, "verify_held", held)
+    cancel_all = "https://api.bitfinex.com/v2/auth/w/funding/offer/cancel/all"
+    if writer_lock_held:
+        httpx_mock.add_response(url=cancel_all, method="POST",
+            json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
+    httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+                            method="GET", json=[], is_reusable=True, is_optional=True)
+    try:
+        await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        state = await trading.current()
+        assert (state.state, state.cause, state.actor) == ("HALTED", "kill_switch", "env:BFX_KILL_SWITCH")
+        writes = [r for r in httpx_mock.get_requests() if "/auth/w/" in str(r.url)]
+        async with factory() as session:
+            phases = [(row.currency, row.phase) for row in (await session.scalars(
+                select(FundingCancelAllAuditRow).order_by(FundingCancelAllAuditRow.id))).all()]
+        if writer_lock_held:
+            assert [(str(r.url), _json.loads(r.content)) for r in writes] == [(cancel_all, {"currency": "UST"})]
+            assert phases == [("UST", "requested"), ("UST", "acknowledged")]
+        else:
+            assert writes == []
+            assert phases == [("UST", "skipped")]
+    finally:
+        await engine.dispose()
+
+
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
     # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several
