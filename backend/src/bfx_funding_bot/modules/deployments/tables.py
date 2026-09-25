@@ -3,13 +3,13 @@
 Written only by the host tool (deploy/vm/ops/bfx_deploy.py) through `docker exec
 bfx-postgres psql` as the owner role; the runtime roles may only read it. The
 row records what was attempted and how it ended -- source revision, both image
-digests, change class, whether migrations ran, outcome -- and is never updated:
+digests, whether migrations ran, outcome -- and is never updated:
 a trigger rejects UPDATE, DELETE and TRUNCATE. An attempt that changes the
 containers has two rows sharing `attempt_id`: `started` (appended before the
 containers are created; `attempt_id` is the BFX_DEPLOYMENT_ID the containers
 get) and a terminal outcome; an attempt that stops earlier has only the latter.
-Operator approval of a material release is a separate append-only fact (T5),
-not a later edit of these rows.
+`change_class` is retired (change classes are gone): the current bfx-deploy
+leaves it NULL; only rows written by the previous tool carry a value.
 
 The CHECK constraints mirror the migration (PostgreSQL is the authority);
 the regex ones are created on PostgreSQL only, so SQLite fixtures still build.
@@ -38,7 +38,6 @@ from bfx_funding_bot.core.db import Base
 
 DEPLOYMENT_STARTED = "started"
 DEPLOYMENT_OUTCOMES = ("deployed", "rolled_back", "failed")
-CHANGE_CLASSES = ("standard", "material")
 _DIGEST_RE = "'^sha256:[0-9a-f]{64}$'"
 
 
@@ -57,7 +56,9 @@ class DeploymentRow(Base):
     source_revision: Mapped[str] = mapped_column(Text, nullable=False)
     backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
     frontend_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    change_class: Mapped[str] = mapped_column(Text, nullable=False)
+    # Retired; dropped in the follow-up release (kept only for the previous
+    # bfx-deploy, which still writes it while deploying the release that retired it).
+    change_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     migrations_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
@@ -70,7 +71,6 @@ class DeploymentRow(Base):
                         name="ck_deployments_source_revision").ddl_if(dialect="postgresql"),
         CheckConstraint(f"backend_digest ~ {_DIGEST_RE} AND frontend_digest ~ {_DIGEST_RE}",
                         name="ck_deployments_digests").ddl_if(dialect="postgresql"),
-        CheckConstraint("change_class IN ('standard', 'material')", name="ck_deployments_change_class"),
         CheckConstraint("outcome IN ('started', 'deployed', 'rolled_back', 'failed')",
                         name="ck_deployments_outcome"),
         CheckConstraint("(outcome = 'started') = (finished_at IS NULL)",

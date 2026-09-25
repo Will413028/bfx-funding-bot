@@ -23,8 +23,13 @@
 # re-checks only the digest and identity each created container runs with.
 #
 # Identity (injected by bfx-deploy, never set in env files): BFX_IMAGE_DIGEST,
-# BFX_SOURCE_REVISION, BFX_CHANGE_CLASS and BFX_DEPLOYMENT_ID, the attempt_id of
-# the `started` row in the deployments ledger for this deployment.
+# BFX_SOURCE_REVISION and BFX_DEPLOYMENT_ID, the attempt_id of the `started` row
+# in the deployments ledger for this deployment.
+#
+# BFX_CHANGE_CLASS is retired (change classes are gone) and nothing reads it. It
+# is kept, optional with the default `retired`, only so the previous bfx-deploy
+# (which injects it and checks each container carries it) can deploy this
+# release; the follow-up release removes it.
 #
 # Env precedence: `environment` > later env_file > earlier env_file. Secrets stay in
 # /opt/bfx/runtime/*.env (root 0600, never in git); non-secret bot settings come
@@ -56,7 +61,7 @@ services:
     environment:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
-      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:-retired}  # transitional, see header
       BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ""
@@ -86,7 +91,7 @@ services:
     environment:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
-      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:-retired}  # transitional, see header
       BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ""
@@ -115,7 +120,7 @@ services:
     environment:
       BFX_IMAGE_DIGEST: ${BFX_FRONTEND_DIGEST:?BFX_FRONTEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
-      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:-retired}  # transitional, see header
       BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       NODE_OPTIONS: ""
       LD_PRELOAD: ""

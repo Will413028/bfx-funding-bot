@@ -36,7 +36,6 @@ FAKE_ENV = {
     "BFX_FRONTEND_IMAGE": f"ghcr.io/will413028/bfx-funding-bot-frontend@{DIGEST_F}",
     "BFX_FRONTEND_DIGEST": DIGEST_F,
     "BFX_SOURCE_REVISION": "b" * 40,
-    "BFX_CHANGE_CLASS": "standard",
     "BFX_DEPLOYMENT_ID": "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f",
 }
 
@@ -165,8 +164,35 @@ def test_wrong_or_optional_env_files_are_detected(
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert policy.CONTAINERS == bfx.CONTAINERS
     assert tuple(bfx.identity_env(
-        bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), service="bot", klass="standard",
+        bfx.Target("b" * 40, DIGEST_B, DIGEST_F, "x", "y"), service="bot",
         deployment_id="d")) == policy.IDENTITY
+
+
+# Transitional (plan "Follow-up release"): the previous bfx-deploy injects
+# BFX_CHANGE_CLASS and checks every container carries its value, so the compose
+# file passes it through when given and defaults it otherwise. Nothing requires it.
+TRANSITIONAL_CHANGE_CLASS = "${BFX_CHANGE_CLASS:-retired}"
+
+
+def test_retired_change_class_is_optional_and_not_identity() -> None:
+    assert "BFX_CHANGE_CLASS" not in policy.IDENTITY
+    for service in ("bot", "webapi", "frontend"):
+        assert COMPOSE["services"][service]["environment"]["BFX_CHANGE_CLASS"] == TRANSITIONAL_CHANGE_CLASS
+
+
+@needs_compose
+@pytest.mark.parametrize(("injected", "expected"), [(None, "retired"), ("material", "material")])
+def test_policy_accepts_the_transitional_change_class(
+    runtime_dir: Path, injected: str | None, expected: str,
+) -> None:
+    # None: the new bfx-deploy; "material": the previous one deploying this release.
+    env = {**FAKE_ENV, **({"BFX_CHANGE_CLASS": injected} if injected else {})}
+    result = _render(runtime_dir, env)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+    assert policy.violations(rendered) == []
+    for service in ("bot", "webapi", "frontend"):
+        assert rendered["services"][service]["environment"]["BFX_CHANGE_CLASS"] == expected
 
 
 # --------------------------------------------------------------------------- rendered policy
@@ -314,7 +340,7 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
         for service, record in zip(("bot", "webapi", "frontend"), json.loads(inspected.stdout),
                                    strict=True):
             mismatches = bfx.container_mismatches(
-                record, service=service, target=target, klass="standard",
+                record, service=service, target=target,
                 deployment_id=FAKE_ENV["BFX_DEPLOYMENT_ID"])
             assert mismatches == ["name", "project"], (service, mismatches)
     finally:

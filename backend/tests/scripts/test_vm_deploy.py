@@ -47,7 +47,6 @@ OLD_B, OLD_F = "sha256:" + "1" * 64, "sha256:" + "2" * 64
 NEW_B, NEW_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
 OLD_ATTEMPT = "11111111-1111-4111-8111-111111111111"
 CI_RUN = "https://github.com/Will413028/bfx-funding-bot/actions/runs/123456789"
-RULES_TEXT = (ROOT / "deploy/change-class.yaml").read_text(encoding="utf-8")
 COMPOSE_TEXT = (ROOT / "deploy/vm/docker-compose.app.yml").read_text(encoding="utf-8")
 LIVE_ENV_TEXT = (ROOT / "deploy/vm/live.env").read_text(encoding="utf-8")
 TOOLING = {
@@ -90,12 +89,12 @@ class FakeLedger:
         self.fail_append: set[str] = set()  # outcomes whose append fails
 
     def seed(self, revision: str, backend: str, frontend: str, outcome: str,
-             klass: str = "standard", attempt_id: str = OLD_ATTEMPT) -> None:
+             attempt_id: str = OLD_ATTEMPT) -> None:
         self.rows.append(bfx.LedgerEntry(
             attempt_id=attempt_id,
             started_at="2026-09-24T00:00:00+00:00", finished_at="2026-09-24T00:01:00+00:00",
             source_revision=revision, backend_digest=backend, frontend_digest=frontend,
-            change_class=klass, migrations_applied=False, outcome=outcome, detail="seed"))
+            migrations_applied=False, outcome=outcome, detail="seed"))
 
     def _row(self, index: int) -> Any:
         entry = self.rows[index]
@@ -103,7 +102,7 @@ class FakeLedger:
                              source_revision=entry.source_revision,
                              backend_digest=entry.backend_digest,
                              frontend_digest=entry.frontend_digest,
-                             change_class=entry.change_class, outcome=entry.outcome,
+                             outcome=entry.outcome,
                              migrations_applied=entry.migrations_applied, ci_run=entry.ci_run)
 
     def read(self) -> Any:
@@ -130,10 +129,12 @@ class FakeLedger:
         return [row.outcome for row in self.rows if row.attempt_id == attempt_id]
 
 
-def inspect_record(service: str, running: tuple[str, str, str, str, str]) -> dict[str, Any]:
-    image, digest, revision, klass, deployment_id = running
+def inspect_record(service: str, running: tuple[str, str, str, str]) -> dict[str, Any]:
+    image, digest, revision, deployment_id = running
+    # BFX_CHANGE_CLASS=retired: the transitional compose default when bfx-deploy
+    # no longer injects it; the identity check must ignore it.
     env = [f"BFX_IMAGE_DIGEST={digest}", f"BFX_SOURCE_REVISION={revision}",
-           f"BFX_CHANGE_CLASS={klass}", f"BFX_DEPLOYMENT_ID={deployment_id}", "PATH=/usr/bin"]
+           f"BFX_DEPLOYMENT_ID={deployment_id}", "PATH=/usr/bin", "BFX_CHANGE_CLASS=retired"]
     return {
         "Name": "/" + bfx.CONTAINERS[service],
         "Config": {"Image": image, "Env": env,
@@ -164,7 +165,7 @@ class FakeHost:
     unhealthy: set[str] = field(default_factory=set)
     tampered: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
     foreign: list[str] = field(default_factory=list)
-    running: dict[str, tuple[str, str, str, str, str]] = field(default_factory=dict)
+    running: dict[str, tuple[str, str, str, str]] = field(default_factory=dict)
     stopped: list[str] = field(default_factory=list)
     worktrees: dict[str, str] = field(default_factory=dict)
     docker_configs: list[dict[str, Any]] = field(default_factory=list)
@@ -173,17 +174,15 @@ class FakeHost:
         for revision in (REV_OLD, REV_NEW):
             self.files[(revision, bfx.COMPOSE_PATH)] = COMPOSE_TEXT
             self.files[(revision, bfx.LIVE_ENV_PATH)] = LIVE_ENV_TEXT
-            self.files[(revision, "deploy/change-class.yaml")] = RULES_TEXT
             for path, text in TOOLING.items():
                 self.files[(revision, path)] = text
         self.diffs.setdefault((REV_OLD, REV_NEW), ["docs/runbooks/offsite-dr.md"])
-        self.start_release(REV_OLD, OLD_B, OLD_F, "standard", OLD_ATTEMPT)
+        self.start_release(REV_OLD, OLD_B, OLD_F, OLD_ATTEMPT)
 
-    def start_release(self, revision: str, backend: str, frontend: str, klass: str,
-                      deployment_id: str) -> None:
+    def start_release(self, revision: str, backend: str, frontend: str, deployment_id: str) -> None:
         for service in ("bot", "webapi"):
-            self.running[service] = (f"{BACKEND}@{backend}", backend, revision, klass, deployment_id)
-        self.running["frontend"] = (f"{FRONTEND}@{frontend}", frontend, revision, klass, deployment_id)
+            self.running[service] = (f"{BACKEND}@{backend}", backend, revision, deployment_id)
+        self.running["frontend"] = (f"{FRONTEND}@{frontend}", frontend, revision, deployment_id)
 
     def index(self, predicate: Callable[[tuple[str, ...]], bool]) -> int:
         return next(i for i, call in enumerate(self.calls) if predicate(call))
@@ -327,7 +326,8 @@ class FakeHost:
             return bfx.CommandResult(1, "", "compose failed")
         backend = (env["BFX_BACKEND_IMAGE"], env["BFX_BACKEND_DIGEST"])
         frontend = (env["BFX_FRONTEND_IMAGE"], env["BFX_FRONTEND_DIGEST"])
-        identity = (env["BFX_SOURCE_REVISION"], env["BFX_CHANGE_CLASS"], env["BFX_DEPLOYMENT_ID"])
+        assert "BFX_CHANGE_CLASS" not in env  # retired; compose supplies a transitional default
+        identity = (env["BFX_SOURCE_REVISION"], env["BFX_DEPLOYMENT_ID"])
         for service in ("bot", "webapi"):
             self.running[service] = (*backend, *identity)
         self.running["frontend"] = (*frontend, *identity)
@@ -466,7 +466,7 @@ def test_second_run_is_skipped_while_the_lock_is_held(harness: Harness) -> None:
 # --------------------------------------------------------------------------- success
 
 
-def test_standard_release_without_migration_deploys_by_digest(harness: Harness) -> None:
+def test_release_without_migration_deploys_by_digest(harness: Harness) -> None:
     assert harness.run() == 0
     host = harness.host
     assert host.count(BACKUP) == 0 and host.count(STOP_BOT) == 0
@@ -476,11 +476,12 @@ def test_standard_release_without_migration_deploys_by_digest(harness: Harness) 
     assert env is not None
     assert env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{NEW_B}"
     assert env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{NEW_F}"
-    assert (env["BFX_SOURCE_REVISION"], env["BFX_CHANGE_CLASS"]) == (REV_NEW, "standard")
+    assert env["BFX_SOURCE_REVISION"] == REV_NEW and "BFX_CHANGE_CLASS" not in env
     # Compose reads the env files bfx-deploy validated, not a separate default.
     assert env["BFX_RUNTIME_DIR"] == str(harness.settings.runtime_dir)
     row = harness.ledger.last
-    assert (row.outcome, row.change_class, row.migrations_applied) == ("deployed", "standard", False)
+    assert (row.outcome, row.migrations_applied) == ("deployed", False)
+    assert "class=" not in row.detail and "class=" not in harness.notices[-1][1]
     assert (row.backend_digest, row.frontend_digest, row.source_revision) == (NEW_B, NEW_F, REV_NEW)
     assert harness.notices[-1][0] == "info"
     assert host.stopped == []
@@ -503,12 +504,12 @@ def test_started_row_precedes_the_containers_and_names_their_deployment_id(harne
     assert started.attempt_id == finished.attempt_id
     assert started.finished_at is None and finished.finished_at is not None
     assert (started.source_revision, started.backend_digest, started.frontend_digest,
-            started.change_class, started.started_at) == (
+            started.started_at) == (
         finished.source_revision, finished.backend_digest, finished.frontend_digest,
-        finished.change_class, finished.started_at)
+        finished.started_at)
     env = harness.host.envs[harness.host.index(COMPOSE_UP)]
     assert env is not None and env["BFX_DEPLOYMENT_ID"] == started.attempt_id
-    assert harness.host.running["bot"][4] == started.attempt_id
+    assert harness.host.running["bot"][3] == started.attempt_id
     assert started.ci_run == finished.ci_run == CI_RUN
 
 
@@ -545,42 +546,10 @@ def test_pending_migration_stops_the_bot_then_backs_up_restore_tests_and_migrate
     assert host.running["bot"][1] == NEW_B
 
 
-def test_material_path_in_the_diff_marks_the_deployment_material(harness: Harness) -> None:
-    harness.host.diffs[(REV_OLD, REV_NEW)] = ["docs/a.md", "backend/src/bfx_funding_bot/main.py"]
-    assert harness.run() == 0
-    env = harness.host.envs[harness.host.index(COMPOSE_UP)]
-    assert env is not None and env["BFX_CHANGE_CLASS"] == "material"
-    assert _started(harness)[-1].change_class == "material"
-    assert harness.ledger.last.change_class == "material"
-    assert "backend/src/bfx_funding_bot/main.py" in harness.ledger.last.detail
-
-
-@pytest.mark.parametrize(("mutate", "reason"), [
-    (lambda h: h.host.commits.discard(REV_OLD), "previous_revision_unknown"),
-    (lambda h: h.host.files.pop((REV_NEW, "deploy/change-class.yaml")), "rules_unavailable"),
-    (lambda h: h.host.files.__setitem__((REV_NEW, "deploy/change-class.yaml"), "version: 9\n"), "rules_invalid"),
-    (lambda h: h.host.diffs.pop((REV_OLD, REV_NEW)), "diff_failed"),
-])
-def test_undecidable_class_is_material(harness: Harness, mutate: Callable[[Harness], None],
-                                       reason: str) -> None:
-    mutate(harness)
-    assert harness.run() == 0
-    assert harness.ledger.last.change_class == "material"
-    assert reason in harness.ledger.last.detail
-
-
-def test_first_deployment_is_material(harness: Harness) -> None:
-    harness.ledger.rows.clear()
-    harness.ledger.exists = False
-    assert harness.run() == 0
-    assert harness.ledger.last.change_class == "material"
-    assert "no_previous_deployment" in harness.ledger.last.detail
-
-
-def test_operator_can_raise_but_the_tool_never_lowers(harness: Harness) -> None:
-    assert harness.run(force_material=True) == 0
-    assert harness.ledger.last.change_class == "material"
-    assert "operator_forced" in harness.ledger.last.detail
+def test_change_classes_are_gone_from_the_command_line() -> None:
+    with pytest.raises(SystemExit):
+        bfx._parser().parse_args(["--force-material"])
+    assert "force_material" not in bfx.Settings.__dataclass_fields__
 
 
 def test_pull_uses_a_throwaway_docker_config_when_credentials_exist(harness: Harness) -> None:
@@ -786,17 +755,58 @@ def test_ordinary_release_without_migration_skips_the_restore_test(harness: Harn
     assert harness.host.count(RESTORE_TEST) == 0
 
 
-def test_unreadable_diff_runs_the_restore_test(harness: Harness) -> None:
-    harness.host.diffs.pop((REV_OLD, REV_NEW))
+@pytest.mark.parametrize("mutate", [
+    lambda h: h.host.diffs.pop((REV_OLD, REV_NEW)),               # git diff fails
+    lambda h: h.host.commits.discard(REV_OLD),                     # previous revision unknown
+    lambda h: (h.ledger.rows.clear(), setattr(h.ledger, "exists", False)),  # first deployment
+])
+def test_unreadable_diff_runs_the_restore_test(harness: Harness,
+                                               mutate: Callable[[Harness], None]) -> None:
+    mutate(harness)
     assert harness.run() == 0
     assert harness.host.count(RESTORE_TEST) == 1
+    assert harness.host.stopped == []   # no migration: the bot keeps running
+    assert harness.ledger.last.outcome == "deployed"
 
 
-def test_rules_file_problem_alone_does_not_trigger_a_restore_test(harness: Harness) -> None:
-    harness.host.files[(REV_NEW, "deploy/change-class.yaml")] = "version: 9\n"
-    assert harness.run() == 0
-    assert harness.ledger.last.change_class == "material"
-    assert harness.host.count(RESTORE_TEST) == 0
+@pytest.mark.parametrize(("pattern", "path", "expected"), [
+    ("deploy/vm/pgbackrest/**", "deploy/vm/pgbackrest/pgbackrest.conf", True),
+    ("deploy/vm/pgbackrest/**", "deploy/vm/pgbackrest/a/b/c.sh", True),
+    ("deploy/vm/pgbackrest/**", "deploy/vm/pgbackrestx/a.sh", False),
+    ("deploy/vm/pgbackrest/**", "deploy/vm/pgbackrest", False),
+    ("docker-compose.bot.yml", "docker-compose.bot.yml", True),
+    ("docker-compose.bot.yml", "deploy/docker-compose.bot.yml", False),  # anchored at the root
+    ("docker-compose.*.yml", "docker-compose.dr.yml", True),
+    ("docker-compose.*.yml", "deploy/docker-compose.dr.yml", False),
+    ("backend/scripts/*.py", "backend/scripts/x.py", True),
+    ("backend/scripts/*.py", "backend/scripts/sub/x.py", False),   # `*` stays in one segment
+    ("a?c", "abc", True),
+    ("a?c", "a/c", False),
+    ("**/*.md", "README.md", True),
+    ("**/*.md", "a/b/c.md", True),                                 # `**/` spans directories
+    ("**/*.md", "a/b/c.mdx", False),
+    ("a/**/z", "a/z", True),
+    ("a/**/z", "a/b/c/z", True),
+])
+def test_path_glob_semantics(pattern: str, path: str, expected: bool) -> None:
+    assert bfx.path_matches([pattern], path) is expected
+
+
+def test_path_glob_without_patterns_matches_nothing() -> None:
+    assert bfx.path_matches([], "docker-compose.bot.yml") is False
+
+
+@pytest.mark.parametrize(("path", "expected"), [
+    ("deploy/vm/pgbackrest/backup.sh", True),
+    ("deploy/vm/postgres/initdb/01.sql", True),
+    ("docker-compose.bot.yml", True),
+    ("docker-compose.dr.yml", True),
+    ("deploy/vm/docker-compose.app.yml", False),
+    ("deploy/vm/ops/bfx_deploy.py", False),
+    ("docs/deploy/vm/pgbackrest/x.md", False),
+])
+def test_dr_trigger_patterns(path: str, expected: bool) -> None:
+    assert bfx.path_matches(bfx.DR_TRIGGER_PATTERNS, path) is expected
 
 
 # --------------------------------------------------------------------------- health
@@ -813,8 +823,8 @@ def test_unhealthy_release_without_migration_rolls_back_to_previous_digests(harn
     assert rollback_env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{OLD_B}"
     assert rollback_env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{OLD_F}"
     assert rollback_env["BFX_SOURCE_REVISION"] == REV_OLD
-    # The previous release comes back under its own deployment id and class.
-    assert (rollback_env["BFX_DEPLOYMENT_ID"], rollback_env["BFX_CHANGE_CLASS"]) == (OLD_ATTEMPT, "standard")
+    # The previous release comes back under its own deployment id.
+    assert rollback_env["BFX_DEPLOYMENT_ID"] == OLD_ATTEMPT and "BFX_CHANGE_CLASS" not in rollback_env
     assert Path(host.calls[ups[1]][5]).parent.name == REV_OLD
     assert host.running["bot"][1] == OLD_B and host.stopped == []
     row = harness.ledger.last
@@ -933,17 +943,12 @@ def test_recreate_redeploys_the_running_release_through_the_ledger(harness: Harn
     assert env is not None
     assert (env["BFX_BACKEND_DIGEST"], env["BFX_FRONTEND_DIGEST"], env["BFX_SOURCE_REVISION"]) == (
         OLD_B, OLD_F, REV_OLD)
-    assert env["BFX_CHANGE_CLASS"] == "standard"
+    assert "BFX_CHANGE_CLASS" not in env
     started, finished = harness.ledger.rows[-2:]
     assert (started.outcome, finished.outcome) == ("started", "deployed")
     assert env["BFX_DEPLOYMENT_ID"] == started.attempt_id == finished.attempt_id != OLD_ATTEMPT
-    assert finished.detail.startswith("recreate; class=standard(recreate_same_release)")
+    assert finished.detail == "recreate; ok"
     assert host.count(STOP_BOT) == 0 and host.count(BACKUP) == 0 and host.count(UV_SYNC) == 0
-
-
-def test_recreate_can_be_raised_to_material(harness: Harness) -> None:
-    assert harness.run(recreate=True, force_material=True) == 0
-    assert harness.ledger.last.change_class == "material"
 
 
 def test_recreate_that_fails_stops_the_bot_and_has_no_rollback(harness: Harness) -> None:
@@ -1026,7 +1031,8 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     assert plan["stop_bot_before_migration"] is True and plan["ci_run"] == CI_RUN
     assert plan["restore_test_before_deploy"] == "migration_pending"
     assert harness.host.count(RESTORE_TEST) == 0
-    assert plan["change_class"] == "standard" and plan["rollback_target"] == REV_OLD
+    assert plan["rollback_target"] == REV_OLD
+    assert not {"change_class", "class_detail"} & set(plan)
     assert plan["blockers"] == [f"foreign_container_holds_name:{n}"
                                 for n in ("bfx-bot", "bfx-webapi", "bfx-frontend")]
 
@@ -1043,9 +1049,22 @@ def test_container_running_the_recorded_release_has_no_mismatch(service: str) ->
     target = _target()
     backend = service != "frontend"
     running = (target.backend_image if backend else target.frontend_image,
-               NEW_B if backend else NEW_F, REV_NEW, "material", "dep-1")
+               NEW_B if backend else NEW_F, REV_NEW, "dep-1")
     assert bfx.container_mismatches(inspect_record(service, running), service=service, target=target,
-                                    klass="material", deployment_id="dep-1") == []
+                                    deployment_id="dep-1") == []
+
+
+@pytest.mark.parametrize("change_class", [None, "material", "standard", "retired"])
+def test_identity_check_ignores_the_retired_change_class(change_class: str | None) -> None:
+    # The previous bfx-deploy injects its own class; this one injects none and
+    # the compose default fills in `retired`. None of it is identity any more.
+    target = _target()
+    record = inspect_record("bot", (target.backend_image, NEW_B, REV_NEW, "dep-1"))
+    env = [e for e in record["Config"]["Env"] if not e.startswith("BFX_CHANGE_CLASS=")]
+    record["Config"]["Env"] = env + ([f"BFX_CHANGE_CLASS={change_class}"] if change_class else [])
+    assert bfx.container_mismatches(record, service="bot", target=target, deployment_id="dep-1") == []
+    assert set(bfx.identity_env(target, service="bot", deployment_id="dep-1")) == {
+        "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID"}
 
 
 @pytest.mark.parametrize(("mutate", "mismatch"), [
@@ -1053,15 +1072,15 @@ def test_container_running_the_recorded_release_has_no_mismatch(service: str) ->
     (lambda r: r["Config"].__setitem__("Labels", {}), "project"),
     (lambda r: r["Config"].__setitem__("Image", f"{FRONTEND}@{NEW_B}"), "image"),
     (lambda r: r["Config"]["Env"].__setitem__(0, "BFX_IMAGE_DIGEST=" + NEW_B), "identity_env"),
-    (lambda r: r["Config"]["Env"].__setitem__(2, "BFX_CHANGE_CLASS=standard"), "identity_env"),
-    (lambda r: r["Config"]["Env"].__setitem__(3, "BFX_DEPLOYMENT_ID=other"), "identity_env"),
+    (lambda r: r["Config"]["Env"].__setitem__(1, "BFX_SOURCE_REVISION=" + REV_OLD), "identity_env"),
+    (lambda r: r["Config"]["Env"].__setitem__(2, "BFX_DEPLOYMENT_ID=other"), "identity_env"),
 ])
 def test_each_release_mismatch_is_reported(mutate: Callable[[dict[str, Any]], None], mismatch: str) -> None:
     target = _target()
-    record = inspect_record("frontend", (target.frontend_image, NEW_F, REV_NEW, "material", "dep-1"))
+    record = inspect_record("frontend", (target.frontend_image, NEW_F, REV_NEW, "dep-1"))
     mutate(record)
     assert mismatch in bfx.container_mismatches(record, service="frontend", target=target,
-                                                klass="material", deployment_id="dep-1")
+                                                deployment_id="dep-1")
 
 
 # --------------------------------------------------------------------------- imagetools registry
@@ -1146,11 +1165,14 @@ def test_psql_ledger_passes_values_as_psql_variables_never_as_sql() -> None:
     ledger_id = ledger.append(bfx.LedgerEntry(
         attempt_id=OLD_ATTEMPT, started_at="2026-09-25T00:00:00+00:00", finished_at=None,
         source_revision=REV_NEW, backend_digest=NEW_B, frontend_digest=NEW_F,
-        change_class="material", migrations_applied=True, outcome="started", detail=detail))
+        migrations_applied=True, outcome="started", detail=detail))
     assert ledger_id == 7
     assert seen["argv"][:6] == ["docker", "exec", "-i", "--user", "postgres", "bfx-postgres"]
     assert f"detail={detail}" in seen["argv"] and "finished_at=" in seen["argv"]
     assert detail not in seen["sql"] and ":'detail'" in seen["sql"]
+    # The retired change_class column is never written (left NULL until it is dropped).
+    assert "change_class" not in seen["sql"]
+    assert not any(arg.startswith("change_class=") for arg in seen["argv"])
 
 
 def test_load_registry_credentials(tmp_path: Path) -> None:

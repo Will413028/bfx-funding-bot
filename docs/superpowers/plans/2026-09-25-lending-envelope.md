@@ -95,3 +95,20 @@ integration tests (Docker), `uv run mypy src/`, `uv run ruff check`,
 4. Place a manual offer below the venue book in the Bitfinex UI → expect a
    `foreign_exposure` alert, no halt, no cancel; cancel it by hand.
 5. Kill from the UI → cancel-all acknowledged → TOTP resume → ACTIVE, no probation.
+
+## 5. Follow-up release
+
+This release is deployed by the previous bfx-deploy (host tooling is installed
+from a release only after it deployed, effective the next run). That tool still
+injects `BFX_CHANGE_CLASS`, checks every container carries it, and writes
+`deployments.change_class` into both ledger rows. So T6 keeps two transitional
+pieces: `BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:-retired}` in
+`deploy/vm/docker-compose.app.yml` (optional, not required by
+`compose_policy.py`), and `deployments.change_class` made nullable without its
+CHECK (migration `1f6392809120`; the new tool leaves it NULL).
+
+After the first deploy by the new tool (a `deployments` row with
+`change_class IS NULL` and outcome `deployed`), ship a follow-up release that
+removes `BFX_CHANGE_CLASS` from the compose file and drops the
+`deployments.change_class` column (the attempt-pairing trigger
+`check_deployment_attempt` must stop naming it in the same migration).

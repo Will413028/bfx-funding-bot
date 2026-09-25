@@ -67,7 +67,6 @@ jobs:
           BFX_FRONTEND_IMAGE: ghcr.io/ci/frontend@sha256:1111111111111111111111111111111111111111111111111111111111111111
           BFX_FRONTEND_DIGEST: sha256:1111111111111111111111111111111111111111111111111111111111111111
           BFX_SOURCE_REVISION: ${{ github.sha }}
-          BFX_CHANGE_CLASS: material
           BFX_DEPLOYMENT_ID: 00000000-0000-4000-8000-000000000000
         # Placeholder secret files: Compose 2.x stats env files even with
         # --no-env-resolution. env_file itself is checked on the uninterpolated
