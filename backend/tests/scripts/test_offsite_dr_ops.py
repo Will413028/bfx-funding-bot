@@ -744,14 +744,14 @@ def test_services_are_one_shot_and_do_not_call_compose_run_or_autoheal() -> None
         assert "After=docker.service" in service
         assert "Type=oneshot" in service
         assert "User=ubuntu" in service
-        assert "WorkingDirectory=/home/ubuntu/bfx-funding-bot" in service
+        assert "WorkingDirectory=/home/ubuntu/bfx-releases/current" in service
         assert re.search(r"(?m)^TimeoutStartSec=[1-9][0-9]*$", service)
     assert (
-        "ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/backup.sh "
+        "ExecStart=/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/backup.sh "
         "--scheduled"
     ) in backup_service
     assert (
-        "ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/status.sh "
+        "ExecStart=/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/status.sh "
         "--output /home/ubuntu/bfx/dr-evidence/backup.json"
     ) in status_service
     combined = backup_service + status_service

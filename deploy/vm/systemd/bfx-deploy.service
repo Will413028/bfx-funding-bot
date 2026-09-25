@@ -1,6 +1,6 @@
 [Unit]
 Description=Deploy the newest green main release by digest (bfx-deploy)
-Documentation=file:///usr/local/lib/bfx-ops/bfx_deploy.py
+Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_deploy.py
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -20,6 +20,8 @@ StateDirectoryMode=0700
 # each) + migration (<=900s) + health/settle. Sized so systemd never kills it
 # mid-migration; a normal release with a migration takes minutes.
 TimeoutStartSec=6h
-ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_deploy.py --mirror /home/ubuntu/bfx-funding-bot --state-dir /var/lib/bfx-deploy
+# The interpreter of the deployed release's uv environment (deploy/vm/ops/uv.lock);
+# bfx-deploy replaces `current` only after a release deploys (next run uses it).
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_deploy.py --mirror /home/ubuntu/bfx-funding-bot --state-dir /var/lib/bfx-deploy
 # No OnFailure=: bfx-deploy sends its own deploy/rollback/failure alerts, including
 # for unexpected crashes, and records every attempt in the deployments ledger.

@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[3]
 BACKEND = ROOT / "backend"
 REVISION = "c3a639388457"
 REV = "b" * 40
+ATTEMPT = "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f"
 DIGEST_B, DIGEST_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
 
 
@@ -46,6 +47,7 @@ def _alembic(url: str, *args: str) -> None:
 
 def _entry(**overrides: Any) -> Any:
     values: dict[str, Any] = {
+        "attempt_id": str(__import__("uuid").uuid4()),
         "started_at": "2026-09-25T10:00:00+00:00", "finished_at": "2026-09-25T10:04:00+00:00",
         "source_revision": REV, "backend_digest": DIGEST_B, "frontend_digest": DIGEST_F,
         "change_class": "standard", "migrations_applied": False, "outcome": "deployed",
@@ -127,6 +129,9 @@ def test_ledger_rejects_every_mutation_even_for_the_owner(ledger_db: Any, statem
     {"change_class": "minor"},
     {"outcome": "no_change"},
     {"finished_at": "2026-09-25T09:00:00+00:00"},
+    {"finished_at": None},                      # only a started row has no finish
+    {"outcome": "started"},                     # ... and a started row has none
+    {"attempt_id": "not-a-uuid"},
     {"detail": "x" * 2001},
 ])
 def test_ledger_constraints_reject_malformed_rows(ledger_db: Any, overrides: dict[str, Any]) -> None:
@@ -135,6 +140,34 @@ def test_ledger_constraints_reject_malformed_rows(ledger_db: Any, overrides: dic
     with pytest.raises(bfx.CommandError, match="ledger_psql_exit"):
         ledger.append(_entry(**overrides))
     assert ledger.read().last_attempt is None
+
+
+def test_attempt_has_one_started_row_first_and_one_matching_terminal_row(ledger_db: Any) -> None:
+    url, engine, ledger = ledger_db
+    _alembic(url, "upgrade", "head")
+    started = _entry(attempt_id=ATTEMPT, outcome="started", finished_at=None, detail="deploy")
+    ledger.append(started)
+    view = ledger.read()
+    assert view.last_attempt is not None and view.last_success is None
+    assert (view.last_attempt.outcome, view.last_attempt.attempt_id) == ("started", ATTEMPT)
+    with pytest.raises(bfx.CommandError):                      # a second started row
+        ledger.append(started)
+    for mismatch in ({"backend_digest": "sha256:" + "9" * 64}, {"change_class": "material"},
+                     {"source_revision": "c" * 40}, {"started_at": "2026-09-25T10:01:00+00:00"}):
+        with pytest.raises(bfx.CommandError):                  # finishing as another release
+            ledger.append(_entry(attempt_id=ATTEMPT, **mismatch))
+    finished = ledger.append(_entry(attempt_id=ATTEMPT))
+    view = ledger.read()
+    assert view.last_success is not None and view.last_success.id == finished
+    assert view.last_success.attempt_id == ATTEMPT
+    with pytest.raises(bfx.CommandError):                      # a second terminal row
+        ledger.append(_entry(attempt_id=ATTEMPT, outcome="failed"))
+    closed = str(__import__("uuid").uuid4())
+    ledger.append(_entry(attempt_id=closed, outcome="failed"))  # terminal row alone is fine
+    with pytest.raises(bfx.CommandError):                      # but never a started row after it
+        ledger.append(_entry(attempt_id=closed, outcome="started", finished_at=None))
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM deployments")) == 3
 
 
 def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
@@ -153,8 +186,9 @@ def test_runtime_roles_can_only_read_the_ledger(ledger_db: Any) -> None:
     with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.exec_driver_sql(
-            "INSERT INTO deployments (started_at, finished_at, source_revision, backend_digest, "
-            f"frontend_digest, change_class, migrations_applied, outcome, detail) VALUES (now(), now(), "
+            "INSERT INTO deployments (attempt_id, started_at, finished_at, source_revision, backend_digest, "
+            f"frontend_digest, change_class, migrations_applied, outcome, detail) VALUES "
+            f"('{ATTEMPT}', now(), now(), "
             f"'{REV}', '{DIGEST_B}', '{DIGEST_F}', 'standard', false, 'deployed', '')")
 
 

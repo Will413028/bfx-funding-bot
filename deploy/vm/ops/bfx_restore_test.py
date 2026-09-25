@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Isolated restore test: run the drill in prefix mode, then write a heartbeat.
 
-Runs as the DR operator user (ubuntu) from bfx-restore-test.service -- monthly
-from its timer, and on demand from bfx-deploy before a release with a pending
+Runs as the DR operator user (ubuntu) from bfx-restore-test@<release>.service --
+monthly from its timer (`current`: the deployed release), and on demand from
+bfx-deploy with the target release's DR scripts before a release with a pending
 migration or a PostgreSQL/pgBackRest change. Like the pgBackRest units, the
 drill reads its secrets and writes its evidence under that user's home and
-git-checks its config in that user's checkout. This wrapper adds no checks of
-its own; it only
+git-checks its config in the release's clean checkout under
+/home/ubuntu/bfx-releases. This wrapper adds no checks of its own; it only
 
 1. runs `restore-drill.sh --prefix` for the account/environment in a small JSON
    config: restore the newest backup to the end of the archive, recompute the

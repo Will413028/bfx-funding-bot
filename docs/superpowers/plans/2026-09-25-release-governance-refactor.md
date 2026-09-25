@@ -81,7 +81,8 @@ interfaces are fixed.
 Step-by-step commands: `docs/runbooks/cutover-release-governance.md` (T12).
 
 1. Merge the branch after review; CI publishes the first images.
-2. On the VM: install compose file, `bfx-deploy`, timers; add secrets (§3).
+2. On the VM: `uv` and `docker buildx` present; first `install.sh` (tooling, units, DR
+   checkout; bfx-deploy maintains them afterwards); add secrets (§3).
 3. Stop the old app containers (keep them renamed as recovery copies).
 4. `bfx-deploy` once by hand: backup → migrations (outbox, trading state,
    archive+drop release tables) → start → health.
@@ -112,4 +113,13 @@ decide (never restore over post-write venue reality; see
 - [x] T7 frontend trading state panel `2c639fa`
 - [x] Resume only through TOTP + versioned web API read grants `9136d2b`; boot refusal cancels venue offers `cfe0f87`; kill-path flaky test `a3e5071`
 - [x] T12 runbooks: `deploy.md`, `operations.md`, `cutover-release-governance.md`; `immutable-release.md` and `halt-2-projector-canary.md` deleted; release-0, rollback-after-venue-write, offsite-dr, AGENTS/README rewritten (this commit)
+- [x] Design review of `ebc943f`, deploy side (this commit, `refactor/vm-deploy-tooling`):
+  two-phase ledger (`started` row before containers, `BFX_DEPLOYMENT_ID`, terminal row by
+  `attempt_id`); DR scripts from the target release (git worktree checkouts, restore test
+  `bfx-restore-test@<rev>`); tooling and units self-installed after a successful deploy
+  (effective next run); bot stopped before backup/restore test/migration and kept stopped on
+  failure; `docker buildx imagetools inspect` instead of the hand-written registry client;
+  PyYAML + pathspec pinned in `deploy/vm/ops/uv.lock`; hardening checked in CI on
+  `docker compose config` instead of on the VM; CI run URL label into the ledger;
+  `bfx-deploy --recreate`
 - [ ] Cutover (§4) — Will's prerequisites (§3), then the cutover runbook; afterwards one rollback drill and the VM cleanup list in the cutover runbook §7

@@ -7,8 +7,9 @@ digests, change class, whether migrations ran, outcome -- and is never updated:
 a trigger rejects UPDATE, DELETE and TRUNCATE. An attempt that changes the
 containers has two rows sharing `attempt_id`: `started` (appended before the
 containers are created; `attempt_id` is the BFX_DEPLOYMENT_ID the containers
-get) and a terminal outcome; an attempt that stops earlier has only the latter. Operator approval of a material
-release is a separate append-only fact (T5), not a later edit of this row.
+get) and a terminal outcome; an attempt that stops earlier has only the latter.
+Operator approval of a material release is a separate append-only fact (T5),
+not a later edit of these rows.
 
 The CHECK constraints mirror the migration (PostgreSQL is the authority);
 the regex ones are created on PostgreSQL only, so SQLite fixtures still build.
