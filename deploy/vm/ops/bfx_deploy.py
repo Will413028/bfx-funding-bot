@@ -4,8 +4,8 @@
 Runs as root from bfx-deploy.timer (every 5 minutes) or by hand, with the
 interpreter of its own uv environment (deploy/vm/ops/uv.lock). ADRs:
 2026-09-25-ci-registry-digest-deploy (D1-D5) and
-2026-09-25-automated-probation-replaces-release-ceremony (D1 change class, D6
-backup before migration).
+2026-09-25-automated-probation-replaces-release-ceremony (D6 backup before
+migration); change classes are retired (lending-envelope plan D5).
 
 One run:
   1. flock, so two runs never overlap;
@@ -15,10 +15,9 @@ One run:
   3. read the revision and CI-run labels, require `backend:sha-<rev>` to be the
      same digest and `frontend:sha-<rev>` to carry the same revision;
   4. fetch the VM mirror, require <rev> on origin/main, and take the compose
-     file, live.env and change-class rules from <rev> itself;
-  5. classify `git diff --name-only --no-renames <last deployed>..<rev>`
-     (pairwise; default material; undecidable is material; --force-material can
-     only raise it);
+     file and live.env from <rev> itself;
+  5. read `git diff --name-only --no-renames <last deployed>..<rev>` for the
+     DR trigger paths (a diff that cannot be read counts as a DR change);
   6. pull both images by digest, validate the env files, compare `alembic
      current` with `alembic heads` in a one-shot of the new image;
   7. migrations pending: stop the bot (the writer), back up with <rev>'s
@@ -70,9 +69,12 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol
+
+import pathspec
 
 _HERE = Path(__file__).resolve().parent
 
@@ -87,7 +89,6 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
-change_class = _load("_bfx_ops_change_class", _HERE / "change_class.py")
 bfx_notify = _load("_bfx_ops_notify", _HERE / "bfx_notify.py")
 
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -105,8 +106,9 @@ TOOLING_PATHS = ("deploy/vm/ops", "deploy/vm/systemd")
 SERVICES = ("bot", "webapi", "frontend")
 # A change to how PostgreSQL is run, backed up or restored earns an isolated
 # restore test before the release goes out (plan DR bullet, Will 2026-09-25), as
-# does every pending migration and any diff that cannot be read. Hard-wired here,
-# not in the target's rules, so a commit cannot switch its own trigger off.
+# does every pending migration and any diff that cannot be read. Hard-wired in
+# the running tool (not read from the target), so a commit cannot switch its own
+# trigger off; matched by path_matches below.
 DR_TRIGGER_PATTERNS = (
     "deploy/vm/pgbackrest/**",
     "deploy/vm/postgres/**",
@@ -127,6 +129,23 @@ _MAX_DETAIL = 1800
 
 def log(message: str) -> None:
     print(f"bfx-deploy: {message}", file=sys.stderr, flush=True)
+
+
+@lru_cache(maxsize=16)
+def _path_spec(patterns: tuple[str, ...]) -> pathspec.PathSpec[Any]:
+    return pathspec.PathSpec.from_lines("gitignore", ["/" + pattern for pattern in patterns])
+
+
+def path_matches(patterns: Sequence[str], path: str) -> bool:
+    """Whether any repository-root-anchored glob in `patterns` matches `path`.
+
+    pathspec's gitignore patterns, each prefixed with `/` (pinned in
+    deploy/vm/ops/uv.lock): `*` and `?` stay inside one path segment, `**/`
+    spans directories, a trailing `**` spans everything below, and a slash-less
+    pattern such as `docker-compose.dr.yml` matches only at the root instead of
+    floating to other directories as it would in a .gitignore.
+    """
+    return bool(patterns) and _path_spec(tuple(patterns)).match_file(path)
 
 
 # --------------------------------------------------------------------------- errors
@@ -378,7 +397,6 @@ class LedgerRow:
     source_revision: str
     backend_digest: str
     frontend_digest: str
-    change_class: str
     outcome: str
     migrations_applied: bool
     ci_run: str | None = None
@@ -399,7 +417,6 @@ class LedgerEntry:
     source_revision: str
     backend_digest: str
     frontend_digest: str
-    change_class: str
     migrations_applied: bool
     outcome: str
     detail: str
@@ -412,7 +429,7 @@ class Ledger(Protocol):
 
 
 _LEDGER_COLUMNS = (
-    "id, attempt_id, source_revision, backend_digest, frontend_digest, change_class, outcome, "
+    "id, attempt_id, source_revision, backend_digest, frontend_digest, outcome, "
     "migrations_applied, ci_run"
 )
 # last_attempt is the newest row of any phase: a `started` row with no terminal
@@ -428,11 +445,12 @@ SELECT json_build_object(
 SELECT 'absent';
 \\endif
 """
+# The retired change_class column is left NULL; the follow-up release drops it.
 _LEDGER_APPEND = """INSERT INTO public.deployments (
   attempt_id, started_at, finished_at, source_revision, backend_digest, frontend_digest,
-  change_class, migrations_applied, outcome, detail, ci_run)
+  migrations_applied, outcome, detail, ci_run)
 VALUES (:'attempt_id', :'started_at', NULLIF(:'finished_at', '')::timestamptz,
-  :'source_revision', :'backend_digest', :'frontend_digest', :'change_class',
+  :'source_revision', :'backend_digest', :'frontend_digest',
   :'migrations_applied', :'outcome', :'detail', NULLIF(:'ci_run', ''))
 RETURNING id;
 """
@@ -482,7 +500,7 @@ class PsqlLedger:
             "attempt_id": entry.attempt_id,
             "started_at": entry.started_at, "finished_at": entry.finished_at or "",
             "source_revision": entry.source_revision, "backend_digest": entry.backend_digest,
-            "frontend_digest": entry.frontend_digest, "change_class": entry.change_class,
+            "frontend_digest": entry.frontend_digest,
             "migrations_applied": "true" if entry.migrations_applied else "false",
             "outcome": entry.outcome, "detail": entry.detail, "ci_run": entry.ci_run or "",
         })
@@ -502,7 +520,7 @@ def _ledger_row(value: object) -> LedgerRow | None:
         id=int(value["id"]), attempt_id=str(value["attempt_id"]),
         source_revision=str(value["source_revision"]),
         backend_digest=str(value["backend_digest"]), frontend_digest=str(value["frontend_digest"]),
-        change_class=str(value["change_class"]), outcome=str(value["outcome"]),
+        outcome=str(value["outcome"]),
         migrations_applied=bool(value["migrations_applied"]),
         ci_run=str(ci_run) if ci_run is not None else None,
     )
@@ -548,7 +566,6 @@ class Settings:
     local_alias: str | None = "bfx-bot:local"
     dry_run: bool = False
     retry: bool = False
-    force_material: bool = False
     rollback_drill: bool = False
     recreate: bool = False
 
@@ -581,7 +598,7 @@ class Prepared:
         if self.changed_paths is None:
             return "diff_unavailable"
         touched = sorted(
-            path for path in self.changed_paths if change_class.matches(DR_TRIGGER_PATTERNS, path)
+            path for path in self.changed_paths if path_matches(DR_TRIGGER_PATTERNS, path)
         )
         return "dr_paths:" + ",".join(touched[:10]) if touched else None
 
@@ -593,8 +610,6 @@ class Attempt:
     attempt_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     ci_run: str | None = None
     action: str = "deploy"  # deploy | recreate
-    klass: str = "material"  # until classified, an attempt is material
-    class_detail: str = "unclassified"
     migrations_applied: bool = False
     bot_stopped: bool = False
     started_recorded: bool = False
@@ -635,18 +650,17 @@ def _alembic_revisions(output: str) -> tuple[str, ...]:
     return tuple(sorted(set(revisions)))
 
 
-def identity_env(target: Target, *, service: str, klass: str, deployment_id: str) -> dict[str, str]:
+def identity_env(target: Target, *, service: str, deployment_id: str) -> dict[str, str]:
     backend = service != "frontend"
     return {
         "BFX_IMAGE_DIGEST": target.backend_digest if backend else target.frontend_digest,
         "BFX_SOURCE_REVISION": target.revision,
-        "BFX_CHANGE_CLASS": klass,
         "BFX_DEPLOYMENT_ID": deployment_id,
     }
 
 
 def container_mismatches(
-    record: Mapping[str, Any], *, service: str, target: Target, klass: str, deployment_id: str,
+    record: Mapping[str, Any], *, service: str, target: Target, deployment_id: str,
 ) -> list[str]:
     """What bfx-deploy re-checks on a created container: the release it runs.
 
@@ -667,7 +681,7 @@ def container_mismatches(
         mismatches.append("project")
     if config.get("Image") != image:
         mismatches.append("image")
-    expected = identity_env(target, service=service, klass=klass, deployment_id=deployment_id)
+    expected = identity_env(target, service=service, deployment_id=deployment_id)
     if any(env.get(key) != value for key, value in expected.items()):
         mismatches.append("identity_env")
     return mismatches
@@ -859,8 +873,7 @@ class Deployer:
         if self.settings.dry_run:
             self.plan = {
                 "revision": target.revision, "backend_image": target.backend_image,
-                "frontend_image": target.frontend_image, "change_class": attempt.klass,
-                "class_detail": attempt.class_detail, "ci_run": attempt.ci_run,
+                "frontend_image": target.frontend_image, "ci_run": attempt.ci_run,
                 "schema_current": list(prepared.current), "schema_heads": list(prepared.heads),
                 "migrations_pending": prepared.pending,
                 "stop_bot_before_migration": prepared.pending,
@@ -899,8 +912,8 @@ class Deployer:
             kept = "; bot stays stopped" if attempt.bot_stopped else "; running release untouched"
             return self._finish(attempt, "failed", f"{exc.code}{kept}")
         try:
-            self._compose_up(prepared.release_dir, target, attempt.klass, attempt.attempt_id)
-            self._verify(target, attempt.klass, attempt.attempt_id)
+            self._compose_up(prepared.release_dir, target, attempt.attempt_id)
+            self._verify(target, attempt.attempt_id)
             self._wait_healthy()
             if self.settings.rollback_drill:
                 raise DeployError("rollback_drill")
@@ -939,10 +952,9 @@ class Deployer:
         target = attempt.target
         self._fetch_and_require_on_main(target.revision)
         release_dir = self._materialize(target.revision)
-        classification, changed_paths = self._classify(view, target.revision)
-        attempt.klass = classification.change_class
-        attempt.class_detail = classification.describe()
-        log(f"change class {attempt.klass} ({attempt.class_detail})")
+        changed_paths, why = self._changed_paths(view, target.revision)
+        if changed_paths is None:
+            log(f"changed paths unavailable ({why}); treated as a DR change")
         self._validate_env_files(release_dir)
         self._refuse_foreign_containers()
         current, heads = self._schema(target)
@@ -980,14 +992,6 @@ class Deployer:
             _write_private(release_dir / Path(path).name, content)
         return release_dir
 
-    def _classify(self, view: LedgerView, revision: str) -> tuple[Any, tuple[str, ...] | None]:
-        paths, reason = self._changed_paths(view, revision)
-        result = change_class.undecidable(reason) if paths is None else self._classify_paths(
-            revision, paths)
-        if self.settings.force_material:
-            result = change_class.raise_to_material(result, "operator_forced")
-        return result, paths
-
     def _changed_paths(self, view: LedgerView, revision: str) -> tuple[tuple[str, ...] | None, str]:
         if view.last_success is None:
             return None, "no_previous_deployment"
@@ -995,23 +999,12 @@ class Deployer:
         if self._git_try("cat-file", "-e", f"{previous}^{{commit}}").returncode != 0:
             return None, "previous_revision_unknown"
         # --no-renames: a rename must report both paths, or moving a file out of
-        # backend/src into docs/ would be judged by its new name alone.
+        # a DR path would be judged by its new name alone.
         diff = self._git_try("diff", "--name-only", "--no-renames", "-z", previous, revision,
                              timeout=120.0)
         if diff.returncode != 0:
             return None, "diff_failed"
         return tuple(path for path in diff.stdout.split("\0") if path), ""
-
-    def _classify_paths(self, revision: str, paths: tuple[str, ...]) -> Any:
-        rules = self._git_try("show", f"{revision}:{change_class.RULES_PATH}")
-        if rules.returncode != 0:
-            return change_class.undecidable("rules_unavailable")
-        try:
-            parsed = change_class.parse_rules(rules.stdout)
-        except change_class.RulesError as exc:
-            log(f"change-class rules invalid at {revision}: {exc}")
-            return change_class.undecidable("rules_invalid")
-        return change_class.classify(paths, parsed)
 
     def _validate_env_files(self, release_dir: Path) -> None:
         files = [(self.settings.runtime_dir / name, name != "migrate.env")
@@ -1137,30 +1130,30 @@ class Deployer:
         deployment; a deploy whose started row cannot be written does not start.
         """
         target = attempt.target
-        detail = _sanitize(f"{attempt.action}; class={attempt.klass}({attempt.class_detail}); "
+        detail = _sanitize(f"{attempt.action}; "
                            f"migrations={'applied' if attempt.migrations_applied else 'none'}")
         try:
             self._ledger.append(LedgerEntry(
                 attempt_id=attempt.attempt_id, started_at=attempt.started_at, finished_at=None,
                 source_revision=target.revision, backend_digest=target.backend_digest,
-                frontend_digest=target.frontend_digest, change_class=attempt.klass,
+                frontend_digest=target.frontend_digest,
                 migrations_applied=attempt.migrations_applied, outcome="started", detail=detail,
                 ci_run=attempt.ci_run))
         except DeployError as exc:
             raise DeployError(f"ledger_started_unrecorded:{exc.code}") from None
         attempt.started_recorded = True
 
-    def _compose_env(self, target: Target, klass: str, deployment_id: str) -> dict[str, str]:
+    def _compose_env(self, target: Target, deployment_id: str) -> dict[str, str]:
         return {**_base_env(), "BFX_BACKEND_IMAGE": target.backend_image,
                 "BFX_BACKEND_DIGEST": target.backend_digest,
                 "BFX_FRONTEND_IMAGE": target.frontend_image,
                 "BFX_FRONTEND_DIGEST": target.frontend_digest,
-                "BFX_SOURCE_REVISION": target.revision, "BFX_CHANGE_CLASS": klass,
+                "BFX_SOURCE_REVISION": target.revision,
                 "BFX_DEPLOYMENT_ID": deployment_id,
                 # The env files Compose reads are the ones validated above.
                 "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
-    def _compose_up(self, release_dir: Path, target: Target, klass: str, deployment_id: str,
+    def _compose_up(self, release_dir: Path, target: Target, deployment_id: str,
                     *, force_recreate: bool = False) -> None:
         for image, digest in ((target.backend_image, target.backend_digest),
                               (target.frontend_image, target.frontend_digest)):
@@ -1170,9 +1163,9 @@ class Deployer:
         self._check(["docker", "compose", "-p", PROJECT, "-f",
                      str(release_dir / Path(COMPOSE_PATH).name), "up", *options, *SERVICES],
                     code="compose_up_failed", timeout=600.0,
-                    env=self._compose_env(target, klass, deployment_id))
+                    env=self._compose_env(target, deployment_id))
 
-    def _verify(self, target: Target, klass: str, deployment_id: str) -> None:
+    def _verify(self, target: Target, deployment_id: str) -> None:
         result = self._check(["docker", "inspect", "--type", "container", *CONTAINERS.values()],
                              code="docker_inspect_failed", timeout=60.0)
         try:
@@ -1186,7 +1179,7 @@ class Deployer:
                 problems.append(f"{service}:missing")
                 continue
             problems += [f"{service}:{m}" for m in container_mismatches(
-                record, service=service, target=target, klass=klass, deployment_id=deployment_id)]
+                record, service=service, target=target, deployment_id=deployment_id)]
         if problems:
             raise DeployError("container_release_mismatch:" + ",".join(problems))
 
@@ -1267,8 +1260,8 @@ class Deployer:
                               previous.frontend_digest)
         release_dir = self._materialize(previous.source_revision)
         self._pull((target.backend_image, target.frontend_image))
-        self._compose_up(release_dir, target, previous.change_class, previous.attempt_id)
-        self._verify(target, previous.change_class, previous.attempt_id)
+        self._compose_up(release_dir, target, previous.attempt_id)
+        self._verify(target, previous.attempt_id)
         self._wait_healthy()
 
     # ------------------------------------------------------------------ recreate
@@ -1276,10 +1269,8 @@ class Deployer:
     def _recreate(self) -> int:
         """Recreate the running release after a runtime env change.
 
-        Same digests, same revision; the diff to the running release is empty,
-        so the class is standard unless --force-material (a runtime env file is
-        not in git, so the operator raises the class when the change warrants
-        an approval). No rollback exists: the previous env is gone.
+        Same digests, same revision, schema already at the release's head. No
+        rollback exists: the previous env is gone.
         """
         started_at = _now_iso(self._clock)
         try:
@@ -1295,10 +1286,7 @@ class Deployer:
             started_at=started_at, action="recreate", ci_run=previous.ci_run,
             target=self._target(previous.source_revision, previous.backend_digest,
                                 previous.frontend_digest),
-            klass=change_class.STANDARD, class_detail="recreate_same_release",
         )
-        if self.settings.force_material:
-            attempt.klass, attempt.class_detail = change_class.MATERIAL, "operator_forced"
         target = attempt.target
         try:
             if self._git_try("cat-file", "-e", f"{target.revision}^{{commit}}").returncode != 0:
@@ -1317,7 +1305,7 @@ class Deployer:
         if self.settings.dry_run:
             self.plan = {"action": "recreate", "revision": target.revision,
                          "backend_image": target.backend_image, "frontend_image": target.frontend_image,
-                         "change_class": attempt.klass, "blockers": list(self._dry_run_blockers)}
+                         "blockers": list(self._dry_run_blockers)}
             print(json.dumps(self.plan, indent=2, sort_keys=True))
             return 0
         try:
@@ -1325,9 +1313,8 @@ class Deployer:
         except DeployError as exc:
             return self._finish(attempt, "failed", f"{exc.code}; running release untouched")
         try:
-            self._compose_up(release_dir, target, attempt.klass, attempt.attempt_id,
-                             force_recreate=True)
-            self._verify(target, attempt.klass, attempt.attempt_id)
+            self._compose_up(release_dir, target, attempt.attempt_id, force_recreate=True)
+            self._verify(target, attempt.attempt_id)
             self._wait_healthy()
         except DeployError as exc:
             stopped = self._stop_bot()
@@ -1443,12 +1430,12 @@ class Deployer:
     def _finish(self, attempt: Attempt, outcome: str, detail: str) -> int:
         target = attempt.target
         prefix = "recreate; " if attempt.action == "recreate" else ""
-        text = _sanitize(f"{prefix}class={attempt.klass}({attempt.class_detail}); {detail}")
+        text = _sanitize(f"{prefix}{detail}")
         entry = LedgerEntry(
             attempt_id=attempt.attempt_id, started_at=attempt.started_at,
             finished_at=_now_iso(self._clock),
             source_revision=target.revision, backend_digest=target.backend_digest,
-            frontend_digest=target.frontend_digest, change_class=attempt.klass,
+            frontend_digest=target.frontend_digest,
             migrations_applied=attempt.migrations_applied, outcome=outcome, detail=text,
             ci_run=attempt.ci_run,
         )
@@ -1461,7 +1448,7 @@ class Deployer:
         except DeployError as exc:
             recorded, level = False, "critical"
             ledger_note = f"LEDGER WRITE FAILED ({exc.code})"
-        message = (f"{attempt.action} {outcome}: {target.revision[:12]} class={attempt.klass} "
+        message = (f"{attempt.action} {outcome}: {target.revision[:12]} "
                    f"migrations={'applied' if attempt.migrations_applied else 'none'}; {detail}; "
                    f"{ledger_note}")
         log(message)
@@ -1512,15 +1499,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backup-user", help="run backup.sh as this user (default: mirror owner)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
-                      help="discover, fetch, classify, pull and compare schema; change nothing")
+                      help="discover, fetch, diff, pull and compare schema; change nothing")
     mode.add_argument("--rollback-drill", action="store_true",
                       help="deploy the new release, then take the real rollback path on purpose "
                            "(refused when migrations are pending); run with the timer stopped, "
                            "then deploy it for real with --retry")
     parser.add_argument("--retry", action="store_true",
                         help="attempt a digest whose last attempt failed, rolled back or was interrupted")
-    parser.add_argument("--force-material", action="store_true",
-                        help="raise this release to material (a class can never be lowered)")
     parser.add_argument("--recreate", action="store_true",
                         help="recreate the running release (same digests) after a runtime env change; "
                              "combine with --dry-run to preview")
@@ -1549,7 +1534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         postgres_container=args.postgres_container, db_user=args.db_user, db_name=args.db_name,
         dr_root=args.dr_root, ops_root=args.ops_root, uv=args.uv,
         backup_user=args.backup_user or owner, dry_run=args.dry_run, retry=args.retry,
-        force_material=args.force_material, rollback_drill=args.rollback_drill,
+        rollback_drill=args.rollback_drill,
         recreate=args.recreate,
     )
     notify_config = settings.runtime_dir / "notify.env"
