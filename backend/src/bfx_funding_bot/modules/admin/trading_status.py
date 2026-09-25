@@ -16,8 +16,7 @@ and log lines. That is what made 2026-07-27 possible.
 Two design rules follow, and both are load-bearing:
 
 1. **Report behaviour, not configuration.** `halted` is obtained by asking the
-   real ManualKillGuard, not by re-reading BFX_KILL_SWITCH or the trading
-   state. If the guard's
+   real ManualKillGuard, not by re-reading the trading state. If the guard's
    logic changes, this report changes with it; it cannot describe a rule the
    money path does not follow.
 2. **Report applied authority.** Live amounts and per-cell budgets come from
@@ -29,7 +28,6 @@ reachable from here.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, replace
 from decimal import Decimal
 from typing import Any, Protocol
@@ -87,10 +85,6 @@ class _TradingStateProtocol(Protocol):
 
 class _KillSwitchProtocol(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult: ...
-
-
-def _env_kill_switch_set() -> bool:
-    return os.environ.get("BFX_KILL_SWITCH", "").lower() in ("true", "1", "yes")
 
 
 def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
@@ -209,15 +203,15 @@ class TradingStatusService:
     async def _halt_state(self) -> dict[str, Any]:
         """Ask the installed ManualKillGuard whether it would block right now.
 
-        Deliberately NOT `os.environ["BFX_KILL_SWITCH"]`. Reading the env var
-        back is what made the first pause look verified while the bot traded on.
-        Asking the guard means this field is the guard's actual verdict.
+        Deliberately not a re-read of the stop's input: reading the input
+        back is what made the first pause look verified while the bot traded
+        on. Asking the guard means this field is the guard's actual verdict.
 
         A missing guard is its own state. "No guard blocked" and "no guard
         exists to block" both produce halted=False, and reporting them
         identically would let a disabled safety control read as a healthy one.
         """
-        sources: dict[str, Any] = {"env_kill_switch": _env_kill_switch_set()}
+        sources: dict[str, Any] = {}
         history: list[dict[str, Any]] = []
         if self._trading_state is not None:
             sources["persisted"] = _trading_state_dict(await self._trading_state.current())
@@ -239,9 +233,8 @@ class TradingStatusService:
                 "reason": None,
                 "guard_installed": False,
                 "note": (
-                    f"{MANUAL_KILL_GUARD_NAME} guard is not installed — neither the "
-                    "kill switch env var nor the persisted halt has any effect in "
-                    "this process"
+                    f"{MANUAL_KILL_GUARD_NAME} guard is not installed — the "
+                    "persisted trading state has no effect in this process"
                 ),
                 "sources": sources,
                 "history": history,
@@ -252,9 +245,6 @@ class TradingStatusService:
             "reason": result.reason,
             "guard_installed": True,
             "note": None,
-            # Which mechanism is holding the bot decides how you resume it.
-            # Collapsing them into one boolean is how "I removed the env var,
-            # why is it still halted?" becomes a mystery.
             "sources": sources,
             "history": history,
         }
@@ -285,7 +275,6 @@ class TradingStatusService:
                 for o in result.cancel_all
             ],
             "scope_error": result.scope_error,
-            "still_halted_by_env": _env_kill_switch_set(),
         }
 
     async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
@@ -294,8 +283,7 @@ class TradingStatusService:
         result = await self._require_store().transition(
             REDUCING, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
         )
-        return {**_trading_state_dict(result.state),  # type: ignore[dict-item]
-                "still_halted_by_env": _env_kill_switch_set()}
+        return _trading_state_dict(result.state)  # type: ignore[return-value]
 
     def _require_store(self) -> _TradingStateProtocol:
         if self._trading_state is None:

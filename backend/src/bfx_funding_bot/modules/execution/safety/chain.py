@@ -205,7 +205,7 @@ class SafetyGuardChain:
         2026-07-27 the kill switch was set while the funding wallet held 3.00 —
         the reconciler never sized an offer, the chain was never reached, and
         "no orders appeared" was therefore compatible with both a working halt
-        and a broken one. Reading BFX_KILL_SWITCH back proved nothing either:
+        and a broken one. Reading the stop's input back proved nothing either:
         that is the input we already knew we wrote. This runs the real guards.
 
         Differences from :meth:`evaluate`, all deliberate:

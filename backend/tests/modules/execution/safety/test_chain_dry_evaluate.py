@@ -124,14 +124,14 @@ async def test_all_allow_reports_would_submit_true() -> None:
 
 @pytest.mark.asyncio
 async def test_block_reports_would_submit_false_and_names_the_blocker() -> None:
-    guards = [_AllowGuard("a"), _BlockGuard("manual_kill", "BFX_KILL_SWITCH env flag set")]
+    guards = [_AllowGuard("a"), _BlockGuard("manual_kill", "trading state HALTED: operator stop")]
     report = await _chain(guards, _EventCapture(), HealthProbe()).dry_evaluate(
         _post(), _ctx(),
     )
     assert report.would_submit is False
     assert report.blocked_by == "manual_kill"
     blocked = [g for g in report.guards if not g.allowed]
-    assert blocked[0].reason == "BFX_KILL_SWITCH env flag set"
+    assert blocked[0].reason == "trading state HALTED: operator stop"
 
 
 @pytest.mark.asyncio

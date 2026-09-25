@@ -65,7 +65,6 @@ class _StubDiv:
 
 @pytest.mark.asyncio
 async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     axiom = _EventCapture()
     diagnostics = _EventCapture()
     probe = HealthProbe()
