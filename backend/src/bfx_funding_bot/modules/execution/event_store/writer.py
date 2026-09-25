@@ -57,6 +57,8 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Moves the retired release ceremony's tables into release_archive; none is
     # a projection, and no event or cursor is touched.
     "5d1c7e9a3b20",
+    # Grants only (the web API's read baseline); no table, event or cursor changes.
+    "6f2b8d0e4a17",
 })
 
 __all__ = [

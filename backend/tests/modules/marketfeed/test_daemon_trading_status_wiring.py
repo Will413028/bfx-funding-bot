@@ -16,7 +16,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -207,12 +206,11 @@ async def test_kill_is_not_lifted_by_the_admin_token(
     assert (out["state"], out["cause"]) == ("HALTED", "operator")
     assert out["cancel_all_complete"] is False
     assert {(o["phase"], o["detail"]) for o in out["cancel_all"]} == {("skipped", "no_live_venue")}
-    with pytest.raises(ValueError, match="authenticated_resume_required"):
-        await daemon.trading_status.resume(reason="static token", actor="test")
+    assert not hasattr(daemon.trading_status, "resume")  # only TOTP resumes
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
 
 
-async def test_resume_after_a_pause_restores_trading_and_leaves_an_audit_trail(
+async def test_a_pause_leaves_an_audit_trail(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
@@ -220,13 +218,12 @@ async def test_resume_after_a_pause_restores_trading_and_leaves_an_audit_trail(
     assert daemon.trading_status is not None
 
     await daemon.trading_status.pause(reason="candle distortion", actor="test")
-    await daemon.trading_status.resume(reason="L4 v2 passed", actor="test")
 
-    assert (await daemon.trading_status.dry_run())["would_submit_any"] is True
+    assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
     snap = await daemon.trading_status.snapshot()
-    # Both transitions retained, newest first — the audit trail that was missing.
+    # Both transitions retained, newest first.
     assert [(h["halted"], h["reason"]) for h in snap["halt"]["history"]] == [
-        (False, "L4 v2 passed"), (True, "candle distortion"), (False, "fixture: trading"),
+        (True, "candle distortion"), (False, "fixture: trading"),
     ]
 
 
@@ -244,5 +241,4 @@ async def test_no_recorded_decision_reads_as_halted(
     snap = await daemon.trading_status.snapshot()
     assert snap["halt"]["halted"] is True
     assert snap["halt"]["sources"]["persisted"] is None
-    with pytest.raises(ValueError, match="authenticated_resume_required"):
-        await daemon.trading_status.resume(reason="static token", actor="test")
+    assert not hasattr(daemon.trading_status, "resume")  # only TOTP resumes

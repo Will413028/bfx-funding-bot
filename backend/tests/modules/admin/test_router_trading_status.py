@@ -145,7 +145,7 @@ def test_smoke_test_route_is_absent_when_no_runner_is_wired() -> None:
     ).status_code == 404
 
 
-# ------------------------------------------------------- halt / resume (P2)
+# ---------------------------------------------------------- halt / pause
 
 
 class _HaltableStatus(_FakeStatus):
@@ -153,7 +153,6 @@ class _HaltableStatus(_FakeStatus):
         super().__init__()
         self.halts: list[dict[str, Any]] = []
         self.pauses: list[dict[str, Any]] = []
-        self.resumes: list[dict[str, Any]] = []
         self.cancel_all_complete = cancel_all_complete
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
@@ -165,19 +164,12 @@ class _HaltableStatus(_FakeStatus):
         self.pauses.append({"reason": reason, "actor": actor})
         return {"halted": True, "state": "REDUCING", "reason": reason, "actor": actor}
 
-    async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
-        self.resumes.append({"reason": reason, "actor": actor})
-        return {"halted": False, "reason": reason, "actor": actor}
-
 
 class _UnconfiguredHaltStatus(_FakeStatus):
     async def halt(self, **kwargs: Any) -> dict[str, Any]:
         raise ValueError("persisted halt is not configured for this daemon")
 
     async def pause(self, **kwargs: Any) -> dict[str, Any]:
-        raise ValueError("persisted halt is not configured for this daemon")
-
-    async def resume(self, **kwargs: Any) -> dict[str, Any]:
         raise ValueError("persisted halt is not configured for this daemon")
 
 
@@ -250,26 +242,13 @@ def test_halt_requires_a_reason() -> None:
     assert status.halts == []
 
 
-def test_resume_refuses_without_explicit_confirmation() -> None:
-    """Resuming restarts REAL-MONEY lending. It must not be one stray curl."""
-    status = _HaltableStatus()
-    resp = TestClient(_app(status)).post(
-        "/admin/resume?reason=verified", headers={"Authorization": "Bearer secret"},
+def test_the_static_token_cannot_resume() -> None:
+    """ADR D4: resume needs the operator's TOTP (the web API's trading-control
+    request). The static admin token only reduces exposure: halt and pause."""
+    resp = TestClient(_app(_HaltableStatus())).post(
+        "/admin/resume?reason=x&confirm=true", headers={"Authorization": "Bearer secret"},
     )
-    assert resp.status_code == 400
-    assert "confirm" in resp.json()["error"]
-    assert status.resumes == []
-
-
-def test_resume_proceeds_with_confirmation() -> None:
-    status = _HaltableStatus()
-    resp = TestClient(_app(status)).post(
-        "/admin/resume?reason=L4+v2+passed&actor=will&confirm=true",
-        headers={"Authorization": "Bearer secret"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["halted"] is False
-    assert status.resumes == [{"reason": "L4 v2 passed", "actor": "will"}]
+    assert resp.status_code in (404, 405)
 
 
 def test_halt_returns_400_when_no_store_is_configured() -> None:

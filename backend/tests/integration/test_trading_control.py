@@ -413,21 +413,15 @@ def same_limits(a: Probation, b: Probation) -> bool:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["webapi_resume", "admin_token_resume"])
-async def test_a_pause_during_probation_resumes_inside_it(capital_db, path):
+async def test_a_pause_during_probation_resumes_inside_it(capital_db):
     """ADR D3 invariant: exposure stays within the probation until it passes.
     A maintenance pause and resume must not be a way out of it."""
-    from tests.modules.admin.test_trading_status import _service
     factory, account = capital_db
     repo, probation = await approved_into_probation(factory, account)
     await repo.transition("REDUCING", cause="operator", actor="t", reason="maintenance", now_ms=T0 + 5)
-    if path == "webapi_resume":
-        # No venue: re-entering the same limits needs no new minimum.
-        w = worker(factory, account, identity("material"), now=lambda: T0 + 10, rules=False)
-        assert await w.process(await request(factory, account, "resume")) == "applied"
-    else:
-        out = await _service(trading_state=repo).resume(reason="maintenance done", actor="admin")
-        assert out["probation"] is not None
+    # No venue: re-entering the same limits needs no new minimum.
+    w = worker(factory, account, identity("material"), now=lambda: T0 + 10, rules=False)
+    assert await w.process(await request(factory, account, "resume")) == "applied"
     current = await state_of(factory, account)
     assert current.state == "ACTIVE" and current.probation is not None
     assert same_limits(current.probation, probation)
@@ -464,19 +458,6 @@ async def test_no_writer_can_leave_an_unfinished_probation(capital_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("setup", "cause"), [("HALTED", "auto"), ("HALTED", "operator"),
-                                              ("REDUCING", "material_deploy")])
-async def test_the_admin_token_lifts_only_an_operator_pause(capital_db, setup, cause):
-    from bfx_funding_bot.modules.execution.safety.trading_state import NotAnOperatorPause
-    factory, account = capital_db
-    repo = await start(factory, account, setup, cause)
-    before = await state_of(factory, account)
-    with pytest.raises(NotAnOperatorPause):
-        await repo.resume_pause(actor="admin", reason="static token", now_ms=T0)
-    assert await state_of(factory, account) == before
-
-
-@pytest.mark.asyncio
 async def test_after_the_lift_a_pause_resumes_without_probation(capital_db):
     factory, account = capital_db
     repo = await probation_state(factory, account)
@@ -484,8 +465,10 @@ async def test_after_the_lift_a_pause_resumes_without_probation(capital_db):
     assert await worker(factory, account, identity("standard"),
                         now=lambda: T0 + BAKE_MS).lift_probation_if_passed() is not None
     await repo.transition("REDUCING", cause="operator", actor="t", reason="maintenance", now_ms=T0 + BAKE_MS + 1)
-    result = await repo.resume_pause(actor="t", reason="done", now_ms=T0 + BAKE_MS + 2)
-    assert (result.state.state, result.state.probation) == ("ACTIVE", None)
+    w = worker(factory, account, identity("standard"), now=lambda: T0 + BAKE_MS + 2, rules=False)
+    assert await w.process(await request(factory, account, "resume")) == "applied"
+    current = await state_of(factory, account)
+    assert (current.state, current.probation) == ("ACTIVE", None)
 
 
 @pytest.mark.asyncio

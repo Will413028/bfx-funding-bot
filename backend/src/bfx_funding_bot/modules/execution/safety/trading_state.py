@@ -60,10 +60,6 @@ class IllegalTradingTransition(ValueError):  # noqa: N818 - a rejected request, 
     """The requested transition would weaken a stop or break the cause contract."""
 
 
-class NotAnOperatorPause(ValueError):  # noqa: N818 - a rejected request, not a fault
-    """Only an operator's pause is lifted by :meth:`TradingStateRepository.resume_pause`."""
-
-
 @dataclass(frozen=True, slots=True)
 class Probation:
     """Reduced limits after an approval or an automatic halt (ADR D3).
@@ -350,36 +346,6 @@ class TradingStateRepository:
         announce(result)
         return result
 
-    async def resume_pause(self, *, actor: str, reason: str,
-                           now_ms: int | None = None) -> TransitionResult:
-        """Lift an operator's pause, back inside an unfinished probation if any.
-
-        Checked under the scope lock, so a stop recorded after the caller last
-        read the state is never lifted by mistake. ACTIVE already: nothing to do.
-        """
-        now = now_ms if now_ms is not None else int(time.time() * 1000)
-        async with self._sf.begin() as session:
-            await acquire_transaction_lock(
-                session, account_id=str(self.account_id), deployment_environment=self.environment,
-            )
-            current = await read_current(session, account_id=self.account_id,
-                                         environment=self.environment)
-            if current is not None and current.state == ACTIVE:
-                return TransitionResult(state=current, changed=False, previous=current)
-            if current is None or current.state != REDUCING or current.cause != CAUSE_OPERATOR:
-                raise NotAnOperatorPause(
-                    "not an operator's pause" if current is None
-                    else f"{current.state} by {current.cause} is not an operator's pause")
-            owed = await unfinished_probation(session, account_id=self.account_id,
-                                              environment=self.environment)
-            result = await append_transition(
-                session, account_id=self.account_id, environment=self.environment,
-                state=ACTIVE, cause=CAUSE_OPERATOR, actor=actor, reason=reason, now_ms=now,
-                probation=owed.restarted(started_at_ms=now) if owed is not None else None,
-            )
-        announce(result)
-        return result
-
     async def history(self, *, limit: int = 20) -> list[TradingState]:
         async with self._sf() as session:
             rows = (await session.scalars(
@@ -403,7 +369,6 @@ __all__ = [
     "PROBATION_STARTED",
     "REDUCING",
     "IllegalTradingTransition",
-    "NotAnOperatorPause",
     "Probation",
     "TradingState",
     "TradingStateRepository",
