@@ -90,6 +90,17 @@ PROJECT = "bfx-app"
 COMPOSE_PATH = "deploy/vm/docker-compose.app.yml"
 LIVE_ENV_PATH = "deploy/vm/live.env"
 SERVICES = ("bot", "webapi", "frontend")
+# A change to how PostgreSQL is run, backed up or restored earns an isolated
+# restore test before the release goes out (plan DR bullet, Will 2026-09-25), as
+# does every pending migration and any diff that cannot be read. Hard-wired here,
+# not in the target's rules, so a commit cannot switch its own trigger off.
+DR_TRIGGER_PATTERNS = (
+    "deploy/vm/pgbackrest/**",
+    "deploy/vm/postgres/**",
+    "docker-compose.bot.yml",
+    "docker-compose.dr.yml",
+)
+RESTORE_TEST_UNIT = "bfx-restore-test.service"
 CONTAINERS = {"bot": "bfx-bot", "webapi": "bfx-webapi", "frontend": "bfx-frontend"}
 RUNTIME_ENV_FILES = {"bot": "bot.env", "webapi": "webapi.env", "frontend": "frontend.env"}
 FORBIDDEN_ENV = (
@@ -588,10 +599,24 @@ class Prepared:
     classification: Any
     current: tuple[str, ...]
     heads: tuple[str, ...]
+    changed_paths: tuple[str, ...] | None = None  # None: the diff could not be read
 
     @property
     def pending(self) -> bool:
         return set(self.current) != set(self.heads)
+
+    @property
+    def restore_test_reason(self) -> str | None:
+        """Why this release needs an isolated restore test first, or None."""
+        if self.pending:
+            return "migration_pending"
+        if self.changed_paths is None:
+            return "diff_unavailable"
+        touched = sorted(
+            path for path in self.changed_paths
+            if any(change_class.compile_pattern(p).match(path) for p in DR_TRIGGER_PATTERNS)
+        )
+        return "dr_paths:" + ",".join(touched[:10]) if touched else None
 
 
 @dataclass(slots=True)
@@ -879,6 +904,7 @@ class Deployer:
                 "class_detail": attempt.class_detail, "schema_current": list(prepared.current),
                 "schema_heads": list(prepared.heads), "migrations_pending": prepared.pending,
                 "backup_before_migration": prepared.pending,
+                "restore_test_before_deploy": prepared.restore_test_reason,
                 "rollback_target": view.last_success.source_revision if view.last_success else None,
                 "blockers": list(self._dry_run_blockers),
             }
@@ -894,6 +920,15 @@ class Deployer:
             except DeployError as exc:
                 return self._finish(attempt, "failed", f"backup_failed:{exc.code}; migrations not "
                                     "applied; running release untouched")
+        reason = prepared.restore_test_reason
+        if reason is not None:
+            # After the pre-migration backup, so the test restores that very backup.
+            try:
+                self._restore_test(reason)
+            except DeployError as exc:
+                return self._finish(attempt, "failed", f"restore_test_failed({reason}):{exc.code}; "
+                                    "nothing deployed; running release untouched")
+        if prepared.pending:
             failure = self._migrate(prepared, attempt)
             if failure is not None:
                 return failure
@@ -924,7 +959,7 @@ class Deployer:
         if ancestry != 0:
             raise DeployError("git_merge_base_failed")
         release_dir = self._materialize(target.revision)
-        classification = self._classify(view, target.revision)
+        classification, changed_paths = self._classify(view, target.revision)
         attempt.klass = classification.change_class
         attempt.class_detail = classification.describe()
         log(f"change class {attempt.klass} ({attempt.class_detail})")
@@ -938,7 +973,7 @@ class Deployer:
         if not current:
             raise DeployError("schema_current_empty")
         return Prepared(release_dir=release_dir, classification=classification,
-                        current=current, heads=heads)
+                        current=current, heads=heads, changed_paths=changed_paths)
 
     def _materialize(self, revision: str) -> Path:
         """Write the compose file and live.env of <revision>; the mirror's worktree is never touched."""
@@ -948,18 +983,29 @@ class Deployer:
             _write_private(release_dir / Path(path).name, content)
         return release_dir
 
-    def _classify(self, view: LedgerView, revision: str) -> Any:
-        result = self._classify_paths(view, revision)
+    def _classify(self, view: LedgerView, revision: str) -> tuple[Any, tuple[str, ...] | None]:
+        paths, reason = self._changed_paths(view, revision)
+        result = change_class.undecidable(reason) if paths is None else self._classify_paths(
+            revision, paths)
         if self.settings.force_material:
             result = change_class.raise_to_material(result, "operator_forced")
-        return result
+        return result, paths
 
-    def _classify_paths(self, view: LedgerView, revision: str) -> Any:
+    def _changed_paths(self, view: LedgerView, revision: str) -> tuple[tuple[str, ...] | None, str]:
         if view.last_success is None:
-            return change_class.undecidable("no_previous_deployment")
+            return None, "no_previous_deployment"
         previous = view.last_success.source_revision
         if self._git_try("cat-file", "-e", f"{previous}^{{commit}}").returncode != 0:
-            return change_class.undecidable("previous_revision_unknown")
+            return None, "previous_revision_unknown"
+        # --no-renames: a rename must report both paths, or moving a file out of
+        # backend/src into docs/ would be judged by its new name alone.
+        diff = self._git_try("diff", "--name-only", "--no-renames", "-z", previous, revision,
+                             timeout=120.0)
+        if diff.returncode != 0:
+            return None, "diff_failed"
+        return tuple(path for path in diff.stdout.split("\0") if path), ""
+
+    def _classify_paths(self, revision: str, paths: tuple[str, ...]) -> Any:
         rules = self._git_try("show", f"{revision}:{change_class.RULES_PATH}")
         if rules.returncode != 0:
             return change_class.undecidable("rules_unavailable")
@@ -968,13 +1014,7 @@ class Deployer:
         except change_class.RulesError as exc:
             log(f"change-class rules invalid at {revision}: {exc}")
             return change_class.undecidable("rules_invalid")
-        # --no-renames: a rename must report both paths, or moving a file out of
-        # backend/src into docs/ would be judged by its new name alone.
-        diff = self._git_try("diff", "--name-only", "--no-renames", "-z", previous, revision,
-                             timeout=120.0)
-        if diff.returncode != 0:
-            return change_class.undecidable("diff_failed")
-        return change_class.classify([path for path in diff.stdout.split("\0") if path], parsed)
+        return change_class.classify(paths, parsed)
 
     def _validate_env_files(self, release_dir: Path) -> None:
         files = [(self.settings.runtime_dir / name, name != "migrate.env")
@@ -1050,6 +1090,17 @@ class Deployer:
         # backup user's home, exactly as bfx-pgbackrest-backup.service (User=ubuntu).
         self._check(["runuser", "-u", self.settings.backup_user, "--", str(script),
                      "--type", "diff"], code="backup_sh_failed", timeout=7200.0)
+
+    def _restore_test(self, reason: str) -> None:
+        """Run the isolated restore test unit and wait for its verdict.
+
+        The unit (User=ubuntu) runs the prefix-mode drill with the mirror's
+        checked-out DR scripts, refreshes the heartbeat on success and alerts on
+        failure itself; `systemctl start` on a oneshot blocks until it finishes.
+        """
+        log(f"isolated restore test before deploying ({reason})")
+        self._check(["systemctl", "start", RESTORE_TEST_UNIT], code="restore_test_unit_failed",
+                    timeout=7500.0)
 
     def _migrate(self, prepared: Prepared, attempt: Attempt) -> int | None:
         target = attempt.target

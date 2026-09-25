@@ -16,8 +16,10 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 StateDirectory=bfx-deploy
 StateDirectoryMode=0700
-# Backup (<=7200s) + pulls + migration + health/settle; never killed mid-migration.
-TimeoutStartSec=3h
+# Worst case: backup (<=7200s) + isolated restore test (<=7500s) + pulls (<=1800s
+# each) + migration (<=900s) + health/settle. Sized so systemd never kills it
+# mid-migration; a normal release with a migration takes minutes.
+TimeoutStartSec=6h
 ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_deploy.py --mirror /home/ubuntu/bfx-funding-bot --state-dir /var/lib/bfx-deploy
 # No OnFailure=: bfx-deploy sends its own deploy/rollback/failure alerts, including
 # for unexpected crashes, and records every attempt in the deployments ledger.

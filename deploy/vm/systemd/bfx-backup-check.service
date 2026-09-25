@@ -12,4 +12,4 @@ UMask=0077
 StateDirectory=bfx-ops
 StateDirectoryMode=0700
 TimeoutStartSec=120
-ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_backup_check.py --evidence /home/ubuntu/bfx/dr-evidence/backup.json --restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json --state /var/lib/bfx-ops/backup-check.json
+ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_backup_check.py --evidence /home/ubuntu/bfx/dr-evidence/backup.json --restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json --restore-max-age-seconds 3024000 --state /var/lib/bfx-ops/backup-check.json

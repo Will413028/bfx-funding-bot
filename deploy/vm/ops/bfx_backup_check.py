@@ -8,7 +8,8 @@ bfx-pgbackrest-status run. It only reads what already exists:
   minutes: `measured: false`, `rpo_seconds` above 300, or a file older than 15
   minutes (the status timer itself stopped) is a problem;
 - the restore-test heartbeat, but only while bfx-restore-test.timer is enabled:
-  missing or older than 8 days is a problem.
+  missing or older than 35 days is a problem (the timer is monthly; deploys with a
+  migration or a DR change also refresh it).
 
 A failed scheduled backup is alerted directly by bfx-pgbackrest-backup.service
 (OnFailure=bfx-alert@%n.service), not here. Nothing here gates a deploy or a
@@ -191,7 +192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--notify-config", type=Path, default=bfx_notify.DEFAULT_CONFIG)
     parser.add_argument("--rpo-seconds", type=int, default=300)
     parser.add_argument("--max-evidence-age-seconds", type=int, default=900)
-    parser.add_argument("--restore-max-age-seconds", type=int, default=8 * 86_400)
+    parser.add_argument("--restore-max-age-seconds", type=int, default=35 * 86_400)
     parser.add_argument("--realert-seconds", type=int, default=6 * 3600)
     args = parser.parse_args(argv)
 
