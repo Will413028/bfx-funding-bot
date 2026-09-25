@@ -14,8 +14,8 @@ from bfx_funding_bot.modules.execution.event_store.persister import EventStorePe
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitAcknowledged
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
@@ -82,13 +82,13 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
     factory, account = capital_db
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
-    chain = SafetyGuardChain(guards=[ManualKillGuard(halt_store=halt), CapitalPolicyGuard(runtime=runtime)],
+    chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt), CapitalPolicyGuard(runtime=runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
     service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
         cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], caps={}, default_cap=Decimal("0"),
         env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
-        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), halt_store=halt, capital_runtime=runtime)
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital_runtime=runtime)
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(account)
     assert snapshot["deployment_environment"] == "ci"
@@ -151,6 +151,18 @@ class Venue:
         self.received.append(kwargs["venue_offer_id"])
 
 
+def stop_chain(halt, account, *guards):
+    """The production chain shape: the trading-state guard, then any others."""
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
+    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink
+    return SafetyGuardChain(
+        guards=[ManualKillGuard(trading_state=halt), *guards],
+        probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
+
+
 async def boundary(factory, account):
     from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
     from bfx_funding_bot.modules.execution.command_gate import DatabaseOpenUncertaintyReader
@@ -174,14 +186,15 @@ async def boundary(factory, account):
         market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
         funding_amount_evidence=evidence(),
     )
-    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
-    await halt.set_halted(False, reason="isolated test only", actor="test", now_ms=1200)
+    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await halt.transition("ACTIVE", cause="operator", reason="isolated test only", actor="test",
+                          now_ms=1200)
     venue = Venue(factory)
     gate = AccountCommandGate(venue, bus=DomainEventBus(),
         persister=EventStorePersister(store=PostgresEventStore(deployment_environment="ci"),
                                      session_factory=factory),
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
-        safety_evaluator=ManualKillGuard(halt_store=halt), deployment_environment="ci",
+        safety_evaluator=stop_chain(halt, account), deployment_environment="ci",
         capital_runtime=runtime, clock=lambda: 1100, is_simulated=False)
     ctx = AccountContext(str(account), Credentials("mock", "mock"), Decimal("0"))
     return gate, venue, ready, ctx, runtime, halt
@@ -192,7 +205,8 @@ async def boundary(factory, account):
     ("revision", "capital_policy_revision_changed"),
     ("snapshot", "capital_snapshot_changed"),
     ("pending", "snapshot_query_pending"),
-    ("halt", "persisted halt"),
+    ("halt", "trading state HALTED"),
+    ("reducing", "trading state REDUCING"),
 ])
 async def test_queued_ready_cannot_send_after_authority_changes(capital_db, change, reason):
     factory, account = capital_db
@@ -206,8 +220,10 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
     elif change == "pending":
         async with factory.begin() as session:
             await runtime.repository.begin_snapshot(session, now_ms=1100)
+    elif change == "reducing":
+        await halt.transition("REDUCING", cause="operator", reason="pause", actor="test", now_ms=1)
     else:
-        await halt.set_halted(True, reason="stop", actor="test", now_ms=1)
+        await halt.transition("HALTED", cause="operator", reason="stop", actor="test", now_ms=1)
     with pytest.raises(CommandGateBlocked, match=reason):
         await gate.submit(ready, ctx)
     assert venue.received == []
@@ -216,24 +232,55 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
 
 
+async def second_ready(factory, account, ready):
+    """Another planned offer, so a stop is tested against a submit that could run."""
+    event, row = intent(account, "200", 20)
+    async with factory.begin() as session:
+        session.add(row)
+    return replace(ready, decision_id=row.decision_id, decision=ready.decision.model_copy(
+        update={"signal_correlation_id": event.signal_correlation_id, "offer_amount_usdt": 200}))
+
+
 @pytest.mark.asyncio
-async def test_submit_and_cancel_durable_before_io_and_halt_blocks_both(capital_db):
+@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
+async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db, stop):
+    """REDUCING and HALTED refuse every new offer; cancelling a managed offer
+    is what both states exist to allow, and it is still made durable first."""
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
-    await halt.set_halted(True, reason="boot halted", actor="test", now_ms=1)
-    with pytest.raises(CommandGateBlocked):
-        await gate.submit(ready, ctx)
-    with pytest.raises(CommandGateBlocked):
+    await gate.submit(ready, ctx)  # managed offer 101 while ACTIVE
+    later = await second_ready(factory, account, ready)
+    await halt.transition(stop, cause="operator", reason="stop", actor="test", now_ms=1)
+    venue.received.clear()
+    with pytest.raises(CommandGateBlocked, match=f"trading state {stop}"):
+        await gate.submit(later, ctx)
+    assert venue.received == []
+    # Venue.cancel asserts CANCEL_REQUESTED is committed before it is reached.
+    await gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                      account_id=ctx.account_id, ctx=ctx)
+    assert venue.received == ["101"]
+    async with factory() as session:
+        intents = (await session.scalars(select(EventLogRow).where(
+            EventLogRow.event_type == "RESERVATION_INTENT"))).all()
+    assert len(intents) == 1
+    # A cancel ACK never releases capital inside this boundary.
+    view = await runtime.read(symbol="fUST", cell_id="a30")
+    assert view.budget.spendable == Decimal("500")
+
+
+@pytest.mark.asyncio
+async def test_cancel_admission_needs_an_evaluator_that_knows_cancel_exemptions(capital_db):
+    """A bare guard cannot tell a cancel from a submit; the gate refuses rather
+    than guessing which guards to skip."""
+    factory, account = capital_db
+    gate, venue, ready, ctx, _, halt = await boundary(factory, account)
+    await gate.submit(ready, ctx)
+    venue.received.clear()
+    gate._safety_evaluator = ManualKillGuard(trading_state=halt)
+    with pytest.raises(CommandGateBlocked, match="cancel_eligibility_unavailable"):
         await gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
                           account_id=ctx.account_id, ctx=ctx)
     assert venue.received == []
-    await halt.set_halted(False, reason="isolated fixture", actor="test", now_ms=0)
-    await gate.submit(ready, ctx)
-    await gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
-                      account_id=ctx.account_id, ctx=ctx)
-    assert len(venue.received) == 2
-    view = await runtime.read(symbol="fUST", cell_id="a30")
-    assert view.budget.spendable == Decimal("500")
 
 
 @pytest.mark.integration
@@ -249,12 +296,13 @@ async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="halt-lock"))
-    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
+    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
     task = None
     try:
         async with factory.begin() as session:
             await acquire_transaction_lock(session, account_id=str(account), deployment_environment="ci")
-            task = asyncio.create_task(halt.set_halted(True, reason="stop", actor="test"))
+            task = asyncio.create_task(halt.transition("HALTED", cause="operator", reason="stop",
+                                                       actor="test"))
             for _ in range(100):
                 async with factory() as observer:
                     waiting = await observer.scalar(text(
@@ -267,7 +315,7 @@ async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
             assert waiting, "halt writer never joined the account authorization lock"
             assert not task.done()
         await task
-        assert (await halt.current()).halted
+        assert (await halt.current()).state == "HALTED"
     finally:
         if task is not None:
             await task
@@ -296,13 +344,13 @@ async def test_authorization_failure_after_append_rolls_back_before_transport(ca
 async def test_locked_guard_observes_same_transaction_halt(capital_db, monkeypatch):
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, _ = await boundary(factory, account)
-    from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+    from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
     original = runtime.repository.authorize_and_append_intent
 
     async def halt_in_transaction(session, **kwargs):
         async def guarded(locked):
-            locked.add(TradingHaltRow(account_id=str(account), exchange_account_id=account,
-                deployment_environment="ci", halted=True, reason="uncommitted halt",
+            locked.add(TradingStateRow(exchange_account_id=account, deployment_environment="ci",
+                state="HALTED", cause="operator", reason="uncommitted halt",
                 actor="test", created_at_ms=0))
             await locked.flush()
             await kwargs["locked_guard"](locked)
@@ -333,7 +381,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
         update={"signal_correlation_id": event.signal_correlation_id}))
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
-        safety_evaluator=ManualKillGuard(halt_store=halt), deployment_environment="ci",
+        safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
         capital_runtime=runtime, clock=lambda: 1100, is_simulated=False)
     results = await asyncio.gather(gate.submit(first, ctx), competitor.submit(second, ctx),
                                    return_exceptions=True)
@@ -402,7 +450,10 @@ async def test_account_retired_after_planning_cannot_send(capital_db):
 
 
 @pytest.mark.asyncio
-async def test_halted_reconcile_attempts_neither_submit_nor_managed_cancel(capital_db):
+@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
+async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_db, stop):
+    """The reprice sweep may pull a stale offer while stopped; the allocation
+    that would re-post it (or place anything new) is refused."""
     from tests.modules.execution.deployment.test_reconciler import (
         _REPRICE,
         _build,
@@ -413,16 +464,17 @@ async def test_halted_reconcile_attempts_neither_submit_nor_managed_cancel(capit
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
     await gate.submit(ready, ctx)
     venue.received.clear()
-    await halt.set_halted(True, reason="retained startup halt", actor="test")
+    await halt.transition(stop, cause="operator", reason="retained startup halt", actor="test")
     rec, _, _, _ = _build(exposure=Decimal("0"), quotes=[_post_quote("fUST_a30")],
-        executor=gate, safety=ManualKillGuard(halt_store=halt), capital_runtime=runtime,
+        executor=gate, safety=stop_chain(halt, account), capital_runtime=runtime,
         canceller=gate, reprice=_REPRICE)
     rec._ctx = ctx
     await rec.deploy(venue_offers=(_venue_offer("101", 0.001),))
-    assert venue.received == []
+    assert venue.received == ["101"]
     async with factory() as session:
-        assert not (await session.scalars(select(EventLogRow).where(
-            EventLogRow.event_type == "CANCEL_REQUESTED"))).all()
+        types = [row.event_type for row in (await session.scalars(select(EventLogRow))).all()]
+    assert types.count("CANCEL_REQUESTED") == 1
+    assert types.count("RESERVATION_INTENT") == 1  # only the offer placed while ACTIVE
 
 
 @pytest.mark.asyncio
@@ -441,7 +493,7 @@ async def test_real_guard_chain_reuses_authorization_session_without_double_rese
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
     gate._safety_evaluator = SafetyGuardChain(
-        guards=[ManualKillGuard(halt_store=halt), UncertaintyGuard(
+        guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
             reader=DatabaseUncertaintyReader(factory), deployment_environment="ci"),
             CapitalPolicyGuard(runtime=runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
@@ -491,8 +543,13 @@ async def test_capital_probe_does_not_commit_projection_replay(capital_db):
         assert (await session.scalar(select(ProjectionHeadRow))).last_event_seq == 0
 
 
-async def cancel_http_boundary(factory, account, http):
-    """Real gate/guards/adapter; only HTTP transport is supplied by the test."""
+async def cancel_http_boundary(factory, account, http, *, state="ACTIVE"):
+    """Real gate/guards/adapter; only HTTP transport is supplied by the test.
+
+    ``state`` is the trading state the cancel runs under: the managed offer is
+    placed while ACTIVE, then the state changes. Cancelling must behave the
+    same in every state -- only uncertainty and provenance decide it.
+    """
     from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
@@ -506,8 +563,10 @@ async def cancel_http_boundary(factory, account, http):
 
     gate, _, ready, ctx, runtime, halt = await boundary(factory, account)
     await gate.submit(ready, ctx)  # Establish a known managed offer, no HTTP.
+    if state != "ACTIVE":
+        await halt.transition(state, cause="operator", reason="stopped during cancel", actor="test")
     gate._safety_evaluator = SafetyGuardChain(
-        guards=[ManualKillGuard(halt_store=halt), UncertaintyGuard(
+        guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
             reader=DatabaseUncertaintyReader(factory), deployment_environment="ci"),
             CapitalPolicyGuard(runtime=runtime)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
@@ -544,8 +603,10 @@ async def append_cancel_race_unknown(factory, account, *, symbol="fUST", environ
         ))
 
 
+@pytest.mark.parametrize("state", ["ACTIVE", "REDUCING", "HALTED"])
 @pytest.mark.parametrize("fault", ["unknown", "unreadable"])
-async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(capital_db, monkeypatch, fault):
+async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(capital_db, monkeypatch, fault,
+                                                                             state):
     import asyncio
 
     import httpx
@@ -560,11 +621,11 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
         return httpx.Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        gate, ctx, _ = await cancel_http_boundary(factory, account, http)
+        gate, ctx, _ = await cancel_http_boundary(factory, account, http, state=state)
         original_guard = gate._guard
         injected = False
 
-        async def after_admission(decision, context, *, transport=False):
+        async def after_admission(decision, context, **kwargs):
             nonlocal injected
             if context.command_session is None and not injected:
                 injected = True
@@ -578,7 +639,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
                         raise RuntimeError("synthetic uncertainty read failure")
                     monkeypatch.setattr(DatabaseUncertaintyReader, "list_open", unavailable)
             # Scheduling hook only: never fake a guard verdict.
-            return await original_guard(decision, context, transport=transport)
+            return await original_guard(decision, context, **kwargs)
 
         monkeypatch.setattr(gate, "_guard", after_admission)
         with pytest.raises(CommandGateBlocked, match="uncertainty"):
@@ -586,3 +647,56 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
                 account_id=str(account), ctx=ctx), timeout=10)
     assert injected
     assert requests == []
+
+
+@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
+    """No new offer reaches the real adapter under a stop, even one already planned."""
+    import httpx
+
+    from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
+    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink
+
+    factory, account = capital_db
+    requests = []
+
+    async def transport(request):
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+        gate, _, ready, ctx, _, halt = await boundary(factory, account)
+        gate._inner = BitfinexLiveExecutor(
+            http=http, event_sink=_CapturingSink(), bus=DomainEventBus(), phase=Phase.LIVE,
+            strategy=StrategyName.MEAN_REVERSION, configured_symbols=frozenset({"fUST"}),
+            cell="a30", nonce_provider=lambda: 123456789,
+        )
+        await halt.transition(state, cause="operator", reason="stop", actor="test")
+        with pytest.raises(CommandGateBlocked, match=f"trading state {state}"):
+            await gate.submit(ready, ctx)
+    assert requests == []
+
+
+@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+async def test_stop_after_intent_commit_is_not_sent(capital_db, state):
+    """A stop landing between the durable intent and transport ends the
+    command as NOT_SENT: the transport recheck keeps the trading-state gate."""
+    factory, account = capital_db
+    gate, venue, ready, ctx, _, halt = await boundary(factory, account)
+    original_guard = gate._guard
+
+    async def stop_before_transport(decision, context, **kwargs):
+        if kwargs.get("transport"):
+            await halt.transition(state, cause="operator", reason="stop mid-command", actor="test")
+        return await original_guard(decision, context, **kwargs)
+
+    gate._guard = stop_before_transport
+    result = await gate.submit(ready, ctx)
+    assert result.outcome_kind.value == "not_sent"
+    assert f"trading state {state}" in result.outcome.reason
+    assert venue.received == []
+    async with factory() as session:
+        types = [row.event_type for row in (await session.scalars(select(EventLogRow))).all()]
+    assert types.count("RESERVATION_INTENT") == 1
+    assert types.count("RESERVATION_FAILED") == 1

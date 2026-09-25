@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_record
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.projection_cutover.archive import (
-    ARCHIVE_READY_MIGRATIONS,
     _stream_identity,
+    archive_ready_revisions,
     verify_archive,
 )
 from bfx_funding_bot.modules.execution.projection_cutover.codec import decode_row, encode_row
@@ -112,7 +112,7 @@ async def verify_archives(
             # alembic_version holds only the current head, so "has the archive
             # migration run" means "is the head one at or after it".
             heads = set(await session.scalars(text("SELECT version_num FROM public.alembic_version")))
-            if expected or heads & ARCHIVE_READY_MIGRATIONS:
+            if expected or heads & archive_ready_revisions():
                 raise ValueError("archive inventory absent")
             return []
         inventory = set(await session.scalars(

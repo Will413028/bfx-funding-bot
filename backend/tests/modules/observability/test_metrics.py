@@ -576,11 +576,11 @@ def test_ws_queue_gauge_fail_open_when_depth_fn_raises() -> None:
 def test_daemon_info_and_render() -> None:
     m = DaemonMetrics()
     m.set_daemon_info(
-        service_version="abc1234", deployment_environment="prod", phase="canary",
+        service_version="abc1234", deployment_environment="prod", phase="live",
     )
     assert m.registry.get_sample_value(
         "bfx_daemon_info",
-        {"service_version": "abc1234", "deployment_environment": "prod", "phase": "canary"},
+        {"service_version": "abc1234", "deployment_environment": "prod", "phase": "live"},
     ) == 1.0
     out = m.render().decode()
     assert "bfx_daemon_info" in out

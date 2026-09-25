@@ -12,7 +12,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
 )
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.events import SnapshotCoverage, VenueSnapshotObserved
-from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from tests.integration.test_capital_repository import (
     capital_db,
     capital_engine,
@@ -112,11 +112,11 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
     if usd_balance is not None:
         wallets["fUSD"] = Decimal(usd_balance)
     seq = await currency_snapshot(factory, repo, wallet_available=wallets)
+    trading = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await trading.transition("HALTED", cause="operator", actor="test", reason="test", now_ms=1)
     async with factory.begin() as session:
         session.add(AccountConfigDraft(exchange_account_id=account, config={"currency": "UST"},
                                        revision=7, source="operator"))
-        session.add(TradingHaltRow(account_id=str(account), exchange_account_id=account,
-            deployment_environment="ci", halted=True, reason="test", actor="test", created_at_ms=1))
     async with factory.begin() as session:
         report = await convert_capital_policy(session, repository=repo, legacy=legacy(),
                                               now_ms=1100, apply_digest=None)
@@ -143,7 +143,7 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
         assert (await repo.read_applied(session, symbol="fUSD")).policy.enabled is False
         assert (await repo.read_applied(session, symbol="fUST")).policy.reserve_amount == Decimal("0")
         assert (await session.scalar(select(AccountConfigDraft))).revision == 7
-        assert (await session.scalar(select(TradingHaltRow))).halted is True
+    assert (await trading.current()).state == "HALTED"  # converting never resumes
     async with factory.begin() as session:
         again = await convert_capital_policy(session, repository=repo, legacy=legacy(),
             now_ms=1100, apply_digest=report["conversion_digest"])

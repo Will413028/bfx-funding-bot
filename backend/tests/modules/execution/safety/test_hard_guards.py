@@ -43,16 +43,14 @@ def _post(symbol: str = "fUST") -> DecisionPayload:
 
 @pytest.mark.asyncio
 async def test_manual_kill_allows_when_flag_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard()
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is True
 
 
 @pytest.mark.asyncio
-async def test_manual_kill_blocks_when_flag_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    g = ManualKillGuard()
+async def test_manual_kill_blocks_while_a_protection_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    g = ManualKillGuard(pending_stop=lambda: "loss_limiter")
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
     assert r.guard_name == "manual_kill"

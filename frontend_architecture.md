@@ -1484,15 +1484,15 @@ halt、operator containment runbook 與人工 production evidence。**
 ## Deployment（Current: Oracle Cloud VM）
 
 Release 0 的實際部署是 `oci-a1` 上的 Docker Compose，包含 Next.js
-standalone、Python FastAPI web-API、VM-local PostgreSQL 與 Redis。部署前必須
-使用 [`scripts/deploy-vm.sh`](scripts/deploy-vm.sh) 的 profile/auth preflight，
-並完成 [operator containment runbook](docs/runbooks/release-0-operator-containment.md)
-中的 planned halt、migration/readiness 與 audit gate。
+standalone、Python FastAPI web-API、VM-local PostgreSQL 與 Redis。CI 在綠燈的 `main`
+commit 建 arm64 image 推到 GHCR，VM 上的 `bfx-deploy` 以 digest 部署（見
+[deploy runbook](docs/runbooks/deploy.md)）；operator bootstrap 與 non-operator containment
+見 [operator containment runbook](docs/runbooks/release-0-operator-containment.md)。
 
 ### Historical: Vercel 部署藍本
 
 下方 Vercel 內容是早期 SaaS blueprint，不是目前 production runbook；不可用
-來替代 VM deploy script 或 Release 0 auth containment gate。
+來替代 VM 部署流程或 Release 0 auth containment gate。
 
 ### 部署流程
 

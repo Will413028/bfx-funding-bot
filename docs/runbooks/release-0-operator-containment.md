@@ -4,6 +4,9 @@
 Better Auth operator 可以建立 execution-capable session。工具預設只讀；本
 專案未在本次開發中連線或修改任何 production DB、Redis、session。
 
+應用程式的部署一律走 [deploy runbook](deploy.md)（CI → GHCR → `bfx-deploy`）；本文件只描述
+operator bootstrap 與 non-operator containment 這兩個 one-shot，以及它們的 auth 邊界檢查。
+
 ## Invariants
 
 - `BFX_OPERATOR_USER_ID` 是 Better Auth `auth."user".id`，不是 email、profile
@@ -21,21 +24,16 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
 
 ## 0. Planned halt and preflight
 
-1. 宣布 maintenance window，暫停 daemon submit/write path；保留 `/health` 與
-   `/ready` 供 deployment probe 使用。不要在 halt 期間進行 schema 或 auth
-   手工修改。
-2. 確認 deploy artifact/branch SHA，並在 release evidence 記錄：
+1. 宣布 maintenance window，交易狀態維持 `HALTED` 或 `REDUCING`（見
+   [operations runbook](operations.md)）；保留 health probe。不要在停機期間進行 schema
+   或 auth 手工修改。
+2. 從 `deployments` ledger 記錄目前部署的 source revision 與 frontend/backend digest
+   （查詢見 deploy runbook）。
+3. Schema 只由 bfx-deploy 在部署時以 `alembic upgrade head` 套用（先備份）；不要在 VM 上
+   手動跑 migration。本機驗證仍用：
 
    ```bash
-   git rev-parse HEAD
    cd backend && uv run alembic check
-   ```
-
-3. 以 dev/staging database 先套用 migration，再確認 production migration
-   policy；正式套用一律使用：
-
-   ```bash
-   cd backend && uv run alembic upgrade head
    ```
 
 4. 由既有受控管理流程建立唯一 operator user，但先維持非 admin role。以該
@@ -52,24 +50,26 @@ Better Auth operator 可以建立 execution-capable session。工具預設只讀
    BFX_OPERATOR_ROLE=admin
    ```
 
-   現行 [immutable release](immutable-release.md) 工具在啟動前拒絕缺值、非 admin role 或 ID
-   不一致。
+   `bfx-deploy` 只檢查 env 檔格式與權限；缺值、非 admin role 或 ID 不一致由 webapi 與
+   frontend 在執行時 fail closed（所有 private route 拒絕），所以部署後必須用 fresh sign-in
+   確認。
 
 ## 1. Approved-image one-shot boundary
 
 現行 frontend 是 read-only rootfs，且沒有 audit/tmp mount；**不得 `docker exec`
-進 runtime container 寫 evidence**。Legacy Compose app/run profile 也不是本次
-release authority。Bootstrap 與後續 containment 都必須是 stack host 上的獨立
-one-shot，使用 reviewed bundle 經 `image_artifact.resolve_image` 解析且已核對的
-actual frontend image、現行 protected `/opt/bfx/runtime/frontend.env`、既有
-`bfx_default` network，以及 root-owned mode `0700` 的 private audit bind。
+進 runtime container 寫 evidence**。Legacy Compose app/run profile（`docker-compose.bot.yml`
+的 `legacy-app`）也不是部署路徑。Bootstrap 與後續 containment 都必須是 stack host 上的獨立
+one-shot，使用目前部署的 frontend image（`deployments` ledger 最新 `deployed` 列的
+`frontend_digest`，或 `docker inspect bfx-frontend --format '{{.Image}}'`）、現行 protected
+`/opt/bfx/runtime/frontend.env`、既有 `bfx_default` network，以及 root-owned mode `0700`
+的 private audit bind。
 
 以下是 controller 必須落實的 manual one-shot contract；`COMMAND...` 每次只換成
 下節列出的單一命令，`AUDIT_DIR`／container name／audit filename 每次皆為新的：
 
 ```bash
-ACTUAL_FRONTEND_IMAGE=sha256:<resolved-approved-actual-id>
-AUDIT_DIR=/opt/bfx/receipts/operator-onboarding/<new-run-id>
+ACTUAL_FRONTEND_IMAGE=sha256:<docker inspect bfx-frontend 的 Image>
+AUDIT_DIR=/opt/bfx/operator-audit/<new-run-id>
 CONTAINER_NAME=bfx-operator-one-shot-<new-run-id>
 install -d -o root -g root -m 0700 "$AUDIT_DIR"
 
@@ -83,7 +83,7 @@ docker create --pull=never --read-only --user 0:0 --entrypoint "" \
 
 這不是可直接略過 inspection 的 `docker run`。記下 create 回傳的 exact container
 ID，**在任何執行前**用不輸出 env values 的受控檢查確認：container ID/Image
-等於本次 create 與 resolved actual ID；state=`created`；command 完全相等；
+等於本次 create 與上面的 image ID；state=`created`；command 完全相等；
 user=`0:0`、cwd=`/app`、read-only rootfs、非 privileged、cap-drop ALL、
 no-new-privileges、network=`bfx_default`；env keys/values 與 protected env file
 逐項相等；唯一 mount 是上述 `/evidence` writable bind，來源與目的 exact。
@@ -185,8 +185,8 @@ node /app/scripts/revoke-non-operators.mjs --apply \
 
 ## 5. Evidence and direct boundary checks
 
-保存以下不含 secrets 的 evidence：apply audit JSON、release SHA、migration
-結果、部署 preflight stdout，以及測試結果。Release gate 至少包含：
+保存以下不含 secrets 的 evidence：apply audit JSON、部署的 source revision 與 digest
+（`deployments` ledger）、以及測試結果。CI 已對每個 main commit 跑前後端測試；手動複核至少包含：
 
 ```bash
 cd ~/bfx/frontend
@@ -231,4 +231,5 @@ Release 0 只保證 operator-only containment、signup 關閉、session/MFA/JWT
 architecture plan 處理。
 
 完成 bootstrap、fresh sign-in 與 containment 只建立 authenticated control plane；
-持續保持 durable halt。它們不授權 canary、permit、submit/cancel、promote 或 resume。
+交易狀態不變。它們不授權 submit 或 resume；恢復交易只能由 operator 在 UI 以 TOTP 執行
+（見 [operations runbook](operations.md)）。

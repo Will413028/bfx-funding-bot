@@ -41,6 +41,8 @@ __all__ = [
     "Credentials",
     "ExecutorPort",
     "FillTracker",
+    "FundingCancelAllPort",
+    "FundingCancelAllResult",
     "GuardResult",
     "GuardRule",
     "ReadyToSubmit",
@@ -64,16 +66,11 @@ class AccountContext:
     account_id: str
     credentials: Credentials
     allocation_cap_usdt: Decimal
-    # In-process opaque capability used only by the Halt 2 one-shot gate to
-    # authorize its already-consumed permit through the persistent halt guard.
-    # It is never serialized or accepted from an external request.
-    canary_halt_authorization: object | None = None
     capital_cell_id: str | None = None
     # Only the command boundary supplies this; guards must reuse its replayed state.
     command_session: AsyncSession | None = None
     before_cancel_transport: Callable[[], Awaitable[None]] | None = None
     before_submit_transport: Callable[[], bool] | None = None
-    release_session_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -268,6 +265,33 @@ class CancelPort(Protocol):
         account_id: str,
         ctx: AccountContext,
     ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FundingCancelAllResult:
+    """The venue's answer to "cancel every funding offer in this currency".
+
+    ``acknowledged`` means the venue accepted the request; the offers it
+    cancelled are observed by the next reconcile, like any other cancel.
+    ``rejected`` carries the venue's own status and text.
+    """
+    outcome: str  # "acknowledged" | "rejected"
+    venue_status: str | None = None
+    text: str | None = None
+
+
+@runtime_checkable
+class FundingCancelAllPort(Protocol):
+    """Venue funding cancel-all for one currency -- the kill switch's only venue write.
+
+    It bypasses the command gate on purpose: provenance, uncertainty and the
+    trading state do not apply to "cancel everything", which is the one write
+    that must still work when those projections are what is broken. Callers
+    own the writer-lock check and the durable record of each attempt.
+    """
+    async def cancel_all_funding_offers(
+        self, *, currency: str, ctx: AccountContext,
+    ) -> FundingCancelAllResult: ...
 
 
 class FillTracker(Protocol):

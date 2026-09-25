@@ -75,23 +75,6 @@ async def test_planner_requires_current_adapter_amount_evidence(fault):
     assert venue.ready_submissions == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("rate,blocked", [("0.5", True), ("2", False)])
-async def test_release_preserves_exact_preview_amount_when_fx_changes(rate, blocked):
-    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
-    rec._funding_rules = FixedRules(rate=rate)
-    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("150"), D("10000"), object())
-    if blocked:
-        with pytest.raises(ValueError, match="minimum"):
-            await rec.deploy(release=command)
-        assert venue.ready_submissions == []
-    else:
-        await rec.deploy(release=command)
-        assert venue.ready_submissions[0].decision.offer_amount_usdt == 150
-        assert venue.ready_submissions[0].funding_amount_evidence.usd_per_unit == D("2")
-
-
 def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
     """Explicit simulated policies/snapshots; never installed by application code."""
     from bfx_funding_bot.modules.execution.capital_policy import (
@@ -495,7 +478,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
-        phase=Phase.CANARY,
+        phase=Phase.LIVE,
         canceller=canceller,
         reprice=reprice,
         **_eligibility_kwargs(
@@ -664,25 +647,6 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     assert audit.last.strategy == "mean_reversion"
     order_submit = next(event for event in sink.events if event["event_type"] == "order_submit")
     assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
-
-
-async def test_release_selection_uses_minimum_without_reconfiguring_normal_cells():
-    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-    audit = _Audit()
-    rec, executor, _, _ = _build(exposure=D("0"), cap=D("2000"),
-        quotes=[_post_quote("fUST_a30"), _post_quote("fUST_p2")], audit=audit)
-    token = object()
-    from uuid import uuid4
-    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion", D("153"), D("10000"), token)
-    await rec.deploy(release=command)
-    assert len(executor.ready_submissions) == 1
-    assert executor.ready_submissions[0].decision.offer_amount_usdt == 153
-    assert audit.last.cell_id == "fUST_a30"
-    assert audit.last.strategy == "mean_reversion"
-    # Normal scheduler still has both configured cells and the normal budget.
-    await rec.deploy()
-    assert len(executor.ready_submissions) == 3
-    assert any(ready.decision.offer_amount_usdt > 153 for ready in executor.ready_submissions[1:])
 
 
 async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():
@@ -1155,7 +1119,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000,
-        event_sink=_CapturingSink(), phase=Phase.CANARY,
+        event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     with caplog.at_level(logging.INFO):
@@ -1184,7 +1148,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
         capital_runtime=_simulated_capital(ledger, tracker),
-        event_sink=_CapturingSink(), phase=Phase.CANARY,
+        event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
@@ -1240,7 +1204,7 @@ async def test_headroom_uses_cell_symbol_available():
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
         capital_runtime=_simulated_capital(ledger, tracker),
         cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     await rec.deploy()
@@ -1277,7 +1241,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         capital_runtime=_simulated_capital(ledger, tracker, totals=caps, reserves=buffers),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
-        phase=Phase.CANARY,
+        phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
@@ -1447,7 +1411,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
         cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     await rec.deploy()
@@ -1574,49 +1538,6 @@ async def test_recorder_is_optional_and_absent_changes_nothing():
     await rec.deploy()
     assert len(ex.submitted) == 1
     assert tracker.deployed("fUST_a30") == D("200")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("rate,submitted", [
-    # The rule is USD-denominated, so its UST equivalent moves with FX. Sub-percent
-    # drift between the human's click and the submit must not discard the session:
-    # revising to the live minimum is the same economic action, and discarding costs
-    # a whole DR window (2026-09-20: a canary died on exactly this, at 150.00450014).
-    # Both figures carry the submit margin: 150.75 is what an authorisation at
-    # parity would have sent, 151.50753770 what this FX sends. The drift the
-    # band absorbs is unchanged -- the margin scales both sides alike.
-    ("0.995", "151.50753770"),
-    # Beyond the tolerance it is no longer the action that was authorized.
-    ("0.9", None),
-])
-async def test_release_revises_to_the_live_minimum_only_within_tolerance(rate, submitted):
-    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
-    rec._funding_rules = FixedRules(rate=rate)
-    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion",
-                             D("150.75"), D("10000"), object())
-    if submitted is None:
-        with pytest.raises(ValueError, match="minimum"):
-            await rec.deploy(release=command)
-        assert venue.ready_submissions == []
-    else:
-        await rec.deploy(release=command)
-        actual = venue.ready_submissions[0].decision.offer_amount_usdt
-        assert D(str(actual)) == D(submitted)
-
-
-@pytest.mark.asyncio
-async def test_release_never_revises_past_the_authorized_ceiling():
-    """The tolerance may not reach past what the human capped."""
-    from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-    rec, venue, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
-    rec._funding_rules = FixedRules(rate="0.995")
-    command = ReleaseCommand(uuid4(), "fUST", "fUST_a30", "mean_reversion",
-                             D("150"), D("150.5"), object())
-    with pytest.raises(ValueError, match="minimum"):
-        await rec.deploy(release=command)
-    assert venue.ready_submissions == []
-
 
 
 # ── E1 reprice reference = book (2026-09-22 strategy-correctness plan, item 2) ──

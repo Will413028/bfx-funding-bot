@@ -60,3 +60,15 @@ export const attributionKeys = {
   weekly: (exchangeAccountId: string | undefined) =>
     [...attributionKeys.all, exchangeAccountId, "weekly"] as const,
 };
+
+export const fundingStatusKeys = {
+  all: ["funding-status"] as const,
+  detail: (exchangeAccountId: string | undefined) =>
+    [...fundingStatusKeys.all, exchangeAccountId] as const,
+};
+
+export const tradingControlKeys = {
+  all: ["trading-control"] as const,
+  overview: (exchangeAccountId: string | undefined) =>
+    [...tradingControlKeys.all, exchangeAccountId, "overview"] as const,
+};

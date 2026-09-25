@@ -19,8 +19,8 @@ from types import ModuleType
 import pytest
 import yaml
 
-from scripts.halt2_cutover import _read_dr_measurement
 from scripts.verify_projection_replay import _TEMPORARY_TABLE_NAMES, replay_one_account
+from tests.scripts.dr_measurement import read_measurement
 
 ROOT = Path(__file__).resolve().parents[3]
 COMMANDS_PATH = ROOT / "deploy/vm/pgbackrest/restore_commands.py"
@@ -268,9 +268,9 @@ def test_prepare_only_physically_restores_and_never_accepts_active_parity(tmp_pa
     assert archive_command[archive_command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert not any("scripts/verify_projection_replay.py" in command for command in fake.commands)
     with pytest.raises(ValueError):
-        _read_dr_measurement(tmp_path / "restore.json", key="rto_seconds")
+        read_measurement(tmp_path / "restore.json", key="rto_seconds")
     with pytest.raises(ValueError):
-        _read_dr_measurement(tmp_path / "restore.json", key="rpo_seconds")
+        read_measurement(tmp_path / "restore.json", key="rpo_seconds")
 
 
 @pytest.mark.parametrize("mutation", ["valid", "request-missing", "request-unknown", "report-target",
@@ -1522,7 +1522,7 @@ def test_failed_persistence_and_invalidation_cannot_leave_green_evidence(
     assert _drill(tmp_path, fake, clock=clock).run(_request(tmp_path)) == 2
     assert invalidation_calls >= 2
     with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
-        _read_dr_measurement(output, key="rto_seconds")
+        read_measurement(output, key="rto_seconds")
     if output.exists():
         assert json.loads(output.read_text(encoding="utf-8"))["measured"] is False
         assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8")
@@ -1541,7 +1541,7 @@ def test_initial_invalidation_interruption_cannot_leave_green_evidence(
 
     assert _drill(tmp_path, _FakeRunner(verifier=subprocess.CompletedProcess(("fake",), 0, _replay_report(), ""))).run(_request(tmp_path)) == 2
     with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
-        _read_dr_measurement(output, key="rto_seconds")
+        read_measurement(output, key="rto_seconds")
 
 
 @pytest.mark.parametrize("failure_stage", ["write", "replace"])
@@ -1567,7 +1567,7 @@ def test_success_persistence_failure_leaves_measurement_unavailable(
     monkeypatch.setattr(restore_drill.os, "replace", fail_replace)
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
     with pytest.raises(ValueError, match=r"rto_seconds_(measurement_unavailable|unmeasured)"):
-        _read_dr_measurement(output, key="rto_seconds")
+        read_measurement(output, key="rto_seconds")
     assert not output.exists() or json.loads(output.read_text())["measured"] is False
     assert "TOKEN-SENTINEL" not in output.read_text(encoding="utf-8") if output.exists() else True
     assert not list(tmp_path.glob(".restore.json.*.tmp"))
@@ -1586,7 +1586,7 @@ def test_cleanup_log_failure_does_not_prevent_failure_evidence(
     assert _drill(tmp_path, fake).run(_request(tmp_path)) == 2
     assert json.loads(output.read_text())["error_code"] == "cleanup_failed"
     with pytest.raises(ValueError, match="rto_seconds_unmeasured"):
-        _read_dr_measurement(output, key="rto_seconds")
+        read_measurement(output, key="rto_seconds")
 
 
 def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
@@ -1634,7 +1634,7 @@ def test_cleanup_blocking_env_unlink_is_interrupted_with_remaining_budget(
         assert report["error_code"] == "cleanup_failed"
         assert report["measured"] is False
         with pytest.raises(ValueError, match="rto_seconds_unmeasured"):
-            _read_dr_measurement(tmp_path / "restore.json", key="rto_seconds")
+            read_measurement(tmp_path / "restore.json", key="rto_seconds")
         assert children and all(child.poll() is not None for child in children)
         assert "DATABASE-PASSWORD-SENTINEL" not in json.dumps(report)
     finally:

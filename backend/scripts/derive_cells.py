@@ -22,8 +22,8 @@ from datetime import UTC, datetime
 
 from bfx_funding_bot.modules.backtest.cell_derivation import DerivedCell, derive_cell_params
 from bfx_funding_bot.modules.backtest.cell_pipeline import (
-    CANARY_YAML,
     CELLS_YAML,
+    DEPLOYED_YAML,
     FIXTURES,
     MR_CELLS,
     CellKey,
@@ -86,9 +86,9 @@ async def _write_main() -> int:
         await engine.dispose()
 
     write_outputs(
-        series, derived, FIXTURES, [CELLS_YAML, CANARY_YAML], canary_path=CANARY_YAML
+        series, derived, FIXTURES, [CELLS_YAML, DEPLOYED_YAML], deployed_path=DEPLOYED_YAML
     )
-    logger.info("wrote fixtures + patched %s, %s", CELLS_YAML, CANARY_YAML)
+    logger.info("wrote fixtures + patched %s, %s", CELLS_YAML, DEPLOYED_YAML)
     return 0
 
 
@@ -110,8 +110,8 @@ def main() -> None:
         sys.exit(asyncio.run(_write_main()))
     problems = check_against_fixture(
         FIXTURES,
-        [CELLS_YAML, CANARY_YAML],
-        canary_path=CANARY_YAML,
+        [CELLS_YAML, DEPLOYED_YAML],
+        deployed_path=DEPLOYED_YAML,
         config=RESEARCH_CONFIG,
         fill_model=UNUSED_LINEAR_MODEL,
     )

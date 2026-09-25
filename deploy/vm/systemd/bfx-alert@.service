@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram alert for failed unit %i
+
+[Service]
+Type=oneshot
+# Root: the Telegram credentials in /opt/bfx/runtime/notify.env are root-only.
+# bfx_notify never fails, so this unit cannot cascade into another failure.
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+TimeoutStartSec=60
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_notify.py --level critical "systemd unit %i failed on %H; see journalctl -u %i"

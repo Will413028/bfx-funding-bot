@@ -37,7 +37,7 @@ def test_records_a_guard_block_with_the_blocking_guard_and_reason() -> None:
     r = SubmitAttemptRecorder(clock=_clock(start, at))
     r.record_blocked(
         cell="c1", symbol="fUST", amount=Decimal("150"),
-        guard_name="manual_kill", reason="BFX_KILL_SWITCH env flag set",
+        guard_name="manual_kill", reason="trading state HALTED: operator stop",
     )
     assert r.last is not None
     assert r.last.outcome == "blocked"
@@ -46,7 +46,7 @@ def test_records_a_guard_block_with_the_blocking_guard_and_reason() -> None:
     assert r.last.symbol == "fUST"
     assert r.last.amount == Decimal("150")
     assert r.last.guard_name == "manual_kill"
-    assert r.last.reason == "BFX_KILL_SWITCH env flag set"
+    assert r.last.reason == "trading state HALTED: operator stop"
 
 
 def test_records_a_successful_submit() -> None:

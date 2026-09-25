@@ -91,7 +91,12 @@ async def test_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
+    # The live guard set, plus the explicit caps a simulated phase sizes from.
+    safety_live = tmp_path / "safety.yaml"
+    safety_live.write_text(
+        (Path(__file__).parents[3] / "configs" / "safety.live.yaml").read_text().replace(
+            "allocation_cap: {enabled: false}",
+            "allocation_cap: {enabled: true, caps: {fUST: 3000}, default_cap: 0}"))
     # Pure NAV wiring test: no legacy canary phase or financial release authority.
     monkeypatch.setenv("BFX_PHASE", "shadow")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -99,7 +104,7 @@ async def test_loss_guards_use_nav_tracker_and_trip_on_drawdown(
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "pnl_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")

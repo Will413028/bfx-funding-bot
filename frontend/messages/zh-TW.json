@@ -1,19 +1,22 @@
 {
   "funding": {
-    "title": "已套用的放貸政策", "halted": "放貸已暫停", "notHalted": "持久暫停已解除，其他風控仍須通過",
-    "enabled": "已啟用", "disabled": "未啟用", "revision": "已套用版本：{revision}",
-    "available": "可用餘額", "pending": "尚未反映的承諾", "reserve": "保留資金", "spendable": "帳戶可動用資金",
-    "total": "總資金", "unattributed": "未歸屬的放貸曝險", "cellHeadroom": "策略餘額上限", "cellBudget": "單筆新增上限",
+    "title": "已套用的放貸政策",
+    "halted": "放貸已暫停",
+    "notHalted": "持久暫停已解除，其他風控仍須通過",
+    "enabled": "已啟用",
+    "disabled": "未啟用",
+    "revision": "已套用版本：{revision}",
+    "available": "可用餘額",
+    "pending": "尚未反映的承諾",
+    "reserve": "保留資金",
+    "spendable": "帳戶可動用資金",
+    "total": "總資金",
+    "unattributed": "未歸屬的放貸曝險",
+    "cellHeadroom": "策略餘額上限",
+    "cellBudget": "單筆新增上限",
     "sharedBudget": "各策略共用帳戶可動用資金，不可加總各策略的新增上限。",
-    "sessionTitle": "Release session", "humanOnly": "準備不會下單。Canary 授權與正式啟用需要分開由人操作；驗證結果仍維持暫停。",
-    "mfaRequired": "需要 operator 登入與已驗證的雙因素 session。服務正常不代表已完成雙因素註冊。",
-    "strategy": "Canary 策略", "meanReversion": "均值回歸", "maximum": "Canary 金額上限（USDT）", "expiry": "授權有效時間（分鐘）",
-    "prepare": "準備 session", "restore": "既有 session ID", "openSession": "開啟 session", "minimum": "計算的最低金額", "exact": "已使用金額", "expires": "到期時間",
-    "confirmCanary": "我授權這一筆真錢放貸", "authorize": "授權 Canary", "validate": "維持暫停並驗證結果",
-    "confirmPromote": "我同意此 release 進入正常放貸", "promote": "正式啟用 release", "evidence": "準備與綁定證據", "refresh": "更新狀態", "newSession": "新增 session",
-    "invalidAmount": "請輸入大於零的十進位金額", "refreshRequired": "Session 無法讀取或已變更，請先更新狀態。",
-    "leaveSession": "離開此 session 選取", "selectionOnly": "離開只清除此瀏覽器的選取，不會取消或修改持久 session，也不會重試放貸。",
-    "unavailable": "無法取得放貸狀態，金額顯示與 release 準備已停用。", "loading": "讀取已套用政策…"
+    "unavailable": "無法取得放貸狀態，金額不顯示。",
+    "loading": "讀取已套用政策…"
   },
   "app": {
     "name": "BFX Funding Bot",
@@ -110,6 +113,8 @@
     "uncertaintyRecordManual": "記錄人工處理",
     "uncertaintyOperatorUnavailable": "目前無法取得操作員身分。",
     "uncertaintyResolutionFailed": "無法記錄處理結果。",
+    "uncertaintyResolutionPending": "已送出處理請求，等待帳戶 daemon 套用。",
+    "uncertaintyResolutionNotApplied": "處理請求未套用",
     "uncertaintyNextAction": {
       "bind": "請以最新完整帳戶對帳確認唯一的場外掛單 ID，再將它綁定至此嘗試。",
       "notAccepted": "請確認完整歷史涵蓋範圍與零個精確候選，才能標記此次請求未被接受。",
@@ -146,7 +151,7 @@
     "authTokenUnavailable": "認證權杖暫時無法取得，請重試。"
   },
   "strategy": {
-    "draftNotice": "儲存草稿不會更改已套用的資金政策，也不會啟動放貸。請在總覽確認已套用版本與 release session。",
+    "draftNotice": "儲存草稿不會更改已套用的資金政策，也不會啟動放貸。請在總覽確認已套用版本與交易狀態。",
     "title": "策略設定",
     "signalParams": "信號參數",
     "executionParams": "執行參數",
@@ -305,5 +310,77 @@
     "csvCta": "下載 CSV",
     "disclaimerTitle": "過去績效不代表未來表現",
     "disclaimerBody": "本頁面所有數字皆為歷史資料，並非對未來報酬的預測、承諾或保證，本頁內容亦不構成投資建議。Bitfinex 放貸利率波動劇烈，可能歸零；過去表現不保證未來績效。"
+  },
+  "tradingControl": {
+    "title": "交易狀態",
+    "loading": "讀取交易狀態…",
+    "unavailable": "無法讀取交易狀態；在能讀取之前所有操作都停用。",
+    "noDecision": "尚未記錄任何交易決策，視同 HALTED。",
+    "state": {
+      "ACTIVE": "交易中",
+      "REDUCING": "暫停（只准撤單）",
+      "HALTED": "停機"
+    },
+    "cause": {
+      "operator": "operator",
+      "auto": "自動保護",
+      "material_deploy": "material 部署"
+    },
+    "since": "自 {time}",
+    "by": "{actor}：{reason}",
+    "probationTitle": "限額期",
+    "probationLimit": "新單上限為正常 cell 上限的 {percent}%，且至少可掛一筆 venue 最小單",
+    "probationFloor": "{symbol} 最小單：{amount}",
+    "probationTime": "{elapsed} 小時 / {required} 小時",
+    "probationAcks": "{count} / {required} 筆 acknowledged 下單",
+    "probationLift": "兩項都達標且期間沒有 HALTED 時自動解除。",
+    "awaitingTitle": "Material 部署等待核准",
+    "awaitingBody": "在你核准這個 build 一次之前，不會掛新單。",
+    "digest": "後端 image",
+    "revision": "Source revision",
+    "changeClass": "變更分級",
+    "identityMissing": "這個 build 沒有部署身分，無法核准；請用部署工具重新部署。",
+    "cancelAllTitle": "本次停機的 venue 撤單",
+    "cancelAllNone": "本次停機沒有 venue 撤單紀錄；請用 kill switch 執行。",
+    "cancelAllIncomplete": "venue 上可能仍有掛單。請重試 kill switch 或手動撤單。",
+    "phase": {
+      "requested": "已送出，結果未記錄",
+      "acknowledged": "已撤單",
+      "rejected": "venue 拒絕",
+      "failed": "失敗",
+      "skipped": "未送出"
+    },
+    "reason": "原因（會隨請求記錄）",
+    "approve": "核准這個 build",
+    "resume": "恢復交易",
+    "resumeHint": "自動停機之後、或限額期尚未通過時，恢復後會進入 24 小時限額期。",
+    "pause": "暫停（只准撤單）",
+    "kill": "Kill switch…",
+    "killRetry": "重試 kill switch…",
+    "killTitle": "Kill switch",
+    "killBody": "寫入 HALTED，並撤掉 venue 上所有幣別的放貸掛單。之後需要經認證的 resume 才能恢復。",
+    "killPhrase": "輸入 KILL 以確認",
+    "killConfirm": "確認 kill",
+    "killCancel": "取消",
+    "mfa": "所有操作都經過你已驗證的雙因素 session，並由交易 daemon 套用。",
+    "waiting": "等待交易 daemon 處理：{action}",
+    "waitingKill": "Kill 已排入，會優先於其他請求處理。",
+    "outcome": {
+      "applied": "已套用：{action}",
+      "rejected": "被拒絕：{action}",
+      "failed": "失敗：{action}"
+    },
+    "action": {
+      "approve": "核准",
+      "resume": "恢復",
+      "pause": "暫停",
+      "kill": "kill"
+    },
+    "error": {
+      "request_pending": "還有其他請求在等 daemon 處理。",
+      "backend_digest_required": "這個 build 沒有部署身分。",
+      "forbidden": "只有 operator 能執行。",
+      "generic": "請求未被接受：{code}"
+    }
   }
 }

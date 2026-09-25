@@ -15,6 +15,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.scripts.dr_measurement import read_measurement
+
 ROOT = Path(__file__).resolve().parents[3]
 PG_BACKREST_DIR = ROOT / "deploy/vm/pgbackrest"
 SECRET_VALIDATION_PATH = PG_BACKREST_DIR / "secret_validation.py"
@@ -574,20 +576,6 @@ def _run_status(tmp_path: Path, archiver_tsv: str) -> tuple[subprocess.Completed
     return completed, output, log_path
 
 
-def test_status_freshness_is_enforced_by_halt2_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts.halt2_cutover import _read_dr_measurement
-
-    completed, output, _ = _run_status(
-        tmp_path, "1756961300000\t1756961240000\t00000001000000000000000A\t0\t",
-    )
-    assert completed.returncode == 0
-    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1756961300)
-    assert _read_dr_measurement(output, key="rpo_seconds") == 60
-    monkeypatch.setattr("scripts.halt2_cutover.time.time", lambda: 1756962201)
-    with pytest.raises(ValueError, match="rpo_seconds_measurement_stale"):
-        _read_dr_measurement(output, key="rpo_seconds")
-
-
 def test_status_collects_one_select_and_redacts_command_diagnostics(tmp_path: Path) -> None:
     completed, output, log_path = _run_status(
         tmp_path,
@@ -627,7 +615,6 @@ def test_status_returns_nonzero_and_measured_false_for_stale_archive(tmp_path: P
 def test_wrapper_persistence_fault_revokes_old_measurement(
     tmp_path: Path, wrapper: str, fault: str,
 ) -> None:
-    from scripts.halt2_cutover import _read_dr_measurement
 
     bin_dir, log = _fake_docker(tmp_path)
     output = tmp_path / "bfx/dr-evidence/backup.json"
@@ -635,7 +622,7 @@ def test_wrapper_persistence_fault_revokes_old_measurement(
     output.write_text(json.dumps({"schema_version": 1, "kind": "backup", "measured": True, "rpo_seconds": 1,
                                   "observed_at_ms": time.time_ns() // 1_000_000}))
     output.chmod(0o600)
-    assert _read_dr_measurement(output, key="rpo_seconds") == 1
+    assert read_measurement(output, key="rpo_seconds") == 1
     shim = bin_dir / ("python3" if fault == "enospc" else "mktemp")
     shim.write_text(
         f"#!{sys.executable}\n"
@@ -657,7 +644,7 @@ def test_wrapper_persistence_fault_revokes_old_measurement(
     assert completed.returncode != 0
     assert TOKEN_SENTINEL not in completed.stdout + completed.stderr
     with pytest.raises(ValueError):
-        _read_dr_measurement(output, key="rpo_seconds")
+        read_measurement(output, key="rpo_seconds")
     assert '"measured":true' not in completed.stdout.replace(" ", "")
 
 
@@ -757,14 +744,14 @@ def test_services_are_one_shot_and_do_not_call_compose_run_or_autoheal() -> None
         assert "After=docker.service" in service
         assert "Type=oneshot" in service
         assert "User=ubuntu" in service
-        assert "WorkingDirectory=/home/ubuntu/bfx-funding-bot" in service
+        assert "WorkingDirectory=/home/ubuntu/bfx-releases/current" in service
         assert re.search(r"(?m)^TimeoutStartSec=[1-9][0-9]*$", service)
     assert (
-        "ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/backup.sh "
+        "ExecStart=/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/backup.sh "
         "--scheduled"
     ) in backup_service
     assert (
-        "ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/status.sh "
+        "ExecStart=/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/status.sh "
         "--output /home/ubuntu/bfx/dr-evidence/backup.json"
     ) in status_service
     combined = backup_service + status_service
@@ -772,100 +759,6 @@ def test_services_are_one_shot_and_do_not_call_compose_run_or_autoheal() -> None
     assert "autoheal" not in combined.lower()
     for forbidden in ("restore", "stanza-create", "expire", "resume", "halt"):
         assert forbidden not in combined.lower()
-
-
-# Task5 replaces whole-stack build/preflight with app-only immutable deployment.
-# pgBackRest validators/wrappers above remain independently exercised. These
-# tests catch accidental infrastructure mutation or reintroduction of legacy CLI.
-@pytest.mark.parametrize("profile", ["paper", "canary", "live", ""])
-def test_legacy_deploy_rejects_before_reading_secrets_or_invoking_tools(
-    tmp_path: Path, profile: str,
-) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "calls"
-    for tool in ("git", "docker", "uv", "python3", "ssh"):
-        shim = bin_dir / tool
-        shim.write_text(f"#!/bin/bash\necho invoked >> {shlex.quote(str(calls))}\nexit 99\n")
-        shim.chmod(0o755)
-    completed = subprocess.run(
-        ["/bin/bash", str(ROOT / "scripts/deploy-vm.sh"), *([profile] if profile else [])],
-        capture_output=True, text=True, check=False,
-        env={"PATH": str(bin_dir), "PGBACKREST_SECRET_DIR": str(tmp_path / "must-not-read")},
-    )
-    assert completed.returncode == 2
-    assert completed.stdout == ""
-    assert "--bundle" in completed.stderr
-    assert not calls.exists()
-    assert not (tmp_path / "must-not-read").exists()
-
-
-def test_app_deploy_leaves_existing_pgbackrest_files_and_infrastructure_untouched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.scripts.test_immutable_deploy import fixture
-
-    cli, args, bundle, release, calls, _, _ = fixture(tmp_path, monkeypatch)
-    secret_dir, secret_file = _write_secret_dir(tmp_path)
-    original_secret = secret_file.read_bytes()
-    original_mode = secret_file.stat().st_mode
-    monkeypatch.setenv("PGBACKREST_SECRET_DIR", str(secret_dir))
-    original_open = Path.open
-
-    def guarded_open(path, *a, **kw):
-        if path == secret_dir or secret_dir in path.parents:
-            raise AssertionError("application deploy must not access pgBackRest secrets")
-        return original_open(path, *a, **kw)
-
-    with monkeypatch.context() as guard:
-        guard.setattr(Path, "open", guarded_open)
-        result = cli.deploy(args, bundle, release)
-    assert result["status"] == "technical_start_only"
-    assert secret_file.read_bytes() == original_secret
-    assert secret_file.stat().st_mode == original_mode
-    for command in calls:
-        if "bfx-postgres" in command or "bfx-redis" in command:
-            assert command == ["docker", "inspect", "bfx-postgres", "bfx-redis"]
-        assert command[:2] not in (["docker", "build"], ["docker", "pull"], ["docker", "compose"])
-    assert TOKEN_SENTINEL not in json.dumps(result)
-    assert len(list(args.bundle.parent.glob("launch-*/deployment.json"))) == 1
-
-
-@pytest.mark.parametrize("role", [0, 1], ids=["postgres", "redis"])
-@pytest.mark.parametrize("drift", ["stopped", "identity", "mounts"])
-def test_app_deploy_requires_running_infrastructure_and_rejects_post_start_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: int, drift: str,
-) -> None:
-    from tests.scripts.test_immutable_deploy import fixture
-
-    cli, args, bundle, release, calls, _, launches = fixture(tmp_path, monkeypatch)
-    original_run = cli.run
-    inspections = 0
-
-    def changed_infrastructure(command, *, data=None):
-        nonlocal inspections
-        response = original_run(command, data=data)
-        if command == ["docker", "inspect", "bfx-postgres", "bfx-redis"]:
-            inspections += 1
-            rows = json.loads(response)
-            if drift == "stopped":
-                rows[role]["State"]["Running"] = False
-            elif inspections == 2:
-                if drift == "identity":
-                    rows[role]["Id"] = "unexpected-replacement"
-                else:
-                    rows[role]["Mounts"] = [{"Name": "unexpected-volume"}]
-            return json.dumps(rows).encode()
-        return response
-
-    monkeypatch.setattr(cli, "run", changed_infrastructure)
-    reason = "existing_postgres_and_redis_required" if drift == "stopped" else "infrastructure_changed"
-    with pytest.raises(cli.PackagingBlocked, match=reason):
-        cli.deploy(args, bundle, release)
-    assert not list(args.bundle.parent.glob("launch-*/deployment.json"))
-    if drift == "stopped":
-        assert not launches
-        assert not any(command[:2] == ["docker", "rename"] for command in calls)
 
 
 def _assert_ordered(text: str, markers: tuple[str, ...]) -> None:

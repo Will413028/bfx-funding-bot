@@ -28,7 +28,7 @@ from bfx_funding_bot.modules.observability.tracing import (
 )
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
-    configure_canary_wiring_env,
+    configure_live_wiring_env,
     seed_exchange_account,
 )
 
@@ -140,18 +140,18 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     tmp_path: Path,
     httpx_mock: HTTPXMock,
 ) -> None:
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_live.db")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 

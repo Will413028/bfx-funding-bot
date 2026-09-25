@@ -221,6 +221,41 @@ async def _seed_orphan_uncertainty(factory, offer: VenueOfferObservation) -> UUI
         return value
 
 
+class _Authority:
+    """Records who the worker asked about; ``authorized`` is the verdict."""
+
+    def __init__(self, authorized: set[str] | None = None) -> None:
+        self.authorized = {"operator-1"} if authorized is None else authorized
+        self.calls: list[tuple[UUID, str]] = []
+
+    async def __call__(self, session, *, account_id: UUID, user: str) -> bool:
+        self.calls.append((account_id, user))
+        return user in self.authorized
+
+
+def _apply_queued(factory, *, clock: int = 5_000, authority: _Authority | None = None) -> bool:
+    """Run the daemon-side resolution worker once, as the account writer would."""
+    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+        ResolutionScope,
+        UncertaintyResolutionWorker,
+    )
+
+    worker = UncertaintyResolutionWorker(
+        session_factory=factory,
+        scope=ResolutionScope(ACCOUNT_ID, "ci"),
+        authority=authority or _Authority(),
+        clock=lambda: clock,
+    )
+    return asyncio.run(worker.tick())
+
+
+async def _event_types(factory) -> list[str]:
+    async with factory() as session:
+        return list(
+            await session.scalars(select(EventLogRow.event_type).order_by(EventLogRow.event_seq))
+        )
+
+
 @pytest_asyncio.fixture
 async def uncertainty_app(sqlite_engine, monkeypatch):
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
@@ -492,8 +527,24 @@ def test_mark_not_accepted_appends_resolution_event(uncertainty_app) -> None:
             "evidence": {"candidateCount": 999},
         },
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["state"] == "resolved"
+    assert response.status_code == 202, response.text
+    queued = response.json()["data"]
+    assert queued["state"] == "requested"
+    assert queued["action"] == "mark_not_accepted"
+    assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
+
+    assert _apply_queued(factory) is True
+    outcome = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainty-resolution-requests/{queued['requestId']}"
+    )
+    assert outcome.status_code == 200, outcome.text
+    assert outcome.json()["data"]["state"] == "applied"
+    assert outcome.json()["data"]["outcomeReason"] is None
+    resolved = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
+    )
+    assert resolved.json()["data"]["state"] == "resolved"
+    assert resolved.json()["data"]["resolvedEventSeq"] == outcome.json()["data"]["resolvedEventSeq"]
     stored = asyncio.run(_latest_resolution_payload(factory))
     assert stored["resolution_evidence"] == {
         "reconcile_event_seq": reconcile_seq,
@@ -598,8 +649,15 @@ def test_bind_to_venue_appends_resolution_event(uncertainty_app) -> None:
             "evidence": {"candidateCount": 1},
         },
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["state"] == "resolved"
+    assert response.status_code == 202, response.text
+    assert response.json()["data"]["state"] == "requested"
+    assert _apply_queued(factory) is True
+    request_id = response.json()["data"]["requestId"]
+    outcome = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainty-resolution-requests/{request_id}"
+    )
+    assert outcome.json()["data"]["state"] == "applied"
+    assert asyncio.run(_event_types(factory))[-1] == "UNCERTAINTY_BOUND_TO_VENUE_OFFER"
 
 
 @pytest.mark.parametrize(
@@ -774,8 +832,9 @@ def test_manual_resolution_allows_unattributed_venue_offer(uncertainty_app) -> N
         },
     )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["state"] == "resolved"
+    assert response.status_code == 202, response.text
+    assert response.json()["data"]["state"] == "requested"
+    assert _apply_queued(factory) is True
 
     async def load_resolution_action() -> object:
         async with factory() as session:
@@ -872,3 +931,368 @@ async def test_resolution_event_replay_contract(sqlite_engine) -> None:
     payload = serialize_event(event)
     decoded = deserialize_event(event_type_of(event), payload)
     assert decoded == event
+
+
+def _mark_not_accepted(client, reconcile_seq: int, *, reason: str = "zero candidates"):
+    return client.post(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}/mark-not-accepted",
+        json={
+            "reconcileEventSeq": reconcile_seq,
+            "operatorUuid": "operator-1",
+            "reason": reason,
+            "evidence": {"candidateCount": 0},
+        },
+    )
+
+
+def _request_outcome(client, request_id: str) -> dict[str, object]:
+    response = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainty-resolution-requests/{request_id}"
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def test_queued_request_is_visible_as_pending_until_the_worker_applies_it(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+    assert queued.status_code == 202, queued.text
+    request_id = queued.json()["data"]["requestId"]
+
+    listed = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties", params={"state": "open"}
+    ).json()["data"]
+    assert [row["resolutionRequest"]["requestId"] for row in listed] == [request_id]
+    assert listed[0]["resolutionRequest"]["state"] == "requested"
+    assert listed[0]["state"] == "open"
+
+    assert _apply_queued(factory) is True
+    assert _apply_queued(factory) is False  # nothing left: one request, one event
+    events = asyncio.run(_event_types(factory))
+    assert events.count("UNCERTAINTY_MARKED_NOT_ACCEPTED") == 1
+    assert client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties", params={"state": "open"}
+    ).json()["data"] == []
+
+
+def test_identical_repeat_is_the_same_request_and_a_different_one_waits(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    first = _mark_not_accepted(client, reconcile_seq)
+    repeat = _mark_not_accepted(client, reconcile_seq)
+    assert first.status_code == repeat.status_code == 202
+    assert repeat.json()["data"]["requestId"] == first.json()["data"]["requestId"]
+
+    different = _mark_not_accepted(client, reconcile_seq, reason="another reason")
+    assert different.status_code == 409
+    assert different.json()["detail"] == "resolution_request_pending"
+
+    assert _apply_queued(factory) is True
+    after = _mark_not_accepted(client, reconcile_seq)
+    assert after.status_code == 409
+    assert after.json()["detail"] == "uncertainty_already_resolved"
+    assert asyncio.run(_event_types(factory)).count("UNCERTAINTY_MARKED_NOT_ACCEPTED") == 1
+
+
+def test_worker_records_why_an_accepted_request_no_longer_applies(
+    uncertainty_app,
+) -> None:
+    """Evidence can move between acceptance and apply; say so, never append."""
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+    assert queued.status_code == 202
+    asyncio.run(_append_snapshot(factory, finished_at=3_000))  # a newer fence arrives
+
+    assert _apply_queued(factory) is True
+    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    assert outcome["state"] == "rejected"
+    assert outcome["outcomeReason"] == "stale_reconcile_fence"
+    assert outcome["resolvedEventSeq"] is None
+    assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
+    detail = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
+    ).json()["data"]
+    assert detail["state"] == "open"
+    # The console learns why from the list itself, not a separate poll.
+    assert detail["resolutionRequest"]["requestId"] == queued.json()["data"]["requestId"]
+    assert detail["resolutionRequest"]["state"] == "rejected"
+    assert detail["resolutionRequest"]["outcomeReason"] == "stale_reconcile_fence"
+
+
+def test_worker_failure_is_recorded_with_its_root_cause_not_a_bare_conflict(
+    uncertainty_app, monkeypatch
+) -> None:
+    """The 2026-09-21 permission failure surfaced only as `resolution_rejected`."""
+    from bfx_funding_bot.modules.execution.event_store.writer import (
+        AccountEventWriter,
+        ProjectionWriteError,
+    )
+
+    class InsufficientPrivilegeError(Exception):
+        pass
+
+    async def denied(self, session, event):
+        try:
+            raise InsufficientPrivilegeError("permission denied for table projection_heads")
+        except InsufficientPrivilegeError as exc:
+            raise ProjectionWriteError("serialized projection failed") from exc
+
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+    original = AccountEventWriter.append
+    monkeypatch.setattr(AccountEventWriter, "append", denied)
+
+    assert _apply_queued(factory) is True
+    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    assert outcome["state"] == "failed"
+    assert outcome["outcomeReason"] == "projection_write_failed:InsufficientPrivilegeError"
+    assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
+
+    # A failed request is terminal; the operator may ask again.
+    monkeypatch.setattr(AccountEventWriter, "append", original)
+    retry = _mark_not_accepted(client, reconcile_seq)
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["data"]["requestId"] != queued.json()["data"]["requestId"]
+    assert _apply_queued(factory) is True
+    assert _request_outcome(client, retry.json()["data"]["requestId"])["state"] == "applied"
+
+
+def test_only_the_configured_operator_can_queue_an_adjudication() -> None:
+    """The web API admits exactly who the worker will authorize.
+
+    `require_operator` (configured operator id + admin role) guards every
+    adjudication route through `require_account_member`, so a writer who is not
+    the operator is refused with 403 before anything is queued -- never accepted
+    and later rejected as `operator_not_authorized`. The worker's database check then
+    only catches what changed since: ban, lost TOTP, lost membership.
+    """
+    from fastapi.dependencies.models import Dependant
+    from fastapi.routing import APIRoute
+
+    from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
+
+    def calls(dependant: Dependant) -> set[object]:
+        found = {dependant.call}
+        for child in dependant.dependencies:
+            found |= calls(child)
+        return found
+
+    posts = [
+        route for route in build_uncertainties_router().routes
+        if isinstance(route, APIRoute) and "POST" in route.methods
+    ]
+    assert {route.path.rsplit("/", 1)[-1] for route in posts} == {
+        "bind-to-venue", "mark-not-accepted", "manual-resolution",
+    }
+    for route in posts:
+        assert require_operator in calls(route.dependant), route.path
+
+
+def test_resolution_request_reads_are_account_scoped(uncertainty_app) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    request_id = _mark_not_accepted(client, reconcile_seq).json()["data"]["requestId"]
+    denied = client.get(
+        f"/api/v1/exchange-accounts/{OTHER_ACCOUNT_ID}/uncertainty-resolution-requests/{request_id}"
+    )
+    assert denied.status_code == 404
+    missing = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainty-resolution-requests/{uuid4()}"
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "not_found"
+
+
+async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) -> UUID:
+    """A request the web API would have refused; the worker must still settle it."""
+    from sqlalchemy import insert
+
+    from bfx_funding_bot.modules.execution.uncertainty_tables import (
+        UncertaintyResolutionRequestRow,
+    )
+
+    request_id = uuid4()
+    async with factory.begin() as session:
+        await session.execute(insert(UncertaintyResolutionRequestRow).values(
+            request_id=request_id, exchange_account_id=ACCOUNT_ID, deployment_environment="ci",
+            uncertainty_id=uncertainty_id, action="mark_not_accepted", reconcile_event_seq=1,
+            requested_by="operator-1", created_at_ms=created_at_ms,
+        ))
+    return request_id
+
+
+def test_a_request_whose_outcome_cannot_be_written_does_not_block_the_queue(
+    uncertainty_app, monkeypatch
+) -> None:
+    """Head-of-line poison: the outcome write fails, so the tick used to roll back
+    and the same oldest row was picked again forever, starving every later one."""
+    from bfx_funding_bot.modules.execution.event_store.writer import (
+        AccountEventWriter,
+        AppendResult,
+    )
+
+    async def unrecordable(self, session, event):
+        # An append result the outcome row cannot hold: `applied` needs a seq.
+        return AppendResult(
+            event_seq=None, persisted=True, projection_head=None,  # type: ignore[arg-type]
+            projector_version="execution-state-v1",
+        )
+
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    poison = _mark_not_accepted(client, reconcile_seq).json()["data"]["requestId"]
+    later = asyncio.run(_queue_directly(factory, uncertainty_id=uuid4(), created_at_ms=10**15))
+    monkeypatch.setattr(AccountEventWriter, "append", unrecordable)
+
+    assert _apply_queued(factory) is True
+    first = _request_outcome(client, poison)
+    assert first["state"] == "failed"
+    assert str(first["outcomeReason"]).startswith("outcome_write_failed:")
+    assert first["resolvedEventSeq"] is None
+
+    assert _apply_queued(factory) is True
+    assert _request_outcome(client, str(later))["state"] == "rejected"
+    assert _apply_queued(factory) is False
+
+
+def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monkeypatch) -> None:
+    """If the fallback write also fails, the worker moves on rather than spin."""
+    from bfx_funding_bot.modules.execution.event_store.writer import (
+        AccountEventWriter,
+        AppendResult,
+    )
+    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+        ResolutionScope,
+        UncertaintyResolutionWorker,
+    )
+
+    async def unrecordable(self, session, event):
+        return AppendResult(
+            event_seq=None, persisted=True, projection_head=None,  # type: ignore[arg-type]
+            projector_version="execution-state-v1",
+        )
+
+    async def cannot_mark(self, request_id, reason):
+        raise RuntimeError("database unavailable")
+
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    poison = _mark_not_accepted(client, reconcile_seq).json()["data"]["requestId"]
+    later = asyncio.run(_queue_directly(factory, uncertainty_id=uuid4(), created_at_ms=10**15))
+    monkeypatch.setattr(AccountEventWriter, "append", unrecordable)
+    monkeypatch.setattr(UncertaintyResolutionWorker, "_mark_failed", cannot_mark)
+    worker = UncertaintyResolutionWorker(
+        session_factory=factory, scope=ResolutionScope(ACCOUNT_ID, "ci"),
+        authority=_Authority(), clock=lambda: 5_000,
+    )
+
+    async def two_ticks() -> tuple[bool, bool]:
+        return await worker.tick(), await worker.tick()
+
+    assert asyncio.run(two_ticks()) == (True, True)
+    assert _request_outcome(client, poison)["state"] == "requested"  # left for a restart
+    assert _request_outcome(client, str(later))["state"] == "rejected"
+
+
+def test_worker_only_touches_its_own_account(uncertainty_app) -> None:
+    from bfx_funding_bot.modules.execution.uncertainty_resolution import (
+        ResolutionScope,
+        UncertaintyResolutionWorker,
+    )
+
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    request_id = _mark_not_accepted(client, reconcile_seq).json()["data"]["requestId"]
+    other = UncertaintyResolutionWorker(
+        session_factory=factory,
+        scope=ResolutionScope(OTHER_ACCOUNT_ID, "ci"),
+        authority=_Authority(),
+        clock=lambda: 5_000,
+    )
+    assert asyncio.run(other.tick()) is False
+    assert _request_outcome(client, request_id)["state"] == "requested"
+
+
+def test_revoked_operator_request_is_rejected_without_an_event(uncertainty_app) -> None:
+    """Authority is re-read when the daemon applies, not trusted from acceptance."""
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+    assert queued.status_code == 202, queued.text
+
+    revoked = _Authority(authorized=set())
+    assert _apply_queued(factory, authority=revoked) is True
+    assert revoked.calls == [(ACCOUNT_ID, "operator-1")]
+    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    assert outcome["state"] == "rejected"
+    assert outcome["outcomeReason"] == "operator_not_authorized"
+    assert outcome["resolvedEventSeq"] is None
+    assert "UNCERTAINTY_MARKED_NOT_ACCEPTED" not in asyncio.run(_event_types(factory))
+    detail = client.get(
+        f"/api/v1/exchange-accounts/{ACCOUNT_ID}/uncertainties/{client.uncertainty_id}"  # type: ignore[attr-defined]
+    ).json()["data"]
+    assert detail["state"] == "open"
+
+
+def test_authorized_operator_request_is_applied_after_the_authority_check(
+    uncertainty_app,
+) -> None:
+    client, factory = uncertainty_app
+    reconcile_seq = asyncio.run(_append_snapshot(factory, finished_at=2_000))
+    queued = _mark_not_accepted(client, reconcile_seq)
+
+    authority = _Authority()
+    assert _apply_queued(factory, authority=authority) is True
+    assert authority.calls == [(ACCOUNT_ID, "operator-1")]
+    outcome = _request_outcome(client, queued.json()["data"]["requestId"])
+    assert outcome["state"] == "applied"
+    assert asyncio.run(_event_types(factory)).count("UNCERTAINTY_MARKED_NOT_ACCEPTED") == 1
+
+
+@pytest.mark.parametrize(
+    ("configured", "role", "user"),
+    [
+        ("operator-1", "admin", "someone-else"),
+        ("operator-1", "viewer", "operator-1"),
+        ("", "admin", ""),
+    ],
+)
+def test_shared_operator_authority_refuses_before_asking_the_database(
+    monkeypatch, configured: str, role: str, user: str
+) -> None:
+    """Configured sole admin first; the database function is never reached."""
+    from unittest.mock import AsyncMock
+
+    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+
+    monkeypatch.delenv("BFX_PHASE", raising=False)
+    monkeypatch.setenv("BFX_OPERATOR_USER_ID", configured)
+    monkeypatch.setenv("BFX_OPERATOR_ROLE", role)
+    session = AsyncMock()
+    assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user=user)) is False
+    session.scalar.assert_not_called()
+
+
+def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+
+    monkeypatch.delenv("BFX_PHASE", raising=False)
+    monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")
+    monkeypatch.setenv("BFX_OPERATOR_ROLE", "admin")
+    for verdict in (True, False):
+        session = AsyncMock()
+        session.scalar.return_value = verdict
+        assert asyncio.run(
+            operator_authorized(session, account_id=ACCOUNT_ID, user="operator-1")
+        ) is verdict
+        _statement, params = session.scalar.call_args.args
+        assert params == {"account": ACCOUNT_ID, "actor": "operator-1"}

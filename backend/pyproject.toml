@@ -49,6 +49,8 @@ dev = [
     "testcontainers[postgres]>=4.8",
     "jsonschema>=4.26.0",
     "types-jsonschema",
+    # deploy/vm/ops tests import the host tooling, pinned in deploy/vm/ops/uv.lock.
+    "pathspec==1.1.1",
 ]
 
 [project.scripts]

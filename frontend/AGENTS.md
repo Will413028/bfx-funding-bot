@@ -150,6 +150,6 @@ BFX_OPERATOR_ROLE          # Release 0 固定為 admin
 ## 部署
 
 - 平台：Oracle Cloud VM（Docker Compose；Frontend、Python web-API、Postgres、Redis）
-- Config：`docker-compose.bot.yml`、`scripts/deploy-vm.sh`
+- Config：`deploy/vm/docker-compose.app.yml`；CI 建 image，VM 以 digest 部署（`deploy/vm/ops/bfx_deploy.py`）
 - Release 0 preflight 會拒絕缺值、非 admin role、或 frontend/backend operator ID 不一致
 - React Compiler 已啟用（自動 memoization）

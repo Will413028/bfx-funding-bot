@@ -1,0 +1,15 @@
+# Units that deploy/vm/ops/install.sh (first install) and bfx-deploy (after each
+# successful deploy, from that release) copy into /etc/systemd/system and reload.
+# Never enabled, started or stopped by either: enabling a timer is an operator step.
+# The other unit files in this directory are installed by hand.
+bfx-alert@.service
+bfx-deploy.service
+bfx-deploy.timer
+bfx-backup-check.service
+bfx-backup-check.timer
+bfx-restore-test@.service
+bfx-restore-test.timer
+bfx-pgbackrest-backup.service
+bfx-pgbackrest-backup.timer
+bfx-pgbackrest-status.service
+bfx-pgbackrest-status.timer
