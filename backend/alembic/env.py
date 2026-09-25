@@ -20,6 +20,7 @@ import bfx_funding_bot.modules.accounts.exchange_accounts
 import bfx_funding_bot.modules.accounts.tables
 import bfx_funding_bot.modules.accounts.user_profile
 import bfx_funding_bot.modules.candles.tables
+import bfx_funding_bot.modules.deployments.tables
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.capital_tables
 import bfx_funding_bot.modules.execution.diagnostics.tables

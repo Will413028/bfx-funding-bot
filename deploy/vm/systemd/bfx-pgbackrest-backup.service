@@ -2,6 +2,9 @@
 Description=Create the scheduled bfx pgBackRest backup
 Requires=docker.service
 After=docker.service
+# A failed scheduled backup alerts at once (root-only Telegram credentials live in
+# the alert unit, not here). Freshness/RPO is watched by bfx-backup-check.timer.
+OnFailure=bfx-alert@%n.service
 
 [Service]
 Type=oneshot
