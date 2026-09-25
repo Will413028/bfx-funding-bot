@@ -24,7 +24,10 @@ from bfx_funding_bot.external.bitfinex.funding_rules import RULE
 INVENTORY_ROOTS = ("src", "scripts", "alembic", "configs",
                    ".venv/lib/python3.13/site-packages")
 INVENTORY_FILES = ("uv.lock", "pyproject.toml", "alembic.ini", ".venv/bin/bfx-shadow", ".venv/pyvenv.cfg")
-_SECRET_ENV = frozenset({"BFX_API_KEY", "BFX_API_SECRET", "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK"})
+# Telegram credentials for the in-process alert sink (T8): secret, read from bot.env,
+# never part of the release's nonsecret environment.
+_SECRET_ENV = frozenset({"BFX_API_KEY", "BFX_API_SECRET", "BFX_ADMIN_TOKEN", "BFX_VAULT_KEK",
+                         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"})
 _PATH_ENV = frozenset({"BFX_RELEASE_MANIFEST_PATH", "BFX_RELEASE_LAUNCH_RECEIPT_PATH"})
 NONSECRET_ENV_KEYS = frozenset({
     "BFX_BOOK_MAX_AGE_SECONDS", "BFX_BOOK_MAX_DOWN_PCT", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS",
