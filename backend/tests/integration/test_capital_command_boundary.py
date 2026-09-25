@@ -206,7 +206,6 @@ async def boundary(factory, account):
     ("snapshot", "capital_snapshot_changed"),
     ("pending", "snapshot_query_pending"),
     ("halt", "trading state HALTED"),
-    ("reducing", "trading state REDUCING"),
 ])
 async def test_queued_ready_cannot_send_after_authority_changes(capital_db, change, reason):
     factory, account = capital_db
@@ -220,8 +219,6 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
     elif change == "pending":
         async with factory.begin() as session:
             await runtime.repository.begin_snapshot(session, now_ms=1100)
-    elif change == "reducing":
-        await halt.transition("REDUCING", cause="operator", reason="pause", actor="test", now_ms=1)
     else:
         await halt.transition("HALTED", cause="operator", reason="stop", actor="test", now_ms=1)
     with pytest.raises(CommandGateBlocked, match=reason):
@@ -242,10 +239,10 @@ async def second_ready(factory, account, ready):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("stop", ["HALTED"])
 async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db, stop):
-    """REDUCING and HALTED refuse every new offer; cancelling a managed offer
-    is what both states exist to allow, and it is still made durable first."""
+    """HALTED refuses every new offer; cancelling a managed offer is what the
+    state exists to allow, and it is still made durable first."""
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
     await gate.submit(ready, ctx)  # managed offer 101 while ACTIVE
@@ -450,7 +447,7 @@ async def test_account_retired_after_planning_cannot_send(capital_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("stop", ["HALTED"])
 async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_db, stop):
     """The reprice sweep may pull a stale offer while stopped; the allocation
     that would re-post it (or place anything new) is refused."""
@@ -603,7 +600,7 @@ async def append_cancel_race_unknown(factory, account, *, symbol="fUST", environ
         ))
 
 
-@pytest.mark.parametrize("state", ["ACTIVE", "REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["ACTIVE", "HALTED"])
 @pytest.mark.parametrize("fault", ["unknown", "unreadable"])
 async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(capital_db, monkeypatch, fault,
                                                                              state):
@@ -649,7 +646,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
     assert requests == []
 
 
-@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["HALTED"])
 async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
     """No new offer reaches the real adapter under a stop, even one already planned."""
     import httpx
@@ -678,7 +675,7 @@ async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
     assert requests == []
 
 
-@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["HALTED"])
 async def test_stop_after_intent_commit_is_not_sent(capital_db, state):
     """A stop landing between the durable intent and transport ends the
     command as NOT_SENT: the transport recheck keeps the trading-state gate."""

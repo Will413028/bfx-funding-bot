@@ -280,7 +280,7 @@ async def test_unreadable_scope_still_cancels_configured_currencies(capital_db, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cause", ["material_deploy", "nonsense"])
+@pytest.mark.parametrize("cause", ["material_deploy", "nonsense"])  # a retired cause, a bogus one
 async def test_only_stop_causes_may_engage(capital_db, cause):
     factory, account = capital_db
     _, ctx, trading, venue = await exposed_account(factory, account)

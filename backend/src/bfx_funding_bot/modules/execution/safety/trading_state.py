@@ -1,20 +1,20 @@
 """Durable trading state -- the authority on whether new offers may be placed.
 
-ADR 2026-09-25 D4 separates the trading state from releases:
+Lending envelope ADR 2026-09-25 D4: two states.
 
-- ``ACTIVE``   -- the writer trades normally, or inside a probation (reduced
-  limits, ADR D3) until one passes;
-- ``REDUCING`` -- a pause: cancels are allowed, no new offer and no re-post;
-- ``HALTED``   -- a stop: as REDUCING, and entering it cancels the venue's
-  funding offers (see ``kill_switch``).
+- ``ACTIVE`` -- the writer trades inside the applied CapitalPolicy envelope;
+- ``HALTED`` -- no new offer or re-post; cancels stay allowed. Entering it
+  cancels offers at the venue (see ``kill_switch``): an operator kill cancels
+  every offer of the currency, an automatic protection only managed ones.
 
-Every transition is an appended row naming its ``cause`` (``operator``,
-``auto``, ``material_deploy``), actor and reason, so "who
-stopped or resumed trading, when and why" stays answerable. The current state
-is the highest id for the account/environment. PostgreSQL's insert trigger
-assigns that id under a per-scope lock and rejects the same illegal transitions
-as :func:`validate_transition`; this module checks them too so SQLite fixtures
-and callers get the error before the database does.
+The everyday per-currency stop is the policy's ``enabled`` flag, not this state.
+Every transition is an appended row naming its ``cause`` (``operator`` or
+``auto``), actor and reason, so "who stopped or resumed trading, when and why"
+stays answerable. The current state is the highest id for the
+account/environment. PostgreSQL's insert trigger assigns that id under a
+per-scope lock and rejects the same illegal transitions as
+:func:`validate_transition` (only an operator ends a halt); this module checks
+them too so callers get the error before the database does.
 
 Failure posture: callers must treat an unreadable state as "no new offers".
 This module does not swallow exceptions; the guard decides, and fails closed.
@@ -24,8 +24,7 @@ the state is read on the submit path and must not hold a long-lived session.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
-from decimal import Decimal
+from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
 
@@ -37,54 +36,16 @@ from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
 from bfx_funding_bot.modules.observability import alerts
 
 ACTIVE: Final = "ACTIVE"
-REDUCING: Final = "REDUCING"
 HALTED: Final = "HALTED"
+STATES: Final = frozenset({ACTIVE, HALTED})
 
 CAUSE_OPERATOR: Final = "operator"
 CAUSE_AUTO: Final = "auto"
-CAUSE_MATERIAL_DEPLOY: Final = "material_deploy"
-
-PROBATION_STARTED: Final = "probation_started"
-PROBATION_LIFTED: Final = "probation_lifted"
-
-# Which causes may put the writer in which state. Mirrors ck_trading_state_cause.
-CAUSES_BY_STATE: Final[dict[str, frozenset[str]]] = {
-    ACTIVE: frozenset({CAUSE_OPERATOR, CAUSE_AUTO}),
-    REDUCING: frozenset({CAUSE_OPERATOR, CAUSE_MATERIAL_DEPLOY}),
-    HALTED: frozenset({CAUSE_OPERATOR, CAUSE_AUTO}),
-}
+CAUSES: Final = frozenset({CAUSE_OPERATOR, CAUSE_AUTO})
 
 
 class IllegalTradingTransition(ValueError):  # noqa: N818 - a rejected request, not a fault
     """The requested transition would weaken a stop or break the cause contract."""
-
-
-@dataclass(frozen=True, slots=True)
-class Probation:
-    """Reduced limits after an approval or an automatic halt (ADR D3).
-
-    ``floor`` is the per-currency venue minimum (native units, submit margin
-    included) observed when the probation started: the probation cell limit is
-    never below one minimum offer. Kept as sorted pairs so the value is
-    hashable and compares by content.
-    """
-
-    multiplier: Decimal
-    started_at_ms: int
-    floor: tuple[tuple[str, Decimal], ...] = ()
-
-    def floor_for(self, symbol: str) -> Decimal:
-        return dict(self.floor).get(symbol, Decimal(0))
-
-    @classmethod
-    def starting(cls, *, multiplier: Decimal, started_at_ms: int,
-                 floor: dict[str, Decimal]) -> Probation:
-        return cls(multiplier=multiplier, started_at_ms=started_at_ms,
-                   floor=tuple(sorted(floor.items())))
-
-    def restarted(self, *, started_at_ms: int) -> Probation:
-        """The same limits, counted again from ``started_at_ms``."""
-        return replace(self, started_at_ms=started_at_ms)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +56,6 @@ class TradingState:
     actor: str
     reason: str
     created_at_ms: int
-    probation: Probation | None = None
     legacy_halt_id: int | None = None
 
     @property
@@ -113,53 +73,27 @@ class TransitionResult:
 
 def validate_transition(
     previous: TradingState | None, *, state: str, cause: str, actor: str, reason: str,
-    probation: Probation | None = None,
 ) -> None:
     """Raise when ``previous -> state`` is not a transition the system allows.
 
     The PostgreSQL insert trigger is the authority; this is the early error,
-    kept in step by ``test_trading_state_rule_parity``. One difference is deliberate:
-    code reads "no decision recorded" as HALTED, so the first transition it
-    writes must be one a HALTED allows; the trigger accepts any first row so
-    the migration can carry an existing pause over.
+    kept in step by ``test_trading_state_rule_parity``. Code reads "no decision
+    recorded" as HALTED, so the first transition it writes must be one a HALTED
+    allows.
     """
-    allowed = CAUSES_BY_STATE.get(state)
-    if allowed is None:
+    if state not in STATES:
         raise IllegalTradingTransition(f"unknown trading state {state!r}")
-    if cause not in allowed:
-        raise IllegalTradingTransition(f"cause {cause!r} cannot put trading in {state}")
+    if cause not in CAUSES:
+        raise IllegalTradingTransition(f"unknown trading state cause {cause!r}")
     if not actor.strip() or not reason.strip():
         raise IllegalTradingTransition("a trading state transition needs an actor and a reason")
-    if probation is not None and (
-        state != ACTIVE
-        or not probation.multiplier.is_finite()
-        or not Decimal(0) < probation.multiplier <= Decimal(1)
-        or probation.started_at_ms < 0
-        or any(not amount.is_finite() or amount < 0 for _, amount in probation.floor)
-    ):
-        raise IllegalTradingTransition(
-            "probation applies only to ACTIVE, with 0 < multiplier <= 1 and non-negative floors")
-    # No recorded decision is read as HALTED (fail closed), so it leaves only
-    # the way a HALTED does.
     previous_state = previous.state if previous is not None else HALTED
-    previous_cause = previous.cause if previous is not None else None
-    if previous_state == HALTED and state == REDUCING:
-        # A halt ends only in an operator's resume; a pause would let the
-        # cheaper exit apply to a stop that was never proven safe to lift.
-        raise IllegalTradingTransition("illegal trading state transition HALTED -> REDUCING")
     if previous_state != ACTIVE and state == ACTIVE and cause != CAUSE_OPERATOR:
         raise IllegalTradingTransition(
-            f"illegal trading state transition {previous_state} -> ACTIVE by {cause}"
-        )
-    if (previous_state == REDUCING and previous_cause == CAUSE_MATERIAL_DEPLOY
-            and state == REDUCING and cause != CAUSE_MATERIAL_DEPLOY):
-        raise IllegalTradingTransition(
-            "illegal trading state transition: material deploy approval cannot be relabelled"
-        )
+            f"illegal trading state transition {previous_state} -> ACTIVE by {cause}")
 
 
-def restates(previous: TradingState | None, *, state: str, cause: str,
-             probation: Probation | None) -> bool:
+def restates(previous: TradingState | None, *, state: str, cause: str) -> bool:
     """True when writing would only repeat the current decision.
 
     Reasserting a halt keeps the halt that is already in force -- its cause,
@@ -167,23 +101,13 @@ def restates(previous: TradingState | None, *, state: str, cause: str,
     """
     if previous is None or previous.state != state:
         return False
-    if state == HALTED:
-        return True
-    return previous.cause == cause and previous.probation == probation
+    return state == HALTED or previous.cause == cause
 
 
 def to_state(row: TradingStateRow) -> TradingState:
-    probation = (
-        Probation(multiplier=Decimal(str(row.probation_multiplier)),
-                  started_at_ms=int(row.probation_started_at_ms),
-                  floor=tuple(sorted((str(symbol), Decimal(str(amount)))
-                                     for symbol, amount in (row.probation_floor or {}).items())))
-        if row.probation_multiplier is not None and row.probation_started_at_ms is not None
-        else None
-    )
     return TradingState(
         id=row.id, state=row.state, cause=row.cause, actor=row.actor, reason=row.reason,
-        created_at_ms=row.created_at_ms, probation=probation, legacy_halt_id=row.legacy_halt_id,
+        created_at_ms=row.created_at_ms, legacy_halt_id=row.legacy_halt_id,
     )
 
 
@@ -206,62 +130,21 @@ async def read_current(session: AsyncSession, *, account_id: UUID,
     return to_state(row) if row is not None else None
 
 
-async def unfinished_probation(session: AsyncSession, *, account_id: UUID,
-                               environment: str) -> Probation | None:
-    """The latest probation that no lift has ended, or None.
-
-    ADR D3 invariant: until a probation passes, exposure stays within it. A
-    pause, an operator's stop or a standard deploy does not end one; only the
-    lift -- an ACTIVE without a probation, written from inside it -- does.
-    """
-    started = await session.scalar(
-        _scope(select(TradingStateRow), account_id=account_id, environment=environment)
-        .where(TradingStateRow.probation_multiplier.is_not(None))
-        .order_by(TradingStateRow.id.desc())
-        .limit(1)
-    )
-    if started is None:
-        return None
-    lifted = await session.scalar(
-        _scope(select(TradingStateRow), account_id=account_id, environment=environment)
-        .where(TradingStateRow.id > started.id, TradingStateRow.state == ACTIVE,
-               TradingStateRow.probation_multiplier.is_(None))
-        .limit(1)
-    )
-    return None if lifted is not None else to_state(started).probation
-
-
-def _is_lift(current: TradingState | None, *, state: str, cause: str,
-             probation: Probation | None) -> bool:
-    return (current is not None and current.state == ACTIVE and current.probation is not None
-            and state == ACTIVE and cause == CAUSE_AUTO and probation is None)
-
-
 async def check_transition(
-    session: AsyncSession, *, account_id: UUID, environment: str, current: TradingState | None,
-    state: str, cause: str, actor: str, reason: str, probation: Probation | None,
+    *, current: TradingState | None, state: str, cause: str, actor: str, reason: str,
 ) -> None:
-    """Refuse, before the database does, what its triggers would refuse.
+    """Refuse, before the database does, what its trigger would refuse.
 
-    The PostgreSQL insert triggers (``guard_trading_state_transition``,
-    ``guard_trading_state_probation``) and CHECKs are the authority; this only
-    fails earlier with a clearer error. ``tests/integration/
+    ``guard_trading_state_transition`` and the CHECKs are the authority; this
+    only fails earlier with a clearer error. ``tests/integration/
     test_trading_state_rule_parity.py`` keeps the two in step.
     """
-    validate_transition(current, state=state, cause=cause, actor=actor, reason=reason,
-                        probation=probation)
-    if (state == ACTIVE and probation is None
-            and not _is_lift(current, state=state, cause=cause, probation=probation)
-            and await unfinished_probation(session, account_id=account_id,
-                                           environment=environment) is not None):
-        raise IllegalTradingTransition(
-            "illegal trading state transition: a probation has not passed, so ACTIVE must "
-            "stay inside it (ADR D3)")
+    validate_transition(current, state=state, cause=cause, actor=actor, reason=reason)
 
 
 async def append_transition(
     session: AsyncSession, *, account_id: UUID, environment: str, state: str, cause: str,
-    actor: str, reason: str, now_ms: int, probation: Probation | None = None,
+    actor: str, reason: str, now_ms: int,
 ) -> TransitionResult:
     """Validate and append one transition inside the caller's transaction.
 
@@ -269,12 +152,11 @@ async def append_transition(
     the state read here is the one the new row supersedes.
     """
     current = await read_current(session, account_id=account_id, environment=environment)
-    if restates(current, state=state, cause=cause, probation=probation):
+    if restates(current, state=state, cause=cause):
         assert current is not None
         return TransitionResult(state=current, changed=False, previous=current)
-    await check_transition(session, account_id=account_id, environment=environment,
-                           current=current, state=state, cause=cause, actor=actor,
-                           reason=reason, probation=probation)
+    await check_transition(current=current, state=state, cause=cause, actor=actor,
+                           reason=reason)
     row = TradingStateRow(
         exchange_account_id=account_id,
         deployment_environment=environment,
@@ -283,12 +165,6 @@ async def append_transition(
         actor=actor,
         reason=reason,
         created_at_ms=now_ms,
-        probation_multiplier=probation.multiplier if probation is not None else None,
-        probation_started_at_ms=probation.started_at_ms if probation is not None else None,
-        probation_floor=(
-            {symbol: str(amount) for symbol, amount in probation.floor}
-            if probation is not None else None
-        ),
     )
     session.add(row)
     await session.flush()
@@ -303,11 +179,6 @@ def announce(result: TransitionResult) -> None:
     alerts.emit(alerts.TRADING_STATE_CHANGED, state=state.state, cause=state.cause,
                 actor=state.actor, reason=state.reason, state_id=state.id,
                 previous=result.previous.state if result.previous else "none")
-    if state.probation is not None:
-        alerts.emit(PROBATION_STARTED, level=alerts.WARNING, state_id=state.id,
-                    multiplier=str(state.probation.multiplier),
-                    floor={symbol: str(amount) for symbol, amount in state.probation.floor},
-                    started_at_ms=state.probation.started_at_ms)
 
 
 class TradingStateRepository:
@@ -343,7 +214,7 @@ class TradingStateRepository:
 
     async def transition(
         self, state: str, *, cause: str, actor: str, reason: str,
-        now_ms: int | None = None, probation: Probation | None = None,
+        now_ms: int | None = None,
     ) -> TransitionResult:
         """Append one transition in its own transaction, serialised per scope."""
         async with self._sf.begin() as session:
@@ -354,7 +225,6 @@ class TradingStateRepository:
                 session, account_id=self.account_id, environment=self.environment,
                 state=state, cause=cause, actor=actor, reason=reason,
                 now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
-                probation=probation,
             )
         announce(result)
         return result
@@ -372,16 +242,12 @@ class TradingStateRepository:
 
 __all__ = [
     "ACTIVE",
-    "CAUSES_BY_STATE",
+    "CAUSES",
     "CAUSE_AUTO",
-    "CAUSE_MATERIAL_DEPLOY",
     "CAUSE_OPERATOR",
     "HALTED",
-    "PROBATION_LIFTED",
-    "PROBATION_STARTED",
-    "REDUCING",
+    "STATES",
     "IllegalTradingTransition",
-    "Probation",
     "TradingState",
     "TradingStateRepository",
     "TransitionResult",
@@ -391,6 +257,5 @@ __all__ = [
     "read_current",
     "restates",
     "to_state",
-    "unfinished_probation",
     "validate_transition",
 ]

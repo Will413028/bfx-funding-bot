@@ -33,7 +33,7 @@ from tests.integration.test_capital_repository import capital_engine as capital_
 
 
 @pytest.mark.usefixtures("_no_tenacity_sleep")
-@pytest.mark.parametrize("state", ["ACTIVE", "REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["ACTIVE", "HALTED"])
 @pytest.mark.parametrize("scope", ["same", "other_symbol", "other_environment", "other_account", "unreadable", "clear"])
 async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkeypatch, scope, state):
     """Every trading state admits the cancel; a new UNKNOWN or unreadable

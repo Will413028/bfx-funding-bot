@@ -45,7 +45,6 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_OPERATOR,
-    REDUCING,
     TradingState,
     TransitionResult,
 )
@@ -98,11 +97,6 @@ def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
         "actor": state.actor,
         "at_ms": state.created_at_ms,
         "id": state.id,
-        "probation": None if state.probation is None else {
-            "multiplier": str(state.probation.multiplier),
-            "started_at_ms": state.probation.started_at_ms,
-            "floor": {symbol: str(amount) for symbol, amount in state.probation.floor},
-        },
     }
 
 
@@ -249,7 +243,7 @@ class TradingStatusService:
             "history": history,
         }
 
-    # ------------------------------------------------------------ halt/pause
+    # ------------------------------------------------------------ halt
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
         """Kill: HALTED (cause operator), then the venue funding cancel-all.
@@ -276,22 +270,6 @@ class TradingStatusService:
             ],
             "scope_error": result.scope_error,
         }
-
-    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
-        """Maintenance pause: REDUCING, cause operator. Cancels stay allowed,
-        nothing new is placed. Resuming is an authenticated operator request."""
-        result = await self._require_store().transition(
-            REDUCING, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
-        )
-        return _trading_state_dict(result.state)  # type: ignore[return-value]
-
-    def _require_store(self) -> _TradingStateProtocol:
-        if self._trading_state is None:
-            raise ValueError(
-                "trading state is not configured for this daemon; accepting the "
-                "request would report success while changing nothing",
-            )
-        return self._trading_state
 
     def _symbol_status(self, symbol: str) -> dict[str, Any]:
         cap = resolve_for_symbol_with_source(

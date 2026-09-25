@@ -1,7 +1,7 @@
 """Operator requests: the web API queues them, the account daemon applies them.
 
 ADR D4': the web API holds no write on execution state. Every human action that
-changes it -- approving a material build or resuming trading (T5), adjudicating
+changes it -- resuming or killing trading, adjudicating
 an uncertainty -- is a row in an outbox table. The web API inserts only the
 request columns (a column-scoped grant) and answers 202; the account daemon's
 worker applies the request inside the account's single writer, under the

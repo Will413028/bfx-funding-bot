@@ -78,6 +78,7 @@ from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_pe
 from bfx_funding_bot.modules.candles.schemas import FundingCandle
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
+from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
@@ -166,12 +167,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
-from bfx_funding_bot.modules.execution.trading_control import (
-    DeploymentIdentity,
-    GateDecision,
-    TradingControlWorker,
-    apply_deploy_gate,
-)
+from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
 from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
@@ -438,7 +434,7 @@ class Daemon:
     # True once boot recovery passed; an exit before that is a refused boot (T8 alert).
     booted: bool = False
     writer_lock_watch: WriterLockWatch | None = None
-    # Applies operator approve/resume requests and lifts a passed probation.
+    # Applies operator resume/kill requests.
     trading_control: TradingControlWorker | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -1545,8 +1541,8 @@ async def build_daemon(
 
     deployment_reconciler = None
     trading_control: TradingControlWorker | None = None
-    # What the deploy tool says this build is (ADR D1): its change class decides
-    # at boot whether the writer may keep trading or waits for an approval.
+    # What the deploy tool says this build is; it names every decision's build
+    # and the status report's, and never gates trading (lending envelope D5).
     deployment_identity = DeploymentIdentity.from_env(os.environ)
     uncertainty_worker = None
     if not spec.is_simulated:
@@ -1567,9 +1563,7 @@ async def build_daemon(
         funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
         trading_control = TradingControlWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, identity=deployment_identity,
-            symbols=configured_symbols(config.cells), funding_rules=funding_rules,
-            authority=operator_authorized, clock=now_ms_utc,
+            environment=env_str, authority=operator_authorized, clock=now_ms_utc,
             ownership=writer_lock.verify_held if writer_lock is not None else None,
         )
         deployment_reconciler = DeploymentReconciler(
@@ -1598,7 +1592,7 @@ async def build_daemon(
                 tick=Decimal("0.00000001"),
             ),
             # Every decision names the build that made it: the revision and
-            # image digest the deploy tool injected (ADR D1).
+            # image digest the deploy tool injected.
             audit_context_factory=_DaemonAuditContextFactory(
                 account_id=account_id,
                 deployment_environment=env_str,
@@ -1896,13 +1890,6 @@ async def build_daemon(
         if safety_cfg.pre_trade_limits is not None:
             command_gate.throttle = build_command_throttle(
                 safety_cfg.pre_trade_limits, protection=protection)
-    deploy_gate: GateDecision | None = None
-    if not spec.is_simulated:
-        # Material and unapproved -> REDUCING before any task can trade.
-        deploy_gate = await apply_deploy_gate(
-            session_factory, account_id=UUID(account_id), environment=env_str,
-            identity=deployment_identity, now_ms=now_ms_utc(),
-        )
 
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
     # Real-money status uses the same applied policy reader as the planner and
@@ -1922,13 +1909,11 @@ async def build_daemon(
         attempts=attempt_recorder,
         trading_state=trading_state,
         kill_switch=kill_switch,
-        deployment=(None if deploy_gate is None else {
+        deployment=(None if spec.is_simulated else {
             "backend_digest": deployment_identity.backend_digest,
             "source_revision": deployment_identity.source_revision,
-            "change_class": deploy_gate.change_class,
-            "why": deploy_gate.why,
-            "approved": deploy_gate.approved,
-            "boot_gate": deploy_gate.action,
+            "deployment_id": (str(deployment_identity.deployment_id)
+                              if deployment_identity.deployment_id else None),
         }),
         readiness=trading_readiness,
         capital_runtime=capital_runtime,

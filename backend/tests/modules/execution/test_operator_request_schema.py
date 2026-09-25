@@ -24,29 +24,30 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 
 _VERSIONS = Path(__file__).resolve().parents[3] / "alembic/versions"
 _MIGRATION = "1c435a35dcb4_trading_governance.py"
+# The migration that last (re)created each outbox, and its constants' prefix.
 _OUTBOXES = [
-    (UncertaintyResolutionRequestRow, "UNCERTAINTY"),
-    (TradingControlRequestRow, "TRADING_CONTROL"),
+    (UncertaintyResolutionRequestRow, _MIGRATION, "UNCERTAINTY_"),
+    (TradingControlRequestRow, "5b1e7c9d2a40_two_state_trading_control.py", ""),
 ]
 
 
-def _migration():
-    spec = importlib.util.spec_from_file_location("outbox_migration", _VERSIONS / _MIGRATION)
+def _migration(name: str = _MIGRATION):
+    spec = importlib.util.spec_from_file_location("outbox_migration", _VERSIONS / name)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-@pytest.mark.parametrize(("model", "prefix"), _OUTBOXES)
-def test_migration_grants_exactly_the_declared_column_split(model, prefix) -> None:
-    migration = _migration()
-    assert tuple(getattr(migration, f"{prefix}_REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
-    assert tuple(getattr(migration, f"{prefix}_WORKER_COLUMNS").split(",")) == model.WORKER_COLUMNS
+@pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
+def test_migration_grants_exactly_the_declared_column_split(model, migration_file, prefix) -> None:
+    migration = _migration(migration_file)
+    assert tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
+    assert tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(",")) == model.WORKER_COLUMNS
 
 
-@pytest.mark.parametrize(("model", "prefix"), _OUTBOXES)
-def test_every_column_belongs_to_exactly_one_writer(model, prefix) -> None:
+@pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
+def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefix) -> None:
     columns = {column.name for column in model.__table__.columns}
     assert set(model.REQUEST_COLUMNS).isdisjoint(model.WORKER_COLUMNS)
     assert columns == set(model.REQUEST_COLUMNS) | set(model.WORKER_COLUMNS)

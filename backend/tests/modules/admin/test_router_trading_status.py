@@ -145,14 +145,13 @@ def test_smoke_test_route_is_absent_when_no_runner_is_wired() -> None:
     ).status_code == 404
 
 
-# ---------------------------------------------------------- halt / pause
+# ---------------------------------------------------------- halt
 
 
 class _HaltableStatus(_FakeStatus):
     def __init__(self, *, cancel_all_complete: bool = True) -> None:
         super().__init__()
         self.halts: list[dict[str, Any]] = []
-        self.pauses: list[dict[str, Any]] = []
         self.cancel_all_complete = cancel_all_complete
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
@@ -160,16 +159,9 @@ class _HaltableStatus(_FakeStatus):
         return {"halted": True, "state": "HALTED", "reason": reason, "actor": actor,
                 "cancel_all_complete": self.cancel_all_complete}
 
-    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
-        self.pauses.append({"reason": reason, "actor": actor})
-        return {"halted": True, "state": "REDUCING", "reason": reason, "actor": actor}
-
 
 class _UnconfiguredHaltStatus(_FakeStatus):
     async def halt(self, **kwargs: Any) -> dict[str, Any]:
-        raise ValueError("persisted halt is not configured for this daemon")
-
-    async def pause(self, **kwargs: Any) -> dict[str, Any]:
         raise ValueError("persisted halt is not configured for this daemon")
 
 
@@ -188,7 +180,6 @@ def test_halt_records_the_reason_and_actor() -> None:
     )
     assert resp.status_code == 200
     assert status.halts == [{"reason": "candle distortion", "actor": "will"}]
-    assert status.pauses == []
 
 
 def test_halt_reports_502_while_the_venue_cancel_all_is_incomplete() -> None:
@@ -202,23 +193,12 @@ def test_halt_reports_502_while_the_venue_cancel_all_is_incomplete() -> None:
     assert resp.json()["cancel_all_complete"] is False
 
 
-def test_pause_is_the_maintenance_stop() -> None:
-    status = _HaltableStatus()
-    resp = TestClient(_app(status)).post(
-        "/admin/pause?reason=pg+upgrade&actor=will", headers={"Authorization": "Bearer secret"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["state"] == "REDUCING"
-    assert status.pauses == [{"reason": "pg upgrade", "actor": "will"}]
-    assert status.halts == []
-
-
-def test_pause_requires_authorization_and_a_reason() -> None:
-    status = _HaltableStatus()
-    assert TestClient(_app(status)).post("/admin/pause?reason=x").status_code == 401
-    assert TestClient(_app(status)).post(
-        "/admin/pause", headers={"Authorization": "Bearer secret"}).status_code == 422
-    assert status.pauses == []
+def test_the_pause_endpoint_is_retired() -> None:
+    """REDUCING is gone (lending envelope D4): the everyday stop is the policy's
+    enabled flag, the emergency stop is /admin/halt."""
+    resp = TestClient(_app(_HaltableStatus())).post(
+        "/admin/pause?reason=x", headers={"Authorization": "Bearer secret"})
+    assert resp.status_code in (404, 405)
 
 
 def test_halt_no_longer_renews_a_canary_epoch() -> None:
@@ -243,8 +223,8 @@ def test_halt_requires_a_reason() -> None:
 
 
 def test_the_static_token_cannot_resume() -> None:
-    """ADR D4: resume needs the operator's TOTP (the web API's trading-control
-    request). The static admin token only reduces exposure: halt and pause."""
+    """Resume needs the operator's TOTP (the web API's trading-control request).
+    The static admin token only reduces exposure: halt."""
     resp = TestClient(_app(_HaltableStatus())).post(
         "/admin/resume?reason=x&confirm=true", headers={"Authorization": "Bearer secret"},
     )
