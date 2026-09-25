@@ -47,6 +47,7 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Adds the append-only funding_cancel_all_audit table; no event, projection
     # or cursor is touched.
     "c2b7b04da604",
+    "c3a639388457",
 })
 
 __all__ = [

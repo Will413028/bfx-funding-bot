@@ -1,7 +1,7 @@
 """Append-only ledger of VM deployments (bfx-deploy), keyed by image digest.
 
 Revision ID: c3a639388457
-Revises: a7f3c1d9e204
+Revises: c2b7b04da604
 
 ADR 2026-09-25-ci-registry-digest-deploy D3: every deployment attempt that
 identified a target is recorded once -- source revision, backend/frontend
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "c3a639388457"
-down_revision = "a7f3c1d9e204"
+down_revision = "c2b7b04da604"
 branch_labels = None
 depends_on = None
 
