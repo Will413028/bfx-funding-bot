@@ -34,7 +34,6 @@ class _TradingStatusProtocol(Protocol):
         rate: float | None = None, period_days: int | None = None,
     ) -> dict[str, Any]: ...
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]: ...
-    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
 def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | None:
@@ -157,27 +156,5 @@ def build_router(
             return JSONResponse(
                 status_code=200 if complete else status.HTTP_502_BAD_GATEWAY, content=result,
             )
-
-        @router.post("/pause")
-        async def pause_endpoint(
-            reason: str = Query(min_length=1),
-            actor: str = Query(default="admin-api"),
-            authorization: str | None = Header(default=None),
-        ) -> JSONResponse:
-            """Maintenance pause (REDUCING): cancels continue, nothing new is
-            placed, no venue cancel-all. Lifting it (resume) is an authenticated
-            operator request through the web API (TOTP), never this token."""
-            denied = _auth_error(authorization, admin_token)
-            if denied is not None:
-                return denied
-            try:
-                result = await trading_status.pause(reason=reason, actor=actor)
-            except ValueError as exc:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": str(exc)},
-                )
-            log.warning("admin_pause actor=%s reason=%s", actor, reason)
-            return JSONResponse(status_code=200, content=result)
 
     return router

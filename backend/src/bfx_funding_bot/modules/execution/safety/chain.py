@@ -175,8 +175,8 @@ class SafetyGuardChain:
     async def evaluate_cancel(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
         """Write eligibility for cancelling one managed offer.
 
-        A cancel spends nothing and is the one venue write REDUCING and HALTED
-        exist to allow, so the capital check and the trading-state gate are
+        A cancel spends nothing and is the one venue write HALTED
+        exists to allow, so the capital check and the trading-state gate are
         skipped. Everything else still runs on the write-shaped probe: a new
         UNKNOWN or an unreadable uncertainty projection for the offer's scope,
         a lost writer lock or a down executor still refuse the cancel. The

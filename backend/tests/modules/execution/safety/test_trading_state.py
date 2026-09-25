@@ -1,4 +1,4 @@
-"""TradingStateRepository — the durable ACTIVE / REDUCING / HALTED decision.
+"""TradingStateRepository — the durable ACTIVE / HALTED decision.
 
 The database trigger is the last word on illegal transitions (see
 tests/integration/test_trading_state_migration.py); these tests pin that the
@@ -7,7 +7,6 @@ see the error before PostgreSQL does, and that a decision survives a restart.
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,7 +20,6 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     IllegalTradingTransition,
-    Probation,
     TradingStateRepository,
 )
 
@@ -80,7 +78,7 @@ async def test_state_survives_a_restart(tmp_path) -> None:
     await _repo(factory, account).transition("ACTIVE", cause="operator", actor="will",
                                              reason="trading", now_ms=4)
     written = (await _repo(factory, account).transition(
-        "REDUCING", cause="operator", actor="will", reason="pg upgrade", now_ms=5)).state
+        "HALTED", cause="operator", actor="will", reason="pg upgrade", now_ms=5)).state
     await first.dispose()
 
     second = make_async_engine_from_url(url)
@@ -104,21 +102,13 @@ async def test_reasserting_a_halt_keeps_the_halt_in_force(scope) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("path", "message"), [
-    ([("HALTED", "auto"), ("REDUCING", "operator")], "HALTED -> REDUCING"),
-    ([("HALTED", "operator"), ("REDUCING", "material_deploy")], "HALTED -> REDUCING"),
     ([("HALTED", "auto"), ("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
-    ([("ACTIVE", "operator"), ("REDUCING", "operator"), ("ACTIVE", "auto")],
-     "REDUCING -> ACTIVE by auto"),
-    ([("ACTIVE", "operator"), ("REDUCING", "material_deploy"), ("REDUCING", "operator")],
-     "cannot be relabelled"),
     # No decision recorded reads as HALTED, so it leaves only the way HALTED does.
-    ([("REDUCING", "operator")], "HALTED -> REDUCING"),
     ([("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
-    ([("REDUCING", "kill_switch")], "cannot put trading in REDUCING"),
-    # kill_switch is a retired cause: every stop is operator or auto.
-    ([("HALTED", "kill_switch")], "cannot put trading in HALTED"),
-    ([("HALTED", "material_deploy")], "cannot put trading in HALTED"),
-    ([("ACTIVE", "kill_switch")], "cannot put trading in ACTIVE"),
+    # REDUCING and material_deploy are retired; kill_switch was retired before.
+    ([("ACTIVE", "operator"), ("REDUCING", "operator")], "unknown trading state"),
+    ([("HALTED", "material_deploy")], "unknown trading state cause"),
+    ([("HALTED", "kill_switch")], "unknown trading state cause"),
     ([("PAUSED", "operator")], "unknown trading state"),
 ])
 async def test_illegal_transitions_are_rejected_in_code(scope, path, message) -> None:
@@ -134,20 +124,12 @@ async def test_illegal_transitions_are_rejected_in_code(scope, path, message) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("actor", "reason", "probation", "state"), [
-    ("", "why", None, "HALTED"),
-    ("will", "  ", None, "HALTED"),
-    ("will", "why", Probation(Decimal("0.25"), 0), "REDUCING"),
-    ("will", "why", Probation(Decimal("0"), 0), "ACTIVE"),
-    ("will", "why", Probation(Decimal("1.5"), 0), "ACTIVE"),
-    ("will", "why", Probation(Decimal("0.25"), -1), "ACTIVE"),
-])
-async def test_evidence_and_probation_shape_is_enforced(scope, actor, reason, probation,
-                                                        state) -> None:
+@pytest.mark.parametrize(("actor", "reason"), [("", "why"), ("will", "  ")])
+async def test_evidence_is_enforced(scope, actor, reason) -> None:
     factory, account = scope
     with pytest.raises(IllegalTradingTransition):
-        await _repo(factory, account).transition(
-            state, cause="operator", actor=actor, reason=reason, probation=probation)
+        await _repo(factory, account).transition("HALTED", cause="operator", actor=actor,
+                                                 reason=reason)
     assert await _rows(factory) == 0
 
 
@@ -156,21 +138,17 @@ async def test_legal_lifecycle_is_recorded_in_order(scope) -> None:
     factory, account = scope
     repo = _repo(factory, account)
     steps = [
-        ("ACTIVE", "operator", None),
-        ("REDUCING", "operator", None),
-        # A material deploy during a pause strengthens it: approval now needed.
-        ("REDUCING", "material_deploy", None),
-        ("ACTIVE", "operator", Probation(Decimal("0.25"), 10)),
-        ("ACTIVE", "auto", None),
-        ("HALTED", "auto", None),
-        ("ACTIVE", "operator", Probation(Decimal("0.25"), 20)),
+        ("ACTIVE", "operator"),
+        ("HALTED", "operator"),
+        ("ACTIVE", "operator"),
+        ("HALTED", "auto"),
+        ("ACTIVE", "operator"),
     ]
-    for state, cause, probation in steps:
-        result = await repo.transition(state, cause=cause, actor="test", reason=f"{state}/{cause}",
-                                       probation=probation)
+    for state, cause in steps:
+        result = await repo.transition(state, cause=cause, actor="test", reason=f"{state}/{cause}")
         assert result.changed
     history = await repo.history(limit=20)
-    assert [(h.state, h.cause, h.probation) for h in reversed(history)] == steps
+    assert [(h.state, h.cause) for h in reversed(history)] == steps
     assert [h.id for h in history] == sorted((h.id for h in history), reverse=True)
 
 
@@ -187,5 +165,5 @@ async def test_scopes_are_independent(scope) -> None:
     # A HALTED elsewhere does not constrain this scope's first decision.
     await _repo(factory, account, "prod").transition("ACTIVE", cause="operator", actor="t",
                                                      reason="start prod")
-    await _repo(factory, account, "prod").transition("REDUCING", cause="operator", actor="t",
-                                                     reason="pause prod")
+    await _repo(factory, account, "prod").transition("HALTED", cause="auto", actor="t",
+                                                     reason="stop prod")

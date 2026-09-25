@@ -33,7 +33,7 @@ class OfferEnvelope:
     """The terms every new offer must stay inside (ADR 2026-09-25 lending envelope D1).
 
     A broken signal, sizing bug or new build can at worst lend at the floor rate for
-    the longest allowed period -- that bound is what replaces release probation.
+    the longest allowed period -- that bound replaces any release probation.
     The effective rate floor is max(min_rate_apr / 365, median live bid x ratio).
     """
 
@@ -120,24 +120,6 @@ class CapitalSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class CapitalProbation:
-    """Reduced cell limit while a new build or a resume is on probation (ADR D3).
-
-    The cell limit becomes ``multiplier`` of the normal one, but never below
-    ``floor`` -- one venue-minimum offer -- and never above the normal limit.
-    """
-
-    multiplier: Decimal
-    floor: Decimal
-
-    def __post_init__(self) -> None:
-        _validate_amount("multiplier", self.multiplier)
-        _validate_amount("floor", self.floor)
-        if not _ZERO < self.multiplier <= Decimal("1"):
-            raise ValueError("multiplier must be greater than 0 and at most 1")
-
-
-@dataclass(frozen=True, slots=True)
 class CapitalBudget:
     """Diagnostic limits plus the maximum new amount; None means positive budget.
 
@@ -166,15 +148,12 @@ class CapitalBudget:
             raise ValueError("reason must be a supported capital blocked reason or None")
 
 
-def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot,
-                     probation: CapitalProbation | None = None) -> CapitalBudget:
+def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot) -> CapitalBudget:
     """Evaluate new-offer limits without I/O, mutation or implicit input defaults."""
     if not isinstance(policy, CapitalPolicy):
         raise ValueError("policy must be an explicit validated CapitalPolicy")
     if not isinstance(snapshot, CapitalSnapshot):
         raise ValueError("snapshot must be an explicit validated CapitalSnapshot")
-    if probation is not None and not isinstance(probation, CapitalProbation):
-        raise ValueError("probation must be an explicit validated CapitalProbation")
     if not policy.enabled:
         return CapitalBudget(_ZERO, _ZERO, _ZERO, _ZERO, "policy_disabled")
 
@@ -185,8 +164,6 @@ def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot,
     cell_limit = (
         max(_ZERO, snapshot.total_capital - policy.reserve_amount) * policy.max_cell_fraction
     )
-    if probation is not None:
-        cell_limit = min(cell_limit, max(cell_limit * probation.multiplier, probation.floor))
     cell_headroom = max(_ZERO, cell_limit - snapshot.cell_exposure)
     max_new_offer = min(spendable, cell_headroom)
     reason: CapitalBlockedReason | None = None

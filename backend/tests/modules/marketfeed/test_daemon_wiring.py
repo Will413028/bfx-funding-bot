@@ -275,16 +275,16 @@ _DEPLOYMENT_ID = "11111111-2222-4333-8444-555555555555"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("deploy_env", "expected"), [
-    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "standard", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
-     ("ACTIVE", "operator", "kept")),
-    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
-     ("REDUCING", "material_deploy", "reducing")),
-    ({}, ("REDUCING", "material_deploy", "reducing")),  # no deploy identity: fail closed
+@pytest.mark.parametrize("deploy_env", [
+    {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+     "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+    # The previous bfx-deploy still injects a class; it means nothing now.
+    {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+     "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+    {},  # no deploy identity: still no change to trading, audit says "unidentified"
 ])
-async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, httpx_mock, deploy_env, expected):
+async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, httpx_mock, deploy_env):
+    """Lending envelope D5: a release is not a trading decision."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -316,18 +316,6 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
-    if "BFX_DEPLOYMENT_ID" in deploy_env:
-        # The deploy tool's `started` row for this process, before it created the container.
-        from datetime import UTC, datetime
-        from uuid import UUID
-
-        from bfx_funding_bot.modules.deployments.tables import DeploymentRow
-        async with factory.begin() as session:
-            session.add(DeploymentRow(attempt_id=UUID(_DEPLOYMENT_ID), started_at=datetime.now(UTC),
-                finished_at=None, source_revision=deploy_env["BFX_SOURCE_REVISION"],
-                backend_digest=deploy_env["BFX_IMAGE_DIGEST"], frontend_digest="sha256:" + "f" * 64,
-                change_class=deploy_env["BFX_CHANGE_CLASS"], migrations_applied=False,
-                outcome="started", detail="fixture"))
     repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
     async with factory.begin() as session:
         await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
@@ -339,11 +327,14 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     try:
         daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
-        assert (state.state, state.cause) == expected[:2]
+        assert (state.state, state.cause, state.reason) == (
+            "ACTIVE", "operator", "trading before the deploy")
         status = await daemon.trading_status.snapshot()
-        assert status["deployment"]["boot_gate"] == expected[2]
+        assert status["deployment"] == {
+            "backend_digest": deploy_env.get("BFX_IMAGE_DIGEST"),
+            "source_revision": deploy_env.get("BFX_SOURCE_REVISION"),
+            "deployment_id": deploy_env.get("BFX_DEPLOYMENT_ID")}
         assert daemon.trading_control is not None
-        assert daemon.trading_control.identity.backend_digest == deploy_env.get("BFX_IMAGE_DIGEST")
         # Every decision's audit names the build the deploy tool injected.
         audit = daemon.periodic_reconcile._deployment._audit_context_factory
         assert (audit.service_version, audit.config_hash) == (

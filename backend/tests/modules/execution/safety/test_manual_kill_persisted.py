@@ -76,18 +76,6 @@ async def test_persisted_halt_blocks_with_no_env_flag(
 
 
 @pytest.mark.asyncio
-async def test_reducing_blocks_new_offers_like_halted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A maintenance pause is REDUCING: no new offer, whatever caused it."""
-    for cause in ("operator", "material_deploy"):
-        r = await ManualKillGuard(trading_state=_FakeStore(_state("REDUCING", cause))).evaluate(
-            _post(), _ctx())
-        assert r.allowed is False
-        assert "REDUCING" in (r.reason or "")
-
-
-@pytest.mark.asyncio
 async def test_persisted_resume_allows(monkeypatch: pytest.MonkeyPatch) -> None:
     g = ManualKillGuard(trading_state=_FakeStore(_halted(False)))
     assert (await g.evaluate(_post(), _ctx())).allowed is True

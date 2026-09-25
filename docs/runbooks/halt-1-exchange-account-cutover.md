@@ -236,10 +236,9 @@ GRANT SELECT ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
 GRANT INSERT (request_id, exchange_account_id, deployment_environment, uncertainty_id,
   action, reconcile_event_seq, venue_offer_id, decision, reason, requested_by,
   created_at_ms) ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
--- Release-flow approve/resume outbox, same contract (migration 1c435a35dcb4 grants the same).
-GRANT SELECT ON TABLE public.trading_state, public.deployment_approvals,
-  public.trading_control_requests TO bfx_webapi;
-GRANT INSERT (request_id, exchange_account_id, deployment_environment, action, backend_digest,
+-- Trading-control resume/kill outbox, same contract (migration 5b1e7c9d2a40 grants the same).
+GRANT SELECT ON TABLE public.trading_state, public.trading_control_requests TO bfx_webapi;
+GRANT INSERT (request_id, exchange_account_id, deployment_environment, action,
   reason, requested_by, created_at_ms) ON TABLE public.trading_control_requests TO bfx_webapi;
 
 -- Run as the role owner and retain the output as release evidence.

@@ -409,8 +409,8 @@ class AccountCommandGate:
                      account_id: str, ctx: AccountContext) -> None:
         """Durable cancel admission; ACK never releases capital in this boundary.
 
-        Cancelling is allowed in every trading state -- it is what REDUCING and
-        HALTED are for -- so it is not gated on the trading state. It is still refused without managed provenance and
+        Cancelling is allowed in every trading state -- it is what HALTED is
+        for -- so it is not gated on the trading state. It is still refused without managed provenance and
         while the offer's scope has an open or unreadable uncertainty, at
         admission and again before every transport attempt.
         """

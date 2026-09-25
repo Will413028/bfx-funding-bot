@@ -317,7 +317,7 @@ def test_boot_refused_fatal_and_future_events_render() -> None:
     for event, fields, expected in (
         (alerts.BOOT_REFUSED, {"error": "ValueError: bad config"}, "[CRITICAL]"),
         (alerts.DAEMON_FATAL, {"error": "RuntimeError: x"}, "[CRITICAL]"),
-        ("material_deploy_awaiting_approval", {"revision": "abc"}, "[WARNING]"),  # T5-style
+        ("foreign_exposure", {"venue_offer_id": "1"}, "[WARNING]"),  # an unregistered event
     ):
         text = alerts.render(event, level=alerts.default_level(event, fields), fields=fields,
                              context="prod", host="oci-a1")

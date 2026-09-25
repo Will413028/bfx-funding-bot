@@ -22,9 +22,8 @@ Contract (the reason this module exists in this shape):
 
 Wiring: the daemon installs the configured sink with :func:`install`; hooks
 call the module-level :func:`emit`. Before installation (tests, scripts) the
-default sink only logs. New event names need no registration -- T5's
-"material deploy awaiting approval" or "probation started/lifted" just call
-``emit("material_deploy_awaiting_approval", level="warning", ...)``.
+default sink only logs. New event names need no registration -- a hook just
+calls ``emit("foreign_exposure", level="warning", ...)``.
 """
 from __future__ import annotations
 
@@ -302,7 +301,7 @@ def secret_values(environ: Mapping[str, str]) -> tuple[str, ...]:
 
 def default_level(event: str, fields: Mapping[str, object]) -> str:
     if event == TRADING_STATE_CHANGED:
-        return {"HALTED": CRITICAL, "REDUCING": WARNING}.get(str(fields.get("state")), INFO)
+        return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
     if event in {PROTECTION_TRIPPED, BOOT_REFUSED, DAEMON_FATAL}:

@@ -23,13 +23,12 @@ from bfx_funding_bot.modules.execution.operator_requests import (
     insert_request,
 )
 from bfx_funding_bot.modules.execution.safety.tables import (
-    DeploymentApprovalRow,
     TradingControlRequestRow,
+    TradingStateRow,
 )
 
 pytestmark = pytest.mark.integration
 
-DIGEST = "sha256:" + "a" * 64
 
 
 class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
@@ -52,11 +51,10 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
     async def apply(self, session: Any, row: TradingControlRequestRow, prepared: str | None) -> Outcome:
         self.calls.append(prepared)
         # A write the outcome must not keep unless the request applied.
-        session.add(DeploymentApprovalRow(
+        session.add(TradingStateRow(
             exchange_account_id=row.exchange_account_id, deployment_environment="ci",
-            backend_digest=f"sha256:{row.request_id.hex * 2}", source_revision="c" * 40,
-            approved_by=row.requested_by,
-            approved_at_ms=1, request_id=row.request_id))
+            state="HALTED", cause="operator", actor=row.requested_by,
+            reason=f"side effect of {row.request_id}", created_at_ms=1))
         await session.flush()
         if self.behaviour == "reject":
             raise RequestRejected("not_now")
@@ -85,7 +83,7 @@ async def outbox(migrated_db: Any) -> Any:
 
 def values(account: UUID, **extra: object) -> dict[str, object]:
     return {"request_id": uuid4(), "exchange_account_id": account, "deployment_environment": "ci",
-            "action": "resume", "backend_digest": DIGEST, "reason": "test",
+            "action": "resume", "reason": "test",
             "requested_by": "operator", "created_at_ms": 1, **extra}
 
 
@@ -99,8 +97,8 @@ async def queue(factory: Any, account: UUID) -> UUID:
 async def row_of(factory: Any, request_id: UUID) -> tuple[str, str | None, int]:
     async with factory() as session:
         row = await session.get(TradingControlRequestRow, request_id)
-        approvals = len((await session.scalars(select(DeploymentApprovalRow))).all())
-        return row.state, row.outcome_reason, approvals
+        writes = len((await session.scalars(select(TradingStateRow))).all())
+        return row.state, row.outcome_reason, writes
 
 
 @pytest.mark.asyncio

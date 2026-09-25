@@ -39,8 +39,8 @@ split is what keeps a trip raised while the command gate's account lock is held
 (an UNKNOWN submit) or inside a recovery transaction from deadlocking against
 the kill switch, which itself waits for that lock and opens its own transaction.
 
-An automatic HALTED is never lifted automatically; ``cause=auto`` is what the
-resume path uses to require a probation period.
+An automatic HALTED is never lifted automatically: only an operator's resume
+ends it.
 """
 from __future__ import annotations
 
