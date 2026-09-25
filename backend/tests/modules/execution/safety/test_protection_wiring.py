@@ -98,7 +98,7 @@ async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() 
     engaged: list[str] = []
 
     class _Kill:
-        async def engage(self, *, cause, actor, reason):  # type: ignore[no-untyped-def]
+        async def engage(self, *, cause, actor, reason, when_already_halted="retry"):  # type: ignore[no-untyped-def]
             engaged.append(actor)
             from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
             from bfx_funding_bot.modules.execution.safety.trading_state import TradingState

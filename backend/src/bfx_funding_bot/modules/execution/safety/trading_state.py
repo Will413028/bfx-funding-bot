@@ -59,8 +59,26 @@ class IllegalTradingTransition(ValueError):  # noqa: N818 - a rejected request, 
 
 @dataclass(frozen=True, slots=True)
 class Probation:
+    """Reduced limits after an approval or an automatic halt (ADR D3).
+
+    ``floor`` is the per-currency venue minimum (native units, submit margin
+    included) observed when the probation started: the probation cell limit is
+    never below one minimum offer. Kept as sorted pairs so the value is
+    hashable and compares by content.
+    """
+
     multiplier: Decimal
     started_at_ms: int
+    floor: tuple[tuple[str, Decimal], ...] = ()
+
+    def floor_for(self, symbol: str) -> Decimal:
+        return dict(self.floor).get(symbol, Decimal(0))
+
+    @classmethod
+    def starting(cls, *, multiplier: Decimal, started_at_ms: int,
+                 floor: dict[str, Decimal]) -> Probation:
+        return cls(multiplier=multiplier, started_at_ms=started_at_ms,
+                   floor=tuple(sorted(floor.items())))
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,8 +129,10 @@ def validate_transition(
         or not probation.multiplier.is_finite()
         or not Decimal(0) < probation.multiplier <= Decimal(1)
         or probation.started_at_ms < 0
+        or any(not amount.is_finite() or amount < 0 for _, amount in probation.floor)
     ):
-        raise IllegalTradingTransition("probation applies only to ACTIVE, with 0 < multiplier <= 1")
+        raise IllegalTradingTransition(
+            "probation applies only to ACTIVE, with 0 < multiplier <= 1 and non-negative floors")
     # No recorded decision is read as HALTED (fail closed), so it leaves only
     # the way a HALTED does.
     previous_state = previous.state if previous is not None else HALTED
@@ -149,7 +169,9 @@ def restates(previous: TradingState | None, *, state: str, cause: str,
 def to_state(row: TradingStateRow) -> TradingState:
     probation = (
         Probation(multiplier=Decimal(str(row.probation_multiplier)),
-                  started_at_ms=int(row.probation_started_at_ms))
+                  started_at_ms=int(row.probation_started_at_ms),
+                  floor=tuple(sorted((str(symbol), Decimal(str(amount)))
+                                     for symbol, amount in (row.probation_floor or {}).items())))
         if row.probation_multiplier is not None and row.probation_started_at_ms is not None
         else None
     )
@@ -203,6 +225,10 @@ async def append_transition(
         created_at_ms=now_ms,
         probation_multiplier=probation.multiplier if probation is not None else None,
         probation_started_at_ms=probation.started_at_ms if probation is not None else None,
+        probation_floor=(
+            {symbol: str(amount) for symbol, amount in probation.floor}
+            if probation is not None else None
+        ),
     )
     session.add(row)
     await session.flush()

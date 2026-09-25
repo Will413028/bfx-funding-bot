@@ -128,15 +128,29 @@ class KillSwitch:
         self._quiesce = quiesce
         self._clock = clock or (lambda: int(time.time() * 1000))
 
-    async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult:
+    async def engage(self, *, cause: str, actor: str, reason: str,
+                     when_already_halted: str = "retry") -> KillResult:
+        """Write HALTED, then cancel every funding offer at the venue.
+
+        ``when_already_halted``: ``"retry"`` (an operator's /admin/halt) re-runs
+        the cancel-all even if HALTED was already in force -- that is how an
+        incomplete kill is retried. ``"skip"`` (automatic protections) does
+        nothing more when HALTED was already in force, so a condition that
+        persists across reconcile ticks does not call the venue or write audit
+        rows every tick; only the transition into HALTED does.
+        """
         if cause not in KILL_CAUSES:
             raise ValueError(f"cause {cause!r} cannot halt trading")
+        if when_already_halted not in {"retry", "skip"}:
+            raise ValueError(f"when_already_halted must be retry or skip, not {when_already_halted!r}")
         # 1. The stop, durably, before anything reaches the venue. Any failure
         #    here propagates and no cancel-all is attempted.
         transition = await self._trading.transition(
             HALTED, cause=cause, actor=actor, reason=reason, now_ms=self._clock(),
         )
         halted = transition.state
+        if not transition.changed and when_already_halted == "skip":
+            return KillResult(state=halted, state_changed=False, cancel_all=())
         currencies, scope_error = await self._currencies()
         if scope_error is not None:
             log.critical("kill_switch_scope_incomplete account=%s error=%s",

@@ -48,6 +48,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # or cursor is touched.
     "c2b7b04da604",
     "c3a639388457",
+    # Approvals, operator requests and trading_state.probation_floor; no event,
+    # projection or cursor is touched.
+    "0218f9ab59a2",
     # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
     "9391a0f675d3",
 })

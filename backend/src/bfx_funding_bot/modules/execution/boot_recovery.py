@@ -457,7 +457,7 @@ class BootRecovery:
 
     def _protect(self, *, unknown: list[ReservationUnknown], persisted: list[RecoveryAction],
                  capital_error: CapitalBlockedError | None, capital_accepted: bool,
-                 drift: SnapshotDrift) -> None:
+                 drift: SnapshotDrift, fence_refusal: CapitalBlockedError | None = None) -> None:
         protection = self._protection
         if protection is None:
             return
@@ -468,10 +468,10 @@ class BootRecovery:
             if isinstance(action, VenueOfferQuarantined):
                 protection.trip(ORPHAN_QUARANTINED, f"venue_offer_id={action.venue_offer_id} "
                                 f"symbol={action.symbol} amount={action.amount}")
-        if capital_error is not None:
-            trigger = CAPITAL_BLOCK_TRIGGERS.get(str(capital_error))
+        for stage, refusal in (("fence", fence_refusal), ("snapshot", capital_error)):
+            trigger = CAPITAL_BLOCK_TRIGGERS.get(str(refusal)) if refusal is not None else None
             if trigger is not None:
-                protection.trip(trigger, f"capital classifier refused the snapshot: {capital_error}")
+                protection.trip(trigger, f"capital classifier refused the {stage}: {refusal}")
         if self._capital_repository is not None:
             for anomaly in self._conservation.observe(drift.symbols, confirmed=capital_accepted):
                 protection.trip(VENUE_LENT_ABOVE_LEDGER, anomaly)
@@ -483,17 +483,20 @@ class BootRecovery:
         history_start_ms = await self._load_history_start_ms()
         query_started_at_ms = self._clock()
         capital_fence = None
+        fence_refusal: CapitalBlockedError | None = None
         if self._capital_repository is not None:
             # Commit the command fence BEFORE any venue query. Pending/UNKNOWN
             # must still reconcile through the ordinary recovery path; such an
-            # observation never becomes capital authority.
+            # observation never becomes capital authority. The refusal is kept:
+            # the attempt inventory checked here is where an identity conflict
+            # between a commitment and its records first shows.
             try:
                 async with session_scope(self._session_factory) as session:
                     capital_fence = await self._capital_repository.begin_snapshot(
                         session, now_ms=query_started_at_ms,
                     )
-            except CapitalBlockedError:
-                pass
+            except CapitalBlockedError as exc:
+                fence_refusal = exc
         all_offers = await self._fetch_offers(None)
         all_credits = await self._fetch_credits(None)
         wallet_available = await self._fetch_available_all()
@@ -646,7 +649,7 @@ class BootRecovery:
 
         self._protect(unknown=unknown_actions, persisted=persisted_remaining_actions,
                       capital_error=capital_error, capital_accepted=capital_accepted,
-                      drift=snapshot_drift)
+                      drift=snapshot_drift, fence_refusal=fence_refusal)
         if capital_error is not None:
             raise capital_error
 
