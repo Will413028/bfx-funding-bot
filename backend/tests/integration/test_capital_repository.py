@@ -460,6 +460,47 @@ async def test_resolved_unknown_audit_does_not_permanently_block(capital_db):
 
 
 @pytest.mark.asyncio
+async def test_resolved_unknowns_add_no_work_to_an_authorization_read(capital_db, monkeypatch):
+    """D3a resolves UNKNOWNs routinely and each keeps outcome_kind='unknown' for
+    audit. Acceptance proved them settled; a read must not re-prove them one by
+    one, or its work grows with every resolution ever made (AGENTS.local
+    capital-authority trap). Counts the work, not the queries."""
+    from bfx_funding_bot.modules.execution.events import UncertaintyMarkedNotAccepted
+    from tests.modules.execution.event_store.test_uncertainty_resolution_events import (
+        ACCOUNT,
+        ENV,
+        _open_unknown,
+        _snapshot,
+    )
+    factory, _ = capital_db
+    unknown_id = await _open_unknown(factory)
+    repo = repository(ACCOUNT, ENV)
+    async with factory.begin() as session:
+        observed = await repo.writer.append(session, _snapshot(finished=5, offer=False))
+        await repo.writer.append(session, UncertaintyMarkedNotAccepted(
+            uncertainty_id=unknown_id, account_id=str(ACCOUNT), environment=ENV, symbol="fUST",
+            kind="submit_outcome_unknown", reconcile_event_seq=observed.event_seq,
+            resolved_by_operator_id="test", resolution_reason="zero complete history candidates",
+            resolution_evidence={"reconcile_event_seq": observed.event_seq,
+                "query_started_at_ms": 4, "query_finished_at_ms": 5, "candidate_count": 0},
+            candidate_count=0, occurred_at_ms=6))
+    await setup_policy(factory, repo)
+    await snapshot(factory, repo)
+    calls = 0
+    real = type(repo)._effective_outcome
+
+    async def counting(self, session, attempt):
+        nonlocal calls
+        calls += 1
+        return await real(self, session, attempt)
+
+    monkeypatch.setattr(type(repo), "_effective_outcome", counting)
+    async with factory.begin() as session:
+        await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
 async def test_corrupt_snapshot_classification_fails_closed(capital_db):
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
     from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
@@ -1194,3 +1235,61 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(capital_db
         assert view.snapshot.unreflected_commitments == 0
         assert view.snapshot.cell_exposure == Decimal("200")   # the loan is on the books
         assert view.budget.spendable == Decimal("700")          # 800 available less 100 reserve
+
+
+@pytest.mark.asyncio
+async def test_foreign_offer_is_counted_out_of_managed_exposure(capital_db):
+    """D2: an active offer no claim or attempt traces to is not an error. Its
+    300 already left the wallet's available; leaving it out of offered is what
+    makes the total 700, and no cell carries it."""
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
+    factory, account = capital_db
+    repo = repository(account)
+    await setup_policy(factory, repo, reserve="0")
+    manual = VenueOfferObservation("manual-1", "fUST", Decimal("300"), Decimal("300"),
+                                   Decimal("0.0001"), 2, "active", 1000, 1000)
+    seq = await snapshot(factory, repo, "700", offers=(manual,))
+    async with factory.begin() as session:
+        view = await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        row = await session.get(CapitalSnapshotRow, seq)
+    assert row.authorization_blocked_reason is None
+    assert row.classification["foreign"] == {"manual-1": {"symbol": "fUST", "amount": "300"}}
+    assert row.classification["symbols"]["fUST"]["foreign"] == "300"
+    assert row.classification["symbols"]["fUST"]["offered"] == "0"
+    assert view.snapshot.total_capital == Decimal("700")
+    assert view.snapshot.cell_exposure == Decimal("0")
+    assert view.budget.spendable == Decimal("700")
+
+
+@pytest.mark.asyncio
+async def test_open_unknown_withholds_only_its_symbol_and_does_not_stop_acceptance(capital_db):
+    """Point 4 of T2: an UNKNOWN on fUST no longer refuses every snapshot of the
+    account. The snapshot is accepted with the attempt recorded against fUST;
+    fUST reads refuse, another symbol reads normally."""
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+    from bfx_funding_bot.modules.execution.capital_tables import CapitalSnapshotRow
+    from bfx_funding_bot.modules.execution.events import ReservationUnknown
+    factory, account = capital_db
+    repo = repository(account)
+    policy = await setup_policy(factory, repo)
+    async with factory.begin() as session:
+        await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
+                                expected_revision=0, source={"operator": "test"})
+    seq = await snapshot(factory, repo)
+    result = await authorize(factory, repo, policy, seq)
+    async with factory.begin() as session:
+        await repo.writer.append(session, ReservationUnknown(
+            symbol="fUST", cid=1, account_id=str(account), is_simulated=True,
+            signal_correlation_id=result.intent.signal_correlation_id,
+            reservation_ref=result.intent.reservation_ref, amount=Decimal("200"),
+            reason="test-outcome", occurred_at_ms=1150,
+        ))
+    later = await snapshot(factory, repo)
+    async with factory.begin() as session:
+        row = await session.get(CapitalSnapshotRow, later)
+        assert row.classification["unresolved"] == {
+            str(result.intent.submission_attempt.attempt_id): "fUST"}
+        with pytest.raises(CapitalBlockedError, match="execution_unknown"):
+            await repo.read_capital(session, symbol="fUST", cell_id="a30", now_ms=1100)
+        other = await repo.read_capital(session, symbol="fUSD", cell_id="a30", now_ms=1100)
+    assert other.budget.reason == "policy_disabled"

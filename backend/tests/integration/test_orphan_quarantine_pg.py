@@ -1,4 +1,10 @@
-"""PostgreSQL integration tests for unattributed venue-offer quarantine."""
+"""PostgreSQL integration tests for unattributed (foreign) venue offers.
+
+Since lending envelope D2 an offer no durable intent traces to is foreign:
+counted by the ledger as venue truth, never quarantined, never given an
+identity, never cancelled. ``VENUE_OFFER_QUARANTINED`` events recorded before
+that still replay, so their projection keeps its own regressions here.
+"""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -146,11 +152,30 @@ def _recovery(pg_session_factory, auth: _Auth, bus: _Bus | None = None) -> BootR
     )
 
 
+async def _legacy_quarantine(pg_session_factory, venue_offer_id: str, amount: str) -> None:
+    """A breadcrumb as recovery wrote it before D2, for replay compatibility."""
+    await EventStorePersister(
+        store=PostgresEventStore(deployment_environment=_ENV),
+        session_factory=pg_session_factory,
+    ).persist(VenueOfferQuarantined(
+        venue_offer_id=venue_offer_id, symbol="fXYZ", amount=Decimal(amount),
+        account_id=str(_ACCOUNT), observed_at_ms=5_000,
+    ))
+
+
+async def _events(pg_session_factory, event_type: str) -> list[EventLogRow]:
+    async with pg_session_factory() as session:
+        return list((await session.execute(
+            select(EventLogRow).where(EventLogRow.event_type == event_type)
+        )).scalars().all())
+
+
 @pytest.mark.asyncio
-async def test_orphan_plus_known_offer_is_counted_blocked_and_never_given_synthetic_identity(
+async def test_foreign_offer_next_to_known_is_counted_never_blocked_or_given_identity(
     pg_session_factory,
 ):
-    """Dropping quarantine projection would understate unattributed exposure."""
+    """The ledger still counts the venue's offer; nothing blocks, nothing is
+    invented, nothing is cancelled."""
     await _seed_account_and_known_claim(pg_session_factory)
     auth = _Auth([_offer("known", "fUST", "40"), _offer("orphan", "fXYZ", "7")])
     bus = _Bus()
@@ -159,29 +184,19 @@ async def test_orphan_plus_known_offer_is_counted_blocked_and_never_given_synthe
 
     async with pg_session_factory() as session:
         claims = (await session.execute(select(OfferClaimRow))).scalars().all()
-        uncertainty = (await session.execute(select(ExecutionUncertaintyRow))).scalar_one()
+        uncertainties = (await session.execute(select(ExecutionUncertaintyRow))).scalars().all()
         orphan = await session.get(VenueOfferStateRow, (_ACCOUNT, _ENV, "orphan"))
         xyz_position = await session.get(PositionStateRow, (_ACCOUNT, _ENV, "fXYZ"))
-        quarantine = (
-            await session.execute(
-                select(EventLogRow).where(
-                    EventLogRow.event_type == "VENUE_OFFER_QUARANTINED"
-                )
-            )
-        ).scalar_one()
-    assert result.n_quarantined == 1
+    assert result.unmanaged_offer_ids == frozenset({"orphan"})
     assert len(claims) == 1 and claims[0].venue_offer_id == "known"
-    assert uncertainty.kind == "unattributed_venue_offer"
-    assert uncertainty.venue_offer_id == "orphan"
-    assert uncertainty.state == "open"
+    assert uncertainties == []
+    assert await _events(pg_session_factory, "VENUE_OFFER_QUARANTINED") == []
     assert orphan is not None and orphan.cid is None
     assert orphan.execution_decision_id is None
     assert orphan.signal_correlation_id is None
     assert xyz_position is not None
     assert xyz_position.offered_amount == Decimal("7")
-    assert xyz_position.uncertain_amount == Decimal("7")
-    assert quarantine.cid is None
-    assert "reservation_ref" not in quarantine.payload
+    assert xyz_position.uncertain_amount == Decimal("0")
     assert auth.cancel_calls == []
     assert any(getattr(event, "symbol", None) == "fUSD" for event in bus.events)
 
@@ -195,6 +210,7 @@ async def test_quarantine_rebuild_preserves_fk_and_old_snapshot_cannot_reopen_te
     auth = _Auth([_offer("known", "fUST", "40"), _offer("orphan", "fXYZ", "7")])
     store = PostgresEventStore(deployment_environment=_ENV)
     await _recovery(pg_session_factory, auth).run()
+    await _legacy_quarantine(pg_session_factory, "orphan", "7")
 
     terminal = VenueSnapshotObserved(
         account_id=str(_ACCOUNT),
@@ -266,7 +282,8 @@ async def test_quarantine_rebuild_preserves_fk_and_old_snapshot_cannot_reopen_te
 async def test_multiple_orphans_in_one_symbol_aggregate_into_one_bounded_uncertainty(
     pg_session_factory,
 ):
-    """The one-open-scope DB invariant must not make a second orphan roll back."""
+    """Legacy replay: the one-open-scope invariant must not make a second
+    breadcrumb roll back."""
     await _seed_account_and_known_claim(pg_session_factory)
     auth = _Auth(
         [
@@ -277,11 +294,13 @@ async def test_multiple_orphans_in_one_symbol_aggregate_into_one_bounded_uncerta
     )
 
     result = await _recovery(pg_session_factory, auth).run()
+    await _legacy_quarantine(pg_session_factory, "orphan-a", "7")
+    await _legacy_quarantine(pg_session_factory, "orphan-b", "3")
 
     async with pg_session_factory() as session:
         uncertainty = (await session.execute(select(ExecutionUncertaintyRow))).scalar_one()
         position = await session.get(PositionStateRow, (_ACCOUNT, _ENV, "fXYZ"))
-    assert result.n_quarantined == 2
+    assert result.unmanaged_offer_ids == frozenset({"orphan-a", "orphan-b"})
     assert uncertainty.intended_amount == Decimal("10")
     assert uncertainty.evidence["venue_offer_ids"] == ["orphan-a", "orphan-b"]
     assert position is not None
@@ -290,7 +309,9 @@ async def test_multiple_orphans_in_one_symbol_aggregate_into_one_bounded_uncerta
 
 
 @pytest.mark.asyncio
-async def test_unchanged_orphan_only_degrades_first_periodic_run(pg_session_factory):
+async def test_unchanged_foreign_offer_only_degrades_first_periodic_run(pg_session_factory):
+    """The first observation absorbs the venue's offer into the ledger (a drift);
+    an unchanged one afterwards is healthy, and nothing is quarantined."""
     await _seed_account_and_known_claim(pg_session_factory)
     recovery = _recovery(
         pg_session_factory,
@@ -311,16 +332,8 @@ async def test_unchanged_orphan_only_degrades_first_periodic_run(pg_session_fact
         for target, status, _fields in probe.updates
         if target == HealthTarget.RECONCILE
     ]
-    async with pg_session_factory() as session:
-        quarantine_events = (
-            await session.execute(
-                select(EventLogRow).where(
-                    EventLogRow.event_type == "VENUE_OFFER_QUARANTINED"
-                )
-            )
-        ).scalars().all()
     assert reconcile_statuses == [HealthStatus.DEGRADED, HealthStatus.HEALTHY]
-    assert len(quarantine_events) == 1
+    assert await _events(pg_session_factory, "VENUE_OFFER_QUARANTINED") == []
 
 
 @pytest.mark.asyncio
