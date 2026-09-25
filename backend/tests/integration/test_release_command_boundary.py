@@ -8,10 +8,9 @@ from sqlalchemy import select
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
-from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from tests.external.bitfinex.test_funding_rules import FixedRules
-from tests.integration.test_capital_command_boundary import boundary
+from tests.integration.test_capital_command_boundary import boundary, stop_chain
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
 from tests.integration.test_release_sessions import prepared
@@ -30,7 +29,7 @@ async def test_same_daemon_gate_consumes_session_and_attempt_before_mock_venue(c
                                         ownership=lambda: _true(), authority_reader=lambda s, u: _true(),
                                         preflight=lambda s, r: _true(), clock=lambda: 1100)
     gate.release_authority = authority
-    gate._safety_evaluator = ManualKillGuard(trading_state=halt, canary_halt_authorization=token)
+    gate._safety_evaluator = stop_chain(halt, account, canary=token)
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.strategy, row.amount_usdt = "mean_reversion", Decimal("150")
@@ -124,7 +123,7 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
         ownership=ownership, authority_reader=operator, preflight=lambda s, r: _true(), clock=lambda: now)
     token = object()
     gate.release_authority = authority
-    gate._safety_evaluator = ManualKillGuard(trading_state=halt, canary_halt_authorization=token)
+    gate._safety_evaluator = stop_chain(halt, account, canary=token)
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.strategy, row.amount_usdt = "mean_reversion", Decimal("150")
@@ -185,24 +184,24 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
         assert row.state == ("promoted" if promotion_fault is None else "blocked"), row.reason
         if promotion_fault is None:
             await authority.check_normal(session)
-            original_check = authority.check_normal
-            checked = 0
-            async def revoke_after_cancel_admission(locked):
-                nonlocal binding, checked
-                await original_check(locked)
-                checked += 1
-                if checked == 1:
-                    binding = {**binding, "release_digest": "changed-before-cancel-transport"}
-            authority.check_normal = revoke_after_cancel_admission
-            with pytest.raises(ReleaseBlocked, match="promotion_required"):
-                await gate.cancel(venue_offer_id="101", signal_correlation_id=ready.decision.signal_correlation_id,
-                    account_id=str(account), ctx=replace(ctx, release_session_id=None, canary_halt_authorization=None))
-            assert len(venue.received) == 1
-            authority.check_normal = original_check
             # Same stable identity supports a restarted authority; changed identity never does.
             binding = {**binding, "release_digest": "new-release"}
             with pytest.raises(ReleaseBlocked, match="promotion_required"):
                 await authority.check_normal(session)
+            # Pulling an offer spends nothing, so it needs no release promotion:
+            # the build whose promotion was just retired can still cancel.
+            original_check = authority.check_normal
+            checked = 0
+            async def counted(locked):
+                nonlocal checked
+                checked += 1
+                await original_check(locked)
+            authority.check_normal = counted
+            await gate.cancel(venue_offer_id="101", signal_correlation_id=ready.decision.signal_correlation_id,
+                account_id=str(account), ctx=replace(ctx, release_session_id=None, canary_halt_authorization=None))
+            assert venue.received[1:] == ["101"]
+            assert checked == 0
+            authority.check_normal = original_check
     assert (not (await halt.current()).allows_new_offers) is (promotion_fault is not None)
     if promotion_fault is None:
         # A maintenance pause and its resume do not retire this promotion: nothing
