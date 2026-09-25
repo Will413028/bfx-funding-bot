@@ -19,7 +19,6 @@ from bfx_funding_bot.modules.execution.capital_tables import (
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
-from bfx_funding_bot.modules.execution.uncertainty_tables import CanaryCommandPermitRow
 from tests.modules.accounts.test_capital_conversion import legacy
 
 
@@ -94,7 +93,6 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
         assert set(stored.classification["symbols"]) == set(venue.wallets)
         logged = await session.get(EventLogRow, receipt["snapshot_seq"])
         assert set(logged.payload["wallet_available"]) == set(venue.wallets)
-        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
         dry_run = await convert_capital_policy(session, repository=repo, legacy=legacy(), now_ms=1100, apply_digest=None)
         assert dry_run["symbols"]["fUST"]["cells"]["fUST_a30"]["available"] == "1000.123456789"
         assert dry_run["symbols"]["fUSD"]["cells"]["fUSD_a30"] == {
@@ -105,7 +103,6 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
             apply_digest=dry_run["conversion_digest"])
         assert applied["status"] == "applied"
         assert (await repo.read_applied(session, symbol="fUSD")).policy.enabled is False
-        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
     assert (await halt.current()).id == epoch.id
     assert (await halt.current()).state == "HALTED"
 
@@ -130,7 +127,6 @@ async def test_bootstrap_rejects_missing_enabled_wallet_without_policy_or_resume
             account_id=account, environment="ci", venue=venue, credentials=credentials, clock=lambda: 1100)
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 0
-        assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
     assert (await halt.current()).id == epoch.id
     assert (await halt.current()).state == "HALTED"
 

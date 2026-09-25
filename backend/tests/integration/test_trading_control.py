@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
+    IllegalTradingTransition,
     Probation,
     TradingStateRepository,
 )
@@ -30,6 +31,7 @@ from bfx_funding_bot.modules.execution.trading_control import (
     apply_deploy_gate,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+from bfx_funding_bot.modules.observability import alerts
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 from .test_capital_command_boundary import boundary, second_ready
@@ -152,7 +154,7 @@ async def test_approval_moves_a_material_build_to_active_in_probation(capital_db
     await apply_deploy_gate(factory, account_id=account, environment="ci",
                             identity=identity("material"), now_ms=T0)
     request_id = await request(factory, account, "approve")
-    assert await worker(factory, account, identity("material"), now=lambda: T0).apply(request_id) == "applied"
+    assert await worker(factory, account, identity("material"), now=lambda: T0).process(request_id) == "applied"
     current = await state_of(factory, account)
     assert (current.state, current.cause, current.actor) == ("ACTIVE", "operator", "operator")
     # Floor = one venue minimum (150 USD at FX 1) plus the submit margin.
@@ -176,7 +178,7 @@ async def test_requests_are_refused_with_a_bounded_reason(capital_db, setup, act
     await start(factory, account, setup, "auto" if setup == "HALTED" else "operator")
     before = await state_of(factory, account)
     request_id = await request(factory, account, action, by=by)
-    assert await worker(factory, account, ident, now=lambda: T0).apply(request_id) == "rejected"
+    assert await worker(factory, account, ident, now=lambda: T0).process(request_id) == "rejected"
     assert await outcome(factory, request_id) == ("rejected", code)
     assert await state_of(factory, account) == before
 
@@ -192,7 +194,7 @@ async def test_resume_enters_probation_only_after_an_automatic_stop(capital_db, 
     factory, account = capital_db
     await start(factory, account, setup, cause)
     request_id = await request(factory, account, "resume")
-    assert await worker(factory, account, identity("standard"), now=lambda: T0).apply(request_id) == "applied"
+    assert await worker(factory, account, identity("standard"), now=lambda: T0).process(request_id) == "applied"
     current = await state_of(factory, account)
     assert current.state == "ACTIVE"
     assert (current.probation is not None) is probation
@@ -203,9 +205,9 @@ async def test_a_material_build_approved_while_halted_still_runs_its_probation(c
     factory, account = capital_db
     await start(factory, account, "HALTED", "operator")
     w = worker(factory, account, identity("material"), now=lambda: T0)
-    assert await w.apply(await request(factory, account, "approve")) == "applied"
+    assert await w.process(await request(factory, account, "approve")) == "applied"
     assert (await state_of(factory, account)).state == "HALTED"  # a stop stays a stop
-    assert await w.apply(await request(factory, account, "resume")) == "applied"
+    assert await w.process(await request(factory, account, "resume")) == "applied"
     assert (await state_of(factory, account)).probation is not None
 
 
@@ -215,7 +217,7 @@ async def test_no_fx_observation_fails_the_request_and_changes_nothing(capital_d
     await start(factory, account, "HALTED", "auto")
     request_id = await request(factory, account, "resume")
     w = worker(factory, account, identity("standard"), now=lambda: T0, rules=False)
-    assert await w.apply(request_id) == "failed"
+    assert await w.process(request_id) == "failed"
     assert await outcome(factory, request_id) == ("failed", "funding_rule_unavailable")
     assert (await state_of(factory, account)).state == "HALTED"
 
@@ -272,11 +274,175 @@ async def test_an_automatic_halt_during_probation_restarts_it(capital_db):
     await repo.transition("HALTED", cause="auto", actor="auto:loss_limiter", reason="loss", now_ms=T0 + 2)
     resumed_at = T0 + BAKE_MS - 10
     w = worker(factory, account, identity("standard"), now=lambda: resumed_at)
-    assert await w.apply(await request(factory, account, "resume")) == "applied"
+    assert await w.process(await request(factory, account, "resume")) == "applied"
     assert (await state_of(factory, account)).probation.started_at_ms == resumed_at
     # 24 hours after the ORIGINAL start is not enough: the window restarted.
     w_later = worker(factory, account, identity("standard"), now=lambda: T0 + BAKE_MS + 10)
     assert await w_later.lift_probation_if_passed() is None
+
+
+@pytest.mark.asyncio
+async def test_a_transition_the_rules_refuse_is_a_rejection_not_a_fault(capital_db, monkeypatch):
+    from bfx_funding_bot.modules.execution import trading_control
+    factory, account = capital_db
+    await start(factory, account, "REDUCING", "operator")
+
+    async def refuse(*args, **kwargs):
+        raise IllegalTradingTransition("illegal trading state transition: by rule")
+
+    monkeypatch.setattr(trading_control, "append_transition", refuse)
+    request_id = await request(factory, account, "resume")
+    assert await worker(factory, account, identity("standard"), now=lambda: T0).process(request_id) == "rejected"
+    assert await outcome(factory, request_id) == (
+        "rejected", "illegal_transition: illegal trading state transition: by rule")
+
+
+@pytest.mark.asyncio
+async def test_the_idle_worker_lifts_a_probation_that_has_passed(capital_db):
+    factory, account = capital_db
+    await probation_state(factory, account)
+    await acknowledged(factory, account, at=T0 + 1, count=3)
+    assert await worker(factory, account, identity("standard"), now=lambda: T0 + BAKE_MS).tick() is False
+    current = await state_of(factory, account)
+    assert (current.cause, current.probation) == ("auto", None)
+
+
+# ------------------------------------------- a probation cannot be escaped
+
+
+async def approved_into_probation(factory, account):
+    """A material build approved into its probation through the real worker."""
+    await start(factory, account, "REDUCING", "operator")
+    await apply_deploy_gate(factory, account_id=account, environment="ci",
+                            identity=identity("material"), now_ms=T0)
+    w = worker(factory, account, identity("material"), now=lambda: T0)
+    assert await w.process(await request(factory, account, "approve")) == "applied"
+    probation = (await state_of(factory, account)).probation
+    assert probation is not None
+    return TradingStateRepository(factory, account_id=account, deployment_environment="ci"), probation
+
+
+def same_limits(a: Probation, b: Probation) -> bool:
+    return (a.multiplier, a.floor) == (b.multiplier, b.floor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["webapi_resume", "admin_token_resume"])
+async def test_a_pause_during_probation_resumes_inside_it(capital_db, path):
+    """ADR D3 invariant: exposure stays within the probation until it passes.
+    A maintenance pause and resume must not be a way out of it."""
+    from tests.modules.admin.test_trading_status import _service
+    factory, account = capital_db
+    repo, probation = await approved_into_probation(factory, account)
+    await repo.transition("REDUCING", cause="operator", actor="t", reason="maintenance", now_ms=T0 + 5)
+    if path == "webapi_resume":
+        # No venue: re-entering the same limits needs no new minimum.
+        w = worker(factory, account, identity("material"), now=lambda: T0 + 10, rules=False)
+        assert await w.process(await request(factory, account, "resume")) == "applied"
+    else:
+        out = await _service(trading_state=repo).resume(reason="maintenance done", actor="admin")
+        assert out["probation"] is not None
+    current = await state_of(factory, account)
+    assert current.state == "ACTIVE" and current.probation is not None
+    assert same_limits(current.probation, probation)
+    assert current.probation.started_at_ms > T0  # the 24 hours count again
+
+
+@pytest.mark.asyncio
+async def test_an_operator_stop_during_probation_resumes_inside_it(capital_db):
+    """A standard build (so no material-build rule applies) in the probation
+    that followed an automatic halt; the operator's own kill does not end it."""
+    factory, account = capital_db
+    repo = await start(factory, account, "HALTED", "auto")
+    w = worker(factory, account, identity("standard"), now=lambda: T0)
+    assert await w.process(await request(factory, account, "resume")) == "applied"
+    probation = (await state_of(factory, account)).probation
+    await repo.transition("HALTED", cause="operator", actor="will", reason="venue incident", now_ms=T0 + 5)
+    w_later = worker(factory, account, identity("standard"), now=lambda: T0 + 10, rules=False)
+    assert await w_later.process(await request(factory, account, "resume")) == "applied"
+    current = await state_of(factory, account)
+    assert current.probation is not None and same_limits(current.probation, probation)
+    assert current.probation.started_at_ms == T0 + 10
+
+
+@pytest.mark.asyncio
+async def test_no_writer_can_leave_an_unfinished_probation(capital_db):
+    factory, account = capital_db
+    repo = await probation_state(factory, account)
+    with pytest.raises(IllegalTradingTransition, match="probation has not passed"):
+        await repo.transition("ACTIVE", cause="operator", actor="t", reason="drop it", now_ms=T0 + 1)
+    await repo.transition("REDUCING", cause="operator", actor="t", reason="maintenance", now_ms=T0 + 5)
+    with pytest.raises(IllegalTradingTransition, match="probation has not passed"):
+        await repo.transition("ACTIVE", cause="operator", actor="t", reason="bypass", now_ms=T0 + 6)
+    assert (await state_of(factory, account)).state == "REDUCING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "cause"), [("HALTED", "auto"), ("HALTED", "operator"),
+                                              ("REDUCING", "material_deploy")])
+async def test_the_admin_token_lifts_only_an_operator_pause(capital_db, setup, cause):
+    from bfx_funding_bot.modules.execution.safety.trading_state import NotAnOperatorPause
+    factory, account = capital_db
+    repo = await start(factory, account, setup, cause)
+    before = await state_of(factory, account)
+    with pytest.raises(NotAnOperatorPause):
+        await repo.resume_pause(actor="admin", reason="static token", now_ms=T0)
+    assert await state_of(factory, account) == before
+
+
+@pytest.mark.asyncio
+async def test_after_the_lift_a_pause_resumes_without_probation(capital_db):
+    factory, account = capital_db
+    repo = await probation_state(factory, account)
+    await acknowledged(factory, account, at=T0 + 1, count=3)
+    assert await worker(factory, account, identity("standard"),
+                        now=lambda: T0 + BAKE_MS).lift_probation_if_passed() is not None
+    await repo.transition("REDUCING", cause="operator", actor="t", reason="maintenance", now_ms=T0 + BAKE_MS + 1)
+    result = await repo.resume_pause(actor="t", reason="done", now_ms=T0 + BAKE_MS + 2)
+    assert (result.state.state, result.state.probation) == ("ACTIVE", None)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_that_starts_no_probation_does_not_need_the_venue(capital_db):
+    """Only a transition that starts a probation observes the venue minimum;
+    anything else must not depend on the venue (no guard deadlock)."""
+    factory, account = capital_db
+    await start(factory, account, "REDUCING", "operator")
+    w = worker(factory, account, identity("standard"), now=lambda: T0, rules=False)
+    assert await w.process(await request(factory, account, "resume")) == "applied"
+    current = await state_of(factory, account)
+    assert (current.state, current.probation) == ("ACTIVE", None)
+
+
+@pytest.mark.asyncio
+async def test_the_release_flow_alerts_the_operator(capital_db, monkeypatch):
+    factory, account = capital_db
+    sent: list[tuple[str, str | None, dict]] = []
+    monkeypatch.setattr(alerts, "emit", lambda event, *, level=None, **fields:
+                        sent.append((event, level, fields)))
+    await start(factory, account)
+    sent.clear()
+    await apply_deploy_gate(factory, account_id=account, environment="ci",
+                            identity=identity("material"), now_ms=T0)
+    assert [(e, lv, f.get("action")) for e, lv, f in sent if e == "deploy_gate"] == [
+        ("deploy_gate", "warning", "reducing")]
+    w = worker(factory, account, identity("material"), now=lambda: T0)
+    assert await w.process(await request(factory, account, "approve")) == "applied"
+    assert await w.process(await request(factory, account, "approve")) == "rejected"
+    await acknowledged(factory, account, at=T0 + 1, count=3)
+    assert await worker(factory, account, identity("material"),
+                        now=lambda: T0 + BAKE_MS).lift_probation_if_passed() is not None
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=T0 + BAKE_MS + 1)
+    no_venue = worker(factory, account, identity("material"), now=lambda: T0 + BAKE_MS + 2, rules=False)
+    assert await no_venue.process(await request(factory, account, "resume")) == "failed"
+    events = [(e, lv) for e, lv, _ in sent]
+    for expected in [("trading_control_applied", "warning"), ("probation_started", "warning"),
+                     ("trading_control_rejected", "warning"), ("probation_lifted", "info"),
+                     ("trading_control_failed", "critical")]:
+        assert expected in events
+    changes = [f["state"] for e, _, f in sent if e == "trading_state_changed"]
+    assert changes == ["REDUCING", "ACTIVE", "ACTIVE", "HALTED"]  # gate, approval, lift, halt
 
 
 # -------------------------------------------------------- capital probation

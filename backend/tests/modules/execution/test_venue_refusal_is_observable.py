@@ -106,11 +106,3 @@ def test_the_rule_itself_is_not_relaxed() -> None:
         validate_amount(floor - RULE.amount_quantum, evidence, symbol="fUST", now_ms=1000)
 
 
-def test_submitted_amount_stays_inside_the_consumption_band() -> None:
-    """The reconciler may revise up to RELEASE_MINIMUM_TOLERANCE and consume()
-    accepts exactly that band; the margin must not eat it."""
-    from bfx_funding_bot.modules.execution.deployment.reconciler import (
-        RELEASE_MINIMUM_TOLERANCE,
-    )
-
-    assert RULE.submit_margin < RELEASE_MINIMUM_TOLERANCE

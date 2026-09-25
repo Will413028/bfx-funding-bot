@@ -54,7 +54,7 @@ from bfx_funding_bot.modules.execution.event_store.tables import (
     ReconcileObservationRow,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow, TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.tables import NavPeakRow
 from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow, ConfigRegimeRow
 
 _MONEY_MODELS: tuple[tuple[str, type[Any]], ...] = (
@@ -65,7 +65,6 @@ _MONEY_MODELS: tuple[tuple[str, type[Any]], ...] = (
     ("execution_decisions", ExecutionDecisionRow),
     ("diagnostics", DiagnosticsRow),
     ("nav_peak", NavPeakRow),
-    ("trading_halt", TradingHaltRow),
     ("attribution_weekly", AttributionWeeklyRow),
     ("config_regime", ConfigRegimeRow),
 )

@@ -2,7 +2,7 @@
 
 The restored cluster's newest event_prefix_hashes link for the scope must equal
 production's link at the same event_seq; the restored chain must recompute. The
-baseline drill (Halt 2) keeps its receipt, allowlists and commands unchanged.
+baseline drill keeps its evidence file, allowlists and commands unchanged.
 """
 from __future__ import annotations
 
@@ -316,8 +316,8 @@ def _request() -> Any:
 
 
 def test_prefix_drill_restores_the_newest_backup_and_compares_with_production(tmp_path: Path) -> None:
-    halt2_receipt = tmp_path / "restore.json"
-    halt2_receipt.write_text('{"kind":"restore","measured":true}')
+    baseline_evidence = tmp_path / "restore.json"
+    baseline_evidence.write_text('{"kind":"restore","measured":true}')
     fake = FakeDocker()
     assert _prefix_drill(tmp_path, fake).run(_request()) == 0
 
@@ -328,7 +328,7 @@ def test_prefix_drill_restores_the_newest_backup_and_compares_with_production(tm
                                 "production_event_head": HEAD_SEQ + 12,
                                 "production_prefix_hash": HEAD_HASH}
     assert report["target_time"] is None and report["egress_disconnected"] is True
-    assert halt2_receipt.read_text() == '{"kind":"restore","measured":true}'   # untouched
+    assert baseline_evidence.read_text() == '{"kind":"restore","measured":true}'   # untouched
 
     # Newest backup, end-of-archive recovery (no PITR target), no baseline hash anywhere.
     assert f"DR_TARGET_BACKUP_LABEL={LABEL_DIFF}\n" in fake.env_text

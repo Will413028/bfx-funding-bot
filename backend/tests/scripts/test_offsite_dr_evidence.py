@@ -15,6 +15,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.scripts.dr_measurement import read_measurement
+
 ROOT = Path(__file__).resolve().parents[3]
 EVIDENCE_PATH = ROOT / "deploy/vm/pgbackrest/evidence.py"
 TOKEN_SENTINEL = "TOKEN-SENTINEL"
@@ -332,8 +334,7 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path, monkeypatc
     completed = subprocess.run(argv, capture_output=True, text=True, check=False)
     assert completed.returncode == 0
     assert json.loads(output.read_text())["measured"] is True
-    from scripts.halt2_cutover import _read_dr_measurement
-    assert _read_dr_measurement(output, key="rto_seconds") == 37
+    assert read_measurement(output, key="rto_seconds") == 37
     if mutation == "baseline":
         baseline.write_text(json.dumps(_baseline_payload() | {"event_head": 43}))
     elif mutation == "missing":
@@ -348,7 +349,7 @@ def test_baseline_restore_cli_requires_matching_state(tmp_path: Path, monkeypatc
         monkeypatch.setattr(evidence.os, "replace", fail_replace)
     assert evidence.main([*argv[2:], *(["--archive-only"] if archive_only else [])]) == 2
     with pytest.raises(ValueError):
-        _read_dr_measurement(output, key="rto_seconds")
+        read_measurement(output, key="rto_seconds")
     if output.exists():
         assert json.loads(output.read_text())["measured"] is False
         assert json.loads(output.read_text())["kind"] == ("archive_restore" if archive_only else "restore")
@@ -416,17 +417,16 @@ def test_pinned_info_rejects_stop_before_start() -> None:
 
 @pytest.mark.parametrize("kind", ["backup", "backup-invalid", "backup-failure"])
 @pytest.mark.parametrize("fault", ["write", "replace", "write-and-unlink"])
-def test_backup_enospc_revokes_green_at_halt2_reader(
+def test_backup_enospc_revokes_green_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, fault: str,
 ) -> None:
-    from scripts.halt2_cutover import _read_dr_measurement
 
     output = tmp_path / "backup.json"
     output.write_text(json.dumps({
         "schema_version": 1, "kind": "backup", "measured": True, "rpo_seconds": 1, "observed_at_ms": time.time_ns() // 1_000_000,
     }))
     output.chmod(0o600)
-    assert _read_dr_measurement(output, key="rpo_seconds") == 1
+    assert read_measurement(output, key="rpo_seconds") == 1
     archiver, info = tmp_path / "archiver.tsv", tmp_path / "info.json"
     archiver.write_text("1756961300000\t1756961240000\t00000001000000000000000A\t0\t")
     info.write_text(_info_json() if kind == "backup" else "{}")
@@ -447,7 +447,7 @@ def test_backup_enospc_revokes_green_at_halt2_reader(
     ]
     assert evidence.main([*argv, "--output", str(output)]) == 2
     with pytest.raises(ValueError):
-        _read_dr_measurement(output, key="rpo_seconds")
+        read_measurement(output, key="rpo_seconds")
 
 
 def _info_json() -> str:

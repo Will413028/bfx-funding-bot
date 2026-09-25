@@ -65,6 +65,12 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     "c3a639388457",
     # New tables and a trading_state column, all outside TABLE_NAMES.
     "0218f9ab59a2",
+    # A request table beside the ledger plus web API privilege revocation: no
+    # archived row or event_log content changes.
+    "b8e2d4f6a013",
+    # Archives the release ceremony's tables in their own schema; none is in
+    # TABLE_NAMES and event_log is untouched.
+    "5d1c7e9a3b20",
     # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
     "9391a0f675d3",
 })
