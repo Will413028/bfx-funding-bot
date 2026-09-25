@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly isolated restore test (existing pgBackRest restore drill)
+Description=Isolated restore test (pgBackRest drill, prefix-hash verification)
 Documentation=file:///home/ubuntu/bfx-funding-bot/docs/runbooks/offsite-dr.md
 Requires=docker.service
 After=docker.service
@@ -15,4 +15,4 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/home/ubuntu/bfx-funding-bot
 # The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
 TimeoutStartSec=7200
-ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_restore_test.py --config /home/ubuntu/bfx/restore-test.json --drill /home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json
+ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_restore_test.py --config /home/ubuntu/bfx/restore-test.json --drill /home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json

@@ -52,6 +52,19 @@ RESTORE_ERROR_CODES = frozenset(
     }
 )
 
+# Prefix mode (restore_drill.py --prefix): no operator baseline. The restored
+# cluster's newest event_prefix_hashes link for the scope must equal production's
+# link at the same event_seq, and the restored chain must recompute exactly.
+PREFIX_ERROR_CODES = RESTORE_ERROR_CODES | frozenset(
+    {
+        "prefix_hash_mismatch",
+        "prefix_ahead_of_production",
+        "prefix_chain_invalid",
+        "production_read_failed",
+        "backup_label_unavailable",
+    }
+)
+
 _BACKUP_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _NETWORK_NAME = re.compile(r"bfx-dr-[a-z0-9-]+")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -616,15 +629,151 @@ def render_restore_evidence(
     }
 
 
+def parse_prefix_verification(
+    verification_json: str, *, event_count: int, account_id: str, environment: str,
+    projector_version: str,
+) -> tuple[dict[str, object], dict[str, int | str]]:
+    """Validate prefix_verify.py output: the existing replay plus the recomputed chain head."""
+    if not isinstance(verification_json, str) or len(verification_json.encode()) > 65536:
+        _raise("restore_output_invalid")
+    try:
+        payload = json.loads(verification_json, object_pairs_hook=_unique_json_object)
+    except (ValueError, TypeError, RecursionError):
+        _raise("restore_output_invalid")
+    if not isinstance(payload, dict) or set(payload) != {"replay", "prefix"}:
+        _raise("restore_output_invalid")
+    replay = _parse_replay(json.dumps(payload["replay"]), event_count=event_count)
+    if (replay["account_id"], replay["environment"], replay["projector_version"]) != (
+        account_id, environment, projector_version,
+    ):
+        _raise("restore_output_invalid")
+    prefix = payload["prefix"]
+    if not isinstance(prefix, dict) or set(prefix) != {"event_seq", "prefix_hash", "chain_length"}:
+        _raise("prefix_chain_invalid")
+    event_seq, prefix_hash, chain_length = (
+        prefix["event_seq"], prefix["prefix_hash"], prefix["chain_length"],
+    )
+    if (
+        type(event_seq) is not int
+        or event_seq <= 0
+        or not _is_sha256(prefix_hash)
+        or type(chain_length) is not int
+        or chain_length != event_count
+        or chain_length <= 0
+        or event_seq != replay["event_head"]
+    ):
+        _raise("prefix_chain_invalid")
+    return replay, {"event_seq": event_seq, "prefix_hash": prefix_hash,
+                    "chain_length": chain_length}
+
+
+def compare_prefix_heads(
+    *, restored_seq: int, restored_hash: str, production_tsv: str,
+) -> dict[str, int | str]:
+    """Production's link at the restored head must exist and be byte-identical.
+
+    `production_tsv` is `<prefix_hash at restored_seq>\t<production head seq>` for the
+    same scope; an empty hash means production has no such link (the restore is
+    ahead of, or diverged from, production). Production normally has moved on --
+    its head may exceed the restored one; that lag is recorded, not judged here
+    (RPO is bfx-backup-check's job).
+    """
+    row = production_tsv.rstrip("\r\n")
+    fields = row.split("\t")
+    if "\n" in row or "\r" in row or len(fields) != 2:
+        _raise("production_read_failed")
+    production_hash, head_text = fields
+    production_head = _optional_nonnegative_int(head_text, code="production_read_failed")
+    if production_hash and not _is_sha256(production_hash):
+        _raise("production_read_failed")
+    if not production_hash or production_head is None or production_head < restored_seq:
+        _raise("prefix_ahead_of_production")
+    if production_hash != restored_hash:
+        _raise("prefix_hash_mismatch")
+    return {"production_event_head": production_head, "production_prefix_hash": production_hash}
+
+
+def render_prefix_restore_evidence(
+    *,
+    schema_tsv: str,
+    verification_json: str,
+    production_tsv: str,
+    account_id: str,
+    environment: str,
+    projector_version: str,
+    target_backup_label: str,
+    elapsed_seconds: int,
+    observed_at_ms: int,
+    config_path: Path,
+    image_digest: str,
+    image_labels: Mapping[str, str],
+    network_name: str,
+    network_internal: bool,
+    egress_disconnected: bool,
+    verifier_image_digest: str,
+    now_ms: int | None = None,
+) -> dict[str, object]:
+    """Bounded evidence for a baseline-free restore verified by prefix-hash comparison."""
+    if isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, int) or elapsed_seconds < 0:
+        _raise("rto_invalid")
+    if network_internal is not True or len(network_name) > 128 or _NETWORK_NAME.fullmatch(network_name) is None:
+        _raise("network_not_internal")
+    if type(observed_at_ms) is not int or observed_at_ms < 0 or egress_disconnected is not True:
+        _raise("restore_output_invalid")
+    now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+    if type(now) is not int or not 0 <= now - observed_at_ms <= _MAX_EVIDENCE_AGE_MS:
+        _raise("restore_output_invalid")
+    if not isinstance(image_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
+        _raise("restore_output_invalid")
+    if not _archive.image_digest(verifier_image_digest):
+        _raise("restore_output_invalid")
+    if not isinstance(target_backup_label, str) or _BACKUP_LABEL.fullmatch(target_backup_label) is None:
+        _raise("restore_output_invalid")
+    labels = validate_image_labels(image_labels)
+    server_version_num, migration_heads, event_count = _parse_schema(schema_tsv)
+    replay, prefix = parse_prefix_verification(
+        verification_json, event_count=event_count, account_id=account_id,
+        environment=environment, projector_version=projector_version,
+    )
+    production = compare_prefix_heads(
+        restored_seq=int(prefix["event_seq"]), restored_hash=str(prefix["prefix_hash"]),
+        production_tsv=production_tsv,
+    )
+    return {
+        "schema_version": 1,
+        "measured": True,
+        "kind": "restore_prefix",
+        "rto_seconds": elapsed_seconds,
+        "target_backup_label": target_backup_label,
+        "target_time": None,
+        "observed_at_ms": observed_at_ms,
+        "egress_disconnected": True,
+        "server_version_num": server_version_num,
+        "migration_heads": migration_heads,
+        "event_count": event_count,
+        **replay,
+        "prefix": {**prefix, **production},
+        "network_name": network_name,
+        "network_internal": True,
+        "verifier_exit_status": 0,
+        "verifier_image_digest": verifier_image_digest,
+        "config_digest": _config_digest(config_path, code="restore_output_invalid"),
+        "image_digest": image_digest,
+        "image_labels": labels,
+    }
+
+
 def render_failure_evidence(
     *,
-    kind: Literal["backup", "restore", "archive_restore"],
+    kind: Literal["backup", "restore", "archive_restore", "restore_prefix"],
     error_code: str,
     observed_at_ms: int,
 ) -> dict[str, object]:
     """Return a measured=false report with only a bounded error code."""
-    allowlist = BACKUP_ERROR_CODES if kind == "backup" else RESTORE_ERROR_CODES
-    if kind not in {"backup", "restore", "archive_restore"} or error_code not in allowlist:
+    allowlist = {"backup": BACKUP_ERROR_CODES, "restore_prefix": PREFIX_ERROR_CODES}.get(
+        kind, RESTORE_ERROR_CODES
+    )
+    if kind not in {"backup", "restore", "archive_restore", "restore_prefix"} or error_code not in allowlist:
         _raise("archiver_output_invalid" if kind == "backup" else "restore_output_invalid")
     observed = _nonnegative_int(observed_at_ms, code="archiver_output_invalid")
     return {

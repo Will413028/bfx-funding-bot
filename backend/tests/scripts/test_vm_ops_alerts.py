@@ -154,7 +154,7 @@ class CheckHarness:
 
         result = check.run_check(
             evidence=self.evidence, heartbeat=self.heartbeat, restore_timer="bfx-restore-test.timer",
-            state_path=self.state, rpo_limit_s=300, max_age_s=900, restore_max_age_s=8 * 86_400,
+            state_path=self.state, rpo_limit_s=300, max_age_s=900, restore_max_age_s=35 * 86_400,
             realert_s=6 * 3600, notify=lambda level, text: self.notices.append((level, text)),
             status=status, clock=lambda: self.now,
         )
@@ -216,30 +216,33 @@ def test_restore_heartbeat_is_only_required_while_the_weekly_test_is_enabled(tmp
     h.heartbeat.write_text(json.dumps({"observed_at_ms": int(h.now * 1000)}))
     h.write()
     assert h.run() == 0
-    h.heartbeat.write_text(json.dumps({"observed_at_ms": int(h.now * 1000) - 9 * 86_400_000}))
-    assert check.restore_problems(json.loads(h.heartbeat.read_text()), now_ms=int(h.now * 1000),
-                                  max_age_s=8 * 86_400) == ["restore_test_stale:9d"]
+    # Monthly cadence: a 34-day-old heartbeat is fine, 36 days is stale.
+    for days, expected in ((34, []), (36, ["restore_test_stale:36d"])):
+        beat = {"observed_at_ms": int(h.now * 1000) - days * 86_400_000}
+        assert check.restore_problems(beat, now_ms=int(h.now * 1000),
+                                      max_age_s=35 * 86_400) == expected
 
 
 # --------------------------------------------------------------------------- restore test
 
 REQUEST = {"account_id": "00000000-0000-0000-0000-0000000000c1", "environment": "prod",
-           "projector_version": "execution-state-v1", "backup_label": "20260927-031700F",
-           "target_time": None, "baseline": "/home/ubuntu/bfx/restore-baseline/baseline.json"}
+           "projector_version": "execution-state-v1"}
 
 
 class DrillHarness:
     def __init__(self, tmp_path: Path) -> None:
         self.config = tmp_path / "restore-test.json"
-        self.evidence = tmp_path / "restore.json"
+        self.evidence = tmp_path / "restore-prefix.json"
         self.heartbeat = tmp_path / "restore-heartbeat.json"
         self.drill = tmp_path / "restore-drill.sh"
         self.calls: list[list[str]] = []
         self.exit = 0
-        self.report: dict[str, Any] | None = {"measured": True, "observed_at_ms": NOW_MS - 5_000,
-                                              "restore_run_id": "20260927T051700Z-abc",
-                                              "rto_seconds": 812,
-                                              "target_backup_label": "20260927-031700F"}
+        self.report: dict[str, Any] | None = {
+            "measured": True, "kind": "restore_prefix", "observed_at_ms": NOW_MS - 5_000,
+            "restore_run_id": "20261001T091700Z-abc", "rto_seconds": 212,
+            "target_backup_label": "20261001-031700F_20261001-031700D",
+            "prefix": {"event_seq": 90_210, "production_event_head": 90_233},
+        }
 
     def run(self) -> int:
         def runner(argv: Sequence[str], timeout: float) -> int:
@@ -253,17 +256,16 @@ class DrillHarness:
                                             timeout=7000, runner=runner, clock=lambda: NOW))
 
 
-def test_restore_test_passes_the_configured_request_to_the_existing_drill(tmp_path: Path) -> None:
+def test_restore_test_runs_the_drill_in_prefix_mode_without_a_baseline(tmp_path: Path) -> None:
     h = DrillHarness(tmp_path)
-    h.config.write_text(json.dumps({**REQUEST, "target_time": "2026-09-27T04:00:00Z"}))
+    h.config.write_text(json.dumps(REQUEST))
     assert h.run() == 0
-    assert h.calls == [[str(h.drill), "--account-id", REQUEST["account_id"], "--environment", "prod",
-                        "--projector-version", "execution-state-v1",
-                        "--backup-label", "20260927-031700F", "--baseline", REQUEST["baseline"],
-                        "--target-time", "2026-09-27T04:00:00Z"]]
+    assert h.calls == [[str(h.drill), "--prefix", "--account-id", REQUEST["account_id"],
+                        "--environment", "prod", "--projector-version", "execution-state-v1"]]
     beat = json.loads(h.heartbeat.read_text())
     assert (beat["observed_at_ms"], beat["restore_run_id"], beat["rto_seconds"]) == (
-        NOW_MS, "20260927T051700Z-abc", 812)
+        NOW_MS, "20261001T091700Z-abc", 212)
+    assert (beat["event_seq"], beat["production_event_head"]) == (90_210, 90_233)
 
 
 def test_unconfigured_restore_test_fails_loudly(tmp_path: Path) -> None:
@@ -274,11 +276,9 @@ def test_unconfigured_restore_test_fails_loudly(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("bad", [
     {**REQUEST, "account_id": "not-a-uuid"},
-    {**REQUEST, "baseline": "relative/baseline.json"},
-    {**REQUEST, "target_time": "yesterday"},
-    {**REQUEST, "backup_label": "x; rm -rf /"},
-    {k: v for k, v in REQUEST.items() if k != "baseline"},
-    {**REQUEST, "extra": 1},
+    {**REQUEST, "environment": "prod; rm -rf /"},
+    {**REQUEST, "baseline": "/home/ubuntu/baseline.json"},
+    {k: v for k, v in REQUEST.items() if k != "projector_version"},
 ])
 def test_malformed_restore_request_never_reaches_the_drill(tmp_path: Path, bad: dict[str, Any]) -> None:
     h = DrillHarness(tmp_path)
@@ -297,10 +297,12 @@ def test_failed_drill_keeps_the_old_heartbeat(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("report", [
     None,
-    {"measured": False, "observed_at_ms": NOW_MS},
-    {"measured": True, "observed_at_ms": NOW_MS - 2 * 3_600_000},
+    {"measured": False, "kind": "restore_prefix", "observed_at_ms": NOW_MS},
+    {"measured": True, "kind": "restore_prefix", "observed_at_ms": NOW_MS - 2 * 3_600_000},
+    # A baseline drill's receipt is not a prefix-mode pass.
+    {"measured": True, "kind": "restore", "observed_at_ms": NOW_MS},
 ])
-def test_success_exit_without_fresh_measured_evidence_is_a_failure(
+def test_success_exit_without_fresh_measured_prefix_evidence_is_a_failure(
     tmp_path: Path, report: dict[str, Any] | None,
 ) -> None:
     h = DrillHarness(tmp_path)

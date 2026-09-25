@@ -709,6 +709,37 @@ serialized append reject reused CID cycles; prove the exact private source in
 rehearsal and keep that gate open until resolved. No automatic DB rollback is
 safe after a venue write; retain halt and follow the forward-repair policy.
 
+## Monthly and change-triggered prefix restore test
+
+The baseline drill above stays the acceptance and Halt 2 path. The recurring
+check is the baseline-free prefix mode, which needs no writer pause and no
+operator baseline:
+
+```bash
+deploy/vm/pgbackrest/restore-drill.sh --prefix \
+  --account-id <canonical-uuid> --environment prod \
+  --projector-version execution-state-v1
+```
+
+It restores the newest backup set (read from the production stanza with
+`pgbackrest info`) to the end of the archive into the same generated, isolated
+resources, then runs `deploy/vm/pgbackrest/prefix_verify.py` on stdin inside the
+`bfx-bot:local` image: the existing event-only replay plus a recomputation of
+the restored `event_prefix_hashes` chain. Finally it reads, in a read-only
+transaction, production's link at the restored head's `event_seq` for the same
+scope and requires it to be identical (`prefix_hash_mismatch` or
+`prefix_ahead_of_production` otherwise). The receipt is
+`$HOME/bfx/dr-evidence/restore-prefix.json` (`kind: restore_prefix`); it never
+replaces `restore.json`.
+
+`bfx-restore-test.service` runs this monthly (`bfx-restore-test.timer`, 1st of
+the month 09:17 UTC) and whenever bfx-deploy is about to apply a migration or
+ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/` or the
+compose files; a failure alerts and blocks that deploy. Its config is
+`/home/ubuntu/bfx/restore-test.json` with exactly `account_id`, `environment`
+and `projector_version`. bfx-deploy never updates the checked-out DR scripts, so
+after applying a DR change on the VM, start the service once by hand.
+
 ## Rotation and incident posture
 
 R2 token rotation and repository cipher rotation are separate procedures. For

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Weekly isolated restore test: run the existing drill, then write a heartbeat.
+"""Isolated restore test: run the drill in prefix mode, then write a heartbeat.
 
-Runs as the DR operator user (ubuntu) from bfx-restore-test.service, exactly
-like the pgBackRest units: restore_drill.py reads its secrets and writes its
-evidence under that user's home, and git-checks its config in that user's
-checkout. This wrapper adds nothing to the drill's checks; it only
+Runs as the DR operator user (ubuntu) from bfx-restore-test.service -- monthly
+from its timer, and on demand from bfx-deploy before a release with a pending
+migration or a PostgreSQL/pgBackRest change. Like the pgBackRest units, the
+drill reads its secrets and writes its evidence under that user's home and
+git-checks its config in that user's checkout. This wrapper adds no checks of
+its own; it only
 
-1. passes the drill the request from a JSON config (account, environment,
-   projector version, backup label, optional PITR target, baseline path);
-2. on success, requires the drill's own restore.json to be `measured: true`
-   and fresh, then atomically writes the heartbeat bfx-backup-check watches;
+1. runs `restore-drill.sh --prefix` for the account/environment in a small JSON
+   config: restore the newest backup to the end of the archive, recompute the
+   restored event_prefix_hashes chain, and require its newest link to equal
+   production's link at the same event_seq (no baseline, no writer pause);
+2. on success, requires the drill's own restore-prefix.json to be `measured:
+   true` and fresh, then atomically writes the heartbeat bfx-backup-check watches;
 3. on any failure exits non-zero, so OnFailure=bfx-alert@%n.service alerts
    (the Telegram credentials are root-only; this process never reads them).
-
-The drill verifies against an operator-captured baseline for the same backup
-target (docs/runbooks/offsite-dr.md section 6). How that baseline is produced for
-an unattended weekly run is an open decision; see the T10 hand-off notes.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from typing import Any
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-_TARGET_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _MAX_EVIDENCE_AGE_MS = 3_600_000
 
 # (argv, timeout) -> exit status; the drill's own output goes to the journal.
@@ -50,35 +49,23 @@ def _fail(code: str) -> None:
 
 
 def load_request(path: Path) -> list[str]:
-    """Return the drill arguments from the JSON config, or raise."""
+    """Return the prefix-mode drill arguments from the JSON config, or raise."""
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise RestoreTestError("restore_test_not_configured") from None
     except (OSError, ValueError):
         raise RestoreTestError("restore_test_config_unreadable") from None
-    expected = {"account_id", "environment", "projector_version", "backup_label",
-                "target_time", "baseline"}
-    if not isinstance(config, dict) or set(config) != expected:
+    if not isinstance(config, dict) or set(config) != {"account_id", "environment", "projector_version"}:
         _fail("restore_test_config_fields")
     values: dict[str, Any] = config
     if not isinstance(values["account_id"], str) or _UUID.fullmatch(values["account_id"]) is None:
         _fail("restore_test_config_account_id")
-    for key in ("environment", "projector_version", "backup_label"):
+    for key in ("environment", "projector_version"):
         if not isinstance(values[key], str) or _TOKEN.fullmatch(values[key]) is None:
             _fail(f"restore_test_config_{key}")
-    target = values["target_time"]
-    if target is not None and (not isinstance(target, str) or _TARGET_TIME.fullmatch(target) is None):
-        _fail("restore_test_config_target_time")
-    baseline = values["baseline"]
-    if not isinstance(baseline, str) or not Path(baseline).is_absolute():
-        _fail("restore_test_config_baseline")
-    arguments = ["--account-id", values["account_id"], "--environment", values["environment"],
-                 "--projector-version", values["projector_version"],
-                 "--backup-label", values["backup_label"], "--baseline", baseline]
-    if target is not None:
-        arguments += ["--target-time", target]
-    return arguments
+    return ["--prefix", "--account-id", values["account_id"], "--environment", values["environment"],
+            "--projector-version", values["projector_version"]]
 
 
 def _subprocess_drill(argv: Sequence[str], timeout: float) -> int:
@@ -97,17 +84,21 @@ def heartbeat_from_evidence(evidence: Path, *, now_ms: int) -> dict[str, object]
         report = json.loads(evidence.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise RestoreTestError("restore_evidence_unreadable") from None
-    if not isinstance(report, dict) or report.get("measured") is not True:
+    if (not isinstance(report, dict) or report.get("measured") is not True
+            or report.get("kind") != "restore_prefix"):
         _fail("restore_evidence_unmeasured")
     observed = report.get("observed_at_ms")
     if type(observed) is not int or not 0 <= now_ms - observed <= _MAX_EVIDENCE_AGE_MS:
         _fail("restore_evidence_stale")
+    prefix = report.get("prefix") if isinstance(report.get("prefix"), dict) else {}
     return {
         "schema_version": 1, "kind": "restore_test_heartbeat", "observed_at_ms": now_ms,
         "restore_observed_at_ms": observed,
         "restore_run_id": report.get("restore_run_id"),
         "rto_seconds": report.get("rto_seconds"),
         "target_backup_label": report.get("target_backup_label"),
+        "event_seq": prefix.get("event_seq"),
+        "production_event_head": prefix.get("production_event_head"),
     }
 
 
@@ -157,7 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=home / "bfx/restore-test.json")
     parser.add_argument("--drill", type=Path,
                         default=home / "bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh")
-    parser.add_argument("--evidence", type=Path, default=home / "bfx/dr-evidence/restore.json")
+    parser.add_argument("--evidence", type=Path, default=home / "bfx/dr-evidence/restore-prefix.json")
     parser.add_argument("--heartbeat", type=Path,
                         default=home / "bfx/dr-evidence/restore-heartbeat.json")
     parser.add_argument("--timeout-seconds", type=float, default=7000.0)
