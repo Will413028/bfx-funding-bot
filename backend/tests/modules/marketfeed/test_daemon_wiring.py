@@ -271,12 +271,17 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         await engine.dispose()
 
 
+_DEPLOYMENT_ID = "11111111-2222-4333-8444-555555555555"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("deploy_env", "expected"), [
     ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "standard"}, ("ACTIVE", "operator", "kept")),
+      "BFX_CHANGE_CLASS": "standard", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+     ("ACTIVE", "operator", "kept")),
     ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "material"}, ("REDUCING", "material_deploy", "reducing")),
+      "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+     ("REDUCING", "material_deploy", "reducing")),
     ({}, ("REDUCING", "material_deploy", "reducing")),  # no deploy identity: fail closed
 ])
 async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, httpx_mock, deploy_env, expected):
@@ -293,7 +298,7 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     for name in list(os.environ):
         if name.startswith("BFX_CANARY_") or name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-            "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS",
+            "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID",
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
@@ -311,6 +316,18 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
+    if "BFX_DEPLOYMENT_ID" in deploy_env:
+        # The deploy tool's `started` row for this process, before it created the container.
+        from datetime import UTC, datetime
+        from uuid import UUID
+
+        from bfx_funding_bot.modules.deployments.tables import DeploymentRow
+        async with factory.begin() as session:
+            session.add(DeploymentRow(attempt_id=UUID(_DEPLOYMENT_ID), started_at=datetime.now(UTC),
+                finished_at=None, source_revision=deploy_env["BFX_SOURCE_REVISION"],
+                backend_digest=deploy_env["BFX_IMAGE_DIGEST"], frontend_digest="sha256:" + "f" * 64,
+                change_class=deploy_env["BFX_CHANGE_CLASS"], migrations_applied=False,
+                outcome="started", detail="fixture"))
     repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
     async with factory.begin() as session:
         await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
