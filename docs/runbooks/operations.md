@@ -14,7 +14,7 @@
 | `REDUCING` | 不可、也不重掛 | 可 | 無 venue 動作 |
 | `HALTED` | 不可 | 可 | 先 commit HALTED，再對每個幣別呼叫 venue funding cancel-all（含 orphan 與有 UNKNOWN 的幣別） |
 
-cause：`operator`（人）、`kill_switch`（`BFX_KILL_SWITCH`）、`auto`（自動保護）、
+cause：`operator`（人）、`auto`（自動保護）、
 `material_deploy`（material 部署等待核准）。讀不到狀態或從未記錄任何決策 ＝ HALTED（fail-closed）。
 
 非法轉換由 DB trigger 與程式碼雙重拒絕：HALTED→REDUCING、非 operator 把 REDUCING/HALTED 改回
@@ -68,8 +68,8 @@ except urllib.error.HTTPError as e:
 
 恢復仍需 UI（TOTP）。bot 自己停著時兩者都不可用：到 Bitfinex 網頁撤單並記錄。
 
-`BFX_KILL_SWITCH=true`（bot.env）是 DB 故障時的 break-glass：guard 直接擋新單，開機時也走 kill
-path。改 bot.env 需要重建 bot container（見 §7）。
+不依賴資料庫的 break-glass 是停掉 bot container（見 §7）：停下的 bot 不會掛新單，但也不會撤單；
+venue 上的掛單要到 Bitfinex 網頁撤。`BFX_KILL_SWITCH` env 已退役，設了也沒有作用。
 
 ## 3. Release flow：核准與限額期
 

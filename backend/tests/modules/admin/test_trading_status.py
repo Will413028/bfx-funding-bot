@@ -198,16 +198,14 @@ def _service(
 async def test_halted_true_comes_from_asking_the_real_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service().snapshot()
+    snap = await _service(trading_state=_FakeTradingState(_trading("HALTED"))).snapshot()
     assert snap["halt"]["halted"] is True
     assert snap["halt"]["guard_installed"] is True
-    assert "BFX_KILL_SWITCH" in snap["halt"]["reason"]
+    assert "trading state HALTED" in snap["halt"]["reason"]
 
 
 @pytest.mark.asyncio
 async def test_halted_false_when_flag_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service().snapshot()
     assert snap["halt"]["halted"] is False
     assert snap["halt"]["reason"] is None
@@ -220,8 +218,8 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
     """`guard_installed=False` must be visible. "No guard blocked" and "no guard
     exists to block" are different states; conflating them is how a disabled
     safety control reads as a healthy one."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service(guards=[]).snapshot()
+    snap = await _service(guards=[],
+                          trading_state=_FakeTradingState(_trading("HALTED"))).snapshot()
     assert snap["halt"]["guard_installed"] is False
     assert snap["halt"]["halted"] is False
     assert "not installed" in (snap["halt"]["note"] or "")
@@ -229,7 +227,6 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
 
 @pytest.mark.asyncio
 async def test_installed_guards_are_listed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service(
         guards=[
             ManualKillGuard(),
@@ -337,7 +334,7 @@ async def test_last_submit_attempt_surfaces_the_blocking_guard() -> None:
     )
     rec.record_blocked(
         cell="fUST_a30", symbol="fUST", amount=D("150"),
-        guard_name="manual_kill", reason="BFX_KILL_SWITCH env flag set",
+        guard_name="manual_kill", reason="trading state HALTED: operator stop",
     )
     snap = await _service(recorder=rec).snapshot()
     assert snap["last_submit_attempt"]["outcome"] == "blocked"
@@ -356,10 +353,11 @@ async def test_dry_run_reports_the_halt_even_with_no_funds(
     """The deadlock this breaks: with available=3.00 the reconciler never sizes
     an offer, so the kill switch could not be verified by observation. The probe
     asks directly."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
+    halted = _FakeTradingState(_trading("HALTED"))
     svc = _service(
+        trading_state=halted,
         guards=[
-            ManualKillGuard(),
+            ManualKillGuard(trading_state=halted),
             BuyingPowerGuard(
                 ledger=_FakeLedger(available={"fUST": D("3.00")}),
                 buffers={"fUST": D("3")}, default_buffer=D("0"),
@@ -388,8 +386,8 @@ async def test_dry_run_probes_every_configured_symbol_by_default(
     An operator running the default probe would have concluded funds were the
     blocker while the funded symbol was held solely by the kill switch. A probe
     that reports on a symbol nobody is trading is worse than none."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
     svc = _service(
+        trading_state=_FakeTradingState(_trading("HALTED")),
         cells=[_cell("fUST"), _cell("fUSD")],
         caps={"fUST": D("10000"), "fUSD": D("400")},
         buffers={"fUST": D("3"), "fUSD": D("3")},
@@ -499,16 +497,11 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_reports_both_stop_sources_separately(
+async def test_status_reports_the_persisted_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Which mechanism is holding the bot decides how you resume it. Collapsing
-    them into one boolean is how "I removed the env var, why is it still
-    halted?" becomes a mystery."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service(trading_state=_FakeTradingState(_halt_state(True))).snapshot()
     assert snap["halt"]["halted"] is True
-    assert snap["halt"]["sources"]["env_kill_switch"] is False
     persisted = snap["halt"]["sources"]["persisted"]
     assert persisted["halted"] is True
     assert persisted["state"] == "REDUCING"
@@ -518,23 +511,11 @@ async def test_status_reports_both_stop_sources_separately(
 
 
 @pytest.mark.asyncio
-async def test_env_flag_alone_is_reported_as_env_sourced(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service(trading_state=_FakeTradingState(_halt_state(False))).snapshot()
-    assert snap["halt"]["halted"] is True
-    assert snap["halt"]["sources"]["env_kill_switch"] is True
-    assert snap["halt"]["sources"]["persisted"]["halted"] is False
-
-
-@pytest.mark.asyncio
 async def test_never_configured_persisted_state_is_null_and_reads_as_halted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`null` (no decision ever recorded) and `{"halted": false}` (explicitly
     ACTIVE, with a reason) are different facts; the first fails closed."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service(trading_state=_FakeTradingState(None)).snapshot()
     assert snap["halt"]["sources"]["persisted"] is None
     assert snap["halt"]["halted"] is True

@@ -181,10 +181,11 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("writer_lock_held", [True, False])
-async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, httpx_mock, writer_lock_held):
-    """BFX_KILL_SWITCH is a real kill at boot: the durable HALTED first, then the
-    venue funding cancel-all for each currency -- before any task can trade.
-    Without the writer lock the stop is still written and the venue untouched."""
+async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_path, httpx_mock, writer_lock_held):
+    """The kill the daemon wires (/admin/halt, the webapi kill request): the
+    durable HALTED first, then the venue funding cancel-all for each currency.
+    Without the writer lock the stop is still written and the venue untouched.
+    BFX_KILL_SWITCH is retired: set, it changes nothing at boot."""
     import json as _json
 
     from sqlalchemy import select
@@ -238,8 +239,10 @@ async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, h
                             method="GET", json=[], is_reusable=True, is_optional=True)
     try:
         daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        assert (await trading.current()).state != "HALTED"  # the retired env flag did nothing
+        await daemon.trading_status.halt(reason="venue incident", actor="will")
         state = await trading.current()
-        assert (state.state, state.cause, state.actor) == ("HALTED", "kill_switch", "env:BFX_KILL_SWITCH")
+        assert (state.state, state.cause, state.actor) == ("HALTED", "operator", "will")
         # Automatic protections are wired where production raises them.
         protection = daemon.protection
         assert protection is not None and daemon.writer_lock_watch is not None
@@ -290,7 +293,7 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     for name in list(os.environ):
         if name.startswith("BFX_CANARY_") or name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
-            "BFX_KILL_SWITCH", "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS",
+            "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS",
         ):
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",

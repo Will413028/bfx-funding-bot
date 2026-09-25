@@ -384,7 +384,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L1 hard guards（always-on，順序固定）**
 
-1. `ManualKillGuard`（trading-state guard）— `BFX_KILL_SWITCH`（true/1/yes）、已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
+1. `ManualKillGuard`（trading-state guard）— 已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
@@ -401,7 +401,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 
-**Kill switch（`safety/kill_switch.py`）**：`POST /admin/halt`、以及開機時設定的 `BFX_KILL_SWITCH`，都執行同一條路徑：先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`。幣別＝設定的 symbols，加上有 open uncertainty（UNKNOWN、orphan）或非終態 venue offer 的 symbols。只需 writer lock，不經 command gate 的 provenance／uncertainty／trading-state 檢查；呼叫前以有上限的等待取得該帳戶的 command lock，避免已過 transport 檢查的 submit 在 cancel-all 之後才落地。每次呼叫在 `funding_cancel_all_audit` 留下 `requested` 與一筆終態（`acknowledged`／`rejected`／`failed`／`skipped`）；venue 失敗不回滾 HALTED，再呼叫一次 `/admin/halt` 即重試（`/admin/halt` 在 cancel-all 未全數完成時回 502）。被 cancel-all 撤掉的 UNKNOWN offer 由既有 offer-history 比對以終態 exact match 解析；orphan 的 uncertainty 仍需 operator resolution。`BFX_KILL_SWITCH` 仍由 guard 直接擋新單，作為 DB 故障時的 break-glass。
+**Kill switch（`safety/kill_switch.py`）**：`POST /admin/halt`、webapi 的 kill 請求與拒絕開機時的自動停機，都執行同一條路徑：先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`。幣別＝設定的 symbols，加上有 open uncertainty（UNKNOWN、orphan）或非終態 venue offer 的 symbols。只需 writer lock，不經 command gate 的 provenance／uncertainty／trading-state 檢查；呼叫前以有上限的等待取得該帳戶的 command lock，避免已過 transport 檢查的 submit 在 cancel-all 之後才落地。每次呼叫在 `funding_cancel_all_audit` 留下 `requested` 與一筆終態（`acknowledged`／`rejected`／`failed`／`skipped`）；venue 失敗不回滾 HALTED，再呼叫一次 `/admin/halt` 即重試（`/admin/halt` 在 cancel-all 未全數完成時回 502）。被 cancel-all 撤掉的 UNKNOWN offer 由既有 offer-history 比對以終態 exact match 解析；orphan 的 uncertainty 仍需 operator resolution。不依賴資料庫的 break-glass 是停掉 bot container；`BFX_KILL_SWITCH` env 已退役。
 
 **真錢 guard 不變式（`assert_canary_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 kill/auth/heartbeat hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`（`canary` phase 本身已在開機時拒絕）。
 
@@ -707,7 +707,7 @@ projection 表零寫權限，授權與收回都在 migration `b8e2d4f6a013`。
 `BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
 `BFX_MIN_OFFER_BUFFER_PCT`、`BFX_SCHEDULER_BUFFER_S`、
-`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
+`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
 credential vault 解密。public read model 另以明確的
 `BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 綁定 UUID。

@@ -164,7 +164,6 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
-    CAUSE_KILL_SWITCH,
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.trading_control import (
@@ -1926,14 +1925,6 @@ async def build_daemon(
             session_factory, account_id=UUID(account_id), environment=env_str,
             identity=deployment_identity, now_ms=now_ms_utc(),
         )
-    if os.environ.get("BFX_KILL_SWITCH", "").strip().lower() in ("true", "1", "yes"):
-        # Break-glass env takes effect at boot as a real kill: the durable
-        # HALTED and the venue cancel-all, before any task can place an offer.
-        # A cancel-all that does not fully land is logged CRITICAL and
-        # recorded in funding_cancel_all_audit; HALTED stays, and /admin/halt
-        # retries the venue part.
-        await kill_switch.engage(cause=CAUSE_KILL_SWITCH, actor="env:BFX_KILL_SWITCH",
-                                 reason="BFX_KILL_SWITCH set at boot")
 
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
     # Real-money status uses the same applied policy reader as the planner and

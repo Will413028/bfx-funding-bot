@@ -130,28 +130,12 @@ async def test_reported_cap_is_the_one_the_guards_enforce(
     assert snap["env_fallback_cap"]["binding"] is False
 
 
-async def test_halt_reported_from_the_guard_tracks_the_env_flag(
-    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
-) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    daemon = await _build(monkeypatch, tmp_path, httpx_mock)
-    assert daemon.trading_status is not None
-    snap = await daemon.trading_status.snapshot()
-    assert snap["halt"]["halted"] is True
-    assert snap["halt"]["guard_installed"] is True
-
-    dry = await daemon.trading_status.dry_run()
-    assert dry["would_submit_any"] is False
-    assert dry["symbols"]["fUSD"]["blocked_by"] == "manual_kill"
-
-
 async def test_dry_run_passes_when_nothing_blocks(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     """The negative control. Without it, a probe that always reported
     would_submit=False would look identical to a working halt — the same
     zero-discriminating-power trap as the alarm that fired 100% of the time."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
     dry = await daemon.trading_status.dry_run()
@@ -174,7 +158,6 @@ async def test_persisted_halt_blocks_with_the_env_flag_absent(
 ) -> None:
     """The property P2 exists for: this is what a reverted canary.env looks
     like. Before the persisted halt, that revert silently resumed lending."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
@@ -189,7 +172,6 @@ async def test_persisted_halt_blocks_with_the_env_flag_absent(
 
     snap = await daemon.trading_status.snapshot()
     assert snap["halt"]["halted"] is True
-    assert snap["halt"]["sources"]["env_kill_switch"] is False
     assert snap["halt"]["sources"]["persisted"]["reason"] == "candle distortion"
 
 
@@ -198,7 +180,6 @@ async def test_kill_is_not_lifted_by_the_admin_token(
 ) -> None:
     """/admin/halt is the kill: HALTED, whose exit is an authenticated resume.
     Paper has no venue, so the cancel-all is recorded as skipped, not done."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
@@ -213,7 +194,6 @@ async def test_kill_is_not_lifted_by_the_admin_token(
 async def test_a_pause_leaves_an_audit_trail(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
@@ -232,7 +212,6 @@ async def test_no_recorded_decision_reads_as_halted(
 ) -> None:
     """Fail closed: a scope nobody has decided about does not trade, and the
     admin token cannot lift that any more than it lifts a HALTED."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock, active=False)
     assert daemon.trading_status is not None
     dry = await daemon.trading_status.dry_run()

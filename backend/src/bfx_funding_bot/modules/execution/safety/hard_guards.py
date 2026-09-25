@@ -5,7 +5,6 @@ allocation cap). Chain short-circuits on first block.
 """
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,22 +64,18 @@ class CapitalPolicyGuard:
 
 
 class ManualKillGuard:
-    """Always-on kill switch. Blocks on EITHER stop mechanism.
+    """The trading-state guard: blocks new offers unless trading is ACTIVE.
 
-    1. ``BFX_KILL_SWITCH=true`` — break-glass. Checked first and short-circuits,
-       so stopping the bot works when the database is the thing that is broken.
-    2. The durable trading state, when a repository is wired: anything but
-       ACTIVE blocks, and so does no recorded decision at all.
-
-    Both point the same way (OR), so unlike the allocation-cap env/yaml pair
-    there is no "which one actually binds" ambiguity — and the status endpoint
-    reports each source separately anyway.
+    Blocks on an automatic protection that has tripped but whose HALTED is not
+    yet committed, and on the durable trading state: anything but ACTIVE blocks,
+    and so does no recorded decision at all. The break-glass that needs no
+    database is stopping the container (runbook), not an environment flag.
 
     **Fails closed.** An unreadable trading state blocks. A kill switch that
     opens when the database hiccups is not a kill switch. Note this differs
     from NavPeakStore's fail-permissive posture; the two must not be unified.
 
-    ``trading_state=None`` (paper/shadow) keeps the original env-only behaviour.
+    ``trading_state=None`` (paper/shadow): only a tripped protection blocks.
     """
 
     name = "manual_kill"
@@ -100,12 +95,6 @@ class ManualKillGuard:
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> GuardResult:
-        flag = os.environ.get("BFX_KILL_SWITCH", "").lower() in ("true", "1", "yes")
-        if flag:
-            return GuardResult(
-                allowed=False, guard_name=self.name,
-                reason="BFX_KILL_SWITCH env flag set",
-            )
         pending = self._pending_stop() if self._pending_stop is not None else None
         if pending is not None:
             return GuardResult(

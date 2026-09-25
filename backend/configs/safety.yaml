@@ -7,7 +7,7 @@
 
 hard_guards:
   manual_kill:
-    enabled: true            # always-on; flip BFX_KILL_SWITCH=true env to trip
+    enabled: true            # always-on: the trading-state guard
   auth_health:
     enabled: true
   heartbeat:

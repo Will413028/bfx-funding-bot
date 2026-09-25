@@ -68,7 +68,6 @@ async def test_persisted_halt_blocks_with_no_env_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The property P2 exists for: canary.env reverted, halt still holds."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard(trading_state=_FakeStore(_halted(True)))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
@@ -81,7 +80,6 @@ async def test_reducing_blocks_new_offers_like_halted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A maintenance pause is REDUCING: no new offer, whatever caused it."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     for cause in ("operator", "material_deploy"):
         r = await ManualKillGuard(trading_state=_FakeStore(_state("REDUCING", cause))).evaluate(
             _post(), _ctx())
@@ -91,7 +89,6 @@ async def test_reducing_blocks_new_offers_like_halted(
 
 @pytest.mark.asyncio
 async def test_persisted_resume_allows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard(trading_state=_FakeStore(_halted(False)))
     assert (await g.evaluate(_post(), _ctx())).allowed is True
 
@@ -100,7 +97,6 @@ async def test_persisted_resume_allows(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_no_persisted_record_blocks_like_halted(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail closed: no decision recorded is read as HALTED. A new scope trades
     only after an operator records ACTIVE."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard(trading_state=_FakeStore(None))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
@@ -111,7 +107,6 @@ async def test_no_persisted_record_blocks_like_halted(monkeypatch: pytest.Monkey
 async def test_a_tripped_protection_blocks_before_its_halt_is_written(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     pending: list[str] = []
     g = ManualKillGuard(trading_state=_FakeStore(_halted(False)),
                         pending_stop=lambda: pending[0] if pending else None)
@@ -124,7 +119,6 @@ async def test_a_tripped_protection_blocks_before_its_halt_is_written(
 
 @pytest.mark.asyncio
 async def test_unreadable_halt_state_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard(trading_state=_BrokenStore())
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
@@ -132,26 +126,24 @@ async def test_unreadable_halt_state_blocks(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_env_flag_blocks_without_consulting_the_store(
+async def test_the_retired_env_flag_has_no_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Break-glass must work when the database is the thing that is broken, so
-    the env check comes first and short-circuits."""
+    """There is no environment break-glass any more (the container stop is):
+    a set BFX_KILL_SWITCH changes nothing, the trading state decides."""
     monkeypatch.setenv("BFX_KILL_SWITCH", "true")
     store = _FakeStore(_halted(False))
     g = ManualKillGuard(trading_state=store)
     r = await g.evaluate(_post(), _ctx())
-    assert r.allowed is False
-    assert "BFX_KILL_SWITCH" in (r.reason or "")
-    assert store.calls == 0
+    assert r.allowed is True
+    assert store.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_without_a_store_behaviour_is_the_previous_env_only_one(
+async def test_without_a_store_only_a_tripped_protection_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """paper/shadow and the existing tests construct the guard with no store."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    """paper/shadow construct the guard with no store: only a tripped protection blocks."""
     assert (await ManualKillGuard().evaluate(_post(), _ctx())).allowed is True
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    assert (await ManualKillGuard().evaluate(_post(), _ctx())).allowed is False
+    tripped = ManualKillGuard(pending_stop=lambda: "writer_lock_lost")
+    assert (await tripped.evaluate(_post(), _ctx())).allowed is False
