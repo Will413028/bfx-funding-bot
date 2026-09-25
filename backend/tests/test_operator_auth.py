@@ -75,7 +75,7 @@ def test_require_operator_verifies_token_before_checking_configuration(monkeypat
     assert exc.value.detail == "invalid_token"
 
 
-@pytest.mark.parametrize("phase", ["canary", "live"])
+@pytest.mark.parametrize("phase", ["live"])
 def test_production_phase_rejects_non_admin_operator_role(monkeypatch, phase):
     """Rejects the regression that allows a non-admin production role setting."""
     monkeypatch.setenv("BFX_PHASE", phase)

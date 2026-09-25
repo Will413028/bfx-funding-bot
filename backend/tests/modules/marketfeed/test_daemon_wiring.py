@@ -50,7 +50,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
-        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'normal.db'}"}
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -210,7 +210,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "BFX_KILL_SWITCH": "true",
-        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'kill.db'}"}
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -300,7 +300,7 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
         "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
-        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'gate.db'}", **deploy_env}
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -362,7 +362,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
         "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_BOOK_MAX_DOWN_PCT": "0.15",
-        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'schema.db'}"}
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -454,8 +454,8 @@ async def test_build_daemon_emit_and_query_env_symmetric(
         monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
         monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     if phase == "live":
-        safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-        monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+        safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+        monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
     # Phase 4.4c: file-based sqlite so event-store tables created below are
     # visible to build_daemon's engine (from_snapshot uses them at boot).
@@ -520,10 +520,10 @@ async def test_build_daemon_reconcile_interval_zero_raises(
 ) -> None:
     """BFX_RECONCILE_INTERVAL_S <= 0 must raise ValueError at boot (canary phase,
     live block) to prevent a busy-loop hammering Bitfinex REST."""
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "reconcile_guard.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -591,10 +591,10 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     reconcile."""
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
@@ -656,10 +656,10 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     """Live boot re-enables deployment only with the concrete integrity set."""
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_live")
@@ -822,10 +822,10 @@ async def test_smoke_runner_gated_off_for_live_executor(
     `10100 apikey: digest invalid`. Smoke is a simulated-only self-test."""
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
@@ -881,10 +881,10 @@ async def test_canary_build_wires_writer_lock_and_guard(
     paper test which exercises the simulated path)."""
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 
-    safety_canary = Path(__file__).parents[3] / "configs" / "safety.canary.yaml"
-    monkeypatch.setenv("BFX_PHASE", "canary")
+    safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_canary))
+    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")

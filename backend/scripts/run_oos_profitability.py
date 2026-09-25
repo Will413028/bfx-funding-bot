@@ -59,7 +59,7 @@ DEFAULT_N_TRIALS = 38  # cumulative strategy-layer configs tried on this data: 9
 # period-aware, mr_a30 legacy diagnostic). SoT = second-brain
 # wiki/projects/bfx-funding-bot/strategy-registry.md 「DSR trials」段 — verdict 落地時同步更新這裡。
 # Undercounting trials inflates DSR (Bailey & López de Prado); the deflated-Sharpe factor
-DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 RESEARCH_CONFIG = BacktestConfig(fill_model="linear-baseline")
 
 
@@ -116,7 +116,7 @@ def render_markdown(reports: list[CellReport], *, data_window: str) -> str:
     lines.append("# Canary OOS Profitability — fUST MeanReversion (a30, p2)\n")
     lines.append(f"**Run date**: {datetime.now(UTC).isoformat()}")
     lines.append(f"**Data window**: {data_window}")
-    lines.append("**Config**: `configs/cells.canary.yaml` (deployed params, fixed — not re-swept)")
+    lines.append("**Config**: `configs/cells.live.yaml` (deployed params, fixed — not re-swept)")
     lines.append("**Fill model**: linear-baseline (explicit deterministic baseline) — see methodology.\n")
 
     lines.append("## TL;DR\n")
@@ -258,7 +258,7 @@ async def _amain() -> int:
     parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
     parser.add_argument(
         "--cells", default=str(DEFAULT_CELLS_YAML),
-        help="cells yaml path (default: configs/cells.canary.yaml)",
+        help="cells yaml path (default: configs/cells.live.yaml)",
     )
     args = parser.parse_args()
 

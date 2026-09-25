@@ -372,7 +372,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **Deterministic rebuild**：`rebuild_snapshot_from_log(account_id, environment)` 對含 `VENUE_SNAPSHOT_OBSERVED` 的 stream 從空 projection 依 `event_seq` 重放 immutable event；舊 stream 則沿用 checkpoint ⊕ tail 相容路徑。所有 venue object、position bucket、quarantine/unknown breadcrumb 均可由 event log 重建，不能讀 live API 或當前 projection 值作為輸入。
 
-**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/canary/CI 而無 cross-account 或 cross-environment 污染。
+**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/prod/CI 而無 cross-account 或 cross-environment 污染。
 
 ---
 
@@ -386,10 +386,10 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 1. `ManualKillGuard`（trading-state guard）— 已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
-3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
+3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（live 為 300s，由 `safety.live.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
 
-**L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
+**L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。live（`safety.live.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
 **Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 DB trigger 與 `validate_transition` 雙重拒絕。static admin token 只保留降低曝險的緊急備用：`POST /admin/halt`（kill）與 `POST /admin/pause`；任何恢復（resume、material 核准）都只能經 webapi 的 TOTP 請求（ADR D4，見下方 Release flow），static token 沒有 resume。
 
@@ -403,7 +403,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **Kill switch（`safety/kill_switch.py`）**：`POST /admin/halt`、webapi 的 kill 請求與拒絕開機時的自動停機，都執行同一條路徑：先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`。幣別＝設定的 symbols，加上有 open uncertainty（UNKNOWN、orphan）或非終態 venue offer 的 symbols。只需 writer lock，不經 command gate 的 provenance／uncertainty／trading-state 檢查；呼叫前以有上限的等待取得該帳戶的 command lock，避免已過 transport 檢查的 submit 在 cancel-all 之後才落地。每次呼叫在 `funding_cancel_all_audit` 留下 `requested` 與一筆終態（`acknowledged`／`rejected`／`failed`／`skipped`）；venue 失敗不回滾 HALTED，再呼叫一次 `/admin/halt` 即重試（`/admin/halt` 在 cancel-all 未全數完成時回 502）。被 cancel-all 撤掉的 UNKNOWN offer 由既有 offer-history 比對以終態 exact match 解析；orphan 的 uncertainty 仍需 operator resolution。不依賴資料庫的 break-glass 是停掉 bot container；`BFX_KILL_SWITCH` env 已退役。
 
-**真錢 guard 不變式（`assert_canary_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 kill/auth/heartbeat hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`（`canary` phase 本身已在開機時拒絕）。
+**真錢 guard 不變式（`assert_live_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 trading-state/auth/heartbeat hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
 
 **Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.yaml`），改 threshold 需 redeploy。
 
@@ -636,7 +636,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 ## 8. Phases & Deployment
 
-**現行部署 phase（`Phase` enum 另保留 legacy `canary`）**
+**現行部署 phase（`paper`／`shadow`／`live`）**
 
 | Phase | 性質 | Realm | Executor | 備註 |
 |---|---|---|---|---|
@@ -646,11 +646,11 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 **歷史相容性**：舊 `canary` phase、fUST cap10000／fUSD cap0、
 `BFX_BALANCE_BUFFER_USDT` 與 env-based canary profile 已退役，不是現行資金 authority。
-enum／部分 simulation helpers 保留供歷史測試；`BFX_PHASE=canary` 在開機時直接拒絕。
+`canary` 已從 `Phase` 移除，`BFX_PHASE=canary` 在 `load_config` 直接拒絕；研究腳本改讀 `cells.live.yaml`。
 每個 build 的四步 canary ceremony（release sessions、canary permit、halt epoch 續開、
 Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資料見 `release_archive`。
 
-**Phase ⟷ Realm guard**（`load_config()`）：live／legacy canary 禁止 shadow realm；
+**Phase ⟷ Realm guard**（`load_config()`）：live 禁止 shadow realm；
 production 使用 prod，ci 僅供測試。paper/shadow 禁止 prod（模擬不可污染真錢分析）。
 違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
@@ -717,7 +717,7 @@ credential vault 解密。public read model 另以明確的
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ compose one-shot `weekly-report`（`--profile ops`）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`）。值得留存的報告手動 promote 進 `backend/docs/research/` 並 commit。
 - **研究重驗（Proposal E，2026-09-22）**：同一個 `weekly-report` 在 G3 之後接研究步驟，每步 `timeout` + fail-soft、絕不阻斷營運報告：外部訊號 topup（`ingest_perp_funding`、`ingest_liquidations`）→ `learn_book_fill_rate`（book-replay artifact，`source="book"`）→ `run_period_structure_backtest`（`--fill-model book` 與 linear 各一份）→ `run_oos_profitability` → `diff_research_report`（champion 漂移＝最近 12 窗中位數跌破全歷史 p25；challenger 反超＝配對 CI 下界連續 3 週 >0；只開 registry review，永不 auto-promote）。報告落 VM `~/bfx/reports/<date>-{period-structure-book,period-structure-linear,oos-profitability,weekly-research-*}.md`。systemd `TimeoutStartSec=5400`。
 - **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID 與 `BFX_DEPLOYMENT_ENV`；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
-- **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高 `safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
+- **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高（已刪除的）`safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 
 ---

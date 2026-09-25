@@ -303,7 +303,7 @@ def render_report(sections: dict[str, list[BandResult]], *, data_window: str) ->
     lines.append("**Fill model**: linear, mean fill = 1.0 (the 100%-fill optimism caveat).")
     lines.append(
         "**Status**: characterization only — locked-but-not-armed, same as p_long=14. "
-        "Not in cells.canary.yaml; zero live impact.\n"
+        "Not in cells.live.yaml; zero live impact.\n"
     )
     lines.append("## Standing caveats\n")
     lines.append(

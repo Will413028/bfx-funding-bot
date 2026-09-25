@@ -13,7 +13,7 @@ _SPEC.loader.exec_module(mod)  # type: ignore[union-attr]
 
 def test_canary_yaml_loads_cells():
     # CANARY_YAML resolves relative to cwd (backend/); load via absolute path
-    yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.canary.yaml"
+    yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.live.yaml"
     cells = mod.load_cells_only(yaml_path)
     # Recovery canary runs fUST only; fUSD stays dark until a separate reviewed
     # change provides explicit coverage. fUST uses the MeanReversion a30 + p2

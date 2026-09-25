@@ -141,7 +141,7 @@ def test_render_markdown_contains_key_sections() -> None:
 
 
 def test_deployed_mr_params_reads_canary_yaml() -> None:
-    yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.canary.yaml"
+    yaml_path = Path(__file__).resolve().parents[2] / "configs" / "cells.live.yaml"
     cells = mod.load_cells_only(yaml_path)
     p = mod.deployed_mr_params(cells, symbol="fUST", period_agg="p2")
     assert p["ema_span"] == 24

@@ -46,7 +46,7 @@ from bfx_funding_bot.modules.marketfeed.config import CellConfig, load_cells_onl
 
 logger = logging.getLogger(__name__)
 START_MTS = 1_451_606_400_000  # 2016-01-01 UTC (full history)
-DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 _MIN_REGIME_ROWS = 30
 
 

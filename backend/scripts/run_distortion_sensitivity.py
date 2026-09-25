@@ -64,7 +64,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import build_strategy
 logger = logging.getLogger("distortion_sensitivity")
 
 START_MTS = 1451606400000  # 2016-01-01, matches run_oos_profitability
-DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 
 # Empirical (final - live)/live * 100, from the only surviving sample. See the
 # research doc for the five biases — notably 0.174 is a FLOOR, since the sample

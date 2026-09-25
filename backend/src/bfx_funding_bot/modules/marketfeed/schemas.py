@@ -25,7 +25,6 @@ class Phase(StrEnum):
     LIVE = "live"
     PAPER = "paper"
     SHADOW = "shadow"
-    CANARY = "canary"
 
 
 class StrategyName(StrEnum):

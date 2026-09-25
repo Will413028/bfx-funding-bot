@@ -1,4 +1,4 @@
-"""Canary phase requires the full operational + loss-limit guard set enabled."""
+"""Live requires the operational + loss-limit guard set; simulation needs explicit caps."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,8 +8,8 @@ import pytest
 from bfx_funding_bot.modules.execution.safety.config import _AllocationCapCfg, load_safety_config
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.daemon import (
-    assert_canary_guard_invariant,
     assert_caps_invariant,
+    assert_live_guard_invariant,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 
@@ -59,24 +59,17 @@ def _load(tmp_path: Path, disable: str | None = None):
     return load_safety_config(p)
 
 
-def test_canary_ok_when_all_required_enabled(tmp_path: Path) -> None:
-    cfg = _load(tmp_path)
-    assert_canary_guard_invariant(Phase.CANARY, cfg)  # must not raise
+def test_live_ok_when_all_required_enabled(tmp_path: Path) -> None:
+    assert_live_guard_invariant(Phase.LIVE, _load(tmp_path))  # must not raise
 
 
-@pytest.mark.parametrize("guard", [
-    "manual_kill", "auth_health", "heartbeat",
-    "allocation_cap", "realized_loss_24h", "drawdown_from_peak",
-])
-def test_canary_raises_when_required_guard_disabled(tmp_path: Path, guard: str) -> None:
-    cfg = _load(tmp_path, disable=guard)
-    with pytest.raises(ValueError, match=guard):
-        assert_canary_guard_invariant(Phase.CANARY, cfg)
+def test_live_needs_no_allocation_cap_guard(tmp_path: Path) -> None:
+    """Live sizes from the applied CapitalPolicy, not the allocation-cap flag."""
+    assert_live_guard_invariant(Phase.LIVE, _load(tmp_path, disable="allocation_cap"))
 
 
 def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
-    cfg = _load(tmp_path, disable="allocation_cap")
-    assert_canary_guard_invariant(Phase.SHADOW, cfg)  # invariant is canary-only
+    assert_live_guard_invariant(Phase.SHADOW, _load(tmp_path, disable="manual_kill"))
 
 
 @pytest.mark.parametrize("guard", [
@@ -84,7 +77,7 @@ def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
 ])
 def test_live_keeps_required_noncapital_guards(tmp_path, guard):
     with pytest.raises(ValueError, match=guard):
-        assert_canary_guard_invariant(Phase.LIVE, _load(tmp_path, disable=guard))
+        assert_live_guard_invariant(Phase.LIVE, _load(tmp_path, disable=guard))
 
 
 _MR_PARAMS = {"threshold_sigma": 1.5, "ratio_sigma": 0.0042, "ema_span": 100}
@@ -101,31 +94,10 @@ def _alloc_cfg(caps: dict[str, int]) -> _AllocationCapCfg:
 
 
 def test_caps_invariant_raises_when_configured_symbol_missing() -> None:
-    cells = [_cell("fUST")]
     with pytest.raises(ValueError, match="fUST"):
-        assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUSD": 0}))
+        assert_caps_invariant([_cell("fUST")], _alloc_cfg({"fUSD": 0}))
 
 
-def test_caps_invariant_raises_when_canary_cap_zero() -> None:
-    cells = [_cell("fUST")]
-    with pytest.raises(ValueError, match=r"cap.*0|> 0"):
-        assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUST": 0}))
-
-
-def test_caps_invariant_ok_for_funded_canary() -> None:
-    cells = [_cell("fUST")]
-    assert assert_caps_invariant(Phase.CANARY, cells, _alloc_cfg({"fUST": 3000})) is None
-
-
-def test_caps_invariant_shadow_allows_zero_cap() -> None:
-    # The cap>0 rejection is CANARY-only; under shadow a configured symbol may sit
-    # at cap 0 (dark) as long as it has an explicit entry. Locks the phase asymmetry.
-    cells = [_cell("fUST")]
-    assert assert_caps_invariant(Phase.SHADOW, cells, _alloc_cfg({"fUST": 0})) is None
-
-
-def test_caps_invariant_missing_entry_raises_in_all_phases() -> None:
-    # The explicit-entry requirement is phase-independent (not gated on canary).
-    cells = [_cell("fUST")]
-    with pytest.raises(ValueError, match="fUST"):
-        assert_caps_invariant(Phase.SHADOW, cells, _alloc_cfg({"fUSD": 0}))
+def test_caps_invariant_allows_a_dark_zero_cap() -> None:
+    # A configured symbol may sit at cap 0 (dark) as long as it has an explicit entry.
+    assert assert_caps_invariant([_cell("fUST")], _alloc_cfg({"fUST": 0})) is None

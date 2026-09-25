@@ -3,7 +3,7 @@
 Motivation (2026-07-27 incident, in three parts):
 
 1. `BFX_ALLOCATION_CAP_USDT=0` was set to pause the canary. Every configured
-   symbol has an explicit cap in safety.canary.yaml, so the env scalar bound
+   symbol has an explicit cap in the safety config, so the env scalar bound
    nothing; the bot kept lending for hours. The value alone read as "paused" —
    only the resolution SOURCE shows the knob was inert.
 2. The pause was "verified" with `docker exec printenv` — reading back the
@@ -168,7 +168,7 @@ def _service(
     chain = SafetyGuardChain(
         guards=guards if guards is not None else [ManualKillGuard(trading_state=trading_state)],
         probe=HealthProbe(), diagnostics=_Sink(),
-        phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     return TradingStatusService(
@@ -182,7 +182,7 @@ def _service(
         buffers=buffers if buffers is not None else {"fUST": D("3")},
         default_buffer=D("0"),
         env_fallback_buffer=env_fallback_buffer,
-        phase=Phase.CANARY,
+        phase=Phase.SHADOW,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
         trading_state=trading_state,
         kill_switch=kill_switch,
@@ -477,14 +477,14 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
     sink = _Sink()
     chain = SafetyGuardChain(
         guards=[ManualKillGuard()], probe=HealthProbe(), diagnostics=sink,
-        phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     svc = TradingStatusService(
         chain=chain, ledger=_FakeLedger(), account_ctx=_ctx(), cells=[_cell("fUST")],
         caps={"fUST": D("10000")}, default_cap=D("0"), env_fallback_cap=D("0"),
         buffers={"fUST": D("3")}, default_buffer=D("0"), env_fallback_buffer=D("3"),
-        phase=Phase.CANARY, attempts=SubmitAttemptRecorder(),
+        phase=Phase.SHADOW, attempts=SubmitAttemptRecorder(),
     )
     await svc.dry_run()
     await svc.snapshot()

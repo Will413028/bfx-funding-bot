@@ -111,7 +111,7 @@ class CellConfig(BaseModel):
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: Annotated[Phase, Field(description="paper / shadow / canary / live")]
+    phase: Annotated[Phase, Field(description="paper / shadow / live")]
     cells: list[CellConfig]
     database_url: str
     deployment_environment: DeploymentEnvironment
@@ -139,8 +139,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
-    if phase_str not in {"paper", "shadow", "canary", "live"}:
-        raise ValueError(f"BFX_PHASE must be paper, shadow, canary, or live, got {phase_str!r}")
+    if phase_str not in {"paper", "shadow", "live"}:
+        # canary was retired with the per-build ceremony (ADR 2026-09-25).
+        raise ValueError(f"BFX_PHASE must be paper, shadow, or live, got {phase_str!r}")
     if phase_str == "live":
         legacy = [name for name in (
             "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
@@ -170,12 +171,12 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     # Phase <-> realm fail-fast guard (defense in depth; deploy-koyeb.sh sets
     # the realm explicitly per phase, but reject obviously-wrong combos in case
     # an env is set by hand). phase = rollout/real-money dimension;
-    # deployment_environment = data-isolation realm (prod/shadow/ci). canary is
+    # deployment_environment = data-isolation realm (prod/shadow/ci). live is
     # real money -> must land in prod (never shadow, which holds the Phase 4.3
     # calibration dataset). paper/shadow are simulated -> must never land in
     # prod (fake fills would corrupt real-money analytics). ci is the universal
     # test/dev realm and is always allowed.
-    if phase_str in {"canary", "live"} and deployment_environment is DeploymentEnvironment.SHADOW:
+    if phase_str == "live" and deployment_environment is DeploymentEnvironment.SHADOW:
         raise ValueError(
             f"BFX_PHASE={phase_str} (real money) must not run in the shadow realm "
             "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
@@ -199,7 +200,7 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
             f"BFX_EXECUTION_POLICY must be one of {valid}, got {execution_policy_raw!r}"
         ) from None
 
-    if phase_str in {"canary", "live"} and execution_policy is ExecutionPolicy.PAPER:
+    if phase_str == "live" and execution_policy is ExecutionPolicy.PAPER:
         raise ValueError(f"{phase_str} execution_policy must be live-capable, not paper")
 
     def required_float(name: str) -> float:

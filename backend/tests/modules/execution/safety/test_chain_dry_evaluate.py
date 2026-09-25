@@ -106,7 +106,7 @@ class _HangGuard:
 def _chain(guards: list[Any], sink: _EventCapture, probe: HealthProbe) -> SafetyGuardChain:
     return SafetyGuardChain(
         guards=guards, probe=probe, diagnostics=sink,
-        phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.LIVE, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
 

@@ -40,7 +40,7 @@ from bfx_funding_bot.modules.marketfeed.strategy_registry import (
 logger = logging.getLogger("parity")
 
 _TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
-DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 _MR_LOOKBACK = 200  # warmup._lookback_for for MEAN_REVERSION
 
 
