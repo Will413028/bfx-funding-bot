@@ -8,11 +8,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import insert, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -35,7 +39,6 @@ from bfx_funding_bot.modules.observability import alerts
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 from .test_capital_command_boundary import boundary, second_ready
-from .test_capital_repository import capital_db as capital_db
 from .test_capital_repository import capital_engine as capital_engine
 from .test_capital_repository import intent
 
@@ -44,10 +47,49 @@ DIGEST = "sha256:" + "a" * 64
 OTHER = "sha256:" + "b" * 64
 REV = "c" * 40
 T0 = 10_000_000
+_DEPLOY_ID = "11111111-2222-4333-8444-555555555555"
+
+
+_LEDGER = uuid5(NAMESPACE_URL, "bfx-test-deployments")
+
+
+def deployment_id(klass: str, digest: str) -> UUID:
+    return uuid5(_LEDGER, f"{klass}:{digest}")
 
 
 def identity(klass: str = "material", digest: str = DIGEST) -> DeploymentIdentity:
-    return DeploymentIdentity(digest, REV, klass)
+    """This process, as the deploy tool starts it: its `started` ledger row exists."""
+    return DeploymentIdentity(digest, REV, klass, None, deployment_id(klass, digest))
+
+
+async def ledger(factory, *, klass: str, digest: str = DIGEST, outcome: str = "started",
+                 attempt: UUID | None = None, revision: str = REV) -> UUID:
+    from datetime import UTC, datetime
+    attempt = attempt or uuid4()
+    now = datetime.now(UTC)
+    async with factory.begin() as session:
+        session.add(DeploymentRow(attempt_id=attempt, started_at=now,
+            finished_at=None if outcome == "started" else now, source_revision=revision,
+            backend_digest=digest, frontend_digest=OTHER, change_class=klass,
+            migrations_applied=False, outcome=outcome, detail="fixture"))
+    return attempt
+
+
+@pytest_asyncio.fixture
+async def capital_db(capital_engine):
+    """An account whose builds were started by the deploy tool (a `started`
+    ledger row per test identity; none of them `deployed`, so none is behind
+    another)."""
+    async with capital_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(capital_engine, expire_on_commit=False)
+    account = uuid4()
+    async with factory.begin() as session:
+        session.add(ExchangeAccount(id=account, venue="bitfinex", label="capital-test"))
+    for klass in ("standard", "material"):
+        for digest in (DIGEST, OTHER):
+            await ledger(factory, klass=klass, digest=digest, attempt=deployment_id(klass, digest))
+    return factory, account
 
 
 async def allow(session, *, account_id, user) -> bool:
@@ -97,7 +139,8 @@ async def start(factory, account, state="ACTIVE", cause="operator"):
     ("ACTIVE", "operator", identity("standard"), ("ACTIVE", "operator"), "kept"),
     ("ACTIVE", "operator", DeploymentIdentity.from_env({}), ("REDUCING", "material_deploy"), "reducing"),
     ("ACTIVE", "operator", DeploymentIdentity.from_env(
-        {"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "cosmetic"}),
+        {"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "cosmetic",
+         "BFX_DEPLOYMENT_ID": _DEPLOY_ID}),
      ("REDUCING", "material_deploy"), "reducing"),
     ("REDUCING", "operator", identity("material"), ("REDUCING", "material_deploy"), "reducing"),
     ("HALTED", "auto", identity("material"), ("HALTED", "auto"), "behind_stop"),
@@ -126,22 +169,96 @@ async def test_boot_gate_keeps_trading_for_an_approved_material_build(capital_db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("ledger_class", "ledger_revision", "why"), [
-    ("material", REV, "ledger_material"),
-    ("standard", "d" * 40, "ledger_revision_conflict"),
-])
-async def test_the_ledger_can_only_raise_the_class(capital_db, ledger_class, ledger_revision, why):
-    from datetime import UTC, datetime
+async def test_a_build_the_ledger_does_not_know_is_material(capital_db):
+    """Fail closed: no `started` row for this process's deployment id."""
     factory, account = capital_db
     await start(factory, account)
-    now = datetime.now(UTC)
-    async with factory.begin() as session:
-        session.add(DeploymentRow(started_at=now, finished_at=now, source_revision=ledger_revision,
-            backend_digest=DIGEST, frontend_digest=OTHER, change_class=ledger_class,
-            migrations_applied=False, outcome="deployed", detail="fixture"))
+    stray = DeploymentIdentity(DIGEST, REV, "standard", None, uuid4())
     decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
-                                       identity=identity("standard"), now_ms=T0)
-    assert (decision.change_class, decision.why, decision.action) == ("material", why, "reducing")
+                                       identity=stray, now_ms=T0)
+    assert (decision.change_class, decision.why, decision.action) == (
+        "material", "deployment_ledger_row_missing", "reducing")
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_row_naming_another_build_is_material(capital_db):
+    factory, account = capital_db
+    await start(factory, account)
+    attempt = await ledger(factory, klass="standard", revision="d" * 40)
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+        identity=DeploymentIdentity(DIGEST, REV, "standard", None, attempt), now_ms=T0)
+    assert (decision.change_class, decision.why) == ("material", "ledger_identity_conflict")
+
+
+@pytest.mark.asyncio
+async def test_a_standard_deploy_on_unapproved_material_stays_material(capital_db):
+    """Design review #1: material X deployed while HALTED, then standard Y on top
+    (pairwise standard against X). Resume must not reach Y's trading without the
+    approval and probation X never had."""
+    factory, account = capital_db
+    await start(factory, account, "HALTED", "operator")
+    x = await ledger(factory, klass="material", digest=OTHER)
+    await ledger(factory, klass="material", digest=OTHER, outcome="deployed", attempt=x)
+    y = await ledger(factory, klass="standard")
+    y_identity = DeploymentIdentity(DIGEST, REV, "standard", None, y)
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+                                       identity=y_identity, now_ms=T0)
+    assert (decision.change_class, decision.why) == ("material", f"unabsorbed_material:{OTHER}")
+    # The resume that would have bypassed it is refused until Y is approved ...
+    w = worker(factory, account, y_identity, now=lambda: T0)
+    request_id = await request(factory, account, "resume")
+    assert await w.process(request_id) == "rejected"
+    assert (await outcome(factory, request_id))[1] == "approval_required"
+    # ... and approving Y starts its probation.
+    assert await w.process(await request(factory, account, "approve")) == "applied"
+    assert await w.process(await request(factory, account, "resume")) == "applied"
+    assert (await state_of(factory, account)).probation is not None
+
+
+@pytest.mark.asyncio
+async def test_material_absorbed_by_an_accepted_build_no_longer_counts(capital_db):
+    """X material, approved and its probation lifted: accepted. A standard Y
+    after it runs as standard; a failed or rolled-back attempt never counts."""
+    factory, account = capital_db
+    await start(factory, account)
+    x = await ledger(factory, klass="material", digest=OTHER)
+    await ledger(factory, klass="material", digest=OTHER, outcome="deployed", attempt=x)
+    async with factory.begin() as session:
+        session.add(DeploymentApprovalRow(exchange_account_id=account, deployment_environment="ci",
+            backend_digest=OTHER, source_revision=REV, approved_by="operator",
+            approved_at_ms=T0, request_id=uuid4()))
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await repo.transition("ACTIVE", cause="operator", actor="operator", reason="approved", now_ms=T0,
+        probation=Probation.starting(multiplier=D("0.25"), started_at_ms=T0, floor={"fUST": D("1")}))
+    await repo.transition("ACTIVE", cause="auto", actor="probation", reason="passed", now_ms=T0 + BAKE_MS)
+    # A material attempt that was rolled back: its code is not in Y.
+    z = await ledger(factory, klass="material", digest="sha256:" + "e" * 64)
+    await ledger(factory, klass="material", digest="sha256:" + "e" * 64, outcome="rolled_back", attempt=z)
+    y = await ledger(factory, klass="standard")
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+        identity=DeploymentIdentity(DIGEST, REV, "standard", None, y), now_ms=T0 + BAKE_MS + 1)
+    assert (decision.change_class, decision.action) == ("standard", "kept")
+
+
+@pytest.mark.asyncio
+async def test_approved_but_still_in_probation_is_not_yet_accepted(capital_db):
+    factory, account = capital_db
+    await start(factory, account)
+    # An earlier build's probation lifted before X was approved: not X's.
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await repo.transition("ACTIVE", cause="operator", actor="operator", reason="earlier", now_ms=T0 - 20,
+        probation=Probation.starting(multiplier=D("0.25"), started_at_ms=T0 - 20, floor={"fUST": D("1")}))
+    await repo.transition("ACTIVE", cause="auto", actor="probation", reason="passed", now_ms=T0 - 10)
+    x = await ledger(factory, klass="material", digest=OTHER)
+    await ledger(factory, klass="material", digest=OTHER, outcome="deployed", attempt=x)
+    async with factory.begin() as session:
+        session.add(DeploymentApprovalRow(exchange_account_id=account, deployment_environment="ci",
+            backend_digest=OTHER, source_revision=REV, approved_by="operator",
+            approved_at_ms=T0, request_id=uuid4()))
+    y = await ledger(factory, klass="standard")
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+        identity=DeploymentIdentity(DIGEST, REV, "standard", None, y), now_ms=T0 + 1)
+    assert decision.change_class == "material"
 
 
 # ------------------------------------------------------------ requests
@@ -559,15 +676,20 @@ async def test_a_submit_within_the_probation_limit_is_admitted(capital_db):
     assert len(venue.received) == 1
 
 
+
 @pytest.mark.parametrize(("env", "klass", "problem"), [
     ({}, "material", "deployment_identity_missing"),
-    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV}, "material", "change_class_invalid"),
-    ({"BFX_IMAGE_DIGEST": "sha256:bad", "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard"},
-     "material", "deployment_identity_invalid"),
-    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": "short", "BFX_CHANGE_CLASS": "standard"},
-     "material", "deployment_identity_invalid"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_DEPLOYMENT_ID": _DEPLOY_ID},
+     "material", "change_class_invalid"),
+    ({"BFX_IMAGE_DIGEST": "sha256:bad", "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard",
+      "BFX_DEPLOYMENT_ID": _DEPLOY_ID}, "material", "deployment_identity_invalid"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": "short", "BFX_CHANGE_CLASS": "standard",
+      "BFX_DEPLOYMENT_ID": _DEPLOY_ID}, "material", "deployment_identity_invalid"),
+    # No deployment id: the ledger row of this process cannot be found.
     ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard"},
-     "standard", None),
+     "material", "deployment_identity_invalid"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard",
+      "BFX_DEPLOYMENT_ID": _DEPLOY_ID}, "standard", None),
 ])
 def test_deploy_identity_fails_closed_to_material(env, klass, problem):
     parsed = DeploymentIdentity.from_env(env)
