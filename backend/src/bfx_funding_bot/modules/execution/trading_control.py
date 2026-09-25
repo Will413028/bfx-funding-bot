@@ -24,23 +24,28 @@ ADR 2026-09-25 D1-D4, plan §1 "Release flow":
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import re
-import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRuleProvider, submit_amount
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
+from bfx_funding_bot.modules.execution.operator_requests import (
+    APPLIED,
+    REJECTED,
+    NeedsPreparation,
+    OperatorAuthority,
+    OperatorRequestWorker,
+    Outcome,
+    RequestRejected,
+)
 from bfx_funding_bot.modules.execution.safety.tables import (
     DeploymentApprovalRow,
     TradingControlRequestRow,
@@ -187,197 +192,95 @@ async def apply_deploy_gate(
     return GateDecision(klass, why, approved, action, current)
 
 
-class OperatorAuthority(Protocol):
-    async def __call__(self, session: AsyncSession, *, account_id: UUID, user: str) -> bool: ...
+class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[str, Decimal]]):
+    """Applies approve/resume requests and lifts a probation that has passed."""
 
-
-async def sql_operator_authorized(session: AsyncSession, *, account_id: UUID, user: str) -> bool:
-    """The configured operator, an admin with two-factor enabled and a write membership."""
-    from bfx_funding_bot.core.settings import AuthSettings
-
-    settings = AuthSettings()
-    if not user or user != settings.operator_user_id or settings.operator_role != "admin":
-        return False
-    return bool(await session.scalar(
-        text("SELECT public.trading_operator_authorized(:account, :actor)"),
-        {"account": account_id, "actor": user}))
-
-
-class _Rejected(Exception):  # noqa: N818 - a bounded outcome, not a fault
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-class _FloorsRequired(Exception):  # noqa: N818 - control flow: observe the venue minimum, then retry
-    """The decision starts a new probation and needs the venue minimum."""
-
-
-class TradingControlWorker:
-    """Applies operator requests and lifts a probation that has passed."""
+    model = TradingControlRequestRow
+    name = "trading_control"
 
     def __init__(
         self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
         environment: str, identity: DeploymentIdentity, symbols: Iterable[str],
         funding_rules: FundingRuleProvider | None, authority: OperatorAuthority,
-        clock: Callable[[], int] | None = None, interval_s: float = 5.0,
+        clock: Callable[[], int] | None = None,
+        ownership: Callable[[], Awaitable[bool]] | None = None, poll_interval_s: float = 5.0,
         multiplier: Decimal = PROBATION_MULTIPLIER, bake_ms: int = BAKE_MS,
         bake_acknowledged: int = BAKE_MIN_ACKNOWLEDGED,
     ) -> None:
-        self._sf = session_factory
-        self.account_id = account_id
-        self.environment = environment
+        super().__init__(session_factory=session_factory, account_id=account_id,
+                         environment=environment, authority=authority, clock=clock,
+                         ownership=ownership, poll_interval_s=poll_interval_s)
         self.identity = identity
         self._symbols = tuple(sorted(set(symbols)))
         self._funding_rules = funding_rules
-        self._authority = authority
-        self._clock = clock or (lambda: int(time.time() * 1000))
-        self._interval_s = interval_s
         self._multiplier = multiplier
         self._bake_ms = bake_ms
         self._bake_acknowledged = bake_acknowledged
 
-    async def run(self, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            try:
-                await self.tick()
-            except Exception:  # a control-plane fault must not kill the writer
-                log.exception("trading_control_tick_failed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self._interval_s)
-
-    async def tick(self) -> None:
-        for request_id in await self._pending():
-            await self.apply(request_id)
+    async def idle(self) -> None:
         await self.lift_probation_if_passed()
 
-    async def _pending(self) -> list[UUID]:
-        async with self._sf() as session:
-            return list(await session.scalars(select(TradingControlRequestRow.request_id).where(
-                TradingControlRequestRow.exchange_account_id == self.account_id,
-                TradingControlRequestRow.deployment_environment == self.environment,
-                TradingControlRequestRow.state == "requested",
-            ).order_by(TradingControlRequestRow.created_at_ms).limit(10)))
+    async def prepare(self, row_id: UUID) -> dict[str, Decimal]:
+        """One venue-minimum offer per currency, observed now: the probation floor.
 
-    async def _floors(self) -> dict[str, Decimal]:
-        """One venue-minimum offer per currency, observed now (outside any transaction)."""
+        Only a decision that starts a new probation asks for it (raising
+        :class:`NeedsPreparation`), so no other request depends on the venue.
+        """
         if self._funding_rules is None:
-            raise _Rejected("funding_rule_unavailable")
+            raise RequestRejected("funding_rule_unavailable")
         floors: dict[str, Decimal] = {}
         for symbol in self._symbols:
             evidence = await self._funding_rules.observe(symbol)
-            floors[symbol] = submit_amount(evidence, symbol=symbol, now_ms=self._clock())
+            floors[symbol] = submit_amount(evidence, symbol=symbol, now_ms=self.clock())
         return floors
 
-    async def apply(self, request_id: UUID) -> str:
-        """Apply one request; returns the recorded outcome state.
+    async def apply(self, session: AsyncSession, row: TradingControlRequestRow,
+                    prepared: dict[str, Decimal] | None) -> Outcome:
+        try:
+            result, note = await self._decide(session, row, prepared)
+        except IllegalTradingTransition as exc:
+            raise RequestRejected(f"illegal_transition: {exc}") from exc
+        return Outcome(APPLIED, note, columns={
+            "trading_state_id": result.state.id if result is not None else None,
+        }, detail=result)
 
-        The venue minimum (the probation floor) is observed only when the
-        decision starts a new probation, and outside the transaction: a request
-        that starts none never depends on the venue.
-        """
-        try:
-            return await self._apply_locked(request_id, floors=None)
-        except _FloorsRequired:
-            pass
-        try:
-            floors = await self._floors()
-        except _Rejected as exc:
-            return await self._record(request_id, "failed", exc.code)
-        except Exception as exc:
-            return await self._record(request_id, "failed", f"funding_rule_unavailable: {type(exc).__name__}")
-        return await self._apply_locked(request_id, floors=floors)
-
-    async def _apply_locked(self, request_id: UUID, *, floors: dict[str, Decimal] | None) -> str:
-        try:
-            async with self._sf.begin() as session:
-                await acquire_transaction_lock(session, account_id=str(self.account_id),
-                                               deployment_environment=self.environment)
-                row = await self._load(session, request_id)
-                if row is None:
-                    return "missing"
-                if row.state != "requested":
-                    return row.state
-                action, by = row.action, row.requested_by
-                try:
-                    result, note = await self._decide(session, row, floors)
-                except (_Rejected, IllegalTradingTransition) as exc:
-                    code = exc.code if isinstance(exc, _Rejected) else f"illegal_transition: {exc}"
-                    row.state, row.outcome_reason = "rejected", code[:500]
-                    row.processed_at_ms = self._clock()
-                    outcome, note, result = "rejected", code, None
-                else:
-                    row.state, row.processed_at_ms = "applied", self._clock()
-                    row.outcome_reason = note
-                    row.trading_state_id = result.state.id if result is not None else None
-                    outcome = "applied"
-        except _FloorsRequired:
-            raise
-        except Exception as exc:
-            log.exception("trading_control_failed request=%s", request_id)
-            return await self._record(request_id, "failed", f"apply_failed: {type(exc).__name__}")
-        # Committed: tell the operator (never blocks or raises).
-        if outcome == "applied":
-            log.warning("trading_control_applied request=%s action=%s by=%s note=%s",
-                        request_id, action, by, note)
-            alerts.emit(TRADING_CONTROL_APPLIED, level=alerts.WARNING, request_id=str(request_id),
-                        action=action, by=by, outcome=note,
-                        state_id=result.state.id if result is not None else "unchanged")
+    def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
+        """Tell the operator; alerting never blocks or raises."""
+        fields = {"request_id": str(row.request_id), "action": row.action, "by": row.requested_by}
+        if outcome.state == APPLIED:
+            result = outcome.detail if isinstance(outcome.detail, TransitionResult) else None
+            alerts.emit(TRADING_CONTROL_APPLIED, level=alerts.WARNING, outcome=outcome.reason,
+                        state_id=result.state.id if result is not None else "unchanged", **fields)
             if result is not None:
                 announce(result)
+        elif outcome.state == REJECTED:
+            alerts.emit(TRADING_CONTROL_REJECTED, level=alerts.WARNING, reason=outcome.reason,
+                        **fields)
         else:
-            log.warning("trading_control_rejected request=%s action=%s reason=%s",
-                        request_id, action, note)
-            alerts.emit(TRADING_CONTROL_REJECTED, level=alerts.WARNING, request_id=str(request_id),
-                        action=action, by=by, reason=note)
-        return outcome
-
-    async def _load(self, session: AsyncSession, request_id: UUID) -> TradingControlRequestRow | None:
-        row: TradingControlRequestRow | None = await session.scalar(select(TradingControlRequestRow).where(
-            TradingControlRequestRow.request_id == request_id,
-            TradingControlRequestRow.exchange_account_id == self.account_id,
-            TradingControlRequestRow.deployment_environment == self.environment,
-        ).execution_options(populate_existing=True))
-        return row
-
-    async def _record(self, request_id: UUID, state: str, reason: str) -> str:
-        async with self._sf.begin() as session:
-            await acquire_transaction_lock(session, account_id=str(self.account_id),
-                                           deployment_environment=self.environment)
-            row = await self._load(session, request_id)
-            if row is None or row.state != "requested":
-                return row.state if row is not None else "missing"
-            row.state, row.outcome_reason = state, reason[:500]
-            row.processed_at_ms = self._clock()
-            action = row.action
-        log.error("trading_control_%s request=%s reason=%s", state, request_id, reason)
-        alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, request_id=str(request_id),
-                    action=action, reason=reason)
-        return state
+            alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, reason=outcome.reason,
+                        **fields)
 
     async def _decide(self, session: AsyncSession, row: TradingControlRequestRow,
                       floors: dict[str, Decimal] | None) -> tuple[TransitionResult | None, str]:
         if row.backend_digest != self.identity.backend_digest:
             # The operator approves the build they saw; it must be the one running.
-            raise _Rejected("digest_not_running")
-        if not await self._authority(session, account_id=self.account_id, user=row.requested_by):
-            raise _Rejected("operator_not_authorized")
+            raise RequestRejected("digest_not_running")
         klass, _why = await effective_change_class(session, self.identity)
         approved = await is_approved(session, account_id=self.account_id,
                                      environment=self.environment, digest=self.identity.backend_digest)
         current = await read_current(session, account_id=self.account_id, environment=self.environment)
-        now = self._clock()
+        now = self.clock()
 
         def fresh() -> Probation:
             if floors is None:
-                raise _FloorsRequired
+                raise NeedsPreparation
             return Probation.starting(multiplier=self._multiplier, started_at_ms=now, floor=floors)
 
         if row.action == "approve":
             if klass == STANDARD:
-                raise _Rejected("approval_not_required")
+                raise RequestRejected("approval_not_required")
             if approved:
-                raise _Rejected("already_approved")
+                raise RequestRejected("already_approved")
             assert self.identity.backend_digest is not None and self.identity.source_revision is not None
             leaves_gate = current is None or (current.state == REDUCING
                                               and current.cause == CAUSE_MATERIAL_DEPLOY)
@@ -398,9 +301,9 @@ class TradingControlWorker:
             return result, "approved; ACTIVE in probation"
         # resume
         if klass == MATERIAL and not approved:
-            raise _Rejected("approval_required")
+            raise RequestRejected("approval_required")
         if current is not None and current.state == ACTIVE:
-            raise _Rejected("already_active")
+            raise RequestRejected("already_active")
         probation_now: Probation | None
         if current is None or current.cause in {CAUSE_AUTO, CAUSE_MATERIAL_DEPLOY}:
             # After an automatic stop, or with no decision ever recorded: prove
@@ -440,7 +343,7 @@ class TradingControlWorker:
         ).limit(1)) is not None
 
     async def lift_probation_if_passed(self) -> TradingState | None:
-        async with self._sf.begin() as session:
+        async with self.session_factory.begin() as session:
             await acquire_transaction_lock(session, account_id=str(self.account_id),
                                            deployment_environment=self.environment)
             current = await read_current(session, account_id=self.account_id,
@@ -448,7 +351,7 @@ class TradingControlWorker:
             if current is None or current.state != ACTIVE or current.probation is None:
                 return None
             started = current.probation.started_at_ms
-            now = self._clock()
+            now = self.clock()
             if now - started < self._bake_ms:
                 return None
             acknowledged = int(await session.scalar(select(func.count()).select_from(
@@ -483,11 +386,9 @@ __all__ = [
     "STANDARD",
     "DeploymentIdentity",
     "GateDecision",
-    "OperatorAuthority",
     "TradingControlWorker",
     "apply_deploy_gate",
     "effective_change_class",
     "is_approved",
-    "sql_operator_authorized",
 ]
 

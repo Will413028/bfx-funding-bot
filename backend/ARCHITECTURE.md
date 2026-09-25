@@ -686,6 +686,16 @@ account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 d
 缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
 ReleaseSessions 由人分開 prepare/authorize/validate/promote，expected_revision 防止
 stale request；既有單一 daemon worker 與 command gate 執行，沒有另一個 executor。
+**Operator requests（`execution/operator_requests.py`，ADR D4'）**：所有會改動執行狀態的人為操作——
+uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`uncertainty_resolution_requests`）
+與 T5 的核准／resume（`trading_control_requests`）——走同一套 outbox 合約：webapi 只以
+`insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
+不取帳戶鎖（單一 pending 由 partial unique index 保證）；daemon 的 `OperatorRequestWorker` 子類
+（`UncertaintyResolutionWorker`、`TradingControlWorker`）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
+`operator_authorized`（SQL `public.operator_authorized`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
+failed＋根因）記回請求列；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
+需要在鎖外觀測的資料（限額期的 venue 最小單）以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger／
+projection 表零寫權限，授權與收回都在 migration `b8e2d4f6a013`。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 

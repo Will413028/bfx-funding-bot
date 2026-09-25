@@ -3,9 +3,9 @@
 Reached only through the frontend BFF, which requires an MFA-verified operator
 session before it mints the JWT this router checks (ADR 2026-09-25 D2/D4). The
 web API holds no write on the trading state or the approvals (ADR D4'): it
-inserts a request row with the operator's identity and returns 202; the account
-daemon re-checks the operator, applies the request under the account lock and
-records the outcome, which ``GET .../requests/{id}`` reports.
+queues an operator request (``execution.operator_requests``) and returns 202;
+the account daemon re-checks the operator, applies it under the account lock
+and records the outcome, which ``GET .../requests/{id}`` reports.
 """
 from __future__ import annotations
 
@@ -17,8 +17,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import insert, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.api.account_scope import (
@@ -29,6 +28,7 @@ from bfx_funding_bot.modules.api.account_scope import (
 from bfx_funding_bot.modules.api.deps import get_session
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
+from bfx_funding_bot.modules.execution.operator_requests import insert_request
 from bfx_funding_bot.modules.execution.safety.tables import (
     DeploymentApprovalRow,
     TradingControlRequestRow,
@@ -124,18 +124,13 @@ def build_trading_control_router() -> APIRouter:
                       session: AsyncSession = Depends(get_session)) -> dict[str, Any]:  # noqa: B008
         require_account_write(context)
         request_id = uuid4()
-        # Explicit column INSERT: the web API's grant covers exactly these
-        # columns, and an ORM flush would also send the daemon's outcome columns.
-        try:
-            await session.execute(insert(TradingControlRequestRow).values(
-                request_id=request_id, exchange_account_id=context.exchange_account_id,
-                deployment_environment=context.deployment_environment, action=action,
-                backend_digest=body.backend_digest, reason=body.reason,
-                requested_by=context.user_id, created_at_ms=int(time.time() * 1000)))
-            await session.flush()
-        except IntegrityError as exc:
-            await session.rollback()
-            raise HTTPException(status_code=409, detail="request_pending") from exc
+        if not await insert_request(session, TradingControlRequestRow, {
+            "request_id": request_id, "exchange_account_id": context.exchange_account_id,
+            "deployment_environment": context.deployment_environment, "action": action,
+            "backend_digest": body.backend_digest, "reason": body.reason,
+            "requested_by": context.user_id, "created_at_ms": int(time.time() * 1000),
+        }):
+            raise HTTPException(status_code=409, detail="request_pending")
         return {"data": {"request_id": str(request_id), "action": action, "state": "requested"}}
 
     @router.get("/requests/{request_id}")

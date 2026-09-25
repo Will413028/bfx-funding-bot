@@ -65,6 +65,9 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     "c3a639388457",
     # New tables and a trading_state column, all outside TABLE_NAMES.
     "0218f9ab59a2",
+    # A request table beside the ledger plus web API privilege revocation: no
+    # archived row or event_log content changes.
+    "b8e2d4f6a013",
 })
 
 
