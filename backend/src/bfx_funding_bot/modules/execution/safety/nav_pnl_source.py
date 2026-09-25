@@ -28,8 +28,11 @@ Each symbol's 24h window is trimmed against that symbol's latest occurred_at_ms
 (the reconcile clock), so the source needs no wall-clock injection and is fully
 deterministic from the event stream.
 
-The 24h window is in-memory only (rebuilds within ~90s of the first reconcile
-after a restart). The all-time peak optionally persists via `peak_store`
+The 24h window persists via `window_store` (nav_window_samples, T9): a sample
+is written when a symbol's NAV changes or every few minutes, and the window is
+reloaded at boot, so a restart right after a loss no longer rebuilds the window
+from the post-loss NAV and reads zero. Without a store the window is in-memory
+only, as before. The all-time peak optionally persists via `peak_store`
 (nav_peak table): loaded at boot (max-merged with any live samples), saved on
 every new high-water mark. Persistence failures are logged and swallowed — the
 reconcile money-path must never depend on this table. With peak_store=None the
@@ -58,10 +61,22 @@ class _PeakStore(Protocol):
     async def save(self, symbol: str, peak: Decimal, updated_at_ms: int) -> None: ...
 
 
+class _WindowStore(Protocol):
+    async def load(self) -> dict[str, list[tuple[int, Decimal]]]: ...
+    async def save(self, symbol: str, occurred_at_ms: int, nav: Decimal) -> None: ...
+
+
+# Persist an unchanged NAV at least this often, so the stored window keeps up.
+_WINDOW_HEARTBEAT_MS = 10 * 60 * 1000
+
+
 class ReconcileNavTracker:
-    def __init__(self, account_id: str, *, peak_store: _PeakStore | None = None) -> None:
+    def __init__(self, account_id: str, *, peak_store: _PeakStore | None = None,
+                 window_store: _WindowStore | None = None) -> None:
         self.account_id = account_id
         self._peak_store = peak_store
+        self._window_store = window_store
+        self._last_persisted: dict[str, tuple[int, Decimal]] = {}
         # Per-symbol all-time peak NAV (high-water mark). Keyed by symbol so a
         # profitable currency never lifts another currency's peak.
         self._peak_by_symbol: dict[str, Decimal] = {}
@@ -84,6 +99,35 @@ class ReconcileNavTracker:
             if live is None or peak > live:
                 self._peak_by_symbol[symbol] = peak
 
+    async def load_persisted_window(self) -> None:
+        """Seed each symbol's 24h window from the store at boot (merge, never replace)."""
+        if self._window_store is None:
+            return
+        try:
+            persisted = await self._window_store.load()
+        except Exception:
+            log.exception("nav_window_load_failed — starting with an empty 24h window")
+            return
+        for symbol, rows in persisted.items():
+            merged = sorted({*self._samples_by_symbol.get(symbol, ()), *rows})
+            self._samples_by_symbol[symbol] = deque(merged)
+            if rows:
+                self._last_persisted[symbol] = rows[-1]
+
+    async def _persist_sample(self, symbol: str, occurred_at_ms: int, nav: Decimal) -> None:
+        if self._window_store is None:
+            return
+        last = self._last_persisted.get(symbol)
+        if last is not None and last[1] == nav and occurred_at_ms - last[0] < _WINDOW_HEARTBEAT_MS:
+            return
+        try:
+            await self._window_store.save(symbol, occurred_at_ms, nav)
+            self._last_persisted[symbol] = (occurred_at_ms, nav)
+        except Exception:
+            # Never break the reconcile path; worst case the window after a
+            # restart misses this sample.
+            log.exception("nav_window_save_failed symbol=%s", symbol)
+
     async def on_position_reconciled(self, event: PositionReconciled) -> None:
         if event.account_id != self.account_id:
             return
@@ -96,6 +140,7 @@ class ReconcileNavTracker:
         nav = available + reserved + realized  # native units; never cross-summed
         samples = self._samples_by_symbol.setdefault(symbol, deque())
         samples.append((event.occurred_at_ms, nav))
+        await self._persist_sample(symbol, event.occurred_at_ms, nav)
         peak = self._peak_by_symbol.get(symbol)
         if peak is None or nav > peak:
             self._peak_by_symbol[symbol] = nav

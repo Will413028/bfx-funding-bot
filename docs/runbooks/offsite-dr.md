@@ -9,8 +9,8 @@ policy in force throughout the procedure.
 
 - Operational RPO must be measured at **<=300 seconds**.
 - An isolated restore drill must be measured at **<=3600 seconds**.
-- The Halt 2 canary uses the approved isolated-restore RTO gate of **<=3600
-  seconds**, aligned with the existing operational target.
+- The monthly and change-triggered restore tests use the same isolated-restore
+  RTO gate of **<=3600 seconds**, aligned with the existing operational target.
 - Only bounded, fresh reports with `measured: true` count as evidence. A green
   offline test, valid config, timer state, or backup object is not evidence of
   R2 reachability or recoverability.
@@ -334,8 +334,8 @@ Unavailable, stale, malformed, or failed archive state must not be interpreted
 as zero lag. Refresh first invalidates old evidence with
 `measured: false` / `backup_refresh_incomplete`; any failed collection stays
 unmeasured. If atomic persistence fails (including ENOSPC), remove the old
-artifact or truncate it if unlink is denied. Halt 2 must reject that missing/
-empty artifact. Wrappers never print old output after persistence failure.
+artifact or truncate it if unlink is denied. `bfx-backup-check` treats that
+missing/empty artifact as a problem. Wrappers never print old output after persistence failure.
 
 ### 6. Capture the same-target bounded baseline.json
 
@@ -602,7 +602,7 @@ after cleanup and cannot change, replace, or promote the accepted restore
 receipt; a persistence failure removes the diagnostic when possible. Stage
 durations are for bottleneck diagnosis only: they can include boundary overhead
 and need not sum exactly to `rto_seconds`. Never use the timing diagnostic to
-satisfy RPO/RTO, authorize a restore, canary, or resume, and never add commands,
+satisfy RPO/RTO, authorize a restore, a deploy, or a resume, and never add commands,
 errors, database URLs, credentials, or arbitrary labels to it.
 
 ### 8. Accept only fresh measured evidence
@@ -617,10 +617,8 @@ exit status zero.
 
 Retain both reports and their digests in the release or incident evidence
 bundle. A future/stale timestamp, missing field, cleanup error, or
-`measured: false` report blocks acceptance. Halt 2 may consume the same fresh
-artifacts but remains blocked unless `rto_seconds <= 3600`, the approved
-alignment with the existing operational target, and all its other event,
-projection, reconcile, image, and configuration gates pass. Never edit
+`measured: false` report blocks acceptance. These artifacts never authorize a
+resume; resuming is an operator action in the UI. Never edit
 JSON to manufacture acceptance.
 
 ### 9. Enable, start, and list the timers
@@ -709,6 +707,63 @@ serialized append reject reused CID cycles; prove the exact private source in
 rehearsal and keep that gate open until resolved. No automatic DB rollback is
 safe after a venue write; retain halt and follow the forward-repair policy.
 
+## Monthly and change-triggered prefix restore test
+
+The baseline drill above stays the provisioning and incident acceptance path. The recurring
+check is the baseline-free prefix mode, which needs no writer pause and no
+operator baseline:
+
+```bash
+deploy/vm/pgbackrest/restore-drill.sh --prefix \
+  --account-id <canonical-uuid> --environment prod \
+  --projector-version execution-state-v1
+```
+
+It restores the newest backup set (read from the production stanza with
+`pgbackrest info`) to the end of the archive into the same generated, isolated
+resources, then runs `deploy/vm/pgbackrest/prefix_verify.py` on stdin inside the
+`bfx-bot:local` image: the existing event-only replay plus a recomputation of
+the restored `event_prefix_hashes` chain. Finally it reads, in a read-only
+transaction, production's link at the restored head's `event_seq` for the same
+scope and requires it to be identical (`prefix_hash_mismatch` or
+`prefix_ahead_of_production` otherwise). The receipt is
+`$HOME/bfx/dr-evidence/restore-prefix.json` (`kind: restore_prefix`); it never
+replaces `restore.json`.
+
+`bfx-restore-test@<release>.service` runs this. The monthly timer
+(`bfx-restore-test.timer`, 1st of the month 09:17 UTC) starts
+`bfx-restore-test@current`: the DR scripts of the deployed release, from the clean
+checkout `/home/ubuntu/bfx-releases/current`. bfx-deploy starts
+`bfx-restore-test@<target revision>` -- the scripts the release is about to ship --
+whenever it is about to apply a migration or
+ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
+`docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
+read); a failure alerts and blocks that deploy. Its config is
+`/home/ubuntu/bfx/restore-test.json` with exactly `account_id`, `environment`
+and `projector_version`, for example
+`{"account_id": "<canonical-uuid>", "environment": "prod", "projector_version": "execution-state-v1"}`.
+bfx-deploy creates those checkouts (git worktrees of the mirror, owned by
+`ubuntu`) and points `current` at each release it deploys, so a DR change is
+tested with its own scripts before it ships and runs on schedule after it
+deploys. To re-run the test by hand, for example after changing the config or
+the secrets:
+
+```bash
+sudo systemctl start --no-block bfx-restore-test@current.service
+journalctl -fu bfx-restore-test@current.service
+```
+
+On success the service writes `$HOME/bfx/dr-evidence/restore-heartbeat.json`;
+`bfx-backup-check` alerts when that heartbeat is missing or older than 35 days
+(only while `bfx-restore-test.timer` is enabled). A failure alerts through
+`bfx-alert@` and never touches trading state; only a deploy that asked for the
+test is stopped. Enable the timer after the first successful manual run:
+
+```bash
+sudo systemctl enable bfx-restore-test.timer
+sudo systemctl start bfx-restore-test.timer
+```
+
 ## Rotation and incident posture
 
 R2 token rotation and repository cipher rotation are separate procedures. For
@@ -722,4 +777,4 @@ A production database restore cannot undo a venue write. If a Bitfinex write
 may have occurred after a candidate restore point, do not restore production;
 retain halt, perform a fresh full-account reconcile, and use the
 adopt/manual-resolution/forward-fix process in
-[Rollback after a Halt 2 venue write](rollback-after-venue-write.md).
+[Rollback after a venue write](rollback-after-venue-write.md).

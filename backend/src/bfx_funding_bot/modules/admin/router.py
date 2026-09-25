@@ -33,8 +33,8 @@ class _TradingStatusProtocol(Protocol):
         self, *, symbol: str | None = None, amount: float | None = None,
         rate: float | None = None, period_days: int | None = None,
     ) -> dict[str, Any]: ...
-    async def halt(self, *, reason: str, actor: str, renew: bool = False) -> dict[str, Any]: ...
-    async def resume(self, *, reason: str, actor: str) -> dict[str, Any]: ...
+    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]: ...
+    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
 def _auth_error(authorization: str | None, admin_token: str) -> JSONResponse | None:
@@ -132,60 +132,52 @@ def build_router(
         async def halt_endpoint(
             reason: str = Query(min_length=1),
             actor: str = Query(default="admin-api"),
-            renew: bool = Query(default=False),
             authorization: str | None = Header(default=None),
         ) -> JSONResponse:
-            """Persist a halt. `reason` is required — an unexplained halt is
-            the one nobody can safely undo six weeks later.
+            """Kill switch: HALTED, then cancel every funding offer at the venue.
 
-            `renew=true` advances the authorization epoch while staying halted,
-            which is the only way to grant another canary attempt once one has
-            been spent. It keeps the current halt's kind, so it never turns a
-            safety halt into a resumable one."""
+            `reason` is required — an unexplained stop is the one nobody can
+            safely undo six weeks later. 200 means the state is HALTED and every
+            currency's cancel-all was acknowledged; 502 means HALTED is in force
+            but the venue part did not fully land (see `cancel_all`) — call
+            again to retry it."""
             denied = _auth_error(authorization, admin_token)
             if denied is not None:
                 return denied
             try:
-                result = await trading_status.halt(reason=reason, actor=actor, renew=renew)
+                result = await trading_status.halt(reason=reason, actor=actor)
             except ValueError as exc:
                 return JSONResponse(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": str(exc)},
                 )
-            log.warning("admin_halt actor=%s reason=%s renew=%s", actor, reason, renew)
-            return JSONResponse(status_code=200, content=result)
+            complete = bool(result.get("cancel_all_complete"))
+            log.warning("admin_halt actor=%s reason=%s cancel_all_complete=%s",
+                        actor, reason, complete)
+            return JSONResponse(
+                status_code=200 if complete else status.HTTP_502_BAD_GATEWAY, content=result,
+            )
 
-        @router.post("/resume")
-        async def resume_endpoint(
+        @router.post("/pause")
+        async def pause_endpoint(
             reason: str = Query(min_length=1),
             actor: str = Query(default="admin-api"),
-            confirm: bool = Query(default=False),
             authorization: str | None = Header(default=None),
         ) -> JSONResponse:
-            """Clear the persisted halt. Requires `confirm=true`.
-
-            This restarts real-money lending. A token alone is not enough of a
-            gate for that — it is the same token used by read-only queries, so
-            a stray shell-history recall would otherwise resume trading.
-            """
+            """Maintenance pause (REDUCING): cancels continue, nothing new is
+            placed, no venue cancel-all. Lifting it (resume) is an authenticated
+            operator request through the web API (TOTP), never this token."""
             denied = _auth_error(authorization, admin_token)
             if denied is not None:
                 return denied
-            if not confirm:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": (
-                        "resuming restarts real-money lending; pass confirm=true"
-                    )},
-                )
             try:
-                result = await trading_status.resume(reason=reason, actor=actor)
+                result = await trading_status.pause(reason=reason, actor=actor)
             except ValueError as exc:
                 return JSONResponse(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": str(exc)},
                 )
-            log.warning("admin_resume actor=%s reason=%s", actor, reason)
+            log.warning("admin_pause actor=%s reason=%s", actor, reason)
             return JSONResponse(status_code=200, content=result)
 
     return router

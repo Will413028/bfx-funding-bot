@@ -128,10 +128,16 @@ async function request<T>(
     let message = `HTTP ${res.status}`;
 
     try {
-      const errorBody = (await res.json()) as ApiErrorResponse;
+      const errorBody = (await res.json()) as Partial<ApiErrorResponse> & {
+        detail?: unknown;
+      };
       if (errorBody.error) {
         code = errorBody.error.code;
         message = errorBody.error.message;
+      } else if (typeof errorBody.detail === "string") {
+        // FastAPI's HTTPException shape: the detail is a bounded reason code.
+        code = errorBody.detail;
+        message = errorBody.detail;
       }
     } catch {
       // Non-JSON error response — use generic message

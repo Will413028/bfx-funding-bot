@@ -87,7 +87,7 @@ calibrated_guards:
 
 
 def test_canary_realized_loss_threshold_is_5pct() -> None:
-    cfg = load_safety_config(Path(__file__).parents[4] / "configs" / "safety.canary.yaml")
+    cfg = load_safety_config(Path(__file__).parents[4] / "configs" / "safety.live.yaml")
     assert cfg.calibrated_guards.realized_loss_24h.enabled is True
     # percentage of NAV (auto-scales with funded capital), not an absolute USDT amount
     assert cfg.calibrated_guards.realized_loss_24h.threshold_pct == 5.0

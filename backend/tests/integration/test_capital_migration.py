@@ -17,6 +17,7 @@ def test_capital_upgrade_drift_and_immutable_runtime_evidence(pg_container):
     with engine.begin() as connection:
         connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+        connection.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         connection.exec_driver_sql("DROP SCHEMA public CASCADE")
         connection.exec_driver_sql("CREATE SCHEMA public")
         connection.exec_driver_sql("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_bot') THEN CREATE ROLE bfx_bot; END IF; END $$")

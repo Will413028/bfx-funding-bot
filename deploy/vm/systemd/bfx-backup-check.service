@@ -1,0 +1,15 @@
+[Unit]
+Description=Alert when backup evidence misses the RPO or restore tests go stale
+Documentation=file:///usr/local/lib/bfx-ops/current/ops/bfx_backup_check.py
+
+[Service]
+Type=oneshot
+# Root: reads the DR operator's evidence by absolute path (never ~) and the
+# root-only Telegram credentials. Sends its own alerts with de-duplication.
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+StateDirectory=bfx-ops
+StateDirectoryMode=0700
+TimeoutStartSec=120
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_backup_check.py --evidence /home/ubuntu/bfx/dr-evidence/backup.json --restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json --restore-max-age-seconds 3024000 --state /var/lib/bfx-ops/backup-check.json

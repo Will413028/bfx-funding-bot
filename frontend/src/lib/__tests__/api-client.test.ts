@@ -93,6 +93,17 @@ describe("apiClient.get", () => {
     }
   });
 
+  it("reads a bounded reason code from a FastAPI detail", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ detail: "request_pending" }, 409),
+    );
+
+    const { apiClient, ApiError } = await loadApiClient();
+    const error = await apiClient.post("/x", {}).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 409, code: "request_pending" });
+  });
+
   it("handles non-JSON error response", async () => {
     mockFetch.mockResolvedValueOnce(
       new Response("Internal Server Error", { status: 500 }),

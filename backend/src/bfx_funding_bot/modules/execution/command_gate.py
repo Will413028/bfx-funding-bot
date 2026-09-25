@@ -7,10 +7,11 @@ persister commits the intent and terminal outcome in two separate calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -49,7 +50,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.release_worker import ReleaseCommandAuthority
+from bfx_funding_bot.modules.execution.safety.protection import (
+    SUBMIT_OUTCOME_UNKNOWN,
+    ProtectionPort,
+)
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitNotSent,
@@ -79,6 +83,12 @@ class OpenUncertaintyReader(Protocol):
         deployment_environment: str,
         symbol: str,
     ) -> bool: ...
+
+
+class CommandRateLimiter(Protocol):
+    """Admits or refuses one venue write; never blocks (safety/pre_trade.CommandThrottle)."""
+
+    def admit(self, kind: str) -> bool: ...
 
 
 class AuthoritativeSafetyEvaluator(Protocol):
@@ -150,10 +160,37 @@ class AccountCommandGate:
         if not is_simulated and capital_runtime is None:
             raise ValueError("live command gate requires applied capital runtime")
         self._capital = capital_runtime
-        # Installed by live daemon before any supervised task starts.
-        self.release_authority: ReleaseCommandAuthority | None = None
+        # Automatic protections. ``trip`` only records and queues, so it is safe
+        # to call here while this gate's account lock is held; the kill it
+        # leads to waits for that lock from another task.
+        self.protection: ProtectionPort | None = None
+        # Always-on venue write rate limit (T9); installed by the live daemon.
+        self.throttle: CommandRateLimiter | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._latched_scopes: dict[tuple[str, str, str], str] = {}
+
+    @contextlib.asynccontextmanager
+    async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
+        """Hold this account's command lock so no submit or cancel is mid-flight.
+
+        The kill switch cancels everything at the venue; a submit already past
+        its transport recheck could otherwise land after that. Waiting is
+        bounded -- a wedged command must not hold a kill hostage -- and the
+        caller learns whether the lock was obtained (``False`` on timeout).
+        Never call this while holding the same lock: it is not re-entrant.
+        """
+        lock = self._account_locks.setdefault(
+            (str(_canonical_account_id(account_id)), self._deployment_environment), asyncio.Lock(),
+        )
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
+        except TimeoutError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
 
     async def check(
         self,
@@ -192,6 +229,7 @@ class AccountCommandGate:
         lock_key = (str(account_id), self._deployment_environment)
         lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
+            self._admit("submit")
             if self._capital is None:
                 await self.check(ready, context)
                 await self._guard(ready.decision, context)
@@ -265,9 +303,6 @@ class AccountCommandGate:
                         raise CommandGateBlocked("execution_audit_conflict")
 
                     async def locked_guard(locked: AsyncSession) -> None:
-                        if self.release_authority is not None:
-                            await self.release_authority.admit(locked, ready=ready,
-                                context=context, attempt_id=UUID(str(attempt.attempt_id)))
                         scope = (canonical_account, self._deployment_environment, decision.symbol)
                         if scope in self._latched_scopes:
                             raise CommandGateBlocked(self._latched_scopes[scope])
@@ -289,8 +324,6 @@ class AccountCommandGate:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
                 if self._capital is not None:
-                    if self.release_authority is not None:
-                        await self.release_authority.before_transport(ready, context)
                     await self._guard(decision, context, transport=True)
                     if not ready.book_valid_at(self._clock()):
                         raise CommandGateBlocked("decision_book_invalid_or_expired")
@@ -343,7 +376,7 @@ class AccountCommandGate:
         return result
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
-                     *, transport: bool = False) -> None:
+                     *, transport: bool = False, cancel: bool = False) -> None:
         if self._capital is not None:
             runtime = self._capital
             async def active(session: AsyncSession) -> bool:
@@ -358,7 +391,15 @@ class AccountCommandGate:
             if not account_active:
                 raise CommandGateBlocked("account_inactive")
         evaluate = self._safety_evaluator.evaluate
-        if transport:
+        if cancel:
+            # Only an evaluator that knows which guards a cancel is exempt from
+            # may admit one; falling back to the submit chain would block every
+            # cancel under a stop, and guessing a subset here could skip more.
+            cancel_evaluate = getattr(self._safety_evaluator, "evaluate_cancel", None)
+            if cancel_evaluate is None:
+                raise CommandGateBlocked("cancel_eligibility_unavailable")
+            evaluate = cancel_evaluate
+        elif transport:
             evaluate = getattr(self._safety_evaluator, "evaluate_transport", evaluate)
         result = await evaluate(decision, context)
         if not result.allowed:
@@ -366,7 +407,13 @@ class AccountCommandGate:
 
     async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
                      account_id: str, ctx: AccountContext) -> None:
-        """Durable cancel admission; ACK never releases capital in this boundary."""
+        """Durable cancel admission; ACK never releases capital in this boundary.
+
+        Cancelling is allowed in every trading state -- it is what REDUCING and
+        HALTED are for -- so it is not gated on the trading state. It is still refused without managed provenance and
+        while the offer's scope has an open or unreadable uncertainty, at
+        admission and again before every transport attempt.
+        """
         runtime = self._capital
         if runtime is None or not isinstance(self._inner, CancelPort):
             raise CommandGateBlocked("durable_cancel_unavailable")
@@ -376,10 +423,9 @@ class AccountCommandGate:
             raise CommandGateBlocked("cancel_account_conflict")
         lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
         async with lock:
+            self._admit("cancel")
             async with runtime.session_factory.begin() as session:
                 await runtime.repository.writer.prepare_locked(session, account_id=runtime.repository.account_id)
-                if self.release_authority is not None:
-                    await self.release_authority.check_normal(session)
                 claim = await session.scalar(select(OfferClaimRow).where(
                     OfferClaimRow.exchange_account_id == runtime.repository.account_id,
                     OfferClaimRow.deployment_environment == self._deployment_environment,
@@ -418,8 +464,6 @@ class AccountCommandGate:
                     raise CommandGateBlocked("cancel_provenance_uncertain")
                 # Bind the durable cancel to the managed offer, not the current quote.
                 signal_correlation_id = reference.signal_correlation_id
-                # No new spending; ordinary cancels never inherit a release halt override.
-                ctx = replace(ctx, canary_halt_authorization=None, release_session_id=None)
                 # A cancel is a venue write, not a SKIP. Probe the managed
                 # order's identity; explicitly omit only capital spending checks.
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
@@ -427,7 +471,7 @@ class AccountCommandGate:
                     offer_amount_usdt=float(claim.size_usdt),
                     offer_rate=float(decision_row.applied_rate),
                     offer_duration_days=decision_row.duration_days)
-                await self._guard(probe, replace(ctx, command_session=session), transport=True)
+                await self._guard(probe, replace(ctx, command_session=session), cancel=True)
                 await runtime.repository.writer.append(session, CancelRequested(
                     venue_offer_id=venue_offer_id, requested_at_ms=self._clock(),
                     signal_correlation_id=signal_correlation_id, account_id=account_id,
@@ -436,12 +480,8 @@ class AccountCommandGate:
             async def before_transport() -> None:
                 # Fresh scoped uncertainty/latch check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
-                if self.release_authority is not None:
-                    async with runtime.session_factory.begin() as fresh:
-                        await self.release_authority.repo.lock(fresh)
-                        await self.release_authority.check_normal(fresh)
                 await self.check(probe, ctx)
-                await self._guard(probe, ctx, transport=True)
+                await self._guard(probe, ctx, cancel=True)
 
             await before_transport()
             await self._inner.cancel(venue_offer_id=venue_offer_id,
@@ -480,6 +520,10 @@ class AccountCommandGate:
                 ),
             )
             await self._persister.persist(unknown_event)
+            if self.protection is not None:
+                self.protection.trip(SUBMIT_OUTCOME_UNKNOWN, (
+                    f"cid={reference.cid} symbol={decision.symbol} amount={size} "
+                    f"reason={unknown_event.reason}"))
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
             return
@@ -552,6 +596,11 @@ class AccountCommandGate:
         await self._safe_publish(claimed)
         if filled is not None:
             await self._safe_publish(filled)
+
+    def _admit(self, kind: str) -> None:
+        """Rate-limit venue writes before anything durable is written."""
+        if self.throttle is not None and not self.throttle.admit(kind):
+            raise CommandGateBlocked("command_rate_limited")
 
     def _latch(self, symbol: str, account_id: str, reason: str) -> None:
         self._latched_scopes[(account_id, self._deployment_environment, symbol)] = reason

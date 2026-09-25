@@ -3,7 +3,7 @@
 Motivation (2026-07-27 incident, in three parts):
 
 1. `BFX_ALLOCATION_CAP_USDT=0` was set to pause the canary. Every configured
-   symbol has an explicit cap in safety.canary.yaml, so the env scalar bound
+   symbol has an explicit cap in the safety config, so the env scalar bound
    nothing; the bot kept lending for hours. The value alone read as "paused" —
    only the resolution SOURCE shows the knob was inert.
 2. The pause was "verified" with `docker exec printenv` — reading back the
@@ -29,11 +29,16 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     BuyingPowerGuard,
     ManualKillGuard,
+)
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    TradingState,
+    TransitionResult,
+    restates,
+    validate_transition,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
@@ -100,39 +105,50 @@ def _ctx() -> AccountContext:
     return AccountContext("default", Credentials("k", "s"), D("0"))
 
 
-class _FakeHaltStore:
-    """In-memory stand-in for HaltStateStore (its own DB tests live elsewhere)."""
+class _FakeTradingState:
+    """In-memory stand-in for TradingStateRepository (its DB tests live elsewhere).
 
-    def __init__(self, state: HaltState | None = None) -> None:
+    Uses the repository's own transition rules so a test cannot get a write
+    the real repository would refuse.
+    """
+
+    def __init__(self, state: TradingState | None = None) -> None:
         self.state = state
-        self.writes: list[tuple[bool, str, str]] = []
-        self.kinds: list[str] = []
+        self.writes: list[tuple[str, str, str, str]] = []
 
-    async def current(self) -> HaltState | None:
+    async def current(self) -> TradingState | None:
         return self.state
 
-    async def set_halted(
-        self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
-        kind: str = "safety", renew: bool = False,
-    ) -> HaltState:
-        self.writes.append((halted, reason, actor))
-        self.kinds.append(kind)
-        self.state = HaltState(
-            halted=halted, reason=reason, actor=actor,
-            created_at_ms=now_ms or 1000, id=len(self.writes), kind=kind,
+    async def transition(
+        self, state: str, *, cause: str, actor: str, reason: str, now_ms: int | None = None,
+    ) -> TransitionResult:
+        previous = self.state
+        if restates(previous, state=state, cause=cause, probation=None):
+            assert previous is not None
+            return TransitionResult(state=previous, changed=False, previous=previous)
+        validate_transition(previous, state=state, cause=cause, actor=actor, reason=reason)
+        self.writes.append((state, cause, reason, actor))
+        self.state = TradingState(
+            id=7 + len(self.writes), state=state, cause=cause, actor=actor, reason=reason,
+            created_at_ms=now_ms or 1000,
         )
-        return self.state
+        return TransitionResult(state=self.state, changed=True, previous=previous)
 
-    async def history(self, *, limit: int = 20) -> list[HaltState]:
+    async def history(self, *, limit: int = 20) -> list[TradingState]:
         return [self.state] if self.state is not None else []
 
 
-def _halt_state(
-    halted: bool, reason: str = "candle distortion", kind: str = "maintenance"
-) -> HaltState:
-    return HaltState(
-        halted=halted, reason=reason, actor="admin", created_at_ms=1000, id=7, kind=kind,
+def _trading(
+    state: str, reason: str = "candle distortion", cause: str = "operator",
+) -> TradingState:
+    return TradingState(
+        id=7, state=state, cause=cause, reason=reason, actor="admin", created_at_ms=1000,
     )
+
+
+def _halt_state(halted: bool, reason: str = "candle distortion") -> TradingState:
+    """An operator's pause (REDUCING) or ACTIVE: the old maintenance halt/resume."""
+    return _trading("REDUCING" if halted else "ACTIVE", reason=reason)
 
 
 def _service(
@@ -145,13 +161,14 @@ def _service(
     env_fallback_buffer: Decimal | None = _ENV_BUFFER_3,
     cells: list[CellConfig] | None = None,
     recorder: SubmitAttemptRecorder | None = None,
-    halt_store: Any = None,
+    trading_state: Any = None,
+    kill_switch: Any = None,
 ) -> TradingStatusService:
     led = ledger if ledger is not None else _FakeLedger()
     chain = SafetyGuardChain(
-        guards=guards if guards is not None else [ManualKillGuard(halt_store=halt_store)],
+        guards=guards if guards is not None else [ManualKillGuard(trading_state=trading_state)],
         probe=HealthProbe(), diagnostics=_Sink(),
-        phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     return TradingStatusService(
@@ -165,9 +182,10 @@ def _service(
         buffers=buffers if buffers is not None else {"fUST": D("3")},
         default_buffer=D("0"),
         env_fallback_buffer=env_fallback_buffer,
-        phase=Phase.CANARY,
+        phase=Phase.SHADOW,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
-        halt_store=halt_store,
+        trading_state=trading_state,
+        kill_switch=kill_switch,
     )
 
 
@@ -180,16 +198,14 @@ def _service(
 async def test_halted_true_comes_from_asking_the_real_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service().snapshot()
+    snap = await _service(trading_state=_FakeTradingState(_trading("HALTED"))).snapshot()
     assert snap["halt"]["halted"] is True
     assert snap["halt"]["guard_installed"] is True
-    assert "BFX_KILL_SWITCH" in snap["halt"]["reason"]
+    assert "trading state HALTED" in snap["halt"]["reason"]
 
 
 @pytest.mark.asyncio
 async def test_halted_false_when_flag_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service().snapshot()
     assert snap["halt"]["halted"] is False
     assert snap["halt"]["reason"] is None
@@ -202,8 +218,8 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
     """`guard_installed=False` must be visible. "No guard blocked" and "no guard
     exists to block" are different states; conflating them is how a disabled
     safety control reads as a healthy one."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service(guards=[]).snapshot()
+    snap = await _service(guards=[],
+                          trading_state=_FakeTradingState(_trading("HALTED"))).snapshot()
     assert snap["halt"]["guard_installed"] is False
     assert snap["halt"]["halted"] is False
     assert "not installed" in (snap["halt"]["note"] or "")
@@ -211,7 +227,6 @@ async def test_uninstalled_kill_guard_is_not_reported_as_running_normally(
 
 @pytest.mark.asyncio
 async def test_installed_guards_are_listed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service(
         guards=[
             ManualKillGuard(),
@@ -319,7 +334,7 @@ async def test_last_submit_attempt_surfaces_the_blocking_guard() -> None:
     )
     rec.record_blocked(
         cell="fUST_a30", symbol="fUST", amount=D("150"),
-        guard_name="manual_kill", reason="BFX_KILL_SWITCH env flag set",
+        guard_name="manual_kill", reason="trading state HALTED: operator stop",
     )
     snap = await _service(recorder=rec).snapshot()
     assert snap["last_submit_attempt"]["outcome"] == "blocked"
@@ -338,10 +353,11 @@ async def test_dry_run_reports_the_halt_even_with_no_funds(
     """The deadlock this breaks: with available=3.00 the reconciler never sizes
     an offer, so the kill switch could not be verified by observation. The probe
     asks directly."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
+    halted = _FakeTradingState(_trading("HALTED"))
     svc = _service(
+        trading_state=halted,
         guards=[
-            ManualKillGuard(),
+            ManualKillGuard(trading_state=halted),
             BuyingPowerGuard(
                 ledger=_FakeLedger(available={"fUST": D("3.00")}),
                 buffers={"fUST": D("3")}, default_buffer=D("0"),
@@ -370,8 +386,8 @@ async def test_dry_run_probes_every_configured_symbol_by_default(
     An operator running the default probe would have concluded funds were the
     blocker while the funded symbol was held solely by the kill switch. A probe
     that reports on a symbol nobody is trading is worse than none."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
     svc = _service(
+        trading_state=_FakeTradingState(_trading("HALTED")),
         cells=[_cell("fUST"), _cell("fUSD")],
         caps={"fUST": D("10000"), "fUSD": D("400")},
         buffers={"fUST": D("3"), "fUSD": D("3")},
@@ -461,14 +477,14 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
     sink = _Sink()
     chain = SafetyGuardChain(
         guards=[ManualKillGuard()], probe=HealthProbe(), diagnostics=sink,
-        phase=Phase.CANARY, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     svc = TradingStatusService(
         chain=chain, ledger=_FakeLedger(), account_ctx=_ctx(), cells=[_cell("fUST")],
         caps={"fUST": D("10000")}, default_cap=D("0"), env_fallback_cap=D("0"),
         buffers={"fUST": D("3")}, default_buffer=D("0"), env_fallback_buffer=D("3"),
-        phase=Phase.CANARY, attempts=SubmitAttemptRecorder(),
+        phase=Phase.SHADOW, attempts=SubmitAttemptRecorder(),
     )
     await svc.dry_run()
     await svc.snapshot()
@@ -481,147 +497,118 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_reports_both_stop_sources_separately(
+async def test_status_reports_the_persisted_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Which mechanism is holding the bot decides how you resume it. Collapsing
-    them into one boolean is how "I removed the env var, why is it still
-    halted?" becomes a mystery."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    snap = await _service(halt_store=_FakeHaltStore(_halt_state(True))).snapshot()
+    snap = await _service(trading_state=_FakeTradingState(_halt_state(True))).snapshot()
     assert snap["halt"]["halted"] is True
-    assert snap["halt"]["sources"]["env_kill_switch"] is False
     persisted = snap["halt"]["sources"]["persisted"]
     assert persisted["halted"] is True
+    assert persisted["state"] == "REDUCING"
     assert persisted["reason"] == "candle distortion"
     assert persisted["actor"] == "admin"
     assert persisted["id"] == 7
 
 
 @pytest.mark.asyncio
-async def test_env_flag_alone_is_reported_as_env_sourced(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    snap = await _service(halt_store=_FakeHaltStore(_halt_state(False))).snapshot()
-    assert snap["halt"]["halted"] is True
-    assert snap["halt"]["sources"]["env_kill_switch"] is True
-    assert snap["halt"]["sources"]["persisted"]["halted"] is False
-
-
-@pytest.mark.asyncio
-async def test_never_configured_persisted_state_is_null_not_false(
+async def test_never_configured_persisted_state_is_null_and_reads_as_halted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`null` (no decision ever recorded) and `{"halted": false}` (explicitly
-    resumed by someone, with a reason) are different facts."""
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    snap = await _service(halt_store=_FakeHaltStore(None)).snapshot()
+    ACTIVE, with a reason) are different facts; the first fails closed."""
+    snap = await _service(trading_state=_FakeTradingState(None)).snapshot()
     assert snap["halt"]["sources"]["persisted"] is None
-    assert snap["halt"]["halted"] is False
+    assert snap["halt"]["halted"] is True
 
 
 @pytest.mark.asyncio
-async def test_halt_writes_a_persisted_transition() -> None:
-    store = _FakeHaltStore(None)
-    svc = _service(halt_store=store)
-    out = await svc.halt(reason="candle distortion", actor="admin")
-    assert store.writes == [(True, "candle distortion", "admin")]
-    assert out["halted"] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["safety", "release"])
-async def test_live_resume_of_an_unproven_halt_requires_release_promotion(kind: str) -> None:
-    """A halt the system imposed says something is unproven; intent cannot prove it."""
-    store = _FakeHaltStore(_halt_state(True, kind=kind))
-    service = _service(halt_store=store)
-    service._phase = Phase.LIVE
-    with pytest.raises(ValueError, match="release_promotion_required"):
-        await service.resume(reason="static bearer", actor="admin-api")
-    assert store.state.halted
+async def test_no_recorded_decision_cannot_be_paused() -> None:
+    store = _FakeTradingState(None)
+    service = _service(trading_state=store)
+    with pytest.raises(ValueError, match="HALTED -> REDUCING"):
+        await service.pause(reason="pause", actor="admin")
     assert store.writes == []
 
 
 @pytest.mark.asyncio
-async def test_live_resume_clears_a_maintenance_halt_without_a_canary() -> None:
-    """An operator-requested pause exits the way it was entered.
+async def test_pause_writes_a_reducing_transition() -> None:
+    store = _FakeTradingState(_trading("ACTIVE"))
+    svc = _service(trading_state=store)
+    out = await svc.pause(reason="candle distortion", actor="admin")
+    assert store.writes == [("REDUCING", "operator", "candle distortion", "admin")]
+    assert out["halted"] is True
+    assert out["state"] == "REDUCING"
 
-    Before halts carried a kind, undoing a database upgrade needed the
-    release-promotion path -- a real-money canary submit to clear a pause that
-    never had anything to do with execution correctness.
-    """
-    store = _FakeHaltStore(_halt_state(True, reason="pg 18.6 upgrade", kind="maintenance"))
-    service = _service(halt_store=store)
-    service._phase = Phase.LIVE
 
-    out = await service.resume(reason="upgrade finished", actor="admin-api")
+class _FakeKillSwitch:
+    def __init__(self, store: _FakeTradingState, *, complete: bool) -> None:
+        self.store, self.complete, self.calls = store, complete, []
 
-    assert out["halted"] is False
-    assert store.writes == [(False, "upgrade finished", "admin-api")]
+    async def engage(self, *, cause: str, actor: str, reason: str) -> Any:
+        from bfx_funding_bot.modules.execution.safety.kill_switch import (
+            CancelAllOutcome,
+            KillResult,
+        )
+        self.calls.append((cause, actor, reason))
+        result = await self.store.transition("HALTED", cause=cause, actor=actor, reason=reason)
+        phase = "acknowledged" if self.complete else "failed"
+        return KillResult(state=result.state, state_changed=result.changed,
+                          cancel_all=(CancelAllOutcome("UST", phase, None if self.complete else "down"),))
 
 
 @pytest.mark.asyncio
-async def test_operator_halt_is_recorded_as_maintenance() -> None:
+@pytest.mark.parametrize("complete", [True, False])
+async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bool) -> None:
+    store = _FakeTradingState(_trading("ACTIVE"))
+    kill = _FakeKillSwitch(store, complete=complete)
+    svc = _service(trading_state=store, kill_switch=kill)
+    out = await svc.halt(reason="venue incident", actor="will")
+    assert kill.calls == [("operator", "will", "venue incident")]
+    assert out["state"] == "HALTED" and out["cause"] == "operator"
+    assert out["cancel_all_complete"] is complete
+    assert out["cancel_all"][0]["currency"] == "UST"
+
+
+@pytest.mark.asyncio
+async def test_operator_halt_is_recorded_as_a_reducing_pause() -> None:
     """This endpoint exists for operator pauses; guards record their own halts."""
-    store = _FakeHaltStore(None)
-    service = _service(halt_store=store)
+    store = _FakeTradingState(_trading("ACTIVE"))
+    service = _service(trading_state=store)
 
-    out = await service.halt(reason="pg 18.6 upgrade", actor="admin")
+    out = await service.pause(reason="pg 18.6 upgrade", actor="admin")
 
-    assert store.kinds == ["maintenance"]
-    assert out["kind"] == "maintenance"
-    assert out["resumable_without_release"] is True
-
-
-async def test_resume_writes_a_persisted_transition() -> None:
-    store = _FakeHaltStore(_halt_state(True))
-    svc = _service(halt_store=store)
-    out = await svc.resume(reason="L4 v2 passed", actor="admin")
-    assert store.writes == [(False, "L4 v2 passed", "admin")]
-    assert out["halted"] is False
+    assert out["state"] == "REDUCING"
+    assert out["cause"] == "operator"
 
 
 @pytest.mark.asyncio
-async def test_resume_warns_while_the_env_flag_still_holds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Clearing the persisted halt does not clear BFX_KILL_SWITCH. Reporting
-    "resumed" while the bot is still fully stopped would be a lie of exactly
-    the kind this whole endpoint exists to prevent."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    svc = _service(halt_store=_FakeHaltStore(_halt_state(True)))
-    out = await svc.resume(reason="L4 v2 passed", actor="admin")
-    assert out["halted"] is False
-    assert out["still_halted_by_env"] is True
-    assert "BFX_KILL_SWITCH" in out["note"]
-
-
-@pytest.mark.asyncio
-async def test_resume_reports_no_env_warning_when_the_flag_is_clear(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    svc = _service(halt_store=_FakeHaltStore(_halt_state(True)))
-    out = await svc.resume(reason="done", actor="admin")
-    assert out["still_halted_by_env"] is False
-    assert out["note"] is None
+async def test_operator_pause_cannot_relabel_a_halt() -> None:
+    """HALTED ends only in an operator's authenticated resume, never in a pause."""
+    store = _FakeTradingState(_trading("HALTED", cause="auto"))
+    with pytest.raises(ValueError, match="HALTED -> REDUCING"):
+        await _service(trading_state=store).pause(reason="maintenance", actor="admin")
+    assert store.writes == []
 
 
 @pytest.mark.asyncio
 async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None:
     """paper/shadow have no store. Silently accepting a halt request there
     would report success while changing nothing."""
-    svc = _service(halt_store=None)
+    svc = _service(trading_state=None)
     with pytest.raises(ValueError, match="not configured"):
         await svc.halt(reason="x", actor="admin")
     with pytest.raises(ValueError, match="not configured"):
-        await svc.resume(reason="x", actor="admin")
+        await svc.pause(reason="x", actor="admin")
 
 
 @pytest.mark.asyncio
 async def test_status_includes_recent_halt_history() -> None:
     """"Who resumed trading and why" must be answerable from the same place
     that answers "are we halted"."""
-    snap = await _service(halt_store=_FakeHaltStore(_halt_state(True))).snapshot()
+    snap = await _service(trading_state=_FakeTradingState(_halt_state(True))).snapshot()
     assert snap["halt"]["history"][0]["reason"] == "candle distortion"
+
+
+def test_the_static_token_cannot_resume() -> None:
+    """ADR D4: resuming needs the operator's TOTP; a static token never lifts a stop."""
+    assert not hasattr(TradingStatusService, "resume")

@@ -1,19 +1,22 @@
 {
   "funding": {
-    "title": "Applied funding policy", "halted": "Lending halted", "notHalted": "Persistent halt cleared; all guards still apply",
-    "enabled": "Enabled", "disabled": "Disabled", "revision": "Applied revision: {revision}",
-    "available": "Available balance", "pending": "Unreflected commitments", "reserve": "Reserve", "spendable": "Account spendable",
-    "total": "Total capital", "unattributed": "Unattributed credit exposure", "cellHeadroom": "Cell headroom", "cellBudget": "Maximum new offer",
+    "title": "Applied funding policy",
+    "halted": "Lending halted",
+    "notHalted": "Persistent halt cleared; all guards still apply",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "revision": "Applied revision: {revision}",
+    "available": "Available balance",
+    "pending": "Unreflected commitments",
+    "reserve": "Reserve",
+    "spendable": "Account spendable",
+    "total": "Total capital",
+    "unattributed": "Unattributed credit exposure",
+    "cellHeadroom": "Cell headroom",
+    "cellBudget": "Maximum new offer",
     "sharedBudget": "Cells share account spendable. Their maximum offers must not be added together.",
-    "sessionTitle": "Release session", "humanOnly": "Preparation does not place an offer. Canary authorization and promotion are separate human actions. Validation keeps lending halted.",
-    "mfaRequired": "Operator login and a verified two-factor session are required. Technical service health does not confirm enrollment.",
-    "strategy": "Canary strategy", "meanReversion": "Mean reversion", "maximum": "Maximum canary amount (USDT)", "expiry": "Authorization window (minutes)",
-    "prepare": "Prepare session", "restore": "Existing session ID", "openSession": "Open session", "minimum": "Calculated minimum", "exact": "Consumed amount", "expires": "Expires",
-    "confirmCanary": "I authorize this single real-money offer", "authorize": "Authorize canary", "validate": "Validate outcome while halted",
-    "confirmPromote": "I approve this release for normal lending", "promote": "Promote release", "evidence": "Preparation and binding evidence", "refresh": "Refresh state", "newSession": "New session",
-    "invalidAmount": "Enter a positive decimal amount", "refreshRequired": "Session unavailable or changed. Refresh before acting.",
-    "leaveSession": "Leave session selection", "selectionOnly": "Leaving clears only this browser's selection. It does not cancel or change a durable session or retry an offer.",
-    "unavailable": "Funding status unavailable. Amounts and release preparation are blocked.", "loading": "Loading applied policy…"
+    "unavailable": "Funding status unavailable. Amounts are not shown.",
+    "loading": "Loading applied policy…"
   },
   "app": {
     "name": "BFX Funding Bot",
@@ -110,6 +113,8 @@
     "uncertaintyRecordManual": "Record manual resolution",
     "uncertaintyOperatorUnavailable": "Operator identity is unavailable.",
     "uncertaintyResolutionFailed": "Resolution could not be recorded.",
+    "uncertaintyResolutionPending": "Resolution requested. Waiting for the account daemon to apply it.",
+    "uncertaintyResolutionNotApplied": "Resolution was not applied",
     "uncertaintyNextAction": {
       "bind": "Confirm the exact venue offer ID from a fresh full-account reconcile, then bind it to this attempt.",
       "notAccepted": "Confirm complete offer-history coverage and zero exact candidates before marking this request not accepted.",
@@ -146,7 +151,7 @@
     "authTokenUnavailable": "Authentication token unavailable. Please try again."
   },
   "strategy": {
-    "draftNotice": "Saving this draft does not change the applied capital policy or activate lending. Check the applied revision and release session on Overview.",
+    "draftNotice": "Saving this draft does not change the applied capital policy or activate lending. Check the applied revision and the trading state on Overview.",
     "title": "Strategy Configuration",
     "signalParams": "Signal Parameters",
     "executionParams": "Execution Parameters",
@@ -305,5 +310,77 @@
     "csvCta": "Download CSV",
     "disclaimerTitle": "Past performance is not indicative of future results",
     "disclaimerBody": "The figures on this page are historical data only. They are not a projection, prediction, promise, or guarantee of future returns, and nothing here is investment advice. Bitfinex funding rates are volatile and can fall to zero; past results do not guarantee future performance."
+  },
+  "tradingControl": {
+    "title": "Trading state",
+    "loading": "Loading trading state…",
+    "unavailable": "Trading state unavailable. Actions are disabled until it can be read.",
+    "noDecision": "No trading decision recorded — treated as HALTED.",
+    "state": {
+      "ACTIVE": "Active",
+      "REDUCING": "Paused (cancels only)",
+      "HALTED": "Halted"
+    },
+    "cause": {
+      "operator": "operator",
+      "auto": "automatic protection",
+      "material_deploy": "material deploy"
+    },
+    "since": "Since {time}",
+    "by": "By {actor}: {reason}",
+    "probationTitle": "Probation",
+    "probationLimit": "New offers limited to {percent}% of the normal cell limit, at least one venue-minimum offer",
+    "probationFloor": "Minimum offer {symbol}: {amount}",
+    "probationTime": "{elapsed}h of {required}h",
+    "probationAcks": "{count} of {required} acknowledged submits",
+    "probationLift": "Lifts automatically when both are met with no HALTED in between.",
+    "awaitingTitle": "Material deploy awaiting approval",
+    "awaitingBody": "New offers stay stopped until you approve this exact build once.",
+    "digest": "Backend image",
+    "revision": "Source revision",
+    "changeClass": "Change class",
+    "identityMissing": "This build has no deployment identity; it cannot be approved. Redeploy with the deploy tool.",
+    "cancelAllTitle": "Venue cancel-all for this stop",
+    "cancelAllNone": "No venue cancel-all is recorded for this stop. Use the kill switch to run it.",
+    "cancelAllIncomplete": "The venue may still hold funding offers. Retry the kill switch or cancel them by hand.",
+    "phase": {
+      "requested": "sent, outcome not recorded",
+      "acknowledged": "cancelled",
+      "rejected": "refused by the venue",
+      "failed": "failed",
+      "skipped": "not sent"
+    },
+    "reason": "Reason (recorded with your request)",
+    "approve": "Approve this build",
+    "resume": "Resume trading",
+    "resumeHint": "After an automatic stop, or while a probation has not passed, trading resumes inside a 24-hour probation.",
+    "pause": "Pause (cancels only)",
+    "kill": "Kill switch…",
+    "killRetry": "Retry kill switch…",
+    "killTitle": "Kill switch",
+    "killBody": "Writes HALTED and cancels every funding offer at the venue, in every currency. Resuming afterwards needs an authenticated resume.",
+    "killPhrase": "Type KILL to confirm",
+    "killConfirm": "Confirm kill",
+    "killCancel": "Cancel",
+    "mfa": "Every action goes through your verified two-factor session and is applied by the trading daemon.",
+    "waiting": "Waiting for the trading daemon: {action}",
+    "waitingKill": "Kill queued; it is applied before anything else.",
+    "outcome": {
+      "applied": "Applied: {action}",
+      "rejected": "Refused: {action}",
+      "failed": "Failed: {action}"
+    },
+    "action": {
+      "approve": "approve",
+      "resume": "resume",
+      "pause": "pause",
+      "kill": "kill"
+    },
+    "error": {
+      "request_pending": "Another request is still waiting for the daemon.",
+      "backend_digest_required": "This build has no deployment identity.",
+      "forbidden": "Only the operator can do this.",
+      "generic": "The request was not accepted: {code}"
+    }
   }
 }

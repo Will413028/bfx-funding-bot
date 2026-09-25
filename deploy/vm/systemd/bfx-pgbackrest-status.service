@@ -7,5 +7,7 @@ After=docker.service
 Type=oneshot
 TimeoutStartSec=300
 User=ubuntu
-WorkingDirectory=/home/ubuntu/bfx-funding-bot
-ExecStart=/home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/status.sh --output /home/ubuntu/bfx/dr-evidence/backup.json
+# The deployed release's DR scripts: bfx-deploy points `current` at each release
+# it deploys (a clean git worktree), never at the mirror's working tree.
+WorkingDirectory=/home/ubuntu/bfx-releases/current
+ExecStart=/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/status.sh --output /home/ubuntu/bfx/dr-evidence/backup.json

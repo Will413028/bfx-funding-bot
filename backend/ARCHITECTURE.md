@@ -372,7 +372,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **Deterministic rebuild**：`rebuild_snapshot_from_log(account_id, environment)` 對含 `VENUE_SNAPSHOT_OBSERVED` 的 stream 從空 projection 依 `event_seq` 重放 immutable event；舊 stream 則沿用 checkpoint ⊕ tail 相容路徑。所有 venue object、position bucket、quarantine/unknown breadcrumb 均可由 event log 重建，不能讀 live API 或當前 projection 值作為輸入。
 
-**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/canary/CI 而無 cross-account 或 cross-environment 污染。
+**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, shadow, ci}`，所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 shadow/prod/CI 而無 cross-account 或 cross-environment 污染。
 
 ---
 
@@ -384,16 +384,26 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L1 hard guards（always-on，順序固定）**
 
-1. `ManualKillGuard` — 讀 `BFX_KILL_SWITCH`（true/1/yes），命中即擋全部，跑最前。
+1. `ManualKillGuard`（trading-state guard）— 已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
-3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
+3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（live 為 300s，由 `safety.live.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
 
-**L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
+**L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。live（`safety.live.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Kill switch**：設定 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 safety config；由目前 VM deployment 的環境組裝提供此 break-glass env。
+**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 PostgreSQL trigger 拒絕（權威）；Python 的 `check_transition` 只是較早、較清楚的錯誤，`test_trading_state_rule_parity` 在遷移後的 PG 上對全部轉換組合驗證兩邊判定一致。新表（trading_state、deployments、operator requests）的規則測試都跑在遷移後的 PG（`migrated_db`，template clone），不再有 SQLite 雙軌（例外：daemon wiring 測試仍用 SQLite，它們驗證元件接線而非狀態規則，碰到 trading_state 時只經過 Python pre-check）；model 帶回全部 CHECK（regex 只在 PG 建），`test_model_constraints` 比對 model 與 migration 的 CHECK。static admin token 只保留降低曝險的緊急備用：`POST /admin/halt`（kill）與 `POST /admin/pause`；任何恢復（resume、material 核准）都只能經 webapi 的 TOTP 請求（ADR D4，見下方 Release flow），static token 沒有 resume。
 
-**Canary gate（`assert_canary_guard_invariant`）**：`BFX_PHASE=canary` 啟動時強制 hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
+**自動保護（`safety/protection.py`，ADR D5）**：下列條件一律寫 `HALTED/auto` 並執行 kill path，且不自動解除：UNKNOWN submit（command gate，或 recovery 把中斷的 PENDING 轉 UNKNOWN）、orphan quarantine／capital classifier 的 `unattributed_offer`、`unclassifiable_commitment`（snapshot acceptance 或 planner 讀取）、`offer_amount_conflict`（受管 offer 的 venue 原始金額≠送出金額）、venue 借出額高於內部帳（見下）、loss limiter（24h loss 或 drawdown 超限；monitor 包住 NAV tracker）、writer lock 在 refresh 後仍未持有。觸發是同步記錄：guard 立即擋新單，kill 由受監督的 task 在所有鎖之外執行，因此在 command gate 的 account lock 或 recovery transaction 內觸發不會自鎖。「借出額高於內部帳」只判斷 capital authority 接受的 snapshot（兩次相同的 fetch，排除查詢中途成交造成的重複計算），逐幣別比較 snapshot 前的 ledger：lent 只能因借款結束而減少，或因我方 offer 成交（offered 減少）而增加，超出部分（>0.01）才觸發；未被接受的 snapshot 的差額會累計到下一個被接受的 snapshot；從未被 venue 觀測過的幣別只建立 baseline。借款結束、reconcile 補回 WS 漏掉的成交／撤單都不觸發。
+
+**Release flow（`execution/trading_control.py`，ADR D1–D4）**：部署工具注入 `BFX_CHANGE_CLASS`／`BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`。live daemon 開機時（任何 task 開始交易前）判斷：standard 保持部署前的 trading state；material 且該 digest 在 `deployment_approvals` 沒有核准 → `REDUCING/material_deploy`（HALTED 或從未記錄時維持停機）；缺少或格式錯誤的部署資訊一律視為 material。分級不是「對上一個部署」的 pairwise，而是**未消化的 material 累積**：部署工具在建立 container 前先 append 一筆 `started` ledger 列並以 `BFX_DEPLOYMENT_ID` 告訴 bot；bot 依序走過自己之前所有 `deployed` 的部署加上自己這一筆，任一為 material 就維持 material，直到之後有某個 build 被接受（該 digest 已核准且其限額期已解除）。所以在 HALTED 時部署 material X、再部署 standard Y，Y 仍須核准與限額期。讀不到自己的 ledger 列、或列上的 digest／revision 與 env 不符，一律 material。核准、resume、pause 與 kill 由 webapi `POST /api/v1/exchange-accounts/{id}/trading-control/{approve|resume|pause|kill}` 受理（只經 BFF 的 MFA 閘門；approve／resume 的 body 帶 operator 看到的 backend digest，停機動作不帶、也不會因 digest 被拒），webapi 只能 INSERT `trading_control_requests` 的請求欄位；daemon 的 `TradingControlWorker` 在 account lock 下以 `operator_authorized` 重新驗證 operator、（approve／resume）確認 digest 就是正在執行的 build，寫 approval 與 trading state，並在請求列記錄 applied／rejected／failed。pause＝`REDUCING/operator`。kill 在同一交易寫 `HALTED/operator`、把其他還在等的請求標成 `rejected: superseded_by_kill`（停機前的 resume 不能在停機後生效），commit 後在所有鎖之外由 `KillSwitch` 執行 venue cancel-all（照 kill path 記 audit 與告警；再送一次 kill 即重試）。kill 有自己的 pending 欄位並優先處理，等待中的其他請求永遠不會讓 kill 收到 409。前端 overview 的交易狀態面板只走這些請求（瀏覽器不碰 bot 的 static-token `/admin/*`），顯示限額期進度（`probation_progress`，與解除判斷同一套規則）與本次 HALTED 的 cancel-all 結果。
+
+**限額期（probation，ADR D3）**：material 核准、HALTED/auto 之後的 resume、從未記錄決策的第一次 resume、以及核准時仍在停機的 material build 第一次 resume，都開始新的限額期（此時才向 venue 取一筆最小單當下限；不開始限額期的 resume 不碰 venue）。`read_capital` 在同一個 session 讀 trading state，所以 planner、guard、command admission 與 status 同時受限：cell limit ＝ min(正常值, max(正常值×0.25, 開始時觀測到的一筆 venue 最小單（含 submit margin）))。不變式是「通過前 exposure 不超過限額」：限額期未通過前，任何回到 ACTIVE 的轉換都必須帶著它（`unfinished_probation`；`append_transition` 與 DB trigger `guard_trading_state_probation` 雙重強制），所以限額期中的 pause 或 operator 自己的 HALTED，恢復時沿用同一組限額並重新起算 24 小時；限額期外的維運 pause 恢復時不帶限額。滿 24 小時、期間 ≥3 筆 acknowledged submit、且期間沒有 HALTED 時，worker 自動寫 `ACTIVE/auto` 解除（唯一能結束限額期的轉換）。部署判斷、核准／resume 的結果（`deploy_gate`、`trading_control_applied|rejected|failed`）、`probation_started`／`probation_lifted` 與每個 trading state 轉換都經 `observability/alerts` 發 Telegram。
+
+**撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
+
+**Kill switch（`safety/kill_switch.py`）**：`POST /admin/halt`、webapi 的 kill 請求與拒絕開機時的自動停機，都執行同一條路徑：先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`。幣別＝設定的 symbols，加上有 open uncertainty（UNKNOWN、orphan）或非終態 venue offer 的 symbols。只需 writer lock，不經 command gate 的 provenance／uncertainty／trading-state 檢查；呼叫前以有上限的等待取得該帳戶的 command lock，避免已過 transport 檢查的 submit 在 cancel-all 之後才落地。每次呼叫在 `funding_cancel_all_audit` 留下 `requested` 與一筆終態（`acknowledged`／`rejected`／`failed`／`skipped`）；venue 失敗不回滾 HALTED，再呼叫一次 `/admin/halt` 即重試（`/admin/halt` 在 cancel-all 未全數完成時回 502）。被 cancel-all 撤掉的 UNKNOWN offer 由既有 offer-history 比對以終態 exact match 解析；orphan 的 uncertainty 仍需 operator resolution。不依賴資料庫的 break-glass 是停掉 bot container；`BFX_KILL_SWITCH` env 已退役。
+
+**真錢 guard 不變式（`assert_live_guard_invariant`）**：`BFX_PHASE=live` 啟動時強制 trading-state/auth/heartbeat hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
 
 **Config 不可熱載**：`SafetyConfig` 啟動時讀一次（`BFX_SAFETY_CONFIG`，預設 `configs/safety.yaml`），改 threshold 需 redeploy。
 
@@ -451,6 +461,37 @@ execution_decisions    (append-only pre-trade audit；非 ledger projection)
   amount_usdt, period_days, market_snapshot_evidence, model_evidence,
   safety_result, execution_policy, service_version, config_hash,
   occurred_at_ms, recorded_at
+
+trading_state          (append-only 交易狀態；放貸與否的唯一權威)
+  PK id（insert trigger 在 scope lock 下指派，id 序即決策序）
+  exchange_account_id (FK RESTRICT), deployment_environment,
+  state{ACTIVE|REDUCING|HALTED}, cause{operator|auto|material_deploy},
+  actor, reason, created_at_ms,
+  probation_multiplier / probation_started_at_ms / probation_floor（per-currency 最小單）, legacy_halt_id
+  -- trigger 拒絕非法轉換與 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
+  -- legacy_halt_id 指向 release_archive.trading_halt 的來源列（無 FK）。
+
+release_archive.*     (已退役 release ceremony 的真錢紀錄；migration c74d45a54e46)
+  trading_halt, canary_command_permits, release_sessions, release_session_audit
+  -- 原表連同欄位、約束、索引與指向 public 的 FK 整張移入（SET SCHEMA），statement-level
+  -- trigger 拒絕任何寫入；manifest 記每表列數與依 PK 排序的 to_jsonb 內容 SHA-256，可重算驗證。
+  -- 任何 app role 都沒有 schema USAGE；DB owner 直接以 SQL 查詢；downgrade 原樣搬回 public。
+
+deployment_approvals   (append-only；material build 的一次性核准)
+  exchange_account_id, deployment_environment, backend_digest (UNIQUE per scope),
+  source_revision, approved_by, approved_at_ms, request_id
+
+trading_control_requests (webapi→daemon 請求；webapi 只 INSERT 請求欄位)
+  request_id, action{approve|resume}, backend_digest, reason, requested_by,
+  created_at_ms, state{requested|applied|rejected|failed}, processed_at_ms,
+  outcome_reason, trading_state_id
+  -- 每個 scope 至多一筆 pending；請求欄位不可改，state 只能從 requested 轉一次終態。
+
+funding_cancel_all_audit (append-only；kill switch 每次 venue cancel-all 的紀錄)
+  PK id, exchange_account_id, deployment_environment, trading_state_id (FK),
+  attempt_id, currency, phase{requested|acknowledged|rejected|failed|skipped},
+  venue_status, detail, actor, occurred_at_ms
+  -- 每個 attempt 一筆 requested、至多一筆終態（partial unique）。
 
 diagnostics            (非 SoT forensic, prunable)
   exchange_account_id, deployment_environment, kind, payload(JSONB),
@@ -530,15 +571,16 @@ Docker/systemd writers 與 DB session inventory 必須同時成立，不能將 l
 可補齊落後 head；這個 source-specific seam 必須在 private rehearsal 驗證，失敗保留
 halt，不改 event/head 來繞過。Production schema/grants/archive/apply 各須 explicit
 operator approval；runtime identity/KEK/auth denial、fresh exposure、no uncertainty、
-RPO/RTO、bounded canary/two fresh reconciles 仍是另外的 gates。
+RPO/RTO、two fresh reconciles 仍是另外的 gates。
 
 ### Offsite DR source of truth
 
 PostgreSQL WAL archive 與 base backup 以 **pgBackRest** 寫入 private Cloudflare
 R2 repository；tracked config 不含 endpoint、bucket、credential 或 cipher
 passphrase。`status.sh`、`preflight.sh` 與 isolated restore drill 只產生 bounded、
-redacted、`measured: true|false` evidence，供 Halt 2 核對 RPO、RTO、event
-head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
+redacted、`measured: true|false` evidence，供營運者與 freshness 告警核對 RPO、RTO、
+event head/hash 與 empty-projector replay，而不是用設定存在或檔案存在推定可恢復。
+DR 狀態不擋交易或 resume（ADR 2026-09-25 D6）。
 
 Isolated restore 的 staged boundary 固定如下：Compose 只以 `restore-data` 作為
 logical volume key，由 runner 注入 generated external volume name；production
@@ -594,21 +636,23 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 
 ## 8. Phases & Deployment
 
-**現行部署 phase（`Phase` enum 另保留 legacy `canary`）**
+**現行部署 phase（`paper`／`shadow`／`live`）**
 
 | Phase | 性質 | Realm | Executor | 備註 |
 |---|---|---|---|---|
 | `paper` | 1h 模擬 | `ci` | paper | `BFX_RUN_DURATION_HOURS=1` |
 | `shadow` | 模擬校準 | `shadow` | paper | 正常 profile 為 `book_guarded`；無 duration cap |
-| `live` | **真錢能力；technical start 維持 halt** | `prod` | `bitfinex_live` | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；單筆 canary 與 promotion 透過人類 authenticated release session，不是切換 phase |
+| `live` | **真錢能力** | `prod` | `bitfinex_live` | `live.env`／`book_guarded`；資金只由已套用 CapitalPolicy 決定：fUST all_available、reserve0、max_cell_fraction0.70，fUSD disabled；能否掛新單只看 trading state（ACTIVE）與 release flow（material 核准＋限額期） |
 
 **歷史相容性**：舊 `canary` phase、fUST cap10000／fUSD cap0、
 `BFX_BALANCE_BUFFER_USDT` 與 env-based canary profile 已退役，不是現行資金 authority。
-enum／部分 simulation helpers 保留供歷史測試；不可用舊指令啟動 immutable release。
+`canary` 已從 `Phase` 移除，`BFX_PHASE=canary` 在 `load_config` 直接拒絕；研究腳本改讀 `cells.live.yaml`。
+每個 build 的四步 canary ceremony（release sessions、canary permit、halt epoch 續開、
+Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資料見 `release_archive`。
 
-**Phase ⟷ Realm guard**（`load_config()`）：live／legacy canary 禁止 shadow realm；
+**Phase ⟷ Realm guard**（`load_config()`）：live 禁止 shadow realm；
 production 使用 prod，ci 僅供測試。paper/shadow 禁止 prod（模擬不可污染真錢分析）。
-違規 `ValueError` fail-fast；webapi 必須明確設定與 manifest 相同的 realm。
+違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
 **Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
 `cells.live.yaml` 只有兩個 armed mean_reversion fUST cells（a30/p2），fUSD
@@ -627,30 +671,36 @@ deployment reconciler 依 gap 動態決定。
 | Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
-**Immutable release（`scripts.immutable_release`）**：clean tracked source archive
-build once → candidate shared inventory/Python/env manifest → saved exact backend
-and frontend images → owner-only schema dry-run/digest apply → bounded BootRecovery
-snapshot bootstrap（初次安裝無 policy 時）→ unchanged policy conversion dry-run/digest
-apply → fresh DR → same-image technical start with existing halt. Host root 由
-Docker inspect 產生 root-owned RO launch proof；actual daemon module、UID1000、RO
-code/Python、no writable executable mounts。新的 container 需要新的 launch proof。
-v2 manifest/receipt 以 typed `image={config_digest,manifest_digest,platform}`
-區分 config 與 OCI manifest content identity；backend/frontend 分開 save 並驗證完整
-archive。Host resolver 只接受這兩種已驗證 digest role，核對 platform 與實際 inspect ID，
-container.Image 一致才 start；receipt 額外綁定 `actual_image_id`，Halt2 沿用這個
-host ID 與 restore verifier 比對。v1 不相容且 fail closed，canonical release/config
-session binding 不改用 host ID；不換 Docker store、不信任 tag、不重寫舊 bundle。
-既有 PG18/Redis/volumes/runtime files 不重建。`deploy-vm.sh --bundle ...` 只是 wrapper；
-舊 moving-main/phase/canary-confirm/whole-stack build 指令已退役，歷史見 git。
-完整 CLI、ownership、首裝順序與 recovery 見
-[immutable release runbook](../docs/runbooks/immutable-release.md)。
+**跨 migration 的契約（`core/schema_head.py`）**：serialized projector 的 seeded cursor 與 projection archive 各由一個 migration 建立；之後每個 migration 以模組屬性 `ledger_contract = "preserved" | "changed"` 宣告是否改變它，契約成立的 revision 集合由此推導（從 head 往回到最近一個 changed，或到建立它的那個），不再有人工維護的清單。`tests/test_schema_head.py` 拒絕沒宣告的 migration 與多個 head。
+
+**部署（`deploy/vm/ops/bfx_deploy.py`，ADR 2026-09-25 ci-registry-digest-deploy）**：CI 在綠燈的
+`main` commit 建 arm64 image 並推到 GHCR；VM 只以 digest 拉取、從不建置；先備份再 migrate，
+recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 append-only `deployments` ledger。
+部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_CHANGE_CLASS`：分級決定開機時的
+release flow（§6），digest 與 revision 也是每筆 execution audit 的 `config_hash`／`service_version`。
+live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alembic/` 推導出的唯一 head（`core/schema_head.build_head`；多個 head 也拒絕開機）與資料庫的
+`alembic_version`：不一致代表這個 build 不屬於這個 schema（例如回滾到較新的 schema 上）。
+這和讀不到已套用的 CapitalPolicy 一樣是自動停機（Will 2026-09-25：手動與自動停機都撤單），走
+`safety/boot_stop.py`：先寫 `HALTED/auto`（寫不進去就不碰 venue），再盡力對設定幣別呼叫 venue
+cancel-all（經 `KillSwitch`，照 kill path 記 audit 與告警），然後拒絕開機。只有當憑證庫兩張表的欄位
+（只讀 catalog，不讀資料列）與這個 build 宣告的完全一致、且取得 writer lock 時才讀憑證並呼叫 venue；
+否則或 cancel-all 沒有全部成功，就發 critical 告警 `venue_offers_may_remain`：venue 上可能仍有掛單，
+需手動撤。
 
 **Application authority**：Overview 的 funding-status adapter 沿用 authenticated
 account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 daemon
 讀 canonical status＋dry-evaluate；不讀 auth.user、不推算另一套 budget。
 缺 policy、disabled、halt 分別顯示；Decimal 保留字串，draft 不等於 applied。
-ReleaseSessions 由人分開 prepare/authorize/validate/promote，expected_revision 防止
-stale request；既有單一 daemon worker 與 command gate 執行，沒有另一個 executor。
+**Operator requests（`execution/operator_requests.py`，ADR D4'）**：所有會改動執行狀態的人為操作——
+uncertainty 裁決（bind-to-venue／mark-not-accepted／manual-resolution，`uncertainty_resolution_requests`）
+與 T5 的核准／resume（`trading_control_requests`）——走同一套 outbox 合約：webapi 只以
+`insert_request` 寫該表的請求欄位（model 的 `REQUEST_COLUMNS`＝migration 的欄位級 INSERT grant）並回 202，
+不取帳戶鎖（單一 pending 由 partial unique index 保證）；daemon 的 `OperatorRequestWorker` 子類
+（`UncertaintyResolutionWorker`、`TradingControlWorker`）一次處理最舊的一筆，在帳戶鎖內的 savepoint 以
+`operator_authorized`（SQL `public.operator_authorized`）重驗權限後才 apply，結果（applied／rejected＋原因碼／
+failed＋根因）記回請求列；寫不進去的請求另以獨立交易標 failed，連這都失敗就由本 process 跳過，不擋佇列。
+需要在鎖外觀測的資料（限額期的 venue 最小單）以 `NeedsPreparation` → `prepare` 取得後再 apply。清單列帶最新一筆請求，前端只在有 pending 時輪詢清單。webapi 對 ledger／
+projection 表零寫權限，授權與收回都在 migration `1c435a35dcb4`。
 靜態 admin token 不能 resume live。TOTP 真實 enrollment／production acceptance
 仍是人工作業，technical start/health 不等同 activation。
 
@@ -659,7 +709,7 @@ stale request；既有單一 daemon worker 與 command gate 執行，沒有另�
 `BFX_EXECUTOR`、`BFX_WS_CLIENT_ENABLED`、`BFX_FILL_TRACKER_ENABLED`、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_VENUE_FLOOR_USD`、
 `BFX_MIN_OFFER_BUFFER_PCT`、`BFX_SCHEDULER_BUFFER_S`、
-`BFX_KILL_SWITCH`、`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
+`BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`。
 Bitfinex secret 不再從 `BFX_API_KEY`/`BFX_API_SECRET` 讀取；由 account-owned
 credential vault 解密。public read model 另以明確的
 `BFX_PUBLIC_EXCHANGE_ACCOUNT_ID` 綁定 UUID。
@@ -669,7 +719,7 @@ credential vault 解密。public read model 另以明確的
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ compose one-shot `weekly-report`（`--profile ops`）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`）。值得留存的報告手動 promote 進 `backend/docs/research/` 並 commit。
 - **研究重驗（Proposal E，2026-09-22）**：同一個 `weekly-report` 在 G3 之後接研究步驟，每步 `timeout` + fail-soft、絕不阻斷營運報告：外部訊號 topup（`ingest_perp_funding`、`ingest_liquidations`）→ `learn_book_fill_rate`（book-replay artifact，`source="book"`）→ `run_period_structure_backtest`（`--fill-model book` 與 linear 各一份）→ `run_oos_profitability` → `diff_research_report`（champion 漂移＝最近 12 窗中位數跌破全歷史 p25；challenger 反超＝配對 CI 下界連續 3 週 >0；只開 registry review，永不 auto-promote）。報告落 VM `~/bfx/reports/<date>-{period-structure-book,period-structure-linear,oos-profitability,weekly-research-*}.md`。systemd `TimeoutStartSec=5400`。
 - **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID 與 `BFX_DEPLOYMENT_ENV`；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
-- **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高 `safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
+- **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高（已刪除的）`safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 
 ---
@@ -682,15 +732,15 @@ credential vault 解密。public read model 另以明確的
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；同 account lock/transaction 內重查 policy revision、snapshot fence、guards 並建立 intent，不靠 in-memory tracker 授權。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
 - **歷史／simulation 說明**：舊 `allocate_gap`、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。
-- **I-BOOK original decision validity**：READY 綁定定價所用 immutable book snapshot、symbol、sequence/checksum consistency 與 provider freshness bound。account lock／identity hash／guard 等待完成後以 current clock 重查，adapter 在 request 前再檢查；失效落 durable NOT_SENT，保留 intent 與 consumed one-shot permit，不用另一份新 book 偷換原價格，不自動重送。
+- **I-BOOK original decision validity**：READY 綁定定價所用 immutable book snapshot、symbol、sequence/checksum consistency 與 provider freshness bound。account lock／identity hash／guard 等待完成後以 current clock 重查，adapter 在 request 前再檢查；失效落 durable NOT_SENT，保留 intent，不用另一份新 book 偷換原價格，不自動重送。
 - **I-WAI write-ahead intent**：txn1 寫 `ReservationIntent`(PENDING) → REST（唯一非事務邊界）→ txn2 寫 typed outcome；crash 於中間留 PENDING，boot 時進 UNKNOWN，不得盲目重送。txn 永不跨 REST call。
 - **I-IDEM idempotency**：`ORDER_FILL` / `RESERVATION_RELEASED` 以 dedup key 去重；`OfferRegistry.transition()` 純函式、原子套用、重送安全。
 - **I-ES event sourcing SoT**：`event_log` append-only；snapshots 皆可由 log 重算；bus publish 為 best-effort，recovery 一律走 event_log。
 - **I-EW serialized projection**：所有 live execution append 先持有 account/environment transaction advisory lock；cursor 之後的 event-log 缺口按 `event_seq` replay，event、entity snapshots 與 `projection_heads` 同 transaction commit，舊事件 dedup 不得令 cursor 倒退。Alembic-managed DB 未完成 cursor seed 時 fail closed。
 - **I-UA ambiguous submit**：timeout、connection reset、5xx、malformed response 或 restart 後未完成 intent 一律 `ReservationUnknown`；不自動 retry。UNKNOWN 的 intended amount 進 `uncertain_amount`，只由 fresh full-account evidence/明確 operator resolution 移除。
 - **I-OQ orphan quarantine**：active venue offer 無本地 provenance 時保存完整 object、計入 `offered_amount` 並寫 `VenueOfferQuarantined`；不合成 CID/reference、不指派 strategy、不自動 cancel，其他 symbol 繼續對帳。
-- **Halt 2 clean cutover**：在 account/environment 的 persistent halt 下，preflight 必須核對 backup/isolated-restore、migration/schema、event head/hash、config/image/projector 與 snapshot fence evidence；舊 projection 只作 diagnostic，empty projection 一律由 event chain 重建。未解 `PENDING` 明確轉 `UNKNOWN`，orphan 保留 venue object 並 quarantine；任何 uncertainty、hash/diff 不一致或 coverage 缺失都不得放行。
-- **Halt 2 bounded canary / rollback**：canary 僅一 account、一 symbol、一 cell、一道最小 command，必須有綁定 current halt epoch 與 exact scope 的 durable `canary_command_permit`；permit 在 venue boundary 前 commit 為 consumed，post-command evidence 由 durable attempt/event server-derived，不信任 JSON claim，所有 terminal path reassert halt。ACK/UNKNOWN 必須有 durable outcome、account-local projection hash 與 outcome 後兩個完整 reconcile cycles，報告不得 auto-ramp。after a venue write，rollback 不得把 DB restore 當作 venue rollback：維持 halt、fresh full-account reconcile、adopt 精確 match 或 manual resolution，然後 forward-fix。DB restore 只在量測證明 no later venue mutation occurred 時才可能安全；UNKNOWN 永不 automatic retry。
+- **Projection clean cutover**：在 account/environment 的 persistent halt 下，preflight 必須核對 backup/isolated-restore、migration/schema、event head/hash、config/image/projector 與 snapshot fence evidence；舊 projection 只作 diagnostic，empty projection 一律由 event chain 重建。未解 `PENDING` 明確轉 `UNKNOWN`，orphan 保留 venue object 並 quarantine；任何 uncertainty、hash/diff 不一致或 coverage 缺失都不得放行。
+- **Rollback after a venue write**：rollback 不得把 DB restore 當作 venue rollback：維持 halt、fresh full-account reconcile、adopt 精確 match 或 manual resolution，然後 forward-fix。DB restore 只在量測證明 no later venue mutation occurred 時才可能安全；UNKNOWN 永不 automatic retry。
 - **I-CI candle 不可變**：進入 `strategy.observe()` 的 candle 必須 `is_final=true`，且定稿後其值永不改變——`upsert_candles` 的 UPDATE arm 帶 `where is_final = false`，對已定稿列無論來源（WS 重送、REST 回補）皆為 no-op，差異改寫進 `funding_candle_revisions`。封存有兩條互補路徑：(a) **寫入即判定**——`mts` 早於 `now` 所屬期者落地就是 final（REST backfill 寫的全是已結算歷史，若落地為未定稿，final-only 讀取會看不到，`fetch_and_store` 的寫後讀回也會回空）；(b) **期轉換時補封**——`CandleWriter` 見到同 series 更晚的 mts 就封存前一根，處理「寫入時還開著、之後才過期」的那根。都不是等固定秒數。**兩個讀取函數必須同規則**：`get_up_to` 與 `get_candles_in_range` 皆預設 `final_only=True`——只改前者時，warmup（走後者）會吸進形成中的 candle 而 replay 不會，兩臂差一次 `observe()` 就是 `ema_span=24` 下約 0.7% 的 EMA 位移。理由：決定性重放要求輸入不可變；輸入可變時 live 增量狀態與 replay 重建必然分歧，而 `LendDecision.rate` 直接取 `candle.close`，失真值會成為實際掛單利率（2026-07-27 實測 23/132 slot 被事後改寫、最大 -35.3%，掛單價偏離達 +54.6%）。
 - **Submit outcome discipline**：先 durable 寫入 `ReservationIntent` 再發送 request；local pre-transport validation 產生 `ReservationFailed`，明確拒絕才產生 `ReservationFailed`，timeout/transport ambiguity/malformed response 一律 `ReservationUnknown` 並 fail closed，不得以 exception 直接推論 venue reject 或自動重試。只有 `CLAIMED`/可稽核 accepted outcome 才 `record_deploy`。
 - **fail-closed**：任何 guard timeout（2s）或 exception → `allowed=False` + `safety_trigger(critical)`。

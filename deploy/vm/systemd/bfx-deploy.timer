@@ -1,0 +1,12 @@
+[Unit]
+Description=Look for a new green main release every five minutes
+
+[Timer]
+# Offset from bfx-pgbackrest-status (*:0/5) and bfx-backup-check (*:1/5).
+OnCalendar=*:2/5
+# A missed tick is not worth catching up on; the next one looks again.
+Persistent=false
+Unit=bfx-deploy.service
+
+[Install]
+WantedBy=timers.target

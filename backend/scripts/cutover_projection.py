@@ -306,7 +306,7 @@ async def prepare_archive(
         )
         # SHARE locks fence direct SQL writers too; event/halt cannot drift while
         # capture validates projections. No rows are changed by these locks.
-        for name in ("event_log", "trading_halt", *TABLE_NAMES):
+        for name in ("event_log", "trading_state", *TABLE_NAMES):
             await session.execute(text(f"LOCK TABLE public.{name} IN SHARE MODE"))
         await verify_database_quiescence(session, scope=scope, runtime_roles=runtime_roles)
         validate_cutover_snapshot(snapshot, scope=scope, managed_symbols=managed_symbols,

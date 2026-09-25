@@ -33,8 +33,12 @@ from tests.integration.test_capital_repository import capital_engine as capital_
 
 
 @pytest.mark.usefixtures("_no_tenacity_sleep")
+@pytest.mark.parametrize("state", ["ACTIVE", "REDUCING", "HALTED"])
 @pytest.mark.parametrize("scope", ["same", "other_symbol", "other_environment", "other_account", "unreadable", "clear"])
-async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkeypatch, scope):
+async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkeypatch, scope, state):
+    """Every trading state admits the cancel; a new UNKNOWN or unreadable
+    projection in the offer's own scope still stops the retry before HTTP,
+    and the other scopes are the allowed control group."""
     import asyncio
 
     from sqlalchemy import select
@@ -69,7 +73,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(capital_db, monkey
         return Response(200, json=[0, "foc-req", None, None, None, 0, "SUCCESS", None, "ok"])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        gate, ctx, _ = await cancel_http_boundary(factory, account, http)
+        gate, ctx, _ = await cancel_http_boundary(factory, account, http, state=state)
         command = gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
                               account_id=str(account), ctx=ctx)
         if scope in {"same", "unreadable"}:

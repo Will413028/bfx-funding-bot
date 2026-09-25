@@ -31,6 +31,11 @@ class CapitalPolicy:
     reserve_amount: Decimal = _ZERO
     allocation_mode: Literal["all_available"] = "all_available"
     max_cell_fraction: Decimal = Decimal("0.70")
+    # Absolute ceiling on one offer's native amount (T9, ADR 2026-09-25 D5). None
+    # means never set: sizing is not capped by it, and MaxOfferAmountGuard refuses
+    # every offer until an amended policy (schema 2) sets it. Not part of
+    # evaluate_capital -- it bounds a single offer, not the budget.
+    max_offer_amount: Decimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -41,6 +46,10 @@ class CapitalPolicy:
         _validate_amount("max_cell_fraction", self.max_cell_fraction)
         if not _ZERO < self.max_cell_fraction <= Decimal("1"):
             raise ValueError("max_cell_fraction must be greater than 0 and at most 1")
+        if self.max_offer_amount is not None:
+            _validate_amount("max_offer_amount", self.max_offer_amount)
+            if self.max_offer_amount == _ZERO:
+                raise ValueError("max_offer_amount must be positive when set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +68,24 @@ class CapitalSnapshot:
         _validate_amount("cell_exposure", self.cell_exposure)
         if self.available_amount > self.total_capital:
             raise ValueError("available_amount must not exceed total_capital")
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalProbation:
+    """Reduced cell limit while a new build or a resume is on probation (ADR D3).
+
+    The cell limit becomes ``multiplier`` of the normal one, but never below
+    ``floor`` -- one venue-minimum offer -- and never above the normal limit.
+    """
+
+    multiplier: Decimal
+    floor: Decimal
+
+    def __post_init__(self) -> None:
+        _validate_amount("multiplier", self.multiplier)
+        _validate_amount("floor", self.floor)
+        if not _ZERO < self.multiplier <= Decimal("1"):
+            raise ValueError("multiplier must be greater than 0 and at most 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +117,15 @@ class CapitalBudget:
             raise ValueError("reason must be a supported capital blocked reason or None")
 
 
-def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot) -> CapitalBudget:
+def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot,
+                     probation: CapitalProbation | None = None) -> CapitalBudget:
     """Evaluate new-offer limits without I/O, mutation or implicit input defaults."""
     if not isinstance(policy, CapitalPolicy):
         raise ValueError("policy must be an explicit validated CapitalPolicy")
     if not isinstance(snapshot, CapitalSnapshot):
         raise ValueError("snapshot must be an explicit validated CapitalSnapshot")
+    if probation is not None and not isinstance(probation, CapitalProbation):
+        raise ValueError("probation must be an explicit validated CapitalProbation")
     if not policy.enabled:
         return CapitalBudget(_ZERO, _ZERO, _ZERO, _ZERO, "policy_disabled")
 
@@ -106,6 +136,8 @@ def evaluate_capital(policy: CapitalPolicy, snapshot: CapitalSnapshot) -> Capita
     cell_limit = (
         max(_ZERO, snapshot.total_capital - policy.reserve_amount) * policy.max_cell_fraction
     )
+    if probation is not None:
+        cell_limit = min(cell_limit, max(cell_limit * probation.multiplier, probation.floor))
     cell_headroom = max(_ZERO, cell_limit - snapshot.cell_exposure)
     max_new_offer = min(spendable, cell_headroom)
     reason: CapitalBlockedReason | None = None

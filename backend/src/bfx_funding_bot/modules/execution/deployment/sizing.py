@@ -32,7 +32,13 @@ def allocate_capital(*, views: dict[str, CapitalView], min_fill: Decimal) -> dic
             first.applied, first.snapshot_seq, first.budget.spendable,
         ):
             raise ValueError("inconsistent capital views")
-        amount = venue_amount(min(remaining, view.budget.max_new_offer))
+        limit = view.budget.max_new_offer
+        ceiling = view.applied.policy.max_offer_amount
+        if ceiling is not None:
+            # Size within the policy's absolute per-offer ceiling (T9) rather than
+            # sizing an offer the pre-trade guard would refuse on every tick.
+            limit = min(limit, ceiling)
+        amount = venue_amount(min(remaining, limit))
         if amount >= min_fill:
             fills[cell] = amount
             remaining -= amount

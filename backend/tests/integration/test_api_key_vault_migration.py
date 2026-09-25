@@ -20,6 +20,7 @@ async def test_api_keys_table_and_fk_after_upgrade(pg_engine, monkeypatch) -> No
     try:
         with eng.begin() as setup_conn:
             setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

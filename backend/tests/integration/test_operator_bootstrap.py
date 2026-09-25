@@ -114,6 +114,7 @@ def auth_database(pg_container, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
     with psycopg.connect(driver_url) as connection, connection.cursor() as cursor:
         cursor.execute("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         cursor.execute("DROP SCHEMA IF EXISTS auth CASCADE")
+        cursor.execute("DROP SCHEMA IF EXISTS release_archive CASCADE")
         cursor.execute("DROP SCHEMA public CASCADE")
         cursor.execute("CREATE SCHEMA public")
     command.upgrade(Config(str(_ALEMBIC_INI)), "head")

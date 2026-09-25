@@ -48,7 +48,7 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     VenueOfferObservation,
     is_terminal_offer_status,
 )
-from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
+from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore, SnapshotDrift
 from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
 from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 from bfx_funding_bot.modules.execution.events import (
@@ -64,6 +64,14 @@ from bfx_funding_bot.modules.execution.events import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
+from bfx_funding_bot.modules.execution.safety.protection import (
+    CAPITAL_BLOCK_TRIGGERS,
+    ORPHAN_QUARANTINED,
+    SUBMIT_OUTCOME_UNKNOWN,
+    VENUE_LENT_ABOVE_LEDGER,
+    LedgerConservation,
+    ProtectionPort,
+)
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
@@ -405,6 +413,7 @@ class BootRecovery:
         clock: Callable[[], int] | None = None,
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         capital_repository: CapitalRepository | None = None,
+        protection: ProtectionPort | None = None,
     ) -> None:
         self._store = store
         self._session_factory = session_factory
@@ -440,6 +449,32 @@ class BootRecovery:
         ) != (account_ctx.account_id, deployment_environment):
             raise ValueError("capital repository scope differs from recovery")
         self._capital_repository = capital_repository
+        # Automatic protections this observation can trip (ADR 2026-09-25 D5).
+        # Trips are synchronous records; the kill runs elsewhere, after this
+        # recovery's transaction has committed.
+        self._protection = protection
+        self._conservation = LedgerConservation()
+
+    def _protect(self, *, unknown: list[ReservationUnknown], persisted: list[RecoveryAction],
+                 capital_error: CapitalBlockedError | None, capital_accepted: bool,
+                 drift: SnapshotDrift, fence_refusal: CapitalBlockedError | None = None) -> None:
+        protection = self._protection
+        if protection is None:
+            return
+        for event in unknown:
+            protection.trip(SUBMIT_OUTCOME_UNKNOWN,
+                            f"recovered interrupted submit cid={event.cid} symbol={event.symbol}")
+        for action in persisted:
+            if isinstance(action, VenueOfferQuarantined):
+                protection.trip(ORPHAN_QUARANTINED, f"venue_offer_id={action.venue_offer_id} "
+                                f"symbol={action.symbol} amount={action.amount}")
+        for stage, refusal in (("fence", fence_refusal), ("snapshot", capital_error)):
+            trigger = CAPITAL_BLOCK_TRIGGERS.get(str(refusal)) if refusal is not None else None
+            if trigger is not None:
+                protection.trip(trigger, f"capital classifier refused the {stage}: {refusal}")
+        if self._capital_repository is not None:
+            for anomaly in self._conservation.observe(drift.symbols, confirmed=capital_accepted):
+                protection.trip(VENUE_LENT_ABOVE_LEDGER, anomaly)
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally
@@ -448,17 +483,20 @@ class BootRecovery:
         history_start_ms = await self._load_history_start_ms()
         query_started_at_ms = self._clock()
         capital_fence = None
+        fence_refusal: CapitalBlockedError | None = None
         if self._capital_repository is not None:
             # Commit the command fence BEFORE any venue query. Pending/UNKNOWN
             # must still reconcile through the ordinary recovery path; such an
-            # observation never becomes capital authority.
+            # observation never becomes capital authority. The refusal is kept:
+            # the attempt inventory checked here is where an identity conflict
+            # between a commitment and its records first shows.
             try:
                 async with session_scope(self._session_factory) as session:
                     capital_fence = await self._capital_repository.begin_snapshot(
                         session, now_ms=query_started_at_ms,
                     )
-            except CapitalBlockedError:
-                pass
+            except CapitalBlockedError as exc:
+                fence_refusal = exc
         all_offers = await self._fetch_offers(None)
         all_credits = await self._fetch_credits(None)
         wallet_available = await self._fetch_available_all()
@@ -609,6 +647,9 @@ class BootRecovery:
                 if was_persisted:
                     persisted_remaining_actions.append(remaining_action)
 
+        self._protect(unknown=unknown_actions, persisted=persisted_remaining_actions,
+                      capital_error=capital_error, capital_accepted=capital_accepted,
+                      drift=snapshot_drift, fence_refusal=fence_refusal)
         if capital_error is not None:
             raise capital_error
 
