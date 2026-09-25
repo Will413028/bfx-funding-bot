@@ -265,6 +265,70 @@ async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, h
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("deploy_env", "expected"), [
+    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+      "BFX_CHANGE_CLASS": "standard"}, ("ACTIVE", "operator", "kept")),
+    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+      "BFX_CHANGE_CLASS": "material"}, ("REDUCING", "material_deploy", "reducing")),
+    ({}, ("REDUCING", "material_deploy", "reducing")),  # no deploy identity: fail closed
+])
+async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, httpx_mock, deploy_env, expected):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+    from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from tests.modules.marketfeed.account_test_helpers import (
+        TEST_EXCHANGE_ACCOUNT_ID,
+        configure_release_runtime,
+    )
+    configure_account_env(monkeypatch)
+    import os
+    for name in list(os.environ):
+        if name.startswith("BFX_CANARY_") or name in (
+            "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
+            "BFX_KILL_SWITCH", "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS",
+        ):
+            monkeypatch.delenv(name)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'gate.db'}", **deploy_env}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine, capital_policies=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
+    repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
+    async with factory.begin() as session:
+        await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
+                                expected_revision=0, source={"fixture": True})
+        await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
+                                expected_revision=0, source={"fixture": True})
+    configure_release_runtime(monkeypatch)
+    httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
+                            method="GET", json=[], is_reusable=True, is_optional=True)
+    try:
+        daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        state = await trading.current()
+        assert (state.state, state.cause) == expected[:2]
+        status = await daemon.trading_status.snapshot()
+        assert status["deployment"]["boot_gate"] == expected[2]
+        assert daemon.trading_control is not None
+        assert daemon.trading_control.identity.backend_digest == deploy_env.get("BFX_IMAGE_DIGEST")
+    finally:
+        await engine.dispose()
+
+
 def _write_cells_yaml(tmp_path: Path) -> Path:
     yaml_path = tmp_path / "cells.yaml"
     # fUST: the funded canary currency (caps {fUSD: 0, fUST: 3000}). Several

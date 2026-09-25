@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 # The single schema this build is willing to run against. Startup compares it
 # with the database's actual alembic heads, so it must move with every
 # migration or the daemon refuses to boot.
-RELEASE_SCHEMA_HEAD = "c3a639388457"
+RELEASE_SCHEMA_HEAD = "0218f9ab59a2"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,

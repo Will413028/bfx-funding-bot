@@ -391,9 +391,13 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 DB trigger 與 `validate_transition` 雙重拒絕。`POST /admin/resume` 只解除 operator 的 REDUCING；HALTED 與 material deploy 的 REDUCING 目前只能由 release promotion 解除（T5 會換成 TOTP 核准）。
+**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 DB trigger 與 `validate_transition` 雙重拒絕。`POST /admin/resume`（static admin token）只解除 operator 的 REDUCING；HALTED、從未記錄決策（視同 HALTED）與 material deploy 的 REDUCING，只能由 webapi 的 TOTP 核准／resume 解除（見下方 Release flow）。
 
 **自動保護（`safety/protection.py`，ADR D5）**：下列條件一律寫 `HALTED/auto` 並執行 kill path，且不自動解除：UNKNOWN submit（command gate，或 recovery 把中斷的 PENDING 轉 UNKNOWN）、orphan quarantine／capital classifier 的 `unattributed_offer`、`unclassifiable_commitment`（snapshot acceptance 或 planner 讀取）、`offer_amount_conflict`（受管 offer 的 venue 原始金額≠送出金額）、venue 借出額高於內部帳（見下）、loss limiter（24h loss 或 drawdown 超限；monitor 包住 NAV tracker）、writer lock 在 refresh 後仍未持有。觸發是同步記錄：guard 立即擋新單，kill 由受監督的 task 在所有鎖之外執行，因此在 command gate 的 account lock 或 recovery transaction 內觸發不會自鎖。「借出額高於內部帳」只判斷 capital authority 接受的 snapshot（兩次相同的 fetch，排除查詢中途成交造成的重複計算），逐幣別比較 snapshot 前的 ledger：lent 只能因借款結束而減少，或因我方 offer 成交（offered 減少）而增加，超出部分（>0.01）才觸發；未被接受的 snapshot 的差額會累計到下一個被接受的 snapshot；從未被 venue 觀測過的幣別只建立 baseline。借款結束、reconcile 補回 WS 漏掉的成交／撤單都不觸發。
+
+**Release flow（`execution/trading_control.py`，ADR D1–D4）**：部署工具注入 `BFX_CHANGE_CLASS`／`BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`。live daemon 開機時（任何 task 開始交易前）判斷：standard 保持部署前的 trading state；material 且該 digest 在 `deployment_approvals` 沒有核准 → `REDUCING/material_deploy`（HALTED 或從未記錄時維持停機）；缺少或格式錯誤的部署資訊一律視為 material。`deployments` ledger 只能升級分級（該 digest 任何一列是 material、或 revision 不符 → material）；ledger 列由部署工具在 bot 健康後才寫，所以開機時通常只有 env。核准與 resume 由 webapi `POST /api/v1/exchange-accounts/{id}/trading-control/{approve|resume}` 受理（只經 BFF 的 MFA 閘門；body 帶 operator 看到的 backend digest），webapi 只能 INSERT `trading_control_requests` 的請求欄位；daemon 的 `TradingControlWorker` 在 account lock 下以 `trading_operator_authorized` 重新驗證 operator、確認 digest 就是正在執行的 build，寫 approval 與 trading state，並在請求列記錄 applied／rejected／failed。
+
+**限額期（probation，ADR D3）**：material 核准、HALTED/auto 之後的 resume、從未記錄決策的第一次 resume、以及尚未跑過限額期的 material build 的 resume，都以 `ACTIVE`＋probation 開始；operator 的 REDUCING→ACTIVE 維運恢復、以及已通過限額期的 build 上 operator 自己的 HALTED 之後的 resume 不進入（因此限額期中 pause 再 resume 會結束該次限額期）。`read_capital` 在同一個 session 讀 trading state，所以 planner、guard、command admission 與 status 同時受限：cell limit ＝ min(正常值, max(正常值×0.25, 開始時觀測到的一筆 venue 最小單（含 submit margin）))。滿 24 小時、期間 ≥3 筆 acknowledged submit、且沒有任何 HALTED（HALTED 會取代 probation，之後的 resume 重新起算）時，worker 自動寫 `ACTIVE/auto` 解除。
 
 **撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard，不再呼叫 release worker 的 `check_normal`；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 
@@ -463,9 +467,19 @@ trading_state          (append-only 交易狀態；放貸與否的唯一權威)
   exchange_account_id (FK RESTRICT), deployment_environment,
   state{ACTIVE|REDUCING|HALTED}, cause{operator|kill_switch|auto|material_deploy},
   actor, reason, created_at_ms,
-  probation_multiplier / probation_started_at_ms (T5 預留), legacy_halt_id
+  probation_multiplier / probation_started_at_ms / probation_floor（per-currency 最小單）, legacy_halt_id
   -- trigger 拒絕非法轉換與 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
   -- 舊 trading_halt 只剩 release ceremony 的 epoch 綁定（T6 移除）。
+
+deployment_approvals   (append-only；material build 的一次性核准)
+  exchange_account_id, deployment_environment, backend_digest (UNIQUE per scope),
+  source_revision, approved_by, approved_at_ms, request_id
+
+trading_control_requests (webapi→daemon 請求；webapi 只 INSERT 請求欄位)
+  request_id, action{approve|resume}, backend_digest, reason, requested_by,
+  created_at_ms, state{requested|applied|rejected|failed}, processed_at_ms,
+  outcome_reason, trading_state_id
+  -- 每個 scope 至多一筆 pending；請求欄位不可改，state 只能從 requested 轉一次終態。
 
 funding_cancel_all_audit (append-only；kill switch 每次 venue cancel-all 的紀錄)
   PK id, exchange_account_id, deployment_environment, trading_state_id (FK),
