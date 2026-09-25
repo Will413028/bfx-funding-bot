@@ -20,6 +20,8 @@ revision = "c2b7b04da604"
 down_revision = "8e4f33517b10"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 
 def upgrade() -> None:

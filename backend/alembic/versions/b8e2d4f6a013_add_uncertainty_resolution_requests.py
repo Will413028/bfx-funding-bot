@@ -17,6 +17,8 @@ revision = "b8e2d4f6a013"
 down_revision = "0218f9ab59a2"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 _REQUEST_COLUMNS = (
     "request_id,exchange_account_id,deployment_environment,uncertainty_id,action,"

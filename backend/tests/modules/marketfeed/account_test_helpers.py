@@ -23,12 +23,12 @@ async def stamp_schema_head(engine: AsyncEngine) -> None:
     """Record this build's schema head, as ``alembic upgrade`` would on Postgres."""
     from sqlalchemy import text
 
-    from bfx_funding_bot.core.schema_head import SCHEMA_HEAD
+    from bfx_funding_bot.core.schema_head import build_head
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
         await conn.execute(text("DELETE FROM alembic_version"))
         await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:head)"),
-                           {"head": SCHEMA_HEAD})
+                           {"head": build_head()})
 
 
 def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:

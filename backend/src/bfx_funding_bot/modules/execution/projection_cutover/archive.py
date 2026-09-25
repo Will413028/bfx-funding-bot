@@ -24,6 +24,7 @@ from sqlalchemy import JSON, MetaData, Table, Text, cast, func, inspect, select,
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.schema_head import ARCHIVE_CONTRACT_BASE, contract_revisions
 from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_record
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
@@ -43,39 +44,12 @@ from .tables import ArchiveRow, ArchiveRun
 
 _BATCH = 256
 
-# Schema heads a capture may run on: the projection_audit tables exist, and no
-# later migration changed the TABLE_NAMES rows or the event_log stream this
-# archive records. Hand-maintained like the projector's allow-list -- whether a
-# migration touches archived state is a judgement -- and a guard test fails when
-# a new head lands unclassified.
-ARCHIVE_READY_MIGRATIONS = frozenset({
-    "f8c2d4e6a901",
-    "a9d3e5f7b102",
-    "b4e6f8a0c203",
-    # Prefix-hash side table, two capital_snapshots columns, then trading_halt.kind:
-    # none of them touches an archived table or event_log itself.
-    "c3f5a1d7e204",
-    "d1b7c2e4a305",
-    "e5c9a3f10b62",
-    "a7f3c1d9e204",
-    # trading_state is a new table outside TABLE_NAMES; event_log is untouched.
-    "8e4f33517b10",
-    # funding_cancel_all_audit is a new table outside TABLE_NAMES.
-    "c2b7b04da604",
-    "c3a639388457",
-    # New tables and a trading_state column, all outside TABLE_NAMES.
-    "0218f9ab59a2",
-    # A request table beside the ledger plus web API privilege revocation: no
-    # archived row or event_log content changes.
-    "b8e2d4f6a013",
-    # Archives the release ceremony's tables in their own schema; none is in
-    # TABLE_NAMES and event_log is untouched.
-    "5d1c7e9a3b20",
-    # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
-    "9391a0f675d3",
-    # Grants only; no archived row or event_log content changes.
-    "6f2b8d0e4a17",
-})
+def archive_ready_revisions() -> frozenset[str]:
+    """Schema heads a capture may run on: the projection_audit tables exist and
+    no later migration changed the TABLE_NAMES rows or the event_log stream this
+    archive records -- derived from the migrations (core.schema_head)."""
+    return contract_revisions(ARCHIVE_CONTRACT_BASE)
+
 
 
 @contextmanager
@@ -233,7 +207,7 @@ async def capture_archive(
             )
         ).scalars()
     )
-    if len(heads) != 1 or heads[0] not in ARCHIVE_READY_MIGRATIONS:
+    if len(heads) != 1 or heads[0] not in archive_ready_revisions():
         raise ValueError("archive migration not ready")
     stream = await _stream_identity(session, scope)
     entries: list[dict[str, object]] = []

@@ -1,74 +1,74 @@
-"""The declared schema head must be the migration head it claims to run on.
+"""The schema a build runs on, and the contracts that span migrations, are derived.
 
-`SCHEMA_HEAD` is compared at live boot against the database's alembic heads, so
-a migration that lands without moving it makes the daemon stop trading and
-refuse to boot. Keeping it hand-maintained is deliberate -- adopting a schema
-should be a decision, not a side effect of a file appearing -- but forgetting
-to move it should fail here, in a second, rather than after a deploy.
+Nothing about a new migration needs to be remembered elsewhere: the build head
+comes from ``alembic/`` itself, and each contract's revisions follow from the
+``ledger_contract`` every migration declares. What a test can do is refuse a
+migration that does not declare, and refuse two heads.
 """
-from pathlib import Path
+import pytest
 
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-
-from bfx_funding_bot.core.schema_head import SCHEMA_HEAD
-from bfx_funding_bot.modules.execution.event_store.writer import _READY_PROJECTOR_MIGRATIONS
-from bfx_funding_bot.modules.execution.projection_cutover.archive import ARCHIVE_READY_MIGRATIONS
-
-_BACKEND_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _alembic_heads() -> tuple[str, ...]:
-    config = Config(str(_BACKEND_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(_BACKEND_ROOT / "alembic"))
-    return tuple(ScriptDirectory.from_config(config).get_heads())
+from bfx_funding_bot.core import schema_head
+from bfx_funding_bot.core.schema_head import (
+    ARCHIVE_CONTRACT_BASE,
+    DECLARED_AFTER,
+    PROJECTOR_CONTRACT_BASE,
+    SchemaHeadMismatch,
+    build_head,
+    contract_revisions,
+    declared_contract,
+    migration_scripts,
+)
 
 
-def test_schema_head_matches_the_alembic_head() -> None:
-    heads = _alembic_heads()
-    assert heads == (SCHEMA_HEAD,), (
-        f"SCHEMA_HEAD is {SCHEMA_HEAD!r} but alembic's head is "
-        f"{heads!r}. A migration landed without moving the declared head: update "
-        f"SCHEMA_HEAD in core/schema_head.py to the new revision."
-    )
+def _after_declared() -> list[str]:
+    return [s.revision for s in migration_scripts().iterate_revisions(build_head(), DECLARED_AFTER)
+            if s.revision != DECLARED_AFTER]
 
 
-def test_migrations_have_exactly_one_head() -> None:
-    """Two heads mean a branched history, which the startup check cannot express."""
-    heads = _alembic_heads()
-    assert len(heads) == 1, f"expected a single migration head, found {heads!r}"
+def test_the_build_has_exactly_one_head() -> None:
+    assert len(migration_scripts().get_heads()) == 1
+    assert build_head() == migration_scripts().get_current_head()
 
 
-def test_head_is_classified_for_the_projector_cursor() -> None:
-    """The head a deployment lands on must be judged against the cursor contract.
-
-    `_assert_projector_migration_ready` fails closed when the database's current
-    revision is missing from the allow-list, so a migration that lands without
-    being classified stops the daemon at startup -- after a release has been
-    built and shipped. The list is hand-maintained on purpose: whether a
-    migration preserves the seeded cursor contract is a judgement, not something
-    a test can infer. What the test can do is refuse to let it be skipped.
-    """
-    heads = _alembic_heads()
-    unclassified = set(heads) - set(_READY_PROJECTOR_MIGRATIONS)
-    assert not unclassified, (
-        f"migration head {sorted(unclassified)} is not classified in "
-        f"_READY_PROJECTOR_MIGRATIONS. Decide whether it preserves the seeded "
-        f"cursor contract, then add it to the allow-list in writer.py."
-    )
+def test_every_new_migration_declares_the_ledger_contract() -> None:
+    """Preserves or changes the projector cursor / projection archive contract:
+    a judgement the author makes, never a default."""
+    undeclared = [r for r in _after_declared() if declared_contract(r) not in {"preserved", "changed"}]
+    assert not undeclared, (
+        f"migrations {undeclared} must set ledger_contract = \"preserved\" or \"changed\" "
+        "(see core/schema_head.py)")
 
 
-def test_head_is_classified_for_the_projection_archive() -> None:
-    """A cutover capture refuses any head missing from the archive allow-list.
+def test_the_contracts_hold_from_their_base_to_the_head() -> None:
+    projector = contract_revisions(PROJECTOR_CONTRACT_BASE)
+    archive = contract_revisions(ARCHIVE_CONTRACT_BASE)
+    assert build_head() in projector and build_head() in archive
+    assert {PROJECTOR_CONTRACT_BASE, ARCHIVE_CONTRACT_BASE} <= projector
+    assert ARCHIVE_CONTRACT_BASE in archive and PROJECTOR_CONTRACT_BASE not in archive
+    # Before the base the contract did not exist.
+    base = migration_scripts().get_revision(PROJECTOR_CONTRACT_BASE)
+    assert base.down_revision not in projector
 
-    Unclassified, the new head makes `capture_archive` raise "archive migration
-    not ready", which only the PostgreSQL integration suite would notice. Decide
-    whether the migration changes an archived table or event_log, then add it.
-    """
-    heads = _alembic_heads()
-    unclassified = set(heads) - set(ARCHIVE_READY_MIGRATIONS)
-    assert not unclassified, (
-        f"migration head {sorted(unclassified)} is not classified in "
-        f"ARCHIVE_READY_MIGRATIONS. Decide whether it changes an archived table "
-        f"or event_log, then add it to the allow-list in projection_cutover/archive.py."
-    )
+
+def test_a_migration_that_changes_the_contract_starts_it_again(monkeypatch) -> None:
+    changed = _after_declared()[len(_after_declared()) // 2]
+    real = schema_head.declared_contract
+    monkeypatch.setattr(schema_head, "declared_contract",
+                        lambda r: "changed" if r == changed else real(r))
+    schema_head.contract_revisions.cache_clear()
+    try:
+        ready = contract_revisions(PROJECTOR_CONTRACT_BASE)
+        assert changed in ready and build_head() in ready
+        assert migration_scripts().get_revision(changed).down_revision not in ready
+    finally:
+        schema_head.contract_revisions.cache_clear()
+
+
+def test_two_heads_are_refused(monkeypatch) -> None:
+    class Two:
+        def get_heads(self):
+            return ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]
+
+    monkeypatch.setattr(schema_head, "migration_scripts", lambda: Two())
+    with pytest.raises(SchemaHeadMismatch, match="schema_heads_ambiguous"):
+        build_head()

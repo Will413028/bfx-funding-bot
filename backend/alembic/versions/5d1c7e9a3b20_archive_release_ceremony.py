@@ -32,6 +32,8 @@ revision = "5d1c7e9a3b20"
 down_revision = "b8e2d4f6a013"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 SCHEMA = "release_archive"
 # (table, primary key) in the order the manifest lists them.

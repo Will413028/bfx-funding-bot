@@ -27,6 +27,8 @@ revision = "8e4f33517b10"
 down_revision = "a7f3c1d9e204"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 _GUARD = """CREATE FUNCTION public.guard_trading_state_transition() RETURNS trigger
     LANGUAGE plpgsql SET search_path=pg_catalog AS $$
