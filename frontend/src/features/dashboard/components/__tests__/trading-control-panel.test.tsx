@@ -25,7 +25,6 @@ function stateOf(
     actor: "will",
     reason: "venue incident",
     at_ms: Date.UTC(2026, 8, 25, 12),
-    probation: null,
     ...extra,
   };
 }
@@ -36,13 +35,8 @@ function overview(
   return {
     trading_state: stateOf("ACTIVE", "operator"),
     cancel_all: [],
-    running: {
-      backend_digest: DIGEST,
-      source_revision: REVISION,
-      change_class: "standard",
-    },
+    running: { backend_digest: DIGEST, source_revision: REVISION },
     latest_deployment: null,
-    approvals: [],
     requests: [],
     ...extra,
   };
@@ -54,7 +48,6 @@ function requestRow(
   return {
     request_id: "22222222-2222-4222-8222-222222222222",
     action: "resume",
-    backend_digest: DIGEST,
     reason: "done",
     requested_by: "will",
     created_at_ms: 1,
@@ -76,7 +69,7 @@ function mount(
   data: TradingControlOverview | (() => Response),
   post: (sent: Sent) => Response = () =>
     Response.json(
-      { data: { request_id: "x", action: "pause", state: "requested" } },
+      { data: { request_id: "x", action: "resume", state: "requested" } },
       { status: 202 },
     ),
 ) {
@@ -133,88 +126,7 @@ it("reads no recorded decision as halted", async () => {
   ).toBeTruthy();
 });
 
-it("shows the probation limit, floor and the lift's progress", async () => {
-  mount(
-    overview({
-      trading_state: stateOf("ACTIVE", "operator", {
-        probation: {
-          multiplier: "0.25",
-          started_at_ms: 1,
-          floor: { fUST: "150.75" },
-          elapsed_ms: 11 * 3_600_000 + 5,
-          required_ms: 24 * 3_600_000,
-          acknowledged: 2,
-          required_acknowledged: 3,
-        },
-      }),
-    }),
-  );
-  expect(await screen.findByText(/limited to 25% of the normal/)).toBeTruthy();
-  expect(screen.getByText("Minimum offer fUST: 150.75")).toBeTruthy();
-  expect(screen.getByText("11h of 24h")).toBeTruthy();
-  expect(screen.getByText("2 of 3 acknowledged submits")).toBeTruthy();
-});
-
-it("a material deploy awaiting approval names the build and approves exactly it", async () => {
-  const sent = mount(
-    overview({
-      trading_state: stateOf("REDUCING", "material_deploy"),
-      running: {
-        backend_digest: DIGEST,
-        source_revision: REVISION,
-        change_class: "material",
-      },
-    }),
-  );
-  expect(
-    await screen.findByText("Material deploy awaiting approval"),
-  ).toBeTruthy();
-  expect(screen.getByText(DIGEST)).toBeTruthy();
-  expect(screen.getByText(REVISION)).toBeTruthy();
-  expect(screen.getByText("material")).toBeTruthy();
-  // Approval first: there is no resume around it.
-  expect(screen.queryByRole("button", { name: "Resume trading" })).toBeNull();
-  const approve = screen.getByRole("button", {
-    name: "Approve this build",
-  }) as HTMLButtonElement;
-  expect(approve.disabled).toBe(true); // a reason is required
-  fireEvent.change(
-    screen.getByLabelText("Reason (recorded with your request)"),
-    {
-      target: { value: "reviewed the diff" },
-    },
-  );
-  fireEvent.click(approve);
-  await waitFor(() =>
-    expect(sent.filter((s) => s.method === "POST")).toHaveLength(1),
-  );
-  expect(sent.find((s) => s.method === "POST")).toEqual({
-    url: `${base}/approve`,
-    method: "POST",
-    body: { reason: "reviewed the diff", backend_digest: DIGEST },
-  });
-});
-
-it("pause and resume go through the web API, a stop naming no build", async () => {
-  const sent = mount(overview());
-  fireEvent.change(
-    await screen.findByLabelText("Reason (recorded with your request)"),
-    { target: { value: "maintenance" } },
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Pause (cancels only)" }));
-  await waitFor(() =>
-    expect(sent.filter((s) => s.method === "POST")).toHaveLength(1),
-  );
-  expect(sent.find((s) => s.method === "POST")).toEqual({
-    url: `${base}/pause`,
-    method: "POST",
-    body: { reason: "maintenance" },
-  });
-  // Never the bot's static-token admin API.
-  expect(sent.every((s) => s.url.startsWith(base))).toBe(true);
-});
-
-it("resume is offered after a stop, with the probation rule stated", async () => {
+it("resume is offered after a stop and goes through the web API naming no build", async () => {
   const sent = mount(
     overview({
       trading_state: stateOf("HALTED", "auto"),
@@ -223,12 +135,7 @@ it("resume is offered after a stop, with the probation rule stated", async () =>
       ],
     }),
   );
-  expect(
-    await screen.findByText(/resumes inside a 24-hour probation/),
-  ).toBeTruthy();
-  expect(
-    screen.queryByRole("button", { name: "Pause (cancels only)" }),
-  ).toBeNull();
+  expect(await screen.findByText(/no probation follows/)).toBeTruthy();
   fireEvent.change(
     screen.getByLabelText("Reason (recorded with your request)"),
     { target: { value: "loss explained" } },
@@ -237,10 +144,24 @@ it("resume is offered after a stop, with the probation rule stated", async () =>
   await waitFor(() =>
     expect(sent.filter((s) => s.method === "POST")).toHaveLength(1),
   );
-  expect(sent.find((s) => s.method === "POST")?.body).toEqual({
-    reason: "loss explained",
-    backend_digest: DIGEST,
+  expect(sent.find((s) => s.method === "POST")).toEqual({
+    url: `${base}/resume`,
+    method: "POST",
+    body: { reason: "loss explained" },
   });
+  // Never the bot's static-token admin API.
+  expect(sent.every((s) => s.url.startsWith(base))).toBe(true);
+});
+
+it("an active state offers no resume, only the kill switch", async () => {
+  mount(overview());
+  expect(
+    await screen.findByRole("button", { name: "Kill switch…" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Resume trading" })).toBeNull();
+  expect(
+    screen.getAllByRole("button").map((button) => button.textContent),
+  ).toEqual(["Kill switch…"]);
 });
 
 it("the kill switch needs a reason and the typed phrase before it is sent", async () => {
@@ -309,7 +230,7 @@ it("a halt with no cancel-all recorded says so", async () => {
 it("while a request waits, other actions wait too but the kill does not", async () => {
   mount(
     overview({
-      trading_state: stateOf("REDUCING", "operator"),
+      trading_state: stateOf("HALTED", "operator"),
       requests: [requestRow({ action: "resume" })],
     }),
   );
@@ -328,8 +249,11 @@ it("while a request waits, other actions wait too but the kill does not", async 
     ).disabled,
   ).toBe(true);
   expect(
-    (screen.getByRole("button", { name: "Kill switch…" }) as HTMLButtonElement)
-      .disabled,
+    (
+      screen.getByRole("button", {
+        name: "Retry kill switch…",
+      }) as HTMLButtonElement
+    ).disabled,
   ).toBe(false);
 });
 
@@ -341,25 +265,25 @@ it("shows why the daemon refused the last request", async () => {
         requestRow({
           state: "rejected",
           processed_at_ms: 2,
-          outcome_reason: "approval_required",
+          outcome_reason: "operator_not_authorized",
         }),
       ],
     }),
   );
   expect(
-    await screen.findByText("Refused: resume — approval required"),
+    await screen.findByText("Refused: resume — operator not authorized"),
   ).toBeTruthy();
 });
 
 it("shows the web API's refusal of a request", async () => {
-  mount(overview(), () =>
+  mount(overview({ trading_state: stateOf("HALTED", "operator") }), () =>
     Response.json({ detail: "request_pending" }, { status: 409 }),
   );
   fireEvent.change(
     await screen.findByLabelText("Reason (recorded with your request)"),
-    { target: { value: "maintenance" } },
+    { target: { value: "back" } },
   );
-  fireEvent.click(screen.getByRole("button", { name: "Pause (cancels only)" }));
+  fireEvent.click(screen.getByRole("button", { name: "Resume trading" }));
   expect(
     await screen.findByText("Another request is still waiting for the daemon."),
   ).toBeTruthy();
@@ -384,42 +308,4 @@ it("an unreadable state leaves nothing to act on but the kill switch", async () 
   await waitFor(() =>
     expect(sent.find((s) => s.method === "POST")?.url).toBe(`${base}/kill`),
   );
-});
-
-it("offers approval only for a material build that is not approved yet", async () => {
-  const material = {
-    backend_digest: DIGEST,
-    source_revision: REVISION,
-    change_class: "material",
-  };
-  mount(
-    overview({
-      trading_state: stateOf("HALTED", "operator"),
-      running: material,
-      approvals: [
-        {
-          backend_digest: DIGEST,
-          source_revision: REVISION,
-          approved_by: "will",
-          approved_at_ms: 1,
-        },
-      ],
-    }),
-  );
-  expect(
-    await screen.findByRole("button", { name: "Resume trading" }),
-  ).toBeTruthy();
-  expect(
-    screen.queryByRole("button", { name: "Approve this build" }),
-  ).toBeNull();
-  cleanup();
-  mount(
-    overview({
-      trading_state: stateOf("HALTED", "operator"),
-      running: material,
-    }),
-  );
-  expect(
-    await screen.findByRole("button", { name: "Approve this build" }),
-  ).toBeTruthy();
 });

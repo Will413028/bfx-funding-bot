@@ -318,28 +318,14 @@
     "noDecision": "No trading decision recorded — treated as HALTED.",
     "state": {
       "ACTIVE": "Active",
-      "REDUCING": "Paused (cancels only)",
       "HALTED": "Halted"
     },
     "cause": {
       "operator": "operator",
-      "auto": "automatic protection",
-      "material_deploy": "material deploy"
+      "auto": "automatic protection"
     },
     "since": "Since {time}",
     "by": "By {actor}: {reason}",
-    "probationTitle": "Probation",
-    "probationLimit": "New offers limited to {percent}% of the normal cell limit, at least one venue-minimum offer",
-    "probationFloor": "Minimum offer {symbol}: {amount}",
-    "probationTime": "{elapsed}h of {required}h",
-    "probationAcks": "{count} of {required} acknowledged submits",
-    "probationLift": "Lifts automatically when both are met with no HALTED in between.",
-    "awaitingTitle": "Material deploy awaiting approval",
-    "awaitingBody": "New offers stay stopped until you approve this exact build once.",
-    "digest": "Backend image",
-    "revision": "Source revision",
-    "changeClass": "Change class",
-    "identityMissing": "This build has no deployment identity; it cannot be approved. Redeploy with the deploy tool.",
     "cancelAllTitle": "Venue cancel-all for this stop",
     "cancelAllNone": "No venue cancel-all is recorded for this stop. Use the kill switch to run it.",
     "cancelAllIncomplete": "The venue may still hold funding offers. Retry the kill switch or cancel them by hand.",
@@ -351,14 +337,12 @@
       "skipped": "not sent"
     },
     "reason": "Reason (recorded with your request)",
-    "approve": "Approve this build",
     "resume": "Resume trading",
-    "resumeHint": "After an automatic stop, or while a probation has not passed, trading resumes inside a 24-hour probation.",
-    "pause": "Pause (cancels only)",
+    "resumeHint": "Resuming trades within the account's offer limits right away; no probation follows.",
     "kill": "Kill switch…",
     "killRetry": "Retry kill switch…",
     "killTitle": "Kill switch",
-    "killBody": "Writes HALTED and cancels every funding offer at the venue, in every currency. Resuming afterwards needs an authenticated resume.",
+    "killBody": "Writes HALTED and cancels every funding offer at the venue in every currency, including offers you placed by hand. Loans already taken keep running until they end. Resuming afterwards needs an authenticated resume.",
     "killPhrase": "Type KILL to confirm",
     "killConfirm": "Confirm kill",
     "killCancel": "Cancel",
@@ -371,14 +355,11 @@
       "failed": "Failed: {action}"
     },
     "action": {
-      "approve": "approve",
       "resume": "resume",
-      "pause": "pause",
       "kill": "kill"
     },
     "error": {
       "request_pending": "Another request is still waiting for the daemon.",
-      "backend_digest_required": "This build has no deployment identity.",
       "forbidden": "Only the operator can do this.",
       "generic": "The request was not accepted: {code}"
     }

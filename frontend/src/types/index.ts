@@ -175,22 +175,10 @@ export interface FundingStatus {
   };
 }
 
-// ── Trading control (ADR 2026-09-25: trading state, release flow, kill) ──
+// ── Trading control (lending envelope ADR 2026-09-25 D4: state, resume, kill) ──
 
-export type TradingStateName = "ACTIVE" | "REDUCING" | "HALTED";
-export type TradingCause = "operator" | "auto" | "material_deploy";
-
-/** Reduced limits after an approval or an automatic halt, and the lift's progress. */
-export interface TradingProbation {
-  multiplier: string;
-  started_at_ms: number;
-  /** Venue minimum per symbol (native units), the floor under the reduced limit. */
-  floor: Record<string, string>;
-  elapsed_ms: number;
-  required_ms: number;
-  acknowledged: number;
-  required_acknowledged: number;
-}
+export type TradingStateName = "ACTIVE" | "HALTED";
+export type TradingCause = "operator" | "auto";
 
 export interface TradingStateView {
   id: number;
@@ -199,10 +187,9 @@ export interface TradingStateView {
   actor: string;
   reason: string;
   at_ms: number;
-  probation: TradingProbation | null;
 }
 
-export type TradingControlAction = "approve" | "resume" | "pause" | "kill";
+export type TradingControlAction = "resume" | "kill";
 export type TradingControlRequestState =
   | "requested"
   | "applied"
@@ -212,7 +199,6 @@ export type TradingControlRequestState =
 export interface TradingControlRequest {
   request_id: string;
   action: TradingControlAction;
-  backend_digest: string | null;
   reason: string;
   requested_by: string;
   created_at_ms: number;
@@ -233,22 +219,13 @@ export interface CancelAllPhase {
 export interface BuildIdentity {
   backend_digest: string | null;
   source_revision: string | null;
-  change_class: string | null;
 }
 
 export interface TradingControlOverview {
   trading_state: TradingStateView | null;
   cancel_all: CancelAllPhase[];
   running: BuildIdentity;
-  latest_deployment:
-    | (BuildIdentity & { finished_at: string; change_class: string })
-    | null;
-  approvals: {
-    backend_digest: string;
-    source_revision: string;
-    approved_by: string;
-    approved_at_ms: number;
-  }[];
+  latest_deployment: (BuildIdentity & { finished_at: string | null }) | null;
   requests: TradingControlRequest[];
 }
 

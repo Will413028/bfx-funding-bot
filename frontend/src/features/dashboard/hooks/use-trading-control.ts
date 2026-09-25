@@ -9,7 +9,7 @@ import type {
 
 /** Re-read while a request waits for the daemon; one poll for the whole panel. */
 export const PENDING_CONTROL_POLL_MS = 3_000;
-/** Otherwise the state still changes on its own (automatic stops, the probation lift). */
+/** Otherwise the state still changes on its own (automatic stops). */
 export const IDLE_CONTROL_POLL_MS = 30_000;
 
 export function tradingControlPath(
@@ -78,8 +78,6 @@ export function useTradingControl(exchangeAccountId?: string) {
 export interface TradingControlInput {
   action: TradingControlAction;
   reason: string;
-  /** Approve/resume: the build the operator saw. A stop names none. */
-  backendDigest?: string | null;
 }
 
 /**
@@ -92,15 +90,10 @@ export function useTradingControlRequest(exchangeAccountId?: string) {
   return useMutation({
     mutationFn: async (input: TradingControlInput) => {
       if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
-      const buildAction =
-        input.action === "approve" || input.action === "resume";
       return apiClient.post<
         Pick<TradingControlRequest, "request_id" | "action" | "state">
       >(tradingControlPath(exchangeAccountId, `/${input.action}`), {
         reason: input.reason,
-        ...(buildAction && input.backendDigest
-          ? { backend_digest: input.backendDigest }
-          : {}),
       });
     },
     retry: false,

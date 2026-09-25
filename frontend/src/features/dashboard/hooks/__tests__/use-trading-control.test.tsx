@@ -35,17 +35,11 @@ function overview(requests: Partial<TradingControlRequest>[] = []) {
   return {
     trading_state: null,
     cancel_all: [],
-    running: {
-      backend_digest: null,
-      source_revision: null,
-      change_class: null,
-    },
+    running: { backend_digest: null, source_revision: null },
     latest_deployment: null,
-    approvals: [],
     requests: requests.map((request, index) => ({
       request_id: `r-${index}`,
       action: "resume",
-      backend_digest: null,
       reason: "x",
       requested_by: "will",
       created_at_ms: 1,
@@ -124,7 +118,7 @@ describe("useTradingControl", () => {
 describe("useTradingControlRequest", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("names the build only for approve and resume, and never retries", async () => {
+  it("sends only the reason, and never retries", async () => {
     const { client, wrapper } = setup();
     vi.mocked(apiClient.post).mockResolvedValue({
       request_id: "r",
@@ -136,18 +130,10 @@ describe("useTradingControlRequest", () => {
       wrapper,
     });
     await act(() =>
-      result.current.mutateAsync({
-        action: "kill",
-        reason: "incident",
-        backendDigest: "sha256:x",
-      }),
+      result.current.mutateAsync({ action: "kill", reason: "incident" }),
     );
     await act(() =>
-      result.current.mutateAsync({
-        action: "approve",
-        reason: "reviewed",
-        backendDigest: "sha256:x",
-      }),
+      result.current.mutateAsync({ action: "resume", reason: "back" }),
     );
     expect(vi.mocked(apiClient.post).mock.calls).toEqual([
       [
@@ -155,8 +141,8 @@ describe("useTradingControlRequest", () => {
         { reason: "incident" },
       ],
       [
-        `/exchange-accounts/${ACCOUNT_ID}/trading-control/approve`,
-        { reason: "reviewed", backend_digest: "sha256:x" },
+        `/exchange-accounts/${ACCOUNT_ID}/trading-control/resume`,
+        { reason: "back" },
       ],
     ]);
     expect(invalidate).toHaveBeenCalledWith({
@@ -166,7 +152,7 @@ describe("useTradingControlRequest", () => {
     vi.mocked(apiClient.post).mockReset();
     vi.mocked(apiClient.post).mockRejectedValue(new Error("conflict"));
     act(() => {
-      result.current.mutate({ action: "pause", reason: "x" });
+      result.current.mutate({ action: "resume", reason: "x" });
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(apiClient.post).toHaveBeenCalledTimes(1);
