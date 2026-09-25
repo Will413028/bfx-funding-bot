@@ -1,133 +1,117 @@
-# Operations runbook（交易狀態、核准、停機、告警）
+# Operations runbook（交易狀態、包絡、停機、告警）
 
 日常操作。部署見 [deploy runbook](deploy.md)；備份與還原見 [offsite DR](offsite-dr.md)；
-行為的權威描述在 `backend/ARCHITECTURE.md` §6（Trading state、自動保護、Release flow、
-限額期、Kill switch）。決策來源：ADR 2026-09-25 `automated-probation-replaces-release-ceremony`（D1–D6）。
+行為的權威描述在 `backend/ARCHITECTURE.md` §6（offer envelope、Trading state、受管與外來 offer、
+UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 2026-09-25
+`lending-envelope-replaces-probation-and-account-halt`（D1–D5、D3a）。
 
-## 1. 交易狀態
+## 1. 三個控制層
 
-`trading_state` 是「能不能掛新單」的唯一權威：append-only，每列有 state、cause、actor、reason。
+| 層 | 控制 | 效果 |
+|---|---|---|
+| 每筆單 | CapitalPolicy 的包絡（§2） | 單筆上限、天期、open offer 數、利率下限；超出就不送 |
+| 每幣別 | policy `enabled` | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
+| 帳戶 | `trading_state` `ACTIVE`／`HALTED` | `HALTED`：所有幣別不掛新單，撤單照常 |
 
-| state | 新單 | 撤單 | 進入時 |
-|---|---|---|---|
-| `ACTIVE` | 可（限額期中受限額） | 可 | — |
-| `REDUCING` | 不可、也不重掛 | 可 | 無 venue 動作 |
-| `HALTED` | 不可 | 可 | 先 commit HALTED，再對每個幣別呼叫 venue funding cancel-all（含 orphan 與有 UNKNOWN 的幣別） |
+`trading_state` 的 cause：`operator`（人）或 `auto`（自動保護，§4）。讀不到狀態或從未記錄任何決策
+＝ HALTED（fail-closed）。只有 operator 能結束 HALTED（DB trigger 與程式碼雙重拒絕）。
+部署永遠不改變交易狀態，也不需要任何核准。
 
-cause：`operator`（人）、`auto`（自動保護）、
-`material_deploy`（material 部署等待核准）。讀不到狀態或從未記錄任何決策 ＝ HALTED（fail-closed）。
+## 2. 包絡與幣別設定：`amend_capital_policy`
 
-非法轉換由 DB trigger 與程式碼雙重拒絕：HALTED→REDUCING、非 operator 把 REDUCING/HALTED 改回
-ACTIVE（唯一例外是限額期通過時的 `ACTIVE/auto`）、把 material 部署的 REDUCING 改標成 operator pause。
+所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，改動一律 dry run → 看報告 → 用 digest apply，
+每次 apply 產生一個新 revision（舊的保留）。在 VM 上以已部署的 backend image 跑一次性 container，
+用 `/opt/bfx/runtime/migrate.env`（owner role）：
 
-## 2. 操作入口
+```bash
+python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
+  --symbol fUST --max-offer-amount 200 --min-period-days 2 --max-period-days 2 \
+  --max-open-offers 6 --rate-floor-ratio 0.5 --min-rate-apr 0.01
+# 看完整報告後，同一組參數加 --apply-digest DIGEST 再跑一次
+```
+
+- 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
+- 利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。低於下限時該幣別閒置，
+  不是錯誤。
+- 暫停一個幣別：`--enabled false`；恢復：`--enabled true`。這是日常的停止方式，不需要 HALTED。
+- 沒有包絡的幣別（舊 schema 的 policy）一律不送單（`envelope_unset`）。
+
+## 3. 帳戶停止與恢復
 
 ### 主要：UI（TOTP）
 
-Overview 的「交易狀態」面板。所有請求都經 frontend BFF 的 MFA 閘門（已驗證 TOTP 的 operator
-session），webapi 只把請求排入 `trading_control_requests`（回 202），由 bot 的
-`TradingControlWorker` 在 account lock 下重新驗證 operator 後套用，結果（applied／rejected＋原因／
-failed）顯示在面板上。
+Overview 的「交易狀態」面板。請求都經 frontend BFF 的 MFA 閘門，webapi 只把請求排入
+`trading_control_requests`（回 202），由 bot 的 `TradingControlWorker` 在 account lock 下重新驗證
+operator 後套用，結果顯示在面板上。
 
 | 按鈕 | 效果 |
 |---|---|
-| 核准這個 build | 只在 material build、且該 digest 未核准時出現。`REDUCING/material_deploy` → `ACTIVE` 限額期；若當下是 HALTED/其他 REDUCING，只記錄核准、狀態不變（之後 resume 才進限額期） |
-| 恢復交易 | `REDUCING`/`HALTED` → `ACTIVE`。material build 未核准會被拒（`approval_required`）；自動停機之後、從未記錄決策、或這個 material build 尚未通過限額期 → 進新的限額期；限額期未通過時的 pause/operator 停機 → 同一組限額重新計 24 小時 |
-| 暫停（只准撤單） | `REDUCING/operator`，無 venue 動作 |
-| Kill switch…（輸入 `KILL`） | `HALTED/operator` ＋ venue cancel-all；同時把其他等待中的請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理，永遠不會因其他請求而被擋。已經是 HALTED 時再按一次 ＝ 重試 cancel-all |
+| 恢復交易 | `HALTED` → `ACTIVE`（不論是誰停的）。不帶任何限額期：每筆單本來就在包絡內 |
+| Kill switch…（輸入 `KILL`） | `HALTED/operator` ＋ 每個幣別的 venue cancel-all，**連你在 Bitfinex 網頁手動掛的單也會撤**；已成交借款不受影響。等待中的其他請求標成 `superseded_by_kill`。kill 有自己的佇列、優先處理。已經 HALTED 時再按一次 ＝ 重試 cancel-all |
 
-核准與恢復的請求帶著面板上看到的 backend digest；不是正在跑的 build 就被拒（`digest_not_running`）。
-面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果；顯示不完整時，重試 kill
-或到 Bitfinex 手動撤單。
-
-**恢復只有 UI 這一條路。** 舊的 `/admin/resume` 已刪除；static token 不能恢復或核准。
+面板的「本次停機的 venue 撤單」顯示 `funding_cancel_all_audit` 的結果；不完整時重試 kill 或到
+Bitfinex 手動撤單。**恢復只有 UI 這一條路**；static token 不能恢復。
 
 ### 緊急備用：static admin token（只能降低曝險）
 
-UI 不可用（frontend/webapi/auth 掛掉）時使用。bot 的 healthz server（container 內 port 8080，
-未對 host 公開）提供：
-
-- `POST /admin/halt?reason=...&actor=...`：與 UI kill 同一條 kill path。200＝HALTED 且每個幣別
-  cancel-all 都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次即重試。
-- `POST /admin/pause?reason=...&actor=...`：`REDUCING/operator`，無 venue 動作。
+UI 不可用時使用。bot 的 healthz server（container 內 port 8080，未對 host 公開）提供
+`POST /admin/halt?reason=...&actor=...`，與 UI kill 同一條路徑。200＝HALTED 且每個幣別 cancel-all
+都 acknowledged；502＝HALTED 已生效但 venue 部分未完成，再呼叫一次即重試。`/admin/pause` 已移除。
 
 在 VM 上執行（token 從 container 自己的環境讀，不印出）：
 
 ```bash
 sudo docker exec bfx-bot /app/.venv/bin/python -c '
 import os, sys, urllib.error, urllib.parse, urllib.request
-q = urllib.parse.urlencode({"reason": sys.argv[2], "actor": "operator-cli"})
-r = urllib.request.Request("http://127.0.0.1:8080/admin/" + sys.argv[1] + "?" + q, method="POST",
+q = urllib.parse.urlencode({"reason": sys.argv[1], "actor": "operator-cli"})
+r = urllib.request.Request("http://127.0.0.1:8080/admin/halt?" + q, method="POST",
     headers={"Authorization": "Bearer " + os.environ["BFX_ADMIN_TOKEN"]})
 try:
     print(urllib.request.urlopen(r, timeout=120).read().decode())
 except urllib.error.HTTPError as e:
     print(e.code, e.read().decode()); sys.exit(1)
-' halt "reason text"          # 或 pause
+' "reason text"
 ```
 
-恢復仍需 UI（TOTP）。bot 自己停著時兩者都不可用：到 Bitfinex 網頁撤單並記錄。
+bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資料庫的 break-glass 是停掉 bot container
+（見 §7）：停下的 bot 不會掛新單，但也不會撤單。
 
-不依賴資料庫的 break-glass 是停掉 bot container（見 §7）：停下的 bot 不會掛新單，但也不會撤單；
-venue 上的掛單要到 Bitfinex 網頁撤。`BFX_KILL_SWITCH` env 已退役，設了也沒有作用。
+## 4. 異常的四個等級
 
-## 3. Release flow：核准與限額期
+| 等級 | 情況 | 反應 | 需要你做什麼 |
+|---|---|---|---|
+| 1 | 違反包絡、book 過期、auth DOWN、heartbeat 過期 | 擋那一筆 | 無 |
+| 2 | 送單結果不明（UNKNOWN）、讀取失敗、未被接受的 snapshot | 只隔離該幣別；settle 窗口（120s）後以金額指紋＋完整 history 自動結案 | 30 分鐘仍未結案時收到 `unknown_quarantine_aged`（之後每 6 小時），見 §5 |
+| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，按 id 撤**受管** offer（外來 offer 不碰），不自動解除 | 查清原因後 UI 恢復 |
+| 4 | 外來 offer（`foreign_exposure`）、外來 offer 成交造成的借出（`foreign_lending`）、NAV 下降（`nav_drop`） | 只告警 | 確認是不是你自己的操作 |
 
-- standard release：保持部署前的交易狀態，不需任何操作。
-- material release：bot 開機時若該 digest 沒有核准 → `REDUCING/material_deploy`（原本 HALTED
-  就維持 HALTED），Telegram 通知 `deploy_gate`。到 UI 核准一次。
-- 缺少或格式錯誤的部署身分一律視為 material（例如不是由 bfx-deploy 啟動的 container）。
+- **不會**觸發任何反應：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
+- writer lock 遺失不是交易決策：bot 直接退出、container 重啟、開機時重新等 lock（Telegram 收到
+  `daemon_fatal`）。
+- 拒絕開機（schema 與 build 不符、policy 讀不到）：寫 `HALTED/auto`（actor `boot`）並發
+  `venue_offers_may_remain`，不碰 venue。venue 上已有的受管 offer 仍在包絡內；要撤就用 kill。
+- 第 3 級處理步驟：
+  1. 看 Telegram 與 UI 的 cause/reason；container log 用 `docker logs bfx-bot --since 1h`。
+  2. 看 `kill_switch_engaged`（scope=managed）的 `not_acknowledged`；有撤不掉的受管 offer 就用 kill。
+  3. 查清 ledger 與 venue 的差異（`/admin/trading-status`、`/admin/dry-evaluate`）。
+  4. 原因消除後在 UI「恢復交易」。
 
-**限額期（probation）**：新單的 cell 上限 ＝ min(正常值, max(正常值×25%, 開始時 venue 的一筆最小單))。
-滿 24 小時、期間 ≥3 筆 acknowledged submit、且期間沒有 HALTED 時，worker 自動寫 `ACTIVE/auto`
-解除（這是唯一能結束限額期的轉換）。面板顯示進度（小時、ack 數、各幣別最小單）。
+## 5. UNKNOWN 的人工處理
 
-開始新限額期：material 核准、`HALTED/auto` 之後的 resume、從未記錄決策的第一次 resume、以及核准時
-仍在停機的 material build 的第一次 resume。維運 pause（不在限額期內）恢復時不帶限額。
+絕大多數 UNKNOWN 在 settle 窗口後自動結案：找到帶同一指紋、同條件的 offer 就認領；history 完整
+涵蓋送單時間卻沒有，就判定未送出。以下情況會維持隔離、等你處理：history 不完整、兩個以上候選、
+候選已被其他紀錄認領、或指紋相同但其他條件不符。
 
-Telegram 會收到 `probation_started`、`probation_lifted`、`trading_control_applied|rejected|failed`
-與每一次交易狀態轉換。
-
-## 4. 自動保護（寫 `HALTED/auto` ＋ kill path，不會自動解除）
-
-| trigger | 意思 |
-|---|---|
-| `submit_outcome_unknown` | 送單結果不明（或 recovery 把中斷的 PENDING 轉成 UNKNOWN） |
-| `orphan_quarantined` / `unattributed_offer` | venue 上有沒有本地來源的掛單 |
-| `unclassifiable_commitment` | 某筆 commitment 無法放進資金快照 |
-| `offer_amount_mismatch` | 受管 offer 的 venue 金額與送出金額不同 |
-| `identity_conflict` | ledger 與 venue、或兩筆 ledger 對同一 commitment 的身分不一致 |
-| `venue_lent_above_ledger` | venue 借出額高於 ledger＋我方成交能解釋的量（>0.01） |
-| `loss_limiter` | 某幣別 24h 虧損或 drawdown 超限 |
-| `writer_lock_lost` | recovery 後仍未持有 writer lock |
-| `command_rate_exceeded` | command gate 持續 throttle venue 寫入（T9） |
-
-**不會**觸發：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
-
-已經 HALTED 時再次觸發只記錄，不重跑 cancel-all（operator 的 kill 則一定重跑）。
-
-處理步驟：
-
-1. 看 Telegram 與 UI 的 cause/reason；`journalctl` 不適用（container log 用
-   `docker logs bfx-bot --since 1h`）。
-2. 確認面板的 venue cancel-all 結果；不完整就重試 kill。
-3. 找出原因並處理 uncertainty（§5）；`venue_lent_above_ledger`、`identity_conflict` 等需要先查清楚
-   ledger 與 venue 的差異。
-4. 原因消除後在 UI「恢復交易」（TOTP）→ 自動進入 24 小時限額期。
-
-## 5. UNKNOWN 與 orphan 的人工處理
-
-Overview 的 uncertainty 明細提供三種請求（同樣經 MFA、排入 `uncertainty_resolution_requests`，
-由 bot 套用；需要新鮮的 reconcile fence，過期會被拒 `stale_reconcile_fence`）：
+Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertainty_resolution_requests`，由 bot 套用；
+需要新鮮的 reconcile fence，過期會被拒 `stale_reconcile_fence`）：
 
 | uncertainty kind | 可用動作 |
 |---|---|
 | `submit_outcome_unknown`（UNKNOWN 送單） | `bind-to-venue`：綁到 venue 上唯一且完全符合的 offer；`mark-not-accepted`：有完整 venue history 證明 venue 沒收下 |
-| `unattributed_venue_offer`（orphan）、`unsupported_venue_exposure` | `manual-resolution`：`closed_at_venue`（已在 venue 關閉，例如被 cancel-all 撤掉）或 `accepted_external_exposure`（確認是外部曝險、接受它） |
+| `unattributed_venue_offer`、`unsupported_venue_exposure`（2026-09-25 前留下的舊紀錄） | `manual-resolution`：`closed_at_venue` 或 `accepted_external_exposure`。新的外來 offer 不再產生這種紀錄 |
 
 規則：
 
-- 被 cancel-all 撤掉的 UNKNOWN offer 會由 offer-history 比對自動解析；orphan 永遠需要人工 resolution。
 - 零個或多個候選 ＝ 維持 UNKNOWN，不要猜。不要刪資料列、不要自己合成 venue reference。
 - 需要 DB 還原或 venue 寫入之後的回滾判斷時，改走
   [rollback after a venue write](rollback-after-venue-write.md)。
@@ -138,7 +122,7 @@ Overview 的 uncertainty 明細提供三種請求（同樣經 MFA、排入 `unce
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
-| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、UNKNOWN、orphan、kill 結果、deploy gate、核准/恢復結果、限額期開始/解除、`venue_offers_may_remain` |
+| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
@@ -158,8 +142,8 @@ bfx-deploy 只在有新 release（或 `--retry`）時自動重建 container；�
 不會觸發。改完後：
 
 ```bash
-sudo bfx-deploy --recreate --dry-run   # 預覽：同一個 release、分級 standard
-sudo bfx-deploy --recreate             # 或 --recreate --force-material（這次 env 改動要核准時）
+sudo bfx-deploy --recreate --dry-run   # 預覽：同一個 release
+sudo bfx-deploy --recreate
 ```
 
 它和一般部署走同一套：env 檢查、ledger `started` 列、`--force-recreate`、身分檢查、健康等待、
