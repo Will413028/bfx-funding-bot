@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly isolated restore test (Sun 05:17 UTC, after the 03:17 full backup)
+
+[Timer]
+OnCalendar=Sun *-*-* 05:17:00 UTC
+Persistent=true
+Unit=bfx-restore-test.service
+
+[Install]
+WantedBy=timers.target
