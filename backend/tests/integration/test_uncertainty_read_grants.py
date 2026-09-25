@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 
 import bfx_funding_bot.modules.accounts.user_profile
+import bfx_funding_bot.modules.execution.safety.tables  # 6b grants name trading_state
 import bfx_funding_bot.modules.live_validation.tables  # noqa: F401
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.api.deps import get_session
