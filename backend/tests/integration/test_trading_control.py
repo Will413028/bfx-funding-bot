@@ -60,13 +60,13 @@ def worker(factory, account, ident, *, now, rules=True) -> TradingControlWorker:
         authority=allow, clock=lambda: now())
 
 
-async def request(factory, account, action, *, digest=DIGEST, by="operator"):
+async def request(factory, account, action, *, digest=DIGEST, by="operator", at=T0):
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
             request_id=request_id, exchange_account_id=account, deployment_environment="ci",
-            action=action, backend_digest=digest, reason=f"{action} for test", requested_by=by,
-            created_at_ms=T0))
+            action=action, backend_digest=digest if action in {"approve", "resume"} else None,
+            reason=f"{action} for test", requested_by=by, created_at_ms=at))
     return request_id
 
 
@@ -305,6 +305,92 @@ async def test_the_idle_worker_lifts_a_probation_that_has_passed(capital_db):
     assert await worker(factory, account, identity("standard"), now=lambda: T0 + BAKE_MS).tick() is False
     current = await state_of(factory, account)
     assert (current.cause, current.probation) == ("auto", None)
+
+
+# ------------------------------------------------------------ pause and kill
+
+
+class KillSpy:
+    def __init__(self, factory, account):
+        self.factory, self.account, self.calls = factory, account, []
+
+    async def engage(self, *, cause, actor, reason, when_already_halted="retry"):
+        # Runs after the request committed, outside every lock: HALTED is
+        # already what another reader sees.
+        self.calls.append((cause, actor, reason, when_already_halted,
+                           (await state_of(self.factory, self.account)).state))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "cause", "outcome", "expected"), [
+    ("ACTIVE", "operator", "applied", ("REDUCING", "operator")),
+    ("REDUCING", "operator", "applied", ("REDUCING", "operator")),  # already paused
+    ("HALTED", "auto", "rejected", ("HALTED", "auto")),              # a stop is not relabelled a pause
+    ("REDUCING", "material_deploy", "rejected", ("REDUCING", "material_deploy")),
+])
+async def test_pause_is_an_operator_reducing(capital_db, setup, cause, outcome, expected):
+    factory, account = capital_db
+    await start(factory, account, setup, cause)
+    # A stop never waits on the running build or the venue.
+    w = worker(factory, account, identity("material", OTHER), now=lambda: T0, rules=False)
+    request_id = await request(factory, account, "pause")
+    assert await w.process(request_id) == outcome
+    current = await state_of(factory, account)
+    assert (current.state, current.cause) == expected
+    if outcome == "rejected":
+        assert (await outcome_of(factory, request_id))[1].startswith("illegal_transition")
+
+
+async def outcome_of(factory, request_id):
+    return await outcome(factory, request_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "cause"), [("ACTIVE", "operator"), ("REDUCING", "material_deploy"),
+                                              ("HALTED", "auto")])
+async def test_kill_writes_halted_then_runs_the_venue_cancel_all(capital_db, setup, cause):
+    factory, account = capital_db
+    await start(factory, account, setup, cause)
+    w = worker(factory, account, identity("material", OTHER), now=lambda: T0, rules=False)
+    w.kill_switch = kill = KillSpy(factory, account)
+    request_id = await request(factory, account, "kill")
+    assert await w.process(request_id) == "applied"
+    current = await state_of(factory, account)
+    if setup == "HALTED":
+        assert (current.state, current.cause) == ("HALTED", "auto")  # a stop stays the stop it was
+    else:
+        assert (current.state, current.cause, current.actor) == ("HALTED", "operator", "operator")
+    # Asking again is how an incomplete cancel-all is retried, as /admin/halt.
+    assert kill.calls == [("operator", "operator", "kill: kill for test", "retry", "HALTED")]
+
+
+@pytest.mark.asyncio
+async def test_a_kill_goes_first_and_a_pending_request_never_blocks_it(capital_db):
+    factory, account = capital_db
+    await start(factory, account, "REDUCING", "operator")
+    older = await request(factory, account, "resume", at=T0 - 10)
+    kill_id = await request(factory, account, "kill", at=T0)  # its own pending lane
+    w = worker(factory, account, identity("standard"), now=lambda: T0, rules=False)
+    w.kill_switch = KillSpy(factory, account)
+    assert await w.tick() is True
+    assert (await outcome(factory, kill_id))[0] == "applied"
+    # What was asked before the stop cannot undo it afterwards.
+    assert await outcome(factory, older) == ("rejected", "superseded_by_kill")
+    assert await w.tick() is False
+    assert (await state_of(factory, account)).state == "HALTED"
+
+
+@pytest.mark.asyncio
+async def test_a_kill_without_a_kill_switch_is_halted_and_alerts(capital_db, monkeypatch):
+    factory, account = capital_db
+    await start(factory, account)
+    sent = []
+    monkeypatch.setattr(alerts, "emit", lambda event, *, level=None, **fields: sent.append((event, level, fields)))
+    w = worker(factory, account, identity("standard"), now=lambda: T0)
+    assert await w.process(await request(factory, account, "kill")) == "applied"
+    assert (await state_of(factory, account)).state == "HALTED"
+    assert any(event == "trading_control_failed" and level == "critical"
+               and "not cancelled" in fields["reason"] for event, level, fields in sent)
 
 
 # ------------------------------------------- a probation cannot be escaped

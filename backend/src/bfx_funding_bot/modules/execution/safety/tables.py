@@ -235,7 +235,8 @@ class TradingControlRequestRow(Base):
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
-    backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    # The build an approve/resume was made for; a stop (pause, kill) names none.
+    backend_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     requested_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -250,7 +251,13 @@ class TradingControlRequestRow(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("action IN ('approve', 'resume')", name="ck_trading_control_requests_action"),
+        CheckConstraint("action IN ('approve', 'resume', 'pause', 'kill')",
+                        name="ck_trading_control_requests_action"),
+        # PostgreSQL also checks the digest's shape (migration 0218f9ab59a2).
+        CheckConstraint(
+            "(action IN ('approve', 'resume') AND backend_digest IS NOT NULL) OR "
+            "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
+            name="ck_trading_control_requests_digest"),
         CheckConstraint(
             "length(trim(reason)) BETWEEN 1 AND 500 AND length(trim(requested_by)) > 0 "
             "AND created_at_ms >= 0",
@@ -264,9 +271,16 @@ class TradingControlRequestRow(Base):
             "AND outcome_reason IS NOT NULL AND trading_state_id IS NULL)",
             name="ck_trading_control_requests_outcome",
         ),
+        # One waiting request per scope, plus one kill beside it: a pending
+        # approval never makes a kill wait for a 409.
         Index("uq_trading_control_requests_pending", "exchange_account_id",
               "deployment_environment", unique=True,
-              postgresql_where=text("state = 'requested'"), sqlite_where=text("state = 'requested'")),
+              postgresql_where=text("state = 'requested' AND action <> 'kill'"),
+              sqlite_where=text("state = 'requested' AND action <> 'kill'")),
+        Index("uq_trading_control_requests_pending_kill", "exchange_account_id",
+              "deployment_environment", unique=True,
+              postgresql_where=text("state = 'requested' AND action = 'kill'"),
+              sqlite_where=text("state = 'requested' AND action = 'kill'")),
         Index("ix_trading_control_requests_queue", "exchange_account_id",
               "deployment_environment", "state", "created_at_ms"),
     )

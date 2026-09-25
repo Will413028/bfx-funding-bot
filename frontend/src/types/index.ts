@@ -175,22 +175,85 @@ export interface FundingStatus {
   };
 }
 
-export interface ReleaseSession {
-  id: string;
-  state: string;
-  symbol: string;
-  cell: string;
-  strategy: string;
-  max_amount: string;
-  minimum_amount: string | null;
-  exact_amount: string | null;
-  expires_at_ms: number;
-  request_revision: number;
-  processed_revision: number;
-  halt_id: number | null;
-  binding: Record<string, unknown> | null;
-  evidence: Record<string, unknown>;
-  reason: string | null;
+// ── Trading control (ADR 2026-09-25: trading state, release flow, kill) ──
+
+export type TradingStateName = "ACTIVE" | "REDUCING" | "HALTED";
+export type TradingCause =
+  | "operator"
+  | "kill_switch"
+  | "auto"
+  | "material_deploy";
+
+/** Reduced limits after an approval or an automatic halt, and the lift's progress. */
+export interface TradingProbation {
+  multiplier: string;
+  started_at_ms: number;
+  /** Venue minimum per symbol (native units), the floor under the reduced limit. */
+  floor: Record<string, string>;
+  elapsed_ms: number;
+  required_ms: number;
+  acknowledged: number;
+  required_acknowledged: number;
+}
+
+export interface TradingStateView {
+  id: number;
+  state: TradingStateName;
+  cause: TradingCause;
+  actor: string;
+  reason: string;
+  at_ms: number;
+  probation: TradingProbation | null;
+}
+
+export type TradingControlAction = "approve" | "resume" | "pause" | "kill";
+export type TradingControlRequestState =
+  | "requested"
+  | "applied"
+  | "rejected"
+  | "failed";
+
+export interface TradingControlRequest {
+  request_id: string;
+  action: TradingControlAction;
+  backend_digest: string | null;
+  reason: string;
+  requested_by: string;
+  created_at_ms: number;
+  state: TradingControlRequestState;
+  processed_at_ms: number | null;
+  outcome_reason: string | null;
+  trading_state_id: number | null;
+}
+
+/** The latest venue cancel-all phase per currency for the HALTED in force. */
+export interface CancelAllPhase {
+  currency: string;
+  phase: "requested" | "acknowledged" | "rejected" | "failed" | "skipped";
+  detail: string | null;
+  at_ms: number;
+}
+
+export interface BuildIdentity {
+  backend_digest: string | null;
+  source_revision: string | null;
+  change_class: string | null;
+}
+
+export interface TradingControlOverview {
+  trading_state: TradingStateView | null;
+  cancel_all: CancelAllPhase[];
+  running: BuildIdentity;
+  latest_deployment:
+    | (BuildIdentity & { finished_at: string; change_class: string })
+    | null;
+  approvals: {
+    backend_digest: string;
+    source_revision: string;
+    approved_by: string;
+    approved_at_ms: number;
+  }[];
+  requests: TradingControlRequest[];
 }
 
 // ── SP4 Projections (operator console read models) ──

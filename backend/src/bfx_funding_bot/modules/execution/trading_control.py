@@ -10,9 +10,10 @@ ADR 2026-09-25 D1-D4, plan §1 "Release flow":
   The ``deployments`` ledger can only raise the class: the deploy tool appends
   its row after the bot is healthy, so the running digest usually has none yet,
   but any row for it saying material, or naming another revision, wins.
-- **Requests.** The web API only inserts an approve/resume request; the
-  :class:`TradingControlWorker` applies it under the account lock after
-  re-checking the operator, and records one outcome on the row.
+- **Requests.** The web API only inserts an approve, resume, pause or kill
+  request (the operator-request outbox); the :class:`TradingControlWorker`
+  applies it under the account lock after re-checking the operator, and records
+  one outcome on the row. A kill's venue cancel-all runs after that commit.
 - **Probation.** An approval, and a resume after an automatic HALTED, start a
   probation: 25% of the normal cell limit, floored at one venue-minimum offer.
   It lifts automatically after 24 hours with at least three acknowledged
@@ -29,9 +30,10 @@ import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
@@ -40,6 +42,7 @@ from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     REJECTED,
+    REQUESTED,
     NeedsPreparation,
     OperatorAuthority,
     OperatorRequestWorker,
@@ -192,8 +195,55 @@ async def apply_deploy_gate(
     return GateDecision(klass, why, approved, action, current)
 
 
+@dataclass(frozen=True, slots=True)
+class ProbationProgress:
+    """How far a probation is toward its lift (ADR D3)."""
+
+    started_at_ms: int
+    elapsed_ms: int
+    acknowledged: int
+    required_ms: int
+    required_acknowledged: int
+
+    @property
+    def passed(self) -> bool:
+        return self.elapsed_ms >= self.required_ms and self.acknowledged >= self.required_acknowledged
+
+
+async def probation_progress(session: AsyncSession, *, account_id: UUID, environment: str,
+                             probation: Probation, now_ms: int, bake_ms: int = BAKE_MS,
+                             bake_acknowledged: int = BAKE_MIN_ACKNOWLEDGED) -> ProbationProgress:
+    """Elapsed time and acknowledged submits since the probation (re)started.
+
+    No HALTED can have happened inside it: a HALTED supersedes the probation,
+    so a current row that still carries one proves there was none.
+    """
+    started = probation.started_at_ms
+    acknowledged = int(await session.scalar(select(func.count()).select_from(
+        SubmissionAttemptRow).where(
+            SubmissionAttemptRow.exchange_account_id == account_id,
+            SubmissionAttemptRow.deployment_environment == environment,
+            SubmissionAttemptRow.outcome_kind == "acknowledged",
+            SubmissionAttemptRow.started_at_ms >= started,
+        )) or 0)
+    return ProbationProgress(started_at_ms=started, elapsed_ms=max(0, now_ms - started),
+                             acknowledged=acknowledged, required_ms=bake_ms,
+                             required_acknowledged=bake_acknowledged)
+
+
+class _Kill(Protocol):
+    async def engage(self, *, cause: str, actor: str, reason: str,
+                     when_already_halted: str = "retry") -> Any: ...
+
+
 class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[str, Decimal]]):
-    """Applies approve/resume requests and lifts a probation that has passed."""
+    """Applies approve/resume/pause/kill requests and lifts a probation that has passed.
+
+    A kill writes HALTED (cause operator) in the request's transaction, then --
+    after commit, outside every lock -- runs the kill switch, which repeats
+    nothing but the venue cancel-all (audited and alerted like /admin/halt).
+    Asking again retries an incomplete cancel-all, as /admin/halt does.
+    """
 
     model = TradingControlRequestRow
     name = "trading_control"
@@ -216,6 +266,13 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
         self._multiplier = multiplier
         self._bake_ms = bake_ms
         self._bake_acknowledged = bake_acknowledged
+        # Bound by the daemon once the kill switch exists (it is built later).
+        self.kill_switch: _Kill | None = None
+
+    def queue_order(self) -> tuple[Any, ...]:
+        """A kill never waits behind another request."""
+        return (case((TradingControlRequestRow.action == "kill", 0), else_=1),
+                TradingControlRequestRow.created_at_ms, TradingControlRequestRow.request_id)
 
     async def idle(self) -> None:
         await self.lift_probation_if_passed()
@@ -244,8 +301,8 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
             "trading_state_id": result.state.id if result is not None else None,
         }, detail=result)
 
-    def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
-        """Tell the operator; alerting never blocks or raises."""
+    async def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
+        """Tell the operator, then finish a kill at the venue (outside every lock)."""
         fields = {"request_id": str(row.request_id), "action": row.action, "by": row.requested_by}
         if outcome.state == APPLIED:
             result = outcome.detail if isinstance(outcome.detail, TransitionResult) else None
@@ -253,6 +310,8 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
                         state_id=result.state.id if result is not None else "unchanged", **fields)
             if result is not None:
                 announce(result)
+            if row.action == "kill":
+                await self._cancel_all(row)
         elif outcome.state == REJECTED:
             alerts.emit(TRADING_CONTROL_REJECTED, level=alerts.WARNING, reason=outcome.reason,
                         **fields)
@@ -260,8 +319,43 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
             alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, reason=outcome.reason,
                         **fields)
 
+    async def _cancel_all(self, row: TradingControlRequestRow) -> None:
+        if self.kill_switch is None:
+            log.critical("trading_control_kill_without_kill_switch request=%s", row.request_id)
+            alerts.emit(TRADING_CONTROL_FAILED, level=alerts.CRITICAL, request_id=str(row.request_id),
+                        action=row.action, reason="kill switch not wired: venue offers not cancelled")
+            return
+        # HALTED is already committed; the kill switch restates it and runs
+        # the venue cancel-all, recording and alerting its outcome.
+        await self.kill_switch.engage(cause=CAUSE_OPERATOR, actor=row.requested_by,
+                                      reason=f"kill: {row.reason}", when_already_halted="retry")
+
     async def _decide(self, session: AsyncSession, row: TradingControlRequestRow,
                       floors: dict[str, Decimal] | None) -> tuple[TransitionResult | None, str]:
+        now = self.clock()
+        if row.action in {"pause", "kill"}:
+            # A stop never waits on which build is running, nor on the venue.
+            state = REDUCING if row.action == "pause" else HALTED
+            result = await append_transition(
+                session, account_id=self.account_id, environment=self.environment, state=state,
+                cause=CAUSE_OPERATOR, actor=row.requested_by, reason=f"{row.action}: {row.reason}",
+                now_ms=now)
+            if row.action == "kill":
+                # Whatever else was waiting was asked before the stop; none of
+                # it may undo the stop after it (a queued resume above all).
+                superseded = (await session.execute(
+                    update(TradingControlRequestRow).where(
+                        TradingControlRequestRow.exchange_account_id == self.account_id,
+                        TradingControlRequestRow.deployment_environment == self.environment,
+                        TradingControlRequestRow.state == REQUESTED,
+                        TradingControlRequestRow.request_id != row.request_id,
+                    ).values(state=REJECTED, processed_at_ms=now, outcome_reason="superseded_by_kill")
+                    .returning(TradingControlRequestRow.request_id))).scalars().all()
+                if superseded:
+                    log.warning("trading_control_superseded_by_kill kill=%s superseded=%s",
+                                row.request_id, [str(r) for r in superseded])
+                return result, "HALTED; venue cancel-all follows (funding_cancel_all_audit)"
+            return result, "paused" if result.changed else "already paused"
         if row.backend_digest != self.identity.backend_digest:
             # The operator approves the build they saw; it must be the one running.
             raise RequestRejected("digest_not_running")
@@ -269,7 +363,6 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
         approved = await is_approved(session, account_id=self.account_id,
                                      environment=self.environment, digest=self.identity.backend_digest)
         current = await read_current(session, account_id=self.account_id, environment=self.environment)
-        now = self.clock()
 
         def fresh() -> Probation:
             if floors is None:
@@ -350,21 +443,14 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, dict[
                                          environment=self.environment)
             if current is None or current.state != ACTIVE or current.probation is None:
                 return None
-            started = current.probation.started_at_ms
             now = self.clock()
-            if now - started < self._bake_ms:
+            progress = await probation_progress(
+                session, account_id=self.account_id, environment=self.environment,
+                probation=current.probation, now_ms=now, bake_ms=self._bake_ms,
+                bake_acknowledged=self._bake_acknowledged)
+            if not progress.passed:
                 return None
-            acknowledged = int(await session.scalar(select(func.count()).select_from(
-                SubmissionAttemptRow).where(
-                    SubmissionAttemptRow.exchange_account_id == self.account_id,
-                    SubmissionAttemptRow.deployment_environment == self.environment,
-                    SubmissionAttemptRow.outcome_kind == "acknowledged",
-                    SubmissionAttemptRow.started_at_ms >= started,
-                )) or 0)
-            if acknowledged < self._bake_acknowledged:
-                return None
-            # Any HALTED since the probation started would have superseded it:
-            # the current row still carrying it proves none happened.
+            started, acknowledged = progress.started_at_ms, progress.acknowledged
             result = await append_transition(
                 session, account_id=self.account_id, environment=self.environment, state=ACTIVE,
                 cause=CAUSE_AUTO, actor="probation",
@@ -386,9 +472,11 @@ __all__ = [
     "STANDARD",
     "DeploymentIdentity",
     "GateDecision",
+    "ProbationProgress",
     "TradingControlWorker",
     "apply_deploy_gate",
     "effective_change_class",
     "is_approved",
+    "probation_progress",
 ]
 

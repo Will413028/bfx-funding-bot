@@ -10,6 +10,7 @@ import { FundingPanel } from "@/features/dashboard/components/funding-panel";
 import { OffersTable } from "@/features/dashboard/components/offers-table";
 import { PositionsCard } from "@/features/dashboard/components/positions-card";
 import { SetupChecklist } from "@/features/dashboard/components/setup-checklist";
+import { TradingControlPanel } from "@/features/dashboard/components/trading-control-panel";
 import { UncertaintyBanner } from "@/features/dashboard/components/uncertainty-banner";
 import { useExecutionEvents } from "@/features/dashboard/hooks/use-execution-events";
 import { useOffers } from "@/features/dashboard/hooks/use-offers";
@@ -77,6 +78,10 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-4">
+      <TradingControlPanel
+        key={`trading-${account.exchangeAccountId}`}
+        exchangeAccountId={account.exchangeAccountId}
+      />
       <FundingPanel
         key={account.exchangeAccountId}
         exchangeAccountId={account.exchangeAccountId}

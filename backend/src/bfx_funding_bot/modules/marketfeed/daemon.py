@@ -1892,6 +1892,8 @@ async def build_daemon(
         clock=now_ms_utc,
     )
     protection.bind(kill_switch)
+    if trading_control is not None:
+        trading_control.kill_switch = kill_switch  # the operator's kill request
     if command_gate is not None:
         command_gate.protection = protection
     deploy_gate: GateDecision | None = None
