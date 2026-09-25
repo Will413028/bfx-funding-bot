@@ -151,14 +151,14 @@ class Venue:
         self.received.append(kwargs["venue_offer_id"])
 
 
-def stop_chain(halt, account, *guards, canary=None):
+def stop_chain(halt, account, *guards):
     """The production chain shape: the trading-state guard, then any others."""
     from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
     from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
     from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
     from tests.modules.execution.deployment.test_reconciler import _CapturingSink
     return SafetyGuardChain(
-        guards=[ManualKillGuard(trading_state=halt, canary_halt_authorization=canary), *guards],
+        guards=[ManualKillGuard(trading_state=halt), *guards],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(account))
 

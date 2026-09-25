@@ -66,7 +66,7 @@ _LEDGER_AND_PROJECTIONS = (
     "event_log", "event_prefix_hashes", "projection_heads", "execution_uncertainties",
     "offer_claims", "position_state", "reconcile_observation", "submission_attempts",
     "venue_credit_state", "venue_offer_state", "capital_snapshots", "capital_policy_revisions",
-    "execution_decisions", "canary_command_permits", "trading_halt",
+    "execution_decisions",
 )
 _REQUEST_COLUMNS = (
     "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id", "action",
@@ -91,6 +91,7 @@ def migrated(pg_container):
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+        conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         for role in ("bfx_bot", "bfx_webapi"):

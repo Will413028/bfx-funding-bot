@@ -70,9 +70,7 @@ class ManualKillGuard:
     1. ``BFX_KILL_SWITCH=true`` — break-glass. Checked first and short-circuits,
        so stopping the bot works when the database is the thing that is broken.
     2. The durable trading state, when a repository is wired: anything but
-       ACTIVE blocks. Before a durable state existed the canary halt lived only
-       in canary.env, and a plain revert of that file would have resumed
-       real-money trading with nothing having to malfunction.
+       ACTIVE blocks, and so does no recorded decision at all.
 
     Both point the same way (OR), so unlike the allocation-cap env/yaml pair
     there is no "which one actually binds" ambiguity — and the status endpoint
@@ -92,11 +90,9 @@ class ManualKillGuard:
         self,
         *,
         trading_state: _TradingStateReader | None = None,
-        canary_halt_authorization: object | None = None,
         pending_stop: Callable[[], str | None] | None = None,
     ) -> None:
         self._trading_state = trading_state
-        self._canary_halt_authorization = canary_halt_authorization
         # An automatic protection that has tripped but whose HALTED is not yet
         # committed. It stops new offers from the instant it trips.
         self._pending_stop = pending_stop
@@ -133,35 +129,18 @@ class ManualKillGuard:
         # None = no decision was ever recorded for this realm: fail closed,
         # exactly like HALTED. A new scope trades only after an operator's
         # explicit ACTIVE.
-        canary_authorized = (
-            self._canary_halt_authorization is not None
-            and ctx.canary_halt_authorization is self._canary_halt_authorization
-        )
-        if state is None and not canary_authorized:
+        if state is None:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason="no trading state recorded — treated as HALTED",
             )
-        if state is None or not state.allows_new_offers:
-            if canary_authorized:
-                return GuardResult(
-                    allowed=True,
-                    guard_name=self.name,
-                    reason="persistent halt overridden by consumed canary permit",
-                )
-            assert state is not None
+        if not state.allows_new_offers:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
                     f"trading state {state.state}: {state.reason} "
                     f"(cause={state.cause}, actor={state.actor}, id={state.id})"
                 ),
-            )
-        if canary_authorized:
-            return GuardResult(
-                allowed=False,
-                guard_name=self.name,
-                reason="persistent halt absent during canary command",
             )
         return GuardResult(allowed=True, guard_name=self.name)
 

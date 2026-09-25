@@ -1,8 +1,8 @@
 """deploy/vm/docker-compose.app.yml keeps every launcher hardening property.
 
 One assertion per (service, property) so a single dropped line fails by name.
-The hardening list is the one release_package.create_launch and
-immutable_release.start_service enforced before the move to Compose.
+The hardening list is the one the retired immutable-release launcher enforced
+before the move to Compose.
 """
 from __future__ import annotations
 

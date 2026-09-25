@@ -50,7 +50,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.release_worker import ReleaseCommandAuthority
 from bfx_funding_bot.modules.execution.safety.protection import (
     SUBMIT_OUTCOME_UNKNOWN,
     ProtectionPort,
@@ -155,8 +154,6 @@ class AccountCommandGate:
         if not is_simulated and capital_runtime is None:
             raise ValueError("live command gate requires applied capital runtime")
         self._capital = capital_runtime
-        # Installed by live daemon before any supervised task starts.
-        self.release_authority: ReleaseCommandAuthority | None = None
         # Automatic protections. ``trip`` only records and queues, so it is safe
         # to call here while this gate's account lock is held; the kill it
         # leads to waits for that lock from another task.
@@ -297,9 +294,6 @@ class AccountCommandGate:
                         raise CommandGateBlocked("execution_audit_conflict")
 
                     async def locked_guard(locked: AsyncSession) -> None:
-                        if self.release_authority is not None:
-                            await self.release_authority.admit(locked, ready=ready,
-                                context=context, attempt_id=UUID(str(attempt.attempt_id)))
                         scope = (canonical_account, self._deployment_environment, decision.symbol)
                         if scope in self._latched_scopes:
                             raise CommandGateBlocked(self._latched_scopes[scope])
@@ -321,8 +315,6 @@ class AccountCommandGate:
             # Recheck ownership/halt after commit; never charge the reserved amount twice.
             try:
                 if self._capital is not None:
-                    if self.release_authority is not None:
-                        await self.release_authority.before_transport(ready, context)
                     await self._guard(decision, context, transport=True)
                     if not ready.book_valid_at(self._clock()):
                         raise CommandGateBlocked("decision_book_invalid_or_expired")
@@ -409,8 +401,7 @@ class AccountCommandGate:
         """Durable cancel admission; ACK never releases capital in this boundary.
 
         Cancelling is allowed in every trading state -- it is what REDUCING and
-        HALTED are for -- so it is not gated on the trading state or on a
-        release promotion. It is still refused without managed provenance and
+        HALTED are for -- so it is not gated on the trading state. It is still refused without managed provenance and
         while the offer's scope has an open or unreadable uncertainty, at
         admission and again before every transport attempt.
         """
@@ -463,8 +454,6 @@ class AccountCommandGate:
                     raise CommandGateBlocked("cancel_provenance_uncertain")
                 # Bind the durable cancel to the managed offer, not the current quote.
                 signal_correlation_id = reference.signal_correlation_id
-                # No new spending; ordinary cancels never inherit a release halt override.
-                ctx = replace(ctx, canary_halt_authorization=None, release_session_id=None)
                 # A cancel is a venue write, not a SKIP. Probe the managed
                 # order's identity; explicitly omit only capital spending checks.
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,

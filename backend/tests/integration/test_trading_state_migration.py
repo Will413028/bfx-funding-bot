@@ -33,6 +33,7 @@ def _reset(engine) -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+        conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         conn.exec_driver_sql("CREATE SCHEMA public")
         # Production's default privileges hand new tables to the runtime roles;
@@ -372,3 +373,61 @@ def test_the_database_keeps_active_inside_an_unfinished_probation(migrated):
     add("ACTIVE", "auto")                        # the lift
     add("REDUCING", "operator")
     add("ACTIVE", "operator")                    # passed: a pause resumes plainly
+
+
+# ------------------------------------------------------------ release archive
+
+
+_ARCHIVED = (("trading_halt", "id"), ("canary_command_permits", "permit_id"),
+             ("release_sessions", "id"), ("release_session_audit", "id"))
+
+
+def _content(conn, schema: str, table: str, key: str) -> tuple[int, str]:
+    return tuple(conn.execute(text(
+        f"SELECT count(*), encode(sha256(convert_to(coalesce(string_agg(to_jsonb(t)::text, "
+        f"E'\\n' ORDER BY t.{key}), ''), 'UTF8')), 'hex') FROM {schema}.{table} t")).one())
+
+
+def test_the_release_ceremony_is_archived_whole_frozen_and_verifiable(migrated):
+    """Real-money canary history leaves the application but is kept, unchanged."""
+    _, engine, ids = migrated
+    with engine.begin() as conn:
+        for table, _ in _ARCHIVED:
+            assert conn.scalar(text(f"SELECT to_regclass('public.{table}')")) is None
+        halts = conn.execute(text("SELECT id, reason FROM release_archive.trading_halt ORDER BY id")).all()
+        assert [row.id for row in halts][-1] == ids["release"] and len(halts) == 7
+        # Anyone can recompute the manifest and see nothing changed since.
+        manifest = {row.table_name: (row.row_count, row.content_sha256) for row in conn.execute(text(
+            "SELECT table_name, row_count, content_sha256 FROM release_archive.manifest"))}
+        assert manifest == {table: _content(conn, "release_archive", table, key)
+                            for table, key in _ARCHIVED}
+        # The foreign keys still bind the archive to the public rows it names.
+        assert conn.scalar(text("""SELECT count(*) FROM pg_constraint c
+            JOIN pg_namespace n ON n.oid = c.connamespace
+            WHERE n.nspname = 'release_archive' AND c.contype = 'f'
+              AND c.confrelid = 'public.exchange_accounts'::regclass""")) >= 2
+    for sql in ("UPDATE release_archive.trading_halt SET reason = 'rewritten'",
+                "DELETE FROM release_archive.release_sessions",
+                "INSERT INTO release_archive.manifest (table_name, row_count, content_sha256, "
+                "archived_by_revision) VALUES ('x', 0, repeat('0', 64), 'x')",
+                "TRUNCATE release_archive.release_session_audit"):
+        with engine.begin() as conn, pytest.raises(Exception, match="release_archive is frozen"):
+            conn.exec_driver_sql(sql)
+    for role in ("bfx_bot", "bfx_webapi"):
+        with engine.begin() as conn, pytest.raises(Exception, match="permission denied for schema"):
+            conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
+            conn.exec_driver_sql("SELECT count(*) FROM release_archive.trading_halt")
+
+
+def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
+    url, engine, _ = migrated
+    with engine.begin() as conn:
+        archived = {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED}
+    _alembic(url, "downgrade", "b8e2d4f6a013")
+    with engine.begin() as conn:
+        assert conn.scalar(text("SELECT to_regnamespace('release_archive')")) is None
+        assert {table: _content(conn, "public", table, key) for table, key in _ARCHIVED} == archived
+    _alembic(url, "upgrade", "head")
+    _alembic(url, "check")
+    with engine.begin() as conn:
+        assert {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED} == archived

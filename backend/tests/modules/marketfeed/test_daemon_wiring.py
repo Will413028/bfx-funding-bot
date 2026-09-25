@@ -22,15 +22,15 @@ from pytest_httpx import HTTPXMock
 
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
-    configure_canary_wiring_env,
+    configure_live_wiring_env,
     seed_exchange_account,
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_policy", [False, True])
-@pytest.mark.parametrize("runtime_proven", [False, True])
-async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_path, httpx_mock, with_policy, runtime_proven):
+@pytest.mark.parametrize("schema_current", [False, True])
+async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mock, with_policy, schema_current):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -68,9 +68,10 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
                                     expected_revision=0, source={"fixture": True})
             await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
                                     expected_revision=0, source={"fixture": True})
-        from tests.modules.marketfeed.account_test_helpers import configure_release_runtime
-        if runtime_proven:
-            configure_release_runtime(monkeypatch)
+    if not schema_current:
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE alembic_version SET version_num = 'a7f3c1d9e204'"))
     httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
                             method="GET", json=[], is_reusable=True, is_optional=True)
     path = _write_cells_yaml(tmp_path)
@@ -79,21 +80,19 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
     doc["cells"].append({**doc["cells"][0], "period_agg": "p2"})
     path.write_text(yaml.safe_dump(doc))
     try:
+        if not schema_current:
+            from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
+            before = await halt.current()
+            with pytest.raises(SchemaHeadMismatch, match="database=a7f3c1d9e204"):
+                await build_daemon(cells_yaml_path=path, skip_ws=True)
+            assert (await halt.current()).id == before.id  # a stop stays the stop it was
+            assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
+            return
         if not with_policy:
             with pytest.raises(ValueError, match="policy_unavailable"):
                 await build_daemon(cells_yaml_path=path, skip_ws=True)
             return
-        if not runtime_proven:
-            from bfx_funding_bot.core.release_identity import ReleaseIdentityError
-            before = await halt.current()
-            with pytest.raises(ReleaseIdentityError):
-                await build_daemon(cells_yaml_path=path, skip_ws=True)
-            assert (await halt.current()).id == before.id
-            assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
-            return
         daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
-        assert daemon.release_worker is not None
-        assert daemon.command_gate.release_authority is daemon.release_worker.authority
         assert len(daemon.config.cells) == 2
         assert (await halt.current()).state == "HALTED"
         status = await daemon.trading_status.snapshot()
@@ -190,10 +189,7 @@ async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, h
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-    from tests.modules.marketfeed.account_test_helpers import (
-        TEST_EXCHANGE_ACCOUNT_ID,
-        configure_release_runtime,
-    )
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     import os
     for name in list(os.environ):
@@ -222,7 +218,6 @@ async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, h
                                 expected_revision=0, source={"fixture": True})
         await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
                                 expected_revision=0, source={"fixture": True})
-    configure_release_runtime(monkeypatch)
 
     async def held(self):
         return writer_lock_held
@@ -281,10 +276,7 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-    from tests.modules.marketfeed.account_test_helpers import (
-        TEST_EXCHANGE_ACCOUNT_ID,
-        configure_release_runtime,
-    )
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     import os
     for name in list(os.environ):
@@ -314,7 +306,6 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
                                 expected_revision=0, source={"fixture": True})
         await repo.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(enabled=False),
                                 expected_revision=0, source={"fixture": True})
-    configure_release_runtime(monkeypatch)
     httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
                             method="GET", json=[], is_reusable=True, is_optional=True)
     try:
@@ -325,6 +316,52 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
         assert status["deployment"]["boot_gate"] == expected[2]
         assert daemon.trading_control is not None
         assert daemon.trading_control.identity.backend_digest == deploy_env.get("BFX_IMAGE_DIGEST")
+        # Every decision's audit names the build the deploy tool injected.
+        audit = daemon.periodic_reconcile._deployment._audit_context_factory
+        assert (audit.service_version, audit.config_hash) == (
+            deploy_env.get("BFX_SOURCE_REVISION", "unidentified"),
+            deploy_env.get("BFX_IMAGE_DIGEST", "unidentified"))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock):
+    """The wrong build for this database (e.g. a rollback onto a newer schema):
+    HALTED/auto before anything can trade, then the boot is refused."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
+    from bfx_funding_bot.core.schema_head import SCHEMA_HEAD, SchemaHeadMismatch
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
+    from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
+    configure_account_env(monkeypatch)
+    values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
+        "BFX_WS_CLIENT_ENABLED": "true", "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
+        "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
+        "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.canary.yaml"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'schema.db'}"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    engine = make_async_engine_from_url(values["DATABASE_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await seed_exchange_account(engine)
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE alembic_version SET version_num = 'ffffffffffff'"))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
+    try:
+        with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={SCHEMA_HEAD}"):
+            await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        state = await trading.current()
+        assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "boot")
+        assert "schema_head_mismatch" in state.reason
+        assert not [r for r in httpx_mock.get_requests() if r.method == "POST"]
     finally:
         await engine.dispose()
 
@@ -390,7 +427,7 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
 
     if phase == "live":
-        configure_canary_wiring_env(monkeypatch, tmp_path)
+        configure_live_wiring_env(monkeypatch, tmp_path)
         monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
         monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
 
@@ -448,7 +485,7 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     db_path = tmp_path / "reconcile_guard.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_RECONCILE_INTERVAL_S", "0")
@@ -525,7 +562,7 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     db_path = tmp_path / "resync_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.setenv("BFX_RESYNC_MIN_INTERVAL_S", "7")
@@ -592,7 +629,7 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     db_path = tmp_path / "integrity_bootstrap.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
@@ -760,7 +797,7 @@ async def test_smoke_runner_gated_off_for_live_executor(
     db_path = tmp_path / "smoke_live.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
@@ -815,7 +852,7 @@ async def test_canary_build_wires_writer_lock_and_guard(
     db_path = tmp_path / "writer_lock_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     monkeypatch.setenv("BFX_API_KEY", "test_key")
     monkeypatch.setenv("BFX_API_SECRET", "test_secret")
     monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)

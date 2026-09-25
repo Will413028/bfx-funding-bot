@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -24,7 +23,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -40,7 +39,7 @@ from bfx_funding_bot.core.errors import (
     ExecutorAuthError,
     WriterLockUnacquired,
 )
-from bfx_funding_bot.core.release_identity import ReleaseRuntime
+from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.auth_ws import BitfinexAuthWSClient
@@ -96,12 +95,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.event_store.persister import EventStorePersister
-from bfx_funding_bot.modules.execution.event_store.serialization import deserialize_stored_event
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
-from bfx_funding_bot.modules.execution.event_store.tables import (
-    EventLogRow,
-    ProjectionHeadRow,
-)
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
     CancelRequested,
@@ -110,7 +104,6 @@ from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
     ReservationClaimed,
     ReservationReleased,
-    VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
 from bfx_funding_bot.modules.execution.middleware import (
@@ -129,8 +122,6 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
-from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
-from bfx_funding_bot.modules.execution.release_worker import ReleaseWorker, build_release_worker
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -165,7 +156,6 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_KILL_SWITCH,
     HALTED,
     TradingStateRepository,
-    read_current,
 )
 from bfx_funding_bot.modules.execution.trading_control import (
     DeploymentIdentity,
@@ -177,7 +167,6 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution import (
     ResolutionScope,
     UncertaintyResolutionWorker,
 )
-from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
@@ -319,352 +308,6 @@ class AccountBootstrap:
             )
 
 
-class CanaryStartupBlocked(ConfigurationError):  # noqa: N818 - domain block state
-    """The bounded real-money canary has incomplete or contradictory evidence."""
-
-
-@dataclass(frozen=True, slots=True)
-class CanaryProfile:
-    """Boot-immutable, one-command ceiling for a real-money canary."""
-
-    account_id: UUID
-    environment: str
-    symbol: str
-    cell: str
-    strategy: str
-    amount_usdt: Decimal
-    cap_usdt: Decimal
-    max_evidence_age_seconds: int
-
-    @classmethod
-    def from_environ(cls, environ: Mapping[str, str]) -> CanaryProfile:
-        """Retired compatibility entrypoint; env cannot create session authority."""
-        raise CanaryStartupBlocked("legacy_canary_requires_authenticated_release_session")
-
-
-@dataclass(frozen=True, slots=True)
-class CanaryEvidence:
-    """Bounded, redacted result of the one allowed canary command."""
-
-    account_id: str
-    environment: str
-    symbol: str
-    cell: str
-    strategy: str
-    amount_usdt: Decimal
-    permit_id: str
-    command_decision_id: str
-    attempt_id: str
-    outcome_kind: str
-    venue_offer_id: str | None
-    outcome_at_ms: int
-    outcome_event_seq: int
-    reconcile_fences: tuple[int, ...]
-    reconcile_observed_at_ms: tuple[int, ...]
-    projection_hash: str
-    venue_db_exposure_diff_usdt: Decimal
-    full_account_snapshot_complete: bool
-    stop_reason: str | None
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> CanaryEvidence:
-        required = tuple(cls.__dataclass_fields__)
-        missing = tuple(name for name in required if name not in value)
-        if missing:
-            raise CanaryStartupBlocked("canary_evidence_missing:" + ",".join(missing))
-        try:
-            fence_values = value["reconcile_fences"]
-            observed_values = value["reconcile_observed_at_ms"]
-            if (
-                not isinstance(fence_values, list | tuple)
-                or isinstance(fence_values, str)
-                or not isinstance(observed_values, list | tuple)
-                or isinstance(observed_values, str)
-            ):
-                raise TypeError("reconcile evidence must be an array")
-            fences = tuple(int(item) for item in fence_values)
-            observed = tuple(int(item) for item in observed_values)
-            amount = Decimal(str(value["amount_usdt"]))
-            exposure_diff = Decimal(str(value["venue_db_exposure_diff_usdt"]))
-            outcome_at_ms = int(str(value["outcome_at_ms"]))
-            outcome_event_seq = int(str(value["outcome_event_seq"]))
-        except (ArithmeticError, TypeError, ValueError) as exc:
-            raise CanaryStartupBlocked("invalid_canary_evidence") from exc
-        venue_offer_id = value["venue_offer_id"]
-        stop_reason = value["stop_reason"]
-        full_account_snapshot_complete = value["full_account_snapshot_complete"]
-        if venue_offer_id is not None and not isinstance(venue_offer_id, str):
-            raise CanaryStartupBlocked("invalid_canary_venue_offer_id")
-        if stop_reason is not None and not isinstance(stop_reason, str):
-            raise CanaryStartupBlocked("invalid_canary_stop_reason")
-        if not isinstance(full_account_snapshot_complete, bool):
-            raise CanaryStartupBlocked("invalid_canary_snapshot_coverage")
-        return cls(
-            account_id=str(value["account_id"]),
-            environment=str(value["environment"]),
-            symbol=str(value["symbol"]),
-            cell=str(value["cell"]),
-            strategy=str(value["strategy"]),
-            amount_usdt=amount,
-            permit_id=str(value["permit_id"]),
-            command_decision_id=str(value["command_decision_id"]),
-            attempt_id=str(value["attempt_id"]),
-            outcome_kind=str(value["outcome_kind"]),
-            venue_offer_id=venue_offer_id,
-            outcome_at_ms=outcome_at_ms,
-            outcome_event_seq=outcome_event_seq,
-            reconcile_fences=fences,
-            reconcile_observed_at_ms=observed,
-            projection_hash=str(value["projection_hash"]),
-            venue_db_exposure_diff_usdt=exposure_diff,
-            full_account_snapshot_complete=full_account_snapshot_complete,
-            stop_reason=stop_reason,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class CanaryReadiness:
-    open_uncertainty_count: int
-    projector_lag: int
-    full_account_snapshot_complete: bool
-    reconcile_fences: tuple[int, ...]
-    reconcile_observed_at_ms: tuple[int, ...]
-    observed_at_ms: int
-    persistent_halt: bool
-
-
-def _canary_block(reasons: list[str]) -> None:
-    if reasons:
-        raise CanaryStartupBlocked(",".join(sorted(set(reasons))))
-
-
-def assert_canary_startup(
-    *,
-    profile: CanaryProfile,
-    evidence: CanaryEvidence | None,
-    readiness: CanaryReadiness,
-    configured_cells: tuple[tuple[str, str, str], ...],
-    configured_caps: Mapping[str, Decimal],
-    allocation_cap_usdt: Decimal,
-) -> None:
-    """Fail closed before the existing command gate can construct a live executor."""
-    reasons: list[str] = []
-    expected_cell = (profile.strategy, profile.symbol, profile.cell)
-    if configured_cells != (expected_cell,):
-        reasons.append("canary_scope_mismatch")
-    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
-        reasons.append("canary_cap_mismatch")
-    if allocation_cap_usdt != profile.cap_usdt:
-        reasons.append("canary_allocation_cap_mismatch")
-    _canary_block(reasons)
-    assert_release_observation(profile=profile, evidence=evidence, readiness=readiness,
-                               historical_outcome_freshness=True)
-
-
-def assert_release_observation(*, profile: CanaryProfile, evidence: CanaryEvidence | None,
-                               readiness: CanaryReadiness,
-                               historical_outcome_freshness: bool = False) -> None:
-    """ACK and two fresh post-outcome fences, independent of normal cells/caps."""
-    reasons: list[str] = []
-    if evidence is None:
-        reasons.append("missing_canary_evidence")
-        _canary_block(reasons)
-        return
-    if (
-        evidence.account_id != str(profile.account_id)
-        or evidence.environment != profile.environment
-        or evidence.symbol != profile.symbol
-        or evidence.cell != profile.cell
-        or evidence.strategy != profile.strategy
-    ):
-        reasons.append("canary_identity_or_scope_mismatch")
-    if evidence.amount_usdt != profile.amount_usdt or evidence.amount_usdt > profile.cap_usdt:
-        reasons.append("canary_amount_mismatch")
-    if not evidence.command_decision_id.strip() or not evidence.attempt_id.strip():
-        reasons.append("canary_command_identity_missing")
-    if evidence.outcome_event_seq <= 0:
-        reasons.append("canary_outcome_event_missing")
-    if evidence.outcome_kind != "acknowledged" or not evidence.venue_offer_id:
-        reasons.append("canary_outcome_not_acknowledged")
-    if len(evidence.projection_hash) != 64 or any(
-        char not in "0123456789abcdef" for char in evidence.projection_hash
-    ):
-        reasons.append("invalid_projection_hash")
-    if evidence.venue_db_exposure_diff_usdt != 0:
-        reasons.append("venue_db_exposure_diff")
-    if evidence.stop_reason:
-        reasons.append("canary_evidence_stop_reason")
-    if len(evidence.reconcile_fences) != 2 or len(evidence.reconcile_observed_at_ms) != 2:
-        reasons.append("two_reconcile_cycles_required")
-    elif (
-        evidence.reconcile_fences[0] >= evidence.reconcile_fences[1]
-        or evidence.reconcile_observed_at_ms[0] >= evidence.reconcile_observed_at_ms[1]
-        or evidence.reconcile_observed_at_ms[0] <= evidence.outcome_at_ms
-    ):
-        reasons.append("invalid_reconcile_cycle_order")
-    if readiness.open_uncertainty_count:
-        reasons.append("open_execution_uncertainty")
-    if readiness.projector_lag:
-        reasons.append("projector_lag")
-    if not evidence.full_account_snapshot_complete or not readiness.full_account_snapshot_complete:
-        reasons.append("venue_snapshot_coverage_incomplete")
-    if (
-        readiness.reconcile_fences != evidence.reconcile_fences
-        or readiness.reconcile_observed_at_ms != evidence.reconcile_observed_at_ms
-    ):
-        reasons.append("reconcile_evidence_mismatch")
-    freshness_ms = (evidence.outcome_at_ms if historical_outcome_freshness else
-                    min(evidence.reconcile_observed_at_ms, default=0))
-    if not 0 <= readiness.observed_at_ms - freshness_ms <= profile.max_evidence_age_seconds * 1000:
-        reasons.append("canary_evidence_stale")
-    if not readiness.persistent_halt:
-        reasons.append("persistent_halt_absent")
-    _canary_block(reasons)
-
-
-def assert_canary_pre_command(
-    *,
-    profile: CanaryProfile,
-    readiness: CanaryReadiness,
-    configured_cells: tuple[tuple[str, str, str], ...],
-    configured_caps: Mapping[str, Decimal],
-    allocation_cap_usdt: Decimal,
-) -> None:
-    """Gate the explicit one-shot command before any venue write exists.
-
-    This is intentionally a different contract from ``assert_canary_startup``:
-    a daemon boot must not require a post-command evidence file.  The durable
-    permit and the command runner own the one-shot write boundary; this check
-    only proves that the account is halted, reconciled, and still within scope.
-    """
-    reasons: list[str] = []
-    if configured_cells != ((profile.strategy, profile.symbol, profile.cell),):
-        reasons.append("canary_scope_mismatch")
-    if dict(configured_caps) != {profile.symbol: profile.cap_usdt}:
-        reasons.append("canary_cap_mismatch")
-    if allocation_cap_usdt != profile.cap_usdt:
-        reasons.append("canary_allocation_cap_mismatch")
-    _canary_block(reasons)
-    assert_release_pre_command(readiness)
-
-
-def assert_release_pre_command(readiness: CanaryReadiness) -> None:
-    """Shared completeness/uncertainty fence; no legacy cap/profile equality."""
-    reasons: list[str] = []
-    if readiness.open_uncertainty_count:
-        reasons.append("open_execution_uncertainty")
-    if readiness.projector_lag:
-        reasons.append("projector_lag")
-    if not readiness.full_account_snapshot_complete:
-        reasons.append("venue_snapshot_coverage_incomplete")
-    if not readiness.persistent_halt:
-        reasons.append("persistent_halt_absent")
-    _canary_block(reasons)
-
-
-def load_canary_evidence(path: Path) -> CanaryEvidence:
-    """Load only the bounded evidence fields; raw venue responses are never accepted."""
-    try:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CanaryStartupBlocked("canary_evidence_unavailable") from exc
-    if not isinstance(value, dict):
-        raise CanaryStartupBlocked("invalid_canary_evidence")
-    return CanaryEvidence.from_dict(value)
-
-
-async def collect_canary_readiness(
-    session: AsyncSession,
-    *,
-    account_id: UUID,
-    environment: str,
-    now_ms: int,
-    after_event_seq: int | None = None,
-    minimum_snapshot_count: int = 2,
-) -> CanaryReadiness:
-    """Read account-local evidence without calling the venue or mutating projections."""
-    if minimum_snapshot_count <= 0:
-        raise ValueError("minimum_snapshot_count must be positive")
-    event_head = int(
-        await session.scalar(
-            select(func.max(EventLogRow.event_seq)).where(
-                EventLogRow.exchange_account_id == account_id,
-                EventLogRow.deployment_environment == environment,
-            )
-        )
-        or 0
-    )
-    projection_heads = list(
-        await session.scalars(
-            select(ProjectionHeadRow.last_event_seq).where(
-                ProjectionHeadRow.exchange_account_id == account_id,
-                ProjectionHeadRow.deployment_environment == environment,
-            )
-        )
-    )
-    projector_lag = (
-        event_head - min(projection_heads) if projection_heads else event_head
-    )
-    open_uncertainty_count = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(ExecutionUncertaintyRow)
-            .where(
-                ExecutionUncertaintyRow.exchange_account_id == account_id,
-                ExecutionUncertaintyRow.deployment_environment == environment,
-                ExecutionUncertaintyRow.state == "open",
-            )
-        )
-        or 0
-    )
-    snapshot_stmt = select(EventLogRow).where(
-        EventLogRow.exchange_account_id == account_id,
-        EventLogRow.deployment_environment == environment,
-        EventLogRow.event_type == "VENUE_SNAPSHOT_OBSERVED",
-    )
-    if after_event_seq is not None:
-        snapshot_stmt = snapshot_stmt.where(EventLogRow.event_seq > after_event_seq)
-    snapshot_rows = list(
-        await session.scalars(
-            snapshot_stmt.order_by(EventLogRow.event_seq.desc()).limit(minimum_snapshot_count)
-        )
-    )
-    snapshot_rows.reverse()
-    snapshots: list[VenueSnapshotObserved] = []
-    for row in snapshot_rows:
-        try:
-            event = deserialize_stored_event(row)
-        except (TypeError, ValueError):
-            continue
-        if (
-            isinstance(event, VenueSnapshotObserved)
-            and event.account_id == str(account_id)
-            and event.environment == environment
-        ):
-            snapshots.append(event)
-    complete_snapshot_coverage = (
-        len(snapshot_rows) >= minimum_snapshot_count
-        and len(snapshots) == len(snapshot_rows)
-        and all(
-            event.coverage.active_offers_complete
-            and event.coverage.active_credits_complete
-            and event.coverage.wallets_complete
-            for event in snapshots
-        )
-    )
-    trading = await read_current(session, account_id=account_id, environment=environment)
-    return CanaryReadiness(
-        open_uncertainty_count=open_uncertainty_count,
-        projector_lag=max(0, projector_lag),
-        full_account_snapshot_complete=complete_snapshot_coverage,
-        reconcile_fences=tuple(int(row.event_seq) for row in snapshot_rows if row.event_seq),
-        reconcile_observed_at_ms=tuple(event.query_finished_at_ms for event in snapshots),
-        observed_at_ms=now_ms,
-        persistent_halt=trading is not None and not trading.allows_new_offers,
-    )
-
-
 async def load_account_bootstrap(
     session: AsyncSession,
     *,
@@ -775,7 +418,6 @@ class Daemon:
     # Single-writer advisory lock — live+Postgres only; None on sim/sqlite.
     writer_lock: WriterLock | None = None
     command_gate: AccountCommandGate | None = None
-    release_worker: ReleaseWorker | None = None
     # Applies operator adjudications the web API queued (ADR D4'); live only.
     uncertainty_worker: UncertaintyResolutionWorker | None = None
     # Four Golden Signals registry — served at /metrics on the healthz server.
@@ -827,8 +469,6 @@ class Daemon:
                 tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
             if self.trading_control is not None:
                 tg.create_task(self.trading_control.run(self._stop_event), name="trading_control")
-            if self.release_worker is not None:
-                tg.create_task(self.release_worker.run(self._stop_event), name="release_session")
             if self.uncertainty_worker is not None:
                 tg.create_task(
                     self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",
@@ -1363,7 +1003,9 @@ async def build_daemon(
 ) -> Daemon:
     config = load_config(cells_yaml_path=cells_yaml_path)
     if config.phase is Phase.CANARY:
-        raise CanaryStartupBlocked("legacy_canary_phase_requires_release_session")
+        # The per-build canary ceremony is retired (ADR 2026-09-25): real money
+        # runs as live, gated by the trading state and the release flow.
+        raise ConfigurationError("BFX_PHASE=canary is retired; real money runs as BFX_PHASE=live")
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     live_executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
@@ -1385,8 +1027,6 @@ async def build_daemon(
             phase=config.phase,
         )
     capital_runtime: CapitalRuntime | None = None
-    release_runtime: ReleaseRuntime | None = None
-    verified_release = None
     if live_executor:
         capital_runtime = CapitalRuntime(
             repository=CapitalRepository(account_id=account_bootstrap.exchange_account_id,
@@ -1394,19 +1034,23 @@ async def build_daemon(
             session_factory=session_factory, clock=now_ms_utc,
         )
         try:
+            # Before anything can trade: this build's schema is the database's,
+            # and every configured currency has an applied capital policy.
             async with session_factory.begin() as policy_session:
+                await assert_schema_head(policy_session)
                 for symbol in configured_symbols(config.cells):
                     await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
-            release_runtime = ReleaseRuntime.from_environment()
-            identity_started = time.perf_counter()
-            verified_release = await asyncio.to_thread(release_runtime.verify)
-            log.info("release_identity_verified digest=%s inventory_seconds=%.6f",
-                     verified_release.release_digest, time.perf_counter() - identity_started)
-        except Exception:
-            await TradingStateRepository(session_factory,
-                account_id=account_bootstrap.exchange_account_id,
-                deployment_environment=config.deployment_environment.value,
-            ).transition(HALTED, cause=CAUSE_AUTO, actor="worker", reason="release_boot_blocked")
+        except Exception as exc:
+            # Refused boot: stop trading durably (HALTED/auto alerts the
+            # operator; so does the refused boot itself) before exiting.
+            try:
+                await TradingStateRepository(session_factory,
+                    account_id=account_bootstrap.exchange_account_id,
+                    deployment_environment=config.deployment_environment.value,
+                ).transition(HALTED, cause=CAUSE_AUTO, actor="boot",
+                             reason=f"boot_blocked: {str(exc) or type(exc).__name__}"[:500])
+            except Exception:
+                log.exception("boot_blocked_halt_unwritten")
             await db_engine.dispose()
             raise
 
@@ -1548,10 +1192,6 @@ async def build_daemon(
     if capital_runtime is None:
         assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
 
-    # Only a scoped durable session can carry this token. No canary env/profile
-    # or pre-issued-permit boot path: both normal and one-shot use the same gate.
-    canary_halt_authorization: object | None = object() if live_executor else None
-
     # Automatic protections (ADR 2026-09-25 D5): trips stop new offers at once
     # and queue HALTED/auto + cancel-all, which a supervised task performs
     # outside every lock once the kill switch is bound below.
@@ -1630,7 +1270,7 @@ async def build_daemon(
         raise ConfigurationError("live executor requires applied capital runtime")
 
     # Single-writer advisory lock (A1). Construct LIVE-ONLY (not spec.is_simulated)
-    # so paper/shadow leave it None and the guard/liveness/release are all inert.
+    # so paper/shadow leave it None and the guard/liveness checks are inert.
     # ACQUIRE only on Postgres: sqlite wiring tests construct the object but must
     # never touch a real lock; the boot acquire raises WriterLockUnacquired on
     # contention → propagates to main() → sys.exit(EXIT_CODE_WRITER_LOCKED). It is
@@ -1650,7 +1290,6 @@ async def build_daemon(
         guards.append(
             ManualKillGuard(
                 trading_state=trading_state,
-                canary_halt_authorization=canary_halt_authorization,
                 pending_stop=protection.pending_reason,
             )
         )
@@ -1868,7 +1507,6 @@ async def build_daemon(
     attempt_recorder = SubmitAttemptRecorder()
 
     deployment_reconciler = None
-    release_worker = None
     trading_control: TradingControlWorker | None = None
     # What the deploy tool says this build is (ADR D1): its change class decides
     # at boot whether the writer may keep trading or waits for an approval.
@@ -1889,8 +1527,6 @@ async def build_daemon(
             events=stdout_sink,
             metrics=metrics,
         )
-        assert verified_release is not None
-        config_hash = verified_release.config_digest
         funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
         trading_control = TradingControlWorker(
             session_factory=session_factory, account_id=UUID(account_id),
@@ -1924,31 +1560,17 @@ async def build_daemon(
                 max_down_pct=Decimal(str(config.book_max_down_pct)),
                 tick=Decimal("0.00000001"),
             ),
+            # Every decision names the build that made it: the revision and
+            # image digest the deploy tool injected (ADR D1).
             audit_context_factory=_DaemonAuditContextFactory(
                 account_id=account_id,
                 deployment_environment=env_str,
-                service_version=verified_release.manifest.source_revision,
-                config_hash=config_hash,
+                service_version=deployment_identity.source_revision or "unidentified",
+                config_hash=deployment_identity.backend_digest or "unidentified",
             ),
             protection=protection,
         )
-        assert release_runtime is not None and writer_lock is not None
-        assert canary_halt_authorization is not None
-
-        async def _release_plan(command: ReleaseCommand) -> None:
-            assert deployment_reconciler is not None
-            await deployment_reconciler.deploy(release=command)
-
-        release_worker = build_release_worker(runtime=release_runtime, capital=capital_runtime,
-            writer_lock=writer_lock, trading_state=trading_state,
-            funding_rules=funding_rules,
-            configured_cells=tuple((c.strategy.value, c.symbol, c.cell_id) for c in config.cells),
-            halt_authorization=canary_halt_authorization, planner=_release_plan,
-            config_artifact=safety_cfg_path,
-            evidence_path=Path(os.environ.get("BFX_HALT2_EVIDENCE_REPORT", "/run/bfx-release/halt2.json")),
-            clock=now_ms_utc)
-        assert reservation_middleware.command_gate is not None
-        reservation_middleware.command_gate.release_authority = release_worker.authority
+        assert writer_lock is not None
         # The web API queues operator adjudications; only this writer appends them.
         uncertainty_worker = UncertaintyResolutionWorker(
             session_factory=capital_runtime.session_factory,
@@ -1966,7 +1588,7 @@ async def build_daemon(
             deployment_environment=env_str,
             clamp_enabled=False,
             reprice_enabled=reprice_policy.enabled,
-            git_sha=os.environ.get("GIT_SHA") or os.environ.get("BFX_SERVICE_VERSION"),
+            git_sha=deployment_identity.source_revision,
             now_ms=now_ms_utc(),
         )
         # Transparent timing shim (bfx_reconcile_tick_duration_seconds /
@@ -2164,9 +1786,7 @@ async def build_daemon(
     # StandingQuoteStore is in-memory, so a restart empties it, and the scheduler
     # arms the NEXT boundary -- a process that comes up at 07:01 deploys nothing
     # until 08:00. That is up to a full timeframe of idle capital bought by a
-    # restart, and it is what makes a deployment and its release ceremony
-    # mutually exclusive: the DR receipt the ceremony needs lives 900 seconds,
-    # and refreshing it costs a restart that costs an hour of quote.
+    # restart, which every deploy would otherwise pay.
     #
     # Nothing about the boundary just closed is unavailable here. Its candle is
     # sealed and in Postgres, the strategy registry is already warmed above, and
@@ -2369,7 +1989,6 @@ async def build_daemon(
         trading_readiness=trading_readiness,
         writer_lock=writer_lock,
         command_gate=reservation_middleware.command_gate,
-        release_worker=release_worker,
         uncertainty_worker=uncertainty_worker,
         metrics=metrics,
         tracing=tracing,

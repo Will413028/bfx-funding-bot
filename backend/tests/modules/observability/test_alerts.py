@@ -23,7 +23,6 @@ import bfx_funding_bot.modules.execution.event_store.tables
 import bfx_funding_bot.modules.execution.safety.tables
 import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.core.release_identity import runtime_environment
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
@@ -379,16 +378,6 @@ def test_partial_or_malformed_config_is_log_only(environ: dict[str, str],
 def test_valid_config_delivers_to_telegram() -> None:
     sink = alerts.AlertSink.from_environment({"TELEGRAM_BOT_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "-100123"})
     assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
-
-
-def test_telegram_credentials_are_classified_secret_and_accepted_by_runtime_environment() -> None:
-    environ = {"BFX_DEPLOYMENT_ENV": "prod", "TELEGRAM_BOT_TOKEN": TOKEN,
-               "TELEGRAM_CHAT_ID": "-100123"}
-    assert runtime_environment(environ) == {"BFX_DEPLOYMENT_ENV": "prod"}
-    from bfx_funding_bot.core import release_identity
-
-    assert {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"} <= release_identity._SECRET_ENV
-    assert not {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"} & release_identity.NONSECRET_ENV_KEYS
 
 
 def test_secret_values_never_reach_an_alert() -> None:

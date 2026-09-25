@@ -16,6 +16,7 @@ async def test_offer_claims_has_symbol_after_upgrade(pg_engine, monkeypatch) -> 
     try:
         with eng.begin() as setup_conn:
             setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

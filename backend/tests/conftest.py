@@ -96,6 +96,7 @@ async def pg_engine(pg_container) -> AsyncIterator[AsyncEngine]:
         # never preserve an earlier test's immutable archive across migrations.
         await conn.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
         await conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
         await conn.exec_driver_sql("DROP SCHEMA public CASCADE")
         await conn.exec_driver_sql("CREATE SCHEMA public")
 

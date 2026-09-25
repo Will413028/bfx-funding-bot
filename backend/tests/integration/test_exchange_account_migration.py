@@ -25,6 +25,7 @@ def _reset_schema(sync_url: str) -> None:
     try:
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

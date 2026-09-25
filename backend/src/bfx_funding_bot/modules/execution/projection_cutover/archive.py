@@ -68,6 +68,9 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     # A request table beside the ledger plus web API privilege revocation: no
     # archived row or event_log content changes.
     "b8e2d4f6a013",
+    # Archives the release ceremony's tables in their own schema; none is in
+    # TABLE_NAMES and event_log is untouched.
+    "5d1c7e9a3b20",
 })
 
 
