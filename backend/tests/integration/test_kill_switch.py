@@ -300,3 +300,19 @@ async def test_credentials_never_reach_the_audit(capital_db):
     async with factory() as session:
         details = [row.detail or "" for row in (await session.scalars(select(FundingCancelAllAuditRow))).all()]
     assert details and not any("KEY-123" in d or "SECRET-9" in d for d in details)
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_operator_retry_does_not(capital_db):
+    factory, account = capital_db
+    _, ctx, trading, venue = await exposed_account(factory, account)
+    switch = kill_switch(factory, trading, ctx, venue)
+    first = await switch.engage(cause="auto", actor="auto:orphan_quarantined", reason="orphan",
+                                when_already_halted="skip")
+    assert first.state_changed and first.complete and len(venue.calls) == 3
+    persisting = await switch.engage(cause="auto", actor="auto:orphan_quarantined",
+                                     reason="orphan again", when_already_halted="skip")
+    assert not persisting.state_changed and persisting.cancel_all == ()
+    assert len(venue.calls) == 3 and len(await audit(factory)) == 6
+    retried = await switch.engage(cause="operator", actor="will", reason="retry the venue part")
+    assert not retried.state_changed and len(venue.calls) == 6 and len(await audit(factory)) == 12

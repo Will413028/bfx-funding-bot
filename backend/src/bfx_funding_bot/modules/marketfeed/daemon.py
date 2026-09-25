@@ -173,6 +173,13 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
     read_current,
 )
+from bfx_funding_bot.modules.execution.trading_control import (
+    DeploymentIdentity,
+    GateDecision,
+    TradingControlWorker,
+    apply_deploy_gate,
+    sql_operator_authorized,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
@@ -781,6 +788,8 @@ class Daemon:
     # True once boot recovery passed; an exit before that is a refused boot (T8 alert).
     booted: bool = False
     writer_lock_watch: WriterLockWatch | None = None
+    # Applies operator approve/resume requests and lifts a passed probation.
+    trading_control: TradingControlWorker | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def _run_boot_recovery(self) -> None:
@@ -817,6 +826,8 @@ class Daemon:
         async with asyncio.TaskGroup() as tg:
             if self.protection is not None:
                 tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
+            if self.trading_control is not None:
+                tg.create_task(self.trading_control.run(self._stop_event), name="trading_control")
             if self.release_worker is not None:
                 tg.create_task(self.release_worker.run(self._stop_event), name="release_session")
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
@@ -1868,6 +1879,10 @@ async def build_daemon(
 
     deployment_reconciler = None
     release_worker = None
+    trading_control: TradingControlWorker | None = None
+    # What the deploy tool says this build is (ADR D1): its change class decides
+    # at boot whether the writer may keep trading or waits for an approval.
+    deployment_identity = DeploymentIdentity.from_env(os.environ)
     if not spec.is_simulated:
         if funding_book_service is None:
             raise ValueError(
@@ -1886,6 +1901,12 @@ async def build_daemon(
         assert verified_release is not None
         config_hash = verified_release.config_digest
         funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
+        trading_control = TradingControlWorker(
+            session_factory=session_factory, account_id=UUID(account_id),
+            environment=env_str, identity=deployment_identity,
+            symbols=configured_symbols(config.cells), funding_rules=funding_rules,
+            authority=sql_operator_authorized, clock=now_ms_utc,
+        )
         deployment_reconciler = DeploymentReconciler(
             capital_runtime=capital_runtime,
             store=quote_store,
@@ -2216,6 +2237,13 @@ async def build_daemon(
         if safety_cfg.pre_trade_limits is not None:
             command_gate.throttle = build_command_throttle(
                 safety_cfg.pre_trade_limits, protection=protection)
+    deploy_gate: GateDecision | None = None
+    if not spec.is_simulated:
+        # Material and unapproved -> REDUCING before any task can trade.
+        deploy_gate = await apply_deploy_gate(
+            session_factory, account_id=UUID(account_id), environment=env_str,
+            identity=deployment_identity, now_ms=now_ms_utc(),
+        )
     if os.environ.get("BFX_KILL_SWITCH", "").strip().lower() in ("true", "1", "yes"):
         # Break-glass env takes effect at boot as a real kill: the durable
         # HALTED and the venue cancel-all, before any task can place an offer.
@@ -2243,6 +2271,14 @@ async def build_daemon(
         attempts=attempt_recorder,
         trading_state=trading_state,
         kill_switch=kill_switch,
+        deployment=(None if deploy_gate is None else {
+            "backend_digest": deployment_identity.backend_digest,
+            "source_revision": deployment_identity.source_revision,
+            "change_class": deploy_gate.change_class,
+            "why": deploy_gate.why,
+            "approved": deploy_gate.approved,
+            "boot_gate": deploy_gate.action,
+        }),
         readiness=trading_readiness,
         capital_runtime=capital_runtime,
     )
@@ -2340,6 +2376,7 @@ async def build_daemon(
         metrics=metrics,
         tracing=tracing,
         protection=protection,
+        trading_control=trading_control,
         writer_lock_watch=(
             WriterLockWatch(lock=writer_lock, protection=protection)
             if writer_lock is not None else None

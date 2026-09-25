@@ -1,0 +1,339 @@
+"""Release flow by change class, approvals, resume and probation (ADR D1-D4).
+
+SQLite and PostgreSQL (``capital_db``). Only the operator authority check and
+the FX observation are fakes; the gate, worker, trading state, approvals and
+capital reads are the real ones.
+"""
+from __future__ import annotations
+
+from dataclasses import replace
+from decimal import Decimal
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import insert, select
+
+from bfx_funding_bot.modules.deployments.tables import DeploymentRow
+from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
+from bfx_funding_bot.modules.execution.safety.tables import (
+    DeploymentApprovalRow,
+    TradingControlRequestRow,
+)
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    Probation,
+    TradingStateRepository,
+)
+from bfx_funding_bot.modules.execution.trading_control import (
+    BAKE_MS,
+    DeploymentIdentity,
+    TradingControlWorker,
+    apply_deploy_gate,
+)
+from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
+from tests.external.bitfinex.test_funding_rules import FixedRules
+
+from .test_capital_command_boundary import boundary, second_ready
+from .test_capital_repository import capital_db as capital_db
+from .test_capital_repository import capital_engine as capital_engine
+from .test_capital_repository import intent
+
+D = Decimal
+DIGEST = "sha256:" + "a" * 64
+OTHER = "sha256:" + "b" * 64
+REV = "c" * 40
+T0 = 10_000_000
+
+
+def identity(klass: str = "material", digest: str = DIGEST) -> DeploymentIdentity:
+    return DeploymentIdentity(digest, REV, klass)
+
+
+async def allow(session, *, account_id, user) -> bool:
+    return user == "operator"
+
+
+def worker(factory, account, ident, *, now, rules=True) -> TradingControlWorker:
+    return TradingControlWorker(session_factory=factory, account_id=account, environment="ci",
+        identity=ident, symbols={"fUST"}, funding_rules=FixedRules(clock=lambda: now()) if rules else None,
+        authority=allow, clock=lambda: now())
+
+
+async def request(factory, account, action, *, digest=DIGEST, by="operator"):
+    request_id = uuid4()
+    async with factory.begin() as session:
+        await session.execute(insert(TradingControlRequestRow).values(
+            request_id=request_id, exchange_account_id=account, deployment_environment="ci",
+            action=action, backend_digest=digest, reason=f"{action} for test", requested_by=by,
+            created_at_ms=T0))
+    return request_id
+
+
+async def outcome(factory, request_id):
+    async with factory() as session:
+        row = await session.get(TradingControlRequestRow, request_id)
+        return row.state, row.outcome_reason
+
+
+async def state_of(factory, account):
+    return await TradingStateRepository(factory, account_id=account, deployment_environment="ci").current()
+
+
+async def start(factory, account, state="ACTIVE", cause="operator"):
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    if state != "ACTIVE":
+        await repo.transition("ACTIVE", cause="operator", actor="t", reason="setup", now_ms=1)
+    await repo.transition(state, cause=cause, actor="t", reason="setup", now_ms=2)
+    return repo
+
+
+# ------------------------------------------------------------------ boot gate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("start_state", "start_cause", "ident", "expected", "action"), [
+    ("ACTIVE", "operator", identity("material"), ("REDUCING", "material_deploy"), "reducing"),
+    ("ACTIVE", "operator", identity("standard"), ("ACTIVE", "operator"), "kept"),
+    ("ACTIVE", "operator", DeploymentIdentity.from_env({}), ("REDUCING", "material_deploy"), "reducing"),
+    ("ACTIVE", "operator", DeploymentIdentity.from_env(
+        {"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "cosmetic"}),
+     ("REDUCING", "material_deploy"), "reducing"),
+    ("REDUCING", "operator", identity("material"), ("REDUCING", "material_deploy"), "reducing"),
+    ("HALTED", "auto", identity("material"), ("HALTED", "auto"), "behind_stop"),
+])
+async def test_boot_gate_by_change_class(capital_db, start_state, start_cause, ident, expected, action):
+    factory, account = capital_db
+    await start(factory, account, start_state, start_cause)
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+                                       identity=ident, now_ms=T0)
+    assert decision.action == action
+    current = await state_of(factory, account)
+    assert (current.state, current.cause) == expected
+
+
+@pytest.mark.asyncio
+async def test_boot_gate_keeps_trading_for_an_approved_material_build(capital_db):
+    factory, account = capital_db
+    await start(factory, account)
+    async with factory.begin() as session:
+        session.add(DeploymentApprovalRow(exchange_account_id=account, deployment_environment="ci",
+            backend_digest=DIGEST, source_revision=REV, approved_by="operator",
+            approved_at_ms=T0, request_id=uuid4()))
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+                                       identity=identity("material"), now_ms=T0)
+    assert decision.action == "kept" and (await state_of(factory, account)).state == "ACTIVE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ledger_class", "ledger_revision", "why"), [
+    ("material", REV, "ledger_material"),
+    ("standard", "d" * 40, "ledger_revision_conflict"),
+])
+async def test_the_ledger_can_only_raise_the_class(capital_db, ledger_class, ledger_revision, why):
+    from datetime import UTC, datetime
+    factory, account = capital_db
+    await start(factory, account)
+    now = datetime.now(UTC)
+    async with factory.begin() as session:
+        session.add(DeploymentRow(started_at=now, finished_at=now, source_revision=ledger_revision,
+            backend_digest=DIGEST, frontend_digest=OTHER, change_class=ledger_class,
+            migrations_applied=False, outcome="deployed", detail="fixture"))
+    decision = await apply_deploy_gate(factory, account_id=account, environment="ci",
+                                       identity=identity("standard"), now_ms=T0)
+    assert (decision.change_class, decision.why, decision.action) == ("material", why, "reducing")
+
+
+# ------------------------------------------------------------ requests
+
+
+@pytest.mark.asyncio
+async def test_approval_moves_a_material_build_to_active_in_probation(capital_db):
+    factory, account = capital_db
+    await start(factory, account, "REDUCING", "operator")
+    await apply_deploy_gate(factory, account_id=account, environment="ci",
+                            identity=identity("material"), now_ms=T0)
+    request_id = await request(factory, account, "approve")
+    assert await worker(factory, account, identity("material"), now=lambda: T0).apply(request_id) == "applied"
+    current = await state_of(factory, account)
+    assert (current.state, current.cause, current.actor) == ("ACTIVE", "operator", "operator")
+    # Floor = one venue minimum (150 USD at FX 1) plus the submit margin.
+    assert current.probation == Probation(D("0.25"), T0, (("fUST", D("150.75")),))
+    async with factory() as session:
+        approvals = (await session.scalars(select(DeploymentApprovalRow))).all()
+    assert [(a.backend_digest, a.approved_by) for a in approvals] == [(DIGEST, "operator")]
+    assert (await outcome(factory, request_id))[0] == "applied"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "action", "ident", "by", "code"), [
+    ("ACTIVE", "approve", identity("standard"), "operator", "approval_not_required"),
+    ("REDUCING", "approve", identity("material", OTHER), "operator", "digest_not_running"),
+    ("REDUCING", "approve", identity("material"), "intruder", "operator_not_authorized"),
+    ("HALTED", "resume", identity("material"), "operator", "approval_required"),
+    ("ACTIVE", "resume", identity("standard"), "operator", "already_active"),
+])
+async def test_requests_are_refused_with_a_bounded_reason(capital_db, setup, action, ident, by, code):
+    factory, account = capital_db
+    await start(factory, account, setup, "auto" if setup == "HALTED" else "operator")
+    before = await state_of(factory, account)
+    request_id = await request(factory, account, action, by=by)
+    assert await worker(factory, account, ident, now=lambda: T0).apply(request_id) == "rejected"
+    assert await outcome(factory, request_id) == ("rejected", code)
+    assert await state_of(factory, account) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("setup", "cause", "probation"), [
+    ("HALTED", "auto", True),         # an automatic protection: prove the system again
+    ("HALTED", "operator", False),    # an operator's own stop of a proven build
+    ("HALTED", "kill_switch", False),
+    ("REDUCING", "operator", False),  # maintenance: nothing new to prove
+])
+async def test_resume_enters_probation_only_after_an_automatic_stop(capital_db, setup, cause, probation):
+    factory, account = capital_db
+    await start(factory, account, setup, cause)
+    request_id = await request(factory, account, "resume")
+    assert await worker(factory, account, identity("standard"), now=lambda: T0).apply(request_id) == "applied"
+    current = await state_of(factory, account)
+    assert current.state == "ACTIVE"
+    assert (current.probation is not None) is probation
+
+
+@pytest.mark.asyncio
+async def test_a_material_build_approved_while_halted_still_runs_its_probation(capital_db):
+    factory, account = capital_db
+    await start(factory, account, "HALTED", "operator")
+    w = worker(factory, account, identity("material"), now=lambda: T0)
+    assert await w.apply(await request(factory, account, "approve")) == "applied"
+    assert (await state_of(factory, account)).state == "HALTED"  # a stop stays a stop
+    assert await w.apply(await request(factory, account, "resume")) == "applied"
+    assert (await state_of(factory, account)).probation is not None
+
+
+@pytest.mark.asyncio
+async def test_no_fx_observation_fails_the_request_and_changes_nothing(capital_db):
+    factory, account = capital_db
+    await start(factory, account, "HALTED", "auto")
+    request_id = await request(factory, account, "resume")
+    w = worker(factory, account, identity("standard"), now=lambda: T0, rules=False)
+    assert await w.apply(request_id) == "failed"
+    assert await outcome(factory, request_id) == ("failed", "funding_rule_unavailable")
+    assert (await state_of(factory, account)).state == "HALTED"
+
+
+# ----------------------------------------------------------------- probation
+
+
+async def acknowledged(factory, account, *, at, count):
+    for n in range(count):
+        _, decision = intent(account, "150", 900 + n + at % 1000)
+        async with factory.begin() as session:
+            session.add(decision)
+            await session.flush()
+            session.add(SubmissionAttemptRow(attempt_id=uuid4(), execution_decision_id=decision.decision_id,
+                exchange_account_id=account, deployment_environment="ci", symbol="fUST", cid=900 + n,
+                normalized_payload={"amount": "150"}, payload_sha256="x", started_at_ms=at,
+                completed_at_ms=at, outcome_kind="acknowledged"))
+
+
+async def probation_state(factory, account, *, started=T0):
+    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await repo.transition("ACTIVE", cause="operator", actor="t", reason="approved", now_ms=started,
+        probation=Probation.starting(multiplier=D("0.25"), started_at_ms=started, floor={"fUST": D("151.50")}))
+    return repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("elapsed", "acks", "before_start", "lifted"), [
+    (BAKE_MS - 1, 3, 0, False),   # not 24 hours yet
+    (BAKE_MS, 2, 0, False),       # too few acknowledged submits
+    (BAKE_MS, 2, 5, False),       # acknowledgements before the probation do not count
+    (BAKE_MS, 3, 0, True),
+])
+async def test_probation_lifts_after_24h_and_three_acknowledged_submits(capital_db, elapsed, acks,
+                                                                        before_start, lifted):
+    factory, account = capital_db
+    await probation_state(factory, account)
+    await acknowledged(factory, account, at=T0 - 1, count=before_start)
+    await acknowledged(factory, account, at=T0 + 1, count=acks)
+    result = await worker(factory, account, identity("standard"), now=lambda: T0 + elapsed).lift_probation_if_passed()
+    current = await state_of(factory, account)
+    assert (result is not None) is lifted
+    if lifted:
+        assert (current.state, current.cause, current.probation) == ("ACTIVE", "auto", None)
+    else:
+        assert current.probation is not None
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_halt_during_probation_restarts_it(capital_db):
+    factory, account = capital_db
+    repo = await probation_state(factory, account)
+    await acknowledged(factory, account, at=T0 + 1, count=3)
+    await repo.transition("HALTED", cause="auto", actor="auto:loss_limiter", reason="loss", now_ms=T0 + 2)
+    resumed_at = T0 + BAKE_MS - 10
+    w = worker(factory, account, identity("standard"), now=lambda: resumed_at)
+    assert await w.apply(await request(factory, account, "resume")) == "applied"
+    assert (await state_of(factory, account)).probation.started_at_ms == resumed_at
+    # 24 hours after the ORIGINAL start is not enough: the window restarted.
+    w_later = worker(factory, account, identity("standard"), now=lambda: T0 + BAKE_MS + 10)
+    assert await w_later.lift_probation_if_passed() is None
+
+
+# -------------------------------------------------------- capital probation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("floor", "cell_limit"), [
+    ("151.50", "175"),     # 25% of 700 is above one minimum offer
+    ("200", "200"),        # the floor: at least one venue-minimum offer
+    ("900", "700"),        # never above the normal limit
+])
+async def test_every_capital_reader_sees_the_probation_limit(capital_db, floor, cell_limit):
+    factory, account = capital_db
+    gate, venue, ready, ctx, runtime, trading = await boundary(factory, account)
+    normal = await runtime.read(symbol="fUST", cell_id="a30")
+    assert normal.budget.cell_limit == D("700.00")
+    await trading.transition("ACTIVE", cause="operator", actor="t", reason="probation", now_ms=T0,
+        probation=Probation.starting(multiplier=D("0.25"), started_at_ms=T0, floor={"fUST": D(floor)}))
+    view = await runtime.read(symbol="fUST", cell_id="a30")
+    assert view.budget.cell_limit == D(cell_limit)
+    assert view.budget.max_new_offer == D(cell_limit)
+    # Command admission re-reads the same budget: the 500 planned before is
+    # refused whenever the probation limit is below it.
+    if D(cell_limit) < D("500"):
+        with pytest.raises(CommandGateBlocked):
+            await gate.submit(ready, ctx)
+        assert venue.received == []
+    else:
+        await gate.submit(ready, ctx)
+        assert len(venue.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_submit_within_the_probation_limit_is_admitted(capital_db):
+    factory, account = capital_db
+    gate, venue, ready, ctx, _, trading = await boundary(factory, account)
+    await trading.transition("ACTIVE", cause="operator", actor="t", reason="probation", now_ms=T0,
+        probation=Probation.starting(multiplier=D("0.25"), started_at_ms=T0, floor={"fUST": D("151.50")}))
+    small = await second_ready(factory, account, ready)
+    small = replace(small, decision=small.decision.model_copy(update={"offer_amount_usdt": 160}))
+    async with factory.begin() as session:
+        from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+        (await session.get(ExecutionDecisionRow, small.decision_id)).amount_usdt = D("160")
+    await gate.submit(small, ctx)
+    assert len(venue.received) == 1
+
+
+@pytest.mark.parametrize(("env", "klass", "problem"), [
+    ({}, "material", "deployment_identity_missing"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV}, "material", "change_class_invalid"),
+    ({"BFX_IMAGE_DIGEST": "sha256:bad", "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard"},
+     "material", "deployment_identity_invalid"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": "short", "BFX_CHANGE_CLASS": "standard"},
+     "material", "deployment_identity_invalid"),
+    ({"BFX_IMAGE_DIGEST": DIGEST, "BFX_SOURCE_REVISION": REV, "BFX_CHANGE_CLASS": "standard"},
+     "standard", None),
+])
+def test_deploy_identity_fails_closed_to_material(env, klass, problem):
+    parsed = DeploymentIdentity.from_env(env)
+    assert (parsed.change_class, parsed.problem) == (klass, problem)

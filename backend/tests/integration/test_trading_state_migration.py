@@ -262,3 +262,83 @@ def test_cancel_all_audit_grants(migrated):
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         _audit(conn, "00000000-0000-0000-0000-0000000000f3", "skipped", detail="writer_lock_not_held")
+
+
+_REQ = "00000000-0000-0000-0000-0000000000d1"
+_DIG = "sha256:" + "a" * 64
+
+
+def _insert_request(conn, request_id=_REQ, account=_A) -> None:
+    conn.execute(text("""INSERT INTO trading_control_requests
+        (request_id, exchange_account_id, deployment_environment, action, backend_digest, reason,
+         requested_by, created_at_ms) VALUES (:r, :a, 'prod', 'approve', :d, 'reviewed', 'operator', 1)"""),
+        {"r": request_id, "a": account, "d": _DIG})
+
+
+def test_web_api_can_only_queue_a_request(migrated):
+    _, engine, _ = migrated
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        _insert_request(conn)
+        assert conn.scalar(text("SELECT count(*) FROM trading_control_requests")) == 1
+    for sql in (
+        "UPDATE trading_control_requests SET state='applied', processed_at_ms=2",
+        "INSERT INTO trading_control_requests (request_id, exchange_account_id, deployment_environment,"
+        " action, backend_digest, reason, requested_by, created_at_ms, state, processed_at_ms)"
+        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'resume', '{_DIG}', 'x',"
+        " 'operator', 1, 'applied', 2)",
+        f"INSERT INTO deployment_approvals (exchange_account_id, deployment_environment, backend_digest,"
+        f" source_revision, approved_by, approved_at_ms, request_id) VALUES ('{_A}', 'prod', '{_DIG}',"
+        f" '{'c' * 40}', 'operator', 1, '{_REQ}')",
+        f"INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, actor,"
+        f" reason, created_at_ms) VALUES ('{_A}', 'prod', 'ACTIVE', 'operator', 'x', 'x', 1)",
+    ):
+        with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
+            conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+            conn.exec_driver_sql(sql)
+
+
+def test_bot_records_one_outcome_and_approvals_are_append_only(migrated):
+    _, engine, _ = migrated
+    with engine.begin() as conn:
+        _insert_request(conn)
+    with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        _insert_request(conn, "00000000-0000-0000-0000-0000000000d3")
+    with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        conn.exec_driver_sql("UPDATE trading_control_requests SET reason='rewritten'")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        conn.exec_driver_sql("UPDATE trading_control_requests SET state='applied', processed_at_ms=2")
+        conn.execute(text("""INSERT INTO deployment_approvals (exchange_account_id, deployment_environment,
+            backend_digest, source_revision, approved_by, approved_at_ms, request_id)
+            VALUES (:a, 'prod', :d, :r, 'operator', 2, :q)"""), {"a": _A, "d": _DIG, "r": "c" * 40, "q": _REQ})
+    with engine.begin() as conn, pytest.raises(Exception, match="invalid trading control request transition"):
+        conn.exec_driver_sql("UPDATE trading_control_requests SET state='rejected', outcome_reason='x'")
+    with engine.begin() as conn, pytest.raises(Exception, match="immutable trading control"):
+        conn.exec_driver_sql("DELETE FROM deployment_approvals")
+    with engine.begin() as conn, pytest.raises(Exception, match="uq_deployment_approvals_digest"):
+        conn.execute(text("""INSERT INTO deployment_approvals (exchange_account_id, deployment_environment,
+            backend_digest, source_revision, approved_by, approved_at_ms, request_id)
+            VALUES (:a, 'prod', :d, :r, 'operator', 3, :q)"""), {"a": _A, "d": _DIG, "r": "c" * 40, "q": _REQ})
+
+
+def test_probation_needs_its_floor_and_the_operator_check_runs_for_the_bot(migrated):
+    _, engine, _ = migrated
+    with engine.begin() as conn, pytest.raises(Exception, match="ck_trading_state_probation"):
+        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
+            cause, actor, reason, created_at_ms, probation_multiplier, probation_started_at_ms)
+            VALUES (:a, 'ci', 'ACTIVE', 'operator', 'x', 'x', 1, 0.25, 1)"""), {"a": _A})
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
+            cause, actor, reason, created_at_ms, probation_multiplier, probation_started_at_ms, probation_floor)
+            VALUES (:a, 'ci', 'ACTIVE', 'operator', 'x', 'x', 1, 0.25, 1, '{"fUST": "150.75"}')"""), {"a": _A})
+        conn.execute(text("INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
+                          "VALUES (:a,'operator','owner')"), {"a": _A})
+        conn.exec_driver_sql('''INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",
+            role,banned,"twoFactorEnabled") VALUES ('operator','op','op@test.invalid',false,now(),now(),
+            'admin',false,true)''')
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        assert conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'operator')"), {"a": _A})
+        assert not conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'nobody')"), {"a": _A})
