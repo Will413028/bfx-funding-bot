@@ -1,5 +1,9 @@
 # Projection audit cutover release handoff
 
+> **歷史紀錄。** 這次切換已完成。文中的 canary gate、Halt 2、手動 image／migration 步驟屬於已刪除的
+> 舊 release 流程；現行部署見 [deploy runbook](deploy.md)，停機與恢復見
+> [operations runbook](operations.md)。
+
 本程序交付 release evidence 與 operator approval package，不授權 production
 schema／grants／archive／apply、merge、push 或 resume trading。所有範例變數均須
 由核准的 scope 與獨立證據填入；本文件不包含 production identity 或實測數字。

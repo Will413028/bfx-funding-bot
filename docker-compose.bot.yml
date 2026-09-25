@@ -1,16 +1,17 @@
 name: bfx
 
-# Infrastructure/history definition, NOT the capital-policy application deployer.
-# Live releases use scripts.immutable_release and exact inspected image IDs.
-# Never broad `up --build`/`down`/`--remove-orphans` during release. Existing PG18,
-# Redis, runtime env files and volumes must remain unchanged. Legacy application
-# profiles below are historical/simulation only; they cannot supply launch proof.
+# Infrastructure definition (PostgreSQL, Redis, ops jobs), NOT the application deployer.
+# bot/webapi/frontend are deployed by bfx-deploy as compose project `bfx-app`
+# (deploy/vm/docker-compose.app.yml, docs/runbooks/deploy.md). Never broad
+# `up --build`/`down`/`--remove-orphans` here. Existing PG18, Redis, runtime env files
+# and volumes must remain unchanged. The `legacy-app` profiles below are historical/
+# simulation only: never `--profile legacy-app up` (same container names as bfx-app).
 
 services:
   # Self-hosted Postgres — replaces Neon. Internal-only (no published port);
   # the real-money DB must never be reachable from outside the docker network.
-  # POSTGRES_USER/PASSWORD/DB come from existing .env.runtime. The immutable
-  # deployer does NOT rewrite that file or recreate this service.
+  # POSTGRES_USER/PASSWORD/DB come from existing .env.runtime. bfx-deploy does NOT
+  # rewrite that file or recreate this service.
   postgres:
     build:
       context: .
