@@ -11,7 +11,7 @@ permits and release sessions to, and goes with that ceremony.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -258,10 +258,18 @@ class TradingControlRequestRow(Base):
     """An operator's approve/resume request, applied by the account daemon.
 
     The web API inserts only the request columns; the daemon writes one outcome
-    (``applied`` / ``rejected`` / ``failed``) and nothing rewrites it.
+    (``applied`` / ``rejected`` / ``failed``) and nothing rewrites it
+    (the operator-request contract, ``execution.operator_requests``).
     """
 
     __tablename__ = "trading_control_requests"
+    REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
+        "request_id", "exchange_account_id", "deployment_environment", "action",
+        "backend_digest", "reason", "requested_by", "created_at_ms",
+    )
+    WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
+        "state", "processed_at_ms", "outcome_reason", "trading_state_id",
+    )
 
     request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(

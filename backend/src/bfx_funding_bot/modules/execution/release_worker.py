@@ -16,7 +16,6 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.release_identity import ReleaseRuntime, assert_protected_file
-from bfx_funding_bot.core.settings import AuthSettings
 from bfx_funding_bot.core.writer_lock import WriterLock
 from bfx_funding_bot.external.bitfinex.funding_rules import (
     RULE,
@@ -29,6 +28,7 @@ from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.execution.event_store.writer import DEFAULT_PROJECTOR_VERSION
+from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.release_session import (
     ReleaseBlocked,
@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 # The single schema this build is willing to run against. Startup compares it
 # with the database's actual alembic heads, so it must move with every
 # migration or the daemon refuses to boot.
-RELEASE_SCHEMA_HEAD = "0218f9ab59a2"
+RELEASE_SCHEMA_HEAD = "b8e2d4f6a013"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
@@ -90,11 +90,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
                 "policies": policies, "funding_rule_digest": RULE.digest}
 
     async def operator(session: AsyncSession, user: str) -> bool:
-        settings = AuthSettings()
-        if not user or user != settings.operator_user_id or settings.operator_role != "admin":
-            return False
-        return bool(await session.scalar(text("SELECT public.release_operator_authorized(:account, :actor)"),
-                                         {"account": repo.account_id, "actor": user}))
+        return await operator_authorized(session, account_id=repo.account_id, user=user)
 
     async def readiness(session: AsyncSession, row: ReleaseSessionRow, *, observe: bool) -> object:
         proof = await asyncio.to_thread(runtime.verify)

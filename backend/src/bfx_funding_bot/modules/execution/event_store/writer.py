@@ -51,6 +51,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Approvals, operator requests and trading_state.probation_floor; no event,
     # projection or cursor is touched.
     "0218f9ab59a2",
+    # Adds the operator adjudication outbox beside the ledger and revokes web API
+    # writes; the rows, the cursor and the projector contract are unchanged.
+    "b8e2d4f6a013",
 })
 
 __all__ = [

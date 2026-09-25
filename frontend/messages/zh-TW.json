@@ -110,6 +110,8 @@
     "uncertaintyRecordManual": "記錄人工處理",
     "uncertaintyOperatorUnavailable": "目前無法取得操作員身分。",
     "uncertaintyResolutionFailed": "無法記錄處理結果。",
+    "uncertaintyResolutionPending": "已送出處理請求，等待帳戶 daemon 套用。",
+    "uncertaintyResolutionNotApplied": "處理請求未套用",
     "uncertaintyNextAction": {
       "bind": "請以最新完整帳戶對帳確認唯一的場外掛單 ID，再將它綁定至此嘗試。",
       "notAccepted": "請確認完整歷史涵蓋範圍與零個精確候選，才能標記此次請求未被接受。",

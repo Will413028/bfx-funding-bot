@@ -20,9 +20,9 @@ never below one venue-minimum offer.
   by ``auto`` without a probation, from inside it -- ends one; a pause or an
   operator's stop does not. It runs after ``guard_trading_state_transition``
   (triggers fire by name), so the scope lock is held and the id assigned.
-- ``trading_operator_authorized``: the operator check the daemon re-runs when it
-  applies a request; independent of the release ceremony's function, which is
-  removed with that ceremony.
+- ``operator_authorized``: the operator check the daemon re-runs when it
+  applies any operator request (``execution.operator_requests``); independent of
+  the release ceremony's function, which is removed with that ceremony.
 """
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -188,7 +188,7 @@ def upgrade() -> None:
 
     # Same authority as the release ceremony's check, owned by trading control
     # so removing the ceremony does not remove it.
-    op.execute('''CREATE FUNCTION public.trading_operator_authorized(account uuid, actor text)
+    op.execute('''CREATE FUNCTION public.operator_authorized(account uuid, actor text)
         RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS $$
         SELECT EXISTS (SELECT 1 FROM auth."user" u
           JOIN public.exchange_account_memberships m ON m.user_id=u.id
@@ -200,7 +200,7 @@ def upgrade() -> None:
 
     op.execute("REVOKE ALL ON FUNCTION public.reject_trading_control_mutation(), "
                "public.guard_trading_control_request(), public.guard_trading_state_probation(), "
-               "public.trading_operator_authorized(uuid,text) FROM PUBLIC")
+               "public.operator_authorized(uuid,text) FROM PUBLIC")
     op.execute("REVOKE ALL ON public.deployment_approvals, public.trading_control_requests FROM PUBLIC")
     op.execute("REVOKE ALL ON SEQUENCE public.deployment_approvals_id_seq FROM PUBLIC")
     op.execute(f"""DO $$ BEGIN
@@ -211,7 +211,7 @@ def upgrade() -> None:
         GRANT USAGE, SELECT ON SEQUENCE public.deployment_approvals_id_seq TO bfx_bot;
         GRANT SELECT ON public.trading_control_requests TO bfx_bot;
         GRANT UPDATE ({_WORKER_COLUMNS}) ON public.trading_control_requests TO bfx_bot;
-        GRANT EXECUTE ON FUNCTION public.trading_operator_authorized(uuid,text) TO bfx_bot;
+        GRANT EXECUTE ON FUNCTION public.operator_authorized(uuid,text) TO bfx_bot;
       END IF;
       IF EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_webapi') THEN
         REVOKE ALL ON public.deployment_approvals, public.trading_control_requests FROM bfx_webapi;
@@ -236,7 +236,7 @@ def downgrade() -> None:
     op.drop_table("deployment_approvals")
     op.execute("DROP FUNCTION public.guard_trading_control_request(), "
                "public.reject_trading_control_mutation(), "
-               "public.trading_operator_authorized(uuid,text)")
+               "public.operator_authorized(uuid,text)")
     op.execute("DROP TRIGGER trading_state_transition_probation ON public.trading_state")
     op.execute("DROP FUNCTION public.guard_trading_state_probation()")
     op.drop_constraint("ck_trading_state_probation", "trading_state", type_="check")

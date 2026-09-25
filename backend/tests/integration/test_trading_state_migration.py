@@ -340,8 +340,8 @@ def test_probation_needs_its_floor_and_the_operator_check_runs_for_the_bot(migra
             role,banned,"twoFactorEnabled") VALUES ('operator','op','op@test.invalid',false,now(),now(),
             'admin',false,true)''')
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        assert conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'operator')"), {"a": _A})
-        assert not conn.scalar(text("SELECT public.trading_operator_authorized(:a, 'nobody')"), {"a": _A})
+        assert conn.scalar(text("SELECT public.operator_authorized(:a, 'operator')"), {"a": _A})
+        assert not conn.scalar(text("SELECT public.operator_authorized(:a, 'nobody')"), {"a": _A})
 
 
 def test_the_database_keeps_active_inside_an_unfinished_probation(migrated):

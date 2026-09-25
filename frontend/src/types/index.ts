@@ -317,6 +317,34 @@ export interface Uncertainty {
   resolutionContext: UncertaintyResolutionContext | null;
   resolvedByOperatorId?: string | null;
   resolutionReason?: string | null;
+  /**
+   * Newest operator adjudication for this row: `requested` while the account
+   * daemon has yet to apply it, otherwise its outcome. The only status source.
+   */
+  resolutionRequest?: UncertaintyResolutionRequest | null;
+}
+
+export type UncertaintyResolutionRequestState =
+  | "requested"
+  | "applied"
+  | "rejected"
+  | "failed";
+
+/**
+ * One queued operator adjudication. The web API only records the request; the
+ * account daemon applies it and reports the outcome here (ADR D4').
+ */
+export interface UncertaintyResolutionRequest {
+  requestId: string;
+  uncertaintyId: string;
+  action: "bind_to_venue" | "mark_not_accepted" | "manual_resolution";
+  state: UncertaintyResolutionRequestState;
+  reconcileEventSeq: number;
+  createdAtMs: number;
+  processedAtMs: number | null;
+  resolvedEventSeq: number | null;
+  /** Bounded code, e.g. `stale_reconcile_fence`; set when rejected or failed. */
+  outcomeReason: string | null;
 }
 
 // ── Attribution ──
