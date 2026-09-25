@@ -69,18 +69,29 @@ def _path_env() -> dict[str, str]:
             if key in os.environ}
 
 
-def _render(env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+@pytest.fixture(scope="module")
+def runtime_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Empty stand-ins for /opt/bfx/runtime: older Compose stats env files even
+    with --no-env-resolution, and CI has no secret directory."""
+    directory = tmp_path_factory.mktemp("runtime")
+    for name in ("bot.env", "webapi.env", "frontend.env"):
+        (directory / name).write_text("")
+    return directory
+
+
+def _render(runtime: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_PATH), "config", "--no-env-resolution",
          "--format", "json"],
-        capture_output=True, text=True, check=False, env={**_path_env(), **(env or FAKE_ENV)})
+        capture_output=True, text=True, check=False,
+        env={**_path_env(), **(FAKE_ENV if env is None else env), "BFX_RUNTIME_DIR": str(runtime)})
 
 
 @pytest.fixture(scope="module")
-def rendered() -> dict[str, Any]:
+def rendered(runtime_dir: Path) -> dict[str, Any]:
     if not _compose_available():
         pytest.skip("docker compose CLI unavailable")
-    result = _render()
+    result = _render(runtime_dir)
     assert result.returncode == 0, result.stderr
     return dict(json.loads(result.stdout))
 
@@ -105,6 +116,23 @@ def test_no_image_tag_appears_anywhere_in_the_file() -> None:
     assert re.search(r"ghcr\.io/\S+:(main|sha-|latest)", COMPOSE_TEXT) is None
 
 
+def test_runtime_env_files_default_to_the_production_secret_directory() -> None:
+    assert policy.source_violations(COMPOSE_TEXT) == []
+    assert all(entry.startswith("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/") or entry == "live.env"
+               for spec in COMPOSE["services"].values() for entry in spec["env_file"])
+
+
+@pytest.mark.parametrize("edit", [
+    lambda t: t.replace("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env", "${BFX_RUNTIME_DIR:-/tmp}/bot.env"),
+    lambda t: t.replace("${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env", "${BFX_RUNTIME_DIR}/webapi.env"),
+    lambda t: t.replace("      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env",
+                        "      - path: ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env\n"
+                        "        required: false"),
+])
+def test_changing_the_default_or_making_secrets_optional_is_detected(edit: Callable[[str], str]) -> None:
+    assert policy.source_violations(edit(COMPOSE_TEXT)) != []
+
+
 def test_policy_and_deployer_agree_on_names_and_commands() -> None:
     assert policy.CONTAINERS == bfx.CONTAINERS
     assert tuple(bfx.identity_env(
@@ -116,19 +144,23 @@ def test_policy_and_deployer_agree_on_names_and_commands() -> None:
 
 
 @needs_compose
-def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any]) -> None:
-    assert policy.violations(rendered) == []
+def test_rendered_compose_file_satisfies_the_policy(rendered: dict[str, Any], runtime_dir: Path) -> None:
+    assert policy.violations(rendered, str(runtime_dir)) == []
+    # Rendered against the production directory, the stand-in paths are a violation.
+    assert {f"{s}:env_files" for s in ("bot", "webapi", "frontend")} <= set(policy.violations(rendered))
 
 
 @needs_compose
-def test_policy_cli_is_what_ci_runs(rendered: dict[str, Any]) -> None:
-    completed = subprocess.run([sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py")],
-                               input=json.dumps(rendered), capture_output=True, text=True, check=False)
+def test_policy_cli_is_what_ci_runs(rendered: dict[str, Any], runtime_dir: Path) -> None:
+    argv = [sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py"), "--source", str(COMPOSE_PATH)]
+    env = {**_path_env(), "BFX_RUNTIME_DIR": str(runtime_dir)}
+    completed = subprocess.run(argv, input=json.dumps(rendered), capture_output=True, text=True,
+                               check=False, env=env)
     assert completed.returncode == 0, completed.stderr
     broken = copy.deepcopy(rendered)
     broken["services"]["bot"]["read_only"] = False
-    completed = subprocess.run([sys.executable, str(ROOT / "deploy/vm/ops/compose_policy.py")],
-                               input=json.dumps(broken), capture_output=True, text=True, check=False)
+    completed = subprocess.run(argv, input=json.dumps(broken), capture_output=True, text=True,
+                               check=False, env=env)
     assert completed.returncode == 1 and "bot:read_only" in completed.stderr
 
 
@@ -164,10 +196,12 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
 @needs_compose
 @pytest.mark.parametrize("service", ["bot", "webapi", "frontend"])
 @pytest.mark.parametrize("prop", sorted(REMOVALS))
-def test_dropping_a_property_is_detected_by_name(rendered: dict[str, Any], service: str, prop: str) -> None:
+def test_dropping_a_property_is_detected_by_name(
+    rendered: dict[str, Any], runtime_dir: Path, service: str, prop: str,
+) -> None:
     broken = copy.deepcopy(rendered)
     REMOVALS[prop](broken["services"][service])
-    assert f"{service}:{prop}" in policy.violations(broken)
+    assert f"{service}:{prop}" in policy.violations(broken, str(runtime_dir))
 
 
 @needs_compose
@@ -180,8 +214,8 @@ def test_bot_alias_and_external_network_are_required(rendered: dict[str, Any]) -
 
 @needs_compose
 @pytest.mark.parametrize("missing", sorted(FAKE_ENV))
-def test_compose_refuses_to_render_without_each_deploy_variable(missing: str) -> None:
-    result = _render({k: v for k, v in FAKE_ENV.items() if k != missing})
+def test_compose_refuses_to_render_without_each_deploy_variable(runtime_dir: Path, missing: str) -> None:
+    result = _render(runtime_dir, {k: v for k, v in FAKE_ENV.items() if k != missing})
     assert result.returncode != 0
     assert missing in result.stderr
 
@@ -220,8 +254,7 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     runtime.mkdir()
     for name in ("bot.env", "webapi.env", "frontend.env"):
         (runtime / name).write_text("EXAMPLE=1\n")
-    text = (COMPOSE_TEXT.replace("/opt/bfx/runtime/", f"{runtime}/")
-            .replace("name: bfx_default", f"name: {network}")
+    text = (COMPOSE_TEXT.replace("name: bfx_default", f"name: {network}")
             .replace("name: bfx-app", f"name: bfx-app-test-{suffix}"))
     for container in ("bfx-bot", "bfx-webapi", "bfx-frontend"):
         text = text.replace(f"container_name: {container}", f"container_name: {container}-{suffix}")
@@ -229,7 +262,8 @@ def test_compose_created_containers_pass_the_deploy_check(tmp_path: Path) -> Non
     shutil.copy(ROOT / "deploy/vm/live.env", tmp_path / "live.env")
     digest = image.split("@", 1)[1]
     target = bfx.Target(FAKE_ENV["BFX_SOURCE_REVISION"], digest, digest, image, image)
-    env = {**_path_env(), **FAKE_ENV, "BFX_BACKEND_IMAGE": image, "BFX_FRONTEND_IMAGE": image,
+    env = {**_path_env(), **FAKE_ENV, "BFX_RUNTIME_DIR": str(runtime),
+           "BFX_BACKEND_IMAGE": image, "BFX_FRONTEND_IMAGE": image,
            "BFX_BACKEND_DIGEST": digest, "BFX_FRONTEND_DIGEST": digest}
     project = f"bfx-app-test-{suffix}"
     compose = ["docker", "compose", "-p", project, "-f", str(tmp_path / "docker-compose.app.yml")]
