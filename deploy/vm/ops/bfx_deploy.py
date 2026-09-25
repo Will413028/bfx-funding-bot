@@ -197,7 +197,7 @@ def _describe(argv: Sequence[str]) -> str:
 
 
 def parse_env_file(text: str, *, name: str, compose: bool) -> dict[str, str]:
-    """Strict KEY=VALUE parser (the old release_package.read_env contract).
+    """Strict KEY=VALUE parser (the retired release launcher's env contract).
 
     With compose=True, values Compose would read differently from `docker
     --env-file` (quotes, `$` interpolation, ` #` inline comments, padding) are
@@ -1037,8 +1037,9 @@ class Deployer:
         for line in result.stdout.splitlines():
             name, _, project = line.partition("\t")
             if name in CONTAINERS.values() and project != PROJECT:
-                # Cutover: the old immutable-release containers must be stopped and
-                # renamed by the operator; bfx-deploy never deletes them.
+                # Cutover: containers left by the retired immutable-release launcher
+                # must be stopped and renamed by the operator; bfx-deploy never deletes
+                # them (docs/runbooks/cutover-release-governance.md).
                 if self.settings.dry_run:
                     self._dry_run_blockers.append(f"foreign_container_holds_name:{name}")
                     continue
@@ -1252,8 +1253,8 @@ class Deployer:
     def _after_success(self, view: LedgerView, target: Target) -> list[str]:
         warnings = []
         if self.settings.local_alias:
-            # Transitional (until T12): the DR verifier (docker-compose.dr.yml) and the
-            # weekly report still name bfx-bot:local; keep that alias on the running
+            # Transitional: the DR verifier (docker-compose.dr.yml) and the weekly
+            # report still name bfx-bot:local; keep that alias on the running
             # backend so neither drifts behind production. Never used to deploy.
             tagged = self._run(["docker", "tag", target.backend_image, self.settings.local_alias],
                                timeout=60.0)

@@ -1,5 +1,10 @@
 # Halt 1：ExchangeAccount identity cutover
 
+> **歷史紀錄。** 這次切換已完成。文中的 canary gate、Halt 2、手動 image／migration 步驟屬於已刪除的
+> 舊 release 流程；現行部署見 [deploy runbook](deploy.md)，停機與恢復見
+> [operations runbook](operations.md)。第 6b 節的 webapi 手動 GRANT 已由 migration
+> `6f2b8d0e4a17` 取代（該 SQL 仍保留，供測試比對）。
+
 這是 pre-launch 的 planned halt runbook。目的：把舊字串 realm 一次切換成
 immutable `ExchangeAccount.id` UUID，並讓 money tables、credential vault、config
 draft、API 與 daemon 使用同一個 account identity。本文件只定義人工 gate；agent

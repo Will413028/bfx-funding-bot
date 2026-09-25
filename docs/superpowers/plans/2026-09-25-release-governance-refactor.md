@@ -71,11 +71,14 @@ interfaces are fixed.
 
 - Bitfinex: confirm the API key has no withdrawal permission, set an IP
   whitelist for the VM, confirm account-level auto-renew is off.
-- Telegram: create a bot, store token and chat id in `/opt/bfx/runtime/bot.env`
-  on the VM, reply `done` (never paste them).
-- GHCR: a read-only token for the VM, stored the same way.
+- Telegram: create a bot, store token and chat id in both `/opt/bfx/runtime/bot.env`
+  (in-process sink) and `/opt/bfx/runtime/notify.env` (host tools) on the VM, reply
+  `done` (never paste them). Changing the token later means changing both files.
+- GHCR: a read-only token for the VM in `/opt/bfx/runtime/ghcr.env`, stored the same way.
 
 ## 4. Cutover
+
+Step-by-step commands: `docs/runbooks/cutover-release-governance.md` (T12).
 
 1. Merge the branch after review; CI publishes the first images.
 2. On the VM: install compose file, `bfx-deploy`, timers; add secrets (§3).
@@ -84,7 +87,8 @@ interfaces are fixed.
    archive+drop release tables) → start → health.
 5. Verify: state `HALTED/operator` carried over, alerts arrive, kill switch
    cancels a test-free account (no open offers expected), UI shows state.
-6. Revoke the five manual webapi grants only if the outbox migration did not.
+6. ~~Revoke the five manual webapi grants~~ — superseded: migration `6f2b8d0e4a17`
+   versions the web API's read grants (`9136d2b`).
 7. Will resumes with TOTP → probation (25%, 24 h) → normal.
 
 **Rollback** before step 4 migrations: restart the renamed old containers.
@@ -98,6 +102,14 @@ decide (never restore over post-write venue reality; see
 - [x] Release workflow (`1a56aee`)
 - [x] T1 trading state `afa1de6`; T2 guards by state `8ce9a0d`; T3 kill path `7dd847a`
 - [x] T10 VM tooling `5030e5d`, merged `97c7612`, migration chain `b0b6067`
-- [ ] T10b monthly restore test with prefix-hash verification + change-triggered runs
-- [ ] T4 automatic protections through the kill path; no trading_state row means HALTED (fail-closed, ADR D5)
-- [ ] T5 … T9, T11, T12
+- [x] T10b monthly restore test with prefix-hash verification + change-triggered runs `d75b288`
+- [x] T4 automatic protections through the kill path; no trading_state row means HALTED `1b43255` (+ identity conflicts `0c94084`)
+- [x] T5 change class + approval + probation `998cc73` (+ `2711e3a`)
+- [x] T8 Telegram alert sink `da63b6f`
+- [x] T9 always-on pre-trade limits `758590e`, merged `0c2a99f`; single migration head `ebc943f`
+- [x] T11 D4' outbox merged `ea10d60`
+- [x] T6 ceremony removed, release tables archived `8422d13` (merged into the deploy tooling `51e3773`)
+- [x] T7 frontend trading state panel `2c639fa`
+- [x] Resume only through TOTP + versioned web API read grants `9136d2b`; boot refusal cancels venue offers `cfe0f87`; kill-path flaky test `a3e5071`
+- [x] T12 runbooks: `deploy.md`, `operations.md`, `cutover-release-governance.md`; `immutable-release.md` and `halt-2-projector-canary.md` deleted; release-0, rollback-after-venue-write, offsite-dr, AGENTS/README rewritten (this commit)
+- [ ] Cutover (§4) — Will's prerequisites (§3), then the cutover runbook; afterwards one rollback drill and the VM cleanup list in the cutover runbook §7

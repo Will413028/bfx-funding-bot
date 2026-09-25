@@ -12,7 +12,11 @@ Bitfinex 自動放貸 SaaS 平台。
 
 ## 部署架構
 
-應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker stack，`docker-compose.bot.yml`）；外部服務包含 Bitfinex venue 與 Cloudflare R2 offsite backup。
+應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）與 Cloudflare R2 offsite backup。
+
+- **應用程式**（bot／webapi／frontend）：compose project `bfx-app`，定義在 `deploy/vm/docker-compose.app.yml`。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 image 推到 GHCR；VM 的 `bfx-deploy`（`deploy/vm/ops/bfx_deploy.py`，`bfx-deploy.timer` 每 5 分鐘）只以 digest 部署：依 `deploy/change-class.yaml` 分級、有 migration 先備份（必要時先跑 isolated restore test）、recreate、健康檢查、失敗回滾，每次寫 `deployments` ledger 並發 Telegram。VM 不 build image。
+- **資料服務**（Postgres／Redis）：compose project `bfx`，`docker-compose.bot.yml`；其 `legacy-app` profile 只是歷史定義，不可用來啟動應用程式。
+- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／核准／停機／告警 `docs/runbooks/operations.md`；一次性切換 `docs/runbooks/cutover-release-governance.md`。
 
 | 服務 | 平台 |
 |------|------|
@@ -21,7 +25,7 @@ Bitfinex 自動放貸 SaaS 平台。
 | Database | 自托 Postgres 18（`bfx-postgres`，volume `bfx_pgdata`；roles：bot owner、`bfx_webapi`、`bfx_webauth`） |
 | Cache | 自托 Redis 7（`bfx-redis`，volume `bfx_redisdata`；Better Auth secondaryStorage：session + rate-limit，ioredis） |
 
-- 備份／WAL archive／isolated restore 依 `docs/runbooks/offsite-dr.md`；pgBackRest backup/status timer 定義在 `deploy/vm/systemd/`，實際啟用與健康狀態須查目標環境。
+- 備份／WAL archive／isolated restore 依 `docs/runbooks/offsite-dr.md`；pgBackRest backup/status、`bfx-backup-check`、每月 `bfx-restore-test`（prefix-hash 驗證）timer 定義在 `deploy/vm/systemd/`（`deploy/vm/ops/install.sh` 安裝但不啟用），實際啟用與健康狀態須查目標環境。
 - 每週 attribution／G3 報告由 `bfx-weekly-report.timer` 執行 compose `weekly-report`（`--profile ops`）；操作前核對目前 unit、排程及輸出。Redis session 為 ephemeral。
 
 ## 指令執行目錄

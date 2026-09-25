@@ -13,8 +13,8 @@
 # never mirrors the old `docker create --pull=never`: bfx-deploy pulls by digest
 # first, so `up` can only start what was already verified.
 #
-# Hardening kept from the immutable-release launcher (release_package.create_launch,
-# immutable_release.start_service): read-only root filesystem, bot/webapi UID 1000,
+# Hardening kept from the retired immutable-release launcher (removed in T6):
+# read-only root filesystem, bot/webapi UID 1000,
 # frontend user nextjs, all capabilities dropped, no-new-privileges, cwd /app, the
 # image's exact interpreter/module, bot DNS alias bfx-bot, frontend published on
 # host loopback 127.0.0.1:3001 only, no volumes, no writable mounts. Loader and
