@@ -260,6 +260,13 @@ class DaemonMetrics:
             "Execution audit persistence failures before a venue submit.",
             registry=self.registry,
         )
+        self.alerts = Counter(
+            "bfx_alerts",
+            "Operator alerts by event and outcome (sent / failed / deduplicated / "
+            "rate_limited / queue_full / log_only); drops never block trading",
+            ["event", "outcome"],
+            registry=self.registry,
+        )
         self.funding_book_snapshots = Counter(
             "bfx_funding_book_snapshots",
             "Funding book snapshot validation outcomes.",
@@ -374,6 +381,10 @@ class DaemonMetrics:
             ).inc()
         except Exception:
             log.debug("metrics_observe_failed metric=execution_decisions", exc_info=True)
+
+    def observe_alert(self, event: str, outcome: str) -> None:
+        with contextlib.suppress(Exception):
+            self.alerts.labels(event=event, outcome=outcome).inc()
 
     def observe_audit_persist_failure(self) -> None:
         try:

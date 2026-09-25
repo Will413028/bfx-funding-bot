@@ -53,6 +53,7 @@ from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelt
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import CAUSE_AUTO
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class AutomaticProtection:
             self._pending = tripped
         self._queue.put_nowait(tripped)
         log.critical("automatic_protection_tripped trigger=%s detail=%s", trigger, tripped.detail)
+        alerts.emit(alerts.PROTECTION_TRIPPED, trigger=trigger, detail=tripped.detail)  # T8
 
     def pending_reason(self) -> str | None:
         """Why new offers are stopped before the HALTED is committed, if they are."""

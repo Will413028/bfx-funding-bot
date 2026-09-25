@@ -15,7 +15,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -203,6 +203,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
 from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
 from bfx_funding_bot.modules.marketfeed.warmup import warmup_cell
+from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     MetricsSubmitMiddleware,
@@ -770,6 +771,8 @@ class Daemon:
     tracing: DaemonTracing | None = None
     # Automatic protections: supervised consumer turning trips into the kill.
     protection: AutomaticProtection | None = None
+    # True once boot recovery passed; an exit before that is a refused boot (T8 alert).
+    booted: bool = False
     writer_lock_watch: WriterLockWatch | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -802,6 +805,7 @@ class Daemon:
         # BEFORE any sub-task starts (live only; paper leaves this None). A venue
         # fetch failure raises here -> daemon fails to start (fail-safe).
         await self._run_boot_recovery()
+        self.booted = True
 
         async with asyncio.TaskGroup() as tg:
             if self.protection is not None:
@@ -2342,11 +2346,22 @@ def main() -> None:
 
 
 async def _run() -> None:
-    daemon = await build_daemon()
+    # T8: operator alerts. Installed before anything can refuse the boot; hooks in
+    # safety/{trading_state,protection,kill_switch}.py emit into it. Log-only
+    # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
+    alerts.install(alerts.AlertSink.from_environment(os.environ))
+    try:
+        daemon = await build_daemon()
 
-    # Phase 4.4 prework: boot smoke (pre-TaskGroup) — see daemon_smoke_boot.py
-    from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
-    await run_boot_smoke(daemon)
+        # Phase 4.4 prework: boot smoke (pre-TaskGroup) — see daemon_smoke_boot.py
+        from bfx_funding_bot.modules.marketfeed.daemon_smoke_boot import run_boot_smoke
+        await run_boot_smoke(daemon)
+    except Exception as exc:
+        alerts.emit(alerts.BOOT_REFUSED, error=_error_text([exc]))
+        await alerts.shutdown()
+        raise
+    if daemon.metrics is not None:
+        alerts.current().observer = daemon.metrics.observe_alert
 
     stop = daemon._stop_event  # share with signal handler
     loop = asyncio.get_running_loop()
@@ -2382,12 +2397,16 @@ async def _run() -> None:
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
+        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+                    error="ExecutorAuthError: venue credentials rejected")
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
             "daemon_taskgroup_fatal exceptions=%s",
             [type(e).__name__ for e in eg.exceptions],
         )
+        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+                    error=_error_text(eg.exceptions))
         raise
     finally:
         # Cleanup after TaskGroup completes (close http client)
@@ -2407,6 +2426,12 @@ async def _run() -> None:
         if daemon.tracing is not None:
             with contextlib.suppress(Exception):
                 daemon.tracing.shutdown()
+        # Deliver queued alerts (a refused boot, a fatal error) before exiting.
+        await alerts.shutdown()
+
+
+def _error_text(exceptions: Sequence[BaseException]) -> str:
+    return "; ".join(f"{type(exc).__name__}: {exc}" for exc in exceptions)[:300]
 
 
 

@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
+from bfx_funding_bot.modules.observability import alerts
 
 ACTIVE: Final = "ACTIVE"
 REDUCING: Final = "REDUCING"
@@ -248,12 +249,17 @@ class TradingStateRepository:
             await acquire_transaction_lock(
                 session, account_id=str(self.account_id), deployment_environment=self.environment,
             )
-            return await append_transition(
+            result = await append_transition(
                 session, account_id=self.account_id, environment=self.environment,
                 state=state, cause=cause, actor=actor, reason=reason,
                 now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
                 probation=probation,
             )
+        if result.changed:  # committed; alerting never blocks or raises (T8)
+            alerts.emit(alerts.TRADING_STATE_CHANGED, state=state, cause=cause, actor=actor,
+                        reason=reason, state_id=result.state.id,
+                        previous=result.previous.state if result.previous else "none")
+        return result
 
     async def history(self, *, limit: int = 20) -> list[TradingState]:
         async with self._sf() as session:

@@ -56,6 +56,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +164,10 @@ class KillSwitch:
                 "outcomes=%s", self._trading.account_id, self._trading.environment, cause,
                 halted.id, result.complete,
                 [(o.currency, o.phase, o.detail) for o in outcomes])
+        alerts.emit(alerts.KILL_SWITCH_ENGAGED, complete=result.complete, cause=cause,  # T8
+                    actor=actor, state_id=halted.id, scope_error=scope_error or "none",
+                    not_acknowledged=[(o.currency, o.phase) for o in outcomes
+                                      if o.phase != "acknowledged"])
         return result
 
     async def _verify_writer_lock(self) -> bool:
