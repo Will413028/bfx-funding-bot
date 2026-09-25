@@ -17,6 +17,9 @@ trigger                    raised where
                            snapshot (capital acceptance or a planner read)
 ``offer_amount_mismatch``  a managed offer's venue amount differs from what was
                            submitted (capital classifier ``offer_amount_conflict``)
+``identity_conflict``      the ledger and the venue, or two ledger records,
+                           disagree about who or what a commitment is (the
+                           classifier's provenance/attempt/evidence conflicts)
 ``venue_lent_above_ledger`` a confirmed snapshot shows more lent than the
                            ledger plus fills of our own offers can explain
 ``loss_limiter``           a currency's 24h loss or drawdown crossed its limit
@@ -61,13 +64,14 @@ ORPHAN_QUARANTINED = "orphan_quarantined"
 UNATTRIBUTED_OFFER = "unattributed_offer"
 UNCLASSIFIABLE_COMMITMENT = "unclassifiable_commitment"
 OFFER_AMOUNT_MISMATCH = "offer_amount_mismatch"
+IDENTITY_CONFLICT = "identity_conflict"
 VENUE_LENT_ABOVE_LEDGER = "venue_lent_above_ledger"
 LOSS_LIMITER = "loss_limiter"
 WRITER_LOCK_LOST = "writer_lock_lost"
 
 TRIGGERS = frozenset({
     SUBMIT_OUTCOME_UNKNOWN, ORPHAN_QUARANTINED, UNATTRIBUTED_OFFER,
-    UNCLASSIFIABLE_COMMITMENT, OFFER_AMOUNT_MISMATCH, VENUE_LENT_ABOVE_LEDGER,
+    UNCLASSIFIABLE_COMMITMENT, OFFER_AMOUNT_MISMATCH, IDENTITY_CONFLICT, VENUE_LENT_ABOVE_LEDGER,
     LOSS_LIMITER, WRITER_LOCK_LOST,
 })
 
@@ -78,6 +82,24 @@ CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
     "unattributed_offer": UNATTRIBUTED_OFFER,
     "unclassifiable_commitment": UNCLASSIFIABLE_COMMITMENT,
     "offer_amount_conflict": OFFER_AMOUNT_MISMATCH,
+    # Integrity: the same commitment or venue object described two ways. Each
+    # of these means a durable record and its evidence disagree, which no
+    # retry resolves -- fail closed rather than keep trading around it.
+    **dict.fromkeys((
+        "offer_provenance_conflict",
+        "offer_attempt_conflict",
+        "attempt_decision_conflict",
+        "attempt_amount_conflict",
+        "attempt_projection_conflict",
+        "attempt_intent_conflict",
+        "attempt_intent_scope_conflict",
+        "attempt_outcome_evidence_conflict",
+        "attempt_outcome_evidence_identity",
+        "attempt_outcome_evidence_scope",
+        "duplicate_attempt_intent",
+        "execution_unknown_resolution_conflict",
+        "snapshot_conflicting_identity",
+    ), IDENTITY_CONFLICT),
 }
 
 # Same tolerance as the reconcile divergence report.
@@ -90,7 +112,8 @@ class ProtectionPort(Protocol):
 
 
 class _KillSwitch(Protocol):
-    async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult: ...
+    async def engage(self, *, cause: str, actor: str, reason: str,
+                     when_already_halted: str = "retry") -> KillResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +132,8 @@ class AutomaticProtection:
         self._queue: asyncio.Queue[Trip] = asyncio.Queue()
         self._pending: Trip | None = None
         self._kill_switch: _KillSwitch | None = None
+        # Trips that found HALTED already in force: logged, counted, no venue call.
+        self.persisting = 0
 
     def bind(self, kill_switch: _KillSwitch) -> None:
         self._kill_switch = kill_switch
@@ -175,15 +200,26 @@ class AutomaticProtection:
                 error: str | None = "kill switch not bound"
             else:
                 try:
+                    # Already HALTED: the condition persisting is not a new
+                    # stop. Only the transition into HALTED runs cancel-all and
+                    # writes audit rows; an operator's /admin/halt retries it.
                     result = await self._kill_switch.engage(
                         cause=CAUSE_AUTO, actor=f"auto:{first.trigger}", reason=reason,
+                        when_already_halted="skip",
                     )
                 except Exception as exc:
                     error = repr(exc)
                 else:
                     error = None
-                    log.critical("automatic_protection_engaged triggers=%s state_id=%s "
-                                 "cancel_all_complete=%s", triggers, result.state.id, result.complete)
+                    if result.state_changed:
+                        log.critical("automatic_protection_engaged triggers=%s state_id=%s "
+                                     "cancel_all_complete=%s", triggers, result.state.id,
+                                     result.complete)
+                    else:
+                        self.persisting += len(batch)
+                        log.warning("automatic_protection_condition_persists triggers=%s "
+                                    "state_id=%s (already HALTED; no cancel-all)", triggers,
+                                    result.state.id)
             if error is None:
                 # HALTED is durable now; the guard reads it from the database.
                 if self._queue.empty():
@@ -206,7 +242,10 @@ class LedgerConservation:
     Per symbol, against the ledger just before the snapshot: lent may fall
     (a loan ended) and may rise only by what our own offers lost (fills,
     including ones WS missed). Anything above that is money lent at the venue
-    that this bot did not lend -- ``venue_lent_above_ledger``.
+    that this bot did not lend -- ``venue_lent_above_ledger``. That halts
+    whatever its cause: the account is dedicated to this bot and venue
+    auto-renew is off, so lending the bot did not do is by definition
+    unexplained (Will, 2026-09-25).
 
     Only snapshots the capital authority accepted are judged: acceptance needs
     two identical fetches, so a fill landing between the offers and the credits
@@ -312,6 +351,7 @@ class WriterLockWatch:
 
 __all__ = [
     "CAPITAL_BLOCK_TRIGGERS",
+    "IDENTITY_CONFLICT",
     "LEDGER_EPSILON",
     "LOSS_LIMITER",
     "OFFER_AMOUNT_MISMATCH",

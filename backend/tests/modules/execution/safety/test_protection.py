@@ -34,7 +34,9 @@ class FakeKill:
         self.calls: list[tuple[str, str, str]] = []
         self.failures = failures
 
-    async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult:
+    async def engage(self, *, cause: str, actor: str, reason: str,
+                     when_already_halted: str = "retry") -> KillResult:
+        assert when_already_halted == "skip"  # automatic kills never re-run a kill in force
         self.calls.append((cause, actor, reason))
         if self.failures:
             self.failures -= 1
@@ -138,6 +140,9 @@ def test_replay_2026_08_migration_catch_ups_do_not_halt(when: str, reading: str)
     The logged drift is an absolute value, so both readings of "the whole
     balance caught up" are replayed: lent returning to the wallet, and the
     first venue observation of a ledger the migration re-keyed (no baseline).
+    A third reading -- lent rising against an established ledger -- WOULD
+    halt, deliberately: lending the bot did not do is unexplained whatever
+    caused it, because the account is bot-only and auto-renew is off.
     """
     conservation = LedgerConservation()
     delta = (_delta("fUST", "0", "392.4", "0", "0") if reading == "returned"
@@ -241,3 +246,25 @@ async def test_writer_lock_trips_only_when_not_held_after_refresh() -> None:
     assert await watch.check() is True
     assert await watch.check() is False
     assert [trigger for trigger, _ in recorder.trips] == [WRITER_LOCK_LOST, WRITER_LOCK_LOST]
+
+
+@pytest.mark.parametrize("reason", [
+    "offer_provenance_conflict", "offer_attempt_conflict", "attempt_decision_conflict",
+    "attempt_amount_conflict", "attempt_projection_conflict", "attempt_intent_conflict",
+    "attempt_intent_scope_conflict", "attempt_outcome_evidence_conflict",
+    "attempt_outcome_evidence_identity", "attempt_outcome_evidence_scope",
+    "duplicate_attempt_intent", "execution_unknown_resolution_conflict",
+    "snapshot_conflicting_identity",
+])
+def test_identity_conflicts_are_protections(reason: str) -> None:
+    from bfx_funding_bot.modules.execution.safety.protection import CAPITAL_BLOCK_TRIGGERS
+    assert CAPITAL_BLOCK_TRIGGERS[reason] == "identity_conflict"
+
+
+@pytest.mark.parametrize("reason", [
+    "snapshot_query_pending", "snapshot_unstable", "snapshot_stale",
+    "snapshot_command_fence_changed", "execution_unknown", "policy_unavailable",
+])
+def test_transient_observation_states_are_not_protections(reason: str) -> None:
+    from bfx_funding_bot.modules.execution.safety.protection import CAPITAL_BLOCK_TRIGGERS
+    assert reason not in CAPITAL_BLOCK_TRIGGERS
