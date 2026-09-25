@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
@@ -183,14 +184,32 @@ async def test_persisted_halt_blocks_with_the_env_flag_absent(
     assert snap["halt"]["sources"]["persisted"]["reason"] == "candle distortion"
 
 
-async def test_resume_restores_trading_and_leaves_an_audit_trail(
+async def test_kill_is_not_lifted_by_the_admin_token(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """/admin/halt is the kill: HALTED, whose exit is an authenticated resume.
+    Paper has no venue, so the cancel-all is recorded as skipped, not done."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    daemon = await _build(monkeypatch, tmp_path, httpx_mock)
+    assert daemon.trading_status is not None
+
+    out = await daemon.trading_status.halt(reason="venue incident", actor="test")
+    assert (out["state"], out["cause"]) == ("HALTED", "operator")
+    assert out["cancel_all_complete"] is False
+    assert {(o["phase"], o["detail"]) for o in out["cancel_all"]} == {("skipped", "no_live_venue")}
+    with pytest.raises(ValueError, match="release_promotion_required"):
+        await daemon.trading_status.resume(reason="static token", actor="test")
+    assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
+
+
+async def test_resume_after_a_pause_restores_trading_and_leaves_an_audit_trail(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
-    await daemon.trading_status.halt(reason="candle distortion", actor="test")
+    await daemon.trading_status.pause(reason="candle distortion", actor="test")
     await daemon.trading_status.resume(reason="L4 v2 passed", actor="test")
 
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is True

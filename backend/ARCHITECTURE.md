@@ -384,14 +384,18 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L1 hard guards（always-on，順序固定）**
 
-1. `ManualKillGuard` — 讀 `BFX_KILL_SWITCH`（true/1/yes），命中即擋全部，跑最前。
+1. `ManualKillGuard`（trading-state guard）— `BFX_KILL_SWITCH`（true/1/yes）或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state 一律 fail-closed。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
 
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
-**Kill switch**：設定 `BFX_KILL_SWITCH=true` 即時擋所有新單，無須改 safety config；由目前 VM deployment 的環境組裝提供此 break-glass env。
+**Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 DB trigger 與 `validate_transition` 雙重拒絕。`POST /admin/resume` 只解除 operator 的 REDUCING；HALTED 與 material deploy 的 REDUCING 目前只能由 release promotion 解除（T5 會換成 TOTP 核准）。
+
+**撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard，不再呼叫 release worker 的 `check_normal`；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
+
+**Kill switch（`safety/kill_switch.py`）**：`POST /admin/halt`、以及開機時設定的 `BFX_KILL_SWITCH`，都執行同一條路徑：先 commit `HALTED`（寫不進去就不呼叫 venue），再對每個幣別呼叫 `POST /v2/auth/w/funding/offer/cancel/all`。幣別＝設定的 symbols，加上有 open uncertainty（UNKNOWN、orphan）或非終態 venue offer 的 symbols。只需 writer lock，不經 command gate 的 provenance／uncertainty／trading-state 檢查；呼叫前以有上限的等待取得該帳戶的 command lock，避免已過 transport 檢查的 submit 在 cancel-all 之後才落地。每次呼叫在 `funding_cancel_all_audit` 留下 `requested` 與一筆終態（`acknowledged`／`rejected`／`failed`／`skipped`）；venue 失敗不回滾 HALTED，再呼叫一次 `/admin/halt` 即重試（`/admin/halt` 在 cancel-all 未全數完成時回 502）。被 cancel-all 撤掉的 UNKNOWN offer 由既有 offer-history 比對以終態 exact match 解析；orphan 的 uncertainty 仍需 operator resolution。`BFX_KILL_SWITCH` 仍由 guard 直接擋新單，作為 DB 故障時的 break-glass。
 
 **Canary gate（`assert_canary_guard_invariant`）**：`BFX_PHASE=canary` 啟動時強制 hard guards + `realized_loss_24h` + `drawdown_from_peak` 全開，否則 `build_daemon` 在 TaskGroup 啟動前 `ValueError`。
 
@@ -451,6 +455,21 @@ execution_decisions    (append-only pre-trade audit；非 ledger projection)
   amount_usdt, period_days, market_snapshot_evidence, model_evidence,
   safety_result, execution_policy, service_version, config_hash,
   occurred_at_ms, recorded_at
+
+trading_state          (append-only 交易狀態；放貸與否的唯一權威)
+  PK id（insert trigger 在 scope lock 下指派，id 序即決策序）
+  exchange_account_id (FK RESTRICT), deployment_environment,
+  state{ACTIVE|REDUCING|HALTED}, cause{operator|kill_switch|auto|material_deploy},
+  actor, reason, created_at_ms,
+  probation_multiplier / probation_started_at_ms (T5 預留), legacy_halt_id
+  -- trigger 拒絕非法轉換與 UPDATE/DELETE/TRUNCATE；bfx_bot SELECT/INSERT，bfx_webapi 只有 SELECT。
+  -- 舊 trading_halt 只剩 release ceremony 的 epoch 綁定（T6 移除）。
+
+funding_cancel_all_audit (append-only；kill switch 每次 venue cancel-all 的紀錄)
+  PK id, exchange_account_id, deployment_environment, trading_state_id (FK),
+  attempt_id, currency, phase{requested|acknowledged|rejected|failed|skipped},
+  venue_status, detail, actor, occurred_at_ms
+  -- 每個 attempt 一筆 requested、至多一筆終態（partial unique）。
 
 diagnostics            (非 SoT forensic, prunable)
   exchange_account_id, deployment_environment, kind, payload(JSONB),

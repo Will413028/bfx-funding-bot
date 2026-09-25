@@ -12,7 +12,7 @@ from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from scripts.release_package import PackagingBlocked, run, run_one_shot
 
 
@@ -60,8 +60,9 @@ async def test_image_migration_then_restricted_runtime_check_without_sync_or_pol
         try:
             async with factory.begin() as session:
                 session.add(ExchangeAccount(id=account, venue="bitfinex", label="migration-fixture"))
-            halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
-            epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
+            halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+            epoch = (await halt.transition("HALTED", cause="operator", reason="fixture",
+                                           actor="fixture")).state
             with pytest.raises(PackagingBlocked, match="one_shot_exit_nonzero:2"):
                 await command("bfx_bot:synthetic", ["/app/.venv/bin/python", "-m", "scripts.release_database", "startup"])
             repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=300000)
@@ -72,7 +73,7 @@ async def test_image_migration_then_restricted_runtime_check_without_sync_or_pol
                         policy=CapitalPolicy(enabled=symbol == "fUST"), source={"fixture": True})
             ready = await command("bfx_bot:synthetic", ["/app/.venv/bin/python", "-m", "scripts.release_database", "startup"])
             assert json.loads(ready)["principal"] == "bfx_bot"
-            assert json.loads(ready)["halt_id"] == epoch.id
+            assert json.loads(ready)["trading_state_id"] == epoch.id
             assert (await halt.current()).id == epoch.id
         finally:
             await engine.dispose()

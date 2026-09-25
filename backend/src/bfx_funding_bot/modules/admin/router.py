@@ -34,6 +34,7 @@ class _TradingStatusProtocol(Protocol):
         rate: float | None = None, period_days: int | None = None,
     ) -> dict[str, Any]: ...
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]: ...
+    async def pause(self, *, reason: str, actor: str) -> dict[str, Any]: ...
     async def resume(self, *, reason: str, actor: str) -> dict[str, Any]: ...
 
 
@@ -134,8 +135,13 @@ def build_router(
             actor: str = Query(default="admin-api"),
             authorization: str | None = Header(default=None),
         ) -> JSONResponse:
-            """Pause trading (REDUCING). `reason` is required — an unexplained
-            stop is the one nobody can safely undo six weeks later."""
+            """Kill switch: HALTED, then cancel every funding offer at the venue.
+
+            `reason` is required — an unexplained stop is the one nobody can
+            safely undo six weeks later. 200 means the state is HALTED and every
+            currency's cancel-all was acknowledged; 502 means HALTED is in force
+            but the venue part did not fully land (see `cancel_all`) — call
+            again to retry it."""
             denied = _auth_error(authorization, admin_token)
             if denied is not None:
                 return denied
@@ -146,7 +152,32 @@ def build_router(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": str(exc)},
                 )
-            log.warning("admin_halt actor=%s reason=%s", actor, reason)
+            complete = bool(result.get("cancel_all_complete"))
+            log.warning("admin_halt actor=%s reason=%s cancel_all_complete=%s",
+                        actor, reason, complete)
+            return JSONResponse(
+                status_code=200 if complete else status.HTTP_502_BAD_GATEWAY, content=result,
+            )
+
+        @router.post("/pause")
+        async def pause_endpoint(
+            reason: str = Query(min_length=1),
+            actor: str = Query(default="admin-api"),
+            authorization: str | None = Header(default=None),
+        ) -> JSONResponse:
+            """Maintenance pause (REDUCING): cancels continue, nothing new is
+            placed, no venue cancel-all. Lifted by /admin/resume."""
+            denied = _auth_error(authorization, admin_token)
+            if denied is not None:
+                return denied
+            try:
+                result = await trading_status.pause(reason=reason, actor=actor)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": str(exc)},
+                )
+            log.warning("admin_pause actor=%s reason=%s", actor, reason)
             return JSONResponse(status_code=200, content=result)
 
         @router.post("/resume")

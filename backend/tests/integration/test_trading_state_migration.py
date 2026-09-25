@@ -107,9 +107,12 @@ def test_current_halt_rows_carry_over_verbatim(migrated):
 
 def test_history_is_append_only(migrated):
     _, engine, _ = migrated
+    # CASCADE gets past the audit table's foreign key, so the truncate trigger
+    # itself is what refuses.
     for sql, message in (("UPDATE trading_state SET state='ACTIVE'", "immutable trading state"),
                          ("DELETE FROM trading_state", "immutable trading state"),
-                         ("TRUNCATE trading_state", "immutable trading state")):
+                         ("TRUNCATE trading_state CASCADE",
+                          "immutable (trading state history|funding cancel-all audit)")):
         with engine.begin() as conn, pytest.raises(Exception, match=message):
             conn.exec_driver_sql(sql)
 
@@ -218,3 +221,44 @@ def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
     assert "refuse downgrade of recorded trading state decisions" in result.stdout + result.stderr
     with engine.begin() as conn:
         assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 5
+
+
+def _audit(conn, attempt: str, phase: str, *, detail: str | None = None) -> None:
+    state_id = conn.scalar(text("SELECT max(id) FROM trading_state WHERE exchange_account_id=:a"), {"a": _A})
+    conn.execute(text("""INSERT INTO funding_cancel_all_audit
+        (exchange_account_id, deployment_environment, trading_state_id, attempt_id, currency, phase,
+         detail, actor, occurred_at_ms)
+        VALUES (:a, 'prod', :s, :attempt, 'UST', :phase, :detail, 'test', 1)"""),
+        {"a": _A, "s": state_id, "attempt": attempt, "phase": phase, "detail": detail})
+
+
+def test_cancel_all_audit_is_append_only_one_outcome_per_attempt(migrated):
+    _, engine, _ = migrated
+    attempt = "00000000-0000-0000-0000-0000000000f1"
+    with engine.begin() as conn:
+        _audit(conn, attempt, "requested")
+        _audit(conn, attempt, "failed", detail="ExecutorTransientError")
+    for sql in ("UPDATE funding_cancel_all_audit SET phase='acknowledged'",
+                "DELETE FROM funding_cancel_all_audit", "TRUNCATE funding_cancel_all_audit"):
+        with engine.begin() as conn, pytest.raises(Exception, match="immutable funding cancel-all audit"):
+            conn.exec_driver_sql(sql)
+    for phase, detail, message in (("acknowledged", None, "uq_funding_cancel_all_audit_outcome"),
+                                   ("requested", None, "uq_funding_cancel_all_audit_request"),
+                                   ("requested", "x", "ck_funding_cancel_all_audit_request_shape")):
+        with engine.begin() as conn, pytest.raises(Exception, match=message):
+            _audit(conn, attempt if message != "ck_funding_cancel_all_audit_request_shape"
+                   else "00000000-0000-0000-0000-0000000000f2", phase, detail=detail)
+
+
+def test_cancel_all_audit_grants(migrated):
+    _, engine, _ = migrated
+    with engine.begin() as conn:
+        for privilege, bot, webapi in (("SELECT", True, True), ("INSERT", True, False),
+                                       ("UPDATE", False, False), ("DELETE", False, False)):
+            assert conn.scalar(text("SELECT has_table_privilege('bfx_bot', 'funding_cancel_all_audit', :p)"),
+                               {"p": privilege}) is bot, privilege
+            assert conn.scalar(text("SELECT has_table_privilege('bfx_webapi', 'funding_cancel_all_audit', :p)"),
+                               {"p": privilege}) is webapi, privilege
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
+        _audit(conn, "00000000-0000-0000-0000-0000000000f3", "skipped", detail="writer_lock_not_held")

@@ -7,10 +7,11 @@ persister commits the intent and terminal outcome in two separate calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -154,6 +155,29 @@ class AccountCommandGate:
         self.release_authority: ReleaseCommandAuthority | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._latched_scopes: dict[tuple[str, str, str], str] = {}
+
+    @contextlib.asynccontextmanager
+    async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
+        """Hold this account's command lock so no submit or cancel is mid-flight.
+
+        The kill switch cancels everything at the venue; a submit already past
+        its transport recheck could otherwise land after that. Waiting is
+        bounded -- a wedged command must not hold a kill hostage -- and the
+        caller learns whether the lock was obtained (``False`` on timeout).
+        Never call this while holding the same lock: it is not re-entrant.
+        """
+        lock = self._account_locks.setdefault(
+            (str(_canonical_account_id(account_id)), self._deployment_environment), asyncio.Lock(),
+        )
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
+        except TimeoutError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
 
     async def check(
         self,

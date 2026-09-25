@@ -105,7 +105,7 @@ async def test_actual_readonly_consumer_verifies_producer_receipt(
     from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-    from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 
     account = uuid4()
     kek = b"f" * 32
@@ -120,8 +120,8 @@ async def test_actual_readonly_consumer_verifies_producer_receipt(
         for symbol in ("fUST", "fUSD"):
             await repo.apply_policy(session, symbol=symbol, expected_revision=0,
                 policy=CapitalPolicy(enabled=symbol == "fUST"), source={"fixture": True})
-    halt = HaltStateStore(pg_session_factory, account_id=str(account), deployment_environment="prod")
-    epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
+    halt = TradingStateRepository(pg_session_factory, account_id=account, deployment_environment="prod")
+    epoch = (await halt.transition("HALTED", cause="operator", reason="fixture", actor="fixture")).state
     image, identity = unapproved_release_image
     network = "task5-fixture-" + uuid4().hex
     release_dir = tmp_path.resolve() / "release"
@@ -203,7 +203,7 @@ async def test_actual_readonly_consumer_verifies_producer_receipt(
             await asyncio.sleep(0.2)
         assert "release_identity_verified:" + image in logs, logs[-4000:]
         assert (await halt.current()).id == epoch.id
-        assert (await halt.current()).halted
+        assert (await halt.current()).state == "HALTED"
         startup_seconds = time.monotonic() - started
         # A separate read-only process measures hashes on the SAME image.
         measured = await asyncio.to_thread(subprocess.run, ["docker", "run", "--rm", "--pull=never",

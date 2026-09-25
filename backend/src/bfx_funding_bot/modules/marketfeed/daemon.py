@@ -123,6 +123,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     CancelPort,
     Credentials,
     ExecutorPort,
+    FundingCancelAllPort,
     GuardRule,
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
@@ -150,10 +151,12 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     UncertaintyGuard,
     WriterLockGuard,
 )
+from bfx_funding_bot.modules.execution.safety.kill_switch import QUIESCE_TIMEOUT_S, KillSwitch
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_AUTO,
+    CAUSE_KILL_SWITCH,
     HALTED,
     TradingStateRepository,
     read_current,
@@ -2120,6 +2123,34 @@ async def build_daemon(
             ),
         )
 
+    # ---- Kill switch: HALTED, then the venue funding cancel-all ----
+    # The only venue write that bypasses the command gate; it needs the writer
+    # lock and nothing else. Paper/shadow have no venue, so they record the
+    # stop and skip the cancel-all.
+    command_gate = reservation_middleware.command_gate
+    kill_switch = KillSwitch(
+        trading_state=trading_state,
+        session_factory=session_factory,
+        ctx=account_ctx,
+        configured_symbols=all_symbols,
+        venue=(executor if not spec.is_simulated and isinstance(executor, FundingCancelAllPort)
+               else None),
+        writer_lock=writer_lock,
+        quiesce=(
+            (lambda: command_gate.quiesced(account_id, timeout_s=QUIESCE_TIMEOUT_S))
+            if command_gate is not None else None
+        ),
+        clock=now_ms_utc,
+    )
+    if os.environ.get("BFX_KILL_SWITCH", "").strip().lower() in ("true", "1", "yes"):
+        # Break-glass env takes effect at boot as a real kill: the durable
+        # HALTED and the venue cancel-all, before any task can place an offer.
+        # A cancel-all that does not fully land is logged CRITICAL and
+        # recorded in funding_cancel_all_audit; HALTED stays, and /admin/halt
+        # retries the venue part.
+        await kill_switch.engage(cause=CAUSE_KILL_SWITCH, actor="env:BFX_KILL_SWITCH",
+                                 reason="BFX_KILL_SWITCH set at boot")
+
     # ---- GET /admin/trading-status + POST /admin/dry-evaluate ----
     # Real-money status uses the same applied policy reader as the planner and
     # command gate. Legacy scalar/map arguments are simulation diagnostics only.
@@ -2137,6 +2168,7 @@ async def build_daemon(
         phase=config.phase,
         attempts=attempt_recorder,
         trading_state=trading_state,
+        kill_switch=kill_switch,
         readiness=trading_readiness,
         capital_runtime=capital_runtime,
     )
