@@ -36,7 +36,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
-    from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
@@ -59,8 +59,8 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         await conn.run_sync(Base.metadata.create_all)
     await seed_exchange_account(engine, capital_policies=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    halt = HaltStateStore(factory, account_id=str(TEST_EXCHANGE_ACCOUNT_ID), deployment_environment="ci")
-    await halt.set_halted(True, reason="retained halt", actor="test")
+    halt = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
+    await halt.transition("HALTED", cause="operator", reason="retained halt", actor="test")
     if with_policy:
         repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
         async with factory.begin() as session:
@@ -95,7 +95,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         assert daemon.release_worker is not None
         assert daemon.command_gate.release_authority is daemon.release_worker.authority
         assert len(daemon.config.cells) == 2
-        assert (await halt.current()).halted
+        assert (await halt.current()).state == "HALTED"
         status = await daemon.trading_status.snapshot()
         assert status["halt"]["halted"]
         assert "capital_policy" in {g["name"] for g in status["guards"]}
@@ -111,7 +111,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
         assert not any(name in posts[0].headers for name in (
             "authorization", "bfx-apikey", "bfx-signature", "cookie",
         ))
-        assert (await halt.current()).halted
+        assert (await halt.current()).state == "HALTED"
 
         # A later periodic observation must not supersede the boot snapshot
         # without updating canonical capital. Exercise the assembled recovery
@@ -145,7 +145,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
                 assert capital.snapshot_seq > previous_seq
                 assert capital.budget.spendable == Decimal("1000")
                 previous_seq = capital.snapshot_seq
-            assert (await halt.current()).halted
+            assert (await halt.current()).state == "HALTED"
 
         # One changed wallet observation must invalidate authority, not reuse
         # the previous successful snapshot or turn the persistent halt off.
@@ -166,7 +166,7 @@ async def test_normal_live_boot_halted_two_cells_no_canary_env(monkeypatch, tmp_
                 await repo.read_capital(
                     session, symbol="fUST", cell_id="fUST_a30", now_ms=time_ns() // 1_000_000,
                 )
-        assert (await halt.current()).halted
+        assert (await halt.current()).state == "HALTED"
         assert all("/auth/w/" not in str(r.url) for r in httpx_mock.get_requests())
     finally:
         await engine.dispose()

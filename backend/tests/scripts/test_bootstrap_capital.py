@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.execution.capital_tables import (
 )
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow
 from bfx_funding_bot.modules.execution.protocols import Credentials
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.execution.uncertainty_tables import CanaryCommandPermitRow
 from tests.modules.accounts.test_capital_conversion import legacy
 
@@ -66,8 +66,8 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="first-deploy-fixture"))
     repo = CapitalRepository(account_id=account, environment="ci", max_snapshot_age_ms=300000)
-    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
-    epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
+    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    epoch = (await halt.transition("HALTED", cause="operator", reason="fixture", actor="fixture")).state
     venue = ReadOnlyVenue(include_usd=include_usd)
     preview_cells = []
     preview = CapitalRepository.preview_policy
@@ -85,7 +85,7 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
     assert receipt["resumed"] is False
     assert receipt["policies_applied"] is False
     assert preview_cells == [("fUST", "fUST_a30")]
-    assert receipt["halt_id"] == epoch.id
+    assert receipt["trading_state_id"] == epoch.id
     assert receipt["snapshot_seq"] > 0
     assert venue.calls == ["offers", "credits", "wallets"] * 2
     async with factory() as session:
@@ -107,7 +107,7 @@ async def test_first_deployment_snapshot_breaks_conversion_cycle_without_policy_
         assert (await repo.read_applied(session, symbol="fUSD")).policy.enabled is False
         assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
     assert (await halt.current()).id == epoch.id
-    assert (await halt.current()).halted
+    assert (await halt.current()).state == "HALTED"
 
 
 @pytest.mark.integration
@@ -117,8 +117,8 @@ async def test_bootstrap_rejects_missing_enabled_wallet_without_policy_or_resume
     factory, account = pg_session_factory, uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="missing-ust-fixture"))
-    halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
-    epoch = await halt.set_halted(True, reason="fixture", actor="fixture")
+    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    epoch = (await halt.transition("HALTED", cause="operator", reason="fixture", actor="fixture")).state
     venue = ReadOnlyVenue()
     del venue.wallets["fUST"]
 
@@ -132,7 +132,7 @@ async def test_bootstrap_rejects_missing_enabled_wallet_without_policy_or_resume
         assert await session.scalar(select(func.count()).select_from(CapitalPolicyRevisionRow)) == 0
         assert await session.scalar(select(func.count()).select_from(CanaryCommandPermitRow)) == 0
     assert (await halt.current()).id == epoch.id
-    assert (await halt.current()).halted
+    assert (await halt.current()).state == "HALTED"
 
 
 @pytest.mark.integration
@@ -144,9 +144,10 @@ async def test_bootstrap_requires_exclusive_writer_and_existing_halt(pg_session_
     url = pg_container.get_connection_url().replace("+psycopg2", "+asyncpg")
     async with pg_session_factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="blocked-fixture"))
-    halt = HaltStateStore(pg_session_factory, account_id=str(account), deployment_environment="ci")
+    halt = TradingStateRepository(pg_session_factory, account_id=account, deployment_environment="ci")
     if blocked_by != "missing_halt":
-        await halt.set_halted(blocked_by == "writer", reason="fixture", actor="fixture")
+        await halt.transition("HALTED" if blocked_by == "writer" else "ACTIVE", cause="operator",
+                              reason="fixture", actor="fixture")
     lock = WriterLock(database_url=url, key=derive_lock_key(str(account), "ci"))
     if blocked_by == "writer":
         await lock.acquire()

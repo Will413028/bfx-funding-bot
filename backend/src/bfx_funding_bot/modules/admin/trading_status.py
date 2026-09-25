@@ -16,7 +16,8 @@ and log lines. That is what made 2026-07-27 possible.
 Two design rules follow, and both are load-bearing:
 
 1. **Report behaviour, not configuration.** `halted` is obtained by asking the
-   real ManualKillGuard, not by re-reading BFX_KILL_SWITCH. If the guard's
+   real ManualKillGuard, not by re-reading BFX_KILL_SWITCH or the trading
+   state. If the guard's
    logic changes, this report changes with it; it cannot describe a rule the
    money path does not follow.
 2. **Report applied authority.** Live amounts and per-cell budgets come from
@@ -40,9 +41,15 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     resolve_for_symbol_with_source,
+)
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    ACTIVE,
+    CAUSE_OPERATOR,
+    REDUCING,
+    TradingState,
+    TransitionResult,
 )
 from bfx_funding_bot.modules.marketfeed.config import CellConfig, configured_symbols
 from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
@@ -69,32 +76,44 @@ class _LedgerProtocol(Protocol):
     def available_balance(self, symbol: str) -> Decimal: ...
 
 
-class _HaltStoreProtocol(Protocol):
-    async def current(self) -> HaltState | None: ...
-    async def set_halted(
-        self, halted: bool, *, reason: str, actor: str, now_ms: int | None = None,
-        kind: str = "safety", renew: bool = False,
-    ) -> HaltState: ...
-    async def history(self, *, limit: int = 20) -> list[HaltState]: ...
+class _TradingStateProtocol(Protocol):
+    async def current(self) -> TradingState | None: ...
+    async def transition(
+        self, state: str, *, cause: str, actor: str, reason: str,
+        now_ms: int | None = None,
+    ) -> TransitionResult: ...
+    async def history(self, *, limit: int = 20) -> list[TradingState]: ...
 
 
 def _env_kill_switch_set() -> bool:
     return os.environ.get("BFX_KILL_SWITCH", "").lower() in ("true", "1", "yes")
 
 
-def _halt_state_dict(state: HaltState | None) -> dict[str, Any] | None:
+def _resumable_without_approval(state: TradingState) -> bool:
+    # A pause an operator asked for can be lifted the same way. A material
+    # deploy waits for its approval and a HALTED waits for an operator's
+    # authenticated resume; neither is lifted by this endpoint.
+    return state.state == REDUCING and state.cause == CAUSE_OPERATOR
+
+
+def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {
-        "halted": state.halted,
-        "kind": state.kind,
-        # Whether this halt can be cleared without a real-money canary. Shown so
-        # the operator does not have to read the reason text and guess.
-        "resumable_without_release": state.kind == "maintenance",
+        "state": state.state,
+        "halted": not state.allows_new_offers,
+        "cause": state.cause,
+        # Shown so the operator does not have to read the cause and guess
+        # whether /admin/resume will work.
+        "resumable_without_approval": _resumable_without_approval(state),
         "reason": state.reason,
         "actor": state.actor,
         "at_ms": state.created_at_ms,
         "id": state.id,
+        "probation": None if state.probation is None else {
+            "multiplier": str(state.probation.multiplier),
+            "started_at_ms": state.probation.started_at_ms,
+        },
     }
 
 
@@ -114,7 +133,7 @@ class TradingStatusService:
         env_fallback_buffer: Decimal | None,
         phase: Phase,
         attempts: SubmitAttemptRecorder,
-        halt_store: _HaltStoreProtocol | None = None,
+        trading_state: _TradingStateProtocol | None = None,
         readiness: TradingReadiness | None = None,
         capital_runtime: CapitalRuntime | None = None,
     ) -> None:
@@ -133,7 +152,7 @@ class TradingStatusService:
         self._env_fallback_buffer = env_fallback_buffer
         self._phase = phase
         self._attempts = attempts
-        self._halt_store = halt_store
+        self._trading_state = trading_state
         self._readiness = readiness
         self._symbols = sorted(configured_symbols(cells))
         # symbol → reference amount, so the probe's default size has a source.
@@ -199,12 +218,12 @@ class TradingStatusService:
         """
         sources: dict[str, Any] = {"env_kill_switch": _env_kill_switch_set()}
         history: list[dict[str, Any]] = []
-        if self._halt_store is not None:
-            sources["persisted"] = _halt_state_dict(await self._halt_store.current())
+        if self._trading_state is not None:
+            sources["persisted"] = _trading_state_dict(await self._trading_state.current())
             history = [
                 d for d in (
-                    _halt_state_dict(h)
-                    for h in await self._halt_store.history(limit=5)
+                    _trading_state_dict(h)
+                    for h in await self._trading_state.history(limit=5)
                 ) if d is not None
             ]
         else:
@@ -241,23 +260,20 @@ class TradingStatusService:
 
     # ------------------------------------------------------------ halt/resume
 
-    async def halt(self, *, reason: str, actor: str, kind: str = "maintenance",
-                   renew: bool = False) -> dict[str, Any]:
-        """Stop trading. An operator asking through this endpoint is, by default,
-        pausing for maintenance -- that is the only thing this endpoint is for.
-        Guards and boot failures record their own halts as `safety` directly.
+    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
+        """Pause trading for maintenance: REDUCING, cause operator.
 
-        `renew` asks for a new authorization epoch while staying halted, which
-        is how an operator grants another canary attempt after one was spent
-        without placing an order. It carries the current halt's kind forward, so
-        it grants an attempt and never a cheaper exit."""
-        state = await self._require_store().set_halted(
-            True, reason=reason, actor=actor, kind=kind, renew=renew,
+        An operator asking through this endpoint is pausing -- that is the only
+        thing it is for. Automatic protections and boot failures record their
+        own HALTED directly."""
+        result = await self._require_store().transition(
+            REDUCING, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
         )
-        return {**_halt_state_dict(state), "still_halted_by_env": _env_kill_switch_set()}  # type: ignore[dict-item]
+        return {**_trading_state_dict(result.state),  # type: ignore[dict-item]
+                "still_halted_by_env": _env_kill_switch_set()}
 
     async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
-        """Clear the persisted halt. Does NOT touch BFX_KILL_SWITCH.
+        """Lift an operator's pause. Does NOT touch BFX_KILL_SWITCH.
 
         When the env flag is still set the bot stays fully stopped, so the
         response says so explicitly — reporting "resumed" while nothing resumed
@@ -265,33 +281,34 @@ class TradingStatusService:
         """
         store = self._require_store()
         current = await store.current()
-        if current is not None and current.halted and current.kind != "maintenance":
-            # A safety halt or a release halt states that something about the
-            # system is unproven, and no amount of operator intent makes it
-            # proven. Those still exit through release promotion, which submits
-            # a bounded real-money canary and observes the outcome.
+        if (current is not None and not current.allows_new_offers
+                and not _resumable_without_approval(current)):
+            # A HALTED or a material deploy's REDUCING states that something is
+            # unproven, and a static admin token does not prove it. Until the
+            # authenticated approval exists, those exit through release
+            # promotion.
             raise ValueError("release_promotion_required")
-        state = await store.set_halted(
-            False, reason=reason, actor=actor, kind="maintenance",
+        result = await store.transition(
+            ACTIVE, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
         )
         env_holds = _env_kill_switch_set()
         return {
-            **_halt_state_dict(state),  # type: ignore[dict-item]
+            **_trading_state_dict(result.state),  # type: ignore[dict-item]
             "still_halted_by_env": env_holds,
             "note": (
-                "persisted halt cleared, but BFX_KILL_SWITCH is still set — the bot "
+                "trading state is ACTIVE, but BFX_KILL_SWITCH is still set — the bot "
                 "remains halted until that env var is removed and the daemon redeployed"
                 if env_holds else None
             ),
         }
 
-    def _require_store(self) -> _HaltStoreProtocol:
-        if self._halt_store is None:
+    def _require_store(self) -> _TradingStateProtocol:
+        if self._trading_state is None:
             raise ValueError(
-                "persisted halt is not configured for this daemon (no halt store); "
-                "accepting the request would report success while changing nothing",
+                "trading state is not configured for this daemon; accepting the "
+                "request would report success while changing nothing",
             )
-        return self._halt_store
+        return self._trading_state
 
     def _symbol_status(self, symbol: str) -> dict[str, Any]:
         cap = resolve_for_symbol_with_source(

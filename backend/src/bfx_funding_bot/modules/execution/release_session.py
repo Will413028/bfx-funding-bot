@@ -18,6 +18,7 @@ from bfx_funding_bot.modules.execution.canary_permit import (
 )
 from bfx_funding_bot.modules.execution.release_tables import ReleaseAuditRow, ReleaseSessionRow
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingState, read_current
 
 
 class ReleaseBlocked(RuntimeError):  # noqa: N818
@@ -90,7 +91,18 @@ class ReleaseSessions:
             raise ReleaseBlocked("session_not_found")
         return row
 
+    async def trading_state(self, session: AsyncSession) -> TradingState | None:
+        """Whether new offers may be placed: the trading state, not the epoch."""
+        return await read_current(session, account_id=self.account_id,
+                                  environment=self.environment)
+
     async def halt(self, session: AsyncSession) -> TradingHaltRow:
+        """The legacy halt row this ceremony binds its epochs to.
+
+        Canary permits and release sessions carry a foreign key to
+        ``trading_halt.id``; they keep that binding until the ceremony is
+        removed. Whether trading is stopped is ``trading_state``.
+        """
         row = await session.scalar(select(TradingHaltRow).where(
             TradingHaltRow.exchange_account_id == self.account_id,
             TradingHaltRow.deployment_environment == self.environment,

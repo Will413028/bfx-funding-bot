@@ -187,9 +187,9 @@ async def verify_database_quiescence(
                OR state<>'idle' OR xact_start IS NOT NULL OR usename<>session_user)
         )
     """), {"roles": list(runtime_roles)})
-    halted = await session.scalar(text("""
-        SELECT halted FROM public.trading_halt WHERE exchange_account_id=:id
+    trading = await session.scalar(text("""
+        SELECT state FROM public.trading_state WHERE exchange_account_id=:id
         AND deployment_environment=:env ORDER BY id DESC LIMIT 1
     """), {"id": scope.account_id, "env": scope.environment})
-    if omitted or active or halted is not True:
+    if omitted or active or trading not in {"REDUCING", "HALTED"}:
         raise ValueError("database_not_quiescent")

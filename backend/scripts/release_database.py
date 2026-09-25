@@ -29,8 +29,8 @@ async def deployment_readiness(factory: async_sessionmaker[AsyncSession], *, acc
         heads = list(await session.scalars(text("SELECT version_num FROM alembic_version")))
         if heads != [RELEASE_SCHEMA_HEAD]:
             raise ValueError("release_schema_mismatch")
-        halt = await ReleaseSessions(account_id, environment).halt(session)
-        if not halt.halted:
+        state = await ReleaseSessions(account_id, environment).trading_state(session)
+        if state is None or state.allows_new_offers:
             raise ValueError("deployment_requires_existing_halt")
         repository = CapitalRepository(account_id=account_id, environment=environment, max_snapshot_age_ms=300000)
         policies = {}
@@ -42,7 +42,8 @@ async def deployment_readiness(factory: async_sessionmaker[AsyncSession], *, acc
                 raise ValueError("release_policy_mismatch")
             policies[symbol] = {"revision": applied.revision, "digest": applied.digest, "enabled": policy.enabled}
         return {"schema_head": RELEASE_SCHEMA_HEAD, "principal": principal, "account_id": str(account_id),
-            "environment": environment, "halt_id": halt.id, "halted": True, "policies": policies}
+            "environment": environment, "trading_state_id": state.id,
+            "trading_state": state.state, "halted": True, "policies": policies}
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:

@@ -1,4 +1,14 @@
-"""Persisted kill switch — DB-backed halt state for ManualKillGuard.
+"""Legacy ``trading_halt`` store — the release ceremony's epoch, not the kill switch.
+
+Superseded by :mod:`bfx_funding_bot.modules.execution.safety.trading_state`
+(ADR 2026-09-25 D4). No trading decision reads this table any more: the guard,
+the status/halt/resume endpoints, boot halts and the operational preconditions
+all use the trading state. What remains is the ceremony's epoch identity --
+canary permits and release sessions carry a foreign key to ``trading_halt.id``
+-- and this store, which its tests use to open an epoch. Both go with the
+ceremony (plan T6).
+
+Original rationale, kept for the history of the control:
 
 Before this, the canary halt existed only as BFX_KILL_SWITCH inside
 canary.env. Nothing had to malfunction for real-money trading to resume: a

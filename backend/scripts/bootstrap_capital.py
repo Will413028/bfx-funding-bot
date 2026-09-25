@@ -1,6 +1,7 @@
 """Bounded first-deployment reconcile; read-only venue, durable local evidence.
 
-Requires an existing durable halt and sole WriterLock. No policy seeding,
+Requires an existing durable stop (trading state REDUCING or HALTED) and the
+sole WriterLock. No policy seeding,
 executor, permit, session worker, cancel, submit or daemon startup. Run from the
 approved backend artifact with the restricted bot principal, then independently
 review convert_capital_policy.py dry-run and explicitly apply its digest.
@@ -34,7 +35,7 @@ from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.marketfeed.config import canonical_cell_id
 
 
@@ -48,12 +49,12 @@ async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment
     engine = make_async_engine_from_url(database_url)
     factory = make_session_factory(engine)
     writer = WriterLock(database_url=database_url, key=derive_lock_key(str(account_id), environment))
-    halt = HaltStateStore(factory, account_id=str(account_id), deployment_environment=environment)
+    trading = TradingStateRepository(factory, account_id=account_id, deployment_environment=environment)
     try:
         async with asyncio.timeout(timeout_seconds):
             await writer.acquire()
-            epoch = await halt.current()
-            if epoch is None or not epoch.halted:
+            epoch = await trading.current()
+            if epoch is None or epoch.allows_new_offers:
                 raise ValueError("bootstrap_existing_halt_required")
             async with factory() as session:
                 credential = await credentials(session)
@@ -74,11 +75,12 @@ async def bootstrap_snapshot(*, database_url: str, account_id: UUID, environment
                 await repository.preview_policy(session, symbol="fUST",
                     cell_id=canonical_cell_id("fUST", "a30"),
                     now_ms=clock(), policy=CapitalPolicy(enabled=True))
-            current = await halt.current()
-            if not await writer.verify_held() or current is None or current.id != epoch.id or not current.halted:
+            current = await trading.current()
+            if (not await writer.verify_held() or current is None or current.id != epoch.id
+                    or current.allows_new_offers):
                 raise ValueError("bootstrap_writer_or_halt_changed")
             return {"status": "snapshot_ready", "account_id": str(account_id),
-                "environment": environment, "halt_id": epoch.id,
+                "environment": environment, "trading_state_id": epoch.id,
                 "snapshot_seq": result.snapshot_event_seq, "resumed": False,
                 "policies_applied": False}
     finally:

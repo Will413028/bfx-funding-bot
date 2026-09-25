@@ -96,7 +96,7 @@ async def complete_raw(factory):
     async with factory() as session:
         return {name: (await session.scalars(text(
             f"SELECT row_to_json(t)::text FROM {name} t ORDER BY row_to_json(t)::text"
-        ))).all() for name in [*("public." + n for n in (*TABLE_NAMES, "event_log", "trading_halt")),
+        ))).all() for name in [*("public." + n for n in (*TABLE_NAMES, "event_log", "trading_state")),
                               "projection_audit.runs", "projection_audit.rows", "projection_audit.receipts"]}
 
 
@@ -118,7 +118,7 @@ async def test_caller_transaction_commit_and_ambiguous_restart(archive_db, tmp_p
     assert len(committed["projection_audit.receipts"]) == 1
     assert len(committed["projection_audit.runs"]) == 2
     assert set(before["projection_audit.rows"]) <= set(committed["projection_audit.rows"])
-    assert committed["public.trading_halt"] == before["public.trading_halt"]
+    assert committed["public.trading_state"] == before["public.trading_state"]
     assert receipt["snapshot_event_id"] == args["snapshot"].event_id
     async with factory.begin() as session:
         assert await module.apply_cutover(session, **{**args, "now_ms": 999999999}) == receipt
@@ -363,7 +363,7 @@ async def test_preconditions_fail_without_mutation(archive_db, tmp_path, mutatio
         async with factory.begin() as session:
             await session.execute(text({
                 "source_drift": "UPDATE position_state SET reserved=99 WHERE deployment_environment='ci'",
-                "halt": "UPDATE trading_halt SET halted=false",
+                "halt": "INSERT INTO trading_state(exchange_account_id,deployment_environment,state,cause,actor,reason,created_at_ms) VALUES ('00000000-0000-0000-0000-000000000064','ci','ACTIVE','operator','test','resumed',9000)",
                 "head_drift": "INSERT INTO projection_heads(exchange_account_id,deployment_environment,projection_name,last_event_seq,projector_version) VALUES ('00000000-0000-0000-0000-000000000064','ci','execution_state',99,'execution-state-v1')",
             }[mutation]))
     elif mutation == "roles":
@@ -643,9 +643,9 @@ async def _release_history(factory, *, stale_head):
                 last_event_seq=0,
             ))
         await session.execute(text(
-            "INSERT INTO trading_halt(account_id,exchange_account_id,deployment_environment,"
-            "halted,reason,actor,created_at_ms) VALUES (:s,:a,'ci',true,'synthetic','test',8000)"
-        ), {"s": str(account), "a": account})
+            "INSERT INTO trading_state(exchange_account_id,deployment_environment,state,cause,"
+            "actor,reason,created_at_ms) VALUES (:a,'ci','HALTED','operator','test','synthetic',8000)"
+        ), {"a": account})
 
 
 async def _release_evidence(factory, tmp_path):
@@ -859,7 +859,7 @@ async def test_release_handoff_restores_history_then_verifies_new_baseline(archi
     assert set(archived["projection_audit.rows"]) < set(committed["projection_audit.rows"])
     assert len(committed["projection_audit.runs"]) == 2
     assert len(committed["projection_audit.receipts"]) == 1
-    assert committed["public.trading_halt"] == before["public.trading_halt"]
+    assert committed["public.trading_state"] == before["public.trading_state"]
     for name in ("position_state", "offer_claims", "reconcile_observation", "projection_heads"):
         def outside_scope(rows):
             return [r for r in rows if (json.loads(r)["exchange_account_id"],

@@ -101,13 +101,16 @@ async def test_one_shot_gate_authorizes_only_the_consumed_permit_through_persist
         amount_usdt=Decimal("150"),
     )
 
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
+
     class _HaltedStore:
         async def current(self):  # type: ignore[no-untyped-def]
-            return SimpleNamespace(halted=True, reason="halt2", actor="operator", id=1)
+            return TradingState(id=1, state="HALTED", cause="operator", reason="halt2",
+                                actor="operator", created_at_ms=0)
 
     halt_authorization = object()
     guard = ManualKillGuard(
-        halt_store=_HaltedStore(),
+        trading_state=_HaltedStore(),
         canary_halt_authorization=halt_authorization,
     )
 

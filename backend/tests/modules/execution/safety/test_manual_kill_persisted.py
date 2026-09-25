@@ -1,4 +1,4 @@
-"""ManualKillGuard reads the PERSISTED halt, and fails closed when it can't.
+"""ManualKillGuard reads the durable trading state, and fails closed when it can't.
 
 Two stop mechanisms, both in the same direction (OR): the env flag is
 break-glass — it works with no database at all — and the DB row is the durable
@@ -19,8 +19,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltState
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 
 
@@ -38,25 +38,29 @@ def _post() -> DecisionPayload:
 
 
 class _FakeStore:
-    def __init__(self, state: HaltState | None) -> None:
+    def __init__(self, state: TradingState | None) -> None:
         self._state = state
         self.calls = 0
 
-    async def current(self) -> HaltState | None:
+    async def current(self) -> TradingState | None:
         self.calls += 1
         return self._state
 
 
 class _BrokenStore:
-    async def current(self) -> HaltState | None:
+    async def current(self) -> TradingState | None:
         raise RuntimeError("connection was closed in the middle of operation")
 
 
-def _halted(halted: bool) -> HaltState:
-    return HaltState(
-        halted=halted, reason="candle distortion", actor="admin",
-        created_at_ms=1000, id=7,
+def _state(state: str, cause: str = "operator") -> TradingState:
+    return TradingState(
+        id=7, state=state, cause=cause, reason="candle distortion", actor="admin",
+        created_at_ms=1000,
     )
+
+
+def _halted(halted: bool) -> TradingState:
+    return _state("HALTED" if halted else "ACTIVE")
 
 
 @pytest.mark.asyncio
@@ -65,7 +69,7 @@ async def test_persisted_halt_blocks_with_no_env_flag(
 ) -> None:
     """The property P2 exists for: canary.env reverted, halt still holds."""
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    g = ManualKillGuard(halt_store=_FakeStore(_halted(True)))
+    g = ManualKillGuard(trading_state=_FakeStore(_halted(True)))
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
     assert "candle distortion" in (r.reason or "")
@@ -73,9 +77,22 @@ async def test_persisted_halt_blocks_with_no_env_flag(
 
 
 @pytest.mark.asyncio
+async def test_reducing_blocks_new_offers_like_halted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A maintenance pause is REDUCING: no new offer, whatever caused it."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    for cause in ("operator", "material_deploy"):
+        r = await ManualKillGuard(trading_state=_FakeStore(_state("REDUCING", cause))).evaluate(
+            _post(), _ctx())
+        assert r.allowed is False
+        assert "REDUCING" in (r.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_persisted_resume_allows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    g = ManualKillGuard(halt_store=_FakeStore(_halted(False)))
+    g = ManualKillGuard(trading_state=_FakeStore(_halted(False)))
     assert (await g.evaluate(_post(), _ctx())).allowed is True
 
 
@@ -84,14 +101,14 @@ async def test_no_persisted_record_allows(monkeypatch: pytest.MonkeyPatch) -> No
     """Never-configured is not halted — otherwise every fresh environment would
     deadlock on first boot."""
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    g = ManualKillGuard(halt_store=_FakeStore(None))
+    g = ManualKillGuard(trading_state=_FakeStore(None))
     assert (await g.evaluate(_post(), _ctx())).allowed is True
 
 
 @pytest.mark.asyncio
 async def test_unreadable_halt_state_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    g = ManualKillGuard(halt_store=_BrokenStore())
+    g = ManualKillGuard(trading_state=_BrokenStore())
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
     assert "failing closed" in (r.reason or "")
@@ -105,7 +122,7 @@ async def test_env_flag_blocks_without_consulting_the_store(
     the env check comes first and short-circuits."""
     monkeypatch.setenv("BFX_KILL_SWITCH", "true")
     store = _FakeStore(_halted(False))
-    g = ManualKillGuard(halt_store=store)
+    g = ManualKillGuard(trading_state=store)
     r = await g.evaluate(_post(), _ctx())
     assert r.allowed is False
     assert "BFX_KILL_SWITCH" in (r.reason or "")

@@ -29,8 +29,12 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.execution.event_store.canonical import canonical_event_hash
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, ProjectionHeadRow
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
-from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    CAUSE_OPERATOR,
+    HALTED,
+    TradingStateRepository,
+    read_current,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 
 EXIT_SUCCESS = 0
@@ -262,15 +266,8 @@ async def collect_preflight_report(
             and snapshot.coverage.wallets_complete
         )
         break
-    halted = await session.scalar(
-        select(TradingHaltRow.halted)
-        .where(
-            TradingHaltRow.exchange_account_id == account_id,
-            TradingHaltRow.deployment_environment == environment,
-        )
-        .order_by(TradingHaltRow.id.desc())
-        .limit(1)
-    )
+    trading = await read_current(session, account_id=account_id, environment=environment)
+    halted = trading is not None and not trading.allows_new_offers
     observed_projector_versions = tuple(
         sorted(
             {
@@ -466,9 +463,12 @@ async def _run(args: argparse.Namespace) -> PreflightResult:
         if args.command == "assert-halt":
             if not args.operator_id:
                 raise ValueError("assert-halt requires --operator-id")
-            state = await HaltStateStore(
-                factory, account_id=str(account_id), deployment_environment=args.environment
-            ).set_halted(True, reason=args.reason, actor=args.operator_id)
+            # State only: this offline tool holds no venue session, so the
+            # cancel-all that accompanies a live kill cannot run from here.
+            state = (await TradingStateRepository(
+                factory, account_id=account_id, deployment_environment=args.environment
+            ).transition(HALTED, cause=CAUSE_OPERATOR, actor=args.operator_id,
+                         reason=args.reason)).state
             report = PreflightReport(
                 exchange_account_id=str(account_id), deployment_environment=args.environment,
                 migration_head=_migration_head(), schema_heads=(),
@@ -482,7 +482,8 @@ async def _run(args: argparse.Namespace) -> PreflightResult:
                 backup_rpo_seconds=evidence.backup_rpo_seconds,
                 restore_rto_seconds=evidence.restore_rto_seconds,
                 config_digest=evidence.config_digest,
-                image_digest=evidence.image_digest, persistent_halt=state.halted, stop_reasons=(),
+                image_digest=evidence.image_digest, persistent_halt=not state.allows_new_offers,
+                stop_reasons=(),
                 projector_version=args.projector_version,
             )
             return PreflightResult(EXIT_SUCCESS, (), report)

@@ -40,6 +40,9 @@ async def test_typed_release_preflight_preserves_dr_schema_and_event_prefix(pg_e
     await setup_policy(factory, capital)
     await snapshot(factory, capital)
     await HaltStateStore(factory, account_id=str(account), deployment_environment="ci").set_halted(True, reason="fixture", actor="fixture")
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    await TradingStateRepository(factory, account_id=account, deployment_environment="ci").transition(
+        "HALTED", cause="operator", reason="fixture", actor="fixture")
     backup, restore, config = (tmp_path / name for name in ("backup.json", "restore.json", "safety.yaml"))
     backup.write_text(json.dumps({"schema_version": 1, "kind": "backup", "measured": True, "rpo_seconds": 60, "observed_at_ms": now}))
     restore.write_text(json.dumps({"schema_version": 1, "kind": "restore", "measured": True, "rto_seconds": 30, "observed_at_ms": now}))

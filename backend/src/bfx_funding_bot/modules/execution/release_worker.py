@@ -37,8 +37,15 @@ from bfx_funding_bot.modules.execution.release_session import (
     ReleaseSessions,
 )
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    ACTIVE,
+    CAUSE_AUTO,
+    CAUSE_OPERATOR,
+    HALTED,
+    TradingStateRepository,
+    append_transition,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     CanaryCommandPermitRow,
     SubmissionAttemptRow,
@@ -49,11 +56,11 @@ log = logging.getLogger(__name__)
 # The single schema this build is willing to run against. Startup compares it
 # with the database's actual alembic heads, so it must move with every
 # migration or the daemon refuses to boot.
-RELEASE_SCHEMA_HEAD = "a7f3c1d9e204"
+RELEASE_SCHEMA_HEAD = "8e4f33517b10"
 
 
 def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
-                         writer_lock: WriterLock, halt_store: HaltStateStore,
+                         writer_lock: WriterLock, trading_state: TradingStateRepository,
                          funding_rules: FundingRuleProvider | None, configured_cells: tuple[tuple[str, str, str], ...],
                          halt_authorization: object, planner: Callable[[ReleaseCommand], Awaitable[None]],
                          config_artifact: Path, evidence_path: Path,
@@ -119,7 +126,7 @@ def build_release_worker(*, runtime: ReleaseRuntime, capital: CapitalRuntime,
 
     authority = ReleaseCommandAuthority(repo=repo, capital=capital, binding_reader=binding_reader,
         ownership=writer_lock.verify_held, authority_reader=operator, preflight=preflight, clock=clock)
-    return ReleaseWorker(authority=authority, halt_store=halt_store, funding_rules=funding_rules,
+    return ReleaseWorker(authority=authority, trading_state=trading_state, funding_rules=funding_rules,
         configured_cells=configured_cells, halt_authorization=halt_authorization,
         planner=planner, observation=observation)
 
@@ -153,7 +160,9 @@ class ReleaseCommandAuthority:
         retired by a changed binding, which is what actually changes the risk.
         """
         binding = await self.binding(session)
-        halt = await self.repo.halt(session)
+        state = await self.repo.trading_state(session)
+        if state is None:
+            raise ReleaseBlocked("persistent_halt_missing")
         promoted = await session.scalar(
             select(ReleaseSessionRow)
             .where(
@@ -164,7 +173,7 @@ class ReleaseCommandAuthority:
             .order_by(ReleaseSessionRow.promoted_halt_id.desc())
             .limit(1)
         )
-        if halt.halted or promoted is None or promoted.binding != binding:
+        if not state.allows_new_offers or promoted is None or promoted.binding != binding:
             raise ReleasePromotionRequired("release_promotion_required")
 
     async def admit(self, session: AsyncSession, *, ready: ReadyToSubmit,
@@ -204,11 +213,11 @@ class ReleaseHaltError(RuntimeError):
 
 class ReleaseWorker:
     """Session-row handoff, supervised inside the existing account daemon."""
-    def __init__(self, *, authority: ReleaseCommandAuthority, halt_store: HaltStateStore,
+    def __init__(self, *, authority: ReleaseCommandAuthority, trading_state: TradingStateRepository,
                  funding_rules: FundingRuleProvider | None, configured_cells: tuple[tuple[str, str, str], ...],
                  halt_authorization: object, planner: Callable[[ReleaseCommand], Awaitable[None]],
                  observation: Callable[[AsyncSession, ReleaseSessionRow], Awaitable[object]]) -> None:
-        self.authority, self.halt_store = authority, halt_store
+        self.authority, self.trading_state = authority, trading_state
         self.funding_rules, self.configured_cells = funding_rules, configured_cells
         self.halt_authorization, self.planner, self.observation = halt_authorization, planner, observation
 
@@ -219,8 +228,12 @@ class ReleaseWorker:
                 await asyncio.wait_for(stop.wait(), timeout=5)
 
     async def _reassert_halt(self, reason: str) -> None:
+        # A system-imposed stop: HALTED/auto. It is only the state write; this
+        # worker has no venue access and the ceremony's canary must stay on the
+        # book to be observed, so no cancel-all runs from here.
         try:
-            await self.halt_store.set_halted(True, reason=reason, actor="worker")
+            await self.trading_state.transition(HALTED, cause=CAUSE_AUTO, actor="worker",
+                                                reason=reason)
         except Exception as exc:
             raise ReleaseHaltError("release_halt_persistence_failed") from exc
 
@@ -239,8 +252,10 @@ class ReleaseWorker:
                         ReleaseSessionRow.state.in_(("authorized", "consumed"))),
                 ).order_by(ReleaseSessionRow.created_at_ms, ReleaseSessionRow.id).limit(1))
                 if row is None:
-                    halt = await repo.halt(session)
-                    if not halt.halted:
+                    state = await repo.trading_state(session)
+                    if state is None:
+                        raise ReleaseBlocked("persistent_halt_missing")
+                    if state.allows_new_offers:
                         await self.authority.check_normal(session)
                     return
                 session_id = row.id
@@ -405,6 +420,11 @@ class ReleaseWorker:
                     actor=row.requested_by, reason="release_promoted:" + str(row.id), created_at_ms=now)
                 session.add(transition)
                 await session.flush()
+                # The legacy row closes the ceremony's epoch; the trading state
+                # is what actually lets the writer trade again.
+                await append_transition(session, account_id=repo.account_id,
+                    environment=repo.environment, state=ACTIVE, cause=CAUSE_OPERATOR,
+                    actor=row.requested_by, reason="release_promoted:" + str(row.id), now_ms=now)
                 row.state, row.promoted_halt_id = "promoted", transition.id
             else:
                 raise ReleaseBlocked("session_transition_conflict")
