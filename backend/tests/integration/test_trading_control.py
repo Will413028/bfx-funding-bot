@@ -6,7 +6,6 @@ capital reads are the real ones.
 """
 from __future__ import annotations
 
-from dataclasses import replace
 from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -660,11 +659,8 @@ async def test_a_submit_within_the_probation_limit_is_admitted(capital_db):
     gate, venue, ready, ctx, _, trading = await boundary(factory, account)
     await trading.transition("ACTIVE", cause="operator", actor="t", reason="probation", now_ms=T0,
         probation=Probation.starting(multiplier=D("0.25"), started_at_ms=T0, floor={"fUST": D("151.50")}))
-    small = await second_ready(factory, account, ready)
-    small = replace(small, decision=small.decision.model_copy(update={"offer_amount_usdt": 160}))
-    async with factory.begin() as session:
-        from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
-        (await session.get(ExecutionDecisionRow, small.decision_id)).amount_usdt = D("160")
+    # 160 as the planner sends it: fingerprinted (D3a).
+    small = await second_ready(factory, account, ready, amount="159.99990160")
     await gate.submit(small, ctx)
     assert len(venue.received) == 1
 
