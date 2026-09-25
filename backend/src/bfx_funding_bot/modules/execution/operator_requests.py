@@ -183,8 +183,13 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
     async def idle(self) -> None:  # noqa: B027 - optional hook
         """Housekeeping when the queue is empty."""
 
-    def committed(self, row: RowT, outcome: Outcome) -> None:  # noqa: B027 - optional hook
-        """After the outcome is committed (alerts, logs)."""
+    async def committed(self, row: RowT, outcome: Outcome) -> None:  # noqa: B027 - optional hook
+        """After the outcome is committed, outside every lock (alerts, follow-up
+        work such as a kill's venue cancel-all). Errors are logged, never raised."""
+
+    def queue_order(self) -> tuple[Any, ...]:
+        """Which waiting request goes first; oldest by default."""
+        return (self.model.created_at_ms, self.model.request_id)
 
     def failure_reason(self, exc: BaseException) -> str:
         return f"{self.name}_failed:{root_cause_name(exc)}"
@@ -238,7 +243,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
     async def _oldest_pending(self) -> UUID | None:
         query = self._scoped(select(self.model.request_id)).where(
             self.model.state == REQUESTED,
-        ).order_by(self.model.created_at_ms, self.model.request_id).limit(1)
+        ).order_by(*self.queue_order()).limit(1)
         if self._stuck:
             query = query.where(self.model.request_id.not_in(self._stuck))
         async with self.session_factory() as session:
@@ -293,9 +298,14 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
             return await self._fail(request_id, reason)
         log.info("%s_processed request_id=%s state=%s reason=%s", self.name, request_id,
                  outcome.state, outcome.reason)
-        with contextlib.suppress(Exception):
-            self.committed(row, outcome)
+        await self._after_commit(row, outcome)
         return outcome.state
+
+    async def _after_commit(self, row: Any, outcome: Outcome) -> None:
+        try:
+            await self.committed(row, outcome)
+        except Exception:
+            log.exception("%s_after_commit_failed request_id=%s", self.name, row.request_id)
 
     async def _fail(self, request_id: UUID, reason: str) -> str:
         """Mark a request failed; when even that cannot be written, skip it.
@@ -312,8 +322,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         if row is None:  # an earlier commit landed after all; its outcome stands
             return "settled"
         log.error("%s_failed request_id=%s reason=%s", self.name, request_id, reason)
-        with contextlib.suppress(Exception):
-            self.committed(row, Outcome(FAILED, reason))
+        await self._after_commit(row, Outcome(FAILED, reason))
         return FAILED
 
     async def _mark_failed(self, request_id: UUID, reason: str) -> Any:

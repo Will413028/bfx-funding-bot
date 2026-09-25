@@ -74,7 +74,7 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
     async def idle(self) -> None:
         self.idled += 1
 
-    def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
+    async def committed(self, row: TradingControlRequestRow, outcome: Outcome) -> None:
         self.outcomes.append((outcome.state, outcome.reason))
 
 

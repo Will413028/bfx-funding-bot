@@ -9,8 +9,11 @@ never below one venue-minimum offer.
   The ``deployments`` ledger is append-only and written by the deploy tool, so
   an approval cannot be recorded on it after the fact.
 - ``trading_control_requests``: the web API's only write. It inserts a request
-  (approve or resume) with the operator's identity; the account daemon applies
-  it under the account lock and records one outcome. The web API has no write
+  (approve, resume, pause or kill) with the operator's identity; the account
+  daemon applies it under the account lock and records one outcome. Approve and
+  resume name the build the operator saw; a stop never waits on a digest. One
+  request may wait per scope, plus one kill beside it, so a pending approval can
+  never make a kill wait for a 409. The web API has no write
   on trading_state or on the approvals (ADR D4': zero write on execution state).
 - ``trading_state.probation_floor``: the per-currency venue minimum (native
   units, with the submit margin) observed when probation starts, so every
@@ -120,7 +123,7 @@ def upgrade() -> None:
                                 name="fk_trading_control_requests_account"), nullable=False),
         sa.Column("deployment_environment", sa.Text(), nullable=False),
         sa.Column("action", sa.Text(), nullable=False),
-        sa.Column("backend_digest", sa.Text(), nullable=False),
+        sa.Column("backend_digest", sa.Text(), nullable=True),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("requested_by", sa.Text(), nullable=False),
         sa.Column("created_at_ms", sa.BigInteger(), nullable=False),
@@ -130,8 +133,15 @@ def upgrade() -> None:
         sa.Column("trading_state_id", sa.BigInteger(),
                   sa.ForeignKey("trading_state.id", ondelete="RESTRICT",
                                 name="fk_trading_control_requests_trading_state"), nullable=True),
-        sa.CheckConstraint("action IN ('approve', 'resume')", name="ck_trading_control_requests_action"),
-        sa.CheckConstraint(f"backend_digest ~ {_DIGEST}", name="ck_trading_control_requests_digest"),
+        sa.CheckConstraint("action IN ('approve', 'resume', 'pause', 'kill')",
+                           name="ck_trading_control_requests_action"),
+        sa.CheckConstraint(
+            # IS NOT NULL: a NULL digest would make the regex NULL, and a NULL
+            # CHECK passes.
+            f"(action IN ('approve', 'resume') AND backend_digest IS NOT NULL "
+            f"AND backend_digest ~ {_DIGEST}) OR "
+            "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
+            name="ck_trading_control_requests_digest"),
         sa.CheckConstraint(
             "length(trim(reason)) BETWEEN 1 AND 500 AND length(trim(requested_by)) > 0 "
             "AND created_at_ms >= 0",
@@ -149,7 +159,12 @@ def upgrade() -> None:
     op.create_index(
         "uq_trading_control_requests_pending", "trading_control_requests",
         ["exchange_account_id", "deployment_environment"], unique=True,
-        postgresql_where=sa.text("state = 'requested'"),
+        postgresql_where=sa.text("state = 'requested' AND action <> 'kill'"),
+    )
+    op.create_index(
+        "uq_trading_control_requests_pending_kill", "trading_control_requests",
+        ["exchange_account_id", "deployment_environment"], unique=True,
+        postgresql_where=sa.text("state = 'requested' AND action = 'kill'"),
     )
     op.create_index(
         "ix_trading_control_requests_queue", "trading_control_requests",

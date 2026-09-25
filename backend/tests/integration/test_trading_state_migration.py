@@ -299,6 +299,40 @@ def test_web_api_can_only_queue_a_request(migrated):
             conn.exec_driver_sql(sql)
 
 
+def test_the_web_api_queues_stops_and_a_kill_has_its_own_lane(migrated):
+    """Pause and kill name no build; a waiting approval never makes a kill wait.
+    The web API still writes nothing the daemon owns (no trading_state, no audit)."""
+    _, engine, _ = migrated
+
+    def queue(conn, request_id: str, action: str, digest: str | None, account: str = _A) -> None:
+        conn.execute(text("""INSERT INTO trading_control_requests
+            (request_id, exchange_account_id, deployment_environment, action, backend_digest, reason,
+             requested_by, created_at_ms) VALUES (:r, :a, 'prod', :act, :d, 'x', 'operator', 1)"""),
+            {"r": request_id, "a": account, "act": action, "d": digest})
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+        queue(conn, "00000000-0000-0000-0000-0000000000e1", "approve", _DIG)
+        queue(conn, "00000000-0000-0000-0000-0000000000e2", "kill", None)
+    for action, digest, account, message in (
+            ("kill", None, _A, "uq_trading_control_requests_pending_kill"),
+            ("pause", None, _A, "uq_trading_control_requests_pending"),
+            ("approve", None, _B, "ck_trading_control_requests_digest"),
+            ("kill", _DIG, _B, "ck_trading_control_requests_digest"),
+            ("promote", _DIG, _B, "ck_trading_control_requests_action")):
+        with engine.begin() as conn, pytest.raises(Exception, match=message):
+            conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+            queue(conn, "00000000-0000-0000-0000-0000000000e3", action, digest, account)
+    for sql in ("INSERT INTO funding_cancel_all_audit (exchange_account_id, deployment_environment,"
+                " trading_state_id, attempt_id, currency, phase, actor, occurred_at_ms) VALUES"
+                f" ('{_A}', 'prod', 1, '00000000-0000-0000-0000-0000000000f9', 'UST', 'requested', 'x', 1)",
+                "UPDATE trading_control_requests SET state='rejected', processed_at_ms=2,"
+                " outcome_reason='x'"):
+        with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
+            conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
+            conn.exec_driver_sql(sql)
+
+
 def test_bot_records_one_outcome_and_approvals_are_append_only(migrated):
     _, engine, _ = migrated
     with engine.begin() as conn:
