@@ -83,15 +83,15 @@ def test_missing_execution_policy_fails_closed(tmp_path: Path, monkeypatch: pyte
         load_config(cells_yaml_path=yaml_path)
 
 
-def test_canary_rejects_paper_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_required_config_env(monkeypatch, phase="canary", policy="paper")
+def test_live_rejects_paper_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_config_env(monkeypatch, phase="live", policy="paper")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match=r"canary.*execution_policy"):
+    with pytest.raises(ValueError, match=r"live.*execution_policy"):
         load_config(cells_yaml_path=yaml_path)
 
 
-def test_normal_live_accepts_two_cells_without_canary_env(tmp_path, monkeypatch):
+def test_normal_live_accepts_two_cells(tmp_path, monkeypatch):
     _set_required_config_env(monkeypatch, phase="live", policy="book_guarded")
     config = load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
     assert config.phase.value == "live"
@@ -192,53 +192,26 @@ def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert cfg.cells[0].cell_id == "fUSD_a30"
 
 
-def test_load_config_accepts_canary_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_the_retired_canary_phase_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BFX_PHASE", "canary")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
-    _set_required_config_env(monkeypatch, phase="canary", policy="book_guarded")
-    monkeypatch.delenv("BFX_CELLS", raising=False)
-    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
-    yaml_path = _write_yaml(tmp_path, _valid_yaml())
-
-    cfg = load_config(cells_yaml_path=yaml_path)
-
-    assert cfg.phase == "canary"
+    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
+    with pytest.raises(ValueError, match="BFX_PHASE must be paper, shadow, or live"):
+        load_config(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
-def test_canary_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Real-money canary must never write to the shadow (simulated) realm —
-    it would pollute the Phase 4.3 calibration dataset. Regression for the
-    residual-env config drift (canary deploy inherited BFX_DEPLOYMENT_ENV=shadow)."""
-    monkeypatch.setenv("BFX_PHASE", "canary")
+def test_live_phase_rejects_shadow_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Real money must never write to the shadow (simulated) realm — it would
+    pollute the calibration dataset."""
+    monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "shadow")
     monkeypatch.delenv("BFX_CELLS", raising=False)
     monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match=r"canary.*must not.*shadow"):
+    with pytest.raises(ValueError, match=r"live.*must not.*shadow"):
         load_config(cells_yaml_path=yaml_path)
-
-
-def test_canary_phase_accepts_prod_realm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("BFX_PHASE", "canary")
-    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    _set_required_config_env(
-        monkeypatch,
-        phase="canary",
-        policy="book_guarded",
-        deployment_environment="prod",
-    )
-    monkeypatch.delenv("BFX_CELLS", raising=False)
-    monkeypatch.delenv("BFX_RUN_DURATION_HOURS", raising=False)
-    yaml_path = _write_yaml(tmp_path, _valid_yaml())
-
-    cfg = load_config(cells_yaml_path=yaml_path)
-
-    assert cfg.phase == "canary"
-    assert cfg.deployment_environment == DeploymentEnvironment.PROD
 
 
 @pytest.mark.parametrize("sim_phase", ["paper", "shadow"])

@@ -478,7 +478,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
-        phase=Phase.CANARY,
+        phase=Phase.LIVE,
         canceller=canceller,
         reprice=reprice,
         **_eligibility_kwargs(
@@ -1119,7 +1119,7 @@ async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
         account_ctx=ctx, cells=cells, funding_rules=FixedRules(),
         clock=lambda: 1_000,
-        event_sink=_CapturingSink(), phase=Phase.CANARY,
+        event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     with caplog.at_level(logging.INFO):
@@ -1148,7 +1148,7 @@ def _build_with_split_ledger(*, reserved, realized, quotes):
         funding_rules=FixedRules(),
         clock=lambda: 1_000,
         capital_runtime=_simulated_capital(ledger, tracker),
-        event_sink=_CapturingSink(), phase=Phase.CANARY,
+        event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
@@ -1204,7 +1204,7 @@ async def test_headroom_uses_cell_symbol_available():
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=_ctx(),
         capital_runtime=_simulated_capital(ledger, tracker),
         cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     await rec.deploy()
@@ -1241,7 +1241,7 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         capital_runtime=_simulated_capital(ledger, tracker, totals=caps, reserves=buffers),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
-        phase=Phase.CANARY,
+        phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     return rec, ex, tracker, safety
@@ -1411,7 +1411,7 @@ async def test_tracker_is_diagnostic_and_cannot_relax_canonical_cell_limit():
         safety_chain=_FakeSafety(allowed=True), executor=ex, account_ctx=ctx,
         capital_runtime=_simulated_capital(ledger, tracker, totals={"fUST": D("10000")}),
         cells=cells, funding_rules=FixedRules(),
-        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.CANARY,
+        clock=lambda: 1_000, event_sink=_CapturingSink(), phase=Phase.LIVE,
         **_eligibility_kwargs(),
     )
     await rec.deploy()

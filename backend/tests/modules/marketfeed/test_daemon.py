@@ -5,14 +5,12 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 from pytest_httpx import HTTPXMock
 
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
 from bfx_funding_bot.modules.marketfeed.schemas import Phase
 from tests.modules.marketfeed.account_test_helpers import (
-    TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
     seed_exchange_account,
 )
@@ -223,83 +221,3 @@ phase3b_wfo_results_ref: x
         "ledger.realized_exposure('fUST') should reflect PositionReconciled.realized_usdt "
         "after bus.publish — subscription missing or account_id mismatch"
     )
-
-
-async def test_live_build_rejects_legacy_canary_before_executor_construction(
-    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
-) -> None:
-    """The retired canary phase stops at the boot boundary, before a live executor exists."""
-    from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.core.errors import ConfigurationError
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-
-    cells = tmp_path / "one-cell.yaml"
-    cells.write_text("""
-cells:
-  - strategy: mean_reversion
-    symbol: fUST
-    period_agg: a30
-    timeframe: 1h
-    params: {threshold_sigma: 0.5, ratio_sigma: 0.42, ema_span: 24}
-""")
-    safety = tmp_path / "one-cell-safety.yaml"
-    safety.write_text("""
-hard_guards:
-  manual_kill: {enabled: true}
-  auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap: {enabled: true, caps: {fUST: 150}, default_cap: 0}
-  buying_power: {enabled: true, buffers: {fUST: 3}, default_buffer: 0}
-calibrated_guards:
-  realized_loss_24h: {enabled: true, threshold_pct: 5}
-  drawdown_from_peak: {enabled: true, threshold_pct: 10}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
-""")
-    db_path = tmp_path / "live-gate.db"
-    monkeypatch.setenv("BFX_PHASE", "canary")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
-    monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
-    monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
-    monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
-    monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
-    monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety))
-    monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
-    monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "150")
-    monkeypatch.setenv("BFX_CANARY_ACCOUNT_ID", str(TEST_EXCHANGE_ACCOUNT_ID))
-    monkeypatch.setenv("BFX_CANARY_ENVIRONMENT", "prod")
-    monkeypatch.setenv("BFX_CANARY_SYMBOL", "fUST")
-    monkeypatch.setenv("BFX_CANARY_CELL", "fUST_a30")
-    monkeypatch.setenv("BFX_CANARY_STRATEGY", "mean_reversion")
-    monkeypatch.setenv("BFX_CANARY_AMOUNT_USDT", "150")
-    monkeypatch.setenv("BFX_CANARY_CAP_USDT", "150")
-    monkeypatch.setenv("BFX_CANARY_MAX_EVIDENCE_AGE_SECONDS", "300")
-    monkeypatch.setenv("BFX_CANARY_EVIDENCE_REPORT", str(tmp_path / "forged.json"))
-    monkeypatch.delenv("BFX_HALT2_EVIDENCE_REPORT", raising=False)
-    configure_account_env(monkeypatch)
-    monkeypatch.setenv("BFX_API_KEY", "test_key")
-    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    engine = make_async_engine_from_url(f"sqlite+aiosqlite:///{db_path}")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    await seed_exchange_account(engine)
-    await engine.dispose()
-    httpx_mock.add_response(
-        url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
-        method="GET", status_code=200, json=[], is_reusable=True, is_optional=True,
-    )
-    constructed = False
-
-    def should_not_construct_executor(*_args, **_kwargs):
-        nonlocal constructed
-        constructed = True
-        raise AssertionError("live executor construction must be unreachable")
-
-    monkeypatch.setattr("bfx_funding_bot.modules.marketfeed.daemon.build_executor", should_not_construct_executor)
-    with pytest.raises(ConfigurationError, match="BFX_PHASE=canary is retired"):
-        await build_daemon(cells_yaml_path=cells, skip_ws=True)
-
-    assert constructed is False

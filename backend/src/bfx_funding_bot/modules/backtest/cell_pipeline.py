@@ -24,7 +24,7 @@ from bfx_funding_bot.modules.marketfeed.config import load_cells_only
 
 CONFIGS = Path("configs")
 CELLS_YAML = CONFIGS / "cells.yaml"
-CANARY_YAML = CONFIGS / "cells.canary.yaml"
+DEPLOYED_YAML = CONFIGS / "cells.live.yaml"
 FIXTURES = Path("fixtures/candles")
 
 # MeanReversion cells to derive (RatePercentile is static, not EDA-derived).
@@ -56,7 +56,7 @@ def write_outputs(
     fixtures_dir: Path,
     yaml_paths: list[Path],
     *,
-    canary_path: Path | None,
+    deployed_path: Path | None,
 ) -> None:
     """Freeze fixtures and patch params + _provenance into each YAML (ruamel
     round-trip preserves comments). Deterministic; only touches disk."""
@@ -108,8 +108,8 @@ def write_outputs(
             cell["params"]["ema_span"] = cell_d.ema_span
             cell["params"]["threshold_sigma"] = float(cell_d.threshold_sigma)
             cell["params"]["ratio_sigma"] = float(cell_d.ratio_sigma)
-        # _provenance only in the full cells.yaml, not the canary subset.
-        if canary_path is None or path != canary_path:
+        # _provenance only in the full cells.yaml, not the deployed subset.
+        if deployed_path is None or path != deployed_path:
             doc["_provenance"] = provenance
         with path.open("w") as fh:
             ruamel.dump(doc, fh)
@@ -119,16 +119,16 @@ def check_against_fixture(
     fixtures_dir: Path,
     yaml_paths: list[Path],
     *,
-    canary_path: Path | None,
+    deployed_path: Path | None,
     config: BacktestConfig,
     fill_model: FillRateModel,
 ) -> list[str]:
     """Offline drift check. Returns a list of human-readable problems ([] = OK)."""
     problems: list[str] = []
 
-    # Identify the main (non-canary) YAML file.
+    # Identify the main (non-deployed-subset) YAML file.
     main = next(
-        (p for p in yaml_paths if canary_path is None or p != canary_path),
+        (p for p in yaml_paths if deployed_path is None or p != deployed_path),
         yaml_paths[0],
     )
     committed = _mr_cells_in(main)
@@ -175,19 +175,19 @@ def check_against_fixture(
                     f"{key[1]}_{key[2]} {field}: committed {got!r} != derived {want!r}"
                 )
 
-    # 4. Canary params must match the main file for shared MR cells.
-    if canary_path is not None and canary_path.exists():
-        canary = _mr_cells_in(canary_path)
-        for key, cparams in canary.items():
+    # 4. Deployed-subset params must match the main file for shared MR cells.
+    if deployed_path is not None and deployed_path.exists():
+        deployed = _mr_cells_in(deployed_path)
+        for key, cparams in deployed.items():
             mparams = committed.get(key)
             if mparams is None:
-                problems.append(f"canary cell {key} not in {main.name}")
+                problems.append(f"deployed cell {key} not in {main.name}")
                 continue
             for field in ("ema_span", "threshold_sigma", "ratio_sigma"):
                 cgot = cparams.get(field)
                 mgot = mparams.get(field)
                 if cgot is None or mgot is None or abs(float(cgot) - float(mgot)) > 1e-9:
                     problems.append(
-                        f"canary {key[1]}_{key[2]} {field} != {main.name}"
+                        f"deployed {key[1]}_{key[2]} {field} != {main.name}"
                     )
     return problems

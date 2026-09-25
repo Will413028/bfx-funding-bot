@@ -51,13 +51,13 @@ def _setup(tmp_path: Path) -> tuple[Path, Path]:
         "      ratio_sigma: 0.5\n"
         "      ema_span: 168\n"
     )
-    write_outputs(series, derived, fixtures, [cells_yaml], canary_path=None)
+    write_outputs(series, derived, fixtures, [cells_yaml], deployed_path=None)
     return fixtures, cells_yaml
 
 
 def test_check_passes_on_freshly_written(tmp_path: Path) -> None:
     fixtures, cells_yaml = _setup(tmp_path)
-    assert check_against_fixture(fixtures, [cells_yaml], canary_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL) == []
+    assert check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL) == []
 
 
 def test_check_fails_on_param_drift(tmp_path: Path) -> None:
@@ -70,7 +70,7 @@ def test_check_fails_on_param_drift(tmp_path: Path) -> None:
     doc["cells"][0]["params"]["threshold_sigma"] = 9.9
     with cells_yaml.open("w") as fh:
         ruamel.dump(doc, fh)
-    problems = check_against_fixture(fixtures, [cells_yaml], canary_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
+    problems = check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
     assert any("threshold_sigma" in p for p in problems)
 
 
@@ -92,23 +92,23 @@ def test_check_fails_on_fixture_hash_mismatch(tmp_path: Path) -> None:
         },
         fixtures,
     )
-    problems = check_against_fixture(fixtures, [cells_yaml], canary_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
+    problems = check_against_fixture(fixtures, [cells_yaml], deployed_path=None, config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL)
     assert any("data_hash" in p for p in problems)
 
 
-def test_check_fails_on_canary_param_drift(tmp_path: Path) -> None:
+def test_check_fails_on_deployed_param_drift(tmp_path: Path) -> None:
     fixtures, cells_yaml = _setup(tmp_path)
-    # Canary starts as a copy of the main file, then one param is diverged.
+    # The deployed subset starts as a copy of the main file, then one param is diverged.
     from ruamel.yaml import YAML  # type: ignore[import-untyped]
 
-    canary_yaml = tmp_path / "cells.canary.yaml"
+    deployed_yaml = tmp_path / "cells.live.yaml"
     ruamel = YAML()
     doc = ruamel.load(cells_yaml.read_text())
     doc["cells"][0]["params"]["threshold_sigma"] = 9.9
-    with canary_yaml.open("w") as fh:
+    with deployed_yaml.open("w") as fh:
         ruamel.dump(doc, fh)
     problems = check_against_fixture(
-        fixtures, [cells_yaml, canary_yaml], canary_path=canary_yaml,
+        fixtures, [cells_yaml, deployed_yaml], deployed_path=deployed_yaml,
         config=_LINEAR_CONFIG, fill_model=_UNUSED_LINEAR_MODEL,
     )
-    assert any("canary" in p and "threshold_sigma" in p for p in problems)
+    assert any("deployed" in p and "threshold_sigma" in p for p in problems)

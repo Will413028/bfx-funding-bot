@@ -88,7 +88,7 @@ PAIRS: tuple[tuple[str, str, str], ...] = (
 )
 
 DEFAULT_SYMBOLS = ["fUST", "fUSD"]
-DEFAULT_CELLS_YAML = Path("configs/cells.canary.yaml")
+DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")
 BOOTSTRAP_SEED = 20260719  # first-run date, fixed for reproducibility
 
 # Order-of-magnitude gate for the per-year median close/(frr*365) ratio. The
@@ -518,7 +518,7 @@ async def _amain() -> int:
     parser.add_argument("--period-agg", default="p2")
     parser.add_argument(
         "--cells", default=str(DEFAULT_CELLS_YAML),
-        help="cells yaml with deployed MR params (default: configs/cells.canary.yaml)",
+        help="cells yaml with deployed MR params (default: configs/cells.live.yaml)",
     )
     parser.add_argument(
         "--fill-model", default="linear-baseline", choices=["linear-baseline"],

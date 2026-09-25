@@ -37,6 +37,6 @@ def test_live_profile_loads_without_legacy_money_or_canary_scope(monkeypatch):
     assert config.phase.value == "live"
     assert [cell.cell_id for cell in config.cells] == ["fUST_a30", "fUST_p2"]
     from bfx_funding_bot.modules.execution.safety.config import load_safety_config
-    from bfx_funding_bot.modules.marketfeed.daemon import assert_canary_guard_invariant
+    from bfx_funding_bot.modules.marketfeed.daemon import assert_live_guard_invariant
     safety = load_safety_config(ROOT / "backend/configs/safety.live.yaml")
-    assert_canary_guard_invariant(config.phase, safety)
+    assert_live_guard_invariant(config.phase, safety)

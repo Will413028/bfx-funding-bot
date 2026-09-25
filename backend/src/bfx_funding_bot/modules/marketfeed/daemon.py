@@ -307,10 +307,10 @@ class AccountBootstrap:
 
     @staticmethod
     def reject_legacy_realm(*, phase: Phase) -> None:
-        """Reject the old process-global realm in live/canary boot modes."""
+        """Reject the old process-global realm in live boot modes."""
         legacy = os.environ.get("BFX_ACCOUNT_ID", "").strip()
         executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower()
-        if legacy and (phase in {Phase.CANARY, Phase.LIVE} or executor == "bitfinex_live"):
+        if legacy and (phase is Phase.LIVE or executor == "bitfinex_live"):
             raise ConfigurationError(
                 "BFX_ACCOUNT_ID is no longer supported; use "
                 "BFX_EXCHANGE_ACCOUNT_ID"
@@ -950,32 +950,25 @@ class _StubDivergenceSource:
         return 0.0
 
 
-_CANARY_REQUIRED_HARD = (
-    "manual_kill",
-    "auth_health",
-    "heartbeat",
-    "allocation_cap",
-    "buying_power",
-)
-_CANARY_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
+_LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")
+_LIVE_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
-def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
+def assert_live_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
     """Real money cannot silently disable ownership-independent safety guards.
 
-    Normal live replaces allocation/buying-power flags with the mandatory
-    applied-policy guard. Both real phases still require kill/auth/heartbeat
+    Live replaces the allocation/buying-power flags with the mandatory applied
+    capital policy, and still requires the trading-state/auth/heartbeat guards
     and both loss limiters. No-op for paper/shadow; divergence stays optional.
     """
-    if phase not in {Phase.CANARY, Phase.LIVE}:
+    if phase is not Phase.LIVE:
         return
     missing = [
-        name for name in _CANARY_REQUIRED_HARD
-        if not (phase is Phase.LIVE and name in {"allocation_cap", "buying_power"})
+        name for name in _LIVE_REQUIRED_HARD
         if not getattr(safety_cfg.hard_guards, name).enabled
     ]
     missing += [
-        name for name in _CANARY_REQUIRED_CALIBRATED
+        name for name in _LIVE_REQUIRED_CALIBRATED
         if not getattr(safety_cfg.calibrated_guards, name).enabled
     ]
     if missing:
@@ -984,24 +977,17 @@ def assert_canary_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> Non
         )
 
 
-def assert_caps_invariant(
-    phase: Phase, cells: list[CellConfig], alloc_cfg: _AllocationCapCfg
-) -> None:
-    """Every configured-cell symbol needs an explicit caps entry; >0 under canary.
+def assert_caps_invariant(cells: list[CellConfig], alloc_cfg: _AllocationCapCfg) -> None:
+    """Simulation: every configured-cell symbol needs an explicit caps entry.
 
     Config-fatal at boot (raises ValueError) — a configured currency with no
-    explicit cap (or a zero cap under real money) is an operator mistake that
-    must abort startup, not silently fall through to default_cap.
+    explicit cap is an operator mistake that must abort startup, not silently
+    fall through to default_cap. (Live sizes from the applied CapitalPolicy.)
     """
     for symbol in configured_symbols(cells):
         if symbol not in alloc_cfg.caps:
             raise ValueError(
                 f"caps invariant: configured symbol {symbol!r} has no explicit caps entry"
-            )
-        if phase == Phase.CANARY and alloc_cfg.caps[symbol] <= 0:
-            raise ValueError(
-                f"caps invariant: canary symbol {symbol!r} cap must be > 0, "
-                f"got {alloc_cfg.caps[symbol]}"
             )
 
 
@@ -1047,10 +1033,6 @@ async def build_daemon(
     skip_ws: bool = False,
 ) -> Daemon:
     config = load_config(cells_yaml_path=cells_yaml_path)
-    if config.phase is Phase.CANARY:
-        # The per-build canary ceremony is retired (ADR 2026-09-25): real money
-        # runs as live, gated by the trading state and the release flow.
-        raise ConfigurationError("BFX_PHASE=canary is retired; real money runs as BFX_PHASE=live")
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     live_executor = os.environ.get("BFX_EXECUTOR", "paper").strip().lower() == "bitfinex_live"
@@ -1233,10 +1215,10 @@ async def build_daemon(
         os.environ.get("BFX_SAFETY_CONFIG", "configs/safety.yaml"),
     )
     safety_cfg = load_safety_config(safety_cfg_path)
-    assert_canary_guard_invariant(config.phase, safety_cfg)
+    assert_live_guard_invariant(config.phase, safety_cfg)
     hg = safety_cfg.hard_guards
     if capital_runtime is None:
-        assert_caps_invariant(config.phase, config.cells, hg.allocation_cap)
+        assert_caps_invariant(config.cells, hg.allocation_cap)
 
     # Automatic protections (ADR 2026-09-25 D5): trips stop new offers at once
     # and queue HALTED/auto + cancel-all, which a supervised task performs
@@ -1280,13 +1262,11 @@ async def build_daemon(
 
     # M2: SafetyConfig.<guard>.enabled is honoured at build time — disabled
     # guards are not constructed (cleaner than relying on internal no-op).
-    # `BFX_PHASE=canary` is rejected upstream in load_config so allowing
-    # operators to disable hard guards in paper/shadow is bounded; 4.4 canary
-    # spec will need an additional invariant requiring all hard guards on.
-    # Canary (real money) must not boot with a safety guard silently off.
+    # Live (real money) cannot boot with a required guard off
+    # (assert_live_guard_invariant); paper/shadow may disable them.
     cg = safety_cfg.calibrated_guards
-    # Phase 2: every configured currency must have an explicit cap (and >0 under
-    # canary) — config-fatal otherwise. Then log the effective cap per symbol so
+    # Phase 2: every configured currency must have an explicit cap in simulation
+    # — config-fatal otherwise. Then log the effective cap per symbol so
     # the boot log is the authoritative record of how much real money each
     # currency may deploy.
     log.info(

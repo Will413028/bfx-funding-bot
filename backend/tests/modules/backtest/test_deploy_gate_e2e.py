@@ -1,4 +1,4 @@
-"""Deploy sanity gate over the committed fixture + deployed canary config.
+"""Deploy sanity gate over the committed fixture + deployed config.
 
 Marked `gate`: offline but slower than unit tests (rolling backtest over ~49
 windows per cell). Run as its own CI job. Asserts the deployed config beats
@@ -32,16 +32,16 @@ pytestmark = pytest.mark.gate
 
 ROOT = Path(__file__).resolve().parents[3]  # backend/
 FIXTURES = ROOT / "fixtures" / "candles"
-CANARY = ROOT / "configs" / "cells.canary.yaml"
+DEPLOYED = ROOT / "configs" / "cells.live.yaml"
 P14 = ROOT / "configs" / "cells.experimental-p14.yaml"
 
 
-def _load_canary_cells() -> list[CellConfig]:
+def _load_deployed_cells() -> list[CellConfig]:
     # Guard at collection time: pytest imports this module even for `-m "not
     # gate"`, so a missing config must not error the whole session. An empty
-    # list yields no parametrized cases; test_canary_config_present (gate-only)
+    # list yields no parametrized cases; test_deployed_config_present (gate-only)
     # is what fails loudly if the deployed config is actually absent.
-    return load_cells_only(CANARY) if CANARY.exists() else []
+    return load_cells_only(DEPLOYED) if DEPLOYED.exists() else []
 
 
 def _bootstrap_ci_mean(values: list[Decimal]) -> tuple[Decimal, Decimal]:
@@ -69,15 +69,15 @@ def _gate_for(
     )
 
 
-def test_canary_config_present() -> None:
+def test_deployed_config_present() -> None:
     # Closes the no-op risk: if the deployed config is missing/empty, the
     # parametrized gate above would silently run zero cases. Fail loudly here.
-    assert CANARY.exists(), f"deployed canary config missing: {CANARY}"
-    assert _load_canary_cells(), "canary config has no cells to gate"
+    assert DEPLOYED.exists(), f"deployed config missing: {DEPLOYED}"
+    assert _load_deployed_cells(), "deployed config has no cells to gate"
 
 
-@pytest.mark.parametrize("cell", _load_canary_cells())
-def test_deployed_canary_cell_beats_passive(cell: CellConfig) -> None:
+@pytest.mark.parametrize("cell", _load_deployed_cells())
+def test_deployed_cell_beats_passive(cell: CellConfig) -> None:
     candles = load_candles(FIXTURES / f"{cell.symbol}_{cell.period_agg}_{cell.timeframe}.jsonl.gz")
     p = cell.params
     result = _gate_for(
@@ -105,7 +105,7 @@ def test_old_inert_config_would_fail_gate() -> None:
 
 
 def _load_p14_cells() -> list[CellConfig]:
-    """Load p14 candidate cells, guarded at collection time (same idiom as _load_canary_cells)."""
+    """Load p14 candidate cells, guarded at collection time (same idiom as _load_deployed_cells)."""
     return load_cells_only(P14) if P14.exists() else []
 
 

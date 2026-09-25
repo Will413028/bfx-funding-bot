@@ -81,8 +81,8 @@ class AuthSettings(BaseSettings):
     def _validate_production_operator_role(self) -> "AuthSettings":
         """Production is deliberately locked to the sole admin operator role."""
         phase = os.environ.get("BFX_PHASE", "").lower()
-        if phase in {"canary", "live"} and self.operator_role != "admin":
-            raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in canary or live")
+        if phase == "live" and self.operator_role != "admin":
+            raise ValueError("BFX_OPERATOR_ROLE must be 'admin' in live")
         return self
 
 

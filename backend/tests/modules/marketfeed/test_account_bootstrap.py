@@ -107,7 +107,7 @@ def test_live_boot_rejects_legacy_account_env(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", str(_ACCOUNT_ID))
     monkeypatch.setenv("BFX_ACCOUNT_ID", "default")
     with pytest.raises(ConfigurationError, match="BFX_ACCOUNT_ID is no longer supported"):
-        AccountBootstrap.reject_legacy_realm(phase=Phase.CANARY)
+        AccountBootstrap.reject_legacy_realm(phase=Phase.LIVE)
 
 
 @pytest.mark.asyncio
