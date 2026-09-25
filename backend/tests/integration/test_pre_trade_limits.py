@@ -120,7 +120,7 @@ async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_
     assert (await _amend(factory, runtime, FULL))["status"] == "unchanged"
 
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    with pytest.raises(CommandGateBlocked, match=r"offer_amount 500(\.0)? > max_offer_amount 200"):
+    with pytest.raises(CommandGateBlocked, match=r"offer_amount 499\.999905 > max_offer_amount 200"):
         await gate.submit(replace(ready, capital_view=view), ctx)
     assert venue.received == [] and await _intents(factory) == 0
     within = replace(await second_ready(factory, account, ready), capital_view=view)

@@ -37,7 +37,7 @@ from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnkno
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
-from .test_capital_command_boundary import boundary, second_ready
+from .test_capital_command_boundary import AMOUNT, boundary, second_ready
 from .test_capital_repository import repository, setup_policy, snapshot
 from .test_kill_switch import FakeVenue, Lock
 
@@ -120,30 +120,8 @@ def recovery(factory, account, auth, protection, *, start=5000) -> BootRecovery:
 # ------------------------------------------------------------- triggers
 
 
-@pytest.mark.asyncio
-async def test_orphan_trips_quarantine_and_unattributed_and_the_kill_takes_its_currency(capital_db):
-    factory, account = capital_db
-    _, _, _, ctx, _, trading = await boundary(factory, account)
-    protection = AutomaticProtection()
-    auth = FakeAuth(offers=[_offer("555", "fUSD", "40", "40")],
-                    wallets={"fUST": D("1000"), "fUSD": D("0")})
-    recorder = Recorder()
-    with pytest.raises(CapitalBlockedError, match="unattributed_offer"):
-        await recovery(factory, account, auth, recorder).run()
-    assert recorder.triggers == {"orphan_quarantined", "unattributed_offer"}
-
-    # The same trips through the real protection and kill switch.
-    venue = FakeVenue(factory, account, {"UST": set(), "USD": {"555"}})
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=venue, writer_lock=Lock()))
-    for trigger, detail in recorder.trips:
-        protection.trip(trigger, detail)
-    await protection.run_pending()
-    state = await trading.current()
-    assert (state.state, state.cause) == ("HALTED", "auto")
-    assert state.actor in {"auto:orphan_quarantined", "auto:unattributed_offer"}
-    assert venue.offers == {}
-    assert ("USD", "HALTED") in venue.calls
+# A foreign offer (no claim, no attempt) trips nothing since lending envelope
+# D2; test_managed_offers runs it through this same recovery and gate.
 
 
 @pytest.mark.asyncio
@@ -240,13 +218,13 @@ async def test_replay_migration_catch_up_as_a_first_observation_does_not_trip(ca
 async def test_fill_caught_by_reconcile_instead_of_ws_does_not_trip(capital_db):
     factory, account = capital_db
     gate, _, ready, ctx, _, _ = await boundary(factory, account)
-    await gate.submit(ready, ctx)  # 500 offered in the ledger
-    filled = _offer("101", "fUST", "0", "500", status="EXECUTED at 0.01% (500.0)", created=1100)
-    auth = FakeAuth(credits=[_credit("from-101", "fUST", "500")], history=[filled],
-                    wallets={"fUST": D("500"), "fUSD": D("0")})
+    await gate.submit(ready, ctx)  # AMOUNT (the fingerprinted 500) offered in the ledger
+    filled = _offer("101", "fUST", "0", AMOUNT, status="EXECUTED at 0.01% (500.0)", created=1100)
+    auth = FakeAuth(credits=[_credit("from-101", "fUST", AMOUNT)], history=[filled],
+                    wallets={"fUST": D("1000") - D(AMOUNT), "fUSD": D("0")})
     recorder = Recorder()
     result = await recovery(factory, account, auth, recorder).run()
-    assert result.reserved_drift_usdt == D("500") and result.realized_drift_usdt == D("500")
+    assert result.reserved_drift_usdt == D(AMOUNT) and result.realized_drift_usdt == D(AMOUNT)
     assert recorder.trips == []
 
 

@@ -109,7 +109,17 @@ def _simulated_capital(ledger, tracker, *, totals=None, reserves=None):
             applied = AppliedCapitalPolicy(1, "explicit-test-policy", policy, UUID(int=1))
             return CapitalView(applied, 1, snapshot, evaluate_capital(policy, snapshot), shared, {})
 
+        async def fingerprints_in_use(self, *, symbol, session):
+            return frozenset()
+
     return SimulatedCapital()
+
+
+def _planned(sent, planned: str) -> bool:
+    """The planned amount as sent: fingerprinted (D3a), so below it by < 0.0001."""
+    from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
+    value = D(str(sent))
+    return D(planned) - D("0.0001") < value <= D(planned) and bool(fingerprint_of(value))
 
 
 class _CapturingSink:
@@ -878,10 +888,10 @@ async def test_deploys_gap_to_active_cell():
     assert len(ex.submitted) == 1
     d = ex.submitted[0]
     assert d.decision_outcome == DecisionOutcome.POST
-    assert d.offer_amount_usdt == 200.0   # gap 200, single active, under cap
+    assert _planned(d.offer_amount_usdt, "200")   # gap 200, single active, under cap
     assert d.offer_rate == 0.00012
     assert d.offer_duration_days == 2
-    assert tracker.deployed("fUST_a30") == D("200")
+    assert _planned(tracker.deployed("fUST_a30"), "200")
 
 
 async def test_no_active_quote_no_submit():
@@ -927,10 +937,10 @@ async def test_two_active_cells_split_when_gap_exceeds_cap():
     )
     await rec.deploy()
     assert len(ex.submitted) == 2
-    assert tracker.deployed("fUST_a30") == D("399")
-    assert tracker.deployed("fUST_p2") == D("171")
+    assert _planned(tracker.deployed("fUST_a30"), "399")
+    assert _planned(tracker.deployed("fUST_p2"), "171")
     amounts = sorted(d.offer_amount_usdt for d in ex.submitted)
-    assert amounts == [171.0, 399.0]
+    assert len(amounts) == 2 and _planned(amounts[0], "171") and _planned(amounts[1], "399")
 
 
 async def test_per_cell_safety_block_does_not_stop_other_cell():
@@ -943,9 +953,9 @@ async def test_per_cell_safety_block_does_not_stop_other_cell():
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_amount_usdt == 171.0
+    assert _planned(ex.submitted[0].offer_amount_usdt, "171")
     assert tracker.deployed("fUST_a30") == D("0")
-    assert tracker.deployed("fUST_p2") == D("171")
+    assert _planned(tracker.deployed("fUST_p2"), "171")
     assert len(safety.calls) == 2  # both cells consulted
 
 
@@ -1023,7 +1033,7 @@ async def test_successful_submit_emits_order_submit_structured_event():
     payload = ev["payload"]
     assert payload["is_simulated"] is False  # live deploy, distinguishes from paper
     assert payload["status"] == "submitted"
-    assert payload["offer_amount_usdt"] == 200.0
+    assert _planned(payload["offer_amount_usdt"], "200")
     assert payload["cid"] == 1
     assert payload["offer_id"] == "x"
     assert [name for name, _ in sink.execution_events] == [
@@ -1069,7 +1079,7 @@ async def test_deploys_when_available_sufficient():
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_amount_usdt == 200.0
+    assert _planned(ex.submitted[0].offer_amount_usdt, "200")
 
 
 async def test_available_headroom_binds_below_cap_gap():
@@ -1079,7 +1089,7 @@ async def test_available_headroom_binds_below_cap_gap():
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_amount_usdt == 317.0
+    assert _planned(ex.submitted[0].offer_amount_usdt, "317")
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1104,7 @@ async def test_canonical_spendable_limits_total_planned_amount(caplog):
     )
     with caplog.at_level(logging.INFO):
         await rec.deploy()
-    assert sum(D(str(d.offer_amount_usdt)) for d in _ex.submitted) == D("200")
+    assert _planned(sum(D(str(d.offer_amount_usdt)) for d in _ex.submitted), "200")
 
 
 async def test_cell_over_canonical_limit_cannot_spend_ample_balance(caplog):
@@ -1209,7 +1219,7 @@ async def test_headroom_uses_cell_symbol_available():
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_amount_usdt == 200.0
+    assert _planned(ex.submitted[0].offer_amount_usdt, "200")
 
 
 # ---------------------------------------------------------------------------
@@ -1488,7 +1498,7 @@ async def test_guard_block_is_recorded_as_the_last_attempt():
     assert rec_att.last.reason == "blocked"
     assert rec_att.last.cell == "fUST_a30"
     assert rec_att.last.symbol == "fUST"
-    assert rec_att.last.amount == D("200")
+    assert _planned(rec_att.last.amount, "200")
 
 
 async def test_successful_submit_is_recorded():
@@ -1499,7 +1509,7 @@ async def test_successful_submit_is_recorded():
     await rec.deploy()
     assert rec_att.last is not None
     assert rec_att.last.outcome == "submitted"
-    assert rec_att.last.amount == D("200")
+    assert _planned(rec_att.last.amount, "200")
 
 
 async def test_venue_rejection_is_recorded_as_rejected_not_blocked():
@@ -1537,7 +1547,7 @@ async def test_recorder_is_optional_and_absent_changes_nothing():
     )
     await rec.deploy()
     assert len(ex.submitted) == 1
-    assert tracker.deployed("fUST_a30") == D("200")
+    assert _planned(tracker.deployed("fUST_a30"), "200")
 
 
 # ── E1 reprice reference = book (2026-09-22 strategy-correctness plan, item 2) ──
@@ -1600,3 +1610,46 @@ async def test_book_reference_without_a_book_never_cancels():
     )
     await rec.deploy(venue_offers=(_venue_offer("42", 0.002),))
     assert canc.cancelled == []
+
+
+# ---------------------------------------------------------------------------
+# D3a: amount fingerprints are chosen before anything durable names the amount
+# ---------------------------------------------------------------------------
+
+
+def _fingerprinting(rec, held):
+    async def fingerprints_in_use(*, symbol, session):
+        assert symbol == "fUST"
+        return frozenset(held)
+
+    rec._capital.fingerprints_in_use = fingerprints_in_use
+
+
+async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all_see():
+    from bfx_funding_bot.modules.execution.amount_fingerprint import (
+        FINGERPRINT_SPACE,
+        fingerprint_of,
+        fingerprint_seed,
+    )
+    quote = _post_quote("fUST_a30")
+    safety = _FakeSafety(allowed=True)
+    rec, ex, tracker, _ = _build(exposure=D("370"), quotes=[quote], safety=safety)
+    seed = fingerprint_seed(f"reconcile:1000:fUST_a30:{quote.signal_correlation_id}")
+    _fingerprinting(rec, {seed})  # the seed is held by a live commitment: probe on
+    await rec.deploy()
+
+    assert len(ex.submitted) == 1
+    sent = D(str(ex.submitted[0].offer_amount_usdt))
+    assert fingerprint_of(sent) == seed % FINGERPRINT_SPACE + 1
+    assert D("199.9999") < sent < D("200")
+    assert D(str(safety.calls[0].offer_amount_usdt)) == sent
+    assert ex.ready_submissions[0].decision.offer_amount_usdt == float(sent)
+    assert tracker.deployed("fUST_a30") == sent
+
+
+async def test_planner_skips_the_submit_when_no_fingerprint_fits():
+    from bfx_funding_bot.modules.execution.amount_fingerprint import FINGERPRINT_SPACE
+    rec, ex, _, _ = _build(exposure=D("370"), quotes=[_post_quote("fUST_a30")])
+    _fingerprinting(rec, range(1, FINGERPRINT_SPACE + 1))
+    await rec.deploy()
+    assert ex.submitted == []

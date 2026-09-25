@@ -5,14 +5,22 @@ the PG event_log + snapshot is the SoT for our intent + accounting. Bitfinex
 funding offers carry NO client cid (submit drops it, response lacks it), so we
 reconcile by venue_offer_id -- the only stable shared key.
 
-  - orphan  (venue has voi, local has no CLAIMED row)  -> VenueOfferQuarantined
+  - foreign (venue has voi, no claim and no attempt)   -> foreign_exposure alert
   - missing (local CLAIMED, venue no longer has voi)   -> ReservationReleased
   - stale PENDING (write-ahead intent, outcome unknown) -> ReservationUnknown
 
 PENDING cannot be treated as rejection just because an active snapshot is empty.
 It remains UNKNOWN until a fresh full-account/history observation or an
-operator resolution proves what happened.  An unattributed venue offer is
-counted and quarantined without a synthetic local identity or auto-cancel.
+operator resolution proves what happened.  Every submitted amount carries a
+fingerprint (lending envelope D3a), so once the settle window has passed a
+complete snapshot resolves an UNKNOWN by itself: exactly one unattributed offer
+with the attempt's amount, rate and period created after it started is its
+offer; complete history with none means it was never accepted; anything less
+leaves it UNKNOWN.
+
+An offer no durable intent traces to is foreign (D2): somebody else's lending
+on the account. It is never quarantined, cancelled or repriced, and never
+given a synthetic identity; the operator hears about it once.
 """
 from __future__ import annotations
 
@@ -49,7 +57,11 @@ from bfx_funding_bot.modules.execution.event_store.entities import (
     is_terminal_offer_status,
 )
 from bfx_funding_bot.modules.execution.event_store.store import PostgresEventStore, SnapshotDrift
-from bfx_funding_bot.modules.execution.event_store.tables import OfferClaimRow
+from bfx_funding_bot.modules.execution.event_store.tables import (
+    EventLogRow,
+    OfferClaimRow,
+    VenueOfferStateRow,
+)
 from bfx_funding_bot.modules.execution.event_store.writer import AccountEventWriter
 from bfx_funding_bot.modules.execution.events import (
     PositionReconciled,
@@ -59,14 +71,13 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationUnknown,
     SnapshotCoverage,
     SubmitMatchedToVenueOffer,
-    VenueOfferQuarantined,
+    UncertaintyMarkedNotAccepted,
     VenueSnapshotObserved,
 )
 from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
-    ORPHAN_QUARANTINED,
     SUBMIT_OUTCOME_UNKNOWN,
     VENUE_LENT_ABOVE_LEDGER,
     LedgerConservation,
@@ -79,12 +90,15 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
 )
 from bfx_funding_bot.modules.execution.unknown_matching import (
     UnknownSubmitAttempt,
+    amount_seen_since_start,
     attempt_from_row,
-    match_unknown_attempt,
+    deterministic_resolution_evidence,
+    match_attempt_to_snapshot,
 )
 from bfx_funding_bot.modules.execution.unknown_matching import (
     offer_matches_attempt_identity as _offer_matches_attempt_identity,
 )
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
@@ -93,8 +107,14 @@ RecoveryAction = (
     | ReservationReleased
     | ReservationFailed
     | ReservationUnknown
-    | VenueOfferQuarantined
 )
+
+# How long after a submit started its offer may still be absent from the venue's
+# answers. Before this an absent offer proves nothing, and a coincidental
+# foreign offer could be the only candidate while ours is still in flight.
+UNKNOWN_SETTLE_MS = 120_000
+# Operator id recorded on resolutions this process derives from evidence alone.
+SYSTEM_RESOLVER = "system:reconcile"
 
 
 def _normalize_flags(value: Mapping[str, Any] | int | None) -> Mapping[str, Any]:
@@ -119,9 +139,12 @@ class ReconcileResult:
     realized_drift_usdt: Decimal = Decimal("0")
     venue_offers: tuple[ActiveFundingOffer, ...] = ()
     n_unknown: int = 0
-    n_quarantined: int = 0
     n_matched: int = 0
+    n_not_sent: int = 0
     snapshot_event_seq: int | None = None
+    # Active offers no claim or attempt traces to (foreign, or a candidate of an
+    # UNKNOWN not yet resolved). Nothing the bot may cancel or reprice.
+    unmanaged_offer_ids: frozenset[str] = frozenset()
 
 
 class _SymbolSnapshot(NamedTuple):
@@ -131,6 +154,12 @@ class _SymbolSnapshot(NamedTuple):
     available: Decimal
     reserved: Decimal
     realized: Decimal
+
+
+class _UnknownResolution(NamedTuple):
+    candidate_ids: set[str]
+    matched: list[SubmitMatchedToVenueOffer]
+    not_sent: list[UncertaintyMarkedNotAccepted]
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,25 +241,6 @@ async def convert_pending_to_unknown(
     return len(events)
 
 
-def quarantine_orphan_offer(
-    observation: ActiveFundingOffer,
-    *,
-    account_id: str,
-    is_simulated: bool,
-    observed_at_ms: int,
-) -> VenueOfferQuarantined:
-    """Create an audit-only orphan event without manufacturing provenance."""
-    return VenueOfferQuarantined(
-        venue_offer_id=observation.venue_offer_id,
-        symbol=observation.symbol,
-        amount=observation.amount,
-        account_id=account_id,
-        is_simulated=is_simulated,
-        observed_at_ms=observed_at_ms,
-        reason="unattributed_active_offer",
-    )
-
-
 def compute_recovery_actions(
     *,
     venue_offers: list[ActiveFundingOffer],
@@ -244,8 +254,10 @@ def compute_recovery_actions(
 ) -> list[RecoveryAction]:
     """Pure reconciliation: produce the ordered list of domain events to append.
 
-    action_grace_ms gates the orphan/missing directions so a runtime reconcile
-    never acts on an offer/claim still mid-placement (boot passes 0 = immediate).
+    action_grace_ms gates the missing direction so a runtime reconcile never
+    acts on a claim still mid-placement (boot passes 0 = immediate). A venue
+    offer without a local claim produces nothing here: it is either foreign
+    (D2, alerted by the caller) or the candidate of an UNKNOWN attempt.
     """
     venue_by_voi = {o.venue_offer_id: o for o in venue_offers}
     claimed_by_voi = {
@@ -254,22 +266,6 @@ def compute_recovery_actions(
         if c.state == RegistryState.CLAIMED and c.venue_offer_id is not None
     }
     actions: list[RecoveryAction] = []
-
-    # orphan: venue has it, local CLAIMED set doesn't -> quarantine.  The full
-    # snapshot already persists/counts the object; fabricating a CID or
-    # ReservationRef would create false provenance and make a later rebuild
-    # impossible to audit.
-    for voi, offer in venue_by_voi.items():
-        if voi in claimed_by_voi:
-            continue
-        if (now_ms - offer.mts_created) < action_grace_ms:
-            continue  # too fresh — local claim may still be committing
-        actions.append(quarantine_orphan_offer(
-            offer,
-            account_id=account_id,
-            is_simulated=is_simulated,
-            observed_at_ms=now_ms,
-        ))
 
     # missing: local CLAIMED, venue gone -> release (reserved -= size)
     for voi, claim in claimed_by_voi.items():
@@ -382,6 +378,29 @@ class _FsmSink(Protocol):
     async def handle(self, event: Any) -> None: ...
 
 
+class ForeignExposureMonitor:
+    """Alert once per foreign venue offer id (D2, ladder level 4).
+
+    Shared by the boot and the runtime reconcile so a restart of neither
+    repeats an alert the process already sent. Ids that left the book are
+    forgotten, which keeps the set as small as the account's live offers.
+    """
+
+    def __init__(self) -> None:
+        self._alerted: set[str] = set()
+
+    def observe(self, foreign: list[ActiveFundingOffer], *, active_ids: set[str]) -> None:
+        self._alerted &= active_ids
+        for offer in foreign:
+            if offer.venue_offer_id in self._alerted:
+                continue
+            self._alerted.add(offer.venue_offer_id)
+            alerts.emit(alerts.FOREIGN_EXPOSURE, venue_offer_id=offer.venue_offer_id,
+                        symbol=offer.symbol, amount=offer.amount,
+                        amount_original=offer.amount_original, rate=offer.rate,
+                        period_days=offer.period_days, mts_created=offer.mts_created)
+
+
 class BootRecovery:
     """Boot orchestration: full-account venue reconcile + crash recovery.
 
@@ -390,7 +409,8 @@ class BootRecovery:
     recovery events plus one immutable observation in ONE txn (no REST call held
     inside the txn). After commit, publishes derived PositionReconciled signals
     and routes only correlated CLAIMED/RELEASED lifecycle events to the registry.
-    UNKNOWN and orphan quarantine are durable states, never automatic retries.
+    UNKNOWN is a durable state, never an automatic retry; it ends only on
+    evidence (``_resolve_unknown``) or an operator resolution.
     """
 
     def __init__(
@@ -414,7 +434,13 @@ class BootRecovery:
         uncertainty_handler: Callable[[ReservationUnknown], Awaitable[None]] | None = None,
         capital_repository: CapitalRepository | None = None,
         protection: ProtectionPort | None = None,
+        unknown_settle_ms: int = UNKNOWN_SETTLE_MS,
+        foreign_exposure: ForeignExposureMonitor | None = None,
     ) -> None:
+        if unknown_settle_ms < 0:
+            raise ValueError("unknown_settle_ms must be non-negative")
+        self._unknown_settle_ms = unknown_settle_ms
+        self._foreign_exposure = foreign_exposure or ForeignExposureMonitor()
         self._store = store
         self._session_factory = session_factory
         self._auth_rest = auth_rest
@@ -455,7 +481,7 @@ class BootRecovery:
         self._protection = protection
         self._conservation = LedgerConservation()
 
-    def _protect(self, *, unknown: list[ReservationUnknown], persisted: list[RecoveryAction],
+    def _protect(self, *, unknown: list[ReservationUnknown],
                  capital_error: CapitalBlockedError | None, capital_accepted: bool,
                  drift: SnapshotDrift, fence_refusal: CapitalBlockedError | None = None) -> None:
         protection = self._protection
@@ -464,10 +490,6 @@ class BootRecovery:
         for event in unknown:
             protection.trip(SUBMIT_OUTCOME_UNKNOWN,
                             f"recovered interrupted submit cid={event.cid} symbol={event.symbol}")
-        for action in persisted:
-            if isinstance(action, VenueOfferQuarantined):
-                protection.trip(ORPHAN_QUARANTINED, f"venue_offer_id={action.venue_offer_id} "
-                                f"symbol={action.symbol} amount={action.amount}")
         for stage, refusal in (("fence", fence_refusal), ("snapshot", capital_error)):
             trigger = CAPITAL_BLOCK_TRIGGERS.get(str(refusal)) if refusal is not None else None
             if trigger is not None:
@@ -485,9 +507,10 @@ class BootRecovery:
         capital_fence = None
         fence_refusal: CapitalBlockedError | None = None
         if self._capital_repository is not None:
-            # Commit the command fence BEFORE any venue query. Pending/UNKNOWN
-            # must still reconcile through the ordinary recovery path; such an
-            # observation never becomes capital authority. The refusal is kept:
+            # Commit the command fence BEFORE any venue query. An in-flight
+            # submit refuses the fence (its outcome may cross the query); an
+            # open UNKNOWN does not -- acceptance withholds only its symbol.
+            # The refusal is kept:
             # the attempt inventory checked here is where an identity conflict
             # between a commitment and its records first shows.
             try:
@@ -578,63 +601,18 @@ class BootRecovery:
             if not capital_accepted:
                 snapshot_drift = await self._append_snapshot_event(session, snapshot_event)
 
-            matched_events: list[SubmitMatchedToVenueOffer] = []
-            matched_offer_ids: set[str] = set()
-            unknown_attempts = (
-                await self._load_unknown_attempts(session)
-                if snapshot_drift.event_seq is not None
-                else []
+            resolution = await self._resolve_unknown(
+                session,
+                snapshot_seq=snapshot_drift.event_seq,
+                all_offers=all_offers,
+                history_offers=history.offers,
+                query_started_at_ms=query_started_at_ms,
+                now_ms=query_finished_at_ms,
             )
-            possible_active_match_ids = {
-                offer.venue_offer_id
-                for attempt in unknown_attempts
-                for offer in all_offers
-                if _offer_matches_attempt_identity(
-                    attempt,
-                    offer,
-                    observed_end_ms=query_started_at_ms,
-                )
-            }
-            for attempt in unknown_attempts:
-                match = match_unknown_attempt(
-                    attempt,
-                    all_offers,
-                    history.offers,
-                    history.coverage,
-                )
-                if match.kind != "exact_match" or match.offer is None:
-                    continue
-                assert snapshot_drift.event_seq is not None
-                offer = match.offer
-                matched_offer_ids.add(offer.venue_offer_id)
-                matched = SubmitMatchedToVenueOffer(
-                    symbol=attempt.symbol,
-                    cid=attempt.cid,
-                    venue_offer_id=offer.venue_offer_id,
-                    signal_correlation_id=attempt.signal_correlation_id,
-                    account_id=attempt.account_id,
-                    is_simulated=self._is_simulated,
-                    venue_status=offer.status,
-                    matched_mts_created=offer.mts_created,
-                    reconcile_event_seq=snapshot_drift.event_seq,
-                    amount=attempt.amount,
-                    reservation_ref=attempt.reservation_ref.bind_venue_offer(
-                        offer.venue_offer_id
-                    ),
-                    occurred_at_ms=query_finished_at_ms,
-                )
-                await self._store.append(session, matched)
-                matched_events.append(matched)
+            unmanaged = await self._unattributed_offer_ids(session, all_offers)
 
             remaining_actions = [
-                ev
-                for ev in actions
-                if not isinstance(ev, ReservationUnknown)
-                and not (
-                    isinstance(ev, VenueOfferQuarantined)
-                    and ev.venue_offer_id
-                    in (matched_offer_ids | possible_active_match_ids)
-                )
+                ev for ev in actions if not isinstance(ev, ReservationUnknown)
             ]
             persisted_remaining_actions: list[RecoveryAction] = []
             for remaining_action in remaining_actions:
@@ -647,7 +625,21 @@ class BootRecovery:
                 if was_persisted:
                     persisted_remaining_actions.append(remaining_action)
 
-        self._protect(unknown=unknown_actions, persisted=persisted_remaining_actions,
+        # Foreign exposure is reported after commit, never inside the recovery
+        # transaction. A possible candidate of an unresolved UNKNOWN may be ours
+        # and is not called foreign; neither is an offer too young for its
+        # claim to have committed.
+        self._foreign_exposure.observe(
+            [
+                offer for offer in all_offers
+                if offer.venue_offer_id in unmanaged
+                and offer.venue_offer_id not in resolution.candidate_ids
+                and query_finished_at_ms - offer.mts_created >= self._action_grace_ms
+            ],
+            active_ids={offer.venue_offer_id for offer in all_offers},
+        )
+        matched_events = resolution.matched
+        self._protect(unknown=unknown_actions,
                       capital_error=capital_error, capital_accepted=capital_accepted,
                       drift=snapshot_drift, fence_refusal=fence_refusal)
         if capital_error is not None:
@@ -699,7 +691,7 @@ class BootRecovery:
             agg_available += snap.available
             agg_n_credits += len(snap.credits)
 
-        n_claim = n_release = n_fail = n_unknown = n_quarantined = n_matched = 0
+        n_claim = n_release = n_fail = n_unknown = n_matched = 0
         for persisted_action in persisted_actions:
             if isinstance(persisted_action, ReservationClaimed):
                 n_claim += 1
@@ -720,17 +712,16 @@ class BootRecovery:
                     )
                 if self._uncertainty_handler is not None:
                     await self._uncertainty_handler(persisted_action)
-            elif isinstance(persisted_action, VenueOfferQuarantined):
-                n_quarantined += 1
             elif isinstance(persisted_action, SubmitMatchedToVenueOffer):
                 n_matched += 1
         log.info(
             "reconcile_complete symbols=%d venue_offers=%d "
             "reserved=%.2f realized=%.2f available=%.2f "
-            "claims=%d released=%d failed=%d unknown=%d quarantined=%d matched=%d",
+            "claims=%d released=%d failed=%d unknown=%d matched=%d not_sent=%d unmanaged=%d",
             len(per_symbol), len(all_offers),
             float(agg_reserved), float(agg_realized), float(agg_available),
-            n_claim, n_release, n_fail, n_unknown, n_quarantined, n_matched,
+            n_claim, n_release, n_fail, n_unknown, n_matched, len(resolution.not_sent),
+            len(unmanaged),
         )
         return ReconcileResult(
             n_claimed=n_claim, n_released=n_release, n_failed=n_fail,
@@ -741,10 +732,199 @@ class BootRecovery:
             realized_drift_usdt=snapshot_drift.realized_drift,
             venue_offers=tuple(all_offers),
             n_unknown=n_unknown,
-            n_quarantined=n_quarantined,
             n_matched=n_matched,
+            n_not_sent=len(resolution.not_sent),
             snapshot_event_seq=snapshot_drift.event_seq,
+            unmanaged_offer_ids=frozenset(unmanaged),
         )
+
+    async def _resolve_unknown(
+        self,
+        session: AsyncSession,
+        *,
+        snapshot_seq: int | None,
+        all_offers: list[ActiveFundingOffer],
+        history_offers: tuple[ActiveFundingOffer, ...],
+        query_started_at_ms: int,
+        now_ms: int,
+    ) -> _UnknownResolution:
+        """Resolve settled UNKNOWN attempts from the snapshot just persisted (D3a).
+
+        The evidence is the stored observation, read back from the ledger --
+        the same payload an operator resolution and a clean replay are judged
+        against, so the projector re-validates exactly what was decided here.
+        Per attempt, once ``query_started_at_ms`` (the history fence's end) is
+        ``unknown_settle_ms`` past its start:
+
+        - exactly one offer, active or terminal, with its symbol, fingerprinted
+          ``amount_original``, rate, period, type and flags, created at or after
+          it started, and attributed to nothing else -> claimed for it;
+        - complete history covering the whole window, no such offer, and no
+          offer carrying its amount at all since it started -> not sent (an
+          offer with the fingerprint but another rate or unreadable metadata is
+          a reason to wait for an operator, not proof of absence);
+        - incomplete evidence, several candidates, or an attributed one -> stays
+          UNKNOWN, still holding its symbol through the uncertainty gate.
+
+        Idempotent: only open uncertainties are considered, and each resolution
+        closes its own.
+        """
+        attempts = await self._load_unknown_attempts(session) if snapshot_seq is not None else []
+        candidates = {
+            offer.venue_offer_id
+            for attempt in attempts
+            for offer in all_offers
+            if _offer_matches_attempt_identity(
+                attempt, offer, observed_end_ms=query_started_at_ms,
+            )
+        }
+        if not attempts or snapshot_seq is None:
+            return _UnknownResolution(candidates, [], [])
+        logged = await session.get(EventLogRow, snapshot_seq)
+        payload = logged.payload if logged is not None else None
+        if not isinstance(payload, dict):
+            return _UnknownResolution(candidates, [], [])
+        coverage = payload.get("coverage")
+        history_end = coverage.get("offer_history_end_ms") if isinstance(coverage, dict) else None
+        # The venue's own status words, for the evidence; the stored payload
+        # carries the normalized form.
+        observed = {offer.venue_offer_id: offer for offer in (*history_offers, *all_offers)}
+        matched: list[SubmitMatchedToVenueOffer] = []
+        not_sent: list[UncertaintyMarkedNotAccepted] = []
+        for attempt in attempts:
+            match = match_attempt_to_snapshot(attempt, payload)
+            candidates.update(offer.venue_offer_id for offer in match.candidates)
+            settled_at = attempt.started_at_ms + self._unknown_settle_ms
+            if query_started_at_ms < settled_at:
+                continue
+            uncertainty = await session.scalar(select(ExecutionUncertaintyRow).where(
+                ExecutionUncertaintyRow.exchange_account_id == UUID(attempt.account_id),
+                ExecutionUncertaintyRow.deployment_environment == self._env,
+                ExecutionUncertaintyRow.symbol == attempt.symbol,
+                ExecutionUncertaintyRow.kind == "submit_outcome_unknown",
+                ExecutionUncertaintyRow.attempt_id == attempt.attempt_id,
+                ExecutionUncertaintyRow.state == "open",
+            ))
+            if uncertainty is None:
+                continue
+            if match.kind == "exact_match" and match.offer is not None:
+                offer = observed.get(match.offer.venue_offer_id, match.offer)
+                if await self._offer_attributed(session, UUID(attempt.account_id), offer):
+                    log.warning("unknown_candidate_attributed attempt=%s venue_offer_id=%s",
+                                attempt.attempt_id, offer.venue_offer_id)
+                    continue
+                event = SubmitMatchedToVenueOffer(
+                    symbol=attempt.symbol,
+                    cid=attempt.cid,
+                    venue_offer_id=offer.venue_offer_id,
+                    signal_correlation_id=attempt.signal_correlation_id,
+                    account_id=attempt.account_id,
+                    is_simulated=self._is_simulated,
+                    venue_status=offer.status,
+                    matched_mts_created=offer.mts_created,
+                    reconcile_event_seq=snapshot_seq,
+                    amount=attempt.amount,
+                    reservation_ref=attempt.reservation_ref.bind_venue_offer(
+                        offer.venue_offer_id
+                    ),
+                    occurred_at_ms=now_ms,
+                )
+                await self._store.append(session, event)
+                matched.append(event)
+            elif (match.kind == "zero_match" and isinstance(history_end, int)
+                    and history_end >= settled_at
+                    and not amount_seen_since_start(attempt, payload)
+                    and await self._observed_after_opening(session, uncertainty,
+                                                           snapshot_seq, query_started_at_ms)):
+                resolved = UncertaintyMarkedNotAccepted(
+                    uncertainty_id=uncertainty.uncertainty_id,
+                    account_id=attempt.account_id,
+                    environment=self._env,
+                    symbol=attempt.symbol,
+                    kind="submit_outcome_unknown",
+                    reconcile_event_seq=snapshot_seq,
+                    resolved_by_operator_id=SYSTEM_RESOLVER,
+                    resolution_reason="fingerprint_absent_from_complete_history",
+                    resolution_evidence=deterministic_resolution_evidence(
+                        reconcile_event_seq=snapshot_seq, payload=payload, candidate_count=0,
+                    ),
+                    candidate_count=0,
+                    occurred_at_ms=now_ms,
+                )
+                await self._store.append(session, resolved)
+                not_sent.append(resolved)
+            else:
+                log.info("unknown_stays_open attempt=%s symbol=%s evidence=%s candidates=%d",
+                         attempt.attempt_id, attempt.symbol, match.kind, len(match.candidates))
+        return _UnknownResolution(candidates, matched, not_sent)
+
+    @staticmethod
+    async def _observed_after_opening(session: AsyncSession, uncertainty: ExecutionUncertaintyRow,
+                                      snapshot_seq: int, query_started_at_ms: int) -> bool:
+        """Absence counts only in an observation that began after the UNKNOWN opened.
+
+        The projector refuses a not-sent resolution on any other snapshot; an
+        UNKNOWN recovered in this very run is judged by the next one.
+        """
+        opening = await session.get(EventLogRow, uncertainty.opened_event_seq)
+        return (opening is not None and snapshot_seq > uncertainty.opened_event_seq
+                and query_started_at_ms > opening.occurred_at_ms)
+
+    async def _offer_attributed(self, session: AsyncSession, account: UUID,
+                                offer: ActiveFundingOffer) -> bool:
+        """Whether any claim, attempt or venue identity already owns ``offer``."""
+        venue_offer_id = offer.venue_offer_id
+        state = await session.scalar(select(VenueOfferStateRow).where(
+            VenueOfferStateRow.exchange_account_id == account,
+            VenueOfferStateRow.deployment_environment == self._env,
+            VenueOfferStateRow.venue_offer_id == venue_offer_id,
+        ))
+        if state is not None and (state.cid is not None or state.execution_decision_id is not None):
+            return True
+        claim = await session.scalar(select(OfferClaimRow.cid).where(
+            OfferClaimRow.exchange_account_id == account,
+            OfferClaimRow.deployment_environment == self._env,
+            OfferClaimRow.venue_offer_id == venue_offer_id,
+        ).limit(1))
+        attempt = await session.scalar(select(SubmissionAttemptRow.attempt_id).where(
+            SubmissionAttemptRow.exchange_account_id == account,
+            SubmissionAttemptRow.deployment_environment == self._env,
+            SubmissionAttemptRow.venue_offer_id == venue_offer_id,
+        ).limit(1))
+        return claim is not None or attempt is not None
+
+    async def _unattributed_offer_ids(
+        self, session: AsyncSession, offers: list[ActiveFundingOffer],
+    ) -> set[str]:
+        """Active offers no claim (any state) and no attempt traces to.
+
+        Read after this recovery's own resolutions were appended, so an offer
+        just matched to an UNKNOWN is already attributed.
+        """
+        ids = {offer.venue_offer_id for offer in offers}
+        if not ids:
+            return set()
+        owned = set((await session.execute(select(OfferClaimRow.venue_offer_id).where(
+            account_scope_clause(
+                session,
+                account_id=self._ctx.account_id,
+                exchange_account_column=OfferClaimRow.exchange_account_id,
+                legacy_account_column=OfferClaimRow.account_id,
+            ),
+            OfferClaimRow.deployment_environment == self._env,
+            OfferClaimRow.venue_offer_id.in_(ids),
+        ))).scalars().all())
+        try:
+            canonical = UUID(self._ctx.account_id)
+        except ValueError:
+            canonical = None
+        if canonical is not None:
+            owned |= set((await session.execute(select(SubmissionAttemptRow.venue_offer_id).where(
+                SubmissionAttemptRow.exchange_account_id == canonical,
+                SubmissionAttemptRow.deployment_environment == self._env,
+                SubmissionAttemptRow.venue_offer_id.in_(ids),
+            ))).scalars().all())
+        return ids - owned
 
     def _group_snapshot(
         self,

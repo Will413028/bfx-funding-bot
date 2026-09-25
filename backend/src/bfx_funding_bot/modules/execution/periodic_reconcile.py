@@ -165,15 +165,14 @@ class PeriodicReconcile:
             result.n_released > 0
             or result.n_claimed > 0
             or result.n_matched > 0
-            or result.n_quarantined > 0
             or drifted
         ):
             log.warning(
                 "periodic_reconcile_divergence released=%d claimed=%d failed=%d "
-                "matched=%d quarantined=%d realized_drift=%s reserved_drift=%s "
+                "matched=%d realized_drift=%s reserved_drift=%s "
                 "— WS lifecycle path missed events",
                 result.n_released, result.n_claimed, result.n_failed,
-                result.n_matched, result.n_quarantined,
+                result.n_matched,
                 result.realized_drift_usdt, result.reserved_drift_usdt,
             )
             self._divergence_flagged = True
@@ -183,7 +182,6 @@ class PeriodicReconcile:
                     f"reconcile drift released={result.n_released} "
                     f"claimed={result.n_claimed} "
                     f"matched={result.n_matched} "
-                    f"quarantined={result.n_quarantined} "
                     f"realized_drift={result.realized_drift_usdt} "
                     f"reserved_drift={result.reserved_drift_usdt}"
                 ),
@@ -196,6 +194,12 @@ class PeriodicReconcile:
             )
         if self._deployment is not None:
             try:
-                await self._deployment.deploy(venue_offers=result.venue_offers)
+                # Only managed offers are the bot's to reprice (D2): a foreign
+                # offer is never cancelled, and an UNKNOWN's candidate has no
+                # claim a cancel could be admitted against.
+                await self._deployment.deploy(venue_offers=tuple(
+                    offer for offer in result.venue_offers
+                    if offer.venue_offer_id not in result.unmanaged_offer_ids
+                ))
             except Exception:  # deployment must never crash the reconcile backbone
                 log.exception("deployment_phase_failed")

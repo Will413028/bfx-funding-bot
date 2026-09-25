@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
 from math import isfinite
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
@@ -20,6 +20,10 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
+)
+from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    choose_fingerprinted_amount,
+    fingerprint_of,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
@@ -293,6 +297,11 @@ class DeploymentReconciler:
                     views = {cell: await self._capital.read(
                         symbol=symbol, cell_id=cell, session=session,
                     ) for cell in active}
+                    # D3a: the amount fingerprints this symbol's live commitments
+                    # already hold, read in the same session as the budget.
+                    held = set(await self._capital.fingerprints_in_use(
+                        symbol=symbol, session=session,
+                    ))
                 min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
             except Exception as exc:
@@ -336,6 +345,24 @@ class DeploymentReconciler:
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue
+                # Finalise the amount before anything durable names it: the
+                # audit row, the intent, the attempt payload and the venue
+                # request all carry this exact fingerprinted value.
+                planned = amount
+                fingerprinted = choose_fingerprinted_amount(
+                    planned,
+                    seed_key=f"{reconcile_id}:{cell_id}:{quote.signal_correlation_id}",
+                    in_use=held, minimum=min_fill,
+                    maximum=views[cell_id].applied.policy.max_offer_amount,
+                )
+                if fingerprinted is None:
+                    log.warning(
+                        "deployment_skip_no_amount_fingerprint cell=%s symbol=%s planned=%s "
+                        "held=%d", cell_id, symbol, planned, len(held),
+                    )
+                    continue
+                amount = fingerprinted
+                held.add(cast(int, fingerprint_of(amount)))
                 decision = DecisionPayload(
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
