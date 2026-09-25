@@ -26,7 +26,10 @@ from bfx_funding_bot.modules.execution.amount_fingerprint import (
     fingerprint_of,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_repository import (
+    CapitalBlockedError,
+    read_policy_unlocked,
+)
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -64,6 +67,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
+from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -171,8 +175,12 @@ class DeploymentReconciler:
         rate_optimizer: RateOptimizer | None = None,
         optimizer_fee_rate: Decimal | None = None,
         optimizer_horizon_h: int | None = None,
+        disabled_sweep: ManagedOfferSweep | None = None,
     ) -> None:
         self._store = store
+        # A currency whose applied policy is disabled has its managed offers
+        # cancelled (lending envelope D4); None on paper/shadow.
+        self._disabled_sweep = disabled_sweep
         self._tracker = tracker
         self._ledger = ledger
         self._safety = safety_chain
@@ -223,6 +231,28 @@ class DeploymentReconciler:
             c.cell_id: c.period_agg for c in cells
         }
 
+    async def _pull_if_disabled(self, symbol: str) -> bool:
+        """Whether ``symbol`` is disabled; if so, cancel its managed offers.
+
+        The everyday per-currency stop (D4): nothing new is placed, the offers
+        this bot placed are pulled by id through the command gate, foreign
+        offers and taken loans are untouched. An unreadable policy is not
+        "disabled": the capital read below fails closed on it instead.
+        """
+        try:
+            repository = self._capital.repository
+            async with self._capital.session_factory() as session:
+                policy = await read_policy_unlocked(
+                    session, account_id=repository.account_id,
+                    environment=repository.environment, symbol=symbol)
+        except Exception:
+            return False
+        if policy.enabled:
+            return False
+        if self._disabled_sweep is not None:
+            await self._disabled_sweep.cancel([symbol], reason=f"{symbol} disabled by policy")
+        return True
+
     async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
         ctx = self._ctx
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
@@ -241,6 +271,8 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            if await self._pull_if_disabled(symbol):
+                continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
