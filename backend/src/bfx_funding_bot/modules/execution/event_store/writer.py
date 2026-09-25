@@ -57,6 +57,8 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Moves the retired release ceremony's tables into release_archive; none is
     # a projection, and no event or cursor is touched.
     "5d1c7e9a3b20",
+    # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
+    "9391a0f675d3",
     # Grants only (the web API's read baseline); no table, event or cursor changes.
     "6f2b8d0e4a17",
 })

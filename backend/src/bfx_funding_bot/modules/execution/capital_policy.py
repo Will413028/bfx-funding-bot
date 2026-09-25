@@ -31,6 +31,11 @@ class CapitalPolicy:
     reserve_amount: Decimal = _ZERO
     allocation_mode: Literal["all_available"] = "all_available"
     max_cell_fraction: Decimal = Decimal("0.70")
+    # Absolute ceiling on one offer's native amount (T9, ADR 2026-09-25 D5). None
+    # means never set: sizing is not capped by it, and MaxOfferAmountGuard refuses
+    # every offer until an amended policy (schema 2) sets it. Not part of
+    # evaluate_capital -- it bounds a single offer, not the budget.
+    max_offer_amount: Decimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -41,6 +46,10 @@ class CapitalPolicy:
         _validate_amount("max_cell_fraction", self.max_cell_fraction)
         if not _ZERO < self.max_cell_fraction <= Decimal("1"):
             raise ValueError("max_cell_fraction must be greater than 0 and at most 1")
+        if self.max_offer_amount is not None:
+            _validate_amount("max_offer_amount", self.max_offer_amount)
+            if self.max_offer_amount == _ZERO:
+                raise ValueError("max_offer_amount must be positive when set")
 
 
 @dataclass(frozen=True, slots=True)

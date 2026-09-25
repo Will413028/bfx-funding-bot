@@ -70,6 +70,8 @@ TRIGGER_TITLES: Final[Mapping[str, str]] = {
     "submit_outcome_unknown": "UNKNOWN submit",
     "orphan_quarantined": "orphan offer quarantined",
     "writer_lock_lost": "writer lock lost",
+    "command_rate_exceeded": "venue write rate kept exceeding its limit",
+    "loss_limiter": "loss limiter",
 }
 
 # Values of these keys are scrubbed from every alert (exception text can carry them).
