@@ -18,8 +18,14 @@ from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAudi
 from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from bfx_funding_bot.modules.observability import alerts
 
-from .test_capital_repository import capital_db as capital_db
-from .test_capital_repository import capital_engine as capital_engine
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+def capital_db(migrated_db):
+    """The migrated PostgreSQL schema: its triggers are the rules' authority."""
+    return migrated_db
+
 
 SYMBOLS = ("fUST", "fUSD")
 

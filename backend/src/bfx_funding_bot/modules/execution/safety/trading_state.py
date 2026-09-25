@@ -118,8 +118,8 @@ def validate_transition(
 ) -> None:
     """Raise when ``previous -> state`` is not a transition the system allows.
 
-    The same rules are enforced by the PostgreSQL insert trigger; keep the two
-    in step (``8e4f33517b10_add_trading_state``). One difference is deliberate:
+    The PostgreSQL insert trigger is the authority; this is the early error,
+    kept in step by ``test_trading_state_rule_parity``. One difference is deliberate:
     code reads "no decision recorded" as HALTED, so the first transition it
     writes must be one a HALTED allows; the trigger accepts any first row so
     the migration can carry an existing pause over.
@@ -238,6 +238,28 @@ def _is_lift(current: TradingState | None, *, state: str, cause: str,
             and state == ACTIVE and cause == CAUSE_AUTO and probation is None)
 
 
+async def check_transition(
+    session: AsyncSession, *, account_id: UUID, environment: str, current: TradingState | None,
+    state: str, cause: str, actor: str, reason: str, probation: Probation | None,
+) -> None:
+    """Refuse, before the database does, what its triggers would refuse.
+
+    The PostgreSQL insert triggers (``guard_trading_state_transition``,
+    ``guard_trading_state_probation``) and CHECKs are the authority; this only
+    fails earlier with a clearer error. ``tests/integration/
+    test_trading_state_rule_parity.py`` keeps the two in step.
+    """
+    validate_transition(current, state=state, cause=cause, actor=actor, reason=reason,
+                        probation=probation)
+    if (state == ACTIVE and probation is None
+            and not _is_lift(current, state=state, cause=cause, probation=probation)
+            and await unfinished_probation(session, account_id=account_id,
+                                           environment=environment) is not None):
+        raise IllegalTradingTransition(
+            "illegal trading state transition: a probation has not passed, so ACTIVE must "
+            "stay inside it (ADR D3)")
+
+
 async def append_transition(
     session: AsyncSession, *, account_id: UUID, environment: str, state: str, cause: str,
     actor: str, reason: str, now_ms: int, probation: Probation | None = None,
@@ -251,17 +273,9 @@ async def append_transition(
     if restates(current, state=state, cause=cause, probation=probation):
         assert current is not None
         return TransitionResult(state=current, changed=False, previous=current)
-    validate_transition(current, state=state, cause=cause, actor=actor, reason=reason,
-                        probation=probation)
-    if (state == ACTIVE and probation is None
-            and not _is_lift(current, state=state, cause=cause, probation=probation)
-            and await unfinished_probation(session, account_id=account_id,
-                                           environment=environment) is not None):
-        # Needs the history, not only the previous row; the insert trigger
-        # guard_trading_state_probation (0218f9ab59a2) enforces the same.
-        raise IllegalTradingTransition(
-            "illegal trading state transition: a probation has not passed, so ACTIVE must "
-            "stay inside it (ADR D3)")
+    await check_transition(session, account_id=account_id, environment=environment,
+                           current=current, state=state, cause=cause, actor=actor,
+                           reason=reason, probation=probation)
     row = TradingStateRow(
         exchange_account_id=account_id,
         deployment_environment=environment,
@@ -375,6 +389,7 @@ __all__ = [
     "TransitionResult",
     "announce",
     "append_transition",
+    "check_transition",
     "read_current",
     "restates",
     "to_state",

@@ -1,6 +1,6 @@
 """Release flow by change class, approvals, resume and probation (ADR D1-D4).
 
-SQLite and PostgreSQL (``capital_db``). Only the operator authority check and
+On the migrated PostgreSQL schema, whose triggers are the rules' authority. Only the operator authority check and
 the FX observation are fakes; the gate, worker, trading state, approvals and
 capital reads are the real ones.
 """
@@ -13,10 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import pytest
 import pytest_asyncio
 from sqlalchemy import insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.deployments.tables import DeploymentRow
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -39,8 +36,9 @@ from bfx_funding_bot.modules.observability import alerts
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 from .test_capital_command_boundary import boundary, second_ready
-from .test_capital_repository import capital_engine as capital_engine
 from .test_capital_repository import intent
+
+pytestmark = pytest.mark.integration
 
 D = Decimal
 DIGEST = "sha256:" + "a" * 64
@@ -66,26 +64,22 @@ async def ledger(factory, *, klass: str, digest: str = DIGEST, outcome: str = "s
                  attempt: UUID | None = None, revision: str = REV) -> UUID:
     from datetime import UTC, datetime
     attempt = attempt or uuid4()
-    now = datetime.now(UTC)
+    # An attempt's rows share its start (the ledger's pairing trigger checks it).
+    started = datetime(2026, 9, 25, tzinfo=UTC)
     async with factory.begin() as session:
-        session.add(DeploymentRow(attempt_id=attempt, started_at=now,
-            finished_at=None if outcome == "started" else now, source_revision=revision,
+        session.add(DeploymentRow(attempt_id=attempt, started_at=started,
+            finished_at=None if outcome == "started" else datetime.now(UTC), source_revision=revision,
             backend_digest=digest, frontend_digest=OTHER, change_class=klass,
             migrations_applied=False, outcome=outcome, detail="fixture"))
     return attempt
 
 
 @pytest_asyncio.fixture
-async def capital_db(capital_engine):
-    """An account whose builds were started by the deploy tool (a `started`
-    ledger row per test identity; none of them `deployed`, so none is behind
-    another)."""
-    async with capital_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(capital_engine, expire_on_commit=False)
-    account = uuid4()
-    async with factory.begin() as session:
-        session.add(ExchangeAccount(id=account, venue="bitfinex", label="capital-test"))
+async def capital_db(migrated_db):
+    """The migrated schema (its triggers are the authority), with builds the
+    deploy tool started (a `started` ledger row per test identity; none of them
+    `deployed`, so none is behind another)."""
+    factory, account = migrated_db
     for klass in ("standard", "material"):
         for digest in (DIGEST, OTHER):
             await ledger(factory, klass=klass, digest=digest, attempt=deployment_id(klass, digest))
