@@ -32,6 +32,10 @@ from .test_capital_repository import (
     snapshot,
 )
 
+# The planned 500, as the planner submits it: rounded down, carrying an amount
+# fingerprint (D3a) the command gate requires.
+AMOUNT = "499.99990500"
+
 
 @pytest.mark.asyncio
 async def test_policy_guard_and_planner_use_total_capital_cell_limit(capital_db):
@@ -66,7 +70,10 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
                          capital_runtime=runtime)
     await rec.deploy()
     planned = ex.ready_submissions[0]
-    assert planned.decision.offer_amount_usdt == 700.0
+    # The 700 budget, fingerprinted (D3a): below it by less than 0.0001.
+    from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
+    sent = Decimal(str(planned.decision.offer_amount_usdt))
+    assert Decimal("699.9999") < sent < Decimal("700") and fingerprint_of(sent)
     assert planned.capital_view.applied.revision == 1
     assert planned.capital_view.budget.max_new_offer == Decimal("700")
 
@@ -171,7 +178,7 @@ async def boundary(factory, account):
     await snapshot(factory, repo)
     runtime = CapitalRuntime(repository=repo, session_factory=factory, clock=lambda: 1100)
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    event, row = intent(account, "500", 10)
+    event, row = intent(account, AMOUNT, 10)
     from tests.external.bitfinex.test_funding_rules import evidence
     from tests.modules.execution.deployment.test_reconciler import _valid_snapshot
     async with factory.begin() as session:
@@ -179,7 +186,7 @@ async def boundary(factory, account):
     ready = ReadyToSubmit(
         decision=DecisionPayload(decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=event.signal_correlation_id, offer_rate=0.0001,
-            offer_amount_usdt=500, offer_duration_days=2, symbol="fUST"),
+            offer_amount_usdt=float(AMOUNT), offer_duration_days=2, symbol="fUST"),
         decision_id=row.decision_id, policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="book", model_version=None, evidence={},
         safety=GuardResult(True, "test"), capital_view=view,
@@ -232,13 +239,14 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
 
 
-async def second_ready(factory, account, ready):
+async def second_ready(factory, account, ready, amount="199.99990200"):
     """Another planned offer, so a stop is tested against a submit that could run."""
-    event, row = intent(account, "200", 20)
+    event, row = intent(account, amount, 20)
     async with factory.begin() as session:
         session.add(row)
     return replace(ready, decision_id=row.decision_id, decision=ready.decision.model_copy(
-        update={"signal_correlation_id": event.signal_correlation_id, "offer_amount_usdt": 200}))
+        update={"signal_correlation_id": event.signal_correlation_id,
+                "offer_amount_usdt": float(amount)}))
 
 
 @pytest.mark.asyncio
@@ -265,7 +273,7 @@ async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db,
     assert len(intents) == 1
     # A cancel ACK never releases capital inside this boundary.
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    assert view.budget.spendable == Decimal("500")
+    assert view.budget.spendable == Decimal("1000") - Decimal(AMOUNT)
 
 
 @pytest.mark.asyncio
@@ -374,11 +382,13 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="two-gates"))
     gate, venue, first, ctx, runtime, halt = await boundary(factory, account)
-    event, row = intent(account, "500", 20)
+    # A distinct fingerprint: only the shared budget may decide between them.
+    event, row = intent(account, "499.99990501", 20)
     async with factory.begin() as session:
         session.add(row)
     second = replace(first, decision_id=row.decision_id, decision=first.decision.model_copy(
-        update={"signal_correlation_id": event.signal_correlation_id}))
+        update={"signal_correlation_id": event.signal_correlation_id,
+                "offer_amount_usdt": 499.99990501}))
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
