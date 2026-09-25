@@ -146,7 +146,8 @@ def build_trading_control_router() -> APIRouter:
                 "source_revision": deployment.source_revision,
                 "backend_digest": deployment.backend_digest,
                 "change_class": deployment.change_class,
-                "finished_at": deployment.finished_at.isoformat(),
+                # Terminal rows always have one; only a `started` row has none.
+                "finished_at": deployment.finished_at.isoformat() if deployment.finished_at else None,
             },
             "approvals": [{"backend_digest": a.backend_digest, "source_revision": a.source_revision,
                            "approved_by": a.approved_by, "approved_at_ms": a.approved_at_ms}

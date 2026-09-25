@@ -46,6 +46,33 @@ jobs:
       - name: Unit tests
         run: pnpm vitest run
 
+  deploy_policy:
+    name: Deploy config policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      # The VM runs this lock (bfx-deploy: uv sync --frozen); it must match pyproject.
+      - name: Host tooling lock is current
+        run: uv lock --check --project deploy/vm/ops
+      # Container hardening is enforced here, on Compose's own rendering, instead of
+      # by re-inspecting every container on the VM (design review #7).
+      - name: Compose hardening policy
+        env:
+          BFX_BACKEND_IMAGE: ghcr.io/ci/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_BACKEND_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          BFX_FRONTEND_IMAGE: ghcr.io/ci/frontend@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          BFX_FRONTEND_DIGEST: sha256:1111111111111111111111111111111111111111111111111111111111111111
+          BFX_SOURCE_REVISION: ${{ github.sha }}
+          BFX_CHANGE_CLASS: material
+          BFX_DEPLOYMENT_ID: 00000000-0000-4000-8000-000000000000
+        run: |
+          docker compose -f deploy/vm/docker-compose.app.yml config --no-env-resolution --format json \
+            | python3 deploy/vm/ops/compose_policy.py
+
   backend_unit:
     name: Backend (Python) — unit
     runs-on: ubuntu-latest

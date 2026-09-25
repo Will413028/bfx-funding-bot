@@ -8,4 +8,4 @@ Type=oneshot
 Environment=HOME=/root
 Environment=PYTHONDONTWRITEBYTECODE=1
 TimeoutStartSec=60
-ExecStart=/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_notify.py --level critical "systemd unit %i failed on %H; see journalctl -u %i"
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_notify.py --level critical "systemd unit %i failed on %H; see journalctl -u %i"

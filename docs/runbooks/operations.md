@@ -69,7 +69,7 @@ except urllib.error.HTTPError as e:
 恢復仍需 UI（TOTP）。bot 自己停著時兩者都不可用：到 Bitfinex 網頁撤單並記錄。
 
 `BFX_KILL_SWITCH=true`（bot.env）是 DB 故障時的 break-glass：guard 直接擋新單，開機時也走 kill
-path。改 bot.env 需要重建 bot container（見 §7）。
+path。改 bot.env 後 `sudo bfx-deploy --recreate`（見 §7）。
 
 ## 3. Release flow：核准與限額期
 
@@ -142,31 +142,29 @@ Overview 的 uncertainty 明細提供三種請求（同樣經 MFA、排入 `unce
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
-- **換 token 或 chat id 要兩個檔都改**：改 `notify.env` 立即生效；改 `bot.env` 要重建 bot（§7）。
+- **換 token 或 chat id 要兩個檔都改**：改 `notify.env` 立即生效；改 `bot.env` 後
+  `sudo bfx-deploy --recreate`（§7）。
+- **為什麼是兩條、兩份檔**（design review #14，刻意保留）：兩條路徑在容器／主機的邊界兩側，
+  各自要在對方掛掉時還能發出告警——bot 死掉或起不來時由主機的 bfx-deploy／`bfx-alert@` 通報，
+  主機 timer 停擺時交易事件仍由 bot 自己通報；合成一條就會讓其中一邊失去告警。token 分兩份檔是
+  最小權限：`bot.env` 只給 bot container，`notify.env` 只給 root 的主機工具，DR unit（`ubuntu`）
+  兩份都讀不到。
 - 測試：`sudo bfx-notify --level info "test"`。
 - Grafana 仍是第二條觀測路徑。
 
 ## 7. 改了 runtime env 之後重建 container
 
-bfx-deploy 只在有新 release（或 `--retry`）時重建 container；只改 `/opt/bfx/runtime/*.env`
-不會觸發。以 ledger 最新一筆 `deployed` 的值手動重建（值要完全照抄，特別是 `change_class`：
-把 standard build 標成 material 會讓 bot 進 `REDUCING/material_deploy`）：
+bfx-deploy 只在有新 release（或 `--retry`）時自動重建 container；只改 `/opt/bfx/runtime/*.env`
+不會觸發。改完後：
 
 ```bash
-docker exec --user postgres bfx-postgres psql -U bfx -d bfx -At -F ' ' -c \
-  "SELECT source_revision, backend_digest, frontend_digest, change_class
-     FROM deployments WHERE outcome='deployed' ORDER BY id DESC LIMIT 1"
-
-REV=<source_revision>; BD=<backend_digest>; FD=<frontend_digest>; CLASS=<change_class>
-sudo env BFX_BACKEND_IMAGE=ghcr.io/will413028/bfx-funding-bot-backend@$BD BFX_BACKEND_DIGEST=$BD \
-  BFX_FRONTEND_IMAGE=ghcr.io/will413028/bfx-funding-bot-frontend@$FD BFX_FRONTEND_DIGEST=$FD \
-  BFX_SOURCE_REVISION=$REV BFX_CHANGE_CLASS=$CLASS \
-  docker compose -p bfx-app -f /var/lib/bfx-deploy/releases/$REV/docker-compose.app.yml \
-  up -d --no-deps --force-recreate bot       # 或 webapi / frontend
+sudo bfx-deploy --recreate --dry-run   # 預覽：同一個 release、分級 standard
+sudo bfx-deploy --recreate             # 或 --recreate --force-material（這次 env 改動要核准時）
 ```
 
-先 `sudo systemctl stop bfx-deploy.timer`，完成並確認 `/healthz` 與 UI 正常後再 start。
-這條路徑不經 bfx-deploy 的 hardening 再檢查與健康等待，也不寫 ledger；只用於 env 變更。
+它和一般部署走同一套：env 檢查、ledger `started` 列、`--force-recreate`、身分檢查、健康等待、
+結束列與 Telegram。沒有 rollback：不健康就停 bot 並記 `failed`，修好 env 再跑一次。細節見
+[deploy runbook](deploy.md#--recreate改了-runtime-env-之後)。
 
 ## 8. 定期與背景工作
 
@@ -175,7 +173,7 @@ sudo env BFX_BACKEND_IMAGE=ghcr.io/will413028/bfx-funding-bot-backend@$BD BFX_BA
 | `bfx-deploy.timer` | 每 5 分鐘（`*:2/5`） | 部署最新綠燈 main |
 | `bfx-pgbackrest-backup.timer` / `bfx-pgbackrest-status.timer` | 見 unit | 備份與 RPO evidence（`OnFailure=bfx-alert@`） |
 | `bfx-backup-check.timer` | 每 5 分鐘（`*:1/5`） | evidence 與 restore heartbeat 檢查，連續兩次才告警，6 小時重發 |
-| `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | isolated restore ＋ prefix-hash 驗證（[offsite DR](offsite-dr.md#monthly-and-change-triggered-prefix-restore-test)） |
+| `bfx-restore-test.timer` | 每月 1 日 09:17 UTC | `bfx-restore-test@current`：用已部署 release 的 DR 腳本做 isolated restore ＋ prefix-hash 驗證（[offsite DR](offsite-dr.md#monthly-and-change-triggered-prefix-restore-test)） |
 | `bfx-weekly-report.timer` | 每週 | attribution／G3 報告（用 `bfx-bot:local`，bfx-deploy 每次成功部署後重新 tag） |
 | `bfx-halt-watch.timer` | 見 unit | 以 `/admin/dry-evaluate` 檢查停機是否真的生效 |
 

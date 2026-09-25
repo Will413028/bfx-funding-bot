@@ -1,0 +1,21 @@
+[Unit]
+Description=Isolated restore test with the DR scripts of release %i (prefix-hash verification)
+Documentation=file:///home/ubuntu/bfx-releases/%i/docs/runbooks/offsite-dr.md
+Requires=docker.service
+After=docker.service
+OnFailure=bfx-alert@%n.service
+
+[Service]
+Type=oneshot
+# Same principal as the pgBackRest units: the drill reads its secrets and writes
+# its evidence under this user's home. HOME is explicit, never inherited.
+# %i is a revision (bfx-deploy runs the target release's scripts before it ships)
+# or `current` (the monthly timer: the deployed release). Each is a clean git
+# worktree of the mirror under /home/ubuntu/bfx-releases, kept by bfx-deploy.
+User=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/home/ubuntu/bfx-releases/%i
+# The drill's own RTO deadline is 3600s plus a 30s cleanup budget.
+TimeoutStartSec=7200
+ExecStart=/usr/local/lib/bfx-ops/current/ops/.venv/bin/python /usr/local/lib/bfx-ops/current/ops/bfx_restore_test.py --config /home/ubuntu/bfx/restore-test.json --drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh --evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json --heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json

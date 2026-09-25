@@ -16,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[3]
 SYSTEMD = ROOT / "deploy/vm/systemd"
 NEW_UNITS = ("bfx-deploy.service", "bfx-deploy.timer", "bfx-alert@.service",
              "bfx-backup-check.service", "bfx-backup-check.timer",
-             "bfx-restore-test.service", "bfx-restore-test.timer")
+             "bfx-restore-test@.service", "bfx-restore-test.timer")
+PGBACKREST_UNITS = ("bfx-pgbackrest-backup.service", "bfx-pgbackrest-backup.timer",
+                    "bfx-pgbackrest-status.service", "bfx-pgbackrest-status.timer")
+OPS_PYTHON = "/usr/local/lib/bfx-ops/current/ops/.venv/bin/python"
+OPS = "/usr/local/lib/bfx-ops/current/ops"
 
 
 class Unit(dict[str, dict[str, list[str]]]):
@@ -44,12 +48,13 @@ def _unit(name: str) -> Unit:
     return unit
 
 
-def test_installer_lists_exactly_the_units_it_needs() -> None:
+def test_managed_units_are_exactly_the_ones_the_tooling_owns() -> None:
+    listed = [line.strip() for line in (SYSTEMD / "managed-units").read_text().splitlines()
+              if line.strip() and not line.startswith("#")]
+    assert sorted(listed) == sorted({*NEW_UNITS, *PGBACKREST_UNITS})
     installer = (ROOT / "deploy/vm/ops/install.sh").read_text(encoding="utf-8")
-    listed = set(re.findall(r"^\s+(bfx-[\w@.-]+\.(?:service|timer))$", installer, re.M))
-    assert listed == {*NEW_UNITS, "bfx-pgbackrest-backup.service"}
-    for tool in ("bfx_deploy.py", "bfx_notify.py", "bfx_backup_check.py", "bfx_restore_test.py",
-                 "change_class.py"):
+    assert "managed-units" in installer and '"$UV" sync --frozen' in installer
+    for tool in ("bfx_deploy.py", "bfx_notify.py"):
         assert tool in installer and (ROOT / "deploy/vm/ops" / tool).is_file()
     assert "systemctl enable" not in installer and "systemctl start" not in installer
 
@@ -63,7 +68,8 @@ def test_services_state_home_and_use_absolute_paths(name: str) -> None:
     home = "/root" if user == "root" else f"/home/{user}"
     assert f"HOME={home}" in unit["Service"]["Environment"]
     exec_start = unit.one("Service", "ExecStart")
-    assert exec_start.startswith("/usr/bin/python3 /usr/local/lib/bfx-ops/")
+    # The deployed release's uv environment, never the system interpreter.
+    assert exec_start.startswith(f"{OPS_PYTHON} {OPS}/")
     assert "~" not in exec_start and "%h" not in exec_start and "$HOME" not in exec_start
     for token in exec_start.split():
         if "/" in token and not token.startswith('"'):
@@ -74,7 +80,7 @@ def test_units_run_as_the_principal_each_job_needs() -> None:
     assert "User" not in _unit("bfx-deploy.service")["Service"]           # docker + root-only secrets
     assert "User" not in _unit("bfx-backup-check.service")["Service"]     # root-only Telegram creds
     assert "User" not in _unit("bfx-alert@.service")["Service"]
-    assert _unit("bfx-restore-test.service").one("Service", "User") == "ubuntu"  # the drill's evidence owner
+    assert _unit("bfx-restore-test@.service").one("Service", "User") == "ubuntu"  # the drill's evidence owner
 
 
 def test_deploy_timer_every_five_minutes_offset_from_status() -> None:
@@ -89,21 +95,28 @@ def test_deploy_timer_every_five_minutes_offset_from_status() -> None:
 
 
 def test_failures_that_cannot_alert_themselves_use_the_alert_template() -> None:
-    assert _unit("bfx-restore-test.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
+    assert _unit("bfx-restore-test@.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
     assert _unit("bfx-pgbackrest-backup.service").one("Unit", "OnFailure") == "bfx-alert@%n.service"
     # bfx-deploy and bfx-backup-check alert on their own; an OnFailure would double-page.
     assert "OnFailure" not in _unit("bfx-deploy.service")["Unit"]
     assert "OnFailure" not in _unit("bfx-backup-check.service")["Unit"]
     alert = _unit("bfx-alert@.service").one("Service", "ExecStart")
-    assert alert.startswith("/usr/bin/python3 /usr/local/lib/bfx-ops/bfx_notify.py --level critical")
+    assert alert.startswith(f"{OPS_PYTHON} {OPS}/bfx_notify.py --level critical")
     assert "%i" in alert
 
 
-def test_restore_test_runs_the_existing_drill_from_the_operator_checkout() -> None:
-    exec_start = _unit("bfx-restore-test.service").one("Service", "ExecStart")
-    assert "--drill /home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh" in exec_start
+def test_restore_test_runs_the_drill_of_the_release_it_is_instantiated_for() -> None:
+    unit = _unit("bfx-restore-test@.service")
+    exec_start = unit.one("Service", "ExecStart")
+    assert "--drill /home/ubuntu/bfx-releases/%i/deploy/vm/pgbackrest/restore-drill.sh" in exec_start
+    assert unit.one("Service", "WorkingDirectory") == "/home/ubuntu/bfx-releases/%i"
+    # The monthly run tests the deployed release; bfx-deploy instantiates <revision>.
+    assert _unit("bfx-restore-test.timer").one("Timer", "Unit") == "bfx-restore-test@current.service"
+    for name in ("bfx-pgbackrest-backup.service", "bfx-pgbackrest-status.service"):
+        assert _unit(name).one("Service", "ExecStart").startswith(
+            "/home/ubuntu/bfx-releases/current/deploy/vm/pgbackrest/")
     assert "--heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in exec_start
-    # Prefix receipts never overwrite the baseline drill's restore.json (Halt 2 reads it).
+    # Prefix receipts never overwrite the baseline drill's restore.json.
     assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert "--evidence /home/ubuntu/bfx/dr-evidence/backup.json" in check
