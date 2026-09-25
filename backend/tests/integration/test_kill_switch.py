@@ -7,6 +7,7 @@ moment -- so "HALTED is written first" is observed, not assumed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import replace
 from decimal import Decimal
 
@@ -189,25 +190,48 @@ async def test_without_the_writer_lock_the_stop_is_recorded_but_the_venue_untouc
 @pytest.mark.asyncio
 async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_db):
     """A submit already past its transport recheck must not land after the
-    cancel-all: the kill holds the account command lock for the venue part."""
+    cancel-all: the kill holds the account command lock for the venue part.
+
+    Synchronised on events, not elapsed time: the test learns that the kill has
+    written HALTED and reached the quiesce step from the quiesce hook itself, so
+    a slow machine only makes it slower, never red. The generous bounds below are
+    functional (a hang fails the test), not timing contracts; the production
+    quiesce limit is untouched and exercised by the wedged-command test.
+    """
     factory, account = capital_db
     gate, ctx, trading, venue = await exposed_account(factory, account)
-    switch = kill_switch(factory, trading, ctx, venue,
-                         quiesce=lambda: gate.quiesced(str(account), timeout_s=10))
+    waiting_for_commands = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def observed_quiesce():
+        waiting_for_commands.set()
+        async with gate.quiesced(str(account), timeout_s=300) as quiet:
+            yield quiet
+
+    switch = kill_switch(factory, trading, ctx, venue, quiesce=observed_quiesce)
     in_flight = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
     await in_flight.acquire()
     task = asyncio.create_task(switch.engage(cause="operator", actor="will", reason="kill"))
-    for _ in range(200):
-        if (await trading.current()).state == "HALTED":
-            break
-        await asyncio.sleep(0.01)
-    assert (await trading.current()).state == "HALTED"
-    await asyncio.sleep(0.05)
-    assert venue.calls == [] and not task.done()
-    in_flight.release()
-    result = await asyncio.wait_for(task, timeout=10)
+    try:
+        await asyncio.wait_for(waiting_for_commands.wait(), timeout=60)
+        # HALTED is committed before the kill waits for the in-flight command...
+        assert (await trading.current()).state == "HALTED"
+        # ...and while that command holds the lock nothing reaches the venue,
+        # however many times the kill task is scheduled.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert venue.calls == [] and not task.done()
+        in_flight.release()
+        result = await asyncio.wait_for(task, timeout=60)
+    finally:
+        if in_flight.locked():
+            in_flight.release()
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     assert result.complete
-    assert [currency for currency, _ in venue.calls] == ["BTC", "USD", "UST"]
+    assert venue.calls == [("BTC", "HALTED"), ("USD", "HALTED"), ("UST", "HALTED")]
 
 
 @pytest.mark.asyncio
