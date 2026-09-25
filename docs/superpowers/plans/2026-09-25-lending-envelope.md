@@ -20,6 +20,15 @@ until the cutover in §4.
   durable intent. Anything else is *foreign*: never cancelled or repriced by the
   bot, excluded from managed exposure, its amount already absent from venue
   `available`; it raises a `foreign_exposure` alert once per venue id.
+- **UNKNOWN resolution by amount fingerprint (D3a)**: funding submits carry no
+  `cid`, so every submitted amount encodes a fingerprint in its last 4 decimals
+  (1..9999, unique among the symbol's non-terminal claims/attempts; the amount
+  moves by < 0.0001 and stays within [venue minimum, max_offer_amount]). After
+  the settle window, a complete snapshot + offer history resolves an UNKNOWN:
+  an offer (active or terminal) with the fingerprinted amount, symbol, rate and
+  period → claim it; history complete over the submit window and no such offer
+  → not sent; incomplete evidence → stays quarantined. Replaces the
+  "never match by amount/rate/time" rule.
 - **Reaction ladder (D3)**:
   1. reject one action — envelope, book stale, auth DOWN, heartbeat;
   2. symbol quarantine, auto-clearing — UNKNOWN submit, read failure, unaccepted
@@ -58,7 +67,7 @@ integration tests (Docker), `uv run mypy src/`, `uv run ruff check`,
 | # | Task | Depends | Acceptance |
 |---|---|---|---|
 | T1 | Envelope into `CapitalPolicy`: new fields + migration + `amend_capital_policy.py`; `PeriodBoundsGuard`/`OpenOfferLimitGuard`/`RateFloorGuard` read the applied policy; absolute `min_rate_apr` floor; drop `pre_trade_limits.symbols` and the live-boot YAML requirement | — | missing policy field → submit rejected; floor = max(abs, relative) tested both sides; mutation on each comparison |
-| T2 | Managed-only capital authority: unattributed / unclassifiable venue exposure becomes `foreign` in the snapshot classifier (`capital_repository.py` 452/459/516/669/761) instead of raising; `foreign_exposure` alert; drop `orphan_quarantined` trip in `boot_recovery.py` | T1 | a manual offer on the account: no halt, no cancel, budget shrinks by its amount; the existing inventory/historical-cycle regressions still pass |
+| T2 | Managed-only capital authority + D3a fingerprint: fingerprinted submit amounts; UNKNOWN auto-resolution from snapshot + history;  unattributed / unclassifiable venue exposure becomes `foreign` in the snapshot classifier (`capital_repository.py` 452/459/516/669/761) instead of raising; `foreign_exposure` alert; drop `orphan_quarantined` trip in `boot_recovery.py` | T1 | a manual offer on the account: no halt, no cancel, budget shrinks by its amount; an UNKNOWN resolves to claimed / not-sent / still-open for the three evidence cases; the existing inventory/historical-cycle regressions still pass |
 | T3 | Reaction ladder: remove `submit_outcome_unknown`, `orphan_quarantined`, `unattributed_offer`, `unclassifiable_commitment`, `loss_limiter`, `writer_lock_lost` from `protection.TRIGGERS`; quarantine-age alert; level-3 kill cancels managed offers by id (new `KillSwitch` mode), operator kill keeps cancel-all; lent-above-ledger attribution; `LossLimitMonitor` → alert; `WriterLockWatch` → exit; `RealizedLossGuard`/`DrawdownGuard` removed from the chain and `_LIVE_REQUIRED_HARD` | T2 | one test per trigger level; UNKNOWN blocks only its symbol and clears after resolution; replay of the 2026-08-27..09-24 divergences does not halt |
 | T4 | Trading state `ACTIVE/HALTED`: migration archives `trading_state` into `release_archive`, recreates it without REDUCING/probation/material_deploy (seed = current state); drop `guard_trading_state_probation`, `deployment_approvals`; `trading_control_requests` actions `resume|kill`; remove probation from `read_capital`/`evaluate_capital`/status; `/admin/pause` removed; `bootstrap_capital.py` and cutover scripts require HALTED or a disabled policy | T3 | rule parity test on migrated PG; resume never starts a probation; `alembic check` clean |
 | T5 | Disabled symbol cancels managed offers: reconciler sweep when `policy.enabled` is false | T1 | integration: disable → managed offers cancelled, foreign untouched, credits untouched |
