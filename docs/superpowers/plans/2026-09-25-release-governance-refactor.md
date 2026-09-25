@@ -33,9 +33,13 @@ Production stays halted (halt 11) until the cutover in §4 completes.
 - **Alerts**: in-process Telegram sink (non-blocking) for trading-state changes,
   automatic protections, UNKNOWN, orphan, divergence that halts, backup failure,
   restore-test failure, deploy/rollback. Grafana stays as the second path.
-- **DR**: backups and WAL archiving unchanged; freshness alert; weekly automated
-  isolated restore with a heartbeat; nothing about DR gates a release or resume.
-  A migration is always preceded by a successful backup.
+- **DR**: backups and WAL archiving unchanged; freshness alert; a monthly automated
+  isolated restore verified by comparing the restored `event_prefix_hashes` with
+  production's at the same sequence (no writer quiescence), plus an extra run after
+  a PostgreSQL upgrade, a pgBackRest/R2 config or credential change, and before an
+  irreversible migration. Heartbeat on success, Telegram on failure. Nothing about
+  DR gates a release or resume. A migration is always preceded by a successful backup
+  (Will, 2026-09-25).
 
 ## 2. Tasks
 
@@ -92,4 +96,8 @@ decide (never restore over post-write venue reality; see
 ## 5. Progress
 
 - [x] Release workflow (`1a56aee`)
-- [ ] T1 … T12
+- [x] T1 trading state `afa1de6`; T2 guards by state `8ce9a0d`; T3 kill path `7dd847a`
+- [x] T10 VM tooling `5030e5d`, merged `97c7612`, migration chain `b0b6067`
+- [ ] T10b monthly restore test with prefix-hash verification + change-triggered runs
+- [ ] T4 automatic protections through the kill path; no trading_state row means HALTED (fail-closed, ADR D5)
+- [ ] T5 … T9, T11, T12
