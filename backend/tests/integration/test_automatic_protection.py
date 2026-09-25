@@ -315,3 +315,52 @@ async def test_a_trip_blocks_the_next_submit_before_halted_is_written(capital_db
     with pytest.raises(CommandGateBlocked, match="automatic protection tripped"):
         await gate.submit(await second_ready(factory, account, ready), ctx)
     assert venue.received == []
+
+
+@pytest.mark.asyncio
+async def test_identity_conflict_trips(capital_db):
+    """The managed commitment's decision says another currency: two durable
+    records disagree about what the commitment is. The attempt inventory at the
+    capital fence finds it before any venue call."""
+    from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+    factory, account = capital_db
+    gate, _, ready, ctx, _, _ = await boundary(factory, account)
+    await gate.submit(ready, ctx)
+    async with factory.begin() as session:
+        (await session.get(ExecutionDecisionRow, ready.decision_id)).symbol = "fUSD"
+    auth = FakeAuth(offers=[_offer("101", "fUST", "500", "500")],
+                    wallets={"fUST": D("500"), "fUSD": D("0")})
+    recorder = Recorder()
+    await recovery(factory, account, auth, recorder).run()
+    assert recorder.triggers == {"identity_conflict"}
+    assert "refused the fence: attempt_decision_conflict" in recorder.trips[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(capital_db):
+    """An identity conflict re-trips every reconcile tick; only the first tick
+    -- the transition into HALTED -- cancels and writes audit rows."""
+    from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+    factory, account = capital_db
+    gate, _, ready, ctx, _, trading = await boundary(factory, account)
+    await gate.submit(ready, ctx)
+    async with factory.begin() as session:
+        (await session.get(ExecutionDecisionRow, ready.decision_id)).symbol = "fUSD"
+    venue = FakeVenue(factory, account, {"UST": {"101"}})
+    protection = AutomaticProtection()
+    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
+        configured_symbols={"fUST"}, venue=venue, writer_lock=Lock()))
+    auth = FakeAuth(offers=[_offer("101", "fUST", "500", "500")],
+                    wallets={"fUST": D("500"), "fUSD": D("0")})
+    tick = recovery(factory, account, auth, protection)
+    for _ in range(3):
+        await tick.run()
+        await protection.run_pending()
+    async with factory() as session:
+        rows = (await session.scalars(select(FundingCancelAllAuditRow))).all()
+    assert venue.calls == [("UST", "HALTED")]  # the first tick only
+    assert [row.phase for row in rows] == ["requested", "acknowledged"]
+    assert protection.persisting == 2
+    assert protection.pending_reason() is None
+    state = await trading.current()
+    assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "auto:identity_conflict")
