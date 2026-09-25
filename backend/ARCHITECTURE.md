@@ -676,9 +676,14 @@ deployment reconciler 依 gap 動態決定。
 recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 append-only `deployments` ledger。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_CHANGE_CLASS`：分級決定開機時的
 release flow（§6），digest 與 revision 也是每筆 execution audit 的 `config_hash`／`service_version`。
-live daemon 開機時（任何交易之前）比對 `core/schema_head.py` 的 `SCHEMA_HEAD` 與資料庫的
-`alembic_version`：不一致代表這個 build 不屬於這個 schema（例如回滾到較新的 schema 上），
-於是寫 `HALTED/auto`（告警）並拒絕開機；讀不到已套用的 CapitalPolicy 同樣處理。
+live daemon 開機時（讀憑證與任何交易之前）比對 `core/schema_head.py` 的 `SCHEMA_HEAD` 與資料庫的
+`alembic_version`：不一致代表這個 build 不屬於這個 schema（例如回滾到較新的 schema 上）。
+這和讀不到已套用的 CapitalPolicy 一樣是自動停機（Will 2026-09-25：手動與自動停機都撤單），走
+`safety/boot_stop.py`：先寫 `HALTED/auto`（寫不進去就不碰 venue），再盡力對設定幣別呼叫 venue
+cancel-all（經 `KillSwitch`，照 kill path 記 audit 與告警），然後拒絕開機。只有當憑證庫兩張表的欄位
+（只讀 catalog，不讀資料列）與這個 build 宣告的完全一致、且取得 writer lock 時才讀憑證並呼叫 venue；
+否則或 cancel-all 沒有全部成功，就發 critical 告警 `venue_offers_may_remain`：venue 上可能仍有掛單，
+需手動撤。
 
 **Application authority**：Overview 的 funding-status adapter 沿用 authenticated
 account proxy/MFA，webapi 只需既有 membership/account SELECT grants，向 daemon

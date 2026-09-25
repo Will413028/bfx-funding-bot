@@ -49,6 +49,7 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
+from bfx_funding_bot.external.bitfinex.live_executor import FundingCancelAllClient
 from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -122,6 +123,10 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
+from bfx_funding_bot.modules.execution.safety.boot_stop import (
+    stop_refused_boot,
+    writer_lock_or_none,
+)
 from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
     DivergenceRateGuard,
     DrawdownGuard,
@@ -152,9 +157,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
-    CAUSE_AUTO,
     CAUSE_KILL_SWITCH,
-    HALTED,
     TradingStateRepository,
 )
 from bfx_funding_bot.modules.execution.trading_control import (
@@ -996,6 +999,42 @@ def assert_caps_invariant(
             )
 
 
+async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
+                            session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """A live boot that refuses to run is an automatic stop: HALTED/auto and the
+    best-effort venue cancel-all (``safety/boot_stop``), before the error is raised."""
+    try:
+        account_id = UUID(_require_env("BFX_EXCHANGE_ACCOUNT_ID"))
+    except Exception:
+        log.critical("boot_refused_without_account account unknown; nothing recorded or cancelled")
+        return
+    environment = config.deployment_environment.value
+
+    async def credentials(session: AsyncSession) -> Credentials:
+        return await load_account_credentials(session, exchange_account_id=account_id,
+                                              kek=load_kek())
+
+    async def writer_lock() -> WriterLock | None:
+        lock = WriterLock(database_url=config.database_url,
+                          key=derive_lock_key(account_id_canonical(account_id), environment))
+        if config.database_url.startswith(("postgres", "postgresql")):
+            return await writer_lock_or_none(lock)
+        return lock
+
+    http = httpx.AsyncClient()
+    try:
+        await stop_refused_boot(
+            session_factory=session_factory, account_id=account_id, environment=environment,
+            configured_symbols=configured_symbols(config.cells),
+            reason=f"boot_blocked: {str(exc) or type(exc).__name__}",
+            load_credentials=credentials,
+            venue=lambda: FundingCancelAllClient(http=http, nonce_provider=make_monotonic_us_nonce()),
+            writer_lock=writer_lock, clock=now_ms_utc,
+        )
+    finally:
+        await http.aclose()
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -1019,6 +1058,17 @@ async def build_daemon(
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be a decimal") from exc
     if not allocation_cap.is_finite() or allocation_cap < 0:
         raise ConfigurationError("BFX_ALLOCATION_CAP_USDT must be finite and >= 0")
+    if live_executor:
+        # Before the credential vault or anything else is read: a database at
+        # another schema means this is the wrong build for it (for instance a
+        # rollback onto a newer schema).
+        try:
+            async with session_factory() as schema_session:
+                await assert_schema_head(schema_session)
+        except Exception as exc:
+            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
+            await db_engine.dispose()
+            raise
     async with session_factory() as bootstrap_session:
         account_bootstrap = await load_account_bootstrap(
             bootstrap_session,
@@ -1034,23 +1084,13 @@ async def build_daemon(
             session_factory=session_factory, clock=now_ms_utc,
         )
         try:
-            # Before anything can trade: this build's schema is the database's,
-            # and every configured currency has an applied capital policy.
+            # Before anything can trade: every configured currency has an
+            # applied capital policy.
             async with session_factory.begin() as policy_session:
-                await assert_schema_head(policy_session)
                 for symbol in configured_symbols(config.cells):
                     await capital_runtime.repository.read_applied(policy_session, symbol=symbol)
         except Exception as exc:
-            # Refused boot: stop trading durably (HALTED/auto alerts the
-            # operator; so does the refused boot itself) before exiting.
-            try:
-                await TradingStateRepository(session_factory,
-                    account_id=account_bootstrap.exchange_account_id,
-                    deployment_environment=config.deployment_environment.value,
-                ).transition(HALTED, cause=CAUSE_AUTO, actor="boot",
-                             reason=f"boot_blocked: {str(exc) or type(exc).__name__}"[:500])
-            except Exception:
-                log.exception("boot_blocked_halt_unwritten")
+            await _refuse_live_boot(exc, config=config, session_factory=session_factory)
             await db_engine.dispose()
             raise
 

@@ -188,6 +188,55 @@ def classify_cancel_all_response(raw: Any) -> FundingCancelAllResult:
     return FundingCancelAllResult(outcome="rejected", venue_status=status, text=text)
 
 
+class FundingCancelAllClient:
+    """``POST /v2/auth/w/funding/offer/cancel/all`` -- the kill path's one venue write.
+
+    Standalone so a stop can reach the venue without a trading executor: the
+    boot that refuses to run cancels with this alone (``safety/boot_stop``).
+    """
+
+    def __init__(self, *, http: httpx.AsyncClient, nonce_provider: Callable[[], int],
+                 base_url: str = BITFINEX_REST_BASE) -> None:
+        self._http = http
+        self._nonce_provider = nonce_provider
+        self._base_url = base_url.rstrip("/")
+
+    async def cancel_all_funding_offers(
+        self, *, currency: str, ctx: AccountContext,
+    ) -> FundingCancelAllResult:
+        """Cancel every funding offer in ``currency`` (e.g. "UST"), managed or not.
+
+        Idempotent at the venue, so transient failures are retried like a
+        single cancel. Auth and other non-retryable failures raise typed
+        executor errors for the caller to record; nothing here publishes a
+        domain event -- the next reconcile observes what was cancelled.
+        """
+        if not _CURRENCY.match(currency):
+            raise ValueError(f"invalid funding currency {currency!r}")
+        raw = await transient_retry(self._call)(currency, ctx)
+        return classify_cancel_all_response(raw)
+
+    async def _call(self, currency: str, ctx: AccountContext) -> Any:
+        body_bytes = json.dumps({"currency": currency}).encode("utf-8")
+        headers = sign_request(
+            body=body_bytes, nonce=self._nonce_provider(),
+            api_secret=ctx.credentials.api_secret,
+            path=_OFFER_CANCEL_ALL_PATH,
+        )
+        headers["bfx-apikey"] = ctx.credentials.api_key
+        headers["Content-Type"] = "application/json"
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/{_OFFER_CANCEL_ALL_PATH}",
+                content=body_bytes, headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise classify_httpx_exception(exc) from exc
+        if resp.status_code >= 400:
+            raise classify_httpx_response(resp)
+        return resp.json()
+
+
 class _EventSink(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
 
@@ -533,37 +582,10 @@ class BitfinexLiveExecutor:
     async def cancel_all_funding_offers(
         self, *, currency: str, ctx: AccountContext,
     ) -> FundingCancelAllResult:
-        """Cancel every funding offer in ``currency`` (e.g. "UST"), managed or not.
-
-        Idempotent at the venue, so transient failures are retried like a
-        single cancel. Auth and other non-retryable failures raise typed
-        executor errors for the caller to record; nothing here publishes a
-        domain event -- the next reconcile observes what was cancelled.
-        """
-        if not _CURRENCY.match(currency):
-            raise ValueError(f"invalid funding currency {currency!r}")
-        raw = await transient_retry(self._cancel_all_http_call)(currency, ctx)
-        return classify_cancel_all_response(raw)
-
-    async def _cancel_all_http_call(self, currency: str, ctx: AccountContext) -> Any:
-        body_bytes = json.dumps({"currency": currency}).encode("utf-8")
-        headers = sign_request(
-            body=body_bytes, nonce=self._nonce_provider(),
-            api_secret=ctx.credentials.api_secret,
-            path=_OFFER_CANCEL_ALL_PATH,
-        )
-        headers["bfx-apikey"] = ctx.credentials.api_key
-        headers["Content-Type"] = "application/json"
-        try:
-            resp = await self._http.post(
-                f"{self._base_url}/{_OFFER_CANCEL_ALL_PATH}",
-                content=body_bytes, headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            raise classify_httpx_exception(exc) from exc
-        if resp.status_code >= 400:
-            raise classify_httpx_response(resp)
-        return resp.json()
+        """Cancel every funding offer in ``currency`` (see :class:`FundingCancelAllClient`)."""
+        return await FundingCancelAllClient(
+            http=self._http, nonce_provider=self._nonce_provider, base_url=self._base_url,
+        ).cancel_all_funding_offers(currency=currency, ctx=ctx)
 
     async def _cancel_http_call(
         self,
