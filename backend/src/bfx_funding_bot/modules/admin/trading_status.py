@@ -312,12 +312,12 @@ class TradingStatusService:
         """
         store = self._require_store()
         current = await store.current()
-        if (current is not None and not current.allows_new_offers
-                and not _resumable_without_approval(current)):
-            # A HALTED or a material deploy's REDUCING states that something is
-            # unproven, and a static admin token does not prove it. Until the
-            # authenticated approval exists, those exit through release
-            # promotion.
+        if current is None or (not current.allows_new_offers
+                               and not _resumable_without_approval(current)):
+            # A HALTED (or no decision at all, which reads as HALTED) or a
+            # material deploy's REDUCING states that something is unproven, and
+            # a static admin token does not prove it. Until the authenticated
+            # approval exists, those exit through release promotion.
             raise ValueError("release_promotion_required")
         result = await store.transition(
             ACTIVE, cause=CAUSE_OPERATOR, actor=actor, reason=reason,

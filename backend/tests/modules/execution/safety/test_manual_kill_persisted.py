@@ -97,12 +97,29 @@ async def test_persisted_resume_allows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_persisted_record_allows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never-configured is not halted — otherwise every fresh environment would
-    deadlock on first boot."""
+async def test_no_persisted_record_blocks_like_halted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed: no decision recorded is read as HALTED. A new scope trades
+    only after an operator records ACTIVE."""
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     g = ManualKillGuard(trading_state=_FakeStore(None))
+    r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is False
+    assert "no trading state recorded" in (r.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_a_tripped_protection_blocks_before_its_halt_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    pending: list[str] = []
+    g = ManualKillGuard(trading_state=_FakeStore(_halted(False)),
+                        pending_stop=lambda: pending[0] if pending else None)
     assert (await g.evaluate(_post(), _ctx())).allowed is True
+    pending.append("submit_outcome_unknown: cid=1")
+    r = await g.evaluate(_post(), _ctx())
+    assert r.allowed is False
+    assert "submit_outcome_unknown" in (r.reason or "")
 
 
 @pytest.mark.asyncio

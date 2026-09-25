@@ -51,6 +51,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.release_worker import ReleaseCommandAuthority
+from bfx_funding_bot.modules.execution.safety.protection import (
+    SUBMIT_OUTCOME_UNKNOWN,
+    ProtectionPort,
+)
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitNotSent,
@@ -153,6 +157,10 @@ class AccountCommandGate:
         self._capital = capital_runtime
         # Installed by live daemon before any supervised task starts.
         self.release_authority: ReleaseCommandAuthority | None = None
+        # Automatic protections. ``trip`` only records and queues, so it is safe
+        # to call here while this gate's account lock is held; the kill it
+        # leads to waits for that lock from another task.
+        self.protection: ProtectionPort | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._latched_scopes: dict[tuple[str, str, str], str] = {}
 
@@ -513,6 +521,10 @@ class AccountCommandGate:
                 ),
             )
             await self._persister.persist(unknown_event)
+            if self.protection is not None:
+                self.protection.trip(SUBMIT_OUTCOME_UNKNOWN, (
+                    f"cid={reference.cid} symbol={decision.symbol} amount={size} "
+                    f"reason={unknown_event.reason}"))
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
             return

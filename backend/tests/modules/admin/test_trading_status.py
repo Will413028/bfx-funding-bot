@@ -529,20 +529,31 @@ async def test_env_flag_alone_is_reported_as_env_sourced(
 
 
 @pytest.mark.asyncio
-async def test_never_configured_persisted_state_is_null_not_false(
+async def test_never_configured_persisted_state_is_null_and_reads_as_halted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`null` (no decision ever recorded) and `{"halted": false}` (explicitly
-    resumed by someone, with a reason) are different facts."""
+    ACTIVE, with a reason) are different facts; the first fails closed."""
     monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
     snap = await _service(trading_state=_FakeTradingState(None)).snapshot()
     assert snap["halt"]["sources"]["persisted"] is None
-    assert snap["halt"]["halted"] is False
+    assert snap["halt"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_no_recorded_decision_cannot_be_paused_or_resumed_by_token() -> None:
+    store = _FakeTradingState(None)
+    service = _service(trading_state=store)
+    with pytest.raises(ValueError, match="HALTED -> REDUCING"):
+        await service.pause(reason="pause", actor="admin")
+    with pytest.raises(ValueError, match="release_promotion_required"):
+        await service.resume(reason="token", actor="admin")
+    assert store.writes == []
 
 
 @pytest.mark.asyncio
 async def test_pause_writes_a_reducing_transition() -> None:
-    store = _FakeTradingState(None)
+    store = _FakeTradingState(_trading("ACTIVE"))
     svc = _service(trading_state=store)
     out = await svc.pause(reason="candle distortion", actor="admin")
     assert store.writes == [("REDUCING", "operator", "candle distortion", "admin")]
@@ -621,7 +632,7 @@ async def test_live_resume_clears_a_maintenance_pause_without_a_canary() -> None
 @pytest.mark.asyncio
 async def test_operator_halt_is_recorded_as_a_reducing_pause() -> None:
     """This endpoint exists for operator pauses; guards record their own halts."""
-    store = _FakeTradingState(None)
+    store = _FakeTradingState(_trading("ACTIVE"))
     service = _service(trading_state=store)
 
     out = await service.pause(reason="pg 18.6 upgrade", actor="admin")

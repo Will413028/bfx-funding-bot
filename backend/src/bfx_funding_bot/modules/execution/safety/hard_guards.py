@@ -6,7 +6,7 @@ allocation cap). Chain short-circuits on first block.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -93,9 +93,13 @@ class ManualKillGuard:
         *,
         trading_state: _TradingStateReader | None = None,
         canary_halt_authorization: object | None = None,
+        pending_stop: Callable[[], str | None] | None = None,
     ) -> None:
         self._trading_state = trading_state
         self._canary_halt_authorization = canary_halt_authorization
+        # An automatic protection that has tripped but whose HALTED is not yet
+        # committed. It stops new offers from the instant it trips.
+        self._pending_stop = pending_stop
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -105,6 +109,12 @@ class ManualKillGuard:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason="BFX_KILL_SWITCH env flag set",
+            )
+        pending = self._pending_stop() if self._pending_stop is not None else None
+        if pending is not None:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason=f"automatic protection tripped, HALTED pending: {pending}",
             )
         if self._trading_state is None:
             return GuardResult(allowed=True, guard_name=self.name)
@@ -120,19 +130,26 @@ class ManualKillGuard:
                 allowed=False, guard_name=self.name,
                 reason=f"trading state unreadable — failing closed: {exc!r}",
             )
-        # None = no decision was ever recorded for this realm. That is not a
-        # stop — otherwise every fresh environment would deadlock on boot.
+        # None = no decision was ever recorded for this realm: fail closed,
+        # exactly like HALTED. A new scope trades only after an operator's
+        # explicit ACTIVE.
         canary_authorized = (
             self._canary_halt_authorization is not None
             and ctx.canary_halt_authorization is self._canary_halt_authorization
         )
-        if state is not None and not state.allows_new_offers:
+        if state is None and not canary_authorized:
+            return GuardResult(
+                allowed=False, guard_name=self.name,
+                reason="no trading state recorded — treated as HALTED",
+            )
+        if state is None or not state.allows_new_offers:
             if canary_authorized:
                 return GuardResult(
                     allowed=True,
                     guard_name=self.name,
                     reason="persistent halt overridden by consumed canary permit",
                 )
+            assert state is not None
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(

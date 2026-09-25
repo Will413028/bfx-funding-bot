@@ -234,9 +234,23 @@ async def test_env_kill_switch_engages_the_kill_at_boot(monkeypatch, tmp_path, h
     httpx_mock.add_response(url=re.compile(r"https://api-pub\.bitfinex\.com/.*"),
                             method="GET", json=[], is_reusable=True, is_optional=True)
     try:
-        await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
+        daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
         assert (state.state, state.cause, state.actor) == ("HALTED", "kill_switch", "env:BFX_KILL_SWITCH")
+        # Automatic protections are wired where production raises them.
+        protection = daemon.protection
+        assert protection is not None and daemon.writer_lock_watch is not None
+        assert daemon.command_gate is not None and daemon.command_gate.protection is protection
+        kill_guard = next(g for g in daemon.safety_chain.guards if g.name == "manual_kill")
+        assert kill_guard._pending_stop == protection.pending_reason
+        assert protection.pending_reason() is None
+        from bfx_funding_bot.modules.execution.events import PositionReconciled
+        for at, nav in ((1, "1000"), (2, "900")):  # 10% > the canary's 5% 24h limit
+            await daemon.bus.publish(PositionReconciled(
+                account_id=str(TEST_EXCHANGE_ACCOUNT_ID), symbol="fUST", reserved=Decimal("0"),
+                realized=Decimal("0"), available=Decimal(nav), n_offers=0, n_credits=0,
+                occurred_at_ms=at))
+        assert (protection.pending_reason() or "").startswith("loss_limiter")
         writes = [r for r in httpx_mock.get_requests() if "/auth/w/" in str(r.url)]
         async with factory() as session:
             phases = [(row.currency, row.phase) for row in (await session.scalars(

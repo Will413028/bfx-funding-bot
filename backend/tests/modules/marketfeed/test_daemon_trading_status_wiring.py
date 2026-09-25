@@ -56,7 +56,7 @@ calibrated_guards:
 """
 
 
-async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock):
+async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock, *, active: bool = True):
     cells = tmp_path / "cells.yaml"
     cells.write_text(_CELLS_YAML)
     safety = tmp_path / "safety.yaml"
@@ -73,6 +73,16 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock):
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await seed_exchange_account(eng)
+    if active:
+        # An operator's explicit ACTIVE: without any decision the account is
+        # treated as HALTED and nothing trades.
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+        from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
+        await TradingStateRepository(async_sessionmaker(eng, expire_on_commit=False),
+            account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+        ).transition("ACTIVE", cause="operator", reason="fixture: trading", actor="test")
     await eng.dispose()
 
     monkeypatch.setenv("BFX_HEALTHZ_PORT", "0")
@@ -169,7 +179,7 @@ async def test_persisted_halt_blocks_with_the_env_flag_absent(
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
-    # Baseline: with no halt recorded anywhere, trading is live.
+    # Baseline: an operator recorded ACTIVE, so trading is live.
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is True
 
     await daemon.trading_status.halt(reason="candle distortion", actor="test")
@@ -216,5 +226,23 @@ async def test_resume_after_a_pause_restores_trading_and_leaves_an_audit_trail(
     snap = await daemon.trading_status.snapshot()
     # Both transitions retained, newest first — the audit trail that was missing.
     assert [(h["halted"], h["reason"]) for h in snap["halt"]["history"]] == [
-        (False, "L4 v2 passed"), (True, "candle distortion"),
+        (False, "L4 v2 passed"), (True, "candle distortion"), (False, "fixture: trading"),
     ]
+
+
+async def test_no_recorded_decision_reads_as_halted(
+    monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
+) -> None:
+    """Fail closed: a scope nobody has decided about does not trade, and the
+    admin token cannot lift that any more than it lifts a HALTED."""
+    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
+    daemon = await _build(monkeypatch, tmp_path, httpx_mock, active=False)
+    assert daemon.trading_status is not None
+    dry = await daemon.trading_status.dry_run()
+    assert dry["would_submit_any"] is False
+    assert dry["symbols"]["fUSD"]["blocked_by"] == "manual_kill"
+    snap = await daemon.trading_status.snapshot()
+    assert snap["halt"]["halted"] is True
+    assert snap["halt"]["sources"]["persisted"] is None
+    with pytest.raises(ValueError, match="release_promotion_required"):
+        await daemon.trading_status.resume(reason="static token", actor="test")
