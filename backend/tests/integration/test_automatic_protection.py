@@ -38,12 +38,19 @@ from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 from .test_capital_command_boundary import boundary, second_ready
-from .test_capital_repository import capital_db as capital_db
-from .test_capital_repository import capital_engine as capital_engine
 from .test_capital_repository import repository, setup_policy, snapshot
 from .test_kill_switch import FakeVenue, Lock
 
 D = Decimal
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+def capital_db(migrated_db):
+    """The migrated PostgreSQL schema: its triggers are the rules' authority."""
+    return migrated_db
 
 
 class Recorder:

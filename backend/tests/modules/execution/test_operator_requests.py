@@ -12,11 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
-from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     NeedsPreparation,
@@ -29,6 +26,8 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     DeploymentApprovalRow,
     TradingControlRequestRow,
 )
+
+pytestmark = pytest.mark.integration
 
 DIGEST = "sha256:" + "a" * 64
 
@@ -79,14 +78,9 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
 
 
 @pytest.fixture
-async def outbox(sqlite_engine: Any) -> Any:
-    async with sqlite_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    account = uuid4()
-    async with factory.begin() as session:
-        session.add(ExchangeAccount(id=account, venue="bitfinex", label="fixture"))
-    return factory, account
+async def outbox(migrated_db: Any) -> Any:
+    """The migrated PostgreSQL schema: its triggers are the outbox's authority."""
+    return migrated_db
 
 
 def values(account: UUID, **extra: object) -> dict[str, object]:

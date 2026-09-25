@@ -53,6 +53,9 @@ class NavPeakRow(Base):
     )
 
 
+_DIGEST_RE = "'^sha256:[0-9a-f]{64}$'"
+
+
 class TradingStateRow(Base):
     """Append-only trading-state decisions. Current = highest id for the scope.
 
@@ -204,6 +207,11 @@ class DeploymentApprovalRow(Base):
     __table_args__ = (
         CheckConstraint("length(trim(approved_by)) > 0 AND approved_at_ms >= 0",
                         name="ck_deployment_approvals_evidence"),
+        # Regex CHECKs are PostgreSQL's (the authority); SQLite fixtures skip them.
+        CheckConstraint(f"backend_digest ~ {_DIGEST_RE}",
+                        name="ck_deployment_approvals_digest").ddl_if(dialect="postgresql"),
+        CheckConstraint("source_revision ~ '^[0-9a-f]{40}$'",
+                        name="ck_deployment_approvals_revision").ddl_if(dialect="postgresql"),
         UniqueConstraint("exchange_account_id", "deployment_environment", "backend_digest",
                          name="uq_deployment_approvals_digest"),
     )
@@ -253,11 +261,15 @@ class TradingControlRequestRow(Base):
     __table_args__ = (
         CheckConstraint("action IN ('approve', 'resume', 'pause', 'kill')",
                         name="ck_trading_control_requests_action"),
-        # PostgreSQL also checks the digest's shape (migration 0218f9ab59a2).
+        CheckConstraint(
+            "(action IN ('approve', 'resume') AND backend_digest IS NOT NULL "
+            f"AND backend_digest ~ {_DIGEST_RE}) OR "
+            "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
+            name="ck_trading_control_requests_digest").ddl_if(dialect="postgresql"),
         CheckConstraint(
             "(action IN ('approve', 'resume') AND backend_digest IS NOT NULL) OR "
             "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
-            name="ck_trading_control_requests_digest"),
+            name="ck_trading_control_requests_digest_portable").ddl_if(dialect="sqlite"),
         CheckConstraint(
             "length(trim(reason)) BETWEEN 1 AND 500 AND length(trim(requested_by)) > 0 "
             "AND created_at_ms >= 0",

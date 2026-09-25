@@ -238,3 +238,68 @@ async def archive_db(archive_pg: str, _archive_template: str, monkeypatch: pytes
     finally:
         await async_engine.dispose()
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Migrated governance database (PostgreSQL 18).
+#
+# The trading-state, deployment and operator-request rules live in PostgreSQL
+# triggers and CHECK constraints (the authority; Python only fails earlier with a
+# clearer message). Tests of those rules run against the real migrated schema:
+# migrated once into a template, then cloned per test.
+# ---------------------------------------------------------------------------
+
+_GOVERNANCE_TEMPLATE = "governance_template"
+
+
+@pytest.fixture(scope="session")
+def _governance_template(archive_pg: str) -> str:
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+
+    from alembic import command
+
+    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f"CREATE DATABASE {_GOVERNANCE_TEMPLATE}")
+    finally:
+        admin.dispose()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("DATABASE_URL", _database_url(archive_pg, _GOVERNANCE_TEMPLATE))
+        command.upgrade(Config(str(_ALEMBIC_INI)), "head")
+    return _GOVERNANCE_TEMPLATE
+
+
+@pytest_asyncio.fixture
+async def migrated_db(archive_pg: str, _governance_template: str):
+    """A fresh migrated database with one exchange account: (session factory, account)."""
+    from uuid import uuid4
+
+    from sqlalchemy import create_engine
+
+    from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+
+    database = f"governance_{uuid4().hex[:12]}"
+    admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.exec_driver_sql(f'CREATE DATABASE "{database}" TEMPLATE {_governance_template}')
+    finally:
+        admin.dispose()
+    url = _database_url(archive_pg, database).replace("+psycopg", "+asyncpg")
+    engine = create_async_engine(url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account = uuid4()
+    async with factory.begin() as session:
+        session.add(ExchangeAccount(id=account, venue="bitfinex", label="governance-test"))
+    try:
+        yield factory, account
+    finally:
+        await engine.dispose()
+        admin = create_engine(_database_url(archive_pg, "postgres"), isolation_level="AUTOCOMMIT")
+        try:
+            with admin.connect() as conn:
+                conn.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+        finally:
+            admin.dispose()

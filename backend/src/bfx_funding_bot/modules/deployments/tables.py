@@ -10,17 +10,27 @@ containers are created; `attempt_id` is the BFX_DEPLOYMENT_ID the containers
 get) and a terminal outcome; an attempt that stops earlier has only the latter. Operator approval of a material
 release is a separate append-only fact (T5), not a later edit of this row.
 
-The CHECK constraints (hex revision, sha256 digests, class/outcome vocabularies,
-bounded detail) live in the migration only: they use PostgreSQL regex syntax and
-Alembic does not compare CHECK constraints, while this metadata must stay
-creatable on the SQLite unit-test engine.
+The CHECK constraints mirror the migration (PostgreSQL is the authority);
+the regex ones are created on PostgreSQL only, so SQLite fixtures still build.
+Alembic does not compare CHECKs: tests/integration/test_model_constraints.py
+does, against the migrated schema.
 """
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, Text, Uuid, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    Text,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
@@ -28,6 +38,7 @@ from bfx_funding_bot.core.db import Base
 DEPLOYMENT_STARTED = "started"
 DEPLOYMENT_OUTCOMES = ("deployed", "rolled_back", "failed")
 CHANGE_CLASSES = ("standard", "material")
+_DIGEST_RE = "'^sha256:[0-9a-f]{64}$'"
 
 
 class DeploymentRow(Base):
@@ -53,6 +64,20 @@ class DeploymentRow(Base):
     ci_run: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
+        # Regex CHECKs are PostgreSQL's (the authority); SQLite fixtures skip them.
+        CheckConstraint("source_revision ~ '^[0-9a-f]{40}$'",
+                        name="ck_deployments_source_revision").ddl_if(dialect="postgresql"),
+        CheckConstraint(f"backend_digest ~ {_DIGEST_RE} AND frontend_digest ~ {_DIGEST_RE}",
+                        name="ck_deployments_digests").ddl_if(dialect="postgresql"),
+        CheckConstraint("change_class IN ('standard', 'material')", name="ck_deployments_change_class"),
+        CheckConstraint("outcome IN ('started', 'deployed', 'rolled_back', 'failed')",
+                        name="ck_deployments_outcome"),
+        CheckConstraint("(outcome = 'started') = (finished_at IS NULL)",
+                        name="ck_deployments_phase_finished"),
+        CheckConstraint("finished_at IS NULL OR finished_at >= started_at", name="ck_deployments_times"),
+        CheckConstraint("length(detail) <= 2000", name="ck_deployments_detail"),
+        CheckConstraint("ci_run IS NULL OR length(ci_run) BETWEEN 1 AND 200",
+                        name="ck_deployments_ci_run"),
         Index("uq_deployments_attempt_started", "attempt_id", unique=True,
               postgresql_where=text("outcome = 'started'"), sqlite_where=text("outcome = 'started'")),
         Index("uq_deployments_attempt_finished", "attempt_id", unique=True,

@@ -1,4 +1,6 @@
-"""Web API for approve/resume: it queues a request and changes nothing else."""
+"""Web API for trading control: it queues a request and changes nothing else.
+
+On the migrated PostgreSQL schema (its CHECKs and triggers are the authority)."""
 from __future__ import annotations
 
 from uuid import uuid4
@@ -7,25 +9,25 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.execution.audit.tables
 import bfx_funding_bot.modules.execution.event_store.tables  # noqa: F401
 from bfx_funding_bot.core import auth
 from bfx_funding_bot.core.auth import Principal
-from bfx_funding_bot.core.db import Base
-from bfx_funding_bot.modules.accounts.tables import ExchangeAccount, ExchangeAccountMembership
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccountMembership
 from bfx_funding_bot.modules.execution.safety.tables import (
     DeploymentApprovalRow,
     TradingControlRequestRow,
     TradingStateRow,
 )
 
+pytestmark = pytest.mark.integration
+
 DIGEST = "sha256:" + "a" * 64
 AUTH = {"Authorization": "Bearer fixture"}
 
 
-async def _app(sqlite_engine, monkeypatch, *, role="owner", principal=None):
+async def _app(migrated_db, monkeypatch, *, role="owner", principal=None):
     from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator")
@@ -33,13 +35,8 @@ async def _app(sqlite_engine, monkeypatch, *, role="owner", principal=None):
     monkeypatch.setenv("BFX_SOURCE_REVISION", "c" * 40)
     monkeypatch.setenv("BFX_CHANGE_CLASS", "material")
     monkeypatch.setattr(auth, "_verify", lambda _: principal or Principal("operator", None, "admin"))
-    async with sqlite_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
-    account = uuid4()
+    factory, account = migrated_db
     async with factory.begin() as session:
-        session.add(ExchangeAccount(id=account, venue="bitfinex", label="fixture"))
-        await session.flush()
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="operator", role=role))
     app = FastAPI()
     app.state.session_factory = factory
@@ -48,8 +45,8 @@ async def _app(sqlite_engine, monkeypatch, *, role="owner", principal=None):
 
 
 @pytest.mark.asyncio
-async def test_approve_only_queues_a_request_with_the_operator_identity(sqlite_engine, monkeypatch):
-    app, factory, account = await _app(sqlite_engine, monkeypatch)
+async def test_approve_only_queues_a_request_with_the_operator_identity(migrated_db, monkeypatch):
+    app, factory, account = await _app(migrated_db, monkeypatch)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(f"{base}/approve", json={"backend_digest": DIGEST,
@@ -78,8 +75,8 @@ async def test_approve_only_queues_a_request_with_the_operator_identity(sqlite_e
     ({"backend_digest": DIGEST, "reason": ""}, 422),
     ({"backend_digest": DIGEST, "reason": "x", "state": "applied"}, 422),
 ])
-async def test_malformed_or_forged_requests_are_refused(sqlite_engine, monkeypatch, body, status):
-    app, _, account = await _app(sqlite_engine, monkeypatch)
+async def test_malformed_or_forged_requests_are_refused(migrated_db, monkeypatch, body, status):
+    app, _, account = await _app(migrated_db, monkeypatch)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/approve",
                                      json=body, headers=AUTH)
@@ -92,9 +89,9 @@ async def test_malformed_or_forged_requests_are_refused(sqlite_engine, monkeypat
     ("owner", Principal("other", None, "admin"), 403),
     ("owner", Principal("operator", None, "user"), 403),
 ])
-async def test_only_the_operator_with_write_membership_can_request(sqlite_engine, monkeypatch, role,
+async def test_only_the_operator_with_write_membership_can_request(migrated_db, monkeypatch, role,
                                                                    principal, status):
-    app, factory, account = await _app(sqlite_engine, monkeypatch, role=role, principal=principal)
+    app, factory, account = await _app(migrated_db, monkeypatch, role=role, principal=principal)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         response = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/resume",
                                      json={"backend_digest": DIGEST, "reason": "x"}, headers=AUTH)
@@ -104,8 +101,8 @@ async def test_only_the_operator_with_write_membership_can_request(sqlite_engine
 
 
 @pytest.mark.asyncio
-async def test_stops_name_no_build_and_a_kill_is_never_blocked(sqlite_engine, monkeypatch):
-    app, factory, account = await _app(sqlite_engine, monkeypatch)
+async def test_stops_name_no_build_and_a_kill_is_never_blocked(migrated_db, monkeypatch):
+    app, factory, account = await _app(migrated_db, monkeypatch)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         missing = await client.post(f"{base}/approve", json={"reason": "no digest"}, headers=AUTH)
@@ -126,7 +123,7 @@ async def test_stops_name_no_build_and_a_kill_is_never_blocked(sqlite_engine, mo
 
 
 @pytest.mark.asyncio
-async def test_the_overview_shows_probation_progress_and_the_cancel_all_of_the_halt(sqlite_engine, monkeypatch):
+async def test_the_overview_shows_probation_progress_and_the_cancel_all_of_the_halt(migrated_db, monkeypatch):
     from decimal import Decimal
 
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
@@ -134,7 +131,7 @@ async def test_the_overview_shows_probation_progress_and_the_cancel_all_of_the_h
         Probation,
         TradingStateRepository,
     )
-    app, factory, account = await _app(sqlite_engine, monkeypatch)
+    app, factory, account = await _app(migrated_db, monkeypatch)
     repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
     await repo.transition("ACTIVE", cause="operator", actor="operator", reason="approved", now_ms=1,
         probation=Probation.starting(multiplier=Decimal("0.25"), started_at_ms=1,
