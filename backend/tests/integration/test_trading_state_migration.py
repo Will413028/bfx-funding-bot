@@ -465,3 +465,40 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
     _alembic(url, "check")
     with engine.begin() as conn:
         assert {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED} == archived
+
+
+def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_container):
+    """No default privileges, no runbook: the migration alone gives the web API
+    what it reads (and its own setup writes), and still no execution write."""
+    url = pg_container.get_connection_url().replace("+psycopg2", "+psycopg")
+    engine = create_engine(url)
+    try:
+        _reset(engine)
+        with engine.begin() as conn:
+            for role in ("bfx_bot", "bfx_webapi"):
+                conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM {role}")
+                conn.exec_driver_sql(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM {role}")
+                conn.exec_driver_sql(f"REVOKE ALL ON SCHEMA public FROM {role}")
+        _alembic(url, "upgrade", "head")
+        expected = {
+            "user_profiles": {"SELECT", "INSERT"},
+            "exchange_accounts": {"SELECT"}, "exchange_account_memberships": {"SELECT"},
+            "position_state": {"SELECT"}, "offer_claims": {"SELECT"}, "event_log": {"SELECT"},
+            "execution_uncertainties": {"SELECT"}, "submission_attempts": {"SELECT"},
+            "attribution_weekly": {"SELECT"}, "funding_candles": {"SELECT"},
+            "exchange_account_credentials": {"SELECT", "INSERT", "UPDATE"},
+            "account_config_drafts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
+            "trading_state": {"SELECT"}, "funding_cancel_all_audit": {"SELECT"},
+            "deployments": {"SELECT"},
+        }
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT has_schema_privilege('bfx_webapi', 'public', 'USAGE')"))
+            assert conn.scalar(text(
+                "SELECT has_column_privilege('bfx_webapi', 'alembic_version', 'version_num', 'SELECT')"))
+            for table, granted in expected.items():
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    has = conn.scalar(text("SELECT has_table_privilege('bfx_webapi', :t, :p)"),
+                                      {"t": f"public.{table}", "p": privilege})
+                    assert has is (privilege in granted), (table, privilege)
+    finally:
+        engine.dispose()

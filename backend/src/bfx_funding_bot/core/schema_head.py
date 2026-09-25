@@ -17,7 +17,7 @@ from typing import Final
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-SCHEMA_HEAD: Final = "5d1c7e9a3b20"
+SCHEMA_HEAD: Final = "6f2b8d0e4a17"
 
 
 class SchemaHeadMismatch(RuntimeError):  # noqa: N818 - a refused boot state

@@ -35,7 +35,6 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     ManualKillGuard,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
-    NotAnOperatorPause,
     TradingState,
     TransitionResult,
     restates,
@@ -134,18 +133,6 @@ class _FakeTradingState:
             created_at_ms=now_ms or 1000,
         )
         return TransitionResult(state=self.state, changed=True, previous=previous)
-
-    async def resume_pause(self, *, actor: str, reason: str,
-                           now_ms: int | None = None) -> TransitionResult:
-        # The real one also re-enters an unfinished probation; that needs the
-        # history, so it is tested against the database (test_trading_control).
-        previous = self.state
-        if previous is not None and previous.state == "ACTIVE":
-            return TransitionResult(state=previous, changed=False, previous=previous)
-        if previous is None or (previous.state, previous.cause) != ("REDUCING", "operator"):
-            raise NotAnOperatorPause("not an operator's pause")
-        return await self.transition("ACTIVE", cause="operator", actor=actor, reason=reason,
-                                     now_ms=now_ms)
 
     async def history(self, *, limit: int = 20) -> list[TradingState]:
         return [self.state] if self.state is not None else []
@@ -554,13 +541,11 @@ async def test_never_configured_persisted_state_is_null_and_reads_as_halted(
 
 
 @pytest.mark.asyncio
-async def test_no_recorded_decision_cannot_be_paused_or_resumed_by_token() -> None:
+async def test_no_recorded_decision_cannot_be_paused() -> None:
     store = _FakeTradingState(None)
     service = _service(trading_state=store)
     with pytest.raises(ValueError, match="HALTED -> REDUCING"):
         await service.pause(reason="pause", actor="admin")
-    with pytest.raises(ValueError, match="authenticated_resume_required"):
-        await service.resume(reason="token", actor="admin")
     assert store.writes == []
 
 
@@ -601,45 +586,6 @@ async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bo
     assert out["state"] == "HALTED" and out["cause"] == "operator"
     assert out["cancel_all_complete"] is complete
     assert out["cancel_all"][0]["currency"] == "UST"
-    assert out["resumable_without_approval"] is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("state", "cause"), [
-    ("HALTED", "operator"), ("HALTED", "auto"), ("HALTED", "kill_switch"),
-    ("REDUCING", "material_deploy"),
-])
-async def test_live_resume_of_an_unproven_stop_requires_an_authenticated_resume(
-    state: str, cause: str,
-) -> None:
-    """A stop that is not an operator's pause says something is unproven; a
-    static admin token cannot prove it."""
-    store = _FakeTradingState(_trading(state, cause=cause))
-    service = _service(trading_state=store)
-    service._phase = Phase.LIVE
-    with pytest.raises(ValueError, match="authenticated_resume_required"):
-        await service.resume(reason="static bearer", actor="admin-api")
-    assert store.state is not None and store.state.state == state
-    assert store.writes == []
-
-
-@pytest.mark.asyncio
-async def test_live_resume_clears_a_maintenance_pause_without_a_canary() -> None:
-    """An operator-requested pause exits the way it was entered.
-
-    Before halts carried a kind, undoing a database upgrade needed the
-    release-promotion path -- a real-money canary submit to clear a pause that
-    never had anything to do with execution correctness.
-    """
-    store = _FakeTradingState(_halt_state(True, reason="pg 18.6 upgrade"))
-    service = _service(trading_state=store)
-    service._phase = Phase.LIVE
-
-    out = await service.resume(reason="upgrade finished", actor="admin-api")
-
-    assert out["halted"] is False
-    assert out["state"] == "ACTIVE"
-    assert store.writes == [("ACTIVE", "operator", "upgrade finished", "admin-api")]
 
 
 @pytest.mark.asyncio
@@ -652,7 +598,6 @@ async def test_operator_halt_is_recorded_as_a_reducing_pause() -> None:
 
     assert out["state"] == "REDUCING"
     assert out["cause"] == "operator"
-    assert out["resumable_without_approval"] is True
 
 
 @pytest.mark.asyncio
@@ -664,40 +609,6 @@ async def test_operator_pause_cannot_relabel_a_halt() -> None:
     assert store.writes == []
 
 
-async def test_resume_writes_a_persisted_transition() -> None:
-    store = _FakeTradingState(_halt_state(True))
-    svc = _service(trading_state=store)
-    out = await svc.resume(reason="L4 v2 passed", actor="admin")
-    assert store.writes == [("ACTIVE", "operator", "L4 v2 passed", "admin")]
-    assert out["halted"] is False
-
-
-@pytest.mark.asyncio
-async def test_resume_warns_while_the_env_flag_still_holds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Clearing the persisted pause does not clear BFX_KILL_SWITCH. Reporting
-    "resumed" while the bot is still fully stopped would be a lie of exactly
-    the kind this whole endpoint exists to prevent."""
-    monkeypatch.setenv("BFX_KILL_SWITCH", "true")
-    svc = _service(trading_state=_FakeTradingState(_halt_state(True)))
-    out = await svc.resume(reason="L4 v2 passed", actor="admin")
-    assert out["halted"] is False
-    assert out["still_halted_by_env"] is True
-    assert "BFX_KILL_SWITCH" in out["note"]
-
-
-@pytest.mark.asyncio
-async def test_resume_reports_no_env_warning_when_the_flag_is_clear(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("BFX_KILL_SWITCH", raising=False)
-    svc = _service(trading_state=_FakeTradingState(_halt_state(True)))
-    out = await svc.resume(reason="done", actor="admin")
-    assert out["still_halted_by_env"] is False
-    assert out["note"] is None
-
-
 @pytest.mark.asyncio
 async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None:
     """paper/shadow have no store. Silently accepting a halt request there
@@ -707,8 +618,6 @@ async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None
         await svc.halt(reason="x", actor="admin")
     with pytest.raises(ValueError, match="not configured"):
         await svc.pause(reason="x", actor="admin")
-    with pytest.raises(ValueError, match="not configured"):
-        await svc.resume(reason="x", actor="admin")
 
 
 @pytest.mark.asyncio
@@ -717,3 +626,8 @@ async def test_status_includes_recent_halt_history() -> None:
     that answers "are we halted"."""
     snap = await _service(trading_state=_FakeTradingState(_halt_state(True))).snapshot()
     assert snap["halt"]["history"][0]["reason"] == "candle distortion"
+
+
+def test_the_static_token_cannot_resume() -> None:
+    """ADR D4: resuming needs the operator's TOTP; a static token never lifts a stop."""
+    assert not hasattr(TradingStatusService, "resume")

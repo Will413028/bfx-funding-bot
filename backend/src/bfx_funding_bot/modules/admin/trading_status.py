@@ -48,7 +48,6 @@ from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_OPERATOR,
     REDUCING,
-    NotAnOperatorPause,
     TradingState,
     TransitionResult,
 )
@@ -83,8 +82,6 @@ class _TradingStateProtocol(Protocol):
         self, state: str, *, cause: str, actor: str, reason: str,
         now_ms: int | None = None,
     ) -> TransitionResult: ...
-    async def resume_pause(self, *, actor: str, reason: str,
-                           now_ms: int | None = None) -> TransitionResult: ...
     async def history(self, *, limit: int = 20) -> list[TradingState]: ...
 
 
@@ -96,13 +93,6 @@ def _env_kill_switch_set() -> bool:
     return os.environ.get("BFX_KILL_SWITCH", "").lower() in ("true", "1", "yes")
 
 
-def _resumable_without_approval(state: TradingState) -> bool:
-    # A pause an operator asked for can be lifted the same way. A material
-    # deploy waits for its approval and a HALTED waits for an operator's
-    # authenticated resume; neither is lifted by this endpoint.
-    return state.state == REDUCING and state.cause == CAUSE_OPERATOR
-
-
 def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
     if state is None:
         return None
@@ -110,9 +100,6 @@ def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
         "state": state.state,
         "halted": not state.allows_new_offers,
         "cause": state.cause,
-        # Shown so the operator does not have to read the cause and guess
-        # whether /admin/resume will work.
-        "resumable_without_approval": _resumable_without_approval(state),
         "reason": state.reason,
         "actor": state.actor,
         "at_ms": state.created_at_ms,
@@ -272,7 +259,7 @@ class TradingStatusService:
             "history": history,
         }
 
-    # ------------------------------------------------------------ halt/resume
+    # ------------------------------------------------------------ halt/pause
 
     async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
         """Kill: HALTED (cause operator), then the venue funding cancel-all.
@@ -303,40 +290,12 @@ class TradingStatusService:
 
     async def pause(self, *, reason: str, actor: str) -> dict[str, Any]:
         """Maintenance pause: REDUCING, cause operator. Cancels stay allowed,
-        nothing new is placed, and /admin/resume lifts it."""
+        nothing new is placed. Resuming is an authenticated operator request."""
         result = await self._require_store().transition(
             REDUCING, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
         )
         return {**_trading_state_dict(result.state),  # type: ignore[dict-item]
                 "still_halted_by_env": _env_kill_switch_set()}
-
-    async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
-        """Lift an operator's pause. Does NOT touch BFX_KILL_SWITCH.
-
-        When the env flag is still set the bot stays fully stopped, so the
-        response says so explicitly — reporting "resumed" while nothing resumed
-        is exactly the class of lie this endpoint exists to prevent.
-        """
-        try:
-            # Checked under the scope lock: a stop recorded since the operator
-            # last looked is never lifted here. A HALTED (or no decision, read
-            # as HALTED) or a material deploy's REDUCING says something is
-            # unproven, which a static admin token does not prove: those exit
-            # through the operator's MFA-authenticated resume/approve. A pause
-            # during a probation resumes back inside it (ADR D3).
-            result = await self._require_store().resume_pause(actor=actor, reason=reason)
-        except NotAnOperatorPause as exc:
-            raise ValueError(f"authenticated_resume_required: {exc}") from exc
-        env_holds = _env_kill_switch_set()
-        return {
-            **_trading_state_dict(result.state),  # type: ignore[dict-item]
-            "still_halted_by_env": env_holds,
-            "note": (
-                "trading state is ACTIVE, but BFX_KILL_SWITCH is still set — the bot "
-                "remains halted until that env var is removed and the daemon redeployed"
-                if env_holds else None
-            ),
-        }
 
     def _require_store(self) -> _TradingStateProtocol:
         if self._trading_state is None:

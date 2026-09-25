@@ -200,7 +200,7 @@ KEK/UUID 設定、config 與 venue reconciliation 等後續 gate 全部通過。
 
 ### 6b. 套用 webapi least-privilege grants
 
-contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
+migration `6f2b8d0e4a17` 起，下列 baseline 由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand` 驗證），不再需要手動執行；以下保留作舊環境對照。contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
 能讀 projection、account/membership，並管理自己的 credential/config draft；不得
 寫入 event store、position、offer 或其他 execution tables。不要把這些 grant 放進
 Alembic，避免 role 不存在時讓 migration 失敗：
