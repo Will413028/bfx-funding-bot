@@ -1,6 +1,5 @@
 """Classify a release as `standard` or `material` from the paths it changes.
 
-Host-side and standard-library only (the VM runs Ubuntu 24.04's python3.12).
 The rules come from `deploy/change-class.yaml` at the *target* commit, so a
 change to the rules is itself judged by the rules it ships with -- which is why
 the rules file is hard-wired material here and cannot be listed away.
@@ -9,21 +8,33 @@ A path is `standard` only if a `standard` pattern matches it and no `material`
 pattern does. One material path makes the release material. Anything that
 cannot be decided (missing or malformed rules, unknown previous revision, a
 failed diff) is material: the class can only ever be raised by uncertainty.
+
+Parsing is PyYAML (`safe_load`) and matching is `pathspec`'s gitignore
+patterns, both pinned in deploy/vm/ops/uv.lock. Every pattern is anchored at
+the repository root (a leading `/` is added), so `*` and `?` stay inside one
+path segment, `**/` spans directories and a trailing `**` spans everything
+below -- and a slash-less pattern such as `.gitignore` never floats to other
+directories the way it would in a .gitignore file.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any
+
+import pathspec
+import yaml
 
 STANDARD = "standard"
 MATERIAL = "material"
 RULES_PATH = "deploy/change-class.yaml"
 
+# Negation (`!`), character classes and escapes are gitignore features that
+# could silently widen `standard`; the rules never need them.
 _PATTERN_CHARS = re.compile(r"[A-Za-z0-9._/*?+@-]+")
-_ITEM = re.compile(r'-\s+(?:"([^"]*)"|(\S+))')
-_KEY = re.compile(r"([a-z_]+):(.*)")
 _MAX_REPORTED_PATHS = 20
 
 
@@ -51,98 +62,68 @@ class Classification:
         return f"{self.reason}:{shown}" + (f",+{more}" if more > 0 else "")
 
 
-def compile_pattern(pattern: str) -> re.Pattern[str]:
-    """Translate a repository glob into an anchored regular expression.
-
-    `*` and `?` never cross `/`; `**/` spans zero or more whole directories and a
-    trailing `**` spans everything below. fnmatch is not used because its `*`
-    crosses directory separators, which would silently widen `standard`.
-    """
+def validate_pattern(pattern: object) -> str:
     if (
-        not pattern
+        not isinstance(pattern, str)
+        or not pattern
         or _PATTERN_CHARS.fullmatch(pattern) is None
         or pattern.startswith("/")
+        or pattern.endswith("/")
         or "//" in pattern
         or any(part in {".", ".."} for part in pattern.split("/"))
+        or any("**" in part and part != "**" for part in pattern.split("/"))
     ):
         raise RulesError(f"invalid pattern: {pattern!r}")
-    out: list[str] = []
-    index = 0
-    while index < len(pattern):
-        if pattern.startswith("**", index):
-            at_segment_start = index == 0 or pattern[index - 1] == "/"
-            rest = pattern[index + 2:]
-            if not at_segment_start or (rest and not rest.startswith("/")):
-                raise RulesError(f"'**' must be a whole path segment: {pattern!r}")
-            if rest:
-                out.append("(?:[^/]+/)*")
-                index += 3
-            else:
-                out.append(".+")
-                index += 2
-        elif pattern[index] == "*":
-            out.append("[^/]*")
-            index += 1
-        elif pattern[index] == "?":
-            out.append("[^/]")
-            index += 1
-        else:
-            out.append(re.escape(pattern[index]))
-            index += 1
-    return re.compile("".join(out) + r"\Z")
+    return pattern
+
+
+@lru_cache(maxsize=256)
+def _spec(patterns: tuple[str, ...]) -> pathspec.PathSpec[Any]:
+    return pathspec.PathSpec.from_lines("gitignore", ["/" + validate_pattern(p) for p in patterns])
+
+
+def matches(patterns: Sequence[str], path: str) -> bool:
+    """Whether any repository-anchored pattern matches `path`."""
+    return bool(patterns) and _spec(tuple(patterns)).match_file(path)
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """safe_load, except a repeated key is an error instead of last-one-wins."""
+
+
+def _unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
+    keys = [loader.construct_object(key, deep=deep) for key, _ in node.value]
+    if len(keys) != len(set(map(repr, keys))):
+        raise yaml.constructor.ConstructorError(None, None, "duplicate key", node.start_mark)
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
 
 
 def parse_rules(text: str) -> Rules:
-    """Parse the strict YAML subset used by deploy/change-class.yaml.
-
-    Accepted shape: comment lines, `version: 1`, and the two block lists
-    `standard:` and `material:` whose items are `- pattern` or `- "pattern"`.
-    Anything else is an error so a typo can never widen `standard`.
-    """
-    sections: dict[str, list[str]] = {}
-    version: str | None = None
-    current: str | None = None
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.split(" #", 1)[0].rstrip()
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line[0].isspace():
-            match = _KEY.fullmatch(line)
-            if match is None:
-                raise RulesError(f"line {number}: expected 'key:'")
-            key, value = match.group(1), match.group(2).strip()
-            if key in sections or (key == "version" and version is not None):
-                raise RulesError(f"line {number}: duplicate key {key!r}")
-            if key == "version":
-                version = value
-                current = None
-            elif key in {"standard", "material"}:
-                if value not in {"", "[]"}:
-                    raise RulesError(f"line {number}: {key} must be a block list")
-                sections[key] = []
-                current = None if value == "[]" else key
-            else:
-                raise RulesError(f"line {number}: unknown key {key!r}")
-            continue
-        item = _ITEM.fullmatch(line.strip())
-        if current is None or item is None:
-            raise RulesError(f"line {number}: expected a '- pattern' list item")
-        pattern = item.group(1) if item.group(1) is not None else item.group(2)
-        compile_pattern(pattern)
-        sections[current].append(pattern)
-    if version != "1":
+    """Read `version: 1` plus the `standard` and `material` pattern lists; nothing else."""
+    try:
+        data = yaml.load(text, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
+    except yaml.YAMLError as exc:
+        raise RulesError(f"not YAML: {type(exc).__name__}") from None
+    if not isinstance(data, dict) or set(data) != {"version", "standard", "material"}:
+        raise RulesError("expected exactly the keys version, standard and material")
+    if data["version"] != 1 or isinstance(data["version"], bool):
         raise RulesError("version must be 1")
-    if set(sections) != {"standard", "material"}:
-        raise RulesError("both 'standard' and 'material' are required")
-    return Rules(standard=tuple(sections["standard"]), material=tuple(sections["material"]))
+    lists: dict[str, tuple[str, ...]] = {}
+    for key in ("standard", "material"):
+        value = data[key] if data[key] is not None else []
+        if not isinstance(value, list):
+            raise RulesError(f"{key} must be a list of patterns")
+        lists[key] = tuple(validate_pattern(item) for item in value)
+    return Rules(standard=lists["standard"], material=lists["material"])
 
 
 def path_class(path: str, rules: Rules) -> str:
-    if path == RULES_PATH:
+    if path == RULES_PATH or matches(rules.material, path):
         return MATERIAL
-    if any(compile_pattern(pattern).match(path) for pattern in rules.material):
-        return MATERIAL
-    if any(compile_pattern(pattern).match(path) for pattern in rules.standard):
+    if matches(rules.standard, path):
         return STANDARD
     return MATERIAL
 

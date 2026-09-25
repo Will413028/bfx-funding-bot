@@ -730,20 +730,27 @@ scope and requires it to be identical (`prefix_hash_mismatch` or
 `$HOME/bfx/dr-evidence/restore-prefix.json` (`kind: restore_prefix`); it never
 replaces `restore.json`.
 
-`bfx-restore-test.service` runs this monthly (`bfx-restore-test.timer`, 1st of
-the month 09:17 UTC) and whenever bfx-deploy is about to apply a migration or
+`bfx-restore-test@<release>.service` runs this. The monthly timer
+(`bfx-restore-test.timer`, 1st of the month 09:17 UTC) starts
+`bfx-restore-test@current`: the DR scripts of the deployed release, from the clean
+checkout `/home/ubuntu/bfx-releases/current`. bfx-deploy starts
+`bfx-restore-test@<target revision>` -- the scripts the release is about to ship --
+whenever it is about to apply a migration or
 ship a change under `deploy/vm/pgbackrest/`, `deploy/vm/postgres/`,
 `docker-compose.bot.yml` or `docker-compose.dr.yml` (or when the diff cannot be
 read); a failure alerts and blocks that deploy. Its config is
 `/home/ubuntu/bfx/restore-test.json` with exactly `account_id`, `environment`
 and `projector_version`, for example
 `{"account_id": "<canonical-uuid>", "environment": "prod", "projector_version": "execution-state-v1"}`.
-bfx-deploy never updates the checked-out DR scripts, so
-after applying a DR change on the VM, start the service once by hand:
+bfx-deploy creates those checkouts (git worktrees of the mirror, owned by
+`ubuntu`) and points `current` at each release it deploys, so a DR change is
+tested with its own scripts before it ships and runs on schedule after it
+deploys. To re-run the test by hand, for example after changing the config or
+the secrets:
 
 ```bash
-sudo systemctl start --no-block bfx-restore-test.service
-journalctl -fu bfx-restore-test.service
+sudo systemctl start --no-block bfx-restore-test@current.service
+journalctl -fu bfx-restore-test@current.service
 ```
 
 On success the service writes `$HOME/bfx/dr-evidence/restore-heartbeat.json`;
