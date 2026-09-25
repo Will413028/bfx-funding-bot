@@ -27,6 +27,11 @@ COMPOSE_PATH = ROOT / "docker-compose.dr.yml"
 CONFIG_PATH = SCRIPT_DIR / "pgbackrest.conf"
 DEFAULT_SECRET_DIR = Path.home() / "bfx/pgbackrest/conf.d"
 DEFAULT_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore.json"
+# Prefix mode writes its own receipt so Halt 2 consumers of restore.json never see it.
+DEFAULT_PREFIX_OUTPUT_PATH = Path.home() / "bfx/dr-evidence/restore-prefix.json"
+PREFIX_SCRIPT_PATH = SCRIPT_DIR / "prefix_verify.py"
+_PREFIX_CHAIN_ERRORS = frozenset({"prefix_chain_empty", "prefix_chain_mismatch", "prefix_chain_incomplete"})
+_CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _REPLAY_HASH = re.compile(r"[0-9a-f]{64}")
 _MAX_RTO_SECONDS = 3600
@@ -80,11 +85,17 @@ class DrillRequest:
     account_id: str
     environment: str
     projector_version: str
-    backup_label: str
+    backup_label: str | None
     target_time: str | None
-    baseline_path: Path
+    baseline_path: Path | None
     archive_only: bool = False
     target_run_id: str | None = None
+    # Prefix mode: no operator baseline. Restore the newest backup to the end of
+    # the archive and compare its newest event_prefix_hashes link with the
+    # production cluster's link at the same event_seq.
+    prefix: bool = False
+    database_name: str = "bfx"
+    production_container: str = "bfx-postgres"
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -212,7 +223,7 @@ def _invalidate_timing_json(path: Path) -> None:
 
 def _write_failure_log(output_path: Path, code: str) -> None:
     """Keep a bounded diagnostic marker without retaining command output."""
-    log_path = output_path.with_name("restore.log")
+    log_path = output_path.with_name(f"{output_path.stem}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(f"restore drill failed: {code}\n"[:8192], encoding="utf-8")
     os.chmod(log_path, 0o600)
@@ -495,7 +506,7 @@ class RestoreDrill:
         )
         return completed.stdout
 
-    def _bootstrap_role(self, plan: RestorePlan, password: str) -> None:
+    def _bootstrap_role(self, plan: RestorePlan, password: str, *, prefix: bool = False) -> None:
         # Connecting to the baseline database validates it exists before any SQL.
         # Send separate statements via psql stdin, with logging disabled before
         # the password-bearing statement is parsed/executed (including on error).
@@ -503,7 +514,7 @@ class RestoreDrill:
             "event_log", "offer_claims", "position_state", "venue_offer_state",
             "venue_credit_state", "projection_heads", "reconcile_observation",
             "submission_attempts", "execution_uncertainties", "alembic_version",
-        )
+        ) + (("event_prefix_hashes",) if prefix else ())
         role = f'"{plan.verify_role}"'
         table_list = ", ".join(f'public."{table}"' for table in tables)
         sql = (
@@ -644,6 +655,94 @@ class RestoreDrill:
                 failed = True
         return failed
 
+    def _latest_backup_label(self, request: DrillRequest) -> str:
+        """Newest backup set, read from the production stanza (read-only `info`)."""
+        if _CONTAINER_NAME.fullmatch(request.production_container) is None:
+            _failure("restore_output_invalid")
+        try:
+            completed = self._command_runner(
+                ("docker", "exec", "--user", "postgres", request.production_container,
+                 "pgbackrest", "--stanza=bfx", "info", "--output=json"),
+                timeout=120,
+            )
+        except Exception:
+            _failure("backup_label_unavailable")
+        if completed.returncode != 0:
+            _failure("backup_label_unavailable")
+        try:
+            return str(_evidence._parse_pgbackrest_info(completed.stdout))
+        except EvidenceError:
+            _failure("backup_label_unavailable")
+
+    def _prefix_plan(self, request: DrillRequest, backup_label: str) -> RestorePlan:
+        if request.target_time is not None or request.baseline_path is not None or request.archive_only:
+            _failure("restore_output_invalid")
+        try:
+            plan = build_restore_plan(
+                account_id=request.account_id,
+                environment=request.environment,
+                projector_version=request.projector_version,
+                backup_label=backup_label,
+                target_time=None,
+                run_id=self._run_id_factory(),
+                database_name=request.database_name,
+                expected_event_hash=None,
+            )
+        except RestoreInputError:
+            _failure("restore_output_invalid")
+        _validate_plan_resources(plan)
+        if (not _config_is_clean_tracked(self._config_path) or not COMPOSE_PATH.is_file()
+                or not PREFIX_SCRIPT_PATH.is_file()):
+            _failure("restore_output_invalid")
+        try:
+            validate_secret_dir(
+                self._secret_dir,
+                postgres_uid=self._postgres_uid,
+                postgres_gid=self._postgres_gid,
+            )
+        except SecretConfigError:
+            _failure("restore_output_invalid")
+        return plan
+
+    def _prefix_json(self, command: tuple[str, ...]) -> str:
+        completed = self._call(command, input_text=PREFIX_SCRIPT_PATH.read_text(encoding="utf-8"))
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        if completed.returncode != 0:
+            try:
+                error = json.loads(lines[-1]).get("error") if lines else None
+            except (json.JSONDecodeError, AttributeError):
+                error = None
+            _failure("prefix_chain_invalid" if error in _PREFIX_CHAIN_ERRORS else "restore_command_failed")
+        if len(lines) != 1:
+            _failure("restore_output_invalid")
+        return lines[0]
+
+    def _production_prefix(self, request: DrillRequest, plan: RestorePlan, event_seq: int) -> str:
+        """Production's link at the restored head, read-only, as `<hash>\t<head seq>`."""
+        if type(event_seq) is not int or event_seq <= 0:
+            _failure("prefix_chain_invalid")
+        scope = (
+            f"exchange_account_id = '{plan.account_id}'::uuid "
+            f"AND deployment_environment = '{plan.environment}'"
+        )
+        query = (
+            "BEGIN TRANSACTION READ ONLY;\n"
+            "SELECT COALESCE((SELECT prefix_hash FROM public.event_prefix_hashes "
+            f"WHERE event_seq = {event_seq} AND {scope}), ''), "
+            "COALESCE((SELECT max(event_seq) FROM public.event_prefix_hashes "
+            f"WHERE {scope})::text, '');\n"
+            "ROLLBACK;\n"
+        )
+        completed = self._call(
+            ("docker", "exec", "--user", "postgres", "--interactive", request.production_container,
+             "psql", "-X", "-qAt", "-F", "\t", "-v", "ON_ERROR_STOP=1",
+             "-h", "/var/run/postgresql", "-U", plan.sql_admin_role, "-d", plan.database_name),
+            input_text=query,
+        )
+        if completed.returncode != 0:
+            _failure("production_read_failed")
+        return completed.stdout
+
     def run(self, request: DrillRequest) -> int:
         plan: RestorePlan | None = None
         env_path: Path | None = None
@@ -700,7 +799,71 @@ class RestoreDrill:
                 # Timing is diagnostic only. The accepted restore receipt keeps
                 # its existing invalidation and failure behavior above.
                 timing_usable = False
-            if failure_code is None:
+            if failure_code is None and request.prefix:
+                label = self._latest_backup_label(request)
+                plan = self._prefix_plan(request, label)
+                password = self._password_factory()
+                if not isinstance(password, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", password) is None:
+                    _failure("restore_output_invalid")
+                env_path = self._write_env_file(plan, password)
+                rto_started = self._clock()
+                self._deadline = rto_started + _MAX_RTO_SECONDS
+                begin_timing("resource_setup")
+                verifier_image = self._require_success((
+                    "docker", "image", "inspect", "--format={{.Id}}", "bfx-bot:local",
+                )).stdout.strip()
+                if not _evidence._archive.image_digest(verifier_image):
+                    _failure("restore_output_invalid")
+                self._require_success(plan.create_commands[0])
+                network_created = True
+                self._require_internal_network(plan)
+                self._require_success(plan.create_commands[1])
+                egress_network_created = True
+                self._require_success(plan.create_commands[2])
+                volume_created = True
+                end_timing("resource_setup")
+                begin_timing("physical_and_wal_recovery")
+                container_cleanup_eligible = True
+                self._require_success(_compose_with_env(plan.run_commands[0], env_path))
+                self._wait_for_health(plan)
+                self._wait_for_recovery(plan)
+                end_timing("physical_and_wal_recovery")
+                begin_timing("isolation_bootstrap")
+                self._require_external_egress(plan.run_commands[1])
+                self._require_success(plan.run_commands[2])
+                self._require_egress_absent(plan.run_commands[3], plan)
+                self._bootstrap_role(plan, password, prefix=True)
+                schema_tsv = self._schema_tsv(plan)
+                end_timing("isolation_bootstrap")
+                begin_timing("verification")
+                verifier_cleanup_eligible = True
+                verification_json = self._prefix_json(_commands.prefix_verifier_command(
+                    plan, image=verifier_image, env_path=env_path,
+                ))
+                _, _, event_count = _evidence._parse_schema(schema_tsv)
+                _, head = _evidence.parse_prefix_verification(
+                    verification_json, event_count=event_count, account_id=plan.account_id,
+                    environment=plan.environment, projector_version=plan.projector_version,
+                )
+                production_tsv = self._production_prefix(request, plan, int(head["event_seq"]))
+                image_digest, image_labels = self._image_metadata(plan)
+                elapsed_seconds = self._elapsed_seconds(rto_started)
+                self._remaining()
+                success_report = _evidence.render_prefix_restore_evidence(
+                    schema_tsv=schema_tsv, verification_json=verification_json,
+                    production_tsv=production_tsv, account_id=plan.account_id,
+                    environment=plan.environment, projector_version=plan.projector_version,
+                    target_backup_label=label, elapsed_seconds=elapsed_seconds,
+                    observed_at_ms=time.time_ns() // 1_000_000, config_path=self._config_path,
+                    image_digest=image_digest, image_labels=image_labels,
+                    network_name=plan.network_name, network_internal=True,
+                    egress_disconnected=True, verifier_image_digest=verifier_image,
+                )
+                success_report["rto_seconds"] = self._elapsed_seconds(rto_started)
+                success_report["restore_run_id"] = plan.project_name.removeprefix("bfx-dr-")
+                self._remaining()
+                end_timing("verification")
+            elif failure_code is None:
                 baseline = load_restore_baseline(
                     request.baseline_path, target_backup_label=request.backup_label,
                     target_time=request.target_time, account_id=request.account_id,
@@ -833,14 +996,18 @@ class RestoreDrill:
                     if not _revoke_after_failure(self._output_path):
                         failure_persist_failed = True
             if failure_code is not None:
+                failure_kind = (
+                    "restore_prefix" if request.prefix
+                    else "archive_restore" if request.archive_only else "restore"
+                )
                 try:
                     report = render_failure_evidence(
-                        kind="archive_restore" if request.archive_only else "restore", error_code=failure_code,
+                        kind=failure_kind, error_code=failure_code,
                         observed_at_ms=time.time_ns() // 1_000_000,
                     )
                 except EvidenceError:
                     report = render_failure_evidence(
-                        kind="archive_restore" if request.archive_only else "restore", error_code="restore_output_invalid",
+                        kind=failure_kind, error_code="restore_output_invalid",
                         observed_at_ms=time.time_ns() // 1_000_000,
                     )
                 try:
@@ -897,16 +1064,43 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--environment", required=True)
     parser.add_argument("--projector-version", required=True)
-    parser.add_argument("--backup-label", required=True)
+    parser.add_argument("--backup-label")
     parser.add_argument("--target-time")
-    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--archive-only", action="store_true")
     parser.add_argument("--target-run-id")
+    parser.add_argument(
+        "--prefix", action="store_true",
+        help="baseline-free mode: restore the newest backup to the end of the archive and "
+             "compare its newest event_prefix_hashes link with production's (restore-prefix.json)",
+    )
+    parser.add_argument("--database-name", default="bfx", help="prefix mode only")
+    parser.add_argument("--production-container", default="bfx-postgres", help="prefix mode only")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.prefix:
+        if any(value is not None for value in (args.backup_label, args.target_time, args.baseline,
+                                               args.target_run_id)) or args.archive_only:
+            parser.error("--prefix takes no --backup-label/--target-time/--baseline/--archive-only")
+        return RestoreDrill(output_path=DEFAULT_PREFIX_OUTPUT_PATH).run(
+            DrillRequest(
+                account_id=args.account_id,
+                environment=args.environment,
+                projector_version=args.projector_version,
+                backup_label=None,
+                target_time=None,
+                baseline_path=None,
+                prefix=True,
+                database_name=args.database_name,
+                production_container=args.production_container,
+            )
+        )
+    if args.backup_label is None or args.baseline is None:
+        parser.error("--backup-label and --baseline are required (or use --prefix)")
     return RestoreDrill().run(
         DrillRequest(
             account_id=args.account_id,

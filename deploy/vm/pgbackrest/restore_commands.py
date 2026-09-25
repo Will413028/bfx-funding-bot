@@ -40,7 +40,8 @@ class RestorePlan:
     projector_version: str
     backup_label: str
     target_time: str | None
-    expected_event_hash: str
+    # None only in prefix mode (restore_drill.py --prefix), which has no baseline hash.
+    expected_event_hash: str | None
     create_commands: tuple[tuple[str, ...], ...]
     run_commands: tuple[tuple[str, ...], ...]
     cleanup_commands: tuple[tuple[str, ...], ...]
@@ -68,9 +69,27 @@ def verifier_command(
                 "scripts/verify_projection_archive.py", "--input", "/run/archive-input.json",
                 "--input-digest", input_digest, "--account-id", plan.account_id,
                 "--environment", plan.environment, *(("--archive-only",) if archive_only else ()))
+    if plan.expected_event_hash is None:
+        _invalid()
     return (*command, image, "scripts/verify_projection_replay.py", "replay",
             "--account-id", plan.account_id, "--environment", plan.environment,
             "--projector-version", plan.projector_version, "--expected-event-hash", plan.expected_event_hash)
+
+
+def prefix_verifier_command(plan: RestorePlan, *, image: str, env_path: Path) -> tuple[str, ...]:
+    """Prefix mode: run prefix_verify.py (fed on stdin) in the observed bot image.
+
+    Same container name, user, isolated network and env file as the replay
+    verifier, so cleanup and isolation are unchanged; `-i` carries the script.
+    """
+    if (re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None or not env_path.is_absolute()
+            or plan.expected_event_hash is not None):
+        _invalid()
+    return ("docker", "run", "--rm", "-i", "--name", plan.verifier_container_name,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--network", plan.network_name, "--env-file", str(env_path), "--entrypoint", "python",
+            image, "-", "--account-id", plan.account_id, "--environment", plan.environment,
+            "--projector-version", plan.projector_version)
 
 
 def _canonical_account_id(account_id: str) -> str:
@@ -104,13 +123,19 @@ def build_restore_plan(
     target_time: str | None,
     run_id: str,
     database_name: str,
-    expected_event_hash: str,
+    expected_event_hash: str | None,
 ) -> RestorePlan:
-    """Validate operator strings and return argv-safe Docker commands."""
+    """Validate operator strings and return argv-safe Docker commands.
+
+    expected_event_hash is required for the baseline drill; None selects the
+    baseline-free prefix mode, whose verifier never receives an expected hash.
+    """
     canonical_account_id = _canonical_account_id(account_id)
     if not isinstance(database_name, str) or _DATABASE_NAME.fullmatch(database_name) is None:
         _invalid()
-    if not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None:
+    if expected_event_hash is not None and (
+        not isinstance(expected_event_hash, str) or _EVENT_HASH.fullmatch(expected_event_hash) is None
+    ):
         _invalid()
     if environment not in _ENVIRONMENTS:
         _invalid()
@@ -197,8 +222,8 @@ def build_restore_plan(
                 environment,
                 "--projector-version",
                 projector_version,
-                "--expected-event-hash",
-                expected_event_hash,
+                *(("--expected-event-hash", expected_event_hash)
+                  if expected_event_hash is not None else ()),
             ),
         ),
         cleanup_commands=(

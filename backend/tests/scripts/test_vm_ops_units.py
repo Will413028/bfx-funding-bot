@@ -81,7 +81,9 @@ def test_deploy_timer_every_five_minutes_offset_from_status() -> None:
     assert _unit("bfx-deploy.timer").one("Timer", "OnCalendar") == "*:2/5"
     assert _unit("bfx-backup-check.timer").one("Timer", "OnCalendar") == "*:1/5"
     assert _unit("bfx-pgbackrest-status.timer").one("Timer", "OnCalendar") == "*:0/5"
-    assert _unit("bfx-restore-test.timer").one("Timer", "OnCalendar") == "Sun *-*-* 05:17:00 UTC"
+    # Monthly, six hours clear of the 03:17 UTC backup and Monday's 04:17 report.
+    assert _unit("bfx-restore-test.timer").one("Timer", "OnCalendar") == "*-*-01 09:17:00 UTC"
+    assert _unit("bfx-restore-test.timer").one("Timer", "Persistent") == "true"
     for timer in ("bfx-deploy.timer", "bfx-backup-check.timer", "bfx-restore-test.timer"):
         assert _unit(timer).one("Install", "WantedBy") == "timers.target"
 
@@ -101,14 +103,17 @@ def test_restore_test_runs_the_existing_drill_from_the_operator_checkout() -> No
     exec_start = _unit("bfx-restore-test.service").one("Service", "ExecStart")
     assert "--drill /home/ubuntu/bfx-funding-bot/deploy/vm/pgbackrest/restore-drill.sh" in exec_start
     assert "--heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in exec_start
+    # Prefix receipts never overwrite the baseline drill's restore.json (Halt 2 reads it).
+    assert "--evidence /home/ubuntu/bfx/dr-evidence/restore-prefix.json" in exec_start
     check = _unit("bfx-backup-check.service").one("Service", "ExecStart")
     assert "--evidence /home/ubuntu/bfx/dr-evidence/backup.json" in check
     assert "--restore-heartbeat /home/ubuntu/bfx/dr-evidence/restore-heartbeat.json" in check
+    assert "--restore-max-age-seconds 3024000" in check  # 35 days for a monthly test
 
 
 def test_deploy_service_never_gets_killed_mid_backup() -> None:
     unit = _unit("bfx-deploy.service")
-    assert unit.one("Service", "TimeoutStartSec") == "3h"
+    assert unit.one("Service", "TimeoutStartSec") == "6h"  # > backup + restore test + pulls + migration
     assert "Restart" not in unit["Service"]
     assert "--mirror /home/ubuntu/bfx-funding-bot" in unit.one("Service", "ExecStart")
 
