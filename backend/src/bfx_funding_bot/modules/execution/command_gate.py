@@ -343,7 +343,7 @@ class AccountCommandGate:
         return result
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
-                     *, transport: bool = False) -> None:
+                     *, transport: bool = False, cancel: bool = False) -> None:
         if self._capital is not None:
             runtime = self._capital
             async def active(session: AsyncSession) -> bool:
@@ -358,7 +358,15 @@ class AccountCommandGate:
             if not account_active:
                 raise CommandGateBlocked("account_inactive")
         evaluate = self._safety_evaluator.evaluate
-        if transport:
+        if cancel:
+            # Only an evaluator that knows which guards a cancel is exempt from
+            # may admit one; falling back to the submit chain would block every
+            # cancel under a stop, and guessing a subset here could skip more.
+            cancel_evaluate = getattr(self._safety_evaluator, "evaluate_cancel", None)
+            if cancel_evaluate is None:
+                raise CommandGateBlocked("cancel_eligibility_unavailable")
+            evaluate = cancel_evaluate
+        elif transport:
             evaluate = getattr(self._safety_evaluator, "evaluate_transport", evaluate)
         result = await evaluate(decision, context)
         if not result.allowed:
@@ -366,7 +374,14 @@ class AccountCommandGate:
 
     async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
                      account_id: str, ctx: AccountContext) -> None:
-        """Durable cancel admission; ACK never releases capital in this boundary."""
+        """Durable cancel admission; ACK never releases capital in this boundary.
+
+        Cancelling is allowed in every trading state -- it is what REDUCING and
+        HALTED are for -- so it is not gated on the trading state or on a
+        release promotion. It is still refused without managed provenance and
+        while the offer's scope has an open or unreadable uncertainty, at
+        admission and again before every transport attempt.
+        """
         runtime = self._capital
         if runtime is None or not isinstance(self._inner, CancelPort):
             raise CommandGateBlocked("durable_cancel_unavailable")
@@ -378,8 +393,6 @@ class AccountCommandGate:
         async with lock:
             async with runtime.session_factory.begin() as session:
                 await runtime.repository.writer.prepare_locked(session, account_id=runtime.repository.account_id)
-                if self.release_authority is not None:
-                    await self.release_authority.check_normal(session)
                 claim = await session.scalar(select(OfferClaimRow).where(
                     OfferClaimRow.exchange_account_id == runtime.repository.account_id,
                     OfferClaimRow.deployment_environment == self._deployment_environment,
@@ -427,7 +440,7 @@ class AccountCommandGate:
                     offer_amount_usdt=float(claim.size_usdt),
                     offer_rate=float(decision_row.applied_rate),
                     offer_duration_days=decision_row.duration_days)
-                await self._guard(probe, replace(ctx, command_session=session), transport=True)
+                await self._guard(probe, replace(ctx, command_session=session), cancel=True)
                 await runtime.repository.writer.append(session, CancelRequested(
                     venue_offer_id=venue_offer_id, requested_at_ms=self._clock(),
                     signal_correlation_id=signal_correlation_id, account_id=account_id,
@@ -436,12 +449,8 @@ class AccountCommandGate:
             async def before_transport() -> None:
                 # Fresh scoped uncertainty/latch check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
-                if self.release_authority is not None:
-                    async with runtime.session_factory.begin() as fresh:
-                        await self.release_authority.repo.lock(fresh)
-                        await self.release_authority.check_normal(fresh)
                 await self.check(probe, ctx)
-                await self._guard(probe, ctx, transport=True)
+                await self._guard(probe, ctx, cancel=True)
 
             await before_transport()
             await self._inner.cancel(venue_offer_id=venue_offer_id,

@@ -40,6 +40,13 @@ GUARD_EVAL_TIMEOUT_SECONDS = 2.0
 # and blocked every offer, and the first signal was total blockage.
 GUARD_EVAL_WARN_FRACTION = 0.5
 
+# Guards a write that commits no new capital does not need. By name, like the
+# rest of the chain's selections, so the chain need not import the guards.
+_CAPITAL_POLICY = "capital_policy"
+_TRADING_STATE = "manual_kill"
+_TRANSPORT_EXEMPT = frozenset({_CAPITAL_POLICY})
+_CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE})
+
 
 class _DiagnosticsProtocol(Protocol):
     """Forensic diagnostics port (→ PG DiagnosticsSink)."""
@@ -153,17 +160,37 @@ class SafetyGuardChain:
             self.probe.record_heartbeat("safety_chain")
 
     async def evaluate_transport(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
-        """Write eligibility without new spending (reserved submit or cancel).
+        """Write eligibility for an already-reserved submit, before its transport.
 
-        Keep the write-shaped probe: SKIP would also bypass uncertainty checks.
+        No new spending, so only the capital check is skipped; the trading
+        state still applies -- a stop that lands between admission and
+        transport must stop the submit. Keep the write-shaped probe: SKIP
+        would also bypass uncertainty checks.
         """
+        return await self._evaluate_except(decision, ctx, _TRANSPORT_EXEMPT, "<transport>")
+
+    async def evaluate_cancel(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
+        """Write eligibility for cancelling one managed offer.
+
+        A cancel spends nothing and is the one venue write REDUCING and HALTED
+        exist to allow, so the capital check and the trading-state gate are
+        skipped. Everything else still runs on the write-shaped probe: a new
+        UNKNOWN or an unreadable uncertainty projection for the offer's scope,
+        a lost writer lock or a down executor still refuse the cancel. The
+        kill switch's venue cancel-all is a separate path that needs only the
+        writer lock.
+        """
+        return await self._evaluate_except(decision, ctx, _CANCEL_EXEMPT, "<cancel>")
+
+    async def _evaluate_except(self, decision: DecisionPayload, ctx: AccountContext,
+                               exempt: frozenset[str], label: str) -> GuardResult:
         for guard in self.guards:
-            if guard.name == "capital_policy":
+            if guard.name in exempt:
                 continue
             result, _ = await self._evaluate_one(guard, decision, ctx)
             if not result.allowed:
                 return result
-        return GuardResult(True, "<transport>")
+        return GuardResult(True, label)
 
     async def dry_evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
