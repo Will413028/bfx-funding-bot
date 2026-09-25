@@ -86,7 +86,7 @@ def include_object(
     schema = getattr(table, "schema", None) or "public"
     table_name = getattr(table, "name", None)
     # The retired release ceremony's tables, frozen in their own schema by
-    # migration 5d1c7e9a3b20: history, not application metadata.
+    # migration c74d45a54e46: history, not application metadata.
     if (type_ == "table" and getattr(object_, "schema", None) == _RELEASE_ARCHIVE) or (
         schema == _RELEASE_ARCHIVE
     ):

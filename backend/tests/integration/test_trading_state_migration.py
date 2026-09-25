@@ -123,6 +123,7 @@ def test_history_is_append_only(migrated):
     (_A, "ACTIVE", "auto", "HALTED -> ACTIVE by auto"),
     (_B, "HALTED", "material_deploy", "ck_trading_state_cause"),
     (_B, "REDUCING", "kill_switch", "ck_trading_state_cause"),
+    (_B, "HALTED", "kill_switch", "ck_trading_state_cause"),  # retired cause
     (_B, "PAUSED", "operator", "ck_trading_state_(state|cause)"),
 ])
 def test_trigger_and_checks_reject_illegal_transitions(migrated, account, state, cause, message):
@@ -215,7 +216,7 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
 def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
     url, engine, _ = migrated
     with engine.begin() as conn:
-        _insert(conn, _B, "HALTED", "kill_switch")
+        _insert(conn, _B, "HALTED", "operator")
     result = subprocess.run(["uv", "run", "alembic", "downgrade", _PREVIOUS], cwd=_BACKEND,
                             env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
     assert result.returncode != 0
@@ -457,10 +458,14 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
     url, engine, _ = migrated
     with engine.begin() as conn:
         archived = {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED}
-    _alembic(url, "downgrade", "b8e2d4f6a013")
+    _alembic(url, "downgrade", _PREVIOUS)
     with engine.begin() as conn:
         assert conn.scalar(text("SELECT to_regnamespace('release_archive')")) is None
         assert {table: _content(conn, "public", table, key) for table, key in _ARCHIVED} == archived
+        # All the way back to production's revision: nothing this branch created remains.
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _PREVIOUS
+        for table in ("trading_state", "deployments", "trading_control_requests", "nav_window_samples"):
+            assert conn.scalar(text(f"SELECT to_regclass('public.{table}')")) is None
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
     with engine.begin() as conn:

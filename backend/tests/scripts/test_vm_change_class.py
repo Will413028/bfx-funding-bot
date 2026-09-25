@@ -55,7 +55,7 @@ def test_release_is_standard_only_when_every_path_is_standard(paths: list[str]) 
     "backend/src/bfx_funding_bot/modules/observability/metrics.py",
     "backend/configs/cells.live.yaml",
     "backend/configs/safety.live.yaml",
-    "backend/alembic/versions/c3a639388457_add_deployments_ledger.py",
+    "backend/alembic/versions/c74d45a54e46_deploy_ledger_grants_and_release_archive.py",
     "backend/alembic.ini",
     "backend/uv.lock",
     "backend/Dockerfile",

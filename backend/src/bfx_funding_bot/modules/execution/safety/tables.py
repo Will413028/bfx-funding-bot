@@ -5,7 +5,7 @@ shape: losing a nav_peak only regresses the high-water mark (fail-permissive),
 whereas an unreadable trading state must stop trading (fail-closed).
 
 ``trading_halt``, the predecessor of ``trading_state``, was archived with the
-release ceremony it served (``release_archive`` schema, migration 5d1c7e9a3b20);
+release ceremony it served (``release_archive`` schema, migration c74d45a54e46);
 ``trading_state.legacy_halt_id`` still names the row a seeded state came from.
 """
 from __future__ import annotations
@@ -100,7 +100,7 @@ class TradingStateRow(Base):
         CheckConstraint(
             "(state = 'ACTIVE' AND cause IN ('operator', 'auto')) OR "
             "(state = 'REDUCING' AND cause IN ('operator', 'material_deploy')) OR "
-            "(state = 'HALTED' AND cause IN ('operator', 'kill_switch', 'auto'))",
+            "(state = 'HALTED' AND cause IN ('operator', 'auto'))",
             name="ck_trading_state_cause",
         ),
         CheckConstraint(

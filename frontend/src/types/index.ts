@@ -178,11 +178,7 @@ export interface FundingStatus {
 // ── Trading control (ADR 2026-09-25: trading state, release flow, kill) ──
 
 export type TradingStateName = "ACTIVE" | "REDUCING" | "HALTED";
-export type TradingCause =
-  | "operator"
-  | "kill_switch"
-  | "auto"
-  | "material_deploy";
+export type TradingCause = "operator" | "auto" | "material_deploy";
 
 /** Reduced limits after an approval or an automatic halt, and the lift's progress. */
 export interface TradingProbation {

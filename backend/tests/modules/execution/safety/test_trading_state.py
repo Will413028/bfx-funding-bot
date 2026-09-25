@@ -115,6 +115,8 @@ async def test_reasserting_a_halt_keeps_the_halt_in_force(scope) -> None:
     ([("REDUCING", "operator")], "HALTED -> REDUCING"),
     ([("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
     ([("REDUCING", "kill_switch")], "cannot put trading in REDUCING"),
+    # kill_switch is a retired cause: every stop is operator or auto.
+    ([("HALTED", "kill_switch")], "cannot put trading in HALTED"),
     ([("HALTED", "material_deploy")], "cannot put trading in HALTED"),
     ([("ACTIVE", "kill_switch")], "cannot put trading in ACTIVE"),
     ([("PAUSED", "operator")], "unknown trading state"),
@@ -178,7 +180,7 @@ async def test_scopes_are_independent(scope) -> None:
     other = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=other, venue="bitfinex", label="other"))
-    await _repo(factory, account, "ci").transition("HALTED", cause="kill_switch", actor="t",
+    await _repo(factory, account, "ci").transition("HALTED", cause="operator", actor="t",
                                                    reason="stop ci")
     assert await _repo(factory, account, "prod").current() is None
     assert await _repo(factory, other, "ci").current() is None

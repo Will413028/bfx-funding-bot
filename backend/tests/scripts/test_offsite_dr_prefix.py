@@ -491,7 +491,7 @@ async def test_backup_restore_and_prefix_comparison_on_real_postgres(pg_containe
         await session.commit()
     async with pg_engine.begin() as connection:
         await connection.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))
-        await connection.execute(text("INSERT INTO alembic_version VALUES ('c3a639388457')"))
+        await connection.execute(text("INSERT INTO alembic_version VALUES ('c74d45a54e46')"))
     await append((1_000, 2_000, 3_000))
     _container_exec(container, "pg_dump", "-U", pg_container.username, "-d", production_db,
                     "-Fc", "-f", "/tmp/prefix-backup.dump")

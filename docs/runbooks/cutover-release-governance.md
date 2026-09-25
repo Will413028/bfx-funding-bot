@@ -183,11 +183,11 @@ Production 在整個切換期間維持停機（halt 11），直到最後一步�
       `BFX_DEPLOYMENT_ID` 等於該 `attempt_id`。
 - [ ] 工具已換成這個 release：`readlink /usr/local/lib/bfx-ops/current` 與
       `readlink /home/ubuntu/bfx-releases/current` 都是 merge commit。
-- [ ] schema：`oneshot` 同樣方式跑 `/app/.venv/bin/alembic current` → `6f2b8d0e4a17 (head)`
+- [ ] schema：`oneshot` 同樣方式跑 `/app/.venv/bin/alembic current` → `c74d45a54e46 (head)`
       （把上面函式的 `python` 換成 `alembic`，或直接看 bfx-deploy 的 journal）。
 - [ ] UI：fresh sign-in＋TOTP；交易狀態面板顯示「停機 · operator」（halt 11 已轉成
       `HALTED/operator`），後端 image＝ledger digest，變更分級 material，出現「核准這個 build」。
-- [ ] uncertainty／history 頁面可讀（webapi read grants 由 migration `6f2b8d0e4a17` 提供，
+- [ ] uncertainty／history 頁面可讀（webapi read grants 由 migration `c74d45a54e46` 提供，
       取代舊 runbook 的手動 GRANT）。
 - [ ] **Kill switch**：UI 輸入 `KILL`（reason「cutover verification」）→ 面板的 venue 撤單
       每個幣別 `acknowledged`（預期原本就沒有掛單）；Telegram 收到交易狀態告警。

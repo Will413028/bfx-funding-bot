@@ -123,10 +123,10 @@ async def test_kill_writes_halted_then_cancels_managed_orphan_and_unknown_curren
     factory, account = capital_db
     _, ctx, trading, venue = await exposed_account(factory, account)
     result = await kill_switch(factory, trading, ctx, venue).engage(
-        cause="kill_switch", actor="test", reason="stop everything")
+        cause="operator", actor="test", reason="stop everything")
 
     assert result.complete
-    assert (result.state.state, result.state.cause) == ("HALTED", "kill_switch")
+    assert (result.state.state, result.state.cause) == ("HALTED", "operator")
     # Every call saw HALTED already committed; orphan (USD) and UNKNOWN (BTC)
     # currencies are cancelled although nothing is configured to trade them.
     assert venue.calls == [("BTC", "HALTED"), ("USD", "HALTED"), ("UST", "HALTED")]
@@ -175,7 +175,7 @@ async def test_no_venue_call_when_halted_cannot_be_written(capital_db, monkeypat
     monkeypatch.setattr(trading, "transition", unwritable)
     with pytest.raises(RuntimeError, match="database unavailable"):
         await kill_switch(factory, trading, ctx, venue).engage(
-            cause="kill_switch", actor="test", reason="stop")
+            cause="operator", actor="test", reason="stop")
     assert venue.calls == []
     assert await audit(factory) == []
 

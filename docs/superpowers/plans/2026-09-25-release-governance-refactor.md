@@ -88,7 +88,7 @@ Step-by-step commands: `docs/runbooks/cutover-release-governance.md` (T12).
    archive+drop release tables) → start → health.
 5. Verify: state `HALTED/operator` carried over, alerts arrive, kill switch
    cancels a test-free account (no open offers expected), UI shows state.
-6. ~~Revoke the five manual webapi grants~~ — superseded: migration `6f2b8d0e4a17`
+6. ~~Revoke the five manual webapi grants~~ — superseded: migration `c74d45a54e46`
    versions the web API's read grants (`9136d2b`).
 7. Will resumes with TOTP → probation (25%, 24 h) → normal.
 

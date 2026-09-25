@@ -298,7 +298,6 @@ async def test_requests_are_refused_with_a_bounded_reason(capital_db, setup, act
 @pytest.mark.parametrize(("setup", "cause", "probation"), [
     ("HALTED", "auto", True),         # an automatic protection: prove the system again
     ("HALTED", "operator", False),    # an operator's own stop of a proven build
-    ("HALTED", "kill_switch", False),
     ("REDUCING", "operator", False),  # maintenance: nothing new to prove
 ])
 async def test_resume_enters_probation_only_after_an_automatic_stop(capital_db, setup, cause, probation):

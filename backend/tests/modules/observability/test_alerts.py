@@ -302,11 +302,11 @@ async def test_kill_switch_alerts_its_cancel_all_result(
         trading_state=repo, session_factory=factory, ctx=ctx,  # type: ignore[arg-type]
         configured_symbols={"fUST", "fUSD"}, venue=Venue(failing), writer_lock=Lock(),
         clock=lambda: 5000,
-    ).engage(cause="kill_switch", actor="will", reason="stop everything")
+    ).engage(cause="operator", actor="will", reason="stop everything")
     await _drain(sink)
     kill = next(text for text in transport.sent if "cancel-all" in text)
     assert kill.startswith(f"[bfx][{level}]") and title in kill
-    assert f"state_id={result.state.id}" in kill and "cause=kill_switch" in kill
+    assert f"state_id={result.state.id}" in kill and "cause=operator" in kill
     assert ("not_acknowledged=[('USD', 'failed')]" in kill) == bool(failing)
     assert any("trading state none -> HALTED" in text for text in transport.sent)
 

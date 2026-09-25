@@ -3,7 +3,7 @@
 > **歷史紀錄。** 這次切換已完成。文中的 canary gate、Halt 2、手動 image／migration 步驟屬於已刪除的
 > 舊 release 流程；現行部署見 [deploy runbook](deploy.md)，停機與恢復見
 > [operations runbook](operations.md)。第 6b 節的 webapi 手動 GRANT 已由 migration
-> `6f2b8d0e4a17` 取代（該 SQL 仍保留，供測試比對）。
+> `c74d45a54e46` 取代（該 SQL 仍保留，供測試比對）。
 
 這是 pre-launch 的 planned halt runbook。目的：把舊字串 realm 一次切換成
 immutable `ExchangeAccount.id` UUID，並讓 money tables、credential vault、config
@@ -205,7 +205,7 @@ KEK/UUID 設定、config 與 venue reconciliation 等後續 gate 全部通過。
 
 ### 6b. 套用 webapi least-privilege grants
 
-migration `6f2b8d0e4a17` 起，下列 baseline 由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand` 驗證），不再需要手動執行；以下保留作舊環境對照。contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
+migration `c74d45a54e46` 起，下列 baseline 由 migration 授予（`test_the_web_api_baseline_is_granted_by_migration_not_by_hand` 驗證），不再需要手動執行；以下保留作舊環境對照。contract migration 後，以 database owner/superuser 執行一次性 grant。webapi 只
 能讀 projection、account/membership，並管理自己的 credential/config draft；不得
 寫入 event store、position、offer 或其他 execution tables。不要把這些 grant 放進
 Alembic，避免 role 不存在時讓 migration 失敗：
@@ -230,13 +230,13 @@ TO bfx_webapi;
 GRANT INSERT ON TABLE public.user_profiles TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.exchange_account_credentials TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bfx_webapi;
--- ADR D4' operator adjudication outbox (migration b8e2d4f6a013 grants the same):
+-- ADR D4' operator adjudication outbox (migration 1c435a35dcb4 grants the same):
 -- read the queue, insert request columns only; the daemon applies them.
 GRANT SELECT ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
 GRANT INSERT (request_id, exchange_account_id, deployment_environment, uncertainty_id,
   action, reconcile_event_seq, venue_offer_id, decision, reason, requested_by,
   created_at_ms) ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
--- Release-flow approve/resume outbox, same contract (migration 0218f9ab59a2 grants the same).
+-- Release-flow approve/resume outbox, same contract (migration 1c435a35dcb4 grants the same).
 GRANT SELECT ON TABLE public.trading_state, public.deployment_approvals,
   public.trading_control_requests TO bfx_webapi;
 GRANT INSERT (request_id, exchange_account_id, deployment_environment, action, backend_digest,

@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
 pytestmark = pytest.mark.integration
 
 STATES = ("ACTIVE", "REDUCING", "HALTED")
+# kill_switch is retired: both sides must refuse it in every state.
 CAUSES = ("operator", "kill_switch", "auto", "material_deploy")
 PROBATION = Probation.starting(multiplier=Decimal("0.25"), started_at_ms=1, floor={"fUST": Decimal("1")})
 # Histories that set up each "previous" situation; the last row is the current state.
