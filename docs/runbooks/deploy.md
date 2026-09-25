@@ -137,7 +137,7 @@ bfx-deploy 啟動前會檢查，違反即 `precheck` 失敗：
   也不會生效；
 - compose 檔的 env_file 寫成 `${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/<name>.env`：bfx-deploy 傳入
   自己檢查過的 `--runtime-dir`；CI 用放了空檔的暫存目錄 render。預設值必須維持 `/opt/bfx/runtime`
-  （`compose_policy.py --source` 會擋），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
+  （CI 在 `config --no-interpolate` 的輸出上由 `compose_policy.py` 檢查，也要求 `required: true`），env 檔也維持必填，缺秘密檔時 `up` 會失敗而不是無聲啟動；
 - `ghcr.env`：`GHCR_USERNAME`、`GHCR_TOKEN`（read-only `read:packages`）；檔案不存在＝匿名 pull。
 - `notify.env`：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`（見 [operations §6](operations.md#6-告警)）。
 
