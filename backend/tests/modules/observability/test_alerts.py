@@ -259,7 +259,7 @@ async def test_no_alert_for_a_transition_that_was_not_committed(installed: Any, 
     ("submit_outcome_unknown", "automatic HALT: UNKNOWN submit"),
     ("orphan_quarantined", "automatic HALT: orphan offer quarantined"),
     ("writer_lock_lost", "automatic HALT: writer lock lost"),
-    ("loss_limiter", "automatic HALT: loss_limiter"),
+    ("loss_limiter", "automatic HALT: loss limiter"),
 ])
 async def test_protection_trip_alerts_with_its_trigger(installed: Any, trigger: str, title: str) -> None:
     transport = Recorder()

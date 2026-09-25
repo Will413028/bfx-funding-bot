@@ -21,6 +21,7 @@ trigger                    raised where
                            ledger plus fills of our own offers can explain
 ``loss_limiter``           a currency's 24h loss or drawdown crossed its limit
 ``writer_lock_lost``       the writer lock is not held after a recovery attempt
+``command_rate_exceeded``  the command gate kept throttling venue writes (T9)
 ========================== ==================================================
 
 What never trips: realized (lent) falling because a loan ended, offers moving to
@@ -65,11 +66,12 @@ OFFER_AMOUNT_MISMATCH = "offer_amount_mismatch"
 VENUE_LENT_ABOVE_LEDGER = "venue_lent_above_ledger"
 LOSS_LIMITER = "loss_limiter"
 WRITER_LOCK_LOST = "writer_lock_lost"
+COMMAND_RATE_EXCEEDED = "command_rate_exceeded"
 
 TRIGGERS = frozenset({
     SUBMIT_OUTCOME_UNKNOWN, ORPHAN_QUARANTINED, UNATTRIBUTED_OFFER,
     UNCLASSIFIABLE_COMMITMENT, OFFER_AMOUNT_MISMATCH, VENUE_LENT_ABOVE_LEDGER,
-    LOSS_LIMITER, WRITER_LOCK_LOST,
+    LOSS_LIMITER, WRITER_LOCK_LOST, COMMAND_RATE_EXCEEDED,
 })
 
 # Capital classifier refusals that are protections, by the reason it raises.
@@ -314,6 +316,7 @@ class WriterLockWatch:
 
 __all__ = [
     "CAPITAL_BLOCK_TRIGGERS",
+    "COMMAND_RATE_EXCEEDED",
     "LEDGER_EPSILON",
     "LOSS_LIMITER",
     "OFFER_AMOUNT_MISMATCH",

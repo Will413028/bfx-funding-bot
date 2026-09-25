@@ -33,3 +33,20 @@ calibrated_guards:
     enabled: false
     threshold_pct: null
     window_minutes: null
+
+# Always-on pre-trade limits (T9, ADR 2026-09-25 D5). A live writer refuses to
+# start without this section; a symbol missing here cannot be offered at all.
+# The per-offer AMOUNT ceiling is not here: it is CapitalPolicy.max_offer_amount,
+# applied with scripts/amend_capital_policy.py (dry run -> digest -> apply).
+pre_trade_limits:
+  symbols:
+    fUST:
+      min_period_days: 2       # the venue minimum
+      max_period_days: 2       # every live cell offers 2-day loans today; a longer-dated strategy must raise this (material)
+      max_open_offers: 6       # 2 cells x up to 3 (reprice overlap); runaway posting stops at 6
+      rate_floor_ratio: "0.5"  # offer >= 50% of the median live bid (exact period, else whole book)
+  command_rate:                # submits + cancels through the command gate
+    capacity: 12               # burst: a boot or reprice tick needs <= ~5
+    refill_per_second: 0.1     # 6/min sustained vs a normal peak of ~3.3/min (5 per ~90 s tick)
+    trip_blocks: 6             # this many throttled commands ...
+    trip_window_seconds: 300   # ... within 5 minutes = a runaway loop -> HALTED/auto

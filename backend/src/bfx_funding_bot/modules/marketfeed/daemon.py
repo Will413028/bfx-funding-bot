@@ -65,6 +65,7 @@ from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
     AccountRetired,
     account_id_canonical,
+    account_id_uuid_or_none,
     get_exchange_account,
 )
 from bfx_funding_bot.modules.accounts.vault import (
@@ -154,6 +155,12 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 from bfx_funding_bot.modules.execution.safety.kill_switch import QUIESCE_TIMEOUT_S, KillSwitch
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
+from bfx_funding_bot.modules.execution.safety.nav_window_store import NavWindowStore
+from bfx_funding_bot.modules.execution.safety.pre_trade import (
+    build_command_throttle,
+    build_pre_trade_guards,
+    require_pre_trade_limits,
+)
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
     LossLimitMonitor,
@@ -1540,15 +1547,21 @@ async def build_daemon(
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
     # RealizedLossGuard / DrawdownGuard can actually trip. Subscribed to
     # PositionReconciled below (alongside the ledger).
+    window_account = account_id_uuid_or_none(account_id)
     pnl_source = ReconcileNavTracker(
         account_id=account_id,
         peak_store=NavPeakStore(
             session_factory, account_id=account_id, deployment_environment=env_str,
         ),
+        # T9: the 24h loss window survives restarts (canonical accounts only).
+        window_store=(NavWindowStore(session_factory, account_id=window_account,
+                                     deployment_environment=env_str)
+                      if window_account is not None else None),
     )
     # Seed the all-time peak from nav_peak so drawdown_pct survives restarts
     # (fail-permissive: load errors leave the in-memory-only behavior).
     await pnl_source.load_persisted_peaks()
+    await pnl_source.load_persisted_window()
     div_source = _StubDivergenceSource()
 
     # Durable trading state. Built unconditionally (like NavPeakStore) so every
@@ -1657,6 +1670,13 @@ async def build_daemon(
         ))
     if capital_runtime is not None:
         guards.append(CapitalPolicyGuard(runtime=capital_runtime))
+        # T9 always-on pre-trade limits: required for a live writer (fail-closed).
+        guards.extend(build_pre_trade_guards(
+            require_pre_trade_limits(safety_cfg.pre_trade_limits), runtime=capital_runtime,
+            book=funding_book_service, session_factory=session_factory,
+            account_id=capital_runtime.repository.account_id, environment=env_str,
+            clock=now_ms_utc,
+        ))
     elif hg.allocation_cap.enabled:
         guards.append(AllocationCapGuard(
             ledger=ledger,
@@ -2193,6 +2213,9 @@ async def build_daemon(
     protection.bind(kill_switch)
     if command_gate is not None:
         command_gate.protection = protection
+        if safety_cfg.pre_trade_limits is not None:
+            command_gate.throttle = build_command_throttle(
+                safety_cfg.pre_trade_limits, protection=protection)
     if os.environ.get("BFX_KILL_SWITCH", "").strip().lower() in ("true", "1", "yes"):
         # Break-glass env takes effect at boot as a real kill: the durable
         # HALTED and the venue cancel-all, before any task can place an offer.

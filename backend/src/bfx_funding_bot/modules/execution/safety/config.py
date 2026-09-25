@@ -97,10 +97,46 @@ class CalibratedGuardsCfg(BaseModel):
     divergence_rate: _DivergenceCfg
 
 
+class _SymbolLimitsCfg(BaseModel):
+    """Always-on per-symbol pre-trade limits (T9). Every field is required."""
+    model_config = ConfigDict(extra="forbid")
+    # Bitfinex funding periods run 2..120 days; the guard enforces this range too.
+    min_period_days: Annotated[int, Field(ge=2, le=120)]
+    max_period_days: Annotated[int, Field(ge=2, le=120)]
+    max_open_offers: Annotated[int, Field(gt=0)]
+    # Offer rate must be at least this fraction of the median live bid rate.
+    rate_floor_ratio: Annotated[Decimal, Field(gt=0, le=1)]
+
+    @model_validator(mode="after")
+    def _check(self) -> _SymbolLimitsCfg:
+        if self.min_period_days > self.max_period_days:
+            raise ValueError("min_period_days must not exceed max_period_days")
+        return self
+
+
+class _CommandRateCfg(BaseModel):
+    """Token bucket over submits and cancels at the command gate."""
+    model_config = ConfigDict(extra="forbid")
+    capacity: Annotated[int, Field(gt=0)]
+    refill_per_second: Annotated[float, Field(gt=0)]
+    # This many throttled commands within the window trip HALTED/auto.
+    trip_blocks: Annotated[int, Field(gt=0)]
+    trip_window_seconds: Annotated[int, Field(gt=0)]
+
+
+class PreTradeLimitsCfg(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbols: dict[str, _SymbolLimitsCfg]
+    command_rate: _CommandRateCfg
+
+
 class SafetyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hard_guards: HardGuardsCfg
     calibrated_guards: CalibratedGuardsCfg
+    # Optional here so paper/simulation configs stay valid; the live daemon
+    # refuses to boot without it (pre_trade.require_pre_trade_limits).
+    pre_trade_limits: PreTradeLimitsCfg | None = None
 
 
 def load_safety_config(path: Path) -> SafetyConfig:

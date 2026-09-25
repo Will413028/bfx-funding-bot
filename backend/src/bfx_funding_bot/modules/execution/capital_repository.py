@@ -81,10 +81,62 @@ class CapitalBlockedError(ValueError):
     """No authorization was issued; caller must not submit."""
 
 
+# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9).
+# Schema 1 stays readable (max_offer_amount None, which the pre-trade guard
+# refuses); every policy that sets the ceiling is written as schema 2.
+POLICY_KEYS = {1: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"}),
+               2: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction",
+                             "max_offer_amount"})}
+
+
+def policy_schema_version(policy: CapitalPolicy) -> int:
+    return 2 if policy.max_offer_amount is not None else SCHEMA_VERSION
+
+
 def policy_payload(policy: CapitalPolicy) -> dict[str, Any]:
-    return {"enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
-            "allocation_mode": policy.allocation_mode,
-            "max_cell_fraction": str(policy.max_cell_fraction)}
+    payload = {"enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
+               "allocation_mode": policy.allocation_mode,
+               "max_cell_fraction": str(policy.max_cell_fraction)}
+    if policy.max_offer_amount is not None:
+        payload["max_offer_amount"] = str(policy.max_offer_amount)
+    return payload
+
+
+def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
+    """Validate one stored policy revision (schema, digest, exact keys) or refuse."""
+    keys = POLICY_KEYS.get(row.schema_version)
+    if keys is None or row.digest != _digest(row.policy):
+        raise CapitalBlockedError("invalid_policy_schema_or_digest")
+    try:
+        if set(row.policy) != keys:
+            raise ValueError
+        return CapitalPolicy(enabled=row.policy["enabled"],
+            reserve_amount=_amount(row.policy["reserve_amount"]),
+            allocation_mode=row.policy["allocation_mode"],
+            max_cell_fraction=_amount(row.policy["max_cell_fraction"]),
+            max_offer_amount=(_amount(row.policy["max_offer_amount"])
+                              if "max_offer_amount" in keys else None))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise CapitalBlockedError("invalid_policy") from exc
+
+
+async def read_policy_unlocked(session: AsyncSession, *, account_id: UUID, environment: str,
+                               symbol: str) -> CapitalPolicy:
+    """The applied policy without the account lock, for read-only pre-trade guards.
+
+    The command boundary re-reads and binds the policy revision under the lock
+    before any intent is written, so a guard reading a pointer that moves an
+    instant later cannot authorise anything by itself.
+    """
+    head = await session.get(CapitalPolicyHeadRow, (account_id, environment, symbol),
+                             populate_existing=True)
+    if head is None:
+        raise CapitalBlockedError("policy_unavailable")
+    row = await session.get(CapitalPolicyRevisionRow, head.revision_id, populate_existing=True)
+    if row is None or (row.exchange_account_id, row.deployment_environment, row.symbol,
+                       row.revision) != (account_id, environment, symbol, head.revision):
+        raise CapitalBlockedError("inconsistent_policy_pointer")
+    return policy_from_row(row)
 
 
 def _digest(value: object) -> str:
@@ -161,7 +213,8 @@ class CapitalRepository:
         payload = policy_payload(policy)
         row = CapitalPolicyRevisionRow(
             id=uuid4(), exchange_account_id=self.account_id, deployment_environment=self.environment,
-            symbol=symbol, revision=version + 1, schema_version=SCHEMA_VERSION, policy=payload,
+            symbol=symbol, revision=version + 1, schema_version=policy_schema_version(policy),
+            policy=payload,
             digest=_digest(payload), source=source,
         )
         session.add(row)
@@ -185,17 +238,7 @@ class CapitalRepository:
         if row is None or (row.exchange_account_id, row.deployment_environment, row.symbol,
                            row.revision) != (self.account_id, self.environment, symbol, head.revision):
             raise CapitalBlockedError("inconsistent_policy_pointer")
-        if row.schema_version != SCHEMA_VERSION or row.digest != _digest(row.policy):
-            raise CapitalBlockedError("invalid_policy_schema_or_digest")
-        try:
-            if set(row.policy) != {"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"}:
-                raise ValueError
-            policy = CapitalPolicy(enabled=row.policy["enabled"],
-                reserve_amount=_amount(row.policy["reserve_amount"]),
-                allocation_mode=row.policy["allocation_mode"],
-                max_cell_fraction=_amount(row.policy["max_cell_fraction"]))
-        except (ValueError, TypeError, KeyError) as exc:
-            raise CapitalBlockedError("invalid_policy") from exc
+        policy = policy_from_row(row)
         return AppliedCapitalPolicy(row.revision, row.digest, policy, row.id)
 
     async def _fence(self, session: AsyncSession) -> int:
