@@ -16,7 +16,7 @@ and taking them away is a decision for whoever downgrades, not a side effect.
 from alembic import op
 
 revision = "6f2b8d0e4a17"
-down_revision = "5d1c7e9a3b20"
+down_revision = "9391a0f675d3"
 branch_labels = None
 depends_on = None
 

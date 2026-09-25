@@ -71,6 +71,8 @@ ARCHIVE_READY_MIGRATIONS = frozenset({
     # Archives the release ceremony's tables in their own schema; none is in
     # TABLE_NAMES and event_log is untouched.
     "5d1c7e9a3b20",
+    # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
+    "9391a0f675d3",
     # Grants only; no archived row or event_log content changes.
     "6f2b8d0e4a17",
 })
