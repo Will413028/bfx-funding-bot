@@ -14,9 +14,9 @@ Bitfinex 自動放貸 SaaS 平台。
 
 應用程式與資料服務自托於 Oracle Cloud VM（單機 Docker）；外部服務包含 Bitfinex venue、GHCR（image registry）與 Cloudflare R2 offsite backup。
 
-- **應用程式**（bot／webapi／frontend）：compose project `bfx-app`，定義在 `deploy/vm/docker-compose.app.yml`。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 image 推到 GHCR；VM 的 `bfx-deploy`（`deploy/vm/ops/bfx_deploy.py`，`bfx-deploy.timer` 每 5 分鐘）只以 digest 部署：依 `deploy/change-class.yaml` 分級、有 migration 時先停 bot 再備份與跑 isolated restore test（用目標版本的 DR 腳本）、寫 `deployments` ledger 的 `started` 列後 recreate、健康檢查、無 migration 時失敗回滾，結束再寫一列並發 Telegram；成功後安裝該版本的主機工具（下一輪生效）。container hardening 由 CI 對 `docker compose config` 做 policy 檢查。VM 不 build image。
+- **應用程式**（bot／webapi／frontend）：compose project `bfx-app`，定義在 `deploy/vm/docker-compose.app.yml`。CI（`.github/workflows/release.yml`）在綠燈的 `main` commit 建 arm64 image 推到 GHCR；VM 的 `bfx-deploy`（`deploy/vm/ops/bfx_deploy.py`，`bfx-deploy.timer` 每 5 分鐘）只以 digest 部署（部署不改變交易狀態、沒有分級或核准）：有 migration 時先停 bot 再備份與跑 isolated restore test（用目標版本的 DR 腳本）、寫 `deployments` ledger 的 `started` 列後 recreate、健康檢查、無 migration 時失敗回滾，結束再寫一列並發 Telegram；成功後安裝該版本的主機工具（下一輪生效）。container hardening 由 CI 對 `docker compose config` 做 policy 檢查。VM 不 build image。
 - **資料服務**（Postgres／Redis）：compose project `bfx`，`docker-compose.bot.yml`；其 `legacy-app` profile 只是歷史定義，不可用來啟動應用程式。
-- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／核准／停機／告警 `docs/runbooks/operations.md`；一次性切換 `docs/runbooks/cutover-release-governance.md`。
+- Runbook：部署 `docs/runbooks/deploy.md`；交易狀態／包絡／停機／告警 `docs/runbooks/operations.md`；首次安裝參考（已執行的一次性切換紀錄）`docs/runbooks/cutover-release-governance.md`。
 
 | 服務 | 平台 |
 |------|------|
