@@ -154,8 +154,8 @@ class _HaltableStatus(_FakeStatus):
         self.halts: list[dict[str, Any]] = []
         self.resumes: list[dict[str, Any]] = []
 
-    async def halt(self, *, reason: str, actor: str, renew: bool = False) -> dict[str, Any]:
-        self.halts.append({"reason": reason, "actor": actor, "renew": renew})
+    async def halt(self, *, reason: str, actor: str) -> dict[str, Any]:
+        self.halts.append({"reason": reason, "actor": actor})
         return {"halted": True, "reason": reason, "actor": actor}
 
     async def resume(self, *, reason: str, actor: str) -> dict[str, Any]:
@@ -185,10 +185,18 @@ def test_halt_records_the_reason_and_actor() -> None:
         headers={"Authorization": "Bearer secret"},
     )
     assert resp.status_code == 200
-    # renew defaults off: an ordinary halt must never advance the epoch.
-    assert status.halts == [
-        {"reason": "candle distortion", "actor": "will", "renew": False}
-    ]
+    assert status.halts == [{"reason": "candle distortion", "actor": "will"}]
+
+
+def test_halt_no_longer_renews_a_canary_epoch() -> None:
+    """The release ceremony's epoch is not a trading decision; this endpoint
+    only changes the trading state and ignores the old parameter."""
+    status = _HaltableStatus()
+    resp = TestClient(_app(status)).post(
+        "/admin/halt?reason=x&renew=true", headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    assert status.halts == [{"reason": "x", "actor": "admin-api"}]
 
 
 def test_halt_requires_a_reason() -> None:

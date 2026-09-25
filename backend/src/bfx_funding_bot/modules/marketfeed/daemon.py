@@ -140,7 +140,6 @@ from bfx_funding_bot.modules.execution.safety.config import (
     _AllocationCapCfg,
     load_safety_config,
 )
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
     AuthHealthGuard,
@@ -153,7 +152,12 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 )
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
-from bfx_funding_bot.modules.execution.safety.tables import TradingHaltRow
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    CAUSE_AUTO,
+    HALTED,
+    TradingStateRepository,
+    read_current,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
 from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
@@ -629,15 +633,7 @@ async def collect_canary_readiness(
             for event in snapshots
         )
     )
-    halted = await session.scalar(
-        select(TradingHaltRow.halted)
-        .where(
-            TradingHaltRow.exchange_account_id == account_id,
-            TradingHaltRow.deployment_environment == environment,
-        )
-        .order_by(TradingHaltRow.id.desc())
-        .limit(1)
-    )
+    trading = await read_current(session, account_id=account_id, environment=environment)
     return CanaryReadiness(
         open_uncertainty_count=open_uncertainty_count,
         projector_lag=max(0, projector_lag),
@@ -645,7 +641,7 @@ async def collect_canary_readiness(
         reconcile_fences=tuple(int(row.event_seq) for row in snapshot_rows if row.event_seq),
         reconcile_observed_at_ms=tuple(event.query_finished_at_ms for event in snapshots),
         observed_at_ms=now_ms,
-        persistent_halt=halted is True,
+        persistent_halt=trading is not None and not trading.allows_new_offers,
     )
 
 
@@ -1353,10 +1349,10 @@ async def build_daemon(
             log.info("release_identity_verified digest=%s inventory_seconds=%.6f",
                      verified_release.release_digest, time.perf_counter() - identity_started)
         except Exception:
-            await HaltStateStore(session_factory,
-                account_id=str(account_bootstrap.exchange_account_id),
+            await TradingStateRepository(session_factory,
+                account_id=account_bootstrap.exchange_account_id,
                 deployment_environment=config.deployment_environment.value,
-            ).set_halted(True, reason="release_boot_blocked", actor="worker")
+            ).transition(HALTED, cause=CAUSE_AUTO, actor="worker", reason="release_boot_blocked")
             await db_engine.dispose()
             raise
 
@@ -1517,11 +1513,11 @@ async def build_daemon(
     await pnl_source.load_persisted_peaks()
     div_source = _StubDivergenceSource()
 
-    # Persisted kill switch. Built unconditionally (like NavPeakStore) so every
-    # phase can be halted durably. Note the OPPOSITE failure posture to the peak
-    # store above: an unreadable halt state blocks submits rather than degrading
-    # gracefully — see ManualKillGuard.
-    halt_store = HaltStateStore(
+    # Durable trading state. Built unconditionally (like NavPeakStore) so every
+    # phase can be stopped durably. Note the OPPOSITE failure posture to the
+    # peak store above: an unreadable trading state blocks submits rather than
+    # degrading gracefully — see ManualKillGuard.
+    trading_state = TradingStateRepository(
         session_factory, account_id=account_id, deployment_environment=env_str,
     )
 
@@ -1594,7 +1590,7 @@ async def build_daemon(
     if hg.manual_kill.enabled:
         guards.append(
             ManualKillGuard(
-                halt_store=halt_store,
+                trading_state=trading_state,
                 canary_halt_authorization=canary_halt_authorization,
             )
         )
@@ -1860,7 +1856,7 @@ async def build_daemon(
             await deployment_reconciler.deploy(release=command)
 
         release_worker = build_release_worker(runtime=release_runtime, capital=capital_runtime,
-            writer_lock=writer_lock, halt_store=halt_store,
+            writer_lock=writer_lock, trading_state=trading_state,
             funding_rules=funding_rules,
             configured_cells=tuple((c.strategy.value, c.symbol, c.cell_id) for c in config.cells),
             halt_authorization=canary_halt_authorization, planner=_release_plan,
@@ -2140,7 +2136,7 @@ async def build_daemon(
         env_fallback_buffer=balance_buffer_usdt,
         phase=config.phase,
         attempts=attempt_recorder,
-        halt_store=halt_store,
+        trading_state=trading_state,
         readiness=trading_readiness,
         capital_runtime=capital_runtime,
     )

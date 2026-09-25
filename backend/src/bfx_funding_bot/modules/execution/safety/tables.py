@@ -1,8 +1,12 @@
-"""Safety-module persistence: nav_peak (guard calibration) + trading_halt (kill switch).
+"""Safety-module persistence: nav_peak (guard calibration) + trading state (kill switch).
 
 The two have OPPOSITE failure postures and must not be refactored into a shared
 shape: losing a nav_peak only regresses the high-water mark (fail-permissive),
-whereas an unreadable trading_halt must stop trading (fail-closed).
+whereas an unreadable trading state must stop trading (fail-closed).
+
+``trading_halt`` is the predecessor of ``trading_state``. Trading decisions no
+longer read it; it remains only as the epoch the release ceremony binds canary
+permits and release sessions to, and goes with that ceremony.
 """
 from __future__ import annotations
 
@@ -12,6 +16,8 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -21,6 +27,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+# Register the referenced account table for metadata-only fixtures.
+import bfx_funding_bot.modules.accounts.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 
 
@@ -82,4 +90,61 @@ class TradingHaltRow(Base):
             "ix_trading_halt_realm_id",
             "exchange_account_id", "deployment_environment", "id",
         ),
+    )
+
+
+class TradingStateRow(Base):
+    """Append-only trading-state decisions. Current = highest id for the scope.
+
+    ``state`` decides what the writer may do: ACTIVE trades, REDUCING only
+    cancels, HALTED only cancels and has had the venue's funding offers
+    cancelled. ``cause`` records who or what made the transition, and the
+    allowed pairs are fixed by ``ck_trading_state_cause``.
+
+    Ordering is by ``id``: PostgreSQL's insert trigger assigns it under a scope
+    lock, validates the transition against the previous row and rejects every
+    UPDATE/DELETE/TRUNCATE. SQLite fixtures get none of that; the repository
+    validates transitions in code as well.
+    """
+
+    __tablename__ = "trading_state"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
+    )
+    exchange_account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("exchange_accounts.id", ondelete="RESTRICT", name="fk_trading_state_account"),
+        nullable=False,
+    )
+    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    cause: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    probation_multiplier: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    probation_started_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    legacy_halt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("state IN ('ACTIVE', 'REDUCING', 'HALTED')", name="ck_trading_state_state"),
+        CheckConstraint(
+            "(state = 'ACTIVE' AND cause IN ('operator', 'auto')) OR "
+            "(state = 'REDUCING' AND cause IN ('operator', 'material_deploy')) OR "
+            "(state = 'HALTED' AND cause IN ('operator', 'kill_switch', 'auto'))",
+            name="ck_trading_state_cause",
+        ),
+        CheckConstraint(
+            "(probation_multiplier IS NULL AND probation_started_at_ms IS NULL) OR "
+            "(state = 'ACTIVE' AND probation_multiplier > 0 AND probation_multiplier <= 1 "
+            "AND probation_started_at_ms >= 0)",
+            name="ck_trading_state_probation",
+        ),
+        CheckConstraint(
+            "length(trim(actor)) > 0 AND length(trim(reason)) > 0 "
+            "AND length(trim(deployment_environment)) > 0 AND created_at_ms >= 0",
+            name="ck_trading_state_evidence",
+        ),
+        Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id"),
     )

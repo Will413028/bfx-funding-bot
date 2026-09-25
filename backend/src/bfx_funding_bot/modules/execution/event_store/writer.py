@@ -41,6 +41,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Adds trading_halt.kind and relaxes one release_sessions transition guard.
     # Touches neither projection_heads, the seeded cursor, nor the projector.
     "a7f3c1d9e204",
+    # Adds the append-only trading_state table beside the ledger; no event,
+    # projection or cursor is touched.
+    "8e4f33517b10",
 })
 
 __all__ = [

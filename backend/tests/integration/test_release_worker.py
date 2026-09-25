@@ -5,6 +5,7 @@ import pytest
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.release_session import ReleaseSessions
 from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
+from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
 from tests.external.bitfinex.test_funding_rules import FixedRules
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
@@ -30,6 +31,8 @@ async def test_preview_uses_fx_minimum_and_respects_max_amount(capital_db, max_a
     sessions = ReleaseSessions(account, "ci")
     halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
     await halt.set_halted(True, reason="fixture", actor="operator")
+    trading = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    await trading.transition("HALTED", cause="operator", reason="fixture", actor="operator")
     now = 1100
     async def yes(*args):
         return True
@@ -41,7 +44,7 @@ async def test_preview_uses_fx_minimum_and_respects_max_amount(capital_db, max_a
         return {"fixture": "versioned-rule"}
     authority = ReleaseCommandAuthority(repo=sessions, capital=capital, binding_reader=binding,
         ownership=yes, authority_reader=yes, preflight=preflight, clock=lambda: now)
-    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
+    worker = ReleaseWorker(authority=authority, trading_state=trading, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=yes, observation=yes)
     worker.funding_rules = FixedRules(rate=rate, clock=lambda: 1100)
@@ -100,6 +103,9 @@ async def test_worker_prepares_then_rechecks_revoked_authorization(capital_db, h
     sessions = ReleaseSessions(account, "ci")
     halt = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
     epoch = await halt.set_halted(True, reason="fixture", actor="operator")
+    trading = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    stopped = (await trading.transition("HALTED", cause="operator", reason="fixture",
+                                        actor="operator")).state
     authorized = True
 
     async def ownership():
@@ -120,7 +126,7 @@ async def test_worker_prepares_then_rechecks_revoked_authorization(capital_db, h
 
     authority = ReleaseCommandAuthority(repo=sessions, capital=capital, binding_reader=binding,
         ownership=ownership, authority_reader=operator, preflight=preflight, clock=lambda: 1100)
-    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
+    worker = ReleaseWorker(authority=authority, trading_state=trading, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=planner, observation=preflight)
     async with factory.begin() as session:
@@ -141,10 +147,10 @@ async def test_worker_prepares_then_rechecks_revoked_authorization(capital_db, h
         from unittest.mock import AsyncMock
         # Simulate a successful planner that returns after its one-shot call.
         # A failed terminal halt write must NOT be retried and then swallowed.
-        halt.set_halted = AsyncMock(side_effect=[OSError("fixture halt failure"), epoch])
+        trading.transition = AsyncMock(side_effect=[OSError("fixture halt failure"), stopped])
         with pytest.raises(Exception, match="halt"):
             await worker.tick()
-        assert halt.set_halted.await_count == 1
+        assert trading.transition.await_count == 1
         return
     authorized = False
     await worker.tick()
@@ -154,6 +160,7 @@ async def test_worker_prepares_then_rechecks_revoked_authorization(capital_db, h
         assert row.reason == "release_operator_revoked"
     assert calls == []
     assert (await halt.current()).id == epoch.id
+    assert (await trading.current()).id == stopped.id
 
 
 @pytest.mark.asyncio
@@ -172,7 +179,7 @@ async def test_production_worker_rejects_unprotected_halt2_source(tmp_path):
     worker = build_release_worker(
         runtime=SimpleNamespace(verify=lambda: SimpleNamespace(actual_image_id="sha256:" + "a"*64)),
         capital=SimpleNamespace(repository=SimpleNamespace(account_id=uuid4(), environment="ci")),
-        writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, funding_rules=FixedRules(),
+        writer_lock=SimpleNamespace(verify_held=owned), trading_state=None, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=planner, config_artifact=path, evidence_path=path, clock=lambda: 1100)
     row = SimpleNamespace(symbol="fUST", cell="a30", strategy="mean_reversion", max_amount=Decimal("200"))
@@ -202,7 +209,7 @@ async def test_worker_binds_halt2_to_actual_host_id_not_source_config(tmp_path, 
     worker = module.build_release_worker(
         runtime=SimpleNamespace(verify=lambda: proof),
         capital=SimpleNamespace(repository=SimpleNamespace(account_id=uuid4(), environment="ci")),
-        writer_lock=SimpleNamespace(verify_held=owned), halt_store=None, funding_rules=FixedRules(),
+        writer_lock=SimpleNamespace(verify_held=owned), trading_state=None, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=object(),
         planner=planner, config_artifact=tmp_path / "config", evidence_path=tmp_path / "evidence",
         clock=lambda: 1100)

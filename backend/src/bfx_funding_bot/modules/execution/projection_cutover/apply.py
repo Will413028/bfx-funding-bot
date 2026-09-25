@@ -366,14 +366,14 @@ async def apply_cutover(
         raise ValueError("apply_completed_request_mismatch")
     # Fence direct SQL writes too. SHARE ROW EXCLUSIVE permits isolated replay
     # reads and serializes upgrades; no self-blocking SHARE -> write conversion.
-    for name in ("event_log", "trading_halt", *TABLE_NAMES):
+    for name in ("event_log", "trading_state", *TABLE_NAMES):
         await session.execute(text(f"LOCK TABLE public.{name} IN SHARE ROW EXCLUSIVE MODE"))
     await audit_runtime_roles(session, role_names=runtime_roles)
-    halted = await session.scalar(text(
-        "SELECT halted FROM public.trading_halt WHERE exchange_account_id=:id "
+    trading = await session.scalar(text(
+        "SELECT state FROM public.trading_state WHERE exchange_account_id=:id "
         "AND deployment_environment=:env ORDER BY id DESC LIMIT 1"
     ), {"id": expected.scope.account_id, "env": expected.scope.environment})
-    if halted is not True:
+    if trading not in {"REDUCING", "HALTED"}:
         raise ValueError("apply_scope_not_halted")
     await quiescence_verifier(session, scope=expected.scope, runtime_roles=runtime_roles,
                              operation_digest=operation_digest)

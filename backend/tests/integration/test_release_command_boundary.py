@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.release_tables import ReleaseSessionRow
+from bfx_funding_bot.modules.execution.safety.halt_state import HaltStateStore
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from tests.external.bitfinex.test_funding_rules import FixedRules
@@ -29,7 +30,7 @@ async def test_same_daemon_gate_consumes_session_and_attempt_before_mock_venue(c
                                         ownership=lambda: _true(), authority_reader=lambda s, u: _true(),
                                         preflight=lambda s, r: _true(), clock=lambda: 1100)
     gate.release_authority = authority
-    gate._safety_evaluator = ManualKillGuard(halt_store=halt, canary_halt_authorization=token)
+    gate._safety_evaluator = ManualKillGuard(trading_state=halt, canary_halt_authorization=token)
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.strategy, row.amount_usdt = "mean_reversion", Decimal("150")
@@ -51,7 +52,7 @@ async def test_same_daemon_gate_consumes_session_and_attempt_before_mock_venue(c
     with pytest.raises(Exception, match="permit_already_consumed"):
         await gate.submit(ready, ctx)
     assert len(venue.received) == 1
-    assert (await halt.current()).halted
+    assert not (await halt.current()).allows_new_offers
     async with factory() as session:
         attempts = (await session.scalars(select(SubmissionAttemptRow))).all()
         assert len(attempts) == 1
@@ -123,7 +124,7 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
         ownership=ownership, authority_reader=operator, preflight=lambda s, r: _true(), clock=lambda: now)
     token = object()
     gate.release_authority = authority
-    gate._safety_evaluator = ManualKillGuard(halt_store=halt, canary_halt_authorization=token)
+    gate._safety_evaluator = ManualKillGuard(trading_state=halt, canary_halt_authorization=token)
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.strategy, row.amount_usdt = "mean_reversion", Decimal("150")
@@ -134,7 +135,8 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
     async def no_submit(command):
         pytest.fail("consumed session retried submit")
 
-    worker = ReleaseWorker(authority=authority, halt_store=halt, funding_rules=FixedRules(),
+    legacy_epoch = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
+    worker = ReleaseWorker(authority=authority, trading_state=halt, funding_rules=FixedRules(),
         configured_cells=(("mean_reversion", "fUST", "a30"),), halt_authorization=token,
         planner=no_submit, observation=observe)
     await worker.tick()
@@ -144,7 +146,8 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
     await worker.tick()  # No post-outcome snapshots: not validated, still halted.
     async with factory() as session:
         assert (await repo.get(session, sid)).state == "observed"
-    assert (await halt.current()).id == epoch
+    assert (await legacy_epoch.current()).id == epoch
+    assert (await halt.current()).state == "HALTED"
     for started in (6000, 6100):  # Authorization expired; read-only observation remains legal.
         async with factory.begin() as session:
             fence = await capital.repository.begin_snapshot(session, now_ms=started)
@@ -167,14 +170,14 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
         row = await repo.get(session, sid)
         assert row.state == "validated", row.reason
         await repo.request_action(session, sid, action="promote", operator="operator", expected_revision=4, now_ms=now)
-    assert (await halt.current()).halted  # validated never auto-resumes
+    assert not (await halt.current()).allows_new_offers  # validated never auto-resumes
     if promotion_fault == "revoked":
         authorized = False
     elif promotion_fault in {"runtime", "policy"}:
         binding = {**binding, "release_digest" if promotion_fault == "runtime" else "policies": "changed"}
     elif promotion_fault == "epoch":
-        await halt.set_halted(False, reason="fixture transition", actor="fixture")
-        await halt.set_halted(True, reason="fixture new epoch", actor="fixture")
+        await legacy_epoch.set_halted(False, reason="fixture transition", actor="fixture")
+        await legacy_epoch.set_halted(True, reason="fixture new epoch", actor="fixture")
     await worker.tick()
     assert len(venue.received) == 1
     async with factory.begin() as session:
@@ -200,14 +203,14 @@ async def test_ack_two_fences_validation_and_delayed_promotion(pg_session_factor
             binding = {**binding, "release_digest": "new-release"}
             with pytest.raises(ReleaseBlocked, match="promotion_required"):
                 await authority.check_normal(session)
-    assert (await halt.current()).halted is (promotion_fault is not None)
+    assert (not (await halt.current()).allows_new_offers) is (promotion_fault is not None)
     if promotion_fault is None:
         # A maintenance pause and its resume do not retire this promotion: nothing
         # about the build changed, so nothing needs re-proving. While the promotion
         # was matched to the live halt id, this cycle alone forced another
         # real-money canary before lending could resume.
         binding = dict(expected_binding)  # undo the deliberate corruption above
-        await halt.set_halted(True, reason="pg upgrade", actor="operator", kind="maintenance")
-        await halt.set_halted(False, reason="upgrade finished", actor="operator", kind="maintenance")
+        await halt.transition("REDUCING", cause="operator", reason="pg upgrade", actor="operator")
+        await halt.transition("ACTIVE", cause="operator", reason="upgrade finished", actor="operator")
         async with factory() as cycled:
             await authority.check_normal(cycled)

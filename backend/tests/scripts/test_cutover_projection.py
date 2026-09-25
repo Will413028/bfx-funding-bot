@@ -745,7 +745,7 @@ async def test_database_quiescence_refuses_hidden_session_metadata(archive_db):
     with archive_db[1].begin() as connection:
         connection.exec_driver_sql(f"CREATE ROLE {reader} NOLOGIN")
         connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {reader}")
-        connection.exec_driver_sql(f"GRANT SELECT ON trading_halt TO {reader}")
+        connection.exec_driver_sql(f"GRANT SELECT ON trading_state TO {reader}")
     async with factory() as other, factory() as observer:
         other_pid = await other.scalar(text("SELECT pg_backend_pid()"))
         await observer.execute(text(f"SET LOCAL ROLE {reader}"))
@@ -810,9 +810,9 @@ async def prepare_fixture(archive_db):
     with engine.begin() as connection:
         connection.exec_driver_sql(f"CREATE ROLE {role} LOGIN")
         connection.execute(text(
-            "INSERT INTO trading_halt(account_id,exchange_account_id,deployment_environment,"
-            "halted,reason,actor,created_at_ms) VALUES (:s,:a,'ci',true,'synthetic','operator',1000)"
-        ), {"s": str(scope.account_id), "a": scope.account_id})
+            "INSERT INTO trading_state(exchange_account_id,deployment_environment,state,cause,"
+            "actor,reason,created_at_ms) VALUES (:a,'ci','HALTED','operator','operator','synthetic',1000)"
+        ), {"a": scope.account_id})
     evidence_root = Path(mkdtemp(prefix="bfx-cutover-fixture-"))
     diagnostic_path = evidence_root / "diagnostic"
     diag = await cli().diagnose(
@@ -969,7 +969,10 @@ async def test_prepare_refuses_drift_or_nonquiescent_runtime(archive_db, tmp_pat
             if mutation == "projection":
                 await session.execute(text("UPDATE position_state SET reserved=999"))
             elif mutation == "halt":
-                await session.execute(text("UPDATE trading_halt SET halted=false"))
+                await session.execute(text(
+                    "INSERT INTO trading_state(exchange_account_id,deployment_environment,state,cause,"
+                    "actor,reason,created_at_ms) SELECT exchange_account_id,deployment_environment,"
+                    "'ACTIVE','operator','test','resumed',2000 FROM trading_state"))
             elif mutation == "superuser":
                 kwargs["runtime_roles"] = (await session.scalar(text("SELECT session_user")),)
         if mutation == "runtime_session":
@@ -1104,7 +1107,7 @@ async def test_cli_apply_verifies_all_io_before_lock_and_repeat_without_http(arc
             await module.run_command(module.parse_args(args), runner=values["runner"])
         durable = await complete_raw(factory)
         assert len(durable["public.event_log"]) == len(durable["projection_audit.receipts"]) == 1
-        assert json.loads(durable["public.trading_halt"][0])["halted"] is True
+        assert json.loads(durable["public.trading_state"][0])["state"] == "HALTED"
         assert not (tmp_path / "applied").exists()
         monkeypatch.setattr(module, "write_private", original_write)
         lock_taken = False

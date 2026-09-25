@@ -19,8 +19,13 @@ async def prepared(factory, account):
     # Imported models are registered after capital_db created its metadata.
     async with factory.kw["bind"].begin() as connection:
         await connection.run_sync(ReleaseSessionRow.metadata.create_all)
+    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     store = HaltStateStore(factory, account_id=str(account), deployment_environment="ci")
+    # The ceremony's epoch (legacy trading_halt) and the trading state that
+    # actually stops new offers: a canary is admitted only while both hold.
     halt = await store.set_halted(True, reason="release", actor="operator", now_ms=1000)
+    await TradingStateRepository(factory, account_id=account, deployment_environment="ci").transition(
+        "HALTED", cause="operator", reason="release", actor="operator", now_ms=1000)
     repo = ReleaseSessions(account, "ci")
     binding = {"release_digest": "r1", "config_digest": "test", "source_revision": "test", "policies": {"fUST": "p1", "fUSD": "disabled"},
                "schema_head": "test", "projector_version": "test"}

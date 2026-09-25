@@ -99,7 +99,7 @@ async def test_expired_decision_is_durable_not_sent_without_refunding_permit(cap
             binding_reader=identity, ownership=true, authority_reader=lambda s, u: true(),
             preflight=lambda s, r: true(), clock=lambda: now)
         token = object()
-        gate._safety_evaluator = ManualKillGuard(halt_store=halt, canary_halt_authorization=token)
+        gate._safety_evaluator = ManualKillGuard(trading_state=halt, canary_halt_authorization=token)
         ctx = replace(ctx, release_session_id=sid, canary_halt_authorization=token)
     elif delay == "identity":
         # Normal release identity also runs after intent commit.
@@ -148,7 +148,7 @@ async def test_expired_decision_is_durable_not_sent_without_refunding_permit(cap
     if canary:
         with pytest.raises(Exception, match="permit_already_consumed"):
             await gate.submit(ready, ctx)
-        assert (await halt.current()).halted
+        assert not (await halt.current()).allows_new_offers
 
 
 @pytest.mark.asyncio

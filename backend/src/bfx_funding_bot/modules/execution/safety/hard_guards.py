@@ -22,7 +22,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     WriterLockHandle,
 )
-from bfx_funding_bot.modules.execution.safety.halt_state import HaltState, HaltStateStore
+from bfx_funding_bot.modules.execution.safety.trading_state import (
+    TradingState,
+    TradingStateRepository,
+)
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import (
@@ -33,8 +36,8 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 
-class _HaltStateReader(Protocol):
-    async def current(self) -> HaltState | None: ...
+class _TradingStateReader(Protocol):
+    async def current(self) -> TradingState | None: ...
 
 
 class CapitalPolicyGuard:
@@ -66,20 +69,20 @@ class ManualKillGuard:
 
     1. ``BFX_KILL_SWITCH=true`` — break-glass. Checked first and short-circuits,
        so stopping the bot works when the database is the thing that is broken.
-    2. The persisted ``trading_halt`` state, when a store is wired. This is the
-       durable decision: before it existed the canary halt lived only in
-       canary.env, and a plain revert of that file would have resumed
+    2. The durable trading state, when a repository is wired: anything but
+       ACTIVE blocks. Before a durable state existed the canary halt lived only
+       in canary.env, and a plain revert of that file would have resumed
        real-money trading with nothing having to malfunction.
 
     Both point the same way (OR), so unlike the allocation-cap env/yaml pair
     there is no "which one actually binds" ambiguity — and the status endpoint
     reports each source separately anyway.
 
-    **Fails closed.** An unreadable halt state blocks. A kill switch that opens
-    when the database hiccups is not a kill switch. Note this differs from
-    NavPeakStore's fail-permissive posture; the two must not be unified.
+    **Fails closed.** An unreadable trading state blocks. A kill switch that
+    opens when the database hiccups is not a kill switch. Note this differs
+    from NavPeakStore's fail-permissive posture; the two must not be unified.
 
-    ``halt_store=None`` (paper/shadow) keeps the original env-only behaviour.
+    ``trading_state=None`` (paper/shadow) keeps the original env-only behaviour.
     """
 
     name = "manual_kill"
@@ -88,10 +91,10 @@ class ManualKillGuard:
     def __init__(
         self,
         *,
-        halt_store: _HaltStateReader | None = None,
+        trading_state: _TradingStateReader | None = None,
         canary_halt_authorization: object | None = None,
     ) -> None:
-        self._halt_store = halt_store
+        self._trading_state = trading_state
         self._canary_halt_authorization = canary_halt_authorization
 
     async def evaluate(
@@ -103,27 +106,27 @@ class ManualKillGuard:
                 allowed=False, guard_name=self.name,
                 reason="BFX_KILL_SWITCH env flag set",
             )
-        if self._halt_store is None:
+        if self._trading_state is None:
             return GuardResult(allowed=True, guard_name=self.name)
         try:
             if ctx.command_session is not None:
-                if not isinstance(self._halt_store, HaltStateStore):
-                    raise ValueError("same-session halt reader required")
-                state = await self._halt_store.current(ctx.command_session)
+                if not isinstance(self._trading_state, TradingStateRepository):
+                    raise ValueError("same-session trading state reader required")
+                state = await self._trading_state.current(ctx.command_session)
             else:
-                state = await self._halt_store.current()
+                state = await self._trading_state.current()
         except Exception as exc:
             return GuardResult(
                 allowed=False, guard_name=self.name,
-                reason=f"halt state unreadable — failing closed: {exc!r}",
+                reason=f"trading state unreadable — failing closed: {exc!r}",
             )
-        # None = no halt decision was ever recorded for this realm. That is not
-        # "halted" — otherwise every fresh environment would deadlock on boot.
+        # None = no decision was ever recorded for this realm. That is not a
+        # stop — otherwise every fresh environment would deadlock on boot.
         canary_authorized = (
             self._canary_halt_authorization is not None
             and ctx.canary_halt_authorization is self._canary_halt_authorization
         )
-        if state is not None and state.halted:
+        if state is not None and not state.allows_new_offers:
             if canary_authorized:
                 return GuardResult(
                     allowed=True,
@@ -133,8 +136,8 @@ class ManualKillGuard:
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=(
-                    f"persisted halt: {state.reason} "
-                    f"(actor={state.actor}, id={state.id})"
+                    f"trading state {state.state}: {state.reason} "
+                    f"(cause={state.cause}, actor={state.actor}, id={state.id})"
                 ),
             )
         if canary_authorized:

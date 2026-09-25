@@ -361,8 +361,11 @@ class _ReadOnlySession:
     async def scalar(self, statement):  # type: ignore[no-untyped-def]
         rendered = str(statement)
         self.statements.append(rendered)
-        if "trading_halt.halted" in rendered:
-            return True
+        if "FROM trading_state" in rendered:
+            from bfx_funding_bot.modules.execution.safety.tables import TradingStateRow
+            return TradingStateRow(id=1, exchange_account_id=ACCOUNT_ID, deployment_environment="canary",
+                                   state="HALTED", cause="operator", actor="operator",
+                                   reason="fixture", created_at_ms=0)
         return 0 if "count" in rendered else None
 
 
@@ -455,7 +458,7 @@ def test_main_rehashes_artifacts_and_rejects_tampered_backup(monkeypatch, tmp_pa
 def test_assert_halt_uses_existing_store_only(monkeypatch, tmp_path: Path) -> None:
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(json.dumps(asdict(_evidence())))
-    calls: list[tuple[bool, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
 
     class _Engine:
         async def dispose(self) -> None:
@@ -465,17 +468,17 @@ def test_assert_halt_uses_existing_store_only(monkeypatch, tmp_path: Path) -> No
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
-        async def set_halted(self, halted: bool, *, reason: str, actor: str):
-            calls.append((halted, reason, actor))
-            return SimpleNamespace(halted=True)
+        async def transition(self, state: str, *, cause: str, actor: str, reason: str):
+            calls.append((state, cause, reason, actor))
+            return SimpleNamespace(state=SimpleNamespace(allows_new_offers=False))
 
     monkeypatch.setattr("scripts.halt2_cutover.make_engine", lambda _settings: _Engine())
     monkeypatch.setattr("scripts.halt2_cutover.make_session_factory", lambda _engine: object())
-    monkeypatch.setattr("scripts.halt2_cutover.HaltStateStore", _Store)
+    monkeypatch.setattr("scripts.halt2_cutover.TradingStateRepository", _Store)
     monkeypatch.setattr("scripts.halt2_cutover.Settings", lambda: object())
 
     assert main(["assert-halt", "--account-id", str(ACCOUNT_ID), "--environment", "canary", "--evidence", str(evidence_path), "--projector-version", "projector-v3", "--image-digest", "image-hash", "--operator-id", "operator-1", "--reason", "test halt"]) == EXIT_SUCCESS
-    assert calls == [(True, "test halt", "operator-1")]
+    assert calls == [("HALTED", "operator", "test halt", "operator-1")]
 
 
 @pytest.mark.parametrize("command", ["replay", "verify", "release-report", "convert-pending", "quarantine"])
