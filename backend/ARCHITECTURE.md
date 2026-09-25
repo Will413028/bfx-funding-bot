@@ -384,7 +384,7 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 
 **L1 hard guards（always-on，順序固定）**
 
-1. `ManualKillGuard`（trading-state guard）— `BFX_KILL_SWITCH`（true/1/yes）或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state 一律 fail-closed。撤單不經過它（見下方 Trading state）。
+1. `ManualKillGuard`（trading-state guard）— `BFX_KILL_SWITCH`（true/1/yes）、已觸發但 HALTED 尚未寫入的自動保護、或 durable trading state 不是 `ACTIVE` 即擋新單，跑最前；讀不到 trading state、或從未記錄任何決策，一律視為 HALTED（fail-closed）。撤單不經過它（見下方 Trading state）。
 2. `AuthHealthGuard` — executor health 為 `DOWN` 時擋（`DEGRADED` 為 soft warn 不擋）。
 3. `HeartbeatGuard` — 只 watch `ws`（market-data liveness，own-loop），`age > threshold_seconds`（canary 為 300s，由 `safety.canary.yaml` 設定；`threshold_seconds` 為必填參數無 code default）擋。刻意**不** watch `executor`/`safety_chain`（reactive，靜市場時不跳動，誤判會造成 idle restart loop）。
 4. `AllocationCapGuard` — POST 時若 `(reserved + realized) + offer > cap` 則擋；恰好 at-cap 放行，over-cap 擋；SKIP 一律放行。
@@ -392,6 +392,8 @@ acceptance 發現歷史未結清時**記錄裁決而非拒絕觀測**
 **L2 calibrated guards**：`RealizedLossGuard`（24h NAV 虧損 % > threshold）、`DrawdownGuard`（peak-to-trough NAV drawdown_pct > threshold）、`DivergenceRateGuard`（無已驗證 threshold，目前 disabled）。metric 由 `ReconcileNavTracker` 提供，**per-symbol**（每幣別對自己的 24h window-high / all-time peak 計算，絕不跨幣加總——賺錢幣別不會掩蓋虧損幣別）；guard 讀 `decision.symbol` 取對應幣別 metric。canary（`safety.canary.yaml`）開 realized_loss(5%) + drawdown(10%)，單一 active 幣別（fUST）時與 pre-per-symbol 純量值相同。`enabled=True` 但 threshold 為 None 時 loader 直接 `ValueError`。
 
 **Trading state（ADR 2026-09-25 D4）**：`trading_state` 是放貸與否的唯一權威，append-only，每列帶 state、cause（`operator`｜`kill_switch`｜`auto`｜`material_deploy`）、actor、reason。`ACTIVE` 正常交易；`REDUCING`（維運暫停，`POST /admin/pause`）只准撤單，不掛新單也不重掛；`HALTED` 同樣只准撤單，且進入時執行 kill path。非法轉換（HALTED→REDUCING、非 operator 離開 REDUCING/HALTED 回 ACTIVE、把 material deploy 的 REDUCING 改標成 operator pause）由 DB trigger 與 `validate_transition` 雙重拒絕。`POST /admin/resume` 只解除 operator 的 REDUCING；HALTED 與 material deploy 的 REDUCING 目前只能由 release promotion 解除（T5 會換成 TOTP 核准）。
+
+**自動保護（`safety/protection.py`，ADR D5）**：下列條件一律寫 `HALTED/auto` 並執行 kill path，且不自動解除：UNKNOWN submit（command gate，或 recovery 把中斷的 PENDING 轉 UNKNOWN）、orphan quarantine／capital classifier 的 `unattributed_offer`、`unclassifiable_commitment`（snapshot acceptance 或 planner 讀取）、`offer_amount_conflict`（受管 offer 的 venue 原始金額≠送出金額）、venue 借出額高於內部帳（見下）、loss limiter（24h loss 或 drawdown 超限；monitor 包住 NAV tracker）、writer lock 在 refresh 後仍未持有。觸發是同步記錄：guard 立即擋新單，kill 由受監督的 task 在所有鎖之外執行，因此在 command gate 的 account lock 或 recovery transaction 內觸發不會自鎖。「借出額高於內部帳」只判斷 capital authority 接受的 snapshot（兩次相同的 fetch，排除查詢中途成交造成的重複計算），逐幣別比較 snapshot 前的 ledger：lent 只能因借款結束而減少，或因我方 offer 成交（offered 減少）而增加，超出部分（>0.01）才觸發；未被接受的 snapshot 的差額會累計到下一個被接受的 snapshot；從未被 venue 觀測過的幣別只建立 baseline。借款結束、reconcile 補回 WS 漏掉的成交／撤單都不觸發。
 
 **撤單資格**：`AccountCommandGate.cancel` 走 `SafetyGuardChain.evaluate_cancel`，只跳過 `capital_policy` 與 trading-state guard，不再呼叫 release worker 的 `check_normal`；受管 provenance、同 scope 的新 UNKNOWN／讀取失敗仍在 admission 與每次 transport 前拒絕撤單。已保留 intent 的 submit 在 transport 前走 `evaluate_transport`，仍受 trading state 約束。
 

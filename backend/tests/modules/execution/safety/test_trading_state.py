@@ -77,6 +77,8 @@ async def test_state_survives_a_restart(tmp_path) -> None:
     factory = async_sessionmaker(first, expire_on_commit=False)
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="restart"))
+    await _repo(factory, account).transition("ACTIVE", cause="operator", actor="will",
+                                             reason="trading", now_ms=4)
     written = (await _repo(factory, account).transition(
         "REDUCING", cause="operator", actor="will", reason="pg upgrade", now_ms=5)).state
     await first.dispose()
@@ -105,8 +107,13 @@ async def test_reasserting_a_halt_keeps_the_halt_in_force(scope) -> None:
     ([("HALTED", "auto"), ("REDUCING", "operator")], "HALTED -> REDUCING"),
     ([("HALTED", "operator"), ("REDUCING", "material_deploy")], "HALTED -> REDUCING"),
     ([("HALTED", "auto"), ("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
-    ([("REDUCING", "operator"), ("ACTIVE", "auto")], "REDUCING -> ACTIVE by auto"),
-    ([("REDUCING", "material_deploy"), ("REDUCING", "operator")], "cannot be relabelled"),
+    ([("ACTIVE", "operator"), ("REDUCING", "operator"), ("ACTIVE", "auto")],
+     "REDUCING -> ACTIVE by auto"),
+    ([("ACTIVE", "operator"), ("REDUCING", "material_deploy"), ("REDUCING", "operator")],
+     "cannot be relabelled"),
+    # No decision recorded reads as HALTED, so it leaves only the way HALTED does.
+    ([("REDUCING", "operator")], "HALTED -> REDUCING"),
+    ([("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
     ([("REDUCING", "kill_switch")], "cannot put trading in REDUCING"),
     ([("HALTED", "material_deploy")], "cannot put trading in HALTED"),
     ([("ACTIVE", "kill_switch")], "cannot put trading in ACTIVE"),
@@ -176,5 +183,7 @@ async def test_scopes_are_independent(scope) -> None:
     assert await _repo(factory, account, "prod").current() is None
     assert await _repo(factory, other, "ci").current() is None
     # A HALTED elsewhere does not constrain this scope's first decision.
+    await _repo(factory, account, "prod").transition("ACTIVE", cause="operator", actor="t",
+                                                     reason="start prod")
     await _repo(factory, account, "prod").transition("REDUCING", cause="operator", actor="t",
                                                      reason="pause prod")

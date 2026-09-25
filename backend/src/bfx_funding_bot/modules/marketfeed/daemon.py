@@ -154,6 +154,11 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 from bfx_funding_bot.modules.execution.safety.kill_switch import QUIESCE_TIMEOUT_S, KillSwitch
 from bfx_funding_bot.modules.execution.safety.nav_peak_store import NavPeakStore
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
+from bfx_funding_bot.modules.execution.safety.protection import (
+    AutomaticProtection,
+    LossLimitMonitor,
+    WriterLockWatch,
+)
 from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_AUTO,
     CAUSE_KILL_SWITCH,
@@ -763,7 +768,23 @@ class Daemon:
     metrics: DaemonMetrics | None = None
     # OTel traces (wiki pending #4) — default-off (BFX_OTEL_ENABLED), fail-open.
     tracing: DaemonTracing | None = None
+    # Automatic protections: supervised consumer turning trips into the kill.
+    protection: AutomaticProtection | None = None
+    writer_lock_watch: WriterLockWatch | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def _run_boot_recovery(self) -> None:
+        if self.boot_recovery is None:
+            return
+        try:
+            await self.boot_recovery.run()
+        except BaseException:
+            # A protection tripped by the refused boot observation must be
+            # durable before the daemon exits, or the next boot starts without
+            # the stop it found.
+            if self.protection is not None:
+                await self.protection.run_pending()
+            raise
 
     async def run(self) -> None:
         """Main entry — sub-task supervision via TaskGroup.
@@ -780,10 +801,11 @@ class Daemon:
         # 3a-recovery: reconcile against venue + resolve crash-mid-flight PENDING
         # BEFORE any sub-task starts (live only; paper leaves this None). A venue
         # fetch failure raises here -> daemon fails to start (fail-safe).
-        if self.boot_recovery is not None:
-            await self.boot_recovery.run()
+        await self._run_boot_recovery()
 
         async with asyncio.TaskGroup() as tg:
+            if self.protection is not None:
+                tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
             if self.release_worker is not None:
                 tg.create_task(self.release_worker.run(self._stop_event), name="release_session")
             tg.create_task(self._candle_writer_loop(), name="candle_writer")
@@ -932,7 +954,9 @@ class Daemon:
 
         The authoritative fail-closed gate is the per-submit
         WriterLockGuard.verify_held(): if the lock isn't held, every real-money
-        submit is blocked — safety is preserved without restarting. Tying this
+        submit is blocked — safety is preserved without restarting. A lock still
+        not held after refresh also trips the writer_lock_lost protection
+        (HALTED/auto), which is durable where the guard is per-process. Tying this
         recovery loop to liveness would re-create the 2026-05-26 reactive
         restart-loop anti-pattern.
 
@@ -948,7 +972,9 @@ class Daemon:
                 return  # stop requested
             except TimeoutError:
                 pass
-            if await self.writer_lock.refresh():
+            held = (await self.writer_lock_watch.check() if self.writer_lock_watch is not None
+                    else await self.writer_lock.refresh())
+            if held:
                 self.probe.record_heartbeat("writer_lock")
         log.info("sub_task_exit name=writer_lock")
 
@@ -1501,6 +1527,11 @@ async def build_daemon(
     # or pre-issued-permit boot path: both normal and one-shot use the same gate.
     canary_halt_authorization: object | None = object() if live_executor else None
 
+    # Automatic protections (ADR 2026-09-25 D5): trips stop new offers at once
+    # and queue HALTED/auto + cancel-all, which a supervised task performs
+    # outside every lock once the kill switch is bound below.
+    protection = AutomaticProtection(clock=now_ms_utc)
+
     # L2 loss-limiter source: account NAV (available + reserved + realized)
     # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
     # RealizedLossGuard / DrawdownGuard can actually trip. Subscribed to
@@ -1595,6 +1626,7 @@ async def build_daemon(
             ManualKillGuard(
                 trading_state=trading_state,
                 canary_halt_authorization=canary_halt_authorization,
+                pending_stop=protection.pending_reason,
             )
         )
     # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
@@ -1692,6 +1724,7 @@ async def build_daemon(
             symbols=configured_symbols(config.cells),
             uncertainty_handler=ledger.on_reservation_unknown,
             capital_repository=capital_runtime.repository if capital_runtime else None,
+            protection=protection,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1716,6 +1749,7 @@ async def build_daemon(
             action_grace_ms=120_000,
             uncertainty_handler=ledger.on_reservation_unknown,
             capital_repository=capital_runtime.repository if capital_runtime else None,
+            protection=protection,
         )
 
     fill_tracker: RestPollingFillTracker | None = None
@@ -1749,7 +1783,16 @@ async def build_daemon(
     bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
     # Same snapshot feeds the L2 loss-limiter source: NAV peak + 24h window drive
     # RealizedLossGuard / DrawdownGuard (no-op stub before this — see #4).
-    bus.subscribe(PositionReconciled, pnl_source.on_position_reconciled)
+    # The loss limiter as a protection: evaluated where its inputs change, and
+    # wrapping the tracker so it reads metrics the tracker already updated.
+    loss_monitor = LossLimitMonitor(
+        source=pnl_source, protection=protection,
+        realized_loss_threshold_pct=(
+            cg.realized_loss_24h.threshold_pct if cg.realized_loss_24h.enabled else None),
+        drawdown_threshold_pct=(
+            cg.drawdown_from_peak.threshold_pct if cg.drawdown_from_peak.enabled else None),
+    )
+    bus.subscribe(PositionReconciled, loss_monitor.on_position_reconciled)
     # Traffic signal: bfx_domain_events_total{event_type} — one fail-open
     # counting handler across all execution domain events (observe-only; a
     # handler failure is already isolated by the bus's per-handler gather).
@@ -1850,6 +1893,7 @@ async def build_daemon(
                 service_version=verified_release.manifest.source_revision,
                 config_hash=config_hash,
             ),
+            protection=protection,
         )
         assert release_runtime is not None and writer_lock is not None
         assert canary_halt_authorization is not None
@@ -2142,6 +2186,9 @@ async def build_daemon(
         ),
         clock=now_ms_utc,
     )
+    protection.bind(kill_switch)
+    if command_gate is not None:
+        command_gate.protection = protection
     if os.environ.get("BFX_KILL_SWITCH", "").strip().lower() in ("true", "1", "yes"):
         # Break-glass env takes effect at boot as a real kill: the durable
         # HALTED and the venue cancel-all, before any task can place an offer.
@@ -2265,6 +2312,11 @@ async def build_daemon(
         release_worker=release_worker,
         metrics=metrics,
         tracing=tracing,
+        protection=protection,
+        writer_lock_watch=(
+            WriterLockWatch(lock=writer_lock, protection=protection)
+            if writer_lock is not None else None
+        ),
     )
 
 

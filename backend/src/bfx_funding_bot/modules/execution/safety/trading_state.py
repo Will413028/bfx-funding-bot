@@ -93,7 +93,10 @@ def validate_transition(
     """Raise when ``previous -> state`` is not a transition the system allows.
 
     The same rules are enforced by the PostgreSQL insert trigger; keep the two
-    in step (``8e4f33517b10_add_trading_state``).
+    in step (``8e4f33517b10_add_trading_state``). One difference is deliberate:
+    code reads "no decision recorded" as HALTED, so the first transition it
+    writes must be one a HALTED allows; the trigger accepts any first row so
+    the migration can carry an existing pause over.
     """
     allowed = CAUSES_BY_STATE.get(state)
     if allowed is None:
@@ -109,17 +112,19 @@ def validate_transition(
         or probation.started_at_ms < 0
     ):
         raise IllegalTradingTransition("probation applies only to ACTIVE, with 0 < multiplier <= 1")
-    if previous is None:
-        return
-    if previous.state == HALTED and state == REDUCING:
+    # No recorded decision is read as HALTED (fail closed), so it leaves only
+    # the way a HALTED does.
+    previous_state = previous.state if previous is not None else HALTED
+    previous_cause = previous.cause if previous is not None else None
+    if previous_state == HALTED and state == REDUCING:
         # A halt ends only in an operator's resume; a pause would let the
         # cheaper exit apply to a stop that was never proven safe to lift.
         raise IllegalTradingTransition("illegal trading state transition HALTED -> REDUCING")
-    if previous.state != ACTIVE and state == ACTIVE and cause != CAUSE_OPERATOR:
+    if previous_state != ACTIVE and state == ACTIVE and cause != CAUSE_OPERATOR:
         raise IllegalTradingTransition(
-            f"illegal trading state transition {previous.state} -> ACTIVE by {cause}"
+            f"illegal trading state transition {previous_state} -> ACTIVE by {cause}"
         )
-    if (previous.state == REDUCING and previous.cause == CAUSE_MATERIAL_DEPLOY
+    if (previous_state == REDUCING and previous_cause == CAUSE_MATERIAL_DEPLOY
             and state == REDUCING and cause != CAUSE_MATERIAL_DEPLOY):
         raise IllegalTradingTransition(
             "illegal trading state transition: material deploy approval cannot be relabelled"
@@ -222,8 +227,10 @@ class TradingStateRepository:
     async def current(self, session: AsyncSession | None = None) -> TradingState | None:
         """Latest decision, or None if none was ever recorded.
 
-        None is not a decision; callers keep "never configured" and "explicitly
-        ACTIVE" distinguishable, as the status report does.
+        None is not a decision, and every trading check reads it as HALTED
+        (fail closed): a scope nobody has decided about does not trade. The
+        status report still shows it as "never recorded" so the two stay
+        distinguishable to an operator.
         """
         if session is not None:
             return await read_current(session, account_id=self.account_id,

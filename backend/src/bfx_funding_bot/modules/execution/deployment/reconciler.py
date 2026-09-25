@@ -23,6 +23,7 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     validate_amount,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
+from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -68,6 +69,10 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
+from bfx_funding_bot.modules.execution.safety.protection import (
+    CAPITAL_BLOCK_TRIGGERS,
+    ProtectionPort,
+)
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
@@ -167,6 +172,7 @@ class DeploymentReconciler:
         execution_policy: ExecutionPolicy,
         period_pricer: PeriodPricer,
         audit_context_factory: _AuditContextFactory,
+        protection: ProtectionPort | None = None,
         fill_model_provider: FillModelEvidenceProvider | None = None,
         rate_optimizer: RateOptimizer | None = None,
         optimizer_fee_rate: Decimal | None = None,
@@ -187,6 +193,7 @@ class DeploymentReconciler:
         self._event_sink = event_sink
         self._phase = phase
         self._canceller = canceller
+        self._protection = protection
         self._reprice = reprice
         self._ladder = ladder
         self._book_provider = book_provider
@@ -340,6 +347,10 @@ class DeploymentReconciler:
                 if release is not None:
                     raise
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
+                trigger = (CAPITAL_BLOCK_TRIGGERS.get(str(exc))
+                           if isinstance(exc, CapitalBlockedError) else None)
+                if trigger is not None and self._protection is not None:
+                    self._protection.trip(trigger, f"planner capital read for {symbol}: {exc}")
                 continue
 
             # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /

@@ -70,10 +70,37 @@ _ORPHAN_UNCERTAINTY_NAMESPACE = UUID("b1f89542-a63e-584a-b5bc-cd448ed74f3f")
 
 
 @dataclass(frozen=True, slots=True)
+class SymbolLedgerDelta:
+    """One symbol's ledger immediately before a complete snapshot, and what it saw.
+
+    ``baseline`` is False when the ledger had never been set by a venue
+    observation for this symbol (new currency, first deployment): there is
+    nothing to compare against, so the observation only establishes one.
+    """
+    symbol: str
+    prior_offered: Decimal
+    prior_lent: Decimal
+    observed_offered: Decimal
+    observed_lent: Decimal
+    baseline: bool
+
+    @property
+    def offered_change(self) -> Decimal:
+        return self.observed_offered - self.prior_offered
+
+    @property
+    def lent_change(self) -> Decimal:
+        return self.observed_lent - self.prior_lent
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotDrift:
     reserved_drift: Decimal
     realized_drift: Decimal
     event_seq: int | None = None
+    # Signed per-symbol deltas; empty unless offers and credits were both
+    # completely observed.
+    symbols: tuple[SymbolLedgerDelta, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +222,7 @@ class PostgresEventStore:
             row.symbol: Decimal(str(row.lent_amount))
             for row in prior_rows
         }
+        baselined = {row.symbol for row in prior_rows if row.last_venue_snapshot_at is not None}
         from bfx_funding_bot.modules.execution.event_store.writer import (
             AccountEventWriter,
         )
@@ -219,6 +247,19 @@ class PostgresEventStore:
                     )
         offered_symbols = set(prior_offered) | set(observed_offered)
         lent_symbols = set(prior_lent) | set(observed_lent)
+        deltas: tuple[SymbolLedgerDelta, ...] = ()
+        if event.coverage.active_offers_complete and event.coverage.active_credits_complete:
+            deltas = tuple(
+                SymbolLedgerDelta(
+                    symbol=symbol,
+                    prior_offered=prior_offered.get(symbol, Decimal("0")),
+                    prior_lent=prior_lent.get(symbol, Decimal("0")),
+                    observed_offered=observed_offered.get(symbol, Decimal("0")),
+                    observed_lent=observed_lent.get(symbol, Decimal("0")),
+                    baseline=symbol in baselined,
+                )
+                for symbol in sorted(offered_symbols | lent_symbols)
+            )
         return SnapshotDrift(
             reserved_drift=sum(
                 (abs(observed_offered.get(symbol, Decimal("0")) - prior_offered.get(symbol, Decimal("0")))
@@ -231,6 +272,7 @@ class PostgresEventStore:
                 Decimal("0"),
             ),
             event_seq=event_seq,
+            symbols=deltas,
         )
 
     async def _append_unlocked(
