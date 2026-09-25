@@ -1156,7 +1156,9 @@ class Deployer:
                 "BFX_FRONTEND_IMAGE": target.frontend_image,
                 "BFX_FRONTEND_DIGEST": target.frontend_digest,
                 "BFX_SOURCE_REVISION": target.revision, "BFX_CHANGE_CLASS": klass,
-                "BFX_DEPLOYMENT_ID": deployment_id}
+                "BFX_DEPLOYMENT_ID": deployment_id,
+                # The env files Compose reads are the ones validated above.
+                "BFX_RUNTIME_DIR": str(self.settings.runtime_dir)}
 
     def _compose_up(self, release_dir: Path, target: Target, klass: str, deployment_id: str,
                     *, force_recreate: bool = False) -> None:

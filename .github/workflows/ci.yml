@@ -69,9 +69,14 @@ jobs:
           BFX_SOURCE_REVISION: ${{ github.sha }}
           BFX_CHANGE_CLASS: material
           BFX_DEPLOYMENT_ID: 00000000-0000-4000-8000-000000000000
+        # Placeholder secret files: older Compose stats env files even with
+        # --no-env-resolution. The file's /opt/bfx/runtime default is checked by --source.
         run: |
+          BFX_RUNTIME_DIR="$(mktemp -d)"
+          export BFX_RUNTIME_DIR
+          touch "$BFX_RUNTIME_DIR/bot.env" "$BFX_RUNTIME_DIR/webapi.env" "$BFX_RUNTIME_DIR/frontend.env"
           docker compose -f deploy/vm/docker-compose.app.yml config --no-env-resolution --format json \
-            | python3 deploy/vm/ops/compose_policy.py
+            | python3 deploy/vm/ops/compose_policy.py --source deploy/vm/docker-compose.app.yml
 
   backend_unit:
     name: Backend (Python) — unit

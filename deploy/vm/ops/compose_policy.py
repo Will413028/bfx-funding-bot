@@ -3,10 +3,15 @@
 
 CI runs (see .github/workflows/ci.yml):
 
+    BFX_RUNTIME_DIR=<dir with empty bot/webapi/frontend.env> \\
     docker compose -f deploy/vm/docker-compose.app.yml config \\
-        --no-env-resolution --format json | python3 deploy/vm/ops/compose_policy.py
+        --no-env-resolution --format json \\
+      | python3 deploy/vm/ops/compose_policy.py --source deploy/vm/docker-compose.app.yml
 
-with placeholder digests for the deploy variables. Checking Compose's own
+with placeholder digests for the deploy variables. The rendered env files must
+sit in $BFX_RUNTIME_DIR (default /opt/bfx/runtime), and --source checks that the
+file's own default is still /opt/bfx/runtime, since a render with the variable
+set cannot show it. Checking Compose's own
 rendering rather than the YAML text means an anchor, an override or a changed
 Compose default cannot slip a property past the check. This replaces the
 per-container hardening inspection bfx-deploy used to run on the VM: the file
@@ -19,7 +24,10 @@ Standard library only; exits 1 and lists every violation.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import re
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -34,10 +42,12 @@ COMMANDS = {
     "frontend": ["node", "server.js"],
 }
 USERS = {"bot": "1000:1000", "webapi": "1000:1000", "frontend": "nextjs"}
+PRODUCTION_RUNTIME_DIR = "/opt/bfx/runtime"
+RUNTIME_REFERENCE = "${BFX_RUNTIME_DIR:-" + PRODUCTION_RUNTIME_DIR + "}/"
 ENV_FILES = {
-    "bot": ["/opt/bfx/runtime/bot.env", "live.env"],
-    "webapi": ["/opt/bfx/runtime/webapi.env"],
-    "frontend": ["/opt/bfx/runtime/frontend.env"],
+    "bot": ["{runtime}/bot.env", "live.env"],
+    "webapi": ["{runtime}/webapi.env"],
+    "frontend": ["{runtime}/frontend.env"],
 }
 IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID")
 LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
@@ -56,7 +66,9 @@ def _env_files(spec: Mapping[str, Any]) -> list[str]:
     return files
 
 
-def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
+def service_violations(
+    service: str, spec: Mapping[str, Any], runtime_dir: str = PRODUCTION_RUNTIME_DIR,
+) -> list[str]:
     env = spec.get("environment") or {}
     found = []
 
@@ -84,7 +96,7 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
         need(((networks.get(NETWORK) or {}).get("aliases") or []) == ["bfx-bot"], "bot_alias")
     need((spec.get("ports") or []) == (FRONTEND_PORTS if service == "frontend" else []), "ports")
     files = _env_files(spec)
-    wanted = ENV_FILES[service]
+    wanted = [w.format(runtime=runtime_dir.rstrip("/")) for w in ENV_FILES[service]]
     need(len(files) == len(wanted) and all(
         f == w if w.startswith("/") else f.endswith("/" + w) for f, w in zip(files, wanted, strict=False)
     ), "env_files")
@@ -98,7 +110,19 @@ def service_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def violations(rendered: Mapping[str, Any]) -> list[str]:
+def source_violations(text: str) -> list[str]:
+    """The compose file itself: runtime env files default to /opt/bfx/runtime."""
+    found = []
+    references = re.findall(r"\$\{BFX_RUNTIME_DIR[^}]*\}/[A-Za-z0-9_.-]*", text)
+    expected = sorted(f"{RUNTIME_REFERENCE}{name}.env" for name in ("bot", "webapi", "frontend"))
+    if sorted(references) != expected:
+        found.append("source:runtime_dir_default")
+    if re.search(r"(?m)^\s*-?\s*(required|path)\s*:", text):
+        found.append("source:env_file_long_form")  # `required: false` would start without secrets
+    return found
+
+
+def violations(rendered: Mapping[str, Any], runtime_dir: str = PRODUCTION_RUNTIME_DIR) -> list[str]:
     found = []
     if rendered.get("name") != "bfx-app":
         found.append("project_name")
@@ -113,17 +137,23 @@ def violations(rendered: Mapping[str, Any]) -> list[str]:
     for service in SERVICES:
         spec = (rendered.get("services") or {}).get(service)
         if isinstance(spec, dict):
-            found += service_violations(service, spec)
+            found += service_violations(service, spec, runtime_dir)
     return found
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Check a rendered docker-compose.app.yml.")
+    parser.add_argument("--source", help="the compose file, to check its runtime-dir default")
+    args = parser.parse_args(argv)
     try:
         rendered = json.load(sys.stdin)
     except ValueError:
         print("compose-policy: input is not JSON", file=sys.stderr)
         return 1
-    found = violations(rendered)
+    found = violations(rendered, os.environ.get("BFX_RUNTIME_DIR") or PRODUCTION_RUNTIME_DIR)
+    if args.source:
+        with open(args.source, encoding="utf-8") as stream:
+            found += source_violations(stream.read())
     for item in found:
         print(f"compose-policy: violation {item}", file=sys.stderr)
     if not found:

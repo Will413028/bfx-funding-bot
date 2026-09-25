@@ -477,6 +477,8 @@ def test_standard_release_without_migration_deploys_by_digest(harness: Harness) 
     assert env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{NEW_B}"
     assert env["BFX_FRONTEND_IMAGE"] == f"{FRONTEND}@{NEW_F}"
     assert (env["BFX_SOURCE_REVISION"], env["BFX_CHANGE_CLASS"]) == (REV_NEW, "standard")
+    # Compose reads the env files bfx-deploy validated, not a separate default.
+    assert env["BFX_RUNTIME_DIR"] == str(harness.settings.runtime_dir)
     row = harness.ledger.last
     assert (row.outcome, row.change_class, row.migrations_applied) == ("deployed", "standard", False)
     assert (row.backend_digest, row.frontend_digest, row.source_revision) == (NEW_B, NEW_F, REV_NEW)

@@ -28,7 +28,11 @@
 #
 # Env precedence: `environment` > later env_file > earlier env_file. Secrets stay in
 # /opt/bfx/runtime/*.env (root 0600, never in git); non-secret bot settings come
-# from live.env at the same commit as this file.
+# from live.env at the same commit as this file. BFX_RUNTIME_DIR exists only so CI
+# can render this file without the secret directory (older Compose stats env files
+# even with --no-env-resolution); bfx-deploy passes its own --runtime-dir, and the
+# default must stay /opt/bfx/runtime (compose_policy.py checks it). The files stay
+# required: a missing secret file must stop `up`, never start without it.
 
 name: bfx-app
 
@@ -47,7 +51,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     env_file:
-      - /opt/bfx/runtime/bot.env
+      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/bot.env
       - live.env
     environment:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
@@ -78,7 +82,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     env_file:
-      - /opt/bfx/runtime/webapi.env
+      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/webapi.env
     environment:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
@@ -107,7 +111,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
     env_file:
-      - /opt/bfx/runtime/frontend.env
+      - ${BFX_RUNTIME_DIR:-/opt/bfx/runtime}/frontend.env
     environment:
       BFX_IMAGE_DIGEST: ${BFX_FRONTEND_DIGEST:?BFX_FRONTEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
