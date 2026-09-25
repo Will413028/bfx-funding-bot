@@ -78,7 +78,7 @@ from bfx_funding_bot.modules.execution.protocols import AccountContext
 from bfx_funding_bot.modules.execution.registry_offers import RegistryState
 from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
-    SUBMIT_OUTCOME_UNKNOWN,
+    FOREIGN_LENDING,
     VENUE_LENT_ABOVE_LEDGER,
     LedgerConservation,
     ProtectionPort,
@@ -160,6 +160,8 @@ class _UnknownResolution(NamedTuple):
     candidate_ids: set[str]
     matched: list[SubmitMatchedToVenueOffer]
     not_sent: list[UncertaintyMarkedNotAccepted]
+    # Attempts this observation could not resolve; their symbols stay quarantined.
+    still_open: list[UnknownSubmitAttempt]
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +403,39 @@ class ForeignExposureMonitor:
                         period_days=offer.period_days, mts_created=offer.mts_created)
 
 
+QUARANTINE_ALERT_AFTER_MS = 30 * 60 * 1000
+QUARANTINE_REPEAT_MS = 6 * 60 * 60 * 1000
+
+
+class QuarantineAgeMonitor:
+    """Alert when an UNKNOWN has held its symbol for too long (D3 level 2).
+
+    The quarantine itself never escalates to a halt -- it already stops new
+    offers for that symbol -- but lending there is paused until evidence or an
+    operator resolves it, so after ``QUARANTINE_ALERT_AFTER_MS`` the operator
+    is told, and reminded every ``QUARANTINE_REPEAT_MS`` while it lasts.
+    """
+
+    def __init__(self, *, alert_after_ms: int = QUARANTINE_ALERT_AFTER_MS,
+                 repeat_ms: int = QUARANTINE_REPEAT_MS) -> None:
+        self._after = alert_after_ms
+        self._repeat = repeat_ms
+        self._last: dict[UUID, int] = {}
+
+    def observe(self, still_open: list[UnknownSubmitAttempt], *, now_ms: int) -> None:
+        open_ids = {attempt.attempt_id for attempt in still_open}
+        self._last = {key: at for key, at in self._last.items() if key in open_ids}
+        for attempt in still_open:
+            age = now_ms - attempt.started_at_ms
+            last = self._last.get(attempt.attempt_id)
+            if age < self._after or (last is not None and now_ms - last < self._repeat):
+                continue
+            self._last[attempt.attempt_id] = now_ms
+            alerts.emit(alerts.UNKNOWN_QUARANTINE_AGED, symbol=attempt.symbol,
+                        attempt_id=str(attempt.attempt_id), minutes=age // 60_000,
+                        amount=str(attempt.amount))
+
+
 class BootRecovery:
     """Boot orchestration: full-account venue reconcile + crash recovery.
 
@@ -436,11 +471,16 @@ class BootRecovery:
         protection: ProtectionPort | None = None,
         unknown_settle_ms: int = UNKNOWN_SETTLE_MS,
         foreign_exposure: ForeignExposureMonitor | None = None,
+        quarantine_age: QuarantineAgeMonitor | None = None,
     ) -> None:
         if unknown_settle_ms < 0:
             raise ValueError("unknown_settle_ms must be non-negative")
         self._unknown_settle_ms = unknown_settle_ms
         self._foreign_exposure = foreign_exposure or ForeignExposureMonitor()
+        self._quarantine_age = quarantine_age or QuarantineAgeMonitor()
+        # Start of the window foreign fills are attributed over (the previous
+        # accepted observation); before the first one, the history window.
+        self._last_accepted_query_ms: int | None = None
         self._store = store
         self._session_factory = session_factory
         self._auth_rest = auth_rest
@@ -481,22 +521,29 @@ class BootRecovery:
         self._protection = protection
         self._conservation = LedgerConservation()
 
-    def _protect(self, *, unknown: list[ReservationUnknown],
-                 capital_error: CapitalBlockedError | None, capital_accepted: bool,
-                 drift: SnapshotDrift, fence_refusal: CapitalBlockedError | None = None) -> None:
+    def _protect(self, *, capital_error: CapitalBlockedError | None, capital_accepted: bool,
+                 drift: SnapshotDrift, fence_refusal: CapitalBlockedError | None = None,
+                 foreign_executed: Mapping[str, Decimal] | None = None) -> None:
+        """Level 3 trips and level 4 alerts from this observation (D3).
+
+        An interrupted submit recovered as UNKNOWN is level 2: its open
+        uncertainty quarantines the symbol, and nothing is tripped here.
+        """
         protection = self._protection
         if protection is None:
             return
-        for event in unknown:
-            protection.trip(SUBMIT_OUTCOME_UNKNOWN,
-                            f"recovered interrupted submit cid={event.cid} symbol={event.symbol}")
         for stage, refusal in (("fence", fence_refusal), ("snapshot", capital_error)):
             trigger = CAPITAL_BLOCK_TRIGGERS.get(str(refusal)) if refusal is not None else None
             if trigger is not None:
                 protection.trip(trigger, f"capital classifier refused the {stage}: {refusal}")
         if self._capital_repository is not None:
-            for anomaly in self._conservation.observe(drift.symbols, confirmed=capital_accepted):
+            verdict = self._conservation.observe(drift.symbols, confirmed=capital_accepted,
+                                                 foreign_executed=foreign_executed)
+            for anomaly in verdict.anomalies:
                 protection.trip(VENUE_LENT_ABOVE_LEDGER, anomaly)
+            for detail in verdict.foreign:
+                log.warning("foreign_lending %s", detail)
+                alerts.emit(FOREIGN_LENDING, detail=detail)
 
     async def run(self) -> ReconcileResult:
         # A reconcile is one account observation.  The venue calls intentionally
@@ -573,6 +620,7 @@ class BootRecovery:
 
         capital_error = None
         capital_accepted = False
+        foreign_executed: dict[str, Decimal] = {}
         async with session_scope(self._session_factory) as session:
             if self._capital_repository is not None and capital_fence is not None:
                 assert confirmation is not None
@@ -610,6 +658,8 @@ class BootRecovery:
                 now_ms=query_finished_at_ms,
             )
             unmanaged = await self._unattributed_offer_ids(session, all_offers)
+            foreign_executed = await self._foreign_executed(session, history.offers,
+                                                            since_ms=history_start_ms)
 
             remaining_actions = [
                 ev for ev in actions if not isinstance(ev, ReservationUnknown)
@@ -638,10 +688,13 @@ class BootRecovery:
             ],
             active_ids={offer.venue_offer_id for offer in all_offers},
         )
+        self._quarantine_age.observe(resolution.still_open, now_ms=query_finished_at_ms)
+        if capital_accepted:
+            self._last_accepted_query_ms = query_started_at_ms
         matched_events = resolution.matched
-        self._protect(unknown=unknown_actions,
-                      capital_error=capital_error, capital_accepted=capital_accepted,
-                      drift=snapshot_drift, fence_refusal=fence_refusal)
+        self._protect(capital_error=capital_error, capital_accepted=capital_accepted,
+                      drift=snapshot_drift, fence_refusal=fence_refusal,
+                      foreign_executed=foreign_executed)
         if capital_error is not None:
             raise capital_error
 
@@ -779,11 +832,11 @@ class BootRecovery:
             )
         }
         if not attempts or snapshot_seq is None:
-            return _UnknownResolution(candidates, [], [])
+            return _UnknownResolution(candidates, [], [], list(attempts))
         logged = await session.get(EventLogRow, snapshot_seq)
         payload = logged.payload if logged is not None else None
         if not isinstance(payload, dict):
-            return _UnknownResolution(candidates, [], [])
+            return _UnknownResolution(candidates, [], [], list(attempts))
         coverage = payload.get("coverage")
         history_end = coverage.get("offer_history_end_ms") if isinstance(coverage, dict) else None
         # The venue's own status words, for the evidence; the stored payload
@@ -856,7 +909,40 @@ class BootRecovery:
             else:
                 log.info("unknown_stays_open attempt=%s symbol=%s evidence=%s candidates=%d",
                          attempt.attempt_id, attempt.symbol, match.kind, len(match.candidates))
-        return _UnknownResolution(candidates, matched, not_sent)
+        matched_cids = {event.cid for event in matched}
+        not_sent_ids = {event.uncertainty_id for event in not_sent}
+        still_open = [attempt for attempt in attempts if attempt.cid not in matched_cids
+                      and not await self._resolved_not_sent(session, attempt, not_sent_ids)]
+        return _UnknownResolution(candidates, matched, not_sent, still_open)
+
+    async def _foreign_executed(self, session: AsyncSession,
+                                history_offers: tuple[ActiveFundingOffer, ...], *,
+                                since_ms: int | None) -> dict[str, Decimal]:
+        """Per symbol, what foreign offers that ended since the last accepted
+        observation lent: original minus remaining (D2, ledger conservation)."""
+        start = self._last_accepted_query_ms if self._last_accepted_query_ms is not None else since_ms
+        ended = [offer for offer in history_offers if is_terminal_offer_status(offer.status)
+                 and (start is None or (offer.mts_updated or offer.mts_created) > start)]
+        if not ended:
+            return {}
+        foreign = await self._unattributed_offer_ids(session, ended)
+        lent: dict[str, Decimal] = {}
+        for offer in ended:
+            if offer.venue_offer_id not in foreign:
+                continue
+            filled = (offer.amount_original or offer.amount) - offer.amount
+            if filled > 0:
+                lent[offer.symbol] = lent.get(offer.symbol, Decimal(0)) + filled
+        return lent
+
+    async def _resolved_not_sent(self, session: AsyncSession, attempt: UnknownSubmitAttempt,
+                                 uncertainty_ids: set[UUID]) -> bool:
+        if not uncertainty_ids:
+            return False
+        return await session.scalar(select(ExecutionUncertaintyRow.uncertainty_id).where(
+            ExecutionUncertaintyRow.attempt_id == attempt.attempt_id,
+            ExecutionUncertaintyRow.uncertainty_id.in_(uncertainty_ids),
+        ).limit(1)) is not None
 
     @staticmethod
     async def _observed_after_opening(session: AsyncSession, uncertainty: ExecutionUncertaintyRow,

@@ -49,7 +49,6 @@ from bfx_funding_bot.external.bitfinex.fill_tracker import (
 from bfx_funding_bot.external.bitfinex.funding_book_ws import FundingBookWSClient
 from bfx_funding_bot.external.bitfinex.funding_rules import FundingRules
 from bfx_funding_bot.external.bitfinex.gap_fill import fill_gap_from_rest
-from bfx_funding_bot.external.bitfinex.live_executor import FundingCancelAllClient
 from bfx_funding_bot.external.bitfinex.nonce import make_monotonic_us_nonce
 from bfx_funding_bot.external.bitfinex.rate_limit import FundingRateLimiter
 from bfx_funding_bot.external.bitfinex.rest import BitfinexREST
@@ -109,6 +108,7 @@ from bfx_funding_bot.modules.execution.events import (
     ReservationReleased,
 )
 from bfx_funding_bot.modules.execution.ledger import PaperPositionLedger
+from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
     ReservationEmittingMiddleware,
@@ -127,12 +127,6 @@ from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
 from bfx_funding_bot.modules.execution.safety.boot_stop import (
     stop_refused_boot,
-    writer_lock_or_none,
-)
-from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
-    DivergenceRateGuard,
-    DrawdownGuard,
-    RealizedLossGuard,
 )
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
@@ -161,7 +155,7 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
-    LossLimitMonitor,
+    NavDropMonitor,
     WriterLockWatch,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
@@ -938,34 +932,22 @@ async def _emit_locf_degraded(
 # Ledger + OfferRegistry subscribe to DomainEventBus in build_daemon.
 
 
-class _StubDivergenceSource:
-    """4.2 stub — disabled DivergenceRateGuard never reaches this.
-    4.4 wires a real source backed by `signal_divergence_warn` event counts."""
-
-    def divergence_rate_pct(self, window_minutes: int) -> float:
-        return 0.0
-
-
 _LIVE_REQUIRED_HARD = ("manual_kill", "auth_health", "heartbeat")
-_LIVE_REQUIRED_CALIBRATED = ("realized_loss_24h", "drawdown_from_peak")
 
 
 def assert_live_guard_invariant(phase: Phase, safety_cfg: SafetyConfig) -> None:
     """Real money cannot silently disable ownership-independent safety guards.
 
     Live replaces the allocation/buying-power flags with the mandatory applied
-    capital policy, and still requires the trading-state/auth/heartbeat guards
-    and both loss limiters. No-op for paper/shadow; divergence stays optional.
+    capital policy and its offer envelope, and still requires the
+    trading-state/auth/heartbeat guards. No-op for paper/shadow. NAV drops only
+    alert (lending envelope D3): they are not a guard.
     """
     if phase is not Phase.LIVE:
         return
     missing = [
         name for name in _LIVE_REQUIRED_HARD
         if not getattr(safety_cfg.hard_guards, name).enabled
-    ]
-    missing += [
-        name for name in _LIVE_REQUIRED_CALIBRATED
-        if not getattr(safety_cfg.calibrated_guards, name).enabled
     ]
     if missing:
         raise ValueError(
@@ -989,38 +971,18 @@ def assert_caps_invariant(cells: list[CellConfig], alloc_cfg: _AllocationCapCfg)
 
 async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
                             session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """A live boot that refuses to run is an automatic stop: HALTED/auto and the
-    best-effort venue cancel-all (``safety/boot_stop``), before the error is raised."""
+    """A live boot that refuses to run is an automatic stop: HALTED/auto and an
+    alert (``safety/boot_stop``), before the error is raised."""
     try:
         account_id = UUID(_require_env("BFX_EXCHANGE_ACCOUNT_ID"))
     except Exception:
-        log.critical("boot_refused_without_account account unknown; nothing recorded or cancelled")
+        log.critical("boot_refused_without_account account unknown; nothing recorded")
         return
-    environment = config.deployment_environment.value
-
-    async def credentials(session: AsyncSession) -> Credentials:
-        return await load_account_credentials(session, exchange_account_id=account_id,
-                                              kek=load_kek())
-
-    async def writer_lock() -> WriterLock | None:
-        lock = WriterLock(database_url=config.database_url,
-                          key=derive_lock_key(account_id_canonical(account_id), environment))
-        if config.database_url.startswith(("postgres", "postgresql")):
-            return await writer_lock_or_none(lock)
-        return lock
-
-    http = httpx.AsyncClient()
-    try:
-        await stop_refused_boot(
-            session_factory=session_factory, account_id=account_id, environment=environment,
-            configured_symbols=configured_symbols(config.cells),
-            reason=f"boot_blocked: {str(exc) or type(exc).__name__}",
-            load_credentials=credentials,
-            venue=lambda: FundingCancelAllClient(http=http, nonce_provider=make_monotonic_us_nonce()),
-            writer_lock=writer_lock, clock=now_ms_utc,
-        )
-    finally:
-        await http.aclose()
+    await stop_refused_boot(
+        session_factory=session_factory, account_id=account_id,
+        environment=config.deployment_environment.value,
+        reason=f"boot_blocked: {str(exc) or type(exc).__name__}", clock=now_ms_utc,
+    )
 
 
 async def build_daemon(
@@ -1216,14 +1178,13 @@ async def build_daemon(
     if capital_runtime is None:
         assert_caps_invariant(config.cells, hg.allocation_cap)
 
-    # Automatic protections (ADR 2026-09-25 D5): trips stop new offers at once
-    # and queue HALTED/auto + cancel-all, which a supervised task performs
-    # outside every lock once the kill switch is bound below.
+    # Automatic protections (lending envelope D3 level 3): trips stop new offers
+    # at once and queue HALTED/auto + a managed-offer cancel, which a supervised
+    # task performs outside every lock once the kill switch is bound below.
     protection = AutomaticProtection(clock=now_ms_utc)
 
-    # L2 loss-limiter source: account NAV (available + reserved + realized)
-    # sampled from each reconcile snapshot — replaces the 0/0 stub so the canary
-    # RealizedLossGuard / DrawdownGuard can actually trip. Subscribed to
+    # NAV (available + reserved + realized) sampled from each reconcile
+    # snapshot, for the NAV-drop alert (level 4). Subscribed to
     # PositionReconciled below (alongside the ledger).
     window_account = account_id_uuid_or_none(account_id)
     pnl_source = ReconcileNavTracker(
@@ -1240,7 +1201,6 @@ async def build_daemon(
     # (fail-permissive: load errors leave the in-memory-only behavior).
     await pnl_source.load_persisted_peaks()
     await pnl_source.load_persisted_window()
-    div_source = _StubDivergenceSource()
 
     # Durable trading state. Built unconditionally (like NavPeakStore) so every
     # phase can be stopped durably. Note the OPPOSITE failure posture to the
@@ -1260,7 +1220,6 @@ async def build_daemon(
     # guards are not constructed (cleaner than relying on internal no-op).
     # Live (real money) cannot boot with a required guard off
     # (assert_live_guard_invariant); paper/shadow may disable them.
-    cg = safety_cfg.calibrated_guards
     # Phase 2: every configured currency must have an explicit cap in simulation
     # — config-fatal otherwise. Then log the effective cap per symbol so
     # the boot log is the authoritative record of how much real money each
@@ -1357,25 +1316,6 @@ async def build_daemon(
             default_cap=hg.allocation_cap.default_cap,
             # Legacy simulation-only configuration. Live always uses the policy above.
             env_fallback_cap=allocation_cap,
-        ))
-    if cg.realized_loss_24h.enabled:
-        guards.append(RealizedLossGuard(
-            enabled=True,
-            threshold_pct=cg.realized_loss_24h.threshold_pct,
-            source=pnl_source,
-        ))
-    if cg.drawdown_from_peak.enabled:
-        guards.append(DrawdownGuard(
-            enabled=True,
-            threshold_pct=cg.drawdown_from_peak.threshold_pct,
-            source=pnl_source,
-        ))
-    if cg.divergence_rate.enabled:
-        guards.append(DivergenceRateGuard(
-            enabled=True,
-            threshold_pct=cg.divergence_rate.threshold_pct,
-            window_minutes=cg.divergence_rate.window_minutes,
-            source=div_source,
         ))
     # Fail-closed single-writer guard — live-only (writer_lock is None on
     # paper/shadow). Authoritative per-submit liveness via verify_held().
@@ -1482,18 +1422,14 @@ async def build_daemon(
     # not the bus — see BootRecovery._route_fsm). Wiring both together is required:
     # subscribing here without the registry routing would double-count orphans.
     bus.subscribe(PositionReconciled, ledger.on_position_reconciled)
-    # Same snapshot feeds the L2 loss-limiter source: NAV peak + 24h window drive
-    # RealizedLossGuard / DrawdownGuard (no-op stub before this — see #4).
-    # The loss limiter as a protection: evaluated where its inputs change, and
-    # wrapping the tracker so it reads metrics the tracker already updated.
-    loss_monitor = LossLimitMonitor(
-        source=pnl_source, protection=protection,
-        realized_loss_threshold_pct=(
-            cg.realized_loss_24h.threshold_pct if cg.realized_loss_24h.enabled else None),
-        drawdown_threshold_pct=(
-            cg.drawdown_from_peak.threshold_pct if cg.drawdown_from_peak.enabled else None),
+    # Same snapshot feeds the NAV tracker (peak + 24h window) behind the NAV-drop
+    # alert, wrapped so it reads metrics the tracker already updated.
+    nav_drop = NavDropMonitor(
+        source=pnl_source,
+        realized_loss_threshold_pct=safety_cfg.nav_alerts.realized_loss_24h_pct,
+        drawdown_threshold_pct=safety_cfg.nav_alerts.drawdown_pct,
     )
-    bus.subscribe(PositionReconciled, loss_monitor.on_position_reconciled)
+    bus.subscribe(PositionReconciled, nav_drop.on_position_reconciled)
     # Traffic signal: bfx_domain_events_total{event_type} — one fail-open
     # counting handler across all execution domain events (observe-only; a
     # handler failure is already isolated by the bus's per-handler gather).
@@ -1885,6 +1821,11 @@ async def build_daemon(
             if command_gate is not None else None
         ),
         clock=now_ms_utc,
+        # An automatic stop cancels only managed offers, through the command gate.
+        sweep=(ManagedOfferSweep(session_factory=session_factory, account_id=UUID(account_id),
+                                 environment=env_str, canceller=reservation_middleware,
+                                 ctx=account_ctx)
+               if not spec.is_simulated and isinstance(executor, CancelPort) else None),
     )
     protection.bind(kill_switch)
     if trading_control is not None:
@@ -2018,7 +1959,7 @@ async def build_daemon(
         protection=protection,
         trading_control=trading_control,
         writer_lock_watch=(
-            WriterLockWatch(lock=writer_lock, protection=protection)
+            WriterLockWatch(lock=writer_lock)
             if writer_lock is not None else None
         ),
     )

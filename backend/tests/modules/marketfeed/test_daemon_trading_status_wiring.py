@@ -48,10 +48,9 @@ hard_guards:
     enabled: true
     buffers: {fUSD: 3}
     default_buffer: 0
-calibrated_guards:
-  realized_loss_24h: {enabled: false, threshold_pct: null}
-  drawdown_from_peak: {enabled: false, threshold_pct: null}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """
 
 

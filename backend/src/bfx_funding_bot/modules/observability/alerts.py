@@ -56,6 +56,8 @@ DAEMON_FATAL: Final = "daemon_fatal"
 # An active venue offer no durable intent traces to (lending envelope D2):
 # never cancelled or counted as managed, reported once per venue offer id.
 FOREIGN_EXPOSURE: Final = "foreign_exposure"
+# An UNKNOWN submit has quarantined its currency past the alert age (D3 level 2).
+UNKNOWN_QUARANTINE_AGED: Final = "unknown_quarantine_aged"
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -66,15 +68,16 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     BOOT_REFUSED: ("error",),
     DAEMON_FATAL: ("error",),
     FOREIGN_EXPOSURE: ("venue_offer_id",),
+    UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
 }
 
 # Human titles for the protection triggers the plan names explicitly.
 TRIGGER_TITLES: Final[Mapping[str, str]] = {
-    "submit_outcome_unknown": "UNKNOWN submit",
-    "orphan_quarantined": "orphan offer quarantined",
-    "writer_lock_lost": "writer lock lost",
+    "unclassifiable_commitment": "commitment the ledger cannot place",
+    "offer_amount_mismatch": "managed offer amount differs from the submit",
+    "identity_conflict": "ledger and venue disagree about an offer",
+    "venue_lent_above_ledger": "lending nothing explains",
     "command_rate_exceeded": "venue write rate kept exceeding its limit",
-    "loss_limiter": "loss limiter",
 }
 
 # Values of these keys are scrubbed from every alert (exception text can carry them).
@@ -327,6 +330,12 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "bot stopped on a fatal error"
     if event == FOREIGN_EXPOSURE:
         return "foreign offer on the account (not managed, left untouched)"
+    if event == UNKNOWN_QUARANTINE_AGED:
+        return f"{fields.get('symbol', '?')} paused: an UNKNOWN submit is still unresolved"
+    if event == "nav_drop":
+        return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
+    if event == "foreign_lending":
+        return "lending no bot offer explains (foreign offer filled unseen)"
     return event
 
 
@@ -381,6 +390,7 @@ __all__ = [
     "PROTECTION_TRIPPED",
     "TRADING_STATE_CHANGED",
     "TRIGGER_TITLES",
+    "UNKNOWN_QUARANTINE_AGED",
     "WARNING",
     "AlertDeliveryError",
     "AlertSink",

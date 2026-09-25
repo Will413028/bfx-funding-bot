@@ -191,8 +191,7 @@ def classify_cancel_all_response(raw: Any) -> FundingCancelAllResult:
 class FundingCancelAllClient:
     """``POST /v2/auth/w/funding/offer/cancel/all`` -- the kill path's one venue write.
 
-    Standalone so a stop can reach the venue without a trading executor: the
-    boot that refuses to run cancels with this alone (``safety/boot_stop``).
+    Standalone so the kill path does not depend on the rest of the executor.
     """
 
     def __init__(self, *, http: httpx.AsyncClient, nonce_provider: Callable[[], int],

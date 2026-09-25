@@ -1,7 +1,4 @@
-# Phase 4.2 default safety config. Loaded by build_daemon at startup.
-# CalibratedGuard threshold values come from 4.3 G2 calibration; all
-# disabled in 4.2. Enable in 4.4 once thresholds are validated against
-# shadow data.
+# Paper/shadow safety config. Loaded by build_daemon at startup.
 #
 # No hot reload — change here = redeploy.
 
@@ -22,17 +19,11 @@ hard_guards:
     buffers: {fUSD: 3, fUST: 3}
     default_buffer: 0
 
-calibrated_guards:
-  realized_loss_24h:
-    enabled: false           # 4.3 calibrate threshold; 4.4 enable
-    threshold_pct: null      # % of NAV (auto-scales with funded capital)
-  drawdown_from_peak:
-    enabled: false
-    threshold_pct: null
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
+# NAV-drop alerts (level 4): a Telegram alert, never a stop. Funding NAV only
+# falls through withdrawals, transfers or platform losses. null disables one.
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 
 # Venue write throttle (a live writer refuses to start without it). Per-symbol
 # offer terms (amount ceiling, periods, open offers, rate floor) are the applied

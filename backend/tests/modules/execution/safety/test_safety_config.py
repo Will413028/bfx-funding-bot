@@ -25,25 +25,18 @@ hard_guards:
     enabled: true
   buying_power:
     enabled: true
-calibrated_guards:
-  realized_loss_24h:
-    enabled: false
-    threshold_pct: null
-  drawdown_from_peak:
-    enabled: false
-    threshold_pct: null
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """)
     cfg = load_safety_config(yaml_path)
     assert cfg.hard_guards.manual_kill.enabled is True
     assert cfg.hard_guards.heartbeat.sub_task_stale_threshold_seconds == 300
-    assert cfg.calibrated_guards.realized_loss_24h.enabled is False
+    assert cfg.nav_alerts.realized_loss_24h_pct is None
 
 
-def test_calibrated_enabled_requires_threshold(tmp_path: Path) -> None:
+def test_retired_calibrated_guards_no_longer_load(tmp_path: Path) -> None:
+    """NAV drops only alert now (lending envelope D3); the old guard section is refused."""
     yaml_path = tmp_path / "bad.yaml"
     yaml_path.write_text("""
 hard_guards:
@@ -53,13 +46,9 @@ hard_guards:
   allocation_cap: {enabled: true}
   buying_power: {enabled: true}
 calibrated_guards:
-  realized_loss_24h:
-    enabled: true
-    threshold_pct: null
-  drawdown_from_peak: {enabled: false, threshold_pct: null}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
+  realized_loss_24h: {enabled: true, threshold_pct: 5}
 """)
-    with pytest.raises(ValidationError, match="threshold_pct"):
+    with pytest.raises(ValidationError):
         load_safety_config(yaml_path)
 
 
@@ -77,20 +66,18 @@ hard_guards:
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: -1}
   allocation_cap: {enabled: true}
   buying_power: {enabled: true}
-calibrated_guards:
-  realized_loss_24h: {enabled: false, threshold_pct: null}
-  drawdown_from_peak: {enabled: false, threshold_pct: null}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """)
     with pytest.raises(ValidationError, match="greater than 0"):
         load_safety_config(yaml_path)
 
 
-def test_canary_realized_loss_threshold_is_5pct() -> None:
+def test_live_nav_drop_alerts_at_5_and_10_pct() -> None:
     cfg = load_safety_config(Path(__file__).parents[4] / "configs" / "safety.live.yaml")
-    assert cfg.calibrated_guards.realized_loss_24h.enabled is True
     # percentage of NAV (auto-scales with funded capital), not an absolute USDT amount
-    assert cfg.calibrated_guards.realized_loss_24h.threshold_pct == 5.0
+    assert (cfg.nav_alerts.realized_loss_24h_pct, cfg.nav_alerts.drawdown_pct) == (5.0, 10.0)
 
 
 def test_caps_and_buffers_maps_parse(tmp_path: Path) -> None:
@@ -108,17 +95,9 @@ hard_guards:
     enabled: true
     buffers: {fUST: 3, fUSD: 3}
     default_buffer: 0
-calibrated_guards:
-  realized_loss_24h:
-    enabled: false
-    threshold_pct: null
-  drawdown_from_peak:
-    enabled: false
-    threshold_pct: null
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """)
     cfg = load_safety_config(p)
     assert cfg.hard_guards.allocation_cap.caps["fUST"] == Decimal("3000")
