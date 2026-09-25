@@ -463,5 +463,5 @@ async def test_boot_reconcile_queries_full_account_and_keeps_unknown_symbol() ->
     snapshots = [event for event in store.events if isinstance(event, VenueSnapshotObserved)]
     assert len(snapshots) == 1
     assert snapshots[0].offers[0].symbol == "fBTC"
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     assert {event.symbol for event in bus.events} == {"fBTC", "fUST"}

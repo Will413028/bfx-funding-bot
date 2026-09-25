@@ -24,6 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    fingerprint_of,
+    fingerprints_in_use,
+)
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
@@ -306,6 +310,18 @@ class AccountCommandGate:
                         scope = (canonical_account, self._deployment_environment, decision.symbol)
                         if scope in self._latched_scopes:
                             raise CommandGateBlocked(self._latched_scopes[scope])
+                        # D3a: the fingerprint is this submit's only identity at
+                        # the venue. Checked under the account lock, in the
+                        # transaction that writes the intent, so no two
+                        # unresolved submits of a symbol can ever share one.
+                        fingerprint = fingerprint_of(size)
+                        if not fingerprint:
+                            raise CommandGateBlocked("amount_fingerprint_missing")
+                        if fingerprint in await fingerprints_in_use(
+                            locked, account_id=account_id,
+                            environment=self._deployment_environment, symbol=decision.symbol,
+                        ):
+                            raise CommandGateBlocked("amount_fingerprint_collision")
                         await self._guard(decision, replace(
                             context, command_session=locked, capital_cell_id=row.cell_id,
                         ))

@@ -80,7 +80,7 @@ from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
-from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery
+from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, ForeignExposureMonitor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
@@ -1409,6 +1409,8 @@ async def build_daemon(
     book_snapshot_writer: BookSnapshotWriter | None = None
     if not spec.is_simulated:
         auth_rest = BitfinexAuthREST(http=bitfinex_http, nonce_provider=bfx_nonce)
+        # One alert per foreign offer across the boot and the runtime reconcile.
+        foreign_exposure = ForeignExposureMonitor()
         boot_recovery = BootRecovery(
             store=event_store,
             session_factory=session_factory,
@@ -1422,6 +1424,7 @@ async def build_daemon(
             uncertainty_handler=ledger.on_reservation_unknown,
             capital_repository=capital_runtime.repository if capital_runtime else None,
             protection=protection,
+            foreign_exposure=foreign_exposure,
         )
         reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
         if reconcile_interval_s <= 0:
@@ -1447,6 +1450,7 @@ async def build_daemon(
             uncertainty_handler=ledger.on_reservation_unknown,
             capital_repository=capital_runtime.repository if capital_runtime else None,
             protection=protection,
+            foreign_exposure=foreign_exposure,
         )
 
     fill_tracker: RestPollingFillTracker | None = None

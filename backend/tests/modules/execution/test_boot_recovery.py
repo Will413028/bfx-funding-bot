@@ -52,12 +52,10 @@ def _actions(venue, local, grace_ms=120_000, now=_NOW):
     )
 
 
-def test_orphan_at_venue_is_claimed():
-    acts = _actions([_offer(voi="555", amount="250")], [])
-    assert len(acts) == 1
-    assert isinstance(acts[0], VenueOfferQuarantined)
-    assert acts[0].venue_offer_id == "555"
-    assert acts[0].amount == Decimal("250")
+def test_unclaimed_venue_offer_produces_no_recovery_action():
+    """D2: an offer no claim traces to is foreign (or an UNKNOWN's candidate),
+    never a quarantine breadcrumb and never a synthetic claim."""
+    assert _actions([_offer(voi="555", amount="250")], []) == []
 
 
 def test_local_claimed_missing_from_venue_is_released():
@@ -124,20 +122,6 @@ def _boot_recovery(auth_rest, **kw):
     )
 
 
-def test_action_grace_skips_recent_orphan():
-    # offer created 50s before now; action_grace_ms=120s → too fresh to claim
-    offer = ActiveFundingOffer(
-        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
-        rate=0.0003, period_days=2, mts_created=_NOW - 50_000, status="ACTIVE",
-    )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        configured_symbols=frozenset({"fUSD", "fUST"}),
-    )
-    assert acts == []
-
-
 def test_action_grace_skips_recent_missing_claim():
     claim = _claim(cid=1, voi="555", state=RegistryState.CLAIMED, occurred=_NOW - 50_000)
     acts = compute_recovery_actions(
@@ -158,32 +142,6 @@ def test_action_grace_releases_stale_missing_claim():
     assert len(acts) == 1
     assert isinstance(acts[0], ReservationReleased)
     assert acts[0].venue_offer_id == "555"
-
-
-def test_action_grace_claims_stale_orphan():
-    offer = ActiveFundingOffer(
-        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
-        rate=0.0003, period_days=2, mts_created=_NOW - 300_000, status="ACTIVE",
-    )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000, action_grace_ms=120_000,
-        configured_symbols=frozenset({"fUSD", "fUST"}),
-    )
-    assert isinstance(acts[0], VenueOfferQuarantined)
-
-
-def test_action_grace_zero_preserves_boot_behaviour():
-    offer = ActiveFundingOffer(
-        venue_offer_id="555", symbol="fUSD", amount=Decimal("100"),
-        rate=0.0003, period_days=2, mts_created=_NOW - 1, status="ACTIVE",
-    )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-        configured_symbols=frozenset({"fUSD", "fUST"}),
-    )
-    assert isinstance(acts[0], VenueOfferQuarantined)
 
 
 class _StubStore:
@@ -288,21 +246,18 @@ def _full_boot_recovery(auth_rest, store, session_factory, bus, **kw):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_reconcile_result_for_orphan_claim():
-    """run() returns a bounded quarantine instead of synthetic claim identity."""
-    # _StubSession returns no rows, so local_claims will be []
-    # → no release; but we want to test a release scenario.
-    # Use action_grace_ms=0 (boot default) with a stale CLAIMED offer absent from venue.
-    # We can't inject rows via _StubSession.execute easily, so test the orphan-claim path:
-    # venue has one offer, local has none → n_claimed=1.
+async def test_run_reports_an_unclaimed_offer_as_unmanaged_without_quarantine():
+    """run() names the offer unmanaged instead of inventing a claim identity or
+    writing a quarantine breadcrumb (D2)."""
+    # _StubSession returns no rows: no local claim, no attempt.
     store = _StubStore()
     bus = _StubBus()
     auth = _StubAuthRest([_offer(voi="999", amount="200")])
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
     result = await rec.run()
-    assert result.n_quarantined == 1
-    assert any(isinstance(event, VenueOfferQuarantined) for event in store.appended)
+    assert result.unmanaged_offer_ids == frozenset({"999"})
+    assert not any(isinstance(event, VenueOfferQuarantined) for event in store.appended)
 
 
 @pytest.mark.asyncio
@@ -502,7 +457,7 @@ async def test_run_position_reconciled_includes_offer_reserved():
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     pr = next(e for e in bus.published if isinstance(e, PositionReconciled) and e.symbol == "fUSD")
     assert pr.reserved == Decimal("100")
 
@@ -590,7 +545,7 @@ async def test_run_routes_recovery_actions_to_registry_not_bus():
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus, offer_registry=registry)
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     assert registry.handled == []
     assert registry.handled == []
 
@@ -604,7 +559,7 @@ async def test_run_falls_back_to_bus_when_no_registry():
     rec = _full_boot_recovery(auth, store, _StubSessionFactory(), bus)  # no offer_registry
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     assert not any(isinstance(event, VenueOfferQuarantined) for event in bus.published)
 
 
@@ -652,20 +607,6 @@ async def test_fetch_available_does_not_retry_4xx():
 
 
 # ── Task 3D: thread offer.symbol + reconciler symbol into recovery actions ─────
-
-
-def test_orphan_claimed_carries_offer_symbol() -> None:
-    offer = ActiveFundingOffer(
-        venue_offer_id="555", symbol="fUST", amount=Decimal("100"),
-        rate=0.0003, period_days=2, mts_created=1_000_000, status="ACTIVE",
-    )
-    acts = compute_recovery_actions(
-        venue_offers=[offer], local_claims=[], account_id=_ACC,
-        is_simulated=False, now_ms=_NOW, grace_ms=120_000,
-        configured_symbols=frozenset({"fUST"}),
-    )
-    assert isinstance(acts[0], VenueOfferQuarantined)
-    assert acts[0].symbol == "fUST"
 
 
 def test_missing_claim_released_carries_own_claim_symbol() -> None:
@@ -757,7 +698,7 @@ async def test_single_symbol_list_reproduces_current_event():
     )
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     published = [e for e in bus.published if isinstance(e, PositionReconciled)]
     assert {e.symbol for e in published} == {"fUSD", "fUST"}
 
@@ -868,7 +809,7 @@ async def test_two_symbols_fire_two_position_reconciled_with_per_symbol_natives(
     )
 
     result = await rec.run()
-    assert result.n_quarantined == 2
+    assert len(result.unmanaged_offer_ids) == 2
     published = [e for e in bus.published if isinstance(e, PositionReconciled)]
     assert {e.symbol for e in published} == {"fUSD", "fUST"}
     assert auth.wallet_calls == ["UST", "USD"]
@@ -888,7 +829,7 @@ async def test_two_symbols_write_one_full_account_snapshot():
     )
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     assert len(store.snapshot_calls) == 1
     snapshot = store.snapshot_calls[0]
     assert {offer.symbol for offer in snapshot.offers} == {"fUST"}
@@ -912,7 +853,7 @@ async def test_multi_symbol_result_aggregates_dims():
     )
 
     result = await rec.run()
-    assert result.n_quarantined == 1
+    assert len(result.unmanaged_offer_ids) == 1
     assert result.reserved_usdt == Decimal("100")
     assert result.realized_usdt == Decimal("230")
 
