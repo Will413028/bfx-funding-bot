@@ -80,7 +80,7 @@ def test_material_path_makes_the_whole_release_material(path: str) -> None:
 
 
 @pytest.mark.parametrize("path", [
-    "scripts/deploy-vm.sh",
+    "scripts/brand-new-deploy-helper.sh",
     "backend/scripts/brand_new_tool.py",
     "some/new/top/level/file.py",
     "Makefile",

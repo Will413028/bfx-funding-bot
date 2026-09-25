@@ -54,6 +54,9 @@ _READY_PROJECTOR_MIGRATIONS = frozenset({
     # Adds the operator adjudication outbox beside the ledger and revokes web API
     # writes; the rows, the cursor and the projector contract are unchanged.
     "b8e2d4f6a013",
+    # Moves the retired release ceremony's tables into release_archive; none is
+    # a projection, and no event or cursor is touched.
+    "5d1c7e9a3b20",
 })
 
 __all__ = [

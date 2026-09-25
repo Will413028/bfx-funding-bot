@@ -30,6 +30,7 @@ async def test_do_run_migrations_sets_timeouts_and_takes_lock(pg_engine, monkeyp
     try:
         with eng.begin() as setup_conn:
             setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:
@@ -98,6 +99,7 @@ async def test_migration_is_atomic_on_failure(pg_engine, monkeypatch) -> None:
     try:
         with eng.begin() as setup_conn:
             setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

@@ -28,7 +28,7 @@ from bfx_funding_bot.modules.observability.tracing import (
 )
 from tests.modules.marketfeed.account_test_helpers import (
     configure_account_env,
-    configure_canary_wiring_env,
+    configure_live_wiring_env,
     seed_exchange_account,
 )
 
@@ -151,7 +151,7 @@ async def test_build_daemon_live_tracing_enabled_wraps_reconcile_and_ws(
     monkeypatch.setenv("BFX_EXECUTOR", "bitfinex_live")
     monkeypatch.setenv("BFX_WS_CLIENT_ENABLED", "true")
     monkeypatch.setenv("BFX_OTEL_ENABLED", "true")
-    configure_canary_wiring_env(monkeypatch, tmp_path)
+    configure_live_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="tracing_live.db")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
 

@@ -20,7 +20,6 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
-    validate_amount,
 )
 from bfx_funding_bot.modules.execution.audit import AuditContext
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
@@ -68,7 +67,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.release_session import ReleaseCommand
 from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
     ProtectionPort,
@@ -92,14 +90,6 @@ from bfx_funding_bot.modules.marketfeed.schemas import (
 )
 
 log = logging.getLogger(__name__)
-
-# How far the live minimum may move past the authorised amount before the
-# submission is no longer the action that was approved. A reviewed system
-# constant, not a per-session field: this absorbs seconds of stablecoin-pair
-# noise, it is not a risk preference anyone would tune per offer. Revisions are
-# logged, so a tolerance that starts being used routinely is visible.
-RELEASE_MINIMUM_TOLERANCE = Decimal("0.01")
-
 
 # A book that never qualified and a book that went stale are different faults
 # with different operator responses; the event must say which.
@@ -229,18 +219,8 @@ class DeploymentReconciler:
             c.cell_id: c.period_agg for c in cells
         }
 
-    async def deploy(
-        self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
-        release: ReleaseCommand | None = None,
-    ) -> None:
+    async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
         ctx = self._ctx
-        if release is not None:
-            matches = [cell for cell in self._cells if (cell.symbol, cell.cell_id, cell.strategy.value)
-                       == (release.symbol, release.cell, release.strategy)]
-            if len(matches) != 1:
-                raise ValueError("release_command_scope_or_minimum_mismatch")
-            ctx = replace(ctx, release_session_id=release.session_id,
-                          canary_halt_authorization=release.halt_authorization)
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise
@@ -257,8 +237,6 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
-            if release is not None and symbol != release.symbol:
-                continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
@@ -317,35 +295,7 @@ class DeploymentReconciler:
                     ) for cell in active}
                 min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
-                if release is not None:
-                    amount = release.amount
-                    if min_fill > amount:
-                        # The venue rule is USD-denominated, so its UST equivalent
-                        # drifts with FX between authorisation and submission.
-                        # Revising to the live minimum is the same economic action;
-                        # discarding the session costs a whole DR window. The rule
-                        # itself is never fudged -- min_fill is exact, and
-                        # validate_amount below still has the final word.
-                        ceiling = min(
-                            amount * (Decimal(1) + RELEASE_MINIMUM_TOLERANCE),
-                            release.max_amount,
-                        )
-                        if min_fill > ceiling:
-                            raise ValueError(
-                                "funding_amount_below_minimum_or_invalid_precision"
-                            )
-                        log.warning(
-                            "release_amount_revised symbol=%s authorized=%s submitted=%s",
-                            symbol, amount, min_fill,
-                        )
-                        amount = min_fill
-                    validate_amount(amount, amount_evidence, symbol=symbol, now_ms=self._clock())
-                    view = views.get(release.cell)
-                    fills = ({release.cell: amount}
-                             if view is not None and view.budget.max_new_offer >= amount else {})
             except Exception as exc:
-                if release is not None:
-                    raise
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
                 trigger = (CAPITAL_BLOCK_TRIGGERS.get(str(exc))
                            if isinstance(exc, CapitalBlockedError) else None)
@@ -356,7 +306,7 @@ class DeploymentReconciler:
             # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
             # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
             # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
-            if release is None and self._reprice is not None and venue_offers:
+            if self._reprice is not None and venue_offers:
                 cancel_budget -= await self._reprice_sweep(
                     symbol=symbol,
                     symbol_cells=symbol_cells,
@@ -548,8 +498,6 @@ class DeploymentReconciler:
                                       funding_amount_evidence=amount_evidence)
                     result = await self._executor.submit(outcome, cell_ctx)
                 except Exception as exc:
-                    if release is not None:
-                        raise
                     log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
                     if self._attempts is not None:
                         self._attempts.record_error(

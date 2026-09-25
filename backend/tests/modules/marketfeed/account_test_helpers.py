@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -20,23 +19,16 @@ TEST_VAULT_KEK = bytes(range(32))
 TEST_VAULT_KEK_B64 = base64.b64encode(TEST_VAULT_KEK).decode()
 
 
-def configure_release_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Synthetic measured identity for construction-only tests; never production fallback."""
-    from bfx_funding_bot.core.release_identity import (
-        PackagedImageIdentity,
-        ReleaseManifest,
-        ReleaseRuntime,
-        VerifiedRelease,
-    )
-    from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
-    manifest = ReleaseManifest(version=2, release_id="fixture", source_revision="a" * 40,
-        image=PackagedImageIdentity(platform="linux/arm64", config_digest="sha256:" + "b" * 64,
-            manifest_digest="sha256:" + "f" * 64),
-        inventory={}, python_inventory={}, environment={}, schema_head=RELEASE_SCHEMA_HEAD,
-        projector_version="execution-state-v1")
-    proof = VerifiedRelease(manifest=manifest, release_digest="c" * 64,
-        config_digest="d" * 64, launch_id="e" * 32, actual_image_id=manifest.image.manifest_digest)
-    monkeypatch.setattr(ReleaseRuntime, "from_environment", classmethod(lambda cls: SimpleNamespace(verify=lambda: proof)))
+async def stamp_schema_head(engine: AsyncEngine) -> None:
+    """Record this build's schema head, as ``alembic upgrade`` would on Postgres."""
+    from sqlalchemy import text
+
+    from bfx_funding_bot.core.schema_head import SCHEMA_HEAD
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        await conn.execute(text("DELETE FROM alembic_version"))
+        await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:head)"),
+                           {"head": SCHEMA_HEAD})
 
 
 def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,16 +37,14 @@ def configure_account_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
 
 
-def configure_canary_wiring_env(
+def configure_live_wiring_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:  # type: ignore[no-untyped-def]
-    """Historical fixture name; construction now uses normal live plus measured release."""
+    """Normal live construction: explicit account, live phase, projector version."""
     configure_account_env(monkeypatch)
-    configure_release_runtime(monkeypatch)
     monkeypatch.setenv("BFX_PHASE", "live")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)
     monkeypatch.setenv("BFX_PROJECTOR_VERSION", "execution-state-v1")
-    monkeypatch.setenv("BFX_HALT2_EVIDENCE_REPORT", str(tmp_path / "halt2-stub.json"))
 
 
 async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool = True) -> None:
@@ -62,6 +52,7 @@ async def seed_exchange_account(engine: AsyncEngine, *, capital_policies: bool =
     envelope = encrypt_secret_with_aad(
         "test_secret", aad=str(TEST_EXCHANGE_ACCOUNT_ID), kek=TEST_VAULT_KEK
     )
+    await stamp_schema_head(engine)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory.begin() as session:
         session.add(
@@ -104,6 +95,7 @@ __all__ = [
     "TEST_EXCHANGE_ACCOUNT_ID",
     "TEST_VAULT_KEK_B64",
     "configure_account_env",
-    "configure_canary_wiring_env",
+    "configure_live_wiring_env",
     "seed_exchange_account",
+    "stamp_schema_head",
 ]
