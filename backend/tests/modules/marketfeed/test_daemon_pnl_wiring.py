@@ -1,10 +1,8 @@
-"""build_daemon wires the L2 loss-limiter guards to a real NAV source.
+"""build_daemon wires the NAV-drop alert to a real NAV source, and nothing blocks on it.
 
-Regression for the #4 safety gap: the canary invariant forces realized_loss_24h
-+ drawdown_from_peak ON, but they were wired to _StubPnLSource (0/0) so they
-could never trip. After the fix both guards share a ReconcileNavTracker that is
-subscribed to PositionReconciled, so a venue snapshot showing a NAV drop makes
-them block POST.
+Lending envelope D3: a NAV drop is level 4 -- an alert, never a stop. The
+ReconcileNavTracker behind it is subscribed to PositionReconciled, so a venue
+snapshot showing a NAV drop alerts once while every guard still allows a POST.
 """
 from __future__ import annotations
 
@@ -20,14 +18,6 @@ from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-)
-from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
-    DrawdownGuard,
-    RealizedLossGuard,
-)
-from bfx_funding_bot.modules.execution.safety.chain import GuardRule
-from bfx_funding_bot.modules.execution.safety.nav_pnl_source import (
-    ReconcileNavTracker,
 )
 from bfx_funding_bot.modules.marketfeed.schemas import (
     DecisionOutcome,
@@ -56,13 +46,6 @@ phase3b_wfo_results_ref: x
     return yaml_path
 
 
-def _find_guard(guards: list[GuardRule], guard_cls: type) -> object:
-    for g in guards:
-        if isinstance(g, guard_cls):
-            return g
-    raise AssertionError(f"{guard_cls.__name__} not wired into the safety chain")
-
-
 def _reconciled(available: str, ts: int) -> PositionReconciled:
     return PositionReconciled(
         account_id="550e8400-e29b-41d4-a716-446655440000",
@@ -86,7 +69,7 @@ def _post() -> DecisionPayload:
 
 
 @pytest.mark.asyncio
-async def test_loss_guards_use_nav_tracker_and_trip_on_drawdown(
+async def test_a_nav_drop_alerts_and_never_blocks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     httpx_mock: HTTPXMock,
@@ -135,28 +118,23 @@ async def test_loss_guards_use_nav_tracker_and_trip_on_drawdown(
         cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
     )
 
-    loss_guard = _find_guard(daemon.safety_chain.guards, RealizedLossGuard)
-    dd_guard = _find_guard(daemon.safety_chain.guards, DrawdownGuard)
-
-    # (A) backed by the real NAV source, not the 0/0 stub, and a single shared
-    #     instance so both guards see the same snapshot history.
-    assert isinstance(loss_guard.source, ReconcileNavTracker)  # type: ignore[attr-defined]
-    assert dd_guard.source is loss_guard.source  # type: ignore[attr-defined]
+    from bfx_funding_bot.modules.execution.safety import protection as protection_module
+    sent: list[tuple[str, dict]] = []
+    monkeypatch.setattr(protection_module.alerts, "emit",
+                        lambda event, **fields: sent.append((event, fields)))
+    names = {guard.name for guard in daemon.safety_chain.guards}
+    assert not names & {"realized_loss_24h", "drawdown_from_peak", "divergence_rate"}
 
     ctx = AccountContext(
         "550e8400-e29b-41d4-a716-446655440000", Credentials("k", "s"), Decimal("500")
     )
-    # Before any reconcile: permissive (no NAV history).
-    assert (await loss_guard.evaluate(_post(), ctx)).allowed is True
-    assert (await dd_guard.evaluate(_post(), ctx)).allowed is True
-
-    # (B) subscribed to the daemon bus → (C) a fUST NAV drop makes both guards
-    #     block. 100 → 40 = 60% 24h loss (> 5%) and 60% drawdown (> 10%), both
-    #     measured against fUST's own per-symbol window/peak.
+    # 100 -> 40 on fUST: a 60% 24h loss (> 5%) and drawdown (> 10%).
     await daemon.bus.publish(_reconciled("100", 1_000))
     await daemon.bus.publish(_reconciled("40", 2_000))
-
-    loss_result = await loss_guard.evaluate(_post(), ctx)
-    dd_result = await dd_guard.evaluate(_post(), ctx)
-    assert loss_result.allowed is False
-    assert dd_result.allowed is False
+    assert sorted(fields["metric"] for event, fields in sent if event == "nav_drop") == [
+        "drawdown_pct", "realized_loss_pct_24h"]
+    for guard in daemon.safety_chain.guards:
+        if guard.name in {"manual_kill", "heartbeat", "auth_health", "allocation_cap",
+                          "buying_power"}:
+            continue
+        assert (await guard.evaluate(_post(), ctx)).allowed is True, guard.name

@@ -18,11 +18,6 @@ from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
 )
-from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
-    DivergenceRateGuard,
-    DrawdownGuard,
-    RealizedLossGuard,
-)
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import (
     AllocationCapGuard,
@@ -50,19 +45,6 @@ class _EventCapture:
         self.events.append(ev)
 
 
-class _StubPnL:
-    def realized_loss_pct_24h(self, symbol: str) -> float:
-        return 0.0
-
-    def drawdown_pct(self, symbol: str) -> float:
-        return 0.0
-
-
-class _StubDiv:
-    def divergence_rate_pct(self, window_minutes: int) -> float:
-        return 0.0
-
-
 @pytest.mark.asyncio
 async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     axiom = _EventCapture()
@@ -72,7 +54,6 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
 
     ledger = PaperPositionLedger(account_id="default")  # Empty ledger — no prior state needed for this sequence (was: replay_from_axiom with empty query)
     ctx = AccountContext("default", Credentials("k", "s"), Decimal("500"))
-    pnl, div = _StubPnL(), _StubDiv()
 
     chain = SafetyGuardChain(
         guards=[
@@ -84,14 +65,6 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
                 watched_sub_tasks=["ws"],
             ),
             AllocationCapGuard(ledger=ledger, caps={}, default_cap=Decimal("500")),
-            RealizedLossGuard(enabled=False, threshold_pct=None, source=pnl),
-            DrawdownGuard(enabled=False, threshold_pct=None, source=pnl),
-            DivergenceRateGuard(
-                enabled=False,
-                threshold_pct=None,
-                window_minutes=None,
-                source=div,
-            ),
         ],
         probe=probe,
         diagnostics=diagnostics,

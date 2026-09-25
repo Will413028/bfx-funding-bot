@@ -1,8 +1,15 @@
-"""Kill switch: write HALTED, then cancel every funding offer at the venue.
+"""Kill switch: write HALTED, then cancel funding offers at the venue.
 
-ADR 2026-09-25 D4 (Will, 2026-09-25): HALTED = the durable stop plus a venue
-funding cancel-all, including orphan offers and currencies with an unresolved
-UNKNOWN, needing only the writer lock and no other guard.
+Two scopes (lending envelope ADR 2026-09-25 D3/D4):
+
+- ``all`` -- the operator's kill (UI request or /admin/halt): a venue funding
+  cancel-all per currency, which also pulls offers placed by hand or by
+  Bitfinex auto-renew, needing only the writer lock and no other guard.
+- ``managed`` -- an automatic protection (ladder level 3): only the offers a
+  durable intent traces to, each by venue id through the command gate
+  (:mod:`execution.managed_cancel`). Foreign offers are never touched.
+
+The rest of this docstring describes the ``all`` scope.
 
 Order is the contract:
 
@@ -41,6 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
+from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep, SweepResult
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     FundingCancelAllPort,
@@ -60,6 +68,7 @@ from bfx_funding_bot.modules.observability import alerts
 log = logging.getLogger(__name__)
 
 KILL_CAUSES = frozenset({CAUSE_OPERATOR, CAUSE_AUTO})
+SCOPES = frozenset({"all", "managed"})
 QUIESCE_TIMEOUT_S = 30.0
 _FUNDING_SYMBOL = re.compile(r"^f([A-Z0-9]{2,15})$")
 _DETAIL_LIMIT = 512
@@ -83,10 +92,14 @@ class KillResult:
     state_changed: bool
     cancel_all: tuple[CancelAllOutcome, ...]
     scope_error: str | None = None
+    # The ``managed`` scope's per-offer cancels; None for a cancel-all.
+    managed: SweepResult | None = None
 
     @property
     def complete(self) -> bool:
-        """Every currency's cancel-all was acknowledged and the scope was fully read."""
+        """Every cancel was sent (managed) or acknowledged (cancel-all), the scope fully read."""
+        if self.managed is not None:
+            return self.scope_error is None and not self.managed.failed
         return self.scope_error is None and bool(self.cancel_all) and all(
             outcome.phase == "acknowledged" for outcome in self.cancel_all
         )
@@ -117,6 +130,7 @@ class KillSwitch:
         writer_lock: WriterLockHandle | None,
         quiesce: Quiesce | None = None,
         clock: Callable[[], int] | None = None,
+        sweep: ManagedOfferSweep | None = None,
     ) -> None:
         self._trading = trading_state
         self._sf = session_factory
@@ -126,9 +140,10 @@ class KillSwitch:
         self._writer_lock = writer_lock
         self._quiesce = quiesce
         self._clock = clock or (lambda: int(time.time() * 1000))
+        self._sweep = sweep
 
     async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry") -> KillResult:
+                     when_already_halted: str = "retry", scope: str = "all") -> KillResult:
         """Write HALTED, then cancel every funding offer at the venue.
 
         ``when_already_halted``: ``"retry"`` (an operator's /admin/halt) re-runs
@@ -142,6 +157,8 @@ class KillSwitch:
             raise ValueError(f"cause {cause!r} cannot halt trading")
         if when_already_halted not in {"retry", "skip"}:
             raise ValueError(f"when_already_halted must be retry or skip, not {when_already_halted!r}")
+        if scope not in SCOPES:
+            raise ValueError(f"scope must be all or managed, not {scope!r}")
         # 1. The stop, durably, before anything reaches the venue. Any failure
         #    here propagates and no cancel-all is attempted.
         transition = await self._trading.transition(
@@ -150,6 +167,8 @@ class KillSwitch:
         halted = transition.state
         if not transition.changed and when_already_halted == "skip":
             return KillResult(state=halted, state_changed=False, cancel_all=())
+        if scope == "managed":
+            return await self._cancel_managed(halted, transition.changed, cause, actor, reason)
         currencies, scope_error = await self._currencies()
         if scope_error is not None:
             log.critical("kill_switch_scope_incomplete account=%s error=%s",
@@ -181,6 +200,32 @@ class KillSwitch:
                     actor=actor, state_id=halted.id, scope_error=scope_error or "none",
                     not_acknowledged=[(o.currency, o.phase) for o in outcomes
                                       if o.phase != "acknowledged"])
+        return result
+
+    async def _cancel_managed(self, halted: TradingState, changed: bool, cause: str, actor: str,
+                              reason: str) -> KillResult:
+        if self._sweep is None:
+            result = KillResult(state=halted, state_changed=changed, cancel_all=(),
+                                scope_error="managed_sweep_not_wired",
+                                managed=SweepResult((), ()))
+        else:
+            try:
+                swept = await self._sweep.cancel(reason=f"{actor}: {reason}")
+                result = KillResult(state=halted, state_changed=changed, cancel_all=(),
+                                    managed=swept)
+            except Exception as exc:  # HALTED stands; the offers stay for the operator
+                result = KillResult(state=halted, state_changed=changed, cancel_all=(),
+                                    scope_error=f"managed_sweep_failed: {type(exc).__name__}",
+                                    managed=SweepResult((), ()))
+        assert result.managed is not None
+        level = logging.WARNING if result.complete else logging.CRITICAL
+        log.log(level, "kill_switch_engaged scope=managed account=%s cause=%s state_id=%s "
+                "requested=%s failed=%s", self._trading.account_id, cause, halted.id,
+                result.managed.requested, result.managed.failed)
+        alerts.emit(alerts.KILL_SWITCH_ENGAGED, complete=result.complete, cause=cause,
+                    actor=actor, state_id=halted.id, scope="managed",
+                    scope_error=result.scope_error or "none",
+                    not_acknowledged=[offer for offer, _ in result.managed.failed])
         return result
 
     async def _verify_writer_lock(self) -> bool:
@@ -290,6 +335,7 @@ class KillSwitch:
 __all__ = [
     "KILL_CAUSES",
     "QUIESCE_TIMEOUT_S",
+    "SCOPES",
     "CancelAllOutcome",
     "KillResult",
     "KillSwitch",

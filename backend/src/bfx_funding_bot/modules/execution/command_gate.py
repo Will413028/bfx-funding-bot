@@ -54,10 +54,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.safety.protection import (
-    SUBMIT_OUTCOME_UNKNOWN,
-    ProtectionPort,
-)
+from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitNotSent,
@@ -536,10 +533,8 @@ class AccountCommandGate:
                 ),
             )
             await self._persister.persist(unknown_event)
-            if self.protection is not None:
-                self.protection.trip(SUBMIT_OUTCOME_UNKNOWN, (
-                    f"cid={reference.cid} symbol={decision.symbol} amount={size} "
-                    f"reason={unknown_event.reason}"))
+            # Lending envelope D3 level 2: the open uncertainty quarantines this
+            # symbol until a snapshot resolves it; nothing is halted.
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
             return

@@ -1,31 +1,30 @@
-"""Automatic protections: conditions that halt trading by themselves.
+"""Automatic protections: the conditions that stop trading by themselves.
 
-ADR 2026-09-25 D5 / plan §1 "Automatic HALTED". Each trigger below writes
-``HALTED`` with ``cause=auto`` and runs the venue funding cancel-all through
-:class:`~bfx_funding_bot.modules.execution.safety.kill_switch.KillSwitch`:
+Lending envelope ADR 2026-09-25 D3, ladder level 3: only conditions meaning the
+bot's knowledge of its own offers is wrong. Each writes ``HALTED`` with
+``cause=auto`` and cancels the *managed* offers by venue id (the kill switch's
+``managed`` scope); offers placed by hand are never touched.
 
-========================== ==================================================
-trigger                    raised where
-========================== ==================================================
-``submit_outcome_unknown`` a submit ended UNKNOWN (command gate), or recovery
-                           turned a crash-interrupted PENDING into UNKNOWN
-``orphan_quarantined``     recovery quarantined an active venue offer with no
-                           local provenance
-``unattributed_offer``     the capital classifier met an active offer it cannot
-                           attribute (the orphan seen from the capital side)
+============================= ===============================================
+trigger                       raised where
+============================= ===============================================
 ``unclassifiable_commitment`` a durable commitment cannot be placed in the
-                           snapshot (capital acceptance or a planner read)
-``offer_amount_mismatch``  a managed offer's venue amount differs from what was
-                           submitted (capital classifier ``offer_amount_conflict``)
-``identity_conflict``      the ledger and the venue, or two ledger records,
-                           disagree about who or what a commitment is (the
-                           classifier's provenance/attempt/evidence conflicts)
-``venue_lent_above_ledger`` a confirmed snapshot shows more lent than the
-                           ledger plus fills of our own offers can explain
-``loss_limiter``           a currency's 24h loss or drawdown crossed its limit
-``writer_lock_lost``       the writer lock is not held after a recovery attempt
-``command_rate_exceeded``  the command gate kept throttling venue writes (T9)
-========================== ==================================================
+                              snapshot (capital acceptance or a planner read)
+``offer_amount_mismatch``     a managed offer's venue amount differs from what
+                              was submitted (classifier ``offer_amount_conflict``)
+``identity_conflict``         the ledger and the venue, or two ledger records,
+                              disagree about who or what a commitment is
+``venue_lent_above_ledger``   a confirmed snapshot shows more lent than the
+                              ledger, our fills and foreign fills can explain
+``command_rate_exceeded``     the command gate kept throttling venue writes
+============================= ===============================================
+
+What is deliberately not here: an UNKNOWN submit or an unreadable snapshot
+quarantines its currency until evidence resolves it (level 2, capital
+repository); a foreign offer and a NAV drop only alert (level 4,
+:class:`NavDropMonitor`); a lost writer lock ends the process
+(:class:`WriterLockWatch`), because it is about which process may write, not
+about the trading decision.
 
 What never trips: realized (lent) falling because a loan ended, offers moving to
 lent because a fill was caught by reconcile instead of WS, offers disappearing
@@ -36,8 +35,8 @@ Tripping is synchronous and never waits: it records a pending stop that the
 trading-state guard honours immediately, and queues the kill. A supervised task
 (:meth:`AutomaticProtection.run`) performs the kill outside every lock. That
 split is what keeps a trip raised while the command gate's account lock is held
-(an UNKNOWN submit) or inside a recovery transaction from deadlocking against
-the kill switch, which itself waits for that lock and opens its own transaction.
+or inside a recovery transaction from deadlocking against the kill, which
+itself goes through that lock and opens its own transaction.
 
 An automatic HALTED is never lifted automatically: only an operator's resume
 ends it.
@@ -48,7 +47,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
@@ -61,28 +60,25 @@ from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
 
-SUBMIT_OUTCOME_UNKNOWN = "submit_outcome_unknown"
-ORPHAN_QUARANTINED = "orphan_quarantined"
-UNATTRIBUTED_OFFER = "unattributed_offer"
 UNCLASSIFIABLE_COMMITMENT = "unclassifiable_commitment"
 OFFER_AMOUNT_MISMATCH = "offer_amount_mismatch"
 IDENTITY_CONFLICT = "identity_conflict"
 VENUE_LENT_ABOVE_LEDGER = "venue_lent_above_ledger"
-LOSS_LIMITER = "loss_limiter"
-WRITER_LOCK_LOST = "writer_lock_lost"
 COMMAND_RATE_EXCEEDED = "command_rate_exceeded"
 
 TRIGGERS = frozenset({
-    SUBMIT_OUTCOME_UNKNOWN, ORPHAN_QUARANTINED, UNATTRIBUTED_OFFER,
     UNCLASSIFIABLE_COMMITMENT, OFFER_AMOUNT_MISMATCH, IDENTITY_CONFLICT, VENUE_LENT_ABOVE_LEDGER,
-    LOSS_LIMITER, WRITER_LOCK_LOST, COMMAND_RATE_EXCEEDED,
+    COMMAND_RATE_EXCEEDED,
 })
+
+# Level 4 alerts (modules/observability/alerts).
+NAV_DROP = "nav_drop"
+FOREIGN_LENDING = "foreign_lending"
 
 # Capital classifier refusals that are protections, by the reason it raises.
 # Others (a pending query, an unstable or stale snapshot, a changed fence) are
 # transient observation states: they block spending and retry, not halt.
 CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
-    "unattributed_offer": UNATTRIBUTED_OFFER,
     "unclassifiable_commitment": UNCLASSIFIABLE_COMMITMENT,
     "offer_amount_conflict": OFFER_AMOUNT_MISMATCH,
     # Integrity: the same commitment or venue object described two ways. Each
@@ -116,7 +112,7 @@ class ProtectionPort(Protocol):
 
 class _KillSwitch(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str,
-                     when_already_halted: str = "retry") -> KillResult: ...
+                     when_already_halted: str = "retry", scope: str = "all") -> KillResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,11 +201,11 @@ class AutomaticProtection:
             else:
                 try:
                     # Already HALTED: the condition persisting is not a new
-                    # stop. Only the transition into HALTED runs cancel-all and
-                    # writes audit rows; an operator's /admin/halt retries it.
+                    # stop. Only the transition into HALTED cancels (managed
+                    # offers only); an operator's kill reaches everything.
                     result = await self._kill_switch.engage(
                         cause=CAUSE_AUTO, actor=f"auto:{first.trigger}", reason=reason,
-                        when_already_halted="skip",
+                        when_already_halted="skip", scope="managed",
                     )
                 except Exception as exc:
                     error = repr(exc)
@@ -217,7 +213,7 @@ class AutomaticProtection:
                     error = None
                     if result.state_changed:
                         log.critical("automatic_protection_engaged triggers=%s state_id=%s "
-                                     "cancel_all_complete=%s", triggers, result.state.id,
+                                     "managed_cancels_complete=%s", triggers, result.state.id,
                                      result.complete)
                     else:
                         self.persisting += len(batch)
@@ -240,16 +236,27 @@ class AutomaticProtection:
                 return
 
 
-class LedgerConservation:
-    """Decides whether a snapshot's lent can be explained by the ledger.
+@dataclass(frozen=True, slots=True)
+class ConservationVerdict:
+    # Lent nothing -- ours or anyone's -- explains: the ledger is wrong (level 3).
+    anomalies: tuple[str, ...]
+    # Lent explained only by foreign offers that filled unseen (level 4).
+    foreign: tuple[str, ...]
 
-    Per symbol, against the ledger just before the snapshot: lent may fall
-    (a loan ended) and may rise only by what our own offers lost (fills,
-    including ones WS missed). Anything above that is money lent at the venue
-    that this bot did not lend -- ``venue_lent_above_ledger``. That halts
-    whatever its cause: the account is dedicated to this bot and venue
-    auto-renew is off, so lending the bot did not do is by definition
-    unexplained (Will, 2026-09-25).
+
+class LedgerConservation:
+    """Decides whether a snapshot's lent can be explained.
+
+    Per symbol, against the ledger just before the snapshot: lent may fall (a
+    loan ended) and may rise by what offers lost (fills, including ones WS
+    missed -- the ledger's offers are every venue offer, ours or foreign). What
+    is left is lending no observed offer accounts for. Lending envelope D2: the
+    account may also carry foreign offers, and one can be placed and filled
+    between two snapshots without ever being seen; the offer history shows it
+    executed. So the remainder is first set against ``foreign_executed`` (the
+    symbol's unmanaged offers that executed since the previous accepted
+    snapshot): fully covered is foreign lending (alert), anything beyond is
+    ``venue_lent_above_ledger``.
 
     Only snapshots the capital authority accepted are judged: acceptance needs
     two identical fetches, so a fill landing between the offers and the credits
@@ -264,8 +271,10 @@ class LedgerConservation:
         self._epsilon = epsilon
         self._carry: dict[str, tuple[Decimal, Decimal]] = {}
 
-    def observe(self, deltas: Iterable[SymbolLedgerDelta], *, confirmed: bool) -> list[str]:
+    def observe(self, deltas: Iterable[SymbolLedgerDelta], *, confirmed: bool,
+                foreign_executed: Mapping[str, Decimal] | None = None) -> ConservationVerdict:
         anomalies: list[str] = []
+        foreign: list[str] = []
         for delta in deltas:
             if not delta.baseline:
                 self._carry.pop(delta.symbol, None)
@@ -277,12 +286,17 @@ class LedgerConservation:
                 self._carry[delta.symbol] = (offered_change, lent_change)
                 continue
             unexplained = lent_change - max(Decimal(0), -offered_change)
-            if unexplained > self._epsilon:
-                anomalies.append(
-                    f"symbol={delta.symbol} lent_change={lent_change} "
-                    f"offered_change={offered_change} unexplained={unexplained}"
-                )
-        return anomalies
+            if unexplained <= self._epsilon:
+                continue
+            by_foreign = (foreign_executed or {}).get(delta.symbol, Decimal(0))
+            detail = (f"symbol={delta.symbol} lent_change={lent_change} "
+                      f"offered_change={offered_change} unexplained={unexplained} "
+                      f"foreign_executed={by_foreign}")
+            if unexplained - by_foreign > self._epsilon:
+                anomalies.append(detail)
+            else:
+                foreign.append(detail)
+        return ConservationVerdict(tuple(anomalies), tuple(foreign))
 
 
 class _NavSource(Protocol):
@@ -291,24 +305,23 @@ class _NavSource(Protocol):
     def drawdown_pct(self, symbol: str) -> float: ...
 
 
-class LossLimitMonitor:
-    """The loss limiter as a protection, evaluated where its inputs change.
+class NavDropMonitor:
+    """Level 4: alert when a currency's NAV fell past a threshold; never stops.
 
-    Wraps the NAV tracker's PositionReconciled handler (the bus runs handlers
-    concurrently, so a sibling subscriber could read the metrics before they
-    are updated) and trips once a currency crosses its limit. The L2 guards
-    keep blocking offers on their own; the trip makes the stop durable, so a
-    24h window rolling past the loss no longer resumes lending.
+    Lending envelope D3: funding NAV is native units (available + offered +
+    lent), so a bad rate only earns less -- it cannot lower NAV. What lowers it
+    is a withdrawal, a transfer or a platform loss, none of which stopping the
+    lending undoes. Wraps the NAV tracker's PositionReconciled handler (the bus
+    runs handlers concurrently, so a sibling could read metrics before they are
+    updated) and alerts once per breach.
     """
 
-    def __init__(self, *, source: _NavSource, protection: ProtectionPort,
-                 realized_loss_threshold_pct: float | None,
+    def __init__(self, *, source: _NavSource, realized_loss_threshold_pct: float | None,
                  drawdown_threshold_pct: float | None) -> None:
         self._source = source
-        self._protection = protection
         self._loss = realized_loss_threshold_pct
         self._drawdown = drawdown_threshold_pct
-        self._tripped: set[tuple[str, str]] = set()
+        self._alerted: set[tuple[str, str]] = set()
 
     async def on_position_reconciled(self, event: PositionReconciled) -> None:
         await self._source.on_position_reconciled(event)
@@ -318,59 +331,62 @@ class LossLimitMonitor:
             ("drawdown_pct", self._drawdown, self._source.drawdown_pct(symbol)),
         ):
             if threshold is None or value <= threshold:
-                self._tripped.discard((symbol, metric))
+                self._alerted.discard((symbol, metric))
                 continue
-            if (symbol, metric) in self._tripped:
-                continue  # already tripped for this breach; HALTED is not lifted automatically
-            self._tripped.add((symbol, metric))
-            self._protection.trip(LOSS_LIMITER, f"{metric}[{symbol}]={value:.4f} > {threshold}")
+            if (symbol, metric) in self._alerted:
+                continue
+            self._alerted.add((symbol, metric))
+            log.warning("nav_drop symbol=%s %s=%.4f threshold=%s", symbol, metric, value, threshold)
+            alerts.emit(NAV_DROP, level=alerts.WARNING, symbol=symbol, metric=metric,
+                        value=f"{value:.4f}", threshold=threshold)
 
 
 class _WriterLock(Protocol):
     async def refresh(self) -> bool: ...
 
 
+class WriterLockLostError(RuntimeError):
+    """The writer lock is gone: this process must stop writing and exit."""
+
+
 class WriterLockWatch:
-    """One liveness check of the writer lock; trips when it is not held after recovery.
+    """One liveness check of the writer lock; a loss ends the process.
 
     ``refresh`` re-acquires a lock whose connection dropped while nobody else
     holds it; only a lock still not held afterwards (another writer has it, or
-    re-acquisition failed) is a loss.
+    re-acquisition failed) is a loss. That is process fencing, not a trading
+    decision: raising takes the daemon's task group down, the container
+    restarts, and boot waits for the lock again. No trading state is written.
     """
 
-    def __init__(self, *, lock: _WriterLock, protection: ProtectionPort) -> None:
+    def __init__(self, *, lock: _WriterLock) -> None:
         self._lock = lock
-        self._protection = protection
-        self._lost = False
 
     async def check(self) -> bool:
-        held = await self._lock.refresh()
-        if held:
-            self._lost = False
-        elif not self._lost:
-            self._lost = True
-            self._protection.trip(WRITER_LOCK_LOST, "writer lock not held after refresh")
-        return held
+        if await self._lock.refresh():
+            return True
+        log.critical("writer_lock_lost: exiting so no second writer talks to the venue")
+        alerts.emit(alerts.DAEMON_FATAL, error="writer lock not held after refresh; exiting")
+        raise WriterLockLostError("writer lock not held after refresh")
 
 
 __all__ = [
     "CAPITAL_BLOCK_TRIGGERS",
     "COMMAND_RATE_EXCEEDED",
+    "FOREIGN_LENDING",
     "IDENTITY_CONFLICT",
     "LEDGER_EPSILON",
-    "LOSS_LIMITER",
+    "NAV_DROP",
     "OFFER_AMOUNT_MISMATCH",
-    "ORPHAN_QUARANTINED",
-    "SUBMIT_OUTCOME_UNKNOWN",
     "TRIGGERS",
-    "UNATTRIBUTED_OFFER",
     "UNCLASSIFIABLE_COMMITMENT",
     "VENUE_LENT_ABOVE_LEDGER",
-    "WRITER_LOCK_LOST",
     "AutomaticProtection",
+    "ConservationVerdict",
     "LedgerConservation",
-    "LossLimitMonitor",
+    "NavDropMonitor",
     "ProtectionPort",
     "Trip",
+    "WriterLockLostError",
     "WriterLockWatch",
 ]

@@ -82,23 +82,14 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
     try:
         if not schema_current or not with_policy:
             # A refused live boot is an automatic stop: HALTED stays (a stop
-            # stays the stop it was) and the venue gets its cancel-all.
+            # stays the stop it was) and nothing reaches the venue (D2/D3).
             from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
-            from bfx_funding_bot.core.writer_lock import WriterLock
-
-            async def held(self):
-                return True
-            monkeypatch.setattr(WriterLock, "verify_held", held)
-            cancel_all = "https://api.bitfinex.com/v2/auth/w/funding/offer/cancel/all"
-            httpx_mock.add_response(url=cancel_all, method="POST",
-                json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
             before = await halt.current()
             with pytest.raises(SchemaHeadMismatch if not schema_current else ValueError,
                                match="database=a7f3c1d9e204" if not schema_current else "policy_unavailable"):
                 await build_daemon(cells_yaml_path=path, skip_ws=True)
             assert (await halt.current()).id == before.id
-            posts = [str(r.url) for r in httpx_mock.get_requests() if r.method == "POST"]
-            assert posts == [cancel_all]  # fUST's currency only; nothing else was sent
+            assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
             return
         daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
         assert len(daemon.config.cells) == 2
@@ -251,12 +242,12 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         assert kill_guard._pending_stop == protection.pending_reason
         assert protection.pending_reason() is None
         from bfx_funding_bot.modules.execution.events import PositionReconciled
-        for at, nav in ((1, "1000"), (2, "900")):  # 10% > the canary's 5% 24h limit
+        for at, nav in ((1, "1000"), (2, "900")):  # 10% > the 5% 24h NAV-drop alert
             await daemon.bus.publish(PositionReconciled(
                 account_id=str(TEST_EXCHANGE_ACCOUNT_ID), symbol="fUST", reserved=Decimal("0"),
                 realized=Decimal("0"), available=Decimal(nav), n_offers=0, n_credits=0,
                 occurred_at_ms=at))
-        assert (protection.pending_reason() or "").startswith("loss_limiter")
+        assert protection.pending_reason() is None  # a NAV drop alerts, never stops (D3)
         writes = [r for r in httpx_mock.get_requests() if "/auth/w/" in str(r.url)]
         async with factory() as session:
             phases = [(row.currency, row.phase) for row in (await session.scalars(
@@ -345,25 +336,19 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("vault_changed", [False, True])
-async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock,
-                                                                      vault_changed):
+async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock):
     """The wrong build for this database (e.g. a rollback onto a newer schema):
-    HALTED/auto and the venue cancel-all before anything can trade, then the
-    boot is refused. When the credential vault's tables are not the ones this
-    build reads, no credential is read and the operator is told to cancel."""
-    import json as _json
-
-    from sqlalchemy import select, text
+    HALTED/auto before anything can trade, the operator is told offers may
+    remain, and the boot is refused. Nothing reaches the venue: an automatic
+    reaction never cancels offers it cannot prove are its own (D2/D3)."""
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
-    from bfx_funding_bot.core.writer_lock import WriterLock
-    from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
+    from bfx_funding_bot.modules.execution.safety import boot_stop
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-    from bfx_funding_bot.modules.observability import alerts
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
@@ -380,39 +365,20 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     await seed_exchange_account(engine)
     async with engine.begin() as conn:
         await conn.execute(text("UPDATE alembic_version SET version_num = 'ffffffffffff'"))
-        if vault_changed:
-            await conn.execute(text("ALTER TABLE exchange_account_credentials ADD COLUMN rotated_by TEXT"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
-
-    async def held(self):
-        return True
-    monkeypatch.setattr(WriterLock, "verify_held", held)
     sent: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(alerts, "emit", lambda event, *, level=None, **fields: sent.append((event, level)))
-    cancel_all = "https://api.bitfinex.com/v2/auth/w/funding/offer/cancel/all"
-    if not vault_changed:
-        httpx_mock.add_response(url=cancel_all, method="POST",
-            json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
+    monkeypatch.setattr(boot_stop.alerts, "emit",
+                        lambda event, *, level=None, **fields: sent.append((event, level)))
     try:
         with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={build_head()}"):
             await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
         assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "boot")
         assert "schema_head_mismatch" in state.reason
-        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-        async with factory() as session:
-            phases = [(row.currency, row.phase) for row in (await session.scalars(
-                select(FundingCancelAllAuditRow).order_by(FundingCancelAllAuditRow.id))).all()]
-        if vault_changed:
-            assert posts == []
-            assert phases == [("UST", "skipped")]
-            assert ("venue_offers_may_remain", "critical") in sent
-        else:
-            assert [(str(r.url), _json.loads(r.content)) for r in posts] == [(cancel_all, {"currency": "UST"})]
-            assert phases == [("UST", "requested"), ("UST", "acknowledged")]
-            assert "venue_offers_may_remain" not in [event for event, _ in sent]
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
+        assert ("venue_offers_may_remain", "critical") in sent
     finally:
         await engine.dispose()
 

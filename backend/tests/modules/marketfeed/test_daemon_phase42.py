@@ -145,8 +145,7 @@ async def test_build_daemon_invalid_executor_combo_raises(
 def _write_safety_yaml(tmp_path: Path, *, disable: set[str] | None = None) -> Path:
     """Write a safety.yaml with `disable` set marking which guards to flip off.
 
-    Names: manual_kill / auth_health / heartbeat / allocation_cap /
-    realized_loss_24h / drawdown_from_peak / divergence_rate.
+    Names: manual_kill / auth_health / heartbeat / allocation_cap.
     """
     disable = disable or set()
 
@@ -169,17 +168,9 @@ hard_guards:
     default_cap: 0
   buying_power:
     enabled: true
-calibrated_guards:
-  realized_loss_24h:
-    enabled: false
-    threshold_pct: null
-  drawdown_from_peak:
-    enabled: false
-    threshold_pct: null
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """)
     return path
 
@@ -207,11 +198,6 @@ async def test_build_daemon_filters_disabled_hard_guards(
 
     _add_bitfinex_mock(httpx_mock)
 
-    from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
-        DivergenceRateGuard,
-        DrawdownGuard,
-        RealizedLossGuard,
-    )
     from bfx_funding_bot.modules.execution.safety.hard_guards import (
         AllocationCapGuard,
         AuthHealthGuard,
@@ -232,62 +218,8 @@ async def test_build_daemon_filters_disabled_hard_guards(
     # Disabled hard guards absent.
     assert HeartbeatGuard not in types
     assert AllocationCapGuard not in types
-    # All calibrated guards disabled in this fixture → absent.
-    assert RealizedLossGuard not in types
-    assert DrawdownGuard not in types
-    assert DivergenceRateGuard not in types
-
-
-@pytest.mark.asyncio
-async def test_build_daemon_includes_enabled_calibrated_guard(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, httpx_mock: HTTPXMock,
-) -> None:
-    """M2: an enabled calibrated guard (with a valid threshold) appears in
-    the chain. Pairs with the disabled-default safety.yaml fixture."""
-    await _base_env(monkeypatch, tmp_path)
-    configure_account_env(monkeypatch)
-    monkeypatch.setenv("BFX_API_KEY", "test_key")
-    monkeypatch.setenv("BFX_API_SECRET", "test_secret")
-    monkeypatch.setenv("BFX_ALLOCATION_CAP_USDT", "500")
-    monkeypatch.delenv("BFX_EXECUTOR", raising=False)
-    monkeypatch.delenv("BFX_FILL_TRACKER_ENABLED", raising=False)
-
-    safety_yaml = tmp_path / "safety.yaml"
-    safety_yaml.write_text("""
-hard_guards:
-  manual_kill: {enabled: true}
-  auth_health: {enabled: true}
-  heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
-  allocation_cap: {enabled: true, caps: {fUSD: 0, fUST: 3000}, default_cap: 0}
-  buying_power: {enabled: true}
-calibrated_guards:
-  realized_loss_24h:
-    enabled: true
-    threshold_pct: 100.0
-  drawdown_from_peak:
-    enabled: false
-    threshold_pct: null
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
-""")
-    monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_yaml))
-
-    _add_bitfinex_mock(httpx_mock)
-
-    from bfx_funding_bot.modules.execution.safety.calibrated_guards import (
-        DrawdownGuard,
-        RealizedLossGuard,
-    )
-    from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-    daemon = await build_daemon(
-        cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True,
-    )
-
-    types = {type(g) for g in daemon.safety_chain.guards}
-    assert RealizedLossGuard in types  # enabled
-    assert DrawdownGuard not in types  # disabled
+    # NAV drops only alert (lending envelope D3): no loss/drawdown guard exists.
+    assert not {"realized_loss_24h", "drawdown_from_peak"} & {g.name for g in guards}
 
 
 @pytest.mark.asyncio

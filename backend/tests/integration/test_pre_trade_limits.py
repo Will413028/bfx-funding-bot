@@ -6,7 +6,7 @@
   and its open-offer count reads the durable venue-offer projection.
 - The command gate's throttle refuses before anything durable and trips
   HALTED/auto on sustained excess.
-- The loss limiter's 24h window survives a restart.
+- The NAV-drop alert's 24h window survives a restart.
 """
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ from bfx_funding_bot.modules.execution.safety.pre_trade import (
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
-    LOSS_LIMITER,
-    LossLimitMonitor,
+    NAV_DROP,
+    NavDropMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
@@ -212,7 +212,7 @@ def _reconciled(account, nav: str, at_ms: int) -> PositionReconciled:
 
 
 @pytest.mark.asyncio
-async def test_loss_window_survives_a_restart_and_the_limiter_still_trips(capital_db):
+async def test_loss_window_survives_a_restart_and_the_nav_drop_still_alerts(capital_db):
     factory, account = capital_db
     store = NavWindowStore(factory, account_id=account, deployment_environment="ci")
     hour = 3_600_000
@@ -230,11 +230,17 @@ async def test_loss_window_survives_a_restart_and_the_limiter_still_trips(capita
     after = ReconcileNavTracker(str(account), window_store=store)
     await after.load_persisted_window()
     assert after.realized_loss_pct_24h("fUST") == pytest.approx(10.0)
-    trips = Trips()
-    monitor = LossLimitMonitor(source=after, protection=trips, realized_loss_threshold_pct=5.0,
-                               drawdown_threshold_pct=None)
-    await monitor.on_position_reconciled(_reconciled(account, "900", 3 * hour))
-    assert [trigger for trigger, _ in trips.calls] == [LOSS_LIMITER]
+    sent: list[str] = []
+    monitor = NavDropMonitor(source=after, realized_loss_threshold_pct=5.0,
+                             drawdown_threshold_pct=None)
+    import bfx_funding_bot.modules.execution.safety.protection as protection_module
+    original = protection_module.alerts.emit
+    protection_module.alerts.emit = lambda event, **fields: sent.append(event)  # type: ignore[assignment]
+    try:
+        await monitor.on_position_reconciled(_reconciled(account, "900", 3 * hour))
+    finally:
+        protection_module.alerts.emit = original  # type: ignore[assignment]
+    assert sent == [NAV_DROP]  # an alert, never a stop (lending envelope D3)
 
     # A day later the loss has aged out of the window, and old rows are pruned.
     await after.on_position_reconciled(_reconciled(account, "900", 3 * hour + 50 * hour))

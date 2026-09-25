@@ -322,3 +322,73 @@ async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_oper
     assert len(venue.calls) == 3 and len(await audit(factory)) == 6
     retried = await switch.engage(cause="operator", actor="will", reason="retry the venue part")
     assert not retried.state_changed and len(venue.calls) == 6 and len(await audit(factory)) == 12
+
+
+# ------------------------------------------------ managed scope (level 3)
+
+
+class Canceller:
+    def __init__(self, fail: set[str] | None = None) -> None:
+        self.cancelled: list[str] = []
+        self.fail = fail or set()
+
+    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx):
+        if venue_offer_id in self.fail:
+            raise ExecutorTransientError("venue unavailable")
+        self.cancelled.append(venue_offer_id)
+
+
+async def _offer_rows(factory, account):
+    """Managed 101 and 102 (a durable intent traces to them), foreign 555 (manual),
+    and a terminal managed 103."""
+    from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
+    async with factory.begin() as session:
+        for offer_id, symbol, decision, terminal in (
+                ("101", "fUST", "d-101", False), ("102", "fUSD", "d-102", False),
+                ("555", "fUST", None, False), ("103", "fUST", "d-103", True)):
+            session.add(VenueOfferStateRow(
+                exchange_account_id=account, deployment_environment="ci", venue_offer_id=offer_id,
+                symbol=symbol, amount_original=Decimal("200"), amount_remaining=Decimal("200"),
+                rate=Decimal("0.0002"), period_days=2, status="ACTIVE", flags={}, mts_created=1,
+                mts_updated=1, first_seen_event_seq=1, last_seen_event_seq=1, is_terminal=terminal,
+                execution_decision_id=decision,
+                signal_correlation_id="00000000-0000-4000-8000-000000000001" if decision else None))
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_kill_cancels_only_managed_offers_by_id(capital_db):
+    """Lending envelope D2/D3: an automatic stop never touches an offer placed by
+    hand, and never calls the venue cancel-all."""
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+    factory, account = capital_db
+    _, _, _, ctx, _, trading = await boundary(factory, account)
+    await _offer_rows(factory, account)
+    canceller = Canceller(fail={"102"})
+    venue = FakeVenue(factory, account, {"UST": {"101", "555"}})
+    sweep = ManagedOfferSweep(session_factory=factory, account_id=account, environment="ci",
+                              canceller=canceller, ctx=ctx)
+    result = await kill_switch(factory, trading, ctx, venue, sweep=sweep).engage(
+        cause="auto", actor="auto:identity_conflict", reason="conflict",
+        when_already_halted="skip", scope="managed")
+    assert (result.state.state, result.state.cause) == ("HALTED", "auto")
+    assert canceller.cancelled == ["101"]
+    assert result.managed is not None and [offer for offer, _ in result.managed.failed] == ["102"]
+    assert not result.complete  # a managed cancel did not go out
+    assert venue.calls == [] and await audit(factory) == []
+    # Persisting: already HALTED, nothing more is cancelled.
+    again = await kill_switch(factory, trading, ctx, venue, sweep=sweep).engage(
+        cause="auto", actor="auto:identity_conflict", reason="conflict",
+        when_already_halted="skip", scope="managed")
+    assert not again.state_changed and canceller.cancelled == ["101"]
+
+
+@pytest.mark.asyncio
+async def test_a_managed_kill_without_a_sweep_still_halts_and_says_so(capital_db):
+    factory, account = capital_db
+    _, _, _, ctx, _, trading = await boundary(factory, account)
+    venue = FakeVenue(factory, account, {})
+    result = await kill_switch(factory, trading, ctx, venue).engage(
+        cause="auto", actor="auto:x", reason="x", scope="managed")
+    assert result.state.state == "HALTED"
+    assert result.scope_error == "managed_sweep_not_wired" and not result.complete
+    assert venue.calls == []
