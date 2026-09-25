@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select
 
-from bfx_funding_bot.core.schema_head import SCHEMA_HEAD
+from bfx_funding_bot.core.schema_head import build_head
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.integration
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
 # The declared head, which tests/test_schema_head.py pins to alembic's.
-_REVISION = SCHEMA_HEAD
+_REVISION = build_head()
 _ENV = "ci"
 
 

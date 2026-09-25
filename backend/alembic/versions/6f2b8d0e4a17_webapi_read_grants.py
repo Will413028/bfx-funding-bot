@@ -19,6 +19,8 @@ revision = "6f2b8d0e4a17"
 down_revision = "9391a0f675d3"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 READ = (
     "user_profiles", "exchange_accounts", "exchange_account_memberships",

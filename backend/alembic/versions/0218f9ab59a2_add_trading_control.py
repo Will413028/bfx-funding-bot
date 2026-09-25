@@ -36,6 +36,8 @@ revision = "0218f9ab59a2"
 down_revision = "c3a639388457"
 branch_labels = None
 depends_on = None
+# No projection table, cursor or event_log content changes (core/schema_head.py).
+ledger_contract = "preserved"
 
 _DIGEST = "'^sha256:[0-9a-f]{64}$'"
 _REQUEST_COLUMNS = (

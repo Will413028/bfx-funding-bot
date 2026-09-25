@@ -134,7 +134,7 @@ docker exec --user postgres bfx-postgres psql -U bfx -d bfx -c \
 **migration 之前**失敗：現行 release 不受影響；自動回滾只會發生在沒有 migration 的情況。
 
 **migration 之後**失敗：舊 code 可能不能在新 schema 上跑（live daemon 開機會比對
-`core/schema_head.py` 的 `SCHEMA_HEAD` 與 `alembic_version`，不一致就寫 `HALTED/auto`、盡力
+image 內 migrations 推導出的唯一 head（`core/schema_head.build_head`）與 `alembic_version`，不一致就寫 `HALTED/auto`、盡力
 cancel-all、拒絕開機）。只能：
 
 1. roll forward：修正後出新 release（新 commit → CI → GHCR → bfx-deploy）；或

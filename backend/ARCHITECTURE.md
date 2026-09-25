@@ -671,12 +671,14 @@ deployment reconciler 依 gap 動態決定。
 | Cache | VM 自托 Redis 7（`bfx-redis`；Better Auth session/rate-limit 用，daemon 不依賴） |
 | Frontend | VM 自托（Next.js standalone，Tailscale Funnel 443→3001。Vercel 專案已刪） |
 
+**跨 migration 的契約（`core/schema_head.py`）**：serialized projector 的 seeded cursor 與 projection archive 各由一個 migration 建立；之後每個 migration 以模組屬性 `ledger_contract = "preserved" | "changed"` 宣告是否改變它，契約成立的 revision 集合由此推導（從 head 往回到最近一個 changed，或到建立它的那個），不再有人工維護的清單。`tests/test_schema_head.py` 拒絕沒宣告的 migration 與多個 head。
+
 **部署（`deploy/vm/ops/bfx_deploy.py`，ADR 2026-09-25 ci-registry-digest-deploy）**：CI 在綠燈的
 `main` commit 建 arm64 image 並推到 GHCR；VM 只以 digest 拉取、從不建置；先備份再 migrate，
 recreate 後查健康，失敗就回到前一個 digest，每次結果寫進 append-only `deployments` ledger。
 部署工具注入 `BFX_IMAGE_DIGEST`／`BFX_SOURCE_REVISION`／`BFX_CHANGE_CLASS`：分級決定開機時的
 release flow（§6），digest 與 revision 也是每筆 execution audit 的 `config_hash`／`service_version`。
-live daemon 開機時（讀憑證與任何交易之前）比對 `core/schema_head.py` 的 `SCHEMA_HEAD` 與資料庫的
+live daemon 開機時（讀憑證與任何交易之前）比對 image 內 `alembic/` 推導出的唯一 head（`core/schema_head.build_head`；多個 head 也拒絕開機）與資料庫的
 `alembic_version`：不一致代表這個 build 不屬於這個 schema（例如回滾到較新的 schema 上）。
 這和讀不到已套用的 CapitalPolicy 一樣是自動停機（Will 2026-09-25：手動與自動停機都撤單），走
 `safety/boot_stop.py`：先寫 `HALTED/auto`（寫不進去就不碰 venue），再盡力對設定幣別呼叫 venue

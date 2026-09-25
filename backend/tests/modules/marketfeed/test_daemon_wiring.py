@@ -350,7 +350,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
-    from bfx_funding_bot.core.schema_head import SCHEMA_HEAD, SchemaHeadMismatch
+    from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
     from bfx_funding_bot.core.writer_lock import WriterLock
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
@@ -388,7 +388,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
         httpx_mock.add_response(url=cancel_all, method="POST",
             json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
     try:
-        with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={SCHEMA_HEAD}"):
+        with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={build_head()}"):
             await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
         assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "boot")

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bfx_funding_bot.core.schema_head import PROJECTOR_CONTRACT_BASE, contract_revisions
 from bfx_funding_bot.core.writer_lock import acquire_transaction_lock
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_canonical,
@@ -24,44 +25,6 @@ if TYPE_CHECKING:
 
 PROJECTION_NAME = "execution_state"
 DEFAULT_PROJECTOR_VERSION = "execution-state-v1"
-_READY_PROJECTOR_MIGRATIONS = frozenset({
-    "c2e3f4a5b6c7",
-    "cd5e6f708192",
-    "de6f708192a3",
-    "e7b1c2d3e4f5",
-    "f8c2d4e6a901",
-    "a9d3e5f7b102",
-    # Each of these adds storage beside the ledger and leaves projection_heads,
-    # the seeded cursor and the projector contract untouched: a prefix-hash side
-    # table, then two capital_snapshots columns.
-    "c3f5a1d7e204",
-    "d1b7c2e4a305",
-    "e5c9a3f10b62",
-    "b4e6f8a0c203",
-    # Adds trading_halt.kind and relaxes one release_sessions transition guard.
-    # Touches neither projection_heads, the seeded cursor, nor the projector.
-    "a7f3c1d9e204",
-    # Adds the append-only trading_state table beside the ledger; no event,
-    # projection or cursor is touched.
-    "8e4f33517b10",
-    # Adds the append-only funding_cancel_all_audit table; no event, projection
-    # or cursor is touched.
-    "c2b7b04da604",
-    "c3a639388457",
-    # Approvals, operator requests and trading_state.probation_floor; no event,
-    # projection or cursor is touched.
-    "0218f9ab59a2",
-    # Adds the operator adjudication outbox beside the ledger and revokes web API
-    # writes; the rows, the cursor and the projector contract are unchanged.
-    "b8e2d4f6a013",
-    # Moves the retired release ceremony's tables into release_archive; none is
-    # a projection, and no event or cursor is touched.
-    "5d1c7e9a3b20",
-    # nav_window_samples (T9): a new side table; no projection, cursor or archived table.
-    "9391a0f675d3",
-    # Grants only (the web API's read baseline); no table, event or cursor changes.
-    "6f2b8d0e4a17",
-})
 
 __all__ = [
     "DEFAULT_PROJECTOR_VERSION",
@@ -385,16 +348,17 @@ class AccountEventWriter:
 
         ``bc4d5e6f7081`` created the cursor table but left it empty for existing
         streams.  Running the replay writer at that intermediate revision would
-        double-apply legacy snapshots.  The explicit allow-list is intentionally
-        updated alongside each later migration that preserves the seeded cursor
-        contract.
+        double-apply legacy snapshots.  The revisions the seeded cursor contract
+        holds on are derived from this build's migrations
+        (``core.schema_head.contract_revisions``); a database at any other
+        revision -- older, or unknown to this build -- fails closed.
         """
         revisions = await self._database_migration_revisions(session)
-        if revisions and not set(revisions).issubset(_READY_PROJECTOR_MIGRATIONS):
+        ready = contract_revisions(PROJECTOR_CONTRACT_BASE)
+        if revisions and not set(revisions).issubset(ready):
             raise ValueError(
                 "serialized projector cursor migration incomplete: "
-                f"database revisions={revisions!r}, "
-                f"requires one of {sorted(_READY_PROJECTOR_MIGRATIONS)!r}"
+                f"database revisions={revisions!r}, requires one of {sorted(ready)!r}"
             )
 
     async def _database_has_contract_marker(self, session: AsyncSession) -> bool:
