@@ -2,8 +2,8 @@
 
 ADR 2026-09-25 D4 separates the trading state from releases:
 
-- ``ACTIVE``   -- the writer trades normally (optionally inside a probation
-  period, whose fields are reserved here for T5);
+- ``ACTIVE``   -- the writer trades normally, or inside a probation (reduced
+  limits, ADR D3) until one passes;
 - ``REDUCING`` -- a pause: cancels are allowed, no new offer and no re-post;
 - ``HALTED``   -- a stop: as REDUCING, and entering it cancels the venue's
   funding offers (see ``kill_switch``).
@@ -24,7 +24,7 @@ the state is read on the submit path and must not hold a long-lived session.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Final
 from uuid import UUID
@@ -45,6 +45,9 @@ CAUSE_KILL_SWITCH: Final = "kill_switch"
 CAUSE_AUTO: Final = "auto"
 CAUSE_MATERIAL_DEPLOY: Final = "material_deploy"
 
+PROBATION_STARTED: Final = "probation_started"
+PROBATION_LIFTED: Final = "probation_lifted"
+
 # Which causes may put the writer in which state. Mirrors ck_trading_state_cause.
 CAUSES_BY_STATE: Final[dict[str, frozenset[str]]] = {
     ACTIVE: frozenset({CAUSE_OPERATOR, CAUSE_AUTO}),
@@ -55,6 +58,10 @@ CAUSES_BY_STATE: Final[dict[str, frozenset[str]]] = {
 
 class IllegalTradingTransition(ValueError):  # noqa: N818 - a rejected request, not a fault
     """The requested transition would weaken a stop or break the cause contract."""
+
+
+class NotAnOperatorPause(ValueError):  # noqa: N818 - a rejected request, not a fault
+    """Only an operator's pause is lifted by :meth:`TradingStateRepository.resume_pause`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +86,10 @@ class Probation:
                  floor: dict[str, Decimal]) -> Probation:
         return cls(multiplier=multiplier, started_at_ms=started_at_ms,
                    floor=tuple(sorted(floor.items())))
+
+    def restarted(self, *, started_at_ms: int) -> Probation:
+        """The same limits, counted again from ``started_at_ms``."""
+        return replace(self, started_at_ms=started_at_ms)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +211,37 @@ async def read_current(session: AsyncSession, *, account_id: UUID,
     return to_state(row) if row is not None else None
 
 
+async def unfinished_probation(session: AsyncSession, *, account_id: UUID,
+                               environment: str) -> Probation | None:
+    """The latest probation that no lift has ended, or None.
+
+    ADR D3 invariant: until a probation passes, exposure stays within it. A
+    pause, an operator's stop or a standard deploy does not end one; only the
+    lift -- an ACTIVE without a probation, written from inside it -- does.
+    """
+    started = await session.scalar(
+        _scope(select(TradingStateRow), account_id=account_id, environment=environment)
+        .where(TradingStateRow.probation_multiplier.is_not(None))
+        .order_by(TradingStateRow.id.desc())
+        .limit(1)
+    )
+    if started is None:
+        return None
+    lifted = await session.scalar(
+        _scope(select(TradingStateRow), account_id=account_id, environment=environment)
+        .where(TradingStateRow.id > started.id, TradingStateRow.state == ACTIVE,
+               TradingStateRow.probation_multiplier.is_(None))
+        .limit(1)
+    )
+    return None if lifted is not None else to_state(started).probation
+
+
+def _is_lift(current: TradingState | None, *, state: str, cause: str,
+             probation: Probation | None) -> bool:
+    return (current is not None and current.state == ACTIVE and current.probation is not None
+            and state == ACTIVE and cause == CAUSE_AUTO and probation is None)
+
+
 async def append_transition(
     session: AsyncSession, *, account_id: UUID, environment: str, state: str, cause: str,
     actor: str, reason: str, now_ms: int, probation: Probation | None = None,
@@ -215,6 +257,15 @@ async def append_transition(
         return TransitionResult(state=current, changed=False, previous=current)
     validate_transition(current, state=state, cause=cause, actor=actor, reason=reason,
                         probation=probation)
+    if (state == ACTIVE and probation is None
+            and not _is_lift(current, state=state, cause=cause, probation=probation)
+            and await unfinished_probation(session, account_id=account_id,
+                                           environment=environment) is not None):
+        # Needs the history, not only the previous row; the insert trigger
+        # guard_trading_state_probation (0218f9ab59a2) enforces the same.
+        raise IllegalTradingTransition(
+            "illegal trading state transition: a probation has not passed, so ACTIVE must "
+            "stay inside it (ADR D3)")
     row = TradingStateRow(
         exchange_account_id=account_id,
         deployment_environment=environment,
@@ -233,6 +284,21 @@ async def append_transition(
     session.add(row)
     await session.flush()
     return TransitionResult(state=to_state(row), changed=True, previous=current)
+
+
+def announce(result: TransitionResult) -> None:
+    """Alert a committed transition. Call after commit; never blocks or raises (T8)."""
+    if not result.changed:
+        return
+    state = result.state
+    alerts.emit(alerts.TRADING_STATE_CHANGED, state=state.state, cause=state.cause,
+                actor=state.actor, reason=state.reason, state_id=state.id,
+                previous=result.previous.state if result.previous else "none")
+    if state.probation is not None:
+        alerts.emit(PROBATION_STARTED, level=alerts.WARNING, state_id=state.id,
+                    multiplier=str(state.probation.multiplier),
+                    floor={symbol: str(amount) for symbol, amount in state.probation.floor},
+                    started_at_ms=state.probation.started_at_ms)
 
 
 class TradingStateRepository:
@@ -281,10 +347,37 @@ class TradingStateRepository:
                 now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
                 probation=probation,
             )
-        if result.changed:  # committed; alerting never blocks or raises (T8)
-            alerts.emit(alerts.TRADING_STATE_CHANGED, state=state, cause=cause, actor=actor,
-                        reason=reason, state_id=result.state.id,
-                        previous=result.previous.state if result.previous else "none")
+        announce(result)
+        return result
+
+    async def resume_pause(self, *, actor: str, reason: str,
+                           now_ms: int | None = None) -> TransitionResult:
+        """Lift an operator's pause, back inside an unfinished probation if any.
+
+        Checked under the scope lock, so a stop recorded after the caller last
+        read the state is never lifted by mistake. ACTIVE already: nothing to do.
+        """
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        async with self._sf.begin() as session:
+            await acquire_transaction_lock(
+                session, account_id=str(self.account_id), deployment_environment=self.environment,
+            )
+            current = await read_current(session, account_id=self.account_id,
+                                         environment=self.environment)
+            if current is not None and current.state == ACTIVE:
+                return TransitionResult(state=current, changed=False, previous=current)
+            if current is None or current.state != REDUCING or current.cause != CAUSE_OPERATOR:
+                raise NotAnOperatorPause(
+                    "not an operator's pause" if current is None
+                    else f"{current.state} by {current.cause} is not an operator's pause")
+            owed = await unfinished_probation(session, account_id=self.account_id,
+                                              environment=self.environment)
+            result = await append_transition(
+                session, account_id=self.account_id, environment=self.environment,
+                state=ACTIVE, cause=CAUSE_OPERATOR, actor=actor, reason=reason, now_ms=now,
+                probation=owed.restarted(started_at_ms=now) if owed is not None else None,
+            )
+        announce(result)
         return result
 
     async def history(self, *, limit: int = 20) -> list[TradingState]:
@@ -306,15 +399,20 @@ __all__ = [
     "CAUSE_MATERIAL_DEPLOY",
     "CAUSE_OPERATOR",
     "HALTED",
+    "PROBATION_LIFTED",
+    "PROBATION_STARTED",
     "REDUCING",
     "IllegalTradingTransition",
+    "NotAnOperatorPause",
     "Probation",
     "TradingState",
     "TradingStateRepository",
     "TransitionResult",
+    "announce",
     "append_transition",
     "read_current",
     "restates",
     "to_state",
+    "unfinished_probation",
     "validate_transition",
 ]

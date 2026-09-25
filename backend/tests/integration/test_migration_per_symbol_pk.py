@@ -36,6 +36,7 @@ async def test_position_state_per_symbol_pk_after_upgrade(
             # reused session-scoped container doesn't carry it over and fail the
             # next upgrade with `relation "auth.user" already exists`.
             setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            setup_conn.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             setup_conn.exec_driver_sql("DROP SCHEMA public CASCADE")
             setup_conn.exec_driver_sql("CREATE SCHEMA public")
     finally:

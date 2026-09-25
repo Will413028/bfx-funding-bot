@@ -207,7 +207,7 @@ async def test_kill_is_not_lifted_by_the_admin_token(
     assert (out["state"], out["cause"]) == ("HALTED", "operator")
     assert out["cancel_all_complete"] is False
     assert {(o["phase"], o["detail"]) for o in out["cancel_all"]} == {("skipped", "no_live_venue")}
-    with pytest.raises(ValueError, match="release_promotion_required"):
+    with pytest.raises(ValueError, match="authenticated_resume_required"):
         await daemon.trading_status.resume(reason="static token", actor="test")
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
 
@@ -244,5 +244,5 @@ async def test_no_recorded_decision_reads_as_halted(
     snap = await daemon.trading_status.snapshot()
     assert snap["halt"]["halted"] is True
     assert snap["halt"]["sources"]["persisted"] is None
-    with pytest.raises(ValueError, match="release_promotion_required"):
+    with pytest.raises(ValueError, match="authenticated_resume_required"):
         await daemon.trading_status.resume(reason="static token", actor="test")

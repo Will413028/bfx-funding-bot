@@ -1,7 +1,7 @@
 """Persist the loss limiter's 24h NAV window so a restart does not forget a loss (T9).
 
 Revision ID: 9391a0f675d3
-Revises: 0218f9ab59a2
+Revises: 5d1c7e9a3b20
 
 ReconcileNavTracker computed realized_loss_pct_24h from an in-memory window,
 so a restart right after a loss rebuilt the window from the post-loss NAV and
@@ -9,15 +9,15 @@ the limiter read zero. The daemon now appends a sample when NAV changes (or
 every few minutes), reloads the last 24h at boot and prunes rows older than
 two days. The runtime role may read, insert and prune; nothing else.
 
-Chained after T5's 0218f9ab59a2 (trading control) when the branches met;
-re-chain again if another migration lands first.
+Chained after T6's 5d1c7e9a3b20 (release ceremony archive) when the branches
+met; re-chain again if another migration lands first.
 """
 import sqlalchemy as sa
 
 from alembic import op
 
 revision = "9391a0f675d3"
-down_revision = "0218f9ab59a2"
+down_revision = "5d1c7e9a3b20"
 branch_labels = None
 depends_on = None
 

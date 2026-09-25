@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import func, select
 
+from bfx_funding_bot.core.schema_head import SCHEMA_HEAD
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.execution.event_store.serialization import serialize_event
@@ -22,15 +23,14 @@ from bfx_funding_bot.modules.execution.event_store.writer import (
     ProjectionWriteError,
 )
 from bfx_funding_bot.modules.execution.events import ReservationClaimed
-from bfx_funding_bot.modules.execution.release_worker import RELEASE_SCHEMA_HEAD
 from tests.modules.execution.event_store.test_historical_claim_cycles import seal_prefix_chain
 
 pytestmark = pytest.mark.integration
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
-# The declared head, which tests/test_release_schema_head.py pins to alembic's.
-_REVISION = RELEASE_SCHEMA_HEAD
+# The declared head, which tests/test_schema_head.py pins to alembic's.
+_REVISION = SCHEMA_HEAD
 _ENV = "ci"
 
 
@@ -45,6 +45,7 @@ def _reset_and_upgrade(sync_url: str) -> None:
         with engine.begin() as connection:
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
+            connection.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             connection.exec_driver_sql("DROP SCHEMA public CASCADE")
             connection.exec_driver_sql("CREATE SCHEMA public")
     finally:
@@ -175,6 +176,7 @@ async def test_cutover_seeds_historical_projection_cursor(
         with engine.begin() as connection:
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS auth CASCADE")
             connection.exec_driver_sql("DROP SCHEMA IF EXISTS projection_audit CASCADE")
+            connection.exec_driver_sql("DROP SCHEMA IF EXISTS release_archive CASCADE")
             connection.exec_driver_sql("DROP SCHEMA public CASCADE")
             connection.exec_driver_sql("CREATE SCHEMA public")
         config = Config(str(_ALEMBIC_INI))

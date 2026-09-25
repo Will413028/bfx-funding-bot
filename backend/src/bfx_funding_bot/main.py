@@ -14,7 +14,6 @@ from bfx_funding_bot.modules.api.deps import database_is_ready
 from bfx_funding_bot.modules.api.funding_status import build_funding_status_router
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.api.public import build_public_router
-from bfx_funding_bot.modules.api.release_sessions import build_release_router
 from bfx_funding_bot.modules.api.routers import build_router as build_api_router
 from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
 from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
@@ -45,7 +44,6 @@ app.include_router(build_api_router())
 app.include_router(build_api_keys_router())
 app.include_router(build_attribution_router())
 app.include_router(build_config_router())
-app.include_router(build_release_router())
 app.include_router(build_funding_status_router())
 app.include_router(build_projections_router())
 app.include_router(build_public_router())

@@ -46,9 +46,9 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
 )
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
 from bfx_funding_bot.modules.execution.safety.trading_state import (
-    ACTIVE,
     CAUSE_OPERATOR,
     REDUCING,
+    NotAnOperatorPause,
     TradingState,
     TransitionResult,
 )
@@ -83,6 +83,8 @@ class _TradingStateProtocol(Protocol):
         self, state: str, *, cause: str, actor: str, reason: str,
         now_ms: int | None = None,
     ) -> TransitionResult: ...
+    async def resume_pause(self, *, actor: str, reason: str,
+                           now_ms: int | None = None) -> TransitionResult: ...
     async def history(self, *, limit: int = 20) -> list[TradingState]: ...
 
 
@@ -118,6 +120,7 @@ def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
         "probation": None if state.probation is None else {
             "multiplier": str(state.probation.multiplier),
             "started_at_ms": state.probation.started_at_ms,
+            "floor": {symbol: str(amount) for symbol, amount in state.probation.floor},
         },
     }
 
@@ -314,18 +317,16 @@ class TradingStatusService:
         response says so explicitly — reporting "resumed" while nothing resumed
         is exactly the class of lie this endpoint exists to prevent.
         """
-        store = self._require_store()
-        current = await store.current()
-        if current is None or (not current.allows_new_offers
-                               and not _resumable_without_approval(current)):
-            # A HALTED (or no decision at all, which reads as HALTED) or a
-            # material deploy's REDUCING states that something is unproven, and
-            # a static admin token does not prove it. Until the authenticated
-            # approval exists, those exit through release promotion.
-            raise ValueError("release_promotion_required")
-        result = await store.transition(
-            ACTIVE, cause=CAUSE_OPERATOR, actor=actor, reason=reason,
-        )
+        try:
+            # Checked under the scope lock: a stop recorded since the operator
+            # last looked is never lifted here. A HALTED (or no decision, read
+            # as HALTED) or a material deploy's REDUCING says something is
+            # unproven, which a static admin token does not prove: those exit
+            # through the operator's MFA-authenticated resume/approve. A pause
+            # during a probation resumes back inside it (ADR D3).
+            result = await self._require_store().resume_pause(actor=actor, reason=reason)
+        except NotAnOperatorPause as exc:
+            raise ValueError(f"authenticated_resume_required: {exc}") from exc
         env_holds = _env_kill_switch_set()
         return {
             **_trading_state_dict(result.state),  # type: ignore[dict-item]

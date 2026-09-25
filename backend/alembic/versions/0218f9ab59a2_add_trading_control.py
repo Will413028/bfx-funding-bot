@@ -15,9 +15,14 @@ never below one venue-minimum offer.
 - ``trading_state.probation_floor``: the per-currency venue minimum (native
   units, with the submit margin) observed when probation starts, so every
   capital read applies the same floor without a venue call.
-- ``trading_operator_authorized``: the operator check the daemon re-runs when it
-  applies a request; independent of the release ceremony's function, which is
-  removed with that ceremony.
+- ``guard_trading_state_probation``: until a probation passes, an ACTIVE row
+  must carry one (ADR D3: exposure stays within it). Only the lift -- ACTIVE
+  by ``auto`` without a probation, from inside it -- ends one; a pause or an
+  operator's stop does not. It runs after ``guard_trading_state_transition``
+  (triggers fire by name), so the scope lock is held and the id assigned.
+- ``operator_authorized``: the operator check the daemon re-runs when it
+  applies any operator request (``execution.operator_requests``); independent of
+  the release ceremony's function, which is removed with that ceremony.
 """
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -49,10 +54,42 @@ _PROBATION_CHECK = (
 )
 
 
+_PROBATION_GUARD = """CREATE FUNCTION public.guard_trading_state_probation() RETURNS trigger
+    LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+    DECLARE started bigint; prev public.trading_state%ROWTYPE;
+    BEGIN
+      IF NEW.state <> 'ACTIVE' OR NEW.probation_multiplier IS NOT NULL THEN
+        RETURN NEW;
+      END IF;
+      SELECT max(id) INTO started FROM public.trading_state
+        WHERE exchange_account_id = NEW.exchange_account_id
+          AND deployment_environment = NEW.deployment_environment
+          AND probation_multiplier IS NOT NULL;
+      IF started IS NULL OR EXISTS (SELECT 1 FROM public.trading_state
+          WHERE exchange_account_id = NEW.exchange_account_id
+            AND deployment_environment = NEW.deployment_environment
+            AND id > started AND state = 'ACTIVE' AND probation_multiplier IS NULL) THEN
+        RETURN NEW;
+      END IF;
+      SELECT * INTO prev FROM public.trading_state
+        WHERE exchange_account_id = NEW.exchange_account_id
+          AND deployment_environment = NEW.deployment_environment
+        ORDER BY id DESC LIMIT 1;
+      IF prev.state = 'ACTIVE' AND prev.probation_multiplier IS NOT NULL AND NEW.cause = 'auto' THEN
+        RETURN NEW;  -- the lift
+      END IF;
+      RAISE EXCEPTION 'illegal trading state transition: probation % has not passed', started;
+    END $$"""
+
+
 def upgrade() -> None:
     op.add_column("trading_state", sa.Column("probation_floor", postgresql.JSONB(), nullable=True))
     op.drop_constraint("ck_trading_state_probation", "trading_state", type_="check")
     op.create_check_constraint("ck_trading_state_probation", "trading_state", _PROBATION_CHECK)
+    op.execute(_PROBATION_GUARD)
+    # Named after trading_state_transition so it fires second (same scope lock).
+    op.execute("CREATE TRIGGER trading_state_transition_probation BEFORE INSERT ON public.trading_state "
+               "FOR EACH ROW EXECUTE FUNCTION public.guard_trading_state_probation()")
 
     op.create_table(
         "deployment_approvals",
@@ -151,7 +188,7 @@ def upgrade() -> None:
 
     # Same authority as the release ceremony's check, owned by trading control
     # so removing the ceremony does not remove it.
-    op.execute('''CREATE FUNCTION public.trading_operator_authorized(account uuid, actor text)
+    op.execute('''CREATE FUNCTION public.operator_authorized(account uuid, actor text)
         RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS $$
         SELECT EXISTS (SELECT 1 FROM auth."user" u
           JOIN public.exchange_account_memberships m ON m.user_id=u.id
@@ -162,8 +199,8 @@ def upgrade() -> None:
         $$''')
 
     op.execute("REVOKE ALL ON FUNCTION public.reject_trading_control_mutation(), "
-               "public.guard_trading_control_request(), "
-               "public.trading_operator_authorized(uuid,text) FROM PUBLIC")
+               "public.guard_trading_control_request(), public.guard_trading_state_probation(), "
+               "public.operator_authorized(uuid,text) FROM PUBLIC")
     op.execute("REVOKE ALL ON public.deployment_approvals, public.trading_control_requests FROM PUBLIC")
     op.execute("REVOKE ALL ON SEQUENCE public.deployment_approvals_id_seq FROM PUBLIC")
     op.execute(f"""DO $$ BEGIN
@@ -174,7 +211,7 @@ def upgrade() -> None:
         GRANT USAGE, SELECT ON SEQUENCE public.deployment_approvals_id_seq TO bfx_bot;
         GRANT SELECT ON public.trading_control_requests TO bfx_bot;
         GRANT UPDATE ({_WORKER_COLUMNS}) ON public.trading_control_requests TO bfx_bot;
-        GRANT EXECUTE ON FUNCTION public.trading_operator_authorized(uuid,text) TO bfx_bot;
+        GRANT EXECUTE ON FUNCTION public.operator_authorized(uuid,text) TO bfx_bot;
       END IF;
       IF EXISTS (SELECT FROM pg_roles WHERE rolname='bfx_webapi') THEN
         REVOKE ALL ON public.deployment_approvals, public.trading_control_requests FROM bfx_webapi;
@@ -199,7 +236,9 @@ def downgrade() -> None:
     op.drop_table("deployment_approvals")
     op.execute("DROP FUNCTION public.guard_trading_control_request(), "
                "public.reject_trading_control_mutation(), "
-               "public.trading_operator_authorized(uuid,text)")
+               "public.operator_authorized(uuid,text)")
+    op.execute("DROP TRIGGER trading_state_transition_probation ON public.trading_state")
+    op.execute("DROP FUNCTION public.guard_trading_state_probation()")
     op.drop_constraint("ck_trading_state_probation", "trading_state", type_="check")
     op.create_check_constraint("ck_trading_state_probation", "trading_state", _OLD_PROBATION_CHECK)
     op.drop_column("trading_state", "probation_floor")

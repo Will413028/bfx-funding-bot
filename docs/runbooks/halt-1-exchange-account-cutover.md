@@ -225,6 +225,17 @@ TO bfx_webapi;
 GRANT INSERT ON TABLE public.user_profiles TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.exchange_account_credentials TO bfx_webapi;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.account_config_drafts TO bfx_webapi;
+-- ADR D4' operator adjudication outbox (migration b8e2d4f6a013 grants the same):
+-- read the queue, insert request columns only; the daemon applies them.
+GRANT SELECT ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
+GRANT INSERT (request_id, exchange_account_id, deployment_environment, uncertainty_id,
+  action, reconcile_event_seq, venue_offer_id, decision, reason, requested_by,
+  created_at_ms) ON TABLE public.uncertainty_resolution_requests TO bfx_webapi;
+-- Release-flow approve/resume outbox, same contract (migration 0218f9ab59a2 grants the same).
+GRANT SELECT ON TABLE public.trading_state, public.deployment_approvals,
+  public.trading_control_requests TO bfx_webapi;
+GRANT INSERT (request_id, exchange_account_id, deployment_environment, action, backend_digest,
+  reason, requested_by, created_at_ms) ON TABLE public.trading_control_requests TO bfx_webapi;
 
 -- Run as the role owner and retain the output as release evidence.
 SET ROLE bfx_webapi;

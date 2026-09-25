@@ -35,6 +35,7 @@ from bfx_funding_bot.modules.execution.safety.hard_guards import (
     ManualKillGuard,
 )
 from bfx_funding_bot.modules.execution.safety.trading_state import (
+    NotAnOperatorPause,
     TradingState,
     TransitionResult,
     restates,
@@ -133,6 +134,18 @@ class _FakeTradingState:
             created_at_ms=now_ms or 1000,
         )
         return TransitionResult(state=self.state, changed=True, previous=previous)
+
+    async def resume_pause(self, *, actor: str, reason: str,
+                           now_ms: int | None = None) -> TransitionResult:
+        # The real one also re-enters an unfinished probation; that needs the
+        # history, so it is tested against the database (test_trading_control).
+        previous = self.state
+        if previous is not None and previous.state == "ACTIVE":
+            return TransitionResult(state=previous, changed=False, previous=previous)
+        if previous is None or (previous.state, previous.cause) != ("REDUCING", "operator"):
+            raise NotAnOperatorPause("not an operator's pause")
+        return await self.transition("ACTIVE", cause="operator", actor=actor, reason=reason,
+                                     now_ms=now_ms)
 
     async def history(self, *, limit: int = 20) -> list[TradingState]:
         return [self.state] if self.state is not None else []
@@ -546,7 +559,7 @@ async def test_no_recorded_decision_cannot_be_paused_or_resumed_by_token() -> No
     service = _service(trading_state=store)
     with pytest.raises(ValueError, match="HALTED -> REDUCING"):
         await service.pause(reason="pause", actor="admin")
-    with pytest.raises(ValueError, match="release_promotion_required"):
+    with pytest.raises(ValueError, match="authenticated_resume_required"):
         await service.resume(reason="token", actor="admin")
     assert store.writes == []
 
@@ -596,7 +609,7 @@ async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bo
     ("HALTED", "operator"), ("HALTED", "auto"), ("HALTED", "kill_switch"),
     ("REDUCING", "material_deploy"),
 ])
-async def test_live_resume_of_an_unproven_stop_requires_release_promotion(
+async def test_live_resume_of_an_unproven_stop_requires_an_authenticated_resume(
     state: str, cause: str,
 ) -> None:
     """A stop that is not an operator's pause says something is unproven; a
@@ -604,7 +617,7 @@ async def test_live_resume_of_an_unproven_stop_requires_release_promotion(
     store = _FakeTradingState(_trading(state, cause=cause))
     service = _service(trading_state=store)
     service._phase = Phase.LIVE
-    with pytest.raises(ValueError, match="release_promotion_required"):
+    with pytest.raises(ValueError, match="authenticated_resume_required"):
         await service.resume(reason="static bearer", actor="admin-api")
     assert store.state is not None and store.state.state == state
     assert store.writes == []
