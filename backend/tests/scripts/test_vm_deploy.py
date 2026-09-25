@@ -151,6 +151,7 @@ class FakeHost:
     current: tuple[str, ...] = ("h2",)
     upgrade_result: str = "ok"  # ok | fail_unchanged | fail_partial
     backup_ok: bool = True
+    restore_test_ok: bool = True
     compose_fail: set[str] = field(default_factory=set)
     unhealthy: set[str] = field(default_factory=set)
     tampered: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
@@ -184,6 +185,8 @@ class FakeHost:
         if call[:4] == ("runuser", "-u", "ubuntu", "--") and call[4].endswith("backup.sh"):
             assert call[5:] == ("--type", "diff")
             return ok if self.backup_ok else bfx.CommandResult(2, "", "backup_evidence_unavailable")
+        if call == ("systemctl", "start", "bfx-restore-test.service"):
+            return ok if self.restore_test_ok else bfx.CommandResult(1, "", "Job failed")
         if call[:2] == ("docker", "ps"):
             lines = [f"{name}\t" for name in self.foreign]
             lines += [f"{bfx.CONTAINERS[s]}\tbfx-app" for s in self.running]
@@ -356,6 +359,7 @@ def _alembic(*args: str) -> Callable[[tuple[str, ...]], bool]:
 
 
 BACKUP = lambda call: len(call) > 4 and call[4].endswith("backup.sh")  # noqa: E731
+RESTORE_TEST = lambda call: call == ("systemctl", "start", "bfx-restore-test.service")  # noqa: E731
 COMPOSE_UP = _is(("docker", "compose"))
 STOP_BOT = _is(("docker", "stop"))
 PULL = _is(("docker", "pull"))
@@ -410,11 +414,12 @@ def test_standard_release_without_migration_deploys_by_digest(harness: Harness) 
     assert host.count(_is(("docker", "tag", f"{BACKEND}@{NEW_B}", "bfx-bot:local"))) == 1
 
 
-def test_pending_migration_is_preceded_by_a_successful_backup(harness: Harness) -> None:
+def test_pending_migration_is_preceded_by_a_successful_backup_and_restore_test(harness: Harness) -> None:
     harness.host.current = ("h1",)
     assert harness.run() == 0
     host = harness.host
-    assert host.index(BACKUP) < host.index(_alembic("upgrade", "head")) < host.index(COMPOSE_UP)
+    assert (host.index(BACKUP) < host.index(RESTORE_TEST) < host.index(_alembic("upgrade", "head"))
+            < host.index(COMPOSE_UP))
     assert harness.ledger.last.migrations_applied is True
     assert harness.ledger.last.outcome == "deployed"
 
@@ -546,6 +551,68 @@ def test_partial_migration_stops_the_bot_and_never_rolls_back(harness: Harness) 
     row = harness.ledger.last
     assert (row.outcome, row.migrations_applied) == ("failed", True)
     assert harness.notices[-1][0] == "critical"
+
+
+def test_failed_restore_test_blocks_the_migration_and_the_deploy(harness: Harness) -> None:
+    harness.host.current = ("h1",)
+    harness.host.restore_test_ok = False
+    assert harness.run() == 1
+    host = harness.host
+    assert host.index(BACKUP) < host.index(RESTORE_TEST)
+    assert host.count(_alembic("upgrade", "head")) == 0
+    assert host.count(COMPOSE_UP) == 0 and host.stopped == []
+    row = harness.ledger.last
+    assert (row.outcome, row.migrations_applied) == ("failed", False)
+    assert "restore_test_failed(migration_pending)" in row.detail
+    assert harness.notices[-1][0] == "critical"
+
+
+@pytest.mark.parametrize("path", [
+    "deploy/vm/pgbackrest/pgbackrest.conf",
+    "deploy/vm/pgbackrest/restore_drill.py",
+    "deploy/vm/postgres/Dockerfile",
+    "docker-compose.bot.yml",
+    "docker-compose.dr.yml",
+])
+def test_dr_path_change_runs_a_restore_test_before_deploying(harness: Harness, path: str) -> None:
+    harness.host.diffs[(REV_OLD, REV_NEW)] = ["docs/a.md", path]
+    assert harness.run() == 0
+    host = harness.host
+    assert host.count(BACKUP) == 0                      # no migration: no extra backup
+    assert host.index(RESTORE_TEST) < host.index(COMPOSE_UP)
+
+
+def test_dr_path_change_with_a_failing_restore_test_is_not_deployed(harness: Harness) -> None:
+    harness.host.diffs[(REV_OLD, REV_NEW)] = ["deploy/vm/pgbackrest/pgbackrest.conf"]
+    harness.host.restore_test_ok = False
+    assert harness.run() == 1
+    assert harness.host.count(COMPOSE_UP) == 0
+    assert "restore_test_failed(dr_paths:deploy/vm/pgbackrest/pgbackrest.conf)" in harness.ledger.last.detail
+
+
+@pytest.mark.parametrize("paths", [
+    ["docs/a.md"],
+    ["backend/src/bfx_funding_bot/main.py", "frontend/src/app/page.tsx"],
+    ["deploy/vm/live.env", "deploy/vm/ops/bfx_deploy.py"],
+])
+def test_ordinary_release_without_migration_skips_the_restore_test(harness: Harness,
+                                                                   paths: list[str]) -> None:
+    harness.host.diffs[(REV_OLD, REV_NEW)] = paths
+    assert harness.run() == 0
+    assert harness.host.count(RESTORE_TEST) == 0
+
+
+def test_unreadable_diff_runs_the_restore_test(harness: Harness) -> None:
+    harness.host.diffs.pop((REV_OLD, REV_NEW))
+    assert harness.run() == 0
+    assert harness.host.count(RESTORE_TEST) == 1
+
+
+def test_rules_file_problem_alone_does_not_trigger_a_restore_test(harness: Harness) -> None:
+    harness.host.files[(REV_NEW, "deploy/change-class.yaml")] = "version: 9\n"
+    assert harness.run() == 0
+    assert harness.ledger.last.change_class == "material"
+    assert harness.host.count(RESTORE_TEST) == 0
 
 
 # --------------------------------------------------------------------------- health
@@ -710,6 +777,8 @@ def test_dry_run_reports_the_plan_and_changes_nothing(harness: Harness, capsys: 
     assert len(harness.ledger.rows) == rows and harness.notices == []
     plan = json.loads(capsys.readouterr().out)
     assert plan["migrations_pending"] is True and plan["backup_before_migration"] is True
+    assert plan["restore_test_before_deploy"] == "migration_pending"
+    assert harness.host.count(RESTORE_TEST) == 0
     assert plan["change_class"] == "standard" and plan["rollback_target"] == REV_OLD
     assert plan["blockers"] == [f"foreign_container_holds_name:{n}"
                                 for n in ("bfx-bot", "bfx-webapi", "bfx-frontend")]
