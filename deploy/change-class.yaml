@@ -10,9 +10,10 @@
 # This file itself is always material (hard-wired in change_class.py), so loosening
 # the rules needs one operator approval on the release that ships the new rules.
 #
-# Syntax: a strict YAML subset (version, two block lists, `- pattern` items).
-# `*` and `?` stay inside one path segment; `**/` spans directories; a trailing `**`
-# spans everything below. Keep it that way -- the parser rejects anything else.
+# Syntax: YAML with exactly `version: 1` and the two lists; patterns are gitignore
+# globs (pathspec) anchored at the repository root: `*` and `?` stay inside one path
+# segment, `**/` spans directories, a trailing `**` spans everything below.
+# Negation, character classes and directory-only patterns are rejected.
 #
 # material = anything that can change what the bot sends to the venue or how it
 # is gated: order path, strategy/pricing, risk limits, CapitalPolicy, migrations,

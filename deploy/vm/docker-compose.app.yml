@@ -14,12 +14,17 @@
 # first, so `up` can only start what was already verified.
 #
 # Hardening kept from the retired immutable-release launcher (removed in T6):
-# read-only root filesystem, bot/webapi UID 1000,
-# frontend user nextjs, all capabilities dropped, no-new-privileges, cwd /app, the
-# image's exact interpreter/module, bot DNS alias bfx-bot, frontend published on
-# host loopback 127.0.0.1:3001 only, no volumes, no writable mounts. Loader and
-# interpreter injection variables are forced empty here AND rejected in the env
-# files by bfx-deploy AND re-checked on the created containers.
+# read-only root filesystem, bot/webapi UID 1000, frontend user nextjs, all
+# capabilities dropped, no-new-privileges, cwd /app, the image's exact
+# interpreter/module, bot DNS alias bfx-bot, frontend published on host loopback
+# 127.0.0.1:3001 only, no volumes, no writable mounts, loader and interpreter
+# injection variables forced empty. CI renders this file with `docker compose
+# config` and enforces all of it (deploy/vm/ops/compose_policy.py); bfx-deploy
+# re-checks only the digest and identity each created container runs with.
+#
+# Identity (injected by bfx-deploy, never set in env files): BFX_IMAGE_DIGEST,
+# BFX_SOURCE_REVISION, BFX_CHANGE_CLASS and BFX_DEPLOYMENT_ID, the attempt_id of
+# the `started` row in the deployments ledger for this deployment.
 #
 # Env precedence: `environment` > later env_file > earlier env_file. Secrets stay in
 # /opt/bfx/runtime/*.env (root 0600, never in git); non-secret bot settings come
@@ -48,6 +53,7 @@ services:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ""
       PYTHONHOME: ""
@@ -77,6 +83,7 @@ services:
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ""
       PYTHONHOME: ""
@@ -105,6 +112,7 @@ services:
       BFX_IMAGE_DIGEST: ${BFX_FRONTEND_DIGEST:?BFX_FRONTEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       BFX_CHANGE_CLASS: ${BFX_CHANGE_CLASS:?BFX_CHANGE_CLASS is required}
+      BFX_DEPLOYMENT_ID: ${BFX_DEPLOYMENT_ID:?BFX_DEPLOYMENT_ID is required}
       NODE_OPTIONS: ""
       LD_PRELOAD: ""
       LD_LIBRARY_PATH: ""

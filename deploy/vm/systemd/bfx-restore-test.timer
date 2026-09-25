@@ -4,11 +4,11 @@ Description=Monthly isolated restore test (1st of the month, 09:17 UTC)
 [Timer]
 # Six hours after the 03:17 UTC daily backup: far enough not to compete with it
 # (or with Monday's 04:17 weekly report), near enough that WAL replay from that
-# backup stays short. bfx-deploy also starts the service before any release with
-# a pending migration or a PostgreSQL/pgBackRest change.
+# backup stays short. bfx-deploy also starts bfx-restore-test@<revision> before any
+# release with a pending migration or a PostgreSQL/pgBackRest change.
 OnCalendar=*-*-01 09:17:00 UTC
 Persistent=true
-Unit=bfx-restore-test.service
+Unit=bfx-restore-test@current.service
 
 [Install]
 WantedBy=timers.target

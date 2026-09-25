@@ -3,6 +3,8 @@ name: Release images
 # Builds the production images once, in CI, from a main commit whose CI run
 # passed, and publishes them to GHCR. The VM deploys by digest only; the `main`
 # tag exists so the VM can discover the newest release, never as deploy input.
+# `bfx.ci-run-url` names the CI run that passed this commit; bfx-deploy writes it
+# into the deployments ledger (ci_run).
 # See wiki ADR 2026-09-25-ci-registry-digest-deploy.
 
 on:
@@ -67,7 +69,9 @@ jobs:
           platforms: linux/arm64
           push: true
           build-args: GIT_SHA=${{ env.REVISION }}
-          labels: org.opencontainers.image.revision=${{ env.REVISION }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.REVISION }}
+            bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
           tags: |
             ${{ steps.names.outputs.backend }}:sha-${{ env.REVISION }}
             ${{ steps.names.outputs.backend }}:main
@@ -82,7 +86,9 @@ jobs:
           platforms: linux/arm64
           push: true
           build-args: ${{ steps.names.outputs.frontend_args }}
-          labels: org.opencontainers.image.revision=${{ env.REVISION }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.REVISION }}
+            bfx.ci-run-url=${{ github.event.workflow_run.html_url }}
           tags: |
             ${{ steps.names.outputs.frontend }}:sha-${{ env.REVISION }}
             ${{ steps.names.outputs.frontend }}:main

@@ -1,7 +1,7 @@
 """Release change class: standard only when every changed path is listed standard.
 
-deploy/vm/ops/change_class.py is host-side standard-library code; the rules are
-deploy/change-class.yaml. Default material, undecidable material, and the rules
+deploy/vm/ops/change_class.py reads the rules (deploy/change-class.yaml) with
+PyYAML and matches them with pathspec, both pinned in deploy/vm/ops/uv.lock. Default material, undecidable material, and the rules
 file itself is always material.
 """
 from __future__ import annotations
@@ -31,8 +31,7 @@ cc = _load("vm_ops_change_class_under_test", ROOT / "deploy/vm/ops/change_class.
 RULES = cc.parse_rules(RULES_TEXT)
 
 
-def test_repository_rules_parse_exactly_as_a_real_yaml_parser_reads_them() -> None:
-    """The strict subset parser must not silently disagree with YAML itself."""
+def test_repository_rules_parse_to_what_yaml_says() -> None:
     assert yaml.safe_load(RULES_TEXT) == {
         "version": 1, "standard": list(RULES.standard), "material": list(RULES.material),
     }
@@ -127,6 +126,8 @@ def test_undecidable_and_raise_only_ever_produce_material() -> None:
     ("backend/scripts/*.py", "backend/scripts/sub/x.py", False),
     ("docker-compose.*.yml", "docker-compose.bot.yml", True),
     ("docker-compose.*.yml", "deploy/docker-compose.bot.yml", False),
+    (".gitignore", ".gitignore", True),
+    (".gitignore", "frontend/.gitignore", False),
     ("a?c", "abc", True),
     ("a?c", "a/c", False),
     ("a/**/z", "a/z", True),
@@ -134,7 +135,7 @@ def test_undecidable_and_raise_only_ever_produce_material() -> None:
     ("frontend/src/app/api/**", "frontend/src/app/api/auth/[...all]/route.ts", True),
 ])
 def test_glob_segments_never_widen_silently(pattern: str, path: str, expected: bool) -> None:
-    assert (cc.compile_pattern(pattern).match(path) is not None) is expected
+    assert cc.matches([pattern], path) is expected
 
 
 @pytest.mark.parametrize("text", [
@@ -151,6 +152,12 @@ def test_glob_segments_never_widen_silently(pattern: str, path: str, expected: b
     "version: 1\nstandard:\n  - '**x/y'\nmaterial: []\n",
     "version: 1\nstandard:\n  - two words\nmaterial: []\n",
     "version: 1\nstandard:\n  - docs/[ab]/x\nmaterial: []\n",
+    "version: 1\nstandard:\n  - '!docs/**'\nmaterial: []\n",
+    "version: 1\nstandard:\n  - docs/\nmaterial: []\n",
+    "version: 1\nstandard:\n  - 3\nmaterial: []\n",
+    "version: true\nstandard: []\nmaterial: []\n",
+    "version: 1\nstandard: []\nmaterial: []\nextra: []\n",
+    "version: 1\nstandard: [\n",
 ])
 def test_malformed_rules_are_rejected_not_guessed(text: str) -> None:
     with pytest.raises(cc.RulesError):

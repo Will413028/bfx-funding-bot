@@ -136,7 +136,7 @@ async def test_the_ledger_can_only_raise_the_class(capital_db, ledger_class, led
     await start(factory, account)
     now = datetime.now(UTC)
     async with factory.begin() as session:
-        session.add(DeploymentRow(started_at=now, finished_at=now, source_revision=ledger_revision,
+        session.add(DeploymentRow(attempt_id=uuid4(), started_at=now, finished_at=now, source_revision=ledger_revision,
             backend_digest=DIGEST, frontend_digest=OTHER, change_class=ledger_class,
             migrations_applied=False, outcome="deployed", detail="fixture"))
     decision = await apply_deploy_gate(factory, account_id=account, environment="ci",

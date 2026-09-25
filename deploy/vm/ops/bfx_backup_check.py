@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alert when backups miss the RPO or the weekly restore test stops succeeding.
+"""Alert when backups miss the RPO or the monthly restore test stops succeeding.
 
 Runs as root from bfx-backup-check.timer, one minute after each
 bfx-pgbackrest-status run. It only reads what already exists:
