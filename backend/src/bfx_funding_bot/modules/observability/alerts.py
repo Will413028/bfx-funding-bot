@@ -54,6 +54,9 @@ PROTECTION_TRIPPED: Final = "protection_tripped"
 KILL_SWITCH_ENGAGED: Final = "kill_switch_engaged"
 BOOT_REFUSED: Final = "boot_refused"
 DAEMON_FATAL: Final = "daemon_fatal"
+# An active venue offer no durable intent traces to (lending envelope D2):
+# never cancelled or counted as managed, reported once per venue offer id.
+FOREIGN_EXPOSURE: Final = "foreign_exposure"
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -63,6 +66,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     KILL_SWITCH_ENGAGED: ("state_id", "complete"),  # retries of the same kill
     BOOT_REFUSED: ("error",),
     DAEMON_FATAL: ("error",),
+    FOREIGN_EXPOSURE: ("venue_offer_id",),
 }
 
 # Human titles for the protection triggers the plan names explicitly.
@@ -322,6 +326,8 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "bot refused to boot"
     if event == DAEMON_FATAL:
         return "bot stopped on a fatal error"
+    if event == FOREIGN_EXPOSURE:
+        return "foreign offer on the account (not managed, left untouched)"
     return event
 
 
@@ -370,6 +376,7 @@ __all__ = [
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",
+    "FOREIGN_EXPOSURE",
     "INFO",
     "KILL_SWITCH_ENGAGED",
     "PROTECTION_TRIPPED",
