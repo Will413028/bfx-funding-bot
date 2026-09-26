@@ -81,6 +81,7 @@ from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
 from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.boot_recovery import BootRecovery, ForeignExposureMonitor
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
+from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.command_gate import AccountCommandGate
@@ -428,6 +429,9 @@ class Daemon:
     writer_lock_watch: WriterLockWatch | None = None
     # Applies operator resume/kill requests.
     trading_control: TradingControlWorker | None = None
+    # Applies operator enable/disable of one currency's policy (its own queue:
+    # a kill never waits behind it).
+    capital_policy_control: CapitalPolicyRequestWorker | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def _run_boot_recovery(self) -> None:
@@ -466,6 +470,9 @@ class Daemon:
                 tg.create_task(self.protection.run(self._stop_event), name="automatic_protection")
             if self.trading_control is not None:
                 tg.create_task(self.trading_control.run(self._stop_event), name="trading_control")
+            if self.capital_policy_control is not None:
+                tg.create_task(self.capital_policy_control.run(self._stop_event),
+                               name="capital_policy_control")
             if self.uncertainty_worker is not None:
                 tg.create_task(
                     self.uncertainty_worker.run(self._stop_event), name="uncertainty_resolution",
@@ -1476,6 +1483,7 @@ async def build_daemon(
 
     deployment_reconciler = None
     trading_control: TradingControlWorker | None = None
+    capital_policy_control: CapitalPolicyRequestWorker | None = None
     # What the deploy tool says this build is; it names every decision's build
     # and the status report's, and never gates trading (lending envelope D5).
     deployment_identity = DeploymentIdentity.from_env(os.environ)
@@ -1497,6 +1505,11 @@ async def build_daemon(
         )
         funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
         trading_control = TradingControlWorker(
+            session_factory=session_factory, account_id=UUID(account_id),
+            environment=env_str, authority=operator_authorized, clock=now_ms_utc,
+            ownership=writer_lock.verify_held if writer_lock is not None else None,
+        )
+        capital_policy_control = CapitalPolicyRequestWorker(
             session_factory=session_factory, account_id=UUID(account_id),
             environment=env_str, authority=operator_authorized, clock=now_ms_utc,
             ownership=writer_lock.verify_held if writer_lock is not None else None,
@@ -1953,6 +1966,7 @@ async def build_daemon(
         tracing=tracing,
         protection=protection,
         trading_control=trading_control,
+        capital_policy_control=capital_policy_control,
         writer_lock_watch=(
             WriterLockWatch(lock=writer_lock)
             if writer_lock is not None else None

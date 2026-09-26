@@ -1,7 +1,9 @@
 """Explicit operator amendment of one applied CapitalPolicy.
 
 Changes ``enabled``, ``max_offer_amount`` and the offer envelope (lending
-envelope ADR D1). Setting the envelope for the first time needs every envelope
+envelope ADR D1). Two callers: ``scripts/amend_capital_policy.py`` (owner
+role, any field) and the daemon's ``CapitalPolicyRequestWorker`` (the
+operator's UI enable/disable; the runtime role may change ``enabled`` only). Setting the envelope for the first time needs every envelope
 field; afterwards any subset may change.
 
 Same contract as the legacy conversion: a dry run returns a reviewable report
@@ -13,6 +15,7 @@ Nothing here writes a trading state, talks to the venue or resumes trading.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from hashlib import sha256
@@ -79,8 +82,13 @@ def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
 async def amend_capital_policy(
     session: AsyncSession, *, repository: CapitalRepository, symbol: str,
     changes: PolicyChanges, apply_digest: str | None,
+    origin: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return the dry-run report, or apply exactly that report. The caller commits."""
+    """Return the dry-run report, or apply exactly that report. The caller commits.
+
+    ``origin`` is recorded in the new revision's ``source`` beside the digest
+    (who asked, and through which request); it is not part of the report.
+    """
     if not changes.as_dict():
         raise CapitalBlockedError("no_changes_requested")
     await repository.writer.prepare_locked(session, account_id=repository.account_id)
@@ -106,9 +114,9 @@ async def amend_capital_policy(
         raise CapitalBlockedError("amendment_changed")
     written = await repository.apply_policy(
         session, symbol=symbol, policy=amended, expected_revision=applied.revision,
-        source={"amendment_digest": digest,
+        source={**(origin or {}), "amendment_digest": digest,
                 "changes": changes.as_dict()},
     )
     report.update(status="applied", new_revision=written.revision,
-                  new_policy_digest=written.digest)
+                  new_revision_id=str(written.revision_id), new_policy_digest=written.digest)
     return report

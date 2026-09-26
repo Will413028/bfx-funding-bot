@@ -427,6 +427,9 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_container):
             "account_config_drafts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "trading_state": {"SELECT"}, "funding_cancel_all_audit": {"SELECT"},
             "deployments": {"SELECT"},
+            # 7d2a9c4e6b13: the currency toggle outbox and the policy it lists.
+            "capital_policy_requests": {"SELECT"}, "capital_policy_heads": {"SELECT"},
+            "capital_policy_revisions": {"SELECT"},
         }
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT has_schema_privilege('bfx_webapi', 'public', 'USAGE')"))
