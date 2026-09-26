@@ -58,6 +58,9 @@ DAEMON_FATAL: Final = "daemon_fatal"
 FOREIGN_EXPOSURE: Final = "foreign_exposure"
 # An UNKNOWN submit has quarantined its currency past the alert age (D3 level 2).
 UNKNOWN_QUARANTINE_AGED: Final = "unknown_quarantine_aged"
+# An automatic halt whose condition cleared, but the rolling auto-resume limit is
+# spent: it stays until an operator resumes (ADR 2026-09-26 auto resume).
+AUTO_RESUME_LIMIT_REACHED: Final = "auto_resume_limit_reached"
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -311,7 +314,7 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
         return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
-    if event in {PROTECTION_TRIPPED, BOOT_REFUSED, DAEMON_FATAL}:
+    if event in {PROTECTION_TRIPPED, BOOT_REFUSED, DAEMON_FATAL, AUTO_RESUME_LIMIT_REACHED}:
         return CRITICAL
     return WARNING
 
@@ -326,6 +329,8 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "cancel-all complete" if fields.get("complete") is True else "cancel-all INCOMPLETE"
     if event == BOOT_REFUSED:
         return "bot refused to boot"
+    if event == AUTO_RESUME_LIMIT_REACHED:
+        return "automatic HALT stays: auto-resume limit reached, resume by hand"
     if event == DAEMON_FATAL:
         return "bot stopped on a fatal error"
     if event == FOREIGN_EXPOSURE:
@@ -380,6 +385,7 @@ async def shutdown(*, timeout_s: float = 5.0) -> None:
 
 
 __all__ = [
+    "AUTO_RESUME_LIMIT_REACHED",
     "BOOT_REFUSED",
     "CRITICAL",
     "DAEMON_FATAL",
