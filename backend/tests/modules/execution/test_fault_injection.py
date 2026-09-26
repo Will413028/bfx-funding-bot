@@ -27,6 +27,7 @@ from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
+    SubmitOutcomeLostError,
 )
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -490,10 +491,14 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             assert _API_SECRET not in str(result.raw_response)
         except BaseException as exc:
             assert scenario.process_crash_at in {"after_intent", "during_send"}
-            assert "process crash" in str(exc)
+            # The gate turns it into process fencing; the crash is the cause.
+            assert isinstance(exc, SubmitOutcomeLostError)
+            assert "process crash" in str(exc.__cause__)
 
         transport_count_before_retry_check = transport.request_count
-        if outcome_kind != SubmitOutcomeKind.ACKNOWLEDGED.value:
+        # A crashed submit ends the process, so there is no in-process retry to
+        # refuse; recovery on restart opens the UNKNOWN (asserted below).
+        if outcome_kind not in {SubmitOutcomeKind.ACKNOWLEDGED.value, "crashed"}:
             try:
                 await gate.submit(_ready(decision_id=f"fault-{scenario.name}-retry"), _context())
             except CommandGateBlocked:

@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import NoReturn, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -64,8 +64,17 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
+
+
+class SubmitOutcomeLostError(BaseException):
+    """A submit's outcome could not be made durable; the process must exit.
+
+    A BaseException, like ``SystemExit``, so no ``except Exception`` on the way up
+    keeps the daemon running: its task group ends and the container restarts.
+    """
 
 
 class CommandGateBlocked(RuntimeError):  # noqa: N818 - domain state, not a failure suffix
@@ -168,7 +177,6 @@ class AccountCommandGate:
         # Always-on venue write rate limit (T9); installed by the live daemon.
         self.throttle: CommandRateLimiter | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._latched_scopes: dict[tuple[str, str, str], str] = {}
 
     @contextlib.asynccontextmanager
     async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
@@ -201,10 +209,6 @@ class AccountCommandGate:
         """Check the exact uncertainty scope, treating every read error as blocked."""
         payload = decision.decision if isinstance(decision, ReadyToSubmit) else decision
         account_id = _canonical_account_id(context.account_id)
-        scope = (str(account_id), self._deployment_environment, payload.symbol)
-        latched_reason = self._latched_scopes.get(scope)
-        if latched_reason is not None:
-            raise CommandGateBlocked(latched_reason)
         try:
             is_open = await self._uncertainty_reader.has_open(
                 exchange_account_id=account_id,
@@ -304,9 +308,6 @@ class AccountCommandGate:
                         raise CommandGateBlocked("execution_audit_conflict")
 
                     async def locked_guard(locked: AsyncSession) -> None:
-                        scope = (canonical_account, self._deployment_environment, decision.symbol)
-                        if scope in self._latched_scopes:
-                            raise CommandGateBlocked(self._latched_scopes[scope])
                         # D3a: the fingerprint is this submit's only identity at
                         # the venue. Checked under the account lock, in the
                         # transaction that writes the intent, so no two
@@ -355,9 +356,10 @@ class AccountCommandGate:
                     )) if self._capital is not None else context,
                     cid=cid, reservation_ref=reference,
                 )
-        except BaseException:
-            self._latch(decision.symbol, canonical_account, "submit ended without durable outcome")
-            raise
+        except asyncio.CancelledError:
+            raise  # shutting down: recovery turns the durable PENDING into UNKNOWN
+        except BaseException as exc:
+            self._outcome_lost(decision.symbol, "submit ended without durable outcome", exc)
         try:
             result = _bind_result(result, reference=reference)
         except _OutcomeIdentityMismatchError:
@@ -383,9 +385,10 @@ class AccountCommandGate:
                 size=size,
                 occurred_at_ms=outcome_ms,
             )
-        except BaseException:
-            self._latch(decision.symbol, canonical_account, "outcome persistence failed")
+        except asyncio.CancelledError:
             raise
+        except BaseException as exc:
+            self._outcome_lost(decision.symbol, "outcome persistence failed", exc)
         return result
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
@@ -491,7 +494,7 @@ class AccountCommandGate:
                     occurred_at_ms=self._clock(),
                 ))
             async def before_transport() -> None:
-                # Fresh scoped uncertainty/latch check after commit AND before
+                # Fresh scoped uncertainty check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
                 await self.check(probe, ctx)
                 await self._guard(probe, ctx, cancel=True)
@@ -613,8 +616,16 @@ class AccountCommandGate:
         if self.throttle is not None and not self.throttle.admit(kind):
             raise CommandGateBlocked("command_rate_limited")
 
-    def _latch(self, symbol: str, account_id: str, reason: str) -> None:
-        self._latched_scopes[(account_id, self._deployment_environment, symbol)] = reason
+    def _outcome_lost(self, symbol: str, reason: str, exc: BaseException) -> NoReturn:
+        """Process fencing (lending envelope D3): a submit whose outcome could
+        not be made durable leaves this process unsure what it sent, so it stops
+        writing and exits. The durable intent stays PENDING; the restarted
+        daemon's recovery turns it into an UNKNOWN that quarantines the symbol
+        until evidence resolves it -- no in-memory state to outlive the cause."""
+        log.critical("submit_outcome_lost symbol=%s reason=%s error=%s: exiting", symbol, reason,
+                     type(exc).__name__)
+        alerts.emit(alerts.DAEMON_FATAL, error=f"{reason} ({symbol}): exiting")
+        raise SubmitOutcomeLostError(f"{reason} ({symbol})") from exc
 
     async def _safe_publish(self, event: object) -> None:
         try:

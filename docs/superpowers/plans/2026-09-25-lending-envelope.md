@@ -36,9 +36,8 @@ until the cutover in §4.
      `UncertaintyGuard` / command-gate latch); no stored state. Alert when a
      quarantine is older than **30 min**, again every 6 h; never escalates;
   3. account `HALTED/auto` + cancel **managed** offers by id + TOTP resume —
-     offer amount mismatch, identity conflict, throttle trip, a managed offer or
-     credit outside the envelope, ledger conservation broken and not explained
-     by foreign activity (below);
+     offer amount mismatch, identity conflict, throttle trip, ledger
+     conservation broken and not explained by foreign activity (below);
   4. alert only — foreign exposure, NAV drop (old loss/drawdown limiter).
   Writer lock loss → stop writing and exit non-zero (supervisor restarts); no
   trading-state write.
