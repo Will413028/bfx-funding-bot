@@ -12,7 +12,9 @@ complete snapshot resolve an UNKNOWN without an operator.
 The amount moves down by less than 0.0001 and never leaves the bounds the
 planner sized it within. The planner chooses the fingerprint; the command gate
 re-checks uniqueness under the account lock, in the transaction that writes the
-intent, so two submits can never share one.
+intent, so two submits can never share one. The chosen Decimal travels unchanged
+through the decision, the durable intent/attempt and the venue body, so every
+fingerprint in the space is usable.
 """
 from __future__ import annotations
 
@@ -67,13 +69,6 @@ def fingerprinted(planned: Decimal, fingerprint: int) -> Decimal:
     return amount
 
 
-def _wire_exact(amount: Decimal) -> bool:
-    # The decision payload carries the amount as a float; the command gate reads
-    # it back with Decimal(str(...)). A fingerprint that does not survive that
-    # trip would reach the venue as a different amount than the intent.
-    return Decimal(str(float(amount))) == amount
-
-
 def choose_fingerprinted_amount(
     planned: Decimal, *, seed_key: str, in_use: Collection[int], minimum: Decimal,
     maximum: Decimal | None,
@@ -91,8 +86,7 @@ def choose_fingerprinted_amount(
         if fingerprint in in_use:
             continue
         amount = fingerprinted(planned, fingerprint)
-        if (amount < minimum or amount <= 0
-                or (maximum is not None and amount > maximum) or not _wire_exact(amount)):
+        if amount < minimum or amount <= 0 or (maximum is not None and amount > maximum):
             continue
         return amount
     return None

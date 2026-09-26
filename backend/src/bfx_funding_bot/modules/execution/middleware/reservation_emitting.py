@@ -149,7 +149,7 @@ class ReservationEmittingMiddleware:
             or reference.signal_correlation_id != decision.signal_correlation_id
         ):
             raise ValueError("reservation_ref conflicts with ReadyToSubmit request")
-        size = Decimal(str(decision.offer_amount_usdt or 0.0))
+        size = decision.offer_amount_usdt if decision.offer_amount_usdt is not None else Decimal(0)
         scid = decision.signal_correlation_id
         intent_ms = self._clock()
 
@@ -228,7 +228,7 @@ class ReservationEmittingMiddleware:
             if result.status == "filled":
                 filled = OrderFilled(
                     cid=cid, venue_offer_id=result.venue_offer_id or "", credit_id=None,
-                    size_usdt=size, fill_rate=decision.offer_rate or 0.0,
+                    size_usdt=size, fill_rate=float(decision.offer_rate or 0),
                     signal_correlation_id=scid, account_id=ctx.account_id,
                     is_simulated=self._is_simulated, occurred_at_ms=outcome_ms,
                     symbol=decision.symbol, reservation_ref=bound_reference,

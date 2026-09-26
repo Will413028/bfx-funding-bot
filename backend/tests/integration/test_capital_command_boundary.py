@@ -45,7 +45,7 @@ async def test_policy_guard_and_planner_use_total_capital_cell_limit(capital_db)
     _, _, ready, ctx, runtime, _ = await boundary(factory, account)
     guard = CapitalPolicyGuard(runtime=runtime)
     ctx = replace(ctx, capital_cell_id="a30")
-    too_large = ready.decision.model_copy(update={"offer_amount_usdt": 701.0})
+    too_large = ready.decision.model_copy(update={"offer_amount_usdt": Decimal("701")})
     assert not (await guard.evaluate(too_large, ctx)).allowed
     view = await runtime.read(symbol="fUST", cell_id="a30")
     assert allocate_capital(views={"a30": view}, min_fill=Decimal("153")) == {"a30": Decimal("700")}
@@ -72,7 +72,8 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
     planned = ex.ready_submissions[0]
     # The 700 budget, fingerprinted (D3a): below it by less than 0.0001.
     from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
-    sent = Decimal(str(planned.decision.offer_amount_usdt))
+    sent = planned.decision.offer_amount_usdt
+    assert isinstance(sent, Decimal)
     assert Decimal("699.9999") < sent < Decimal("700") and fingerprint_of(sent)
     assert planned.capital_view.applied.revision == 1
     assert planned.capital_view.budget.max_new_offer == Decimal("700")
@@ -185,8 +186,8 @@ async def boundary(factory, account):
         session.add(row)
     ready = ReadyToSubmit(
         decision=DecisionPayload(decision_outcome=DecisionOutcome.POST,
-            signal_correlation_id=event.signal_correlation_id, offer_rate=0.0001,
-            offer_amount_usdt=float(AMOUNT), offer_duration_days=2, symbol="fUST"),
+            signal_correlation_id=event.signal_correlation_id, offer_rate=Decimal("0.0001"),
+            offer_amount_usdt=Decimal(AMOUNT), offer_duration_days=2, symbol="fUST"),
         decision_id=row.decision_id, policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="book", model_version=None, evidence={},
         safety=GuardResult(True, "test"), capital_view=view,
@@ -243,7 +244,7 @@ async def second_ready(factory, account, ready, amount="199.99990200"):
         session.add(row)
     return replace(ready, decision_id=row.decision_id, decision=ready.decision.model_copy(
         update={"signal_correlation_id": event.signal_correlation_id,
-                "offer_amount_usdt": float(amount)}))
+                "offer_amount_usdt": Decimal(amount)}))
 
 
 @pytest.mark.asyncio
@@ -385,7 +386,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
         session.add(row)
     second = replace(first, decision_id=row.decision_id, decision=first.decision.model_copy(
         update={"signal_correlation_id": event.signal_correlation_id,
-                "offer_amount_usdt": 499.99990501}))
+                "offer_amount_usdt": Decimal("499.99990501")}))
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
@@ -401,7 +402,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
 async def test_final_amount_cannot_round_up_across_capital_guard(capital_db):
     factory, account = capital_db
     gate, venue, ready, ctx, _, _ = await boundary(factory, account)
-    altered = ready.decision.model_copy(update={"offer_amount_usdt": 700.0000000000001})
+    altered = ready.decision.model_copy(update={"offer_amount_usdt": Decimal("700.0000000000001")})
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.amount_usdt = Decimal("700.0000000000001")

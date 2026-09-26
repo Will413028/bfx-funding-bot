@@ -13,6 +13,7 @@ StandingQuote.rate 仍是 POST/SKIP 閘門與 down-clamp floor 的權威 — cla
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
@@ -22,7 +23,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome
 class StandingQuote:
     cell_id: str
     outcome: DecisionOutcome          # POST / SKIP
-    rate: float | None                # set iff POST
+    rate: Decimal | None              # set iff POST; exact, feeds the submit rate
     period_days: int | None           # set iff POST
     signal_correlation_id: UUID
     created_at_ms: int                # wall-clock ms when written

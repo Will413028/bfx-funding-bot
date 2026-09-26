@@ -676,7 +676,7 @@ async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_
 
     await rec.deploy()
 
-    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
     assert audit.last.model_evidence["unavailable_reason"] == "fill_model_missing"
     assert [name for name, _ in sink.execution_events] == [
         "funding.fill_model.unavailable",
@@ -708,7 +708,7 @@ async def test_optimizer_shadow_emits_unavailable_event_for_canonical_reason(
 
     await rec.deploy()
 
-    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
     assert [name for name, _ in sink.execution_events] == [
         "funding.fill_model.unavailable",
         "funding.optimizer.no_recommendation",
@@ -733,7 +733,7 @@ async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit()
 
     await rec.deploy()
 
-    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
     assert audit.last.outcome is ExecutionDecisionOutcome.READY
     assert audit.last.applied_rate == D("0.00024999")
     assert audit.last.model_evidence["optimizer"]["selected_source"] == "maker"
@@ -812,7 +812,7 @@ async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects()
 
     await rec.deploy()
 
-    assert [decision.offer_rate for decision in executor.submitted] == [0.00024999]
+    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
     assert audit.last.applied_rate == D("0.00024999")
     assert audit.last.model_evidence["optimizer"]["outcome"] == "selected"
 
@@ -833,7 +833,7 @@ async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> Non
 
     await rec.deploy()
 
-    assert [decision.offer_rate for decision in executor.submitted] == [0.00012]
+    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00012")]
     optimizer = audit.last.model_evidence["optimizer"]
     assert [candidate["source"] for candidate in optimizer["candidates"]] == [
         "signal", "taker",
@@ -889,7 +889,7 @@ async def test_deploys_gap_to_active_cell():
     d = ex.submitted[0]
     assert d.decision_outcome == DecisionOutcome.POST
     assert _planned(d.offer_amount_usdt, "200")   # gap 200, single active, under cap
-    assert d.offer_rate == 0.00012
+    assert d.offer_rate == Decimal("0.00012")
     assert d.offer_duration_days == 2
     assert _planned(tracker.deployed("fUST_a30"), "200")
 
@@ -1451,7 +1451,7 @@ async def test_ladder_observe_logs_rungs_without_touching_submits(caplog):
     # observe-only invariant: exactly the same submit as without a ladder —
     # one offer, at the exact-period maker price.
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00024999
+    assert ex.submitted[0].offer_rate == Decimal("0.00024999")
 
 
 async def test_no_ladder_config_never_computes_rungs(caplog):
@@ -1465,7 +1465,7 @@ async def test_no_ladder_config_never_computes_rungs(caplog):
         await rec.deploy()
     assert not any("ladder_would_post" in r.getMessage() for r in caplog.records)
     assert len(ex.submitted) == 1
-    assert ex.submitted[0].offer_rate == 0.00024999
+    assert ex.submitted[0].offer_rate == Decimal("0.00024999")
 
 
 # ---------------------------------------------------------------------------
@@ -1639,11 +1639,12 @@ async def test_planner_fingerprints_the_amount_the_guards_audit_and_executor_all
     await rec.deploy()
 
     assert len(ex.submitted) == 1
-    sent = D(str(ex.submitted[0].offer_amount_usdt))
+    sent = ex.submitted[0].offer_amount_usdt
+    assert isinstance(sent, D)
     assert fingerprint_of(sent) == seed % FINGERPRINT_SPACE + 1
     assert D("199.9999") < sent < D("200")
-    assert D(str(safety.calls[0].offer_amount_usdt)) == sent
-    assert ex.ready_submissions[0].decision.offer_amount_usdt == float(sent)
+    assert safety.calls[0].offer_amount_usdt == sent
+    assert ex.ready_submissions[0].decision.offer_amount_usdt == sent
     assert tracker.deployed("fUST_a30") == sent
 
 
