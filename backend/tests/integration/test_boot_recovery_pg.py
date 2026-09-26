@@ -106,17 +106,17 @@ async def _reserved(session_factory, account_id) -> Decimal:
 
 
 @pytest.mark.asyncio
-async def test_orphan_at_venue_is_quarantined_without_audited_reference(pg_session_factory):
+async def test_foreign_offer_at_venue_is_counted_without_audited_reference(pg_session_factory):
     acct = "00000000-0000-0000-0000-000000000021"
     await _seed_account(pg_session_factory, acct)
     store = PostgresEventStore(deployment_environment=_ENV)
     offers = [ActiveFundingOffer("777", "fUST", Decimal("250"), 0.0003, 2, 1_000, "ACTIVE")]
     result = await _recovery(offers, store, pg_session_factory, acct).run()
 
-    assert result.n_quarantined == 1
+    assert result.unmanaged_offer_ids == frozenset({"777"})
     assert await _claims(pg_session_factory, acct) == []
-    # Quarantine preserves the venue truth in the canonical snapshot without
-    # fabricating a local CID/reservation reference.
+    # The canonical snapshot keeps the venue truth without fabricating a local
+    # CID/reservation reference -- and, since D2, without a quarantine.
     assert await _reserved(pg_session_factory, acct) == Decimal("250")
     async with pg_session_factory() as session:
         event_types = (
@@ -127,7 +127,7 @@ async def test_orphan_at_venue_is_quarantined_without_audited_reference(pg_sessi
                 )
             )
         ).scalars().all()
-    assert "VENUE_OFFER_QUARANTINED" in event_types
+    assert "VENUE_OFFER_QUARANTINED" not in event_types
 
 
 @pytest.mark.asyncio

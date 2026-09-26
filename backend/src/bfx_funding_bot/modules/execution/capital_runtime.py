@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprints_in_use
 from bfx_funding_bot.modules.execution.capital_repository import CapitalRepository, CapitalView
 
 
@@ -23,3 +24,8 @@ class CapitalRuntime:
         # updates back; only the command/snapshot owner may commit them.
         async with self.session_factory() as owned:
             return await self.read(symbol=symbol, cell_id=cell_id, session=owned)
+
+    async def fingerprints_in_use(self, *, symbol: str, session: AsyncSession) -> frozenset[int]:
+        """Amount fingerprints the planner must not reuse for ``symbol`` (D3a)."""
+        return await fingerprints_in_use(session, account_id=self.repository.account_id,
+                                         environment=self.repository.environment, symbol=symbol)

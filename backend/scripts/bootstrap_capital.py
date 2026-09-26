@@ -1,6 +1,6 @@
 """Bounded first-deployment reconcile; read-only venue, durable local evidence.
 
-Requires an existing durable stop (trading state REDUCING or HALTED) and the
+Requires an existing durable stop (trading state HALTED) and the
 sole WriterLock. No policy seeding,
 executor, permit, session worker, cancel, submit or daemon startup. Run from the
 approved backend artifact with the restricted bot principal, then independently

@@ -191,5 +191,5 @@ async def verify_database_quiescence(
         SELECT state FROM public.trading_state WHERE exchange_account_id=:id
         AND deployment_environment=:env ORDER BY id DESC LIMIT 1
     """), {"id": scope.account_id, "env": scope.environment})
-    if omitted or active or trading not in {"REDUCING", "HALTED"}:
+    if omitted or active or trading != "HALTED":
         raise ValueError("database_not_quiescent")

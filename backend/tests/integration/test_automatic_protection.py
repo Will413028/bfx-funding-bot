@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import time
 from decimal import Decimal
 
 import pytest
@@ -30,16 +29,15 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
-from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
 from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
 from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
-from .test_capital_command_boundary import boundary, second_ready
+from .test_capital_command_boundary import AMOUNT, boundary, second_ready
 from .test_capital_repository import repository, setup_policy, snapshot
-from .test_kill_switch import FakeVenue, Lock
+from .test_kill_switch import FakeVenue
 
 D = Decimal
 
@@ -120,30 +118,8 @@ def recovery(factory, account, auth, protection, *, start=5000) -> BootRecovery:
 # ------------------------------------------------------------- triggers
 
 
-@pytest.mark.asyncio
-async def test_orphan_trips_quarantine_and_unattributed_and_the_kill_takes_its_currency(capital_db):
-    factory, account = capital_db
-    _, _, _, ctx, _, trading = await boundary(factory, account)
-    protection = AutomaticProtection()
-    auth = FakeAuth(offers=[_offer("555", "fUSD", "40", "40")],
-                    wallets={"fUST": D("1000"), "fUSD": D("0")})
-    recorder = Recorder()
-    with pytest.raises(CapitalBlockedError, match="unattributed_offer"):
-        await recovery(factory, account, auth, recorder).run()
-    assert recorder.triggers == {"orphan_quarantined", "unattributed_offer"}
-
-    # The same trips through the real protection and kill switch.
-    venue = FakeVenue(factory, account, {"UST": set(), "USD": {"555"}})
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=venue, writer_lock=Lock()))
-    for trigger, detail in recorder.trips:
-        protection.trip(trigger, detail)
-    await protection.run_pending()
-    state = await trading.current()
-    assert (state.state, state.cause) == ("HALTED", "auto")
-    assert state.actor in {"auto:orphan_quarantined", "auto:unattributed_offer"}
-    assert venue.offers == {}
-    assert ("USD", "HALTED") in venue.calls
+# A foreign offer (no claim, no attempt) trips nothing since lending envelope
+# D2; test_managed_offers runs it through this same recovery and gate.
 
 
 @pytest.mark.asyncio
@@ -187,7 +163,8 @@ async def test_lent_our_offers_cannot_explain_trips(capital_db):
 
 
 @pytest.mark.asyncio
-async def test_interrupted_submit_recovered_as_unknown_trips(capital_db):
+async def test_interrupted_submit_recovered_as_unknown_quarantines_without_tripping(capital_db):
+    """Lending envelope D3 level 2: the open uncertainty holds its symbol; nothing halts."""
     factory, account = capital_db
     _, _, _, _, runtime, _ = await boundary(factory, account)
     from .test_capital_repository import intent
@@ -199,7 +176,7 @@ async def test_interrupted_submit_recovered_as_unknown_trips(capital_db):
     recorder = Recorder()
     result = await recovery(factory, account, FakeAuth(), recorder, start=500_000).run()
     assert result.n_unknown == 1
-    assert recorder.triggers == {"submit_outcome_unknown"}
+    assert recorder.trips == []
 
 
 # ---------------------------------------------------------- never trips
@@ -240,13 +217,13 @@ async def test_replay_migration_catch_up_as_a_first_observation_does_not_trip(ca
 async def test_fill_caught_by_reconcile_instead_of_ws_does_not_trip(capital_db):
     factory, account = capital_db
     gate, _, ready, ctx, _, _ = await boundary(factory, account)
-    await gate.submit(ready, ctx)  # 500 offered in the ledger
-    filled = _offer("101", "fUST", "0", "500", status="EXECUTED at 0.01% (500.0)", created=1100)
-    auth = FakeAuth(credits=[_credit("from-101", "fUST", "500")], history=[filled],
-                    wallets={"fUST": D("500"), "fUSD": D("0")})
+    await gate.submit(ready, ctx)  # AMOUNT (the fingerprinted 500) offered in the ledger
+    filled = _offer("101", "fUST", "0", AMOUNT, status="EXECUTED at 0.01% (500.0)", created=1100)
+    auth = FakeAuth(credits=[_credit("from-101", "fUST", AMOUNT)], history=[filled],
+                    wallets={"fUST": D("1000") - D(AMOUNT), "fUSD": D("0")})
     recorder = Recorder()
     result = await recovery(factory, account, auth, recorder).run()
-    assert result.reserved_drift_usdt == D("500") and result.realized_drift_usdt == D("500")
+    assert result.reserved_drift_usdt == D(AMOUNT) and result.realized_drift_usdt == D(AMOUNT)
     assert recorder.trips == []
 
 
@@ -262,27 +239,16 @@ def _guarded_chain(trading, protection, account):
 
 
 @pytest.mark.asyncio
-async def test_unknown_submit_trips_inside_the_gate_lock_without_self_locking(capital_db):
-    """The trip happens while the gate's account lock is held; the kill, which
-    waits for that same lock with a 30 s budget, proceeds as soon as the
-    submit returns -- it neither deadlocks nor sits out the budget."""
+async def test_an_unknown_submit_blocks_its_symbol_but_never_halts(capital_db):
+    """D3 level 2: an ambiguous submit leaves trading ACTIVE and cancels nothing;
+    the next submit on that symbol is refused until the UNKNOWN is resolved."""
     factory, account = capital_db
     gate, venue, ready, ctx, _, trading = await boundary(factory, account)
     protection = AutomaticProtection()
     gate._safety_evaluator = _guarded_chain(trading, protection, account)
     gate.protection = protection
-    events: list[str] = []
     cancel_venue = FakeVenue(factory, account, {"UST": set()})
-    original_cancel_all = cancel_venue.cancel_all_funding_offers
-
-    async def cancel_all(**kwargs):
-        events.append("cancel_all")
-        return await original_cancel_all(**kwargs)
-
-    cancel_venue.cancel_all_funding_offers = cancel_all
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=cancel_venue, writer_lock=Lock(),
-        quiesce=lambda: gate.quiesced(str(account), timeout_s=30)))
+    protection.bind(trading)
 
     async def unknown(ready_, ctx_, *, cid, reservation_ref):
         venue.received.append(ready_)
@@ -290,25 +256,16 @@ async def test_unknown_submit_trips_inside_the_gate_lock_without_self_locking(ca
             outcome=SubmitOutcomeUnknown(reason="transport_timeout", transport_started=True))
 
     venue.submit = unknown
-    stop = asyncio.Event()
-    consumer = asyncio.create_task(protection.run(stop))
-    started = time.monotonic()
     result = await asyncio.wait_for(gate.submit(ready, ctx), timeout=10)
-    events.append("submit_returned")
     assert result.outcome_kind.value == "unknown"
-    for _ in range(500):
-        if "cancel_all" in events:
-            break
-        await asyncio.sleep(0.01)
-    stop.set()
-    await asyncio.wait_for(consumer, timeout=10)
-    assert time.monotonic() - started < 5
-    assert events == ["submit_returned", "cancel_all"]
-    state = await trading.current()
-    assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "auto:submit_outcome_unknown")
-    async with factory() as session:
-        phases = [row.phase for row in (await session.scalars(select(FundingCancelAllAuditRow))).all()]
-    assert phases == ["requested", "acknowledged"]
+    await protection.run_pending()
+    assert protection.pending_reason() is None
+    assert (await trading.current()).state == "ACTIVE"
+    assert cancel_venue.calls == []
+    later = await second_ready(factory, account, ready)
+    with pytest.raises(CommandGateBlocked):
+        await gate.submit(later, ctx)
+    assert len(venue.received) == 1
 
 
 @pytest.mark.asyncio
@@ -344,9 +301,10 @@ async def test_identity_conflict_trips(capital_db):
 
 
 @pytest.mark.asyncio
-async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(capital_db):
+async def test_a_persisting_condition_writes_one_halt_and_never_the_cancel_all(capital_db):
     """An identity conflict re-trips every reconcile tick; only the first tick
-    -- the transition into HALTED -- cancels and writes audit rows."""
+    writes HALTED. No protection calls the venue: the planner pulls managed
+    offers, and the venue cancel-all is the operator's kill alone (D3)."""
     from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
     factory, account = capital_db
     gate, _, ready, ctx, _, trading = await boundary(factory, account)
@@ -355,8 +313,7 @@ async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(ca
         (await session.get(ExecutionDecisionRow, ready.decision_id)).symbol = "fUSD"
     venue = FakeVenue(factory, account, {"UST": {"101"}})
     protection = AutomaticProtection()
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=venue, writer_lock=Lock()))
+    protection.bind(trading)
     auth = FakeAuth(offers=[_offer("101", "fUST", "500", "500")],
                     wallets={"fUST": D("500"), "fUSD": D("0")})
     tick = recovery(factory, account, auth, protection)
@@ -365,8 +322,9 @@ async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(ca
         await protection.run_pending()
     async with factory() as session:
         rows = (await session.scalars(select(FundingCancelAllAuditRow))).all()
-    assert venue.calls == [("UST", "HALTED")]  # the first tick only
-    assert [row.phase for row in rows] == ["requested", "acknowledged"]
+    assert venue.calls == [] and rows == []  # never the venue cancel-all
+    halts = [h for h in await trading.history(limit=10) if h.state == "HALTED"]
+    assert len(halts) == 1  # the first tick only
     assert protection.persisting == 2
     assert protection.pending_reason() is None
     state = await trading.current()

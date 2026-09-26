@@ -153,18 +153,50 @@ async def test_preview_apply_preserves_draft_and_history_and_never_resumes(capit
         assert set(stored.classification["symbols"]) == set(wallets)
 
 
+async def _open_unknown(factory, repo, account, symbol):
+    from bfx_funding_bot.modules.execution.events import ReservationUnknown
+    from tests.integration.test_capital_repository import intent
+
+    event, decision = intent(account, symbol=symbol)
+    async with factory.begin() as session:
+        session.add(decision)
+        await session.flush()
+        await repo.writer.append(session, event)
+        await repo.writer.append(session, ReservationUnknown(
+            symbol=symbol, cid=event.cid, account_id=str(account), is_simulated=True,
+            signal_correlation_id=event.signal_correlation_id,
+            reservation_ref=event.reservation_ref, amount=event.amount,
+            reason="test-outcome", occurred_at_ms=1150,
+        ))
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_on_the_disabled_currency_withholds_only_that_currency(capital_db):
+    """Ladder level 2 is per symbol (lending envelope T2): an UNKNOWN fUSD
+    submit says nothing about fUST's wallet, so fUST is still evaluated."""
+    from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
+
+    factory, account = capital_db
+    repo = repository(account)
+    await currency_snapshot(factory, repo, wallet_available={"fUST": Decimal("1000")})
+    await _open_unknown(factory, repo, account, "fUSD")
+    async with factory.begin() as session:
+        report = await convert_capital_policy(session, repository=repo, legacy=legacy(),
+                                              now_ms=1200, apply_digest=None)
+    for cell in ("fUST_a30", "fUST_p2"):
+        assert "unavailable" not in report["symbols"]["fUST"]["cells"][cell]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault,reason", [
     ("missing_ust", "snapshot_symbol_missing"),
     ("stale", "snapshot_stale"),
     ("incomplete", "snapshot_unavailable"),
-    ("unknown_usd", "execution_unknown"),
+    ("unknown_ust", "execution_unknown"),
 ])
 async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capital_db, fault, reason):
     from bfx_funding_bot.modules.accounts.capital_conversion import convert_capital_policy
     from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
-    from bfx_funding_bot.modules.execution.events import ReservationUnknown
-    from tests.integration.test_capital_repository import intent
 
     factory, account = capital_db
     repo = repository(account)
@@ -174,18 +206,8 @@ async def test_disabled_currency_does_not_bypass_enabled_or_account_guards(capit
     else:
         wallets = {"fUSD": Decimal("0")} if fault == "missing_ust" else {"fUST": Decimal("1000")}
         await currency_snapshot(factory, repo, wallet_available=wallets)
-    if fault == "unknown_usd":
-        event, decision = intent(account, symbol="fUSD")
-        async with factory.begin() as session:
-            session.add(decision)
-            await session.flush()
-            await repo.writer.append(session, event)
-            await repo.writer.append(session, ReservationUnknown(
-                symbol="fUSD", cid=event.cid, account_id=str(account), is_simulated=True,
-                signal_correlation_id=event.signal_correlation_id,
-                reservation_ref=event.reservation_ref, amount=event.amount,
-                reason="test-outcome", occurred_at_ms=1150,
-            ))
+    if fault == "unknown_ust":
+        await _open_unknown(factory, repo, account, "fUST")
     now_ms = 11001 if fault == "stale" else 1200
     async with factory.begin() as session:
         report = await convert_capital_policy(session, repository=repo, legacy=legacy(),

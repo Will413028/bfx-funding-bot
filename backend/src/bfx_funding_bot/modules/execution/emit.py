@@ -7,6 +7,7 @@ before emit — catches bad shapes at the call site.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -65,8 +66,8 @@ async def emit_order_submit(
         offer_id=offer_id,
         execution_decision_id=ready.decision_id,
         signal_correlation_id=decision.signal_correlation_id,
-        offer_rate=decision.offer_rate or 0.0,
-        offer_amount_usdt=decision.offer_amount_usdt or 0.0,
+        offer_rate=decision.offer_rate or Decimal(0),
+        offer_amount_usdt=decision.offer_amount_usdt or Decimal(0),
         offer_duration_days=decision.offer_duration_days or 0,
         is_simulated=is_simulated,
         status=status,

@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -45,10 +46,9 @@ GUARD_EVAL_WARN_FRACTION = 0.5
 _CAPITAL_POLICY = "capital_policy"
 _TRADING_STATE = "manual_kill"
 _TRANSPORT_EXEMPT = frozenset({_CAPITAL_POLICY})
-# Pre-trade limits (T9, safety/pre_trade.py) judge a NEW offer's terms; a cancel's
+# The offer envelope (safety/pre_trade.py) judges a NEW offer's terms; a cancel's
 # probe carries the managed offer's old terms and must never be refused by them.
-_PRE_TRADE_LIMITS = frozenset({"period_bounds", "max_offer_amount", "open_offer_limit",
-                               "rate_floor"})
+_PRE_TRADE_LIMITS = frozenset({"offer_envelope"})
 _CANCEL_EXEMPT = frozenset({_CAPITAL_POLICY, _TRADING_STATE}) | _PRE_TRADE_LIMITS
 
 
@@ -143,8 +143,8 @@ class SafetyGuardChain:
         decision = DecisionPayload(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=uuid4(),
-            offer_rate=0.0,
-            offer_amount_usdt=0.0,
+            offer_rate=Decimal(0),
+            offer_amount_usdt=Decimal(0),
             offer_duration_days=0,
             symbol=symbol,
         )
@@ -176,8 +176,8 @@ class SafetyGuardChain:
     async def evaluate_cancel(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
         """Write eligibility for cancelling one managed offer.
 
-        A cancel spends nothing and is the one venue write REDUCING and HALTED
-        exist to allow, so the capital check and the trading-state gate are
+        A cancel spends nothing and is the one venue write HALTED
+        exists to allow, so the capital check and the trading-state gate are
         skipped. Everything else still runs on the write-shaped probe: a new
         UNKNOWN or an unreadable uncertainty projection for the offer's scope,
         a lost writer lock or a down executor still refuse the cancel. The

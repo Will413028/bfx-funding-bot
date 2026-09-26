@@ -1,4 +1,4 @@
-"""Live requires the operational + loss-limit guard set; simulation needs explicit caps."""
+"""Live requires the operational guard set; simulation needs explicit caps."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,7 +17,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase
 def _safety_yaml(*, disable: str | None = None) -> str:
     on = dict.fromkeys(
         ("manual_kill", "auth_health", "heartbeat",
-         "allocation_cap", "realized_loss_24h", "drawdown_from_peak"),
+         "allocation_cap"),
         True,
     )
     if disable is not None:
@@ -39,17 +39,9 @@ hard_guards:
     enabled: {b("allocation_cap")}
   buying_power:
     enabled: true
-calibrated_guards:
-  realized_loss_24h:
-    enabled: {b("realized_loss_24h")}
-    threshold_pct: {15 if on["realized_loss_24h"] else "null"}
-  drawdown_from_peak:
-    enabled: {b("drawdown_from_peak")}
-    threshold_pct: {15 if on["drawdown_from_peak"] else "null"}
-  divergence_rate:
-    enabled: false
-    threshold_pct: null
-    window_minutes: null
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """
 
 
@@ -72,9 +64,7 @@ def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
     assert_live_guard_invariant(Phase.SHADOW, _load(tmp_path, disable="manual_kill"))
 
 
-@pytest.mark.parametrize("guard", [
-    "manual_kill", "auth_health", "heartbeat", "realized_loss_24h", "drawdown_from_peak",
-])
+@pytest.mark.parametrize("guard", ["manual_kill", "auth_health", "heartbeat"])
 def test_live_keeps_required_noncapital_guards(tmp_path, guard):
     with pytest.raises(ValueError, match=guard):
         assert_live_guard_invariant(Phase.LIVE, _load(tmp_path, disable=guard))

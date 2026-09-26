@@ -225,7 +225,6 @@ def _outcome_from_legacy_status(
 class GuardRule(Protocol):
     """Pre-trade guard. Single-method, fail-closed convention."""
     name: str
-    is_calibrated: bool   # True = L2 (enabled=false by default in 4.2)
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,

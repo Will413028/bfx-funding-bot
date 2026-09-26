@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
 from math import isfinite
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
@@ -21,8 +21,15 @@ from bfx_funding_bot.external.bitfinex.funding_rules import (
     FundingRuleProvider,
     submit_amount,
 )
+from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    choose_fingerprinted_amount,
+    fingerprint_of,
+)
 from bfx_funding_bot.modules.execution.audit import AuditContext
-from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
+from bfx_funding_bot.modules.execution.capital_repository import (
+    CapitalBlockedError,
+    read_policy_unlocked,
+)
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
@@ -60,6 +67,7 @@ from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
 )
 from bfx_funding_bot.modules.execution.deployment.tracker import CellDeploymentTracker
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
+from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     CancelPort,
@@ -71,6 +79,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
     ProtectionPort,
 )
+from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
@@ -167,8 +176,13 @@ class DeploymentReconciler:
         rate_optimizer: RateOptimizer | None = None,
         optimizer_fee_rate: Decimal | None = None,
         optimizer_horizon_h: int | None = None,
+        managed_sweep: ManagedOfferSweep | None = None,
     ) -> None:
         self._store = store
+        # Level-triggered: while the account is HALTED or a currency's policy is
+        # disabled, the managed offers there converge to none (lending envelope
+        # D3/D4); None on paper/shadow.
+        self._managed_sweep = managed_sweep
         self._tracker = tracker
         self._ledger = ledger
         self._safety = safety_chain
@@ -219,6 +233,36 @@ class DeploymentReconciler:
             c.cell_id: c.period_agg for c in cells
         }
 
+    async def _pull_if_stopped(self, symbol: str) -> bool:
+        """Whether ``symbol`` must place nothing; if so, cancel its managed offers.
+
+        The one place where the offers this bot placed are pulled when trading
+        stops (D3 level 3, D4): the account is HALTED (an automatic protection
+        or the operator; the operator's kill already sent a venue cancel-all),
+        or the currency's applied policy is disabled. Level-triggered: every
+        tick re-reads the state and cancels what is still open, so a cancel
+        refused or failed on one tick is retried on the next. Foreign offers
+        and taken loans are never touched. An unreadable state or policy is not
+        "stopped": the capital read below fails closed on it instead.
+        """
+        try:
+            repository = self._capital.repository
+            async with self._capital.session_factory() as session:
+                policy = await read_policy_unlocked(
+                    session, account_id=repository.account_id,
+                    environment=repository.environment, symbol=symbol)
+                state = await read_current(session, account_id=repository.account_id,
+                                           environment=repository.environment)
+        except Exception:
+            return False
+        halted = state is not None and state.state == HALTED
+        if policy.enabled and not halted:
+            return False
+        if self._managed_sweep is not None:
+            why = "account HALTED" if halted else "disabled by policy"
+            await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
+        return True
+
     async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
         ctx = self._ctx
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
@@ -237,6 +281,8 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
+            if await self._pull_if_stopped(symbol):
+                continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is
             # optional for compatibility with small test adapters and older
@@ -293,6 +339,11 @@ class DeploymentReconciler:
                     views = {cell: await self._capital.read(
                         symbol=symbol, cell_id=cell, session=session,
                     ) for cell in active}
+                    # D3a: the amount fingerprints this symbol's live commitments
+                    # already hold, read in the same session as the budget.
+                    held = set(await self._capital.fingerprints_in_use(
+                        symbol=symbol, session=session,
+                    ))
                 min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
             except Exception as exc:
@@ -336,11 +387,29 @@ class DeploymentReconciler:
                 quote = self._store.get_active(cell_id, now_ms=now)
                 if quote is None:  # defensive: TTL could lapse between checks
                     continue
+                # Finalise the amount before anything durable names it: the
+                # audit row, the intent, the attempt payload and the venue
+                # request all carry this exact fingerprinted value.
+                planned = amount
+                fingerprinted = choose_fingerprinted_amount(
+                    planned,
+                    seed_key=f"{reconcile_id}:{cell_id}:{quote.signal_correlation_id}",
+                    in_use=held, minimum=min_fill,
+                    maximum=views[cell_id].applied.policy.max_offer_amount,
+                )
+                if fingerprinted is None:
+                    log.warning(
+                        "deployment_skip_no_amount_fingerprint cell=%s symbol=%s planned=%s "
+                        "held=%d", cell_id, symbol, planned, len(held),
+                    )
+                    continue
+                amount = fingerprinted
+                held.add(cast(int, fingerprint_of(amount)))
                 decision = DecisionPayload(
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
                     offer_rate=quote.rate,
-                    offer_amount_usdt=float(amount),
+                    offer_amount_usdt=amount,
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
                 )
@@ -396,7 +465,7 @@ class DeploymentReconciler:
                         candidate=decision,
                         snapshot=snapshot,
                         price=price,
-                        offer_rate=Decimal(str(decision.offer_rate)),
+                        offer_rate=_offer_rate(decision),
                         now_ms=now,
                         period_agg=period_agg,
                     )
@@ -567,7 +636,7 @@ class DeploymentReconciler:
             return None
         horizon_h, _model_version, _artifact_hash = self._optimizer_scope()
         requested_horizon_h = horizon_h if horizon_h is not None else 1
-        signal_rate = Decimal(str(candidate.offer_rate))
+        signal_rate = _offer_rate(candidate)
         reference_rate = _reference_rate(price, fallback=signal_rate)
         try:
             evidence = self._fill_model_provider.estimate_fill(
@@ -612,7 +681,7 @@ class DeploymentReconciler:
         exact_period_evidence = (
             price_evidence if isinstance(price_evidence, FillModelEvidence) else None
         )
-        signal_rate = Decimal(str(candidate.offer_rate))
+        signal_rate = _offer_rate(candidate)
         book_evidence = {
             "snapshot_id": price.evidence.get("snapshot_id"),
             "branch": price.branch.value,
@@ -776,7 +845,7 @@ class DeploymentReconciler:
             # 無 active POST quote：resting 高價單 = 免費 spike option，留著。
             # 下一個 POST quote 出現時本 sweep 自然會 reprice-down。
             return 0
-        ref = max(quotes, key=lambda q: q.rate or 0.0)
+        ref = max(quotes, key=lambda q: q.rate or Decimal(0))
         assert ref.rate is not None  # POST quote 的 rate 必非 None
         symbol_offers = [o for o in venue_offers if o.symbol == symbol]
         ref_by_offer: dict[str, float]
@@ -791,9 +860,10 @@ class DeploymentReconciler:
                 now_ms=now, policy=self._reprice,
             )
         else:
-            ref_by_offer = {o.venue_offer_id: ref.rate for o in symbol_offers}
+            # The reprice heuristic compares against float venue offer rates.
+            ref_by_offer = {o.venue_offer_id: float(ref.rate) for o in symbol_offers}
             candidates = stale_offers(
-                offers=symbol_offers, ref_rate=ref.rate, now_ms=now, policy=self._reprice,
+                offers=symbol_offers, ref_rate=float(ref.rate), now_ms=now, policy=self._reprice,
             )
         issued = 0
         for offer in candidates:
@@ -833,6 +903,13 @@ class DeploymentReconciler:
         return issued
 
 
+def _offer_rate(candidate: DecisionPayload) -> Decimal:
+    """A POST candidate's exact signal rate (the schema guarantees it is set)."""
+    if candidate.offer_rate is None:
+        raise ValueError("POST candidate requires offer_rate")
+    return candidate.offer_rate
+
+
 def _book_reprice_reference_for(
     *,
     pricer: PeriodPricer,
@@ -853,7 +930,7 @@ def _book_reprice_reference_for(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=quote.signal_correlation_id,
             offer_rate=quote.rate,
-            offer_amount_usdt=float(offer.amount),
+            offer_amount_usdt=offer.amount,
             offer_duration_days=offer.period_days,
             symbol=symbol,
         )

@@ -179,8 +179,11 @@ async def test_crash_mid_flight_leaves_pending(pg_session_factory) -> None:
             raise RuntimeError("crash between INTENT and outcome")
 
     mw = _mw(_RaisingInner(), pg_session_factory)
-    with pytest.raises(RuntimeError):
+    # Process fencing: the gate ends the process; the crash is the cause.
+    from bfx_funding_bot.modules.execution.command_gate import SubmitOutcomeLostError
+    with pytest.raises(SubmitOutcomeLostError) as lost:
         await mw.submit(_ready(_decision(), "wp-crash-decision"), _ctx(acct))
+    assert isinstance(lost.value.__cause__, RuntimeError)
     async with pg_session_factory() as s:
         rows = (await s.execute(select(OfferClaimRow).where(
             OfferClaimRow.account_id == acct,

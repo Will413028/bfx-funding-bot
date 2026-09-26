@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import NoReturn, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -23,7 +23,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
+from bfx_funding_bot.external.bitfinex.live_executor import (
+    format_offer_amount,
+    format_venue_decimal,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
+from bfx_funding_bot.modules.execution.amount_fingerprint import (
+    fingerprint_of,
+    fingerprints_in_use,
+)
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
@@ -50,10 +58,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     ExecutorPort,
     SubmittedOrder,
 )
-from bfx_funding_bot.modules.execution.safety.protection import (
-    SUBMIT_OUTCOME_UNKNOWN,
-    ProtectionPort,
-)
+from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
 from bfx_funding_bot.modules.execution.submit_outcomes import (
     SubmissionAttemptPayload,
     SubmitNotSent,
@@ -63,8 +68,17 @@ from bfx_funding_bot.modules.execution.submit_outcomes import (
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import ExecutionUncertaintyRow
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
+from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
+
+
+class SubmitOutcomeLostError(BaseException):
+    """A submit's outcome could not be made durable; the process must exit.
+
+    A BaseException, like ``SystemExit``, so no ``except Exception`` on the way up
+    keeps the daemon running: its task group ends and the container restarts.
+    """
 
 
 class CommandGateBlocked(RuntimeError):  # noqa: N818 - domain state, not a failure suffix
@@ -167,7 +181,6 @@ class AccountCommandGate:
         # Always-on venue write rate limit (T9); installed by the live daemon.
         self.throttle: CommandRateLimiter | None = None
         self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._latched_scopes: dict[tuple[str, str, str], str] = {}
 
     @contextlib.asynccontextmanager
     async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
@@ -200,10 +213,6 @@ class AccountCommandGate:
         """Check the exact uncertainty scope, treating every read error as blocked."""
         payload = decision.decision if isinstance(decision, ReadyToSubmit) else decision
         account_id = _canonical_account_id(context.account_id)
-        scope = (str(account_id), self._deployment_environment, payload.symbol)
-        latched_reason = self._latched_scopes.get(scope)
-        if latched_reason is not None:
-            raise CommandGateBlocked(latched_reason)
         try:
             is_open = await self._uncertainty_reader.has_open(
                 exchange_account_id=account_id,
@@ -256,7 +265,7 @@ class AccountCommandGate:
             signal_correlation_id=decision.signal_correlation_id,
         )
         _validate_reference(reference, ready=ready, cid=cid)
-        size = Decimal(str(decision.offer_amount_usdt or 0.0))
+        size = decision.offer_amount_usdt if decision.offer_amount_usdt is not None else Decimal(0)
         intent_ms = self._clock()
         attempt = SubmissionAttemptPayload(
             attempt_id=uuid4(),
@@ -297,15 +306,24 @@ class AccountCommandGate:
                 async with runtime.session_factory.begin() as session:
                     row = await session.get(ExecutionDecisionRow, ready.decision_id)
                     if row is None or row.outcome != "ready" or (
-                        row.applied_rate != Decimal(str(decision.offer_rate))
+                        row.applied_rate != decision.offer_rate
                         or row.duration_days != decision.offer_duration_days
                     ):
                         raise CommandGateBlocked("execution_audit_conflict")
 
                     async def locked_guard(locked: AsyncSession) -> None:
-                        scope = (canonical_account, self._deployment_environment, decision.symbol)
-                        if scope in self._latched_scopes:
-                            raise CommandGateBlocked(self._latched_scopes[scope])
+                        # D3a: the fingerprint is this submit's only identity at
+                        # the venue. Checked under the account lock, in the
+                        # transaction that writes the intent, so no two
+                        # unresolved submits of a symbol can ever share one.
+                        fingerprint = fingerprint_of(size)
+                        if not fingerprint:
+                            raise CommandGateBlocked("amount_fingerprint_missing")
+                        if fingerprint in await fingerprints_in_use(
+                            locked, account_id=account_id,
+                            environment=self._deployment_environment, symbol=decision.symbol,
+                        ):
+                            raise CommandGateBlocked("amount_fingerprint_collision")
                         await self._guard(decision, replace(
                             context, command_session=locked, capital_cell_id=row.cell_id,
                         ))
@@ -342,9 +360,10 @@ class AccountCommandGate:
                     )) if self._capital is not None else context,
                     cid=cid, reservation_ref=reference,
                 )
-        except BaseException:
-            self._latch(decision.symbol, canonical_account, "submit ended without durable outcome")
-            raise
+        except asyncio.CancelledError:
+            raise  # shutting down: recovery turns the durable PENDING into UNKNOWN
+        except BaseException as exc:
+            self._outcome_lost(decision.symbol, "submit ended without durable outcome", exc)
         try:
             result = _bind_result(result, reference=reference)
         except _OutcomeIdentityMismatchError:
@@ -370,9 +389,10 @@ class AccountCommandGate:
                 size=size,
                 occurred_at_ms=outcome_ms,
             )
-        except BaseException:
-            self._latch(decision.symbol, canonical_account, "outcome persistence failed")
+        except asyncio.CancelledError:
             raise
+        except BaseException as exc:
+            self._outcome_lost(decision.symbol, "outcome persistence failed", exc)
         return result
 
     async def _guard(self, decision: DecisionPayload, context: AccountContext,
@@ -409,8 +429,8 @@ class AccountCommandGate:
                      account_id: str, ctx: AccountContext) -> None:
         """Durable cancel admission; ACK never releases capital in this boundary.
 
-        Cancelling is allowed in every trading state -- it is what REDUCING and
-        HALTED are for -- so it is not gated on the trading state. It is still refused without managed provenance and
+        Cancelling is allowed in every trading state -- it is what HALTED is
+        for -- so it is not gated on the trading state. It is still refused without managed provenance and
         while the offer's scope has an open or unreadable uncertainty, at
         admission and again before every transport attempt.
         """
@@ -468,8 +488,8 @@ class AccountCommandGate:
                 # order's identity; explicitly omit only capital spending checks.
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=signal_correlation_id, symbol=claim.symbol,
-                    offer_amount_usdt=float(claim.size_usdt),
-                    offer_rate=float(decision_row.applied_rate),
+                    offer_amount_usdt=claim.size_usdt,
+                    offer_rate=decision_row.applied_rate,
                     offer_duration_days=decision_row.duration_days)
                 await self._guard(probe, replace(ctx, command_session=session), cancel=True)
                 await runtime.repository.writer.append(session, CancelRequested(
@@ -478,7 +498,7 @@ class AccountCommandGate:
                     occurred_at_ms=self._clock(),
                 ))
             async def before_transport() -> None:
-                # Fresh scoped uncertainty/latch check after commit AND before
+                # Fresh scoped uncertainty check after commit AND before
                 # every idempotent retry. Read errors fail closed, outside txn.
                 await self.check(probe, ctx)
                 await self._guard(probe, ctx, cancel=True)
@@ -520,10 +540,8 @@ class AccountCommandGate:
                 ),
             )
             await self._persister.persist(unknown_event)
-            if self.protection is not None:
-                self.protection.trip(SUBMIT_OUTCOME_UNKNOWN, (
-                    f"cid={reference.cid} symbol={decision.symbol} amount={size} "
-                    f"reason={unknown_event.reason}"))
+            # Lending envelope D3 level 2: the open uncertainty quarantines this
+            # symbol until a snapshot resolves it; nothing is halted.
             if self._uncertainty_handler is not None:
                 await self._uncertainty_handler(unknown_event)
             return
@@ -589,7 +607,7 @@ class AccountCommandGate:
                 reservation_ref=reference,
                 venue_offer_id=result.venue_offer_id or "",
                 credit_id=None,
-                fill_rate=decision.offer_rate or 0.0,
+                fill_rate=float(decision.offer_rate or 0),  # paper fill event field
             )
         events: tuple[object, ...] = (claimed, filled) if filled is not None else (claimed,)
         await self._persister.persist(*events)
@@ -602,8 +620,16 @@ class AccountCommandGate:
         if self.throttle is not None and not self.throttle.admit(kind):
             raise CommandGateBlocked("command_rate_limited")
 
-    def _latch(self, symbol: str, account_id: str, reason: str) -> None:
-        self._latched_scopes[(account_id, self._deployment_environment, symbol)] = reason
+    def _outcome_lost(self, symbol: str, reason: str, exc: BaseException) -> NoReturn:
+        """Process fencing (lending envelope D3): a submit whose outcome could
+        not be made durable leaves this process unsure what it sent, so it stops
+        writing and exits. The durable intent stays PENDING; the restarted
+        daemon's recovery turns it into an UNKNOWN that quarantines the symbol
+        until evidence resolves it -- no in-memory state to outlive the cause."""
+        log.critical("submit_outcome_lost symbol=%s reason=%s error=%s: exiting", symbol, reason,
+                     type(exc).__name__)
+        alerts.emit(alerts.DAEMON_FATAL, error=f"{reason} ({symbol}): exiting")
+        raise SubmitOutcomeLostError(f"{reason} ({symbol})") from exc
 
     async def _safe_publish(self, event: object) -> None:
         try:
@@ -674,17 +700,19 @@ def _bind_result(
 
 
 def _normalized_venue_payload(decision: DecisionPayload) -> dict[str, object]:
-    """Capture the exact secret-free funding-offer body before transport."""
-    amount = (
-        format(Decimal(str(decision.offer_amount_usdt)), "f")
-        if decision.offer_amount_usdt is not None
-        else None
-    )
-    rate = (
-        format(Decimal(str(decision.offer_rate)), "f")
-        if decision.offer_rate is not None
-        else None
-    )
+    """Capture the exact secret-free funding-offer body before transport.
+
+    Formatted by the venue adapter's own formatters from the decision's
+    Decimals, so the durable attempt names byte-for-byte the amount and rate
+    the venue receives (the amount's fingerprint included).
+    """
+    try:
+        amount = (format_offer_amount(decision.offer_amount_usdt)
+                  if decision.offer_amount_usdt is not None else None)
+        rate = (format_venue_decimal(decision.offer_rate)
+                if decision.offer_rate is not None else None)
+    except ValueError as exc:
+        raise CommandGateBlocked("offer_terms_invalid") from exc
     return normalize_submit_payload(
         {
             "type": "LIMIT",

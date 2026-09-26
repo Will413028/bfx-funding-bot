@@ -1,8 +1,10 @@
-"""Kill switch: write HALTED, then cancel every funding offer at the venue.
+"""Kill switch: the operator's stop -- write HALTED, then cancel every funding offer.
 
-ADR 2026-09-25 D4 (Will, 2026-09-25): HALTED = the durable stop plus a venue
-funding cancel-all, including orphan offers and currencies with an unresolved
-UNKNOWN, needing only the writer lock and no other guard.
+Lending envelope ADR 2026-09-25 D4: the operator's kill (UI request or
+/admin/halt) is a venue funding cancel-all per currency, which also pulls
+offers placed by hand or by Bitfinex auto-renew, needing only the writer lock
+and no other guard. It is the only venue cancel-all: an automatic protection
+writes HALTED alone, and the planner then pulls the managed offers by id.
 
 Order is the contract:
 

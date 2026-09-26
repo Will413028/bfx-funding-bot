@@ -123,7 +123,7 @@ class _FakeTradingState:
         self, state: str, *, cause: str, actor: str, reason: str, now_ms: int | None = None,
     ) -> TransitionResult:
         previous = self.state
-        if restates(previous, state=state, cause=cause, probation=None):
+        if restates(previous, state=state, cause=cause):
             assert previous is not None
             return TransitionResult(state=previous, changed=False, previous=previous)
         validate_transition(previous, state=state, cause=cause, actor=actor, reason=reason)
@@ -147,8 +147,8 @@ def _trading(
 
 
 def _halt_state(halted: bool, reason: str = "candle distortion") -> TradingState:
-    """An operator's pause (REDUCING) or ACTIVE: the old maintenance halt/resume."""
-    return _trading("REDUCING" if halted else "ACTIVE", reason=reason)
+    """An operator's HALTED or ACTIVE: the old maintenance halt/resume."""
+    return _trading("HALTED" if halted else "ACTIVE", reason=reason)
 
 
 def _service(
@@ -433,8 +433,8 @@ async def test_dry_run_echoes_the_synthetic_decision_it_evaluated() -> None:
     out = await svc.dry_run(symbol="fUST", amount=250.0, rate=0.0002, period_days=7)
     d = out["symbols"]["fUST"]["decision"]
     assert d["symbol"] == "fUST"
-    assert d["offer_amount_usdt"] == 250.0
-    assert d["offer_rate"] == 0.0002
+    assert d["offer_amount_usdt"] == "250.0"  # exact decimal strings
+    assert d["offer_rate"] == "0.0002"
     assert d["offer_duration_days"] == 7
 
 
@@ -443,7 +443,7 @@ async def test_dry_run_defaults_come_from_the_configured_cells_not_magic_numbers
     svc = _service(cells=[_cell("fUST")])
     out = await svc.dry_run()
     d = out["symbols"]["fUST"]["decision"]
-    assert d["offer_amount_usdt"] == 150.0  # cell reference_amount_usdt
+    assert d["offer_amount_usdt"] == "150.0"  # cell reference_amount_usdt
 
 
 @pytest.mark.asyncio
@@ -504,7 +504,7 @@ async def test_status_reports_the_persisted_stop(
     assert snap["halt"]["halted"] is True
     persisted = snap["halt"]["sources"]["persisted"]
     assert persisted["halted"] is True
-    assert persisted["state"] == "REDUCING"
+    assert persisted["state"] == "HALTED"
     assert persisted["reason"] == "candle distortion"
     assert persisted["actor"] == "admin"
     assert persisted["id"] == 7
@@ -519,25 +519,6 @@ async def test_never_configured_persisted_state_is_null_and_reads_as_halted(
     snap = await _service(trading_state=_FakeTradingState(None)).snapshot()
     assert snap["halt"]["sources"]["persisted"] is None
     assert snap["halt"]["halted"] is True
-
-
-@pytest.mark.asyncio
-async def test_no_recorded_decision_cannot_be_paused() -> None:
-    store = _FakeTradingState(None)
-    service = _service(trading_state=store)
-    with pytest.raises(ValueError, match="HALTED -> REDUCING"):
-        await service.pause(reason="pause", actor="admin")
-    assert store.writes == []
-
-
-@pytest.mark.asyncio
-async def test_pause_writes_a_reducing_transition() -> None:
-    store = _FakeTradingState(_trading("ACTIVE"))
-    svc = _service(trading_state=store)
-    out = await svc.pause(reason="candle distortion", actor="admin")
-    assert store.writes == [("REDUCING", "operator", "candle distortion", "admin")]
-    assert out["halted"] is True
-    assert out["state"] == "REDUCING"
 
 
 class _FakeKillSwitch:
@@ -570,35 +551,12 @@ async def test_halt_is_the_operator_kill_and_reports_the_venue_part(complete: bo
 
 
 @pytest.mark.asyncio
-async def test_operator_halt_is_recorded_as_a_reducing_pause() -> None:
-    """This endpoint exists for operator pauses; guards record their own halts."""
-    store = _FakeTradingState(_trading("ACTIVE"))
-    service = _service(trading_state=store)
-
-    out = await service.pause(reason="pg 18.6 upgrade", actor="admin")
-
-    assert out["state"] == "REDUCING"
-    assert out["cause"] == "operator"
-
-
-@pytest.mark.asyncio
-async def test_operator_pause_cannot_relabel_a_halt() -> None:
-    """HALTED ends only in an operator's authenticated resume, never in a pause."""
-    store = _FakeTradingState(_trading("HALTED", cause="auto"))
-    with pytest.raises(ValueError, match="HALTED -> REDUCING"):
-        await _service(trading_state=store).pause(reason="maintenance", actor="admin")
-    assert store.writes == []
-
-
-@pytest.mark.asyncio
 async def test_halt_without_a_store_is_a_clear_error_not_a_silent_noop() -> None:
     """paper/shadow have no store. Silently accepting a halt request there
     would report success while changing nothing."""
     svc = _service(trading_state=None)
     with pytest.raises(ValueError, match="not configured"):
         await svc.halt(reason="x", actor="admin")
-    with pytest.raises(ValueError, match="not configured"):
-        await svc.pause(reason="x", actor="admin")
 
 
 @pytest.mark.asyncio

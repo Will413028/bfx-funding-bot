@@ -22,9 +22,8 @@ Contract (the reason this module exists in this shape):
 
 Wiring: the daemon installs the configured sink with :func:`install`; hooks
 call the module-level :func:`emit`. Before installation (tests, scripts) the
-default sink only logs. New event names need no registration -- T5's
-"material deploy awaiting approval" or "probation started/lifted" just call
-``emit("material_deploy_awaiting_approval", level="warning", ...)``.
+default sink only logs. New event names need no registration -- a hook just
+calls ``emit("foreign_exposure", level="warning", ...)``.
 """
 from __future__ import annotations
 
@@ -54,6 +53,11 @@ PROTECTION_TRIPPED: Final = "protection_tripped"
 KILL_SWITCH_ENGAGED: Final = "kill_switch_engaged"
 BOOT_REFUSED: Final = "boot_refused"
 DAEMON_FATAL: Final = "daemon_fatal"
+# An active venue offer no durable intent traces to (lending envelope D2):
+# never cancelled or counted as managed, reported once per venue offer id.
+FOREIGN_EXPOSURE: Final = "foreign_exposure"
+# An UNKNOWN submit has quarantined its currency past the alert age (D3 level 2).
+UNKNOWN_QUARANTINE_AGED: Final = "unknown_quarantine_aged"
 
 # Fields that identify "the same event" for de-duplication. Unlisted events
 # de-duplicate on all of their fields.
@@ -63,15 +67,17 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     KILL_SWITCH_ENGAGED: ("state_id", "complete"),  # retries of the same kill
     BOOT_REFUSED: ("error",),
     DAEMON_FATAL: ("error",),
+    FOREIGN_EXPOSURE: ("venue_offer_id",),
+    UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
 }
 
 # Human titles for the protection triggers the plan names explicitly.
 TRIGGER_TITLES: Final[Mapping[str, str]] = {
-    "submit_outcome_unknown": "UNKNOWN submit",
-    "orphan_quarantined": "orphan offer quarantined",
-    "writer_lock_lost": "writer lock lost",
+    "unclassifiable_commitment": "commitment the ledger cannot place",
+    "offer_amount_mismatch": "managed offer amount differs from the submit",
+    "identity_conflict": "ledger and venue disagree about an offer",
+    "venue_lent_above_ledger": "lending nothing explains",
     "command_rate_exceeded": "venue write rate kept exceeding its limit",
-    "loss_limiter": "loss limiter",
 }
 
 # Values of these keys are scrubbed from every alert (exception text can carry them).
@@ -302,7 +308,7 @@ def secret_values(environ: Mapping[str, str]) -> tuple[str, ...]:
 
 def default_level(event: str, fields: Mapping[str, object]) -> str:
     if event == TRADING_STATE_CHANGED:
-        return {"HALTED": CRITICAL, "REDUCING": WARNING}.get(str(fields.get("state")), INFO)
+        return CRITICAL if fields.get("state") == "HALTED" else INFO
     if event == KILL_SWITCH_ENGAGED:
         return WARNING if fields.get("complete") is True else CRITICAL
     if event in {PROTECTION_TRIPPED, BOOT_REFUSED, DAEMON_FATAL}:
@@ -322,6 +328,14 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "bot refused to boot"
     if event == DAEMON_FATAL:
         return "bot stopped on a fatal error"
+    if event == FOREIGN_EXPOSURE:
+        return "foreign offer on the account (not managed, left untouched)"
+    if event == UNKNOWN_QUARANTINE_AGED:
+        return f"{fields.get('symbol', '?')} paused: an UNKNOWN submit is still unresolved"
+    if event == "nav_drop":
+        return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
+    if event == "foreign_lending":
+        return "lending no bot offer explains (foreign offer filled unseen)"
     return event
 
 
@@ -370,11 +384,13 @@ __all__ = [
     "CRITICAL",
     "DAEMON_FATAL",
     "DEDUP_FIELDS",
+    "FOREIGN_EXPOSURE",
     "INFO",
     "KILL_SWITCH_ENGAGED",
     "PROTECTION_TRIPPED",
     "TRADING_STATE_CHANGED",
     "TRIGGER_TITLES",
+    "UNKNOWN_QUARANTINE_AGED",
     "WARNING",
     "AlertDeliveryError",
     "AlertSink",

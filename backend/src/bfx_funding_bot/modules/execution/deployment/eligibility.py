@@ -222,7 +222,7 @@ class ExecutionGate:
 
         assert isinstance(price, PriceDecision)
         assert snapshot is not None
-        applied_candidate = candidate.model_copy(update={"offer_rate": float(price.rate)})
+        applied_candidate = candidate.model_copy(update={"offer_rate": price.rate})
         audit_decision = self._audit_decision(
             candidate=candidate,
             decision_id=decision_id,
@@ -728,7 +728,7 @@ def _fill_model_block_reason(reason: str) -> BlockReason:
     }.get(reason, BlockReason.FILL_MODEL_MISSING)
 
 
-def _required_decimal(value: float | None, name: str) -> Decimal:
+def _required_decimal(value: Decimal | None, name: str) -> Decimal:
     if value is None:
         raise ValueError(f"POST candidate requires {name}")
-    return Decimal(str(value))
+    return value

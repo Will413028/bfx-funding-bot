@@ -1,12 +1,12 @@
-"""T9 pre-trade limits against real SQL (SQLite and PostgreSQL); only the venue is fake.
+"""Pre-trade limits against real SQL (SQLite and PostgreSQL); only the venue is fake.
 
-- max_offer_amount: an applied policy without the ceiling refuses; the operator
-  amendment (dry run -> digest -> apply) writes schema 2 through apply_policy;
-  the guard then bounds the offer inside the command gate's locked boundary.
-- open_offer_limit counts the durable venue-offer projection.
+- offer_envelope: an applied policy without an envelope refuses; the operator
+  amendment (dry run -> digest -> apply) writes schema 3 through apply_policy;
+  the guard then bounds the offer inside the command gate's locked boundary,
+  and its open-offer count reads the durable venue-offer projection.
 - The command gate's throttle refuses before anything durable and trips
   HALTED/auto on sustained excess.
-- The loss limiter's 24h window survives a restart.
+- The NAV-drop alert's 24h window survives a restart.
 """
 from __future__ import annotations
 
@@ -21,7 +21,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, select, text
 
-from bfx_funding_bot.modules.accounts.capital_amendment import amend_capital_policy
+from bfx_funding_bot.modules.accounts.capital_amendment import (
+    PolicyChanges,
+    amend_capital_policy,
+)
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.event_store.tables import EventLogRow, VenueOfferStateRow
@@ -31,17 +34,17 @@ from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNav
 from bfx_funding_bot.modules.execution.safety.nav_window_store import NavWindowStore
 from bfx_funding_bot.modules.execution.safety.pre_trade import (
     CommandThrottle,
-    MaxOfferAmountGuard,
-    OpenOfferLimitGuard,
+    OfferEnvelopeGuard,
 )
 from bfx_funding_bot.modules.execution.safety.protection import (
     COMMAND_RATE_EXCEEDED,
-    LOSS_LIMITER,
-    LossLimitMonitor,
+    NAV_DROP,
+    NavDropMonitor,
 )
 from bfx_funding_bot.modules.execution.safety.tables import NavWindowSampleRow
 from bfx_funding_bot.modules.marketfeed.schemas import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.observability import alerts
+from tests.modules.execution.safety.test_pre_trade import Book, book
 
 from .test_capital_command_boundary import boundary, second_ready, stop_chain
 from .test_capital_repository import capital_db as capital_db
@@ -72,10 +75,17 @@ async def _intents(factory) -> int:
             EventLogRow.event_type == "RESERVATION_INTENT"))).all())
 
 
-async def _amend(factory, runtime, amount: str, *, digest: str | None = None) -> dict[str, Any]:
+FULL = PolicyChanges(max_offer_amount=Decimal("200"), min_period_days=2, max_period_days=2,
+                     max_open_offers=2, rate_floor_ratio=Decimal("0.5"),
+                     min_rate_apr=Decimal("0.01"))
+MARKET = Book(book((0.0003, 2), (0.0001, 2), (0.0002, 2)))  # relative floor 0.0001
+
+
+async def _amend(factory, runtime, changes: PolicyChanges, *,
+                 digest: str | None = None) -> dict[str, Any]:
     async with factory() as session:
         report = await amend_capital_policy(session, repository=runtime.repository, symbol="fUST",
-                                            max_offer_amount=Decimal(amount), apply_digest=digest)
+                                            changes=changes, apply_digest=digest)
         if report["status"] == "applied":
             await session.commit()
         else:
@@ -84,66 +94,89 @@ async def _amend(factory, runtime, amount: str, *, digest: str | None = None) ->
 
 
 @pytest.mark.asyncio
-async def test_policy_without_a_ceiling_refuses_and_the_amendment_bounds_each_offer(capital_db):
+async def test_policy_without_an_envelope_refuses_and_the_amendment_bounds_each_offer(capital_db):
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
-    gate._safety_evaluator = stop_chain(halt, account, MaxOfferAmountGuard(runtime=runtime))
+    guard = OfferEnvelopeGuard(runtime=runtime, book=MARKET, clock=lambda: 1_000)
+    gate._safety_evaluator = stop_chain(halt, account, guard)
 
-    # Schema 1 (no ceiling): refused inside the locked boundary, nothing durable.
-    with pytest.raises(CommandGateBlocked, match="max_offer_amount_unset"):
+    # Schema 1 (no envelope): refused inside the locked boundary, nothing durable.
+    with pytest.raises(CommandGateBlocked, match="envelope_unset"):
         await gate.submit(ready, ctx)
     assert venue.received == [] and await _intents(factory) == 0
 
-    # Dry run is reviewable and changes nothing; a stale digest is refused.
-    report = await _amend(factory, runtime, "200")
+    # A first envelope needs every field; the dry run changes nothing; a stale
+    # digest is refused.
+    with pytest.raises(CapitalBlockedError, match="envelope_incomplete: max_period_days"):
+        await _amend(factory, runtime, PolicyChanges(min_period_days=2))
+    report = await _amend(factory, runtime, FULL)
     assert report["status"] == "dry_run" and report["expected_revision"] == 1
-    assert report["new_policy"]["max_offer_amount"] == "200" and report["new_schema_version"] == 2
+    assert report["new_schema_version"] == 3
+    assert report["new_policy"]["envelope"]["min_rate_apr"] == "0.01"
     with pytest.raises(CapitalBlockedError, match="amendment_changed"):
-        await _amend(factory, runtime, "200", digest="0" * 64)
-    applied = await _amend(factory, runtime, "200", digest=report["amendment_digest"])
+        await _amend(factory, runtime, FULL, digest="0" * 64)
+    applied = await _amend(factory, runtime, FULL, digest=report["amendment_digest"])
     assert (applied["status"], applied["new_revision"]) == ("applied", 2)
-    assert (await _amend(factory, runtime, "200"))["status"] == "unchanged"
-    async with factory() as session:
-        policy = (await runtime.repository.read_applied(session, symbol="fUST")).policy
-    assert policy.max_offer_amount == Decimal("200")
+    assert (await _amend(factory, runtime, FULL))["status"] == "unchanged"
 
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    with pytest.raises(CommandGateBlocked, match=r"offer_amount 500(\.0)? > max_offer_amount 200"):
+    with pytest.raises(CommandGateBlocked, match=r"offer_amount 499\.99990500 > max_offer_amount 200"):
         await gate.submit(replace(ready, capital_view=view), ctx)
     assert venue.received == [] and await _intents(factory) == 0
     within = replace(await second_ready(factory, account, ready), capital_view=view)
-    await gate.submit(within, ctx)                          # 200 <= 200
+    await gate.submit(within, ctx)                          # 200 <= 200, rate on the floor
     assert len(venue.received) == 1 and await _intents(factory) == 1
+
+    # A later amendment may change one field, and a bad value is refused.
+    one = await _amend(factory, runtime, PolicyChanges(max_open_offers=1))
+    assert one["new_policy"]["envelope"]["max_open_offers"] == 1
+    with pytest.raises(CapitalBlockedError, match="invalid_policy"):
+        await _amend(factory, runtime, PolicyChanges(max_period_days=121))
 
 
 @pytest.mark.asyncio
-async def test_open_offer_limit_counts_the_durable_projection(capital_db):
+async def test_disabling_through_the_amendment_zeroes_the_budget(capital_db):
     factory, account = capital_db
-    guard = OpenOfferLimitGuard(session_factory=factory, account_id=account, environment="ci",
-                                limits={"fUST": 2})
+    _gate, _venue, _ready, _ctx, runtime, _halt = await boundary(factory, account)
+    report = await _amend(factory, runtime, PolicyChanges(enabled=False))
+    await _amend(factory, runtime, PolicyChanges(enabled=False),
+                 digest=report["amendment_digest"])
+    view = await runtime.read(symbol="fUST", cell_id="a30")
+    assert (view.budget.max_new_offer, view.budget.reason) == (Decimal("0"), "policy_disabled")
+
+
+@pytest.mark.asyncio
+async def test_open_offers_are_counted_from_the_durable_projection(capital_db):
+    factory, account = capital_db
+    _gate, _venue, _ready, ctx, runtime, _halt = await boundary(factory, account)
+    report = await _amend(factory, runtime, FULL)
+    await _amend(factory, runtime, FULL, digest=report["amendment_digest"])
+    guard = OfferEnvelopeGuard(runtime=runtime, book=MARKET, clock=lambda: 1_000)
     decision = DecisionPayload(decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
                                offer_rate=0.0002, offer_amount_usdt=200, offer_duration_days=2,
                                symbol="fUST")
     ctx = AccountContext(str(account), Credentials("k", "s"), Decimal("0"))
+    environment = runtime.repository.environment
 
-    async def add(offer_id: str, *, symbol: str = "fUST", terminal: bool = False) -> None:
+    async def add(offer_id: str, *, symbol: str = "fUST", terminal: bool = False,
+                  managed: bool = True) -> None:
         async with factory.begin() as session:
             session.add(VenueOfferStateRow(
-                exchange_account_id=account, deployment_environment="ci", venue_offer_id=offer_id,
-                symbol=symbol, amount_original=Decimal("200"), amount_remaining=Decimal("200"),
-                rate=Decimal("0.0002"), period_days=2, status="ACTIVE", flags={}, mts_created=1,
-                mts_updated=1, first_seen_event_seq=1, last_seen_event_seq=1, is_terminal=terminal))
+                exchange_account_id=account, deployment_environment=environment,
+                venue_offer_id=offer_id, symbol=symbol, amount_original=Decimal("200"),
+                amount_remaining=Decimal("200"), rate=Decimal("0.0002"), period_days=2,
+                status="ACTIVE", flags={}, mts_created=1, mts_updated=1, first_seen_event_seq=1,
+                last_seen_event_seq=1, is_terminal=terminal,
+                execution_decision_id=f"d-{offer_id}" if managed else None))
 
     await add("1")
+    await add("m", managed=False)                           # a manual offer takes no slot (D2)
     await add("2", terminal=True)                           # executed/cancelled: not open
     await add("3", symbol="fUSD")                           # another symbol
     assert (await guard.evaluate(decision, ctx)).allowed
     await add("4")
     result = await guard.evaluate(decision, ctx)
     assert (result.allowed, result.reason) == (False, "open_offers 2 >= limit 2")
-    unconfigured = OpenOfferLimitGuard(session_factory=factory, account_id=account,
-                                       environment="ci", limits={})
-    assert not (await unconfigured.evaluate(decision, ctx)).allowed
 
 
 @pytest.mark.asyncio
@@ -164,10 +197,12 @@ async def test_throttle_refuses_before_anything_durable_and_trips_on_sustained_e
 
     later = await second_ready(factory, account, ready)
     with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
-        await gate.submit(later, ctx)
-    with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
         await gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
                           account_id=ctx.account_id, ctx=ctx)
+    assert trips.calls == []  # a refused cancel waits for a token; it never counts toward a stop
+    for _ in range(2):
+        with pytest.raises(CommandGateBlocked, match="command_rate_limited"):
+            await gate.submit(later, ctx)
     assert venue.received == received
     async with factory() as session:
         assert len((await session.scalars(select(EventLogRow))).all()) == durable
@@ -182,7 +217,7 @@ def _reconciled(account, nav: str, at_ms: int) -> PositionReconciled:
 
 
 @pytest.mark.asyncio
-async def test_loss_window_survives_a_restart_and_the_limiter_still_trips(capital_db):
+async def test_loss_window_survives_a_restart_and_the_nav_drop_still_alerts(capital_db):
     factory, account = capital_db
     store = NavWindowStore(factory, account_id=account, deployment_environment="ci")
     hour = 3_600_000
@@ -200,11 +235,17 @@ async def test_loss_window_survives_a_restart_and_the_limiter_still_trips(capita
     after = ReconcileNavTracker(str(account), window_store=store)
     await after.load_persisted_window()
     assert after.realized_loss_pct_24h("fUST") == pytest.approx(10.0)
-    trips = Trips()
-    monitor = LossLimitMonitor(source=after, protection=trips, realized_loss_threshold_pct=5.0,
-                               drawdown_threshold_pct=None)
-    await monitor.on_position_reconciled(_reconciled(account, "900", 3 * hour))
-    assert [trigger for trigger, _ in trips.calls] == [LOSS_LIMITER]
+    sent: list[str] = []
+    monitor = NavDropMonitor(source=after, realized_loss_threshold_pct=5.0,
+                             drawdown_threshold_pct=None)
+    import bfx_funding_bot.modules.execution.safety.protection as protection_module
+    original = protection_module.alerts.emit
+    protection_module.alerts.emit = lambda event, **fields: sent.append(event)  # type: ignore[assignment]
+    try:
+        await monitor.on_position_reconciled(_reconciled(account, "900", 3 * hour))
+    finally:
+        protection_module.alerts.emit = original  # type: ignore[assignment]
+    assert sent == [NAV_DROP]  # an alert, never a stop (lending envelope D3)
 
     # A day later the loss has aged out of the window, and old rows are pruned.
     await after.on_position_reconciled(_reconciled(account, "900", 3 * hour + 50 * hour))
@@ -266,3 +307,58 @@ def test_migration_grants_the_runtime_role_only_read_insert_and_prune(pg_contain
         with engine.begin() as conn:
             conn.exec_driver_sql("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM bfx_bot")
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disabling_a_currency_pulls_only_its_managed_offers(capital_db):
+    """D4: the everyday per-currency stop. The planner skips the symbol and the
+    managed offers of that symbol are cancelled by id; a foreign offer, another
+    currency and an enabled currency are untouched."""
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+
+    from .test_kill_switch import Canceller, _offer_rows
+    factory, account = capital_db
+    _gate, _venue, _ready, ctx, runtime, _halt = await boundary(factory, account)
+    await _offer_rows(factory, account)   # managed 101 (fUST), 102 (fUSD); foreign 555 (fUST)
+    canceller = Canceller()
+    planner = object.__new__(DeploymentReconciler)
+    planner._capital = runtime
+    planner._managed_sweep = ManagedOfferSweep(
+        session_factory=factory, account_id=account, environment=runtime.repository.environment,
+        canceller=canceller, ctx=ctx)
+
+    assert await planner._pull_if_stopped("fUST") is False    # enabled, ACTIVE: nothing happens
+    assert canceller.cancelled == []
+    report = await _amend(factory, runtime, PolicyChanges(enabled=False))
+    await _amend(factory, runtime, PolicyChanges(enabled=False), digest=report["amendment_digest"])
+    assert await planner._pull_if_stopped("fUST") is True
+    assert canceller.cancelled == ["101"]
+    # No policy at all is not "disabled": the capital read fails closed on it instead.
+    assert await planner._pull_if_stopped("fBTC") is False
+
+
+@pytest.mark.asyncio
+async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(capital_db):
+    """D3 level 3 is level-triggered: an automatic HALTED writes the state alone,
+    and each planner tick cancels whatever managed offer is still open -- a
+    cancel that failed on one tick is retried on the next. Foreign offers stay."""
+    from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+
+    from .test_kill_switch import Canceller, _offer_rows
+    factory, account = capital_db
+    _gate, _venue, _ready, ctx, runtime, halt = await boundary(factory, account)
+    await _offer_rows(factory, account)
+    await halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
+    canceller = Canceller(fail={"101"})
+    planner = object.__new__(DeploymentReconciler)
+    planner._capital = runtime
+    planner._managed_sweep = ManagedOfferSweep(
+        session_factory=factory, account_id=account, environment=runtime.repository.environment,
+        canceller=canceller, ctx=ctx)
+    assert await planner._pull_if_stopped("fUST") is True
+    assert canceller.cancelled == []            # 101 failed; 555 is foreign
+    canceller.fail.clear()
+    assert await planner._pull_if_stopped("fUST") is True
+    assert canceller.cancelled == ["101"]

@@ -21,7 +21,8 @@ pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[3]
 BACKEND = ROOT / "backend"
-REVISION = "c74d45a54e46"
+REVISION = "c74d45a54e46"          # creates the ledger
+RETIRED = "1f6392809120"           # change_class nullable, no CHECK
 REV = "b" * 40
 ATTEMPT = "0b8f7c5e-5d59-4a4c-9b58-6f0a1c2d3e4f"
 DIGEST_B, DIGEST_F = "sha256:" + "3" * 64, "sha256:" + "4" * 64
@@ -50,8 +51,8 @@ def _entry(**overrides: Any) -> Any:
         "attempt_id": str(__import__("uuid").uuid4()),
         "started_at": "2026-09-25T10:00:00+00:00", "finished_at": "2026-09-25T10:04:00+00:00",
         "source_revision": REV, "backend_digest": DIGEST_B, "frontend_digest": DIGEST_F,
-        "change_class": "standard", "migrations_applied": False, "outcome": "deployed",
-        "detail": "class=standard(standard_paths_only); ok", **overrides,
+        "migrations_applied": False, "outcome": "deployed",
+        "detail": "ok", **overrides,
     }
     return bfx.LedgerEntry(**values)
 
@@ -89,20 +90,50 @@ def test_ledger_reads_absent_before_the_migration_then_appends_and_reads_back(le
     assert ledger.read() == bfx.LedgerView(exists=False, last_attempt=None, last_success=None)
     _alembic(url, "upgrade", REVISION)
     assert ledger.read() == bfx.LedgerView(exists=True, last_attempt=None, last_success=None)
+    _alembic(url, "upgrade", "head")
 
     hostile = "unhealthy:x'; DROP TABLE deployments; -- \\gset :'detail'"
     first = ledger.append(_entry())
-    second = ledger.append(_entry(outcome="rolled_back", change_class="material",
-                                  migrations_applied=False, detail=hostile))
+    second = ledger.append(_entry(outcome="rolled_back", migrations_applied=False, detail=hostile))
     assert second == first + 1
     view = ledger.read()
     assert view.last_attempt is not None and view.last_success is not None
-    assert (view.last_attempt.id, view.last_attempt.outcome, view.last_attempt.change_class) == (
-        second, "rolled_back", "material")
+    assert (view.last_attempt.id, view.last_attempt.outcome) == (second, "rolled_back")
     assert (view.last_success.id, view.last_success.backend_digest) == (first, DIGEST_B)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT detail FROM deployments WHERE id = :id"), {"id": second}) == hostile
         assert conn.scalar(text("SELECT ci_run FROM deployments WHERE id = :id"), {"id": first}) is None
+        # The retired column is left NULL by this tool.
+        assert conn.scalar(text("SELECT count(*) FROM deployments WHERE change_class IS NULL")) == 2
+
+
+def _old_tool_insert(conn: Any, attempt: str, outcome: str, klass: str) -> None:
+    """A row the way the previous bfx-deploy writes it: change_class included."""
+    finished = "NULL" if outcome == "started" else "'2026-09-25T10:04:00+00:00'"
+    conn.exec_driver_sql(
+        "INSERT INTO deployments (attempt_id, started_at, finished_at, source_revision, backend_digest, "
+        "frontend_digest, change_class, migrations_applied, outcome, detail) VALUES "
+        f"('{attempt}', '2026-09-25T10:00:00+00:00', {finished}, '{REV}', '{DIGEST_B}', '{DIGEST_F}', "
+        f"'{klass}', true, '{outcome}', 'class={klass}(rules_unavailable)')")
+
+
+def test_previous_tool_can_deploy_the_release_that_retires_change_class(ledger_db: Any) -> None:
+    """Rollout: the old bfx-deploy migrates, then writes both rows with a class."""
+    url, engine, ledger = ledger_db
+    _alembic(url, "upgrade", REVISION)
+    earlier = str(__import__("uuid").uuid4())
+    with engine.begin() as conn:
+        _old_tool_insert(conn, earlier, "deployed", "standard")
+    _alembic(url, "upgrade", RETIRED)
+    with engine.begin() as conn:                      # the old tool, after the migration ran
+        _old_tool_insert(conn, ATTEMPT, "started", "material")
+        _old_tool_insert(conn, ATTEMPT, "deployed", "material")
+    ledger.append(_entry())                           # then the new tool, next release
+    view = ledger.read()
+    assert view.last_success is not None and view.last_success.attempt_id != ATTEMPT
+    with engine.connect() as conn:
+        classes = [row[0] for row in conn.execute(text("SELECT change_class FROM deployments ORDER BY id"))]
+    assert classes == ["standard", "material", "material", None]
 
 
 @pytest.mark.parametrize("statement", [
@@ -126,7 +157,6 @@ def test_ledger_rejects_every_mutation_even_for_the_owner(ledger_db: Any, statem
     {"source_revision": "main"},
     {"backend_digest": "sha256:abc"},
     {"frontend_digest": "ghcr.io/x:main"},
-    {"change_class": "minor"},
     {"outcome": "no_change"},
     {"finished_at": "2026-09-25T09:00:00+00:00"},
     {"finished_at": None},                      # only a started row has no finish
@@ -152,7 +182,7 @@ def test_attempt_has_one_started_row_first_and_one_matching_terminal_row(ledger_
     assert (view.last_attempt.outcome, view.last_attempt.attempt_id) == ("started", ATTEMPT)
     with pytest.raises(bfx.CommandError):                      # a second started row
         ledger.append(started)
-    for mismatch in ({"backend_digest": "sha256:" + "9" * 64}, {"change_class": "material"},
+    for mismatch in ({"backend_digest": "sha256:" + "9" * 64},
                      {"source_revision": "c" * 40}, {"started_at": "2026-09-25T10:01:00+00:00"}):
         with pytest.raises(bfx.CommandError):                  # finishing as another release
             ledger.append(_entry(attempt_id=ATTEMPT, **mismatch))
@@ -196,10 +226,21 @@ def test_migration_is_reversible_and_leaves_no_drift(ledger_db: Any) -> None:
     url, engine, ledger = ledger_db
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
-    ledger.append(_entry())
+    # Back across the retirement: the empty ledger downgrades, all the way.
     _alembic(url, "downgrade", "a7f3c1d9e204")
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass('public.deployments')")) is None
         assert conn.scalar(text("SELECT count(*) FROM pg_proc WHERE proname = 'reject_deployment_mutation'")) == 0
     _alembic(url, "upgrade", "head")
     assert ledger.read().last_attempt is None
+    # Classless rows: the downgrade refuses rather than invent a class that never
+    # happened in an append-only ledger.
+    ledger.append(_entry(attempt_id=ATTEMPT, outcome="started", finished_at=None))
+    ledger.append(_entry(attempt_id=ATTEMPT))
+    result = subprocess.run(["uv", "run", "alembic", "downgrade", REVISION], cwd=BACKEND,
+                            env=dict(os.environ, DATABASE_URL=url), capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "recorded without a change class" in result.stdout + result.stderr
+    with engine.connect() as conn:
+        assert [row[0] for row in conn.execute(text("SELECT change_class FROM deployments"))] == [
+            None, None]

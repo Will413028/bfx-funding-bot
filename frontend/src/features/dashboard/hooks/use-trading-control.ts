@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accountScopedPath, apiClient } from "@/lib/api-client";
 import { fundingStatusKeys, tradingControlKeys } from "@/lib/query-keys";
 import type {
+  CurrencyAction,
+  CurrencyRequest,
   TradingControlAction,
   TradingControlOverview,
   TradingControlRequest,
@@ -9,7 +11,7 @@ import type {
 
 /** Re-read while a request waits for the daemon; one poll for the whole panel. */
 export const PENDING_CONTROL_POLL_MS = 3_000;
-/** Otherwise the state still changes on its own (automatic stops, the probation lift). */
+/** Otherwise the state still changes on its own (automatic stops). */
 export const IDLE_CONTROL_POLL_MS = 30_000;
 
 export function tradingControlPath(
@@ -25,8 +27,13 @@ export function tradingControlPath(
 function pendingRequestIds(
   overview: TradingControlOverview | undefined,
 ): Set<string> {
+  // Resume/kill and currency toggles alike: each is settled by the daemon.
+  const requests: { request_id: string; state: string }[] = [
+    ...(overview?.requests ?? []),
+    ...(overview?.currencies ?? []).flatMap((currency) => currency.requests),
+  ];
   return new Set(
-    (overview?.requests ?? [])
+    requests
       .filter((request) => request.state === "requested")
       .map((request) => request.request_id),
   );
@@ -78,8 +85,6 @@ export function useTradingControl(exchangeAccountId?: string) {
 export interface TradingControlInput {
   action: TradingControlAction;
   reason: string;
-  /** Approve/resume: the build the operator saw. A stop names none. */
-  backendDigest?: string | null;
 }
 
 /**
@@ -92,16 +97,45 @@ export function useTradingControlRequest(exchangeAccountId?: string) {
   return useMutation({
     mutationFn: async (input: TradingControlInput) => {
       if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
-      const buildAction =
-        input.action === "approve" || input.action === "resume";
       return apiClient.post<
         Pick<TradingControlRequest, "request_id" | "action" | "state">
       >(tradingControlPath(exchangeAccountId, `/${input.action}`), {
         reason: input.reason,
-        ...(buildAction && input.backendDigest
-          ? { backend_digest: input.backendDigest }
-          : {}),
       });
+    },
+    retry: false,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: tradingControlKeys.overview(exchangeAccountId),
+      });
+    },
+  });
+}
+
+export interface CurrencyToggleInput {
+  symbol: string;
+  action: CurrencyAction;
+  reason: string;
+}
+
+/**
+ * Queue an enable/disable of one currency's policy. Same contract as
+ * {@link useTradingControlRequest}: accepted, not done; never retried.
+ */
+export function useCurrencyToggleRequest(exchangeAccountId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: CurrencyToggleInput) => {
+      if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
+      return apiClient.post<
+        Pick<CurrencyRequest, "request_id" | "symbol" | "action" | "state">
+      >(
+        tradingControlPath(
+          exchangeAccountId,
+          `/currencies/${encodeURIComponent(input.symbol)}/${input.action}`,
+        ),
+        { reason: input.reason },
+      );
     },
     retry: false,
     onSuccess: async () => {

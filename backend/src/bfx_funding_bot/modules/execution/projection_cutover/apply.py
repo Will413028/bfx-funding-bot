@@ -373,7 +373,7 @@ async def apply_cutover(
         "SELECT state FROM public.trading_state WHERE exchange_account_id=:id "
         "AND deployment_environment=:env ORDER BY id DESC LIMIT 1"
     ), {"id": expected.scope.account_id, "env": expected.scope.environment})
-    if trading not in {"REDUCING", "HALTED"}:
+    if trading != "HALTED":
         raise ValueError("apply_scope_not_halted")
     await quiescence_verifier(session, scope=expected.scope, runtime_roles=runtime_roles,
                              operation_digest=operation_digest)

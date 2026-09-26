@@ -6,6 +6,7 @@ Schema 改動 = 必須同步更新此 module; CP3 test 會 catch 違反。
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -104,8 +105,12 @@ class DecisionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision_outcome: DecisionOutcome
     signal_correlation_id: UUID
-    offer_rate: float | None = None
-    offer_amount_usdt: float | None = None
+    # Money terms are Decimal end-to-end (planner -> intent/attempt -> command
+    # gate -> venue body): the amount's last 4 of 8 decimals are the submit's
+    # only venue identity (D3a fingerprint), so no float may sit on this path.
+    # JSON dumps (audit, stdout, safety snapshots) carry them as exact strings.
+    offer_rate: Decimal | None = None
+    offer_amount_usdt: Decimal | None = None
     offer_duration_days: int | None = None
     skip_reason: SkipReason | None = None
     skip_reason_detail: str | None = None
@@ -172,8 +177,8 @@ class OrderSubmitPayload(BaseModel):
     offer_id: str | None  # paper: "paper_<uuid12>"; real: stringified int from venue; None when no venue id exists
     execution_decision_id: str = Field(..., min_length=1)
     signal_correlation_id: UUID
-    offer_rate: float
-    offer_amount_usdt: float
+    offer_rate: Decimal  # echoes the submitted terms exactly (JSON: string)
+    offer_amount_usdt: Decimal
     offer_duration_days: int
     is_simulated: bool
     status: Literal["submitted", "failed", "unknown", "not_sent"]

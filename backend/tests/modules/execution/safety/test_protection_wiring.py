@@ -11,6 +11,7 @@ import pytest
 from bfx_funding_bot.modules.execution.capital_repository import CapitalBlockedError
 from bfx_funding_bot.modules.execution.safety.protection import (
     AutomaticProtection,
+    WriterLockLostError,
     WriterLockWatch,
 )
 
@@ -62,7 +63,9 @@ class _Lock:
         return self.results.pop(0)
 
 
-async def test_liveness_loop_trips_when_the_writer_lock_is_lost(monkeypatch) -> None:
+async def test_liveness_loop_exits_when_the_writer_lock_is_lost(monkeypatch) -> None:
+    """Process fencing, not a trading decision (lending envelope D3): the loop
+    raises, the task group ends the daemon, and nothing is tripped or halted."""
     from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
 
     rounds = 0
@@ -77,17 +80,16 @@ async def test_liveness_loop_trips_when_the_writer_lock_is_lost(monkeypatch) -> 
         return None
 
     monkeypatch.setattr(daemon_module.asyncio, "wait_for", one_round)
-    recorder = Recorder()
     lock = _Lock([False])
     heartbeats: list[str] = []
     fake = SimpleNamespace(
         _stop_event=asyncio.Event(), writer_lock=lock,
-        writer_lock_watch=WriterLockWatch(lock=lock, protection=recorder),
+        writer_lock_watch=WriterLockWatch(lock=lock),
         probe=SimpleNamespace(record_heartbeat=heartbeats.append),
     )
-    await daemon_module.Daemon._writer_lock_liveness_loop(fake)  # type: ignore[arg-type]
-    assert rounds == 2
-    assert [trigger for trigger, _ in recorder.trips] == ["writer_lock_lost"]
+    with pytest.raises(WriterLockLostError):
+        await daemon_module.Daemon._writer_lock_liveness_loop(fake)  # type: ignore[arg-type]
+    assert rounds == 1
     assert heartbeats == []
 
 
@@ -97,22 +99,24 @@ async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() 
     protection = AutomaticProtection()
     engaged: list[str] = []
 
-    class _Kill:
-        async def engage(self, *, cause, actor, reason, when_already_halted="retry"):  # type: ignore[no-untyped-def]
+    class _Trading:
+        async def transition(self, state, *, cause, actor, reason, now_ms=None):  # type: ignore[no-untyped-def]
             engaged.append(actor)
-            from bfx_funding_bot.modules.execution.safety.kill_switch import KillResult
-            from bfx_funding_bot.modules.execution.safety.trading_state import TradingState
-            return KillResult(state=TradingState(1, "HALTED", cause, actor, reason, 0),
-                              state_changed=True, cancel_all=())
+            from bfx_funding_bot.modules.execution.safety.trading_state import (
+                TradingState,
+                TransitionResult,
+            )
+            return TransitionResult(state=TradingState(1, state, cause, actor, reason, 0),
+                                    changed=True)
 
-    protection.bind(_Kill())
+    protection.bind(_Trading())
 
     class _Recovery:
         async def run(self):  # type: ignore[no-untyped-def]
-            protection.trip("unattributed_offer", "orphan at boot")
-            raise CapitalBlockedError("unattributed_offer")
+            protection.trip("identity_conflict", "conflict at boot")
+            raise CapitalBlockedError("offer_provenance_conflict")
 
     fake = SimpleNamespace(boot_recovery=_Recovery(), protection=protection)
     with pytest.raises(CapitalBlockedError):
         await Daemon._run_boot_recovery(fake)  # type: ignore[arg-type]
-    assert engaged == ["auto:unattributed_offer"]
+    assert engaged == ["auto:identity_conflict"]

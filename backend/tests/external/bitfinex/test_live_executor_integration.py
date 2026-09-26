@@ -71,7 +71,8 @@ async def test_submit_without_authoritative_amount_rule_is_not_sent(fault):
         executor = BitfinexLiveExecutor(http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
             phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}), cell="C-1")
-        amount = {"missing": 150.0, "changed": 150.0, "below_minimum": 2.0, "precision": 150.000000001}[fault]
+        amount = Decimal({"missing": "150", "changed": "150", "below_minimum": "2",
+                           "precision": "150.000000001"}[fault])
         ready = _ready(_make_decision().model_copy(update={"offer_amount_usdt": amount}))
         if fault == "missing":
             ready = replace(ready, funding_amount_evidence=None)
@@ -219,6 +220,59 @@ async def test_submit_fixed_point_rate_serialization() -> None:
     assert result.status == "submitted"
     assert captured["body"]["rate"] == "0.00005531"
     assert "e" not in captured["body"]["rate"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("planned", "fingerprint", "wire"), [
+    (Decimal("200"), 42, "199.99990042"),
+    # 17 significant digits: a float round trip would have changed the fingerprint.
+    (Decimal("900000001"), 9999, "900000000.99999999"),
+])
+async def test_planned_amount_reaches_the_venue_body_unchanged(planned, fingerprint, wire) -> None:
+    """D3a: the fingerprinted Decimal the planner chooses is byte-for-byte what
+    the decision records (as its audit JSON too), what the command gate's
+    durable attempt names and what the venue receives. No float in between."""
+    from bfx_funding_bot.modules.execution.amount_fingerprint import (
+        FINGERPRINT_SPACE,
+        choose_fingerprinted_amount,
+        fingerprint_of,
+    )
+    from bfx_funding_bot.modules.execution.command_gate import _normalized_venue_payload
+
+    amount = choose_fingerprinted_amount(
+        planned, seed_key="exact-path",
+        in_use=frozenset(range(1, FINGERPRINT_SPACE + 1)) - {fingerprint},
+        minimum=Decimal("150"), maximum=planned,
+    )
+    assert amount == Decimal(wire) and fingerprint_of(amount) == fingerprint
+    decision = DecisionPayload(
+        decision_outcome=DecisionOutcome.POST, signal_correlation_id=uuid4(),
+        offer_rate=Decimal("0.00012345"), offer_amount_usdt=amount, offer_duration_days=2,
+        symbol="fUST",
+    )
+    audit = decision.model_dump(mode="json")
+    assert audit["offer_amount_usdt"] == wire and audit["offer_rate"] == "0.00012345"
+    assert DecisionPayload.model_validate(audit).offer_amount_usdt == amount
+    attempt = _normalized_venue_payload(decision)
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=SUCCESS)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        executor = BitfinexLiveExecutor(
+            http=http, event_sink=_EventCapture(), bus=DomainEventBus(),
+            phase=Phase.LIVE, strategy=StrategyName.RATE_PERCENTILE,
+            configured_symbols=frozenset({"fUST"}), cell="fUST_a30",
+        )
+        result = await executor.submit(_ready(decision), _make_ctx())
+
+    assert result.status == "submitted"
+    assert captured["body"]["amount"] == wire
+    assert captured["body"]["rate"] == "0.00012345"
+    assert captured["body"] == attempt
 
 
 @pytest.mark.asyncio

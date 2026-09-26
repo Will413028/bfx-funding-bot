@@ -48,10 +48,9 @@ hard_guards:
     enabled: true
     buffers: {fUSD: 3}
     default_buffer: 0
-calibrated_guards:
-  realized_loss_24h: {enabled: false, threshold_pct: null}
-  drawdown_from_peak: {enabled: false, threshold_pct: null}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
+nav_alerts:
+  realized_loss_24h_pct: null
+  drawdown_pct: null
 """
 
 
@@ -191,13 +190,13 @@ async def test_kill_is_not_lifted_by_the_admin_token(
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
 
 
-async def test_a_pause_leaves_an_audit_trail(
+async def test_a_halt_leaves_an_audit_trail(
     monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock,
 ) -> None:
     daemon = await _build(monkeypatch, tmp_path, httpx_mock)
     assert daemon.trading_status is not None
 
-    await daemon.trading_status.pause(reason="candle distortion", actor="test")
+    await daemon.trading_status.halt(reason="candle distortion", actor="test")
 
     assert (await daemon.trading_status.dry_run())["would_submit_any"] is False
     snap = await daemon.trading_status.snapshot()
