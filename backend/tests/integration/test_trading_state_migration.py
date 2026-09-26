@@ -124,7 +124,8 @@ def test_history_is_append_only(migrated):
 
 
 @pytest.mark.parametrize(("account", "state", "cause", "message"), [
-    (_A, "ACTIVE", "auto", "HALTED -> ACTIVE by auto"),
+    # Never ends an operator's halt or a halt younger than 15 min (8e4b2f6a1c37).
+    (_A, "ACTIVE", "auto", "-> ACTIVE by auto|minimum halt duration"),
     (_B, "REDUCING", "operator", "ck_trading_state_state"),           # retired state
     (_B, "HALTED", "material_deploy", "ck_trading_state_cause"),      # retired causes
     (_B, "HALTED", "kill_switch", "ck_trading_state_cause"),
@@ -192,7 +193,7 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
             results = await asyncio.gather(*(repo(first).transition(
                 "HALTED", cause="auto", actor=f"worker-{i}", reason="concurrent") for i in range(8)))
             assert sum(result.changed for result in results) == 1
-            with pytest.raises(IllegalTradingTransition, match="HALTED -> ACTIVE by auto"):
+            with pytest.raises(IllegalTradingTransition, match="minimum halt duration"):
                 await repo(first).transition("ACTIVE", cause="auto", actor="t", reason="t")
             written = await repo(first).current()
         finally:
@@ -203,6 +204,43 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
             assert written is not None and written.state == "HALTED" and written.cause == "auto"
         finally:
             await second.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_the_database_clock_decides_an_automatic_resume(migrated):
+    """8e4b2f6a1c37: automatic rows are stamped by the database, and its refusals
+    map to typed errors even when the writer's own clock would have allowed them."""
+    url, _, _ = migrated
+
+    async def scenario():
+        import time
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from bfx_funding_bot.modules.execution.safety.trading_state import (
+            AutoResumeTooSoon,
+            TradingStateRepository,
+        )
+
+        engine = create_async_engine(url)
+        repo = TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
+                                      account_id=UUID(_B), deployment_environment="auto-resume")
+        try:
+            now = int(time.time() * 1000)
+            await repo.transition("ACTIVE", cause="operator", actor="will", reason="start")
+            # A writer claiming its halt is a day old: the row carries the database's time.
+            halted = await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x",
+                                           now_ms=now - 24 * 60 * 60 * 1000)
+            assert abs(halted.state.created_at_ms - now) < 60_000
+            assert abs((await repo.current()).created_at_ms - now) < 60_000
+            # The writer's clock says 15 minutes passed; the database's does not.
+            with pytest.raises(AutoResumeTooSoon):
+                await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="ok",
+                                      now_ms=now + 24 * 60 * 60 * 1000)
+            assert (await repo.current()).state == "HALTED"
+        finally:
+            await engine.dispose()
 
     asyncio.run(scenario())
 

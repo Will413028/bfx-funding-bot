@@ -102,9 +102,13 @@ async def test_reasserting_a_halt_keeps_the_halt_in_force(scope) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("path", "message"), [
-    ([("HALTED", "auto"), ("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
+    # An automatic halt ends automatically only after the minimum duration.
+    ([("HALTED", "auto"), ("ACTIVE", "auto")], "minimum halt duration"),
+    ([("ACTIVE", "operator"), ("HALTED", "operator"), ("ACTIVE", "auto")],
+     "HALTED/operator -> ACTIVE by auto"),
+    ([("ACTIVE", "operator"), ("ACTIVE", "auto")], "ACTIVE/operator -> ACTIVE by auto"),
     # No decision recorded reads as HALTED, so it leaves only the way HALTED does.
-    ([("ACTIVE", "auto")], "HALTED -> ACTIVE by auto"),
+    ([("ACTIVE", "auto")], "none -> ACTIVE by auto"),
     # REDUCING and material_deploy are retired; kill_switch was retired before.
     ([("ACTIVE", "operator"), ("REDUCING", "operator")], "unknown trading state"),
     ([("HALTED", "material_deploy")], "unknown trading state cause"),
@@ -167,3 +171,59 @@ async def test_scopes_are_independent(scope) -> None:
                                                      reason="start prod")
     await _repo(factory, account, "prod").transition("HALTED", cause="auto", actor="t",
                                                      reason="stop prod")
+
+
+MIN_HALT = 15 * 60 * 1000
+DAY = 24 * 60 * 60 * 1000
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_halt_ends_automatically_after_the_minimum(scope) -> None:
+    factory, account = scope
+    repo = _repo(factory, account)
+    await repo.transition("ACTIVE", cause="operator", actor="will", reason="start", now_ms=0)
+    await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=1_000)
+    with pytest.raises(IllegalTradingTransition, match="minimum halt duration"):
+        await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="cleared",
+                              now_ms=1_000 + MIN_HALT - 1)
+    resumed = await repo.transition("ACTIVE", cause="auto", actor="auto-resume",
+                                    reason="cleared", now_ms=1_000 + MIN_HALT)
+    assert resumed.changed and resumed.state.cause == "auto"
+
+
+@pytest.mark.asyncio
+async def test_at_most_two_automatic_resumes_per_rolling_day(scope) -> None:
+    factory, account = scope
+    repo = _repo(factory, account)
+    await repo.transition("ACTIVE", cause="operator", actor="will", reason="start", now_ms=0)
+    now = 0
+    for _ in range(2):
+        now += 1
+        await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=now)
+        now += MIN_HALT
+        await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="ok", now_ms=now)
+    await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=now + 1)
+    with pytest.raises(IllegalTradingTransition, match="limit reached"):
+        await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="ok",
+                              now_ms=now + 1 + MIN_HALT)
+    # The window rolls: once the first resume is a day old, one more is allowed.
+    later = MIN_HALT + 1 + DAY
+    resumed = await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="ok",
+                                    now_ms=later)
+    assert resumed.changed
+
+
+@pytest.mark.asyncio
+async def test_an_operator_halt_supersedes_an_automatic_one(scope) -> None:
+    factory, account = scope
+    repo = _repo(factory, account)
+    await repo.transition("ACTIVE", cause="operator", actor="will", reason="start", now_ms=0)
+    await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=1)
+    kill = await repo.transition("HALTED", cause="operator", actor="will", reason="kill", now_ms=2)
+    assert kill.changed and kill.state.cause == "operator"
+    # An automatic halt does not restate an operator's away.
+    again = await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=3)
+    assert not again.changed and again.state.cause == "operator"
+    with pytest.raises(IllegalTradingTransition, match="HALTED/operator -> ACTIVE by auto"):
+        await repo.transition("ACTIVE", cause="auto", actor="auto-resume", reason="ok",
+                              now_ms=2 + DAY)
