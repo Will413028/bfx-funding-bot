@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -142,8 +143,8 @@ class SafetyGuardChain:
         decision = DecisionPayload(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=uuid4(),
-            offer_rate=0.0,
-            offer_amount_usdt=0.0,
+            offer_rate=Decimal(0),
+            offer_amount_usdt=Decimal(0),
             offer_duration_days=0,
             symbol=symbol,
         )

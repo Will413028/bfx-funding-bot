@@ -128,7 +128,7 @@ def _decimal(value: float) -> Decimal:
     return Decimal(str(value))
 
 
-def _required_decimal(value: float | None, name: str) -> Decimal:
+def _required_decimal(value: Decimal | None, name: str) -> Decimal:
     if value is None:
         raise ValueError(f"POST candidate requires {name}")
-    return _decimal(value)
+    return value

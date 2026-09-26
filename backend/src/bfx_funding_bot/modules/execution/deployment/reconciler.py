@@ -409,7 +409,7 @@ class DeploymentReconciler:
                     decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=quote.signal_correlation_id,
                     offer_rate=quote.rate,
-                    offer_amount_usdt=float(amount),
+                    offer_amount_usdt=amount,
                     offer_duration_days=quote.period_days,
                     symbol=self._cell_symbol[cell_id],
                 )
@@ -465,7 +465,7 @@ class DeploymentReconciler:
                         candidate=decision,
                         snapshot=snapshot,
                         price=price,
-                        offer_rate=Decimal(str(decision.offer_rate)),
+                        offer_rate=_offer_rate(decision),
                         now_ms=now,
                         period_agg=period_agg,
                     )
@@ -636,7 +636,7 @@ class DeploymentReconciler:
             return None
         horizon_h, _model_version, _artifact_hash = self._optimizer_scope()
         requested_horizon_h = horizon_h if horizon_h is not None else 1
-        signal_rate = Decimal(str(candidate.offer_rate))
+        signal_rate = _offer_rate(candidate)
         reference_rate = _reference_rate(price, fallback=signal_rate)
         try:
             evidence = self._fill_model_provider.estimate_fill(
@@ -681,7 +681,7 @@ class DeploymentReconciler:
         exact_period_evidence = (
             price_evidence if isinstance(price_evidence, FillModelEvidence) else None
         )
-        signal_rate = Decimal(str(candidate.offer_rate))
+        signal_rate = _offer_rate(candidate)
         book_evidence = {
             "snapshot_id": price.evidence.get("snapshot_id"),
             "branch": price.branch.value,
@@ -845,7 +845,7 @@ class DeploymentReconciler:
             # 無 active POST quote：resting 高價單 = 免費 spike option，留著。
             # 下一個 POST quote 出現時本 sweep 自然會 reprice-down。
             return 0
-        ref = max(quotes, key=lambda q: q.rate or 0.0)
+        ref = max(quotes, key=lambda q: q.rate or Decimal(0))
         assert ref.rate is not None  # POST quote 的 rate 必非 None
         symbol_offers = [o for o in venue_offers if o.symbol == symbol]
         ref_by_offer: dict[str, float]
@@ -860,9 +860,10 @@ class DeploymentReconciler:
                 now_ms=now, policy=self._reprice,
             )
         else:
-            ref_by_offer = {o.venue_offer_id: ref.rate for o in symbol_offers}
+            # The reprice heuristic compares against float venue offer rates.
+            ref_by_offer = {o.venue_offer_id: float(ref.rate) for o in symbol_offers}
             candidates = stale_offers(
-                offers=symbol_offers, ref_rate=ref.rate, now_ms=now, policy=self._reprice,
+                offers=symbol_offers, ref_rate=float(ref.rate), now_ms=now, policy=self._reprice,
             )
         issued = 0
         for offer in candidates:
@@ -902,6 +903,13 @@ class DeploymentReconciler:
         return issued
 
 
+def _offer_rate(candidate: DecisionPayload) -> Decimal:
+    """A POST candidate's exact signal rate (the schema guarantees it is set)."""
+    if candidate.offer_rate is None:
+        raise ValueError("POST candidate requires offer_rate")
+    return candidate.offer_rate
+
+
 def _book_reprice_reference_for(
     *,
     pricer: PeriodPricer,
@@ -922,7 +930,7 @@ def _book_reprice_reference_for(
             decision_outcome=DecisionOutcome.POST,
             signal_correlation_id=quote.signal_correlation_id,
             offer_rate=quote.rate,
-            offer_amount_usdt=float(offer.amount),
+            offer_amount_usdt=offer.amount,
             offer_duration_days=offer.period_days,
             symbol=symbol,
         )

@@ -54,7 +54,9 @@ class CapitalPolicyGuard:
                 raise ValueError("capital_scope_missing")
             view = await self.runtime.read(symbol=decision.symbol, cell_id=ctx.capital_cell_id,
                                            session=ctx.command_session)
-            amount = Decimal(str(decision.offer_amount_usdt))
+            amount = decision.offer_amount_usdt
+            if amount is None:
+                raise ValueError("offer_amount_missing")
             if not amount.is_finite() or amount <= 0 or amount > view.budget.max_new_offer:
                 return GuardResult(False, self.name, view.budget.reason or "insufficient_deployable_funds")
             return GuardResult(True, self.name)
@@ -465,7 +467,7 @@ class AllocationCapGuard:
             self._caps, decision.symbol, self._env_fallback, self._default_cap,
         )
         exposure = self.ledger.current_exposure(decision.symbol)
-        offer = Decimal(str(decision.offer_amount_usdt))
+        offer = decision.offer_amount_usdt
         projected = exposure + offer
         if projected > cap:
             return GuardResult(
@@ -528,7 +530,7 @@ class BuyingPowerGuard:
         )
         available = self.ledger.available_balance(decision.symbol)
         deployable = available - buffer
-        offer = Decimal(str(decision.offer_amount_usdt))
+        offer = decision.offer_amount_usdt
         if offer > deployable:
             return GuardResult(
                 allowed=False, guard_name=self.name,

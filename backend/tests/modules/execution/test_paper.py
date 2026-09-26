@@ -48,7 +48,7 @@ def _decision(corr: UUID) -> DecisionPayload:
 
 
 def _ready_to_submit(*, corr: UUID, rate: float = 0.0001, decision_id: str = "d-paper") -> ReadyToSubmit:
-    decision = _decision(corr).model_copy(update={"offer_rate": rate})
+    decision = _decision(corr).model_copy(update={"offer_rate": Decimal(str(rate))})
     return ReadyToSubmit(
         decision=decision,
         decision_id=decision_id,
@@ -148,5 +148,5 @@ async def test_paper_executor_uses_the_rate_inside_ready_to_submit() -> None:
 
     assert result.status == "filled"
     assert result.raw_response == {"offer_rate": "0.00023"}
-    assert axiom.events[0]["payload"]["offer_rate"] == 0.00023
+    assert axiom.events[0]["payload"]["offer_rate"] == "0.00023"
     assert axiom.events[0]["payload"]["execution_decision_id"] == "d-7"

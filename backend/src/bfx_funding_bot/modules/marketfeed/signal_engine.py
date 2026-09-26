@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -256,8 +257,9 @@ class SignalEngine:
     ) -> DecisionPayload:
         """Pre-safety DecisionPayload built from strategy output.
 
-        Decimal → float: DecisionPayload schema declares offer_rate: float | None.
-        Funding rate precision (~6 dp) is well within double-precision range.
+        The strategy's Decimal rate is carried as-is (no float on the money
+        path). The amount is the cell's config reference, never submitted: the
+        deployment reconciler sizes the real offer.
 
         Staleness (is_stale/stale_seconds + cell budget) is stamped here so it
         rides the durable DECISION record, not just the ephemeral SIGNAL.
@@ -268,8 +270,8 @@ class SignalEngine:
                 decision_outcome=DecisionOutcome.POST,
                 signal_correlation_id=correlation_id,
                 symbol=cell.symbol,
-                offer_rate=float(sig.lend_decision.rate),
-                offer_amount_usdt=cell.reference_amount_usdt,
+                offer_rate=sig.lend_decision.rate,
+                offer_amount_usdt=Decimal(str(cell.reference_amount_usdt)),
                 offer_duration_days=int(sig.lend_decision.period_days),
                 is_stale=is_stale, stale_seconds=stale_seconds, budget_seconds=budget_seconds,
             )
