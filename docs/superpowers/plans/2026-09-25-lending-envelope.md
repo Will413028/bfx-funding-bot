@@ -73,6 +73,7 @@ integration tests (Docker), `uv run mypy src/`, `uv run ruff check`,
 | T6 | Remove change classes: `DeploymentIdentity` class/ledger walk, `apply_deploy_gate`, `BFX_CHANGE_CLASS` (daemon, compose, `compose_policy.IDENTITY`, CI), `deploy/change-class.yaml`, classifier in `change_class.py` (keep the glob helper for `DR_TRIGGER_PATTERNS` or inline it), `--force-material`, ledger `change_class` column | T4 | deploy dry-run and ledger tests green; migration flow tests unchanged |
 | T7 | Frontend: panel shows state, resume (TOTP), kill; remove approve/pause/probation/change_class; i18n strings | T4, T6 | vitest + browser check at cutover |
 | T8 | Docs: `backend/ARCHITECTURE.md` §6–§8, `docs/runbooks/operations.md`, `deploy.md`, delete the governance parts of `cutover-release-governance.md`, repo `AGENTS.md`/`AGENTS.local.md` lookups | T1–T7 | every command in the runbooks exists; no reference to probation/material/REDUCING |
+| T9 | Per-currency `enabled` from the UI (TOTP): `capital_policy_requests` outbox (migration `7d2a9c4e6b13`), `CapitalPolicyRequestWorker` through `capital_amendment`; runtime role may append an enabled-only revision (DB trigger); kill supersedes waiting enables; overview lists each currency's policy and envelope; panel toggle | T4, T5, T7 | migrated-PG role tests (webapi column INSERT only, bot enabled-only write), worker revision/unchanged/rejection/kill-ordering tests, router + panel tests |
 
 ## 3. Initial envelope values (fUST)
 
