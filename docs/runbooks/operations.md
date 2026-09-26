@@ -10,18 +10,42 @@ UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 202
 | 層 | 控制 | 效果 |
 |---|---|---|
 | 每筆單 | CapitalPolicy 的包絡（§2） | 單筆上限、天期、open offer 數、利率下限；超出就不送 |
-| 每幣別 | policy `enabled` | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
+| 每幣別 | policy `enabled`（§2，UI 切換） | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
 | 帳戶 | `trading_state` `ACTIVE`／`HALTED` | `HALTED`：所有幣別不掛新單，planner 撤掉受管 offer |
 
 `trading_state` 的 cause：`operator`（人）或 `auto`（自動保護，§4）。讀不到狀態或從未記錄任何決策
 ＝ HALTED（fail-closed）。只有 operator 能結束 HALTED（DB trigger 與程式碼雙重拒絕）。
 部署永遠不改變交易狀態，也不需要任何核准。
 
-## 2. 包絡與幣別設定：`amend_capital_policy`
+## 2. 幣別啟停與包絡設定
 
-所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，改動一律 dry run → 看報告 → 用 digest apply，
-每次 apply 產生一個新 revision（舊的保留）。在 VM 上以已部署的 backend image 跑一次性 container，
-用 `/opt/bfx/runtime/migrate.env`（owner role）：
+所有每幣別設定都是 DB 裡有版本的 CapitalPolicy，每次改動產生一個新 revision（舊的保留）。
+
+### 啟用／停用幣別：UI（TOTP，主要路徑）
+
+Overview「交易狀態」面板的「幣別」區塊列出每個有 applied policy 的幣別：啟用與否、包絡
+（未設定時明白標示）、最近的請求與結果。停用／啟用需要填原因，經 frontend BFF 的 MFA 閘門，
+webapi 只把請求排入 `capital_policy_requests`（回 202），由 bot 的 `CapitalPolicyRequestWorker`
+在 account lock 下重新驗證 operator 後，走與 script 相同的 amendment 路徑寫一個新 revision
+（`source` 記 `request_id`／`requested_by`／`reason`），結果顯示在該幣別下。
+
+- 停用：不掛新單，下一個 reconcile tick 撤掉該幣別的受管 offer；手動掛的單與已成交借款不動。
+  不是停機，不寫 `trading_state`，恢復也不需要 resume。停用除了 operator 驗證之外不受任何條件
+  阻擋（不看 build、trading state、包絡）。
+- 啟用：沒有包絡的幣別也可以啟用（結果會註明 `envelope unset`），但 offer-envelope guard
+  會拒絕每一筆單直到包絡設好。fUSD 不能啟用（`unsupported_enabled_symbol`）。
+- 已經是要求的狀態時結果是 `unchanged`，不寫新 revision。
+- 啟用與停用各有自己的等待格（同一幣別同一動作只能有一筆 pending，409 `request_pending`），
+  依送出順序套用，後送的為準。kill 另有自己的佇列、不會排在它們後面；kill 套用時會把等待中的
+  **啟用**標成 `superseded_by_kill`（等待中的停用照常套用）。
+- bot 的 runtime role 只能以這種方式改 `enabled`：DB trigger 拒絕 runtime role 寫入除了
+  `enabled` 以外有任何不同的 revision，或把 head 移到下一個 revision 以外的地方。
+
+### 包絡與其他欄位：`amend_capital_policy`
+
+包絡、`max_offer_amount` 等其他欄位只能用 script 改（`--enabled` 仍可用，作為 UI 不可用時的
+備用）：dry run → 看報告 → 用 digest apply。在 VM 上以已部署的 backend image 跑一次性
+container，用 `/opt/bfx/runtime/migrate.env`（owner role）：
 
 ```bash
 python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
@@ -33,7 +57,8 @@ python -m scripts.amend_capital_policy --exchange-account-id UUID --environment 
 - 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
 - 利率下限 ＝ max(`min_rate_apr`/365, 即時 bid 中位數 × `rate_floor_ratio`)。低於下限時該幣別閒置，
   不是錯誤。
-- 暫停一個幣別：`--enabled false`；恢復：`--enabled true`。這是日常的停止方式，不需要 HALTED。
+- 暫停／恢復一個幣別平常用上面的 UI；script 的 `--enabled false`／`--enabled true` 是備用。
+  這是日常的停止方式，不需要 HALTED。
 - 沒有包絡的幣別（舊 schema 的 policy）一律不送單（`envelope_unset`）。
 
 ## 3. 帳戶停止與恢復
@@ -122,7 +147,7 @@ Overview 的 uncertainty 明細提供請求（同樣經 MFA、排入 `uncertaint
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
-| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
+| bot 內的 sink（`observability/alerts.py`，非阻塞） | `/opt/bfx/runtime/bot.env` 的 `TELEGRAM_BOT_TOKEN`／`TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 
 - 兩個都空 → bot 只記 log（開機時會說一次）；`bfx-notify` 永遠 exit 0，送不出去只記 journal。
