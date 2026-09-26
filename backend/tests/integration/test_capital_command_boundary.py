@@ -140,6 +140,48 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(cap
     assert "snapshot_query_pending" in unavailable["reason"]
 
 
+@pytest.mark.asyncio
+async def test_status_with_an_envelope_serializes_to_json(capital_db):
+    # The admin router returns the snapshot through JSONResponse: a Decimal nested
+    # in the envelope made /admin/trading-status a 500 once a policy carried one.
+    import json
+
+    from bfx_funding_bot.modules.admin.trading_status import TradingStatusService
+    from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy, OfferEnvelope
+    from bfx_funding_bot.modules.execution.deployment.submit_attempt import SubmitAttemptRecorder
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    from bfx_funding_bot.modules.marketfeed.health_monitor import HealthProbe
+    from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
+    from tests.modules.execution.deployment.test_reconciler import _CapturingSink, _cell
+    factory, account = capital_db
+    _, _, _, ctx, runtime, halt = await boundary(factory, account)
+    envelope = OfferEnvelope(min_period_days=2, max_period_days=2, max_open_offers=6,
+                             rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
+    async with factory.begin() as session:
+        current = await runtime.repository.read_applied(session, symbol="fUST")
+        await runtime.repository.apply_policy(session, symbol="fUST", policy=replace(
+            current.policy, max_offer_amount=Decimal("200"), envelope=envelope),
+            expected_revision=current.revision, source={"operator": "test"})
+        await runtime.repository.apply_policy(session, symbol="fUSD", policy=CapitalPolicy(
+            enabled=False, max_offer_amount=Decimal("200"), envelope=envelope),
+            expected_revision=0, source={"operator": "test"})
+    chain = SafetyGuardChain(guards=[ManualKillGuard(trading_state=halt)],
+        probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(account))
+    service = TradingStatusService(chain=chain, ledger=None, account_ctx=ctx,
+        cells=[_cell("fUST", "a30")], caps={}, default_cap=Decimal("0"),
+        env_fallback_cap=None, buffers={}, default_buffer=Decimal("0"), env_fallback_buffer=None,
+        phase=Phase.LIVE, attempts=SubmitAttemptRecorder(), trading_state=halt, capital_runtime=runtime)
+    symbols = json.loads(json.dumps(await service.snapshot()))["symbols"]
+    for symbol in ("fUST", "fUSD"):
+        assert symbols[symbol]["policy"]["envelope"] == {
+            "min_period_days": 2, "max_period_days": 2, "max_open_offers": 6,
+            "rate_floor_ratio": "0.5", "min_rate_apr": "0.01"}, symbol
+        assert symbols[symbol]["policy"]["max_offer_amount"] == "200"
+    assert symbols["fUST"]["capital_available"] is True
+    assert symbols["fUSD"]["reason"] == "policy_disabled"
+
+
 class Venue:
     def __init__(self, factory):
         self.factory = factory
