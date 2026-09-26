@@ -227,6 +227,45 @@ export interface TradingControlOverview {
   running: BuildIdentity;
   latest_deployment: (BuildIdentity & { finished_at: string | null }) | null;
   requests: TradingControlRequest[];
+  /** Every currency with an applied CapitalPolicy (its own request outbox). */
+  currencies: CurrencyPolicy[];
+}
+
+export type CurrencyAction = "enable" | "disable";
+
+export interface CurrencyRequest {
+  request_id: string;
+  symbol: string;
+  action: CurrencyAction;
+  reason: string;
+  requested_by: string;
+  created_at_ms: number;
+  state: TradingControlRequestState;
+  processed_at_ms: number | null;
+  outcome_reason: string | null;
+  policy_revision_id: string | null;
+}
+
+/** The terms every new offer must stay inside; decimals stay strings. */
+export interface OfferEnvelope {
+  min_period_days: number;
+  max_period_days: number;
+  max_open_offers: number;
+  rate_floor_ratio: string;
+  min_rate_apr: string;
+}
+
+export interface CurrencyPolicy {
+  symbol: string;
+  revision: number;
+  /** Set when the applied policy cannot be read; the other fields are null. */
+  policy_error: string | null;
+  enabled: boolean | null;
+  max_offer_amount: string | null;
+  /** null: never set, and every offer for the currency is refused. */
+  envelope: OfferEnvelope | null;
+  /** Latest first. */
+  requests: CurrencyRequest[];
 }
 
 // ── SP4 Projections (operator console read models) ──

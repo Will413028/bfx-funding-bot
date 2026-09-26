@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@/lib/test-utils";
 import type {
+  CurrencyPolicy,
+  CurrencyRequest,
   TradingControlOverview,
   TradingControlRequest,
   TradingStateView,
@@ -38,6 +40,7 @@ function overview(
     running: { backend_digest: DIGEST, source_revision: REVISION },
     latest_deployment: null,
     requests: [],
+    currencies: [],
     ...extra,
   };
 }
@@ -308,4 +311,171 @@ it("an unreadable state leaves nothing to act on but the kill switch", async () 
   await waitFor(() =>
     expect(sent.find((s) => s.method === "POST")?.url).toBe(`${base}/kill`),
   );
+});
+
+// ── Currency enable/disable ─────────────────────────────────────────────────
+
+function currency(extra: Partial<CurrencyPolicy> = {}): CurrencyPolicy {
+  return {
+    symbol: "fUST",
+    revision: 3,
+    policy_error: null,
+    enabled: true,
+    max_offer_amount: "200",
+    envelope: {
+      min_period_days: 2,
+      max_period_days: 2,
+      max_open_offers: 6,
+      rate_floor_ratio: "0.5",
+      min_rate_apr: "0.01",
+    },
+    requests: [],
+    ...extra,
+  };
+}
+
+function currencyRequest(extra: Partial<CurrencyRequest>): CurrencyRequest {
+  return {
+    request_id: "33333333-3333-4333-8333-333333333333",
+    symbol: "fUST",
+    action: "disable",
+    reason: "maintenance",
+    requested_by: "will",
+    created_at_ms: 1,
+    state: "requested",
+    processed_at_ms: null,
+    outcome_reason: null,
+    policy_revision_id: null,
+    ...extra,
+  };
+}
+
+it("shows each currency's state and offer limits, or that the limits are unset", async () => {
+  mount(
+    overview({
+      currencies: [
+        currency({ symbol: "fUSD", enabled: false, envelope: null }),
+        currency(),
+      ],
+    }),
+  );
+  expect(await screen.findByText("fUST · Enabled")).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Up to 200 per offer · 2–2 days · at most 6 open offers · rate floor: the higher of 1% a year and 0.5 × the median bid",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("fUSD · Disabled")).toBeTruthy();
+  expect(screen.getByText(/Offer limits not set/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Disable fUST" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Enable fUSD" })).toBeTruthy();
+});
+
+it("disabling a currency needs a reason and only queues a request", async () => {
+  const sent = mount(overview({ currencies: [currency()] }), () =>
+    Response.json(
+      {
+        data: {
+          request_id: "x",
+          symbol: "fUST",
+          action: "disable",
+          state: "requested",
+        },
+      },
+      { status: 202 },
+    ),
+  );
+  const button = (await screen.findByRole("button", {
+    name: "Disable fUST",
+  })) as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText("Reason for the fUST change"), {
+    target: { value: "venue maintenance" },
+  });
+  expect(button.disabled).toBe(false);
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(sent.filter((s) => s.method === "POST")).toHaveLength(1),
+  );
+  expect(sent.find((s) => s.method === "POST")).toEqual({
+    url: `${base}/currencies/fUST/disable`,
+    method: "POST",
+    body: { reason: "venue maintenance" },
+  });
+});
+
+it("a waiting toggle holds its button but never the kill switch", async () => {
+  mount(
+    overview({
+      currencies: [currency({ requests: [currencyRequest({})] })],
+    }),
+  );
+  expect(
+    await screen.findByText("Waiting for the trading daemon: disable"),
+  ).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Reason for the fUST change"), {
+    target: { value: "again" },
+  });
+  expect(
+    (screen.getByRole("button", { name: "Disable fUST" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole("button", { name: "Kill switch…" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
+it("shows the daemon's outcome of the last toggle", async () => {
+  mount(
+    overview({
+      currencies: [
+        currency({
+          enabled: false,
+          requests: [
+            currencyRequest({
+              action: "enable",
+              state: "rejected",
+              processed_at_ms: 2,
+              outcome_reason: "superseded_by_kill",
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  expect(
+    await screen.findByText("Refused: enable — superseded by kill"),
+  ).toBeTruthy();
+});
+
+it("an unreadable policy is shown and offers no toggle", async () => {
+  mount(
+    overview({
+      currencies: [
+        currency({
+          policy_error: "invalid_policy_schema_or_digest",
+          enabled: null,
+          max_offer_amount: null,
+          envelope: null,
+        }),
+      ],
+    }),
+  );
+  expect(await screen.findByText("fUST · Policy unreadable")).toBeTruthy();
+  expect(screen.getByText(/invalid policy schema or digest/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /fUST/ })).toBeNull();
+});
+
+it("shows the web API's refusal of a toggle", async () => {
+  mount(overview({ currencies: [currency()] }), () =>
+    Response.json({ detail: "policy_unavailable" }, { status: 404 }),
+  );
+  fireEvent.change(await screen.findByLabelText("Reason for the fUST change"), {
+    target: { value: "x" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Disable fUST" }));
+  expect(
+    await screen.findByText("This currency has no applied policy."),
+  ).toBeTruthy();
 });

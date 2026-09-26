@@ -5,14 +5,23 @@ import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  useCurrencyToggleRequest,
   useTradingControl,
   useTradingControlRequest,
 } from "@/features/dashboard/hooks/use-trading-control";
 import { ApiError } from "@/lib/api-client";
-import type { TradingControlOverview } from "@/types";
+import type {
+  CurrencyAction,
+  CurrencyPolicy,
+  TradingControlOverview,
+} from "@/types";
 
 const KILL_PHRASE = "KILL";
-const KNOWN_ERRORS = new Set(["request_pending", "forbidden"]);
+const KNOWN_ERRORS = new Set([
+  "request_pending",
+  "forbidden",
+  "policy_unavailable",
+]);
 
 function humanize(code: string): string {
   return code.replaceAll("_", " ");
@@ -22,7 +31,10 @@ function time(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
-/** Trading state, resume and the kill switch (lending envelope ADR D4). */
+/**
+ * Trading state, resume, the kill switch and each currency's enable/disable
+ * (lending envelope ADR D4).
+ */
 export function TradingControlPanel({
   exchangeAccountId,
 }: {
@@ -130,7 +142,154 @@ export function TradingControlPanel({
         queued={Boolean(pendingKill)}
       />
       {control.error && <ErrorView error={control.error} />}
+
+      <CurrenciesView
+        exchangeAccountId={exchangeAccountId}
+        currencies={data.currencies ?? []}
+        stale={overview.isError}
+      />
     </section>
+  );
+}
+
+/** Every currency's everyday stop: the policy's enabled flag (ADR D4). */
+function CurrenciesView({
+  exchangeAccountId,
+  currencies,
+  stale,
+}: {
+  exchangeAccountId: string;
+  currencies: CurrencyPolicy[];
+  stale: boolean;
+}) {
+  const t = useTranslations("tradingControl.currencies");
+  return (
+    <div className="space-y-3 border-t pt-3">
+      <h3 className="font-semibold">{t("title")}</h3>
+      <p className="text-sm text-muted-foreground">{t("hint")}</p>
+      {currencies.length === 0 ? (
+        <p>{t("none")}</p>
+      ) : (
+        <ul className="space-y-3">
+          {currencies.map((currency) => (
+            <CurrencyControl
+              key={currency.symbol}
+              exchangeAccountId={exchangeAccountId}
+              currency={currency}
+              stale={stale}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function percent(fraction: string): string {
+  return `${Number((Number(fraction) * 100).toFixed(4))}%`;
+}
+
+function CurrencyControl({
+  exchangeAccountId,
+  currency,
+  stale,
+}: {
+  exchangeAccountId: string;
+  currency: CurrencyPolicy;
+  stale: boolean;
+}) {
+  const t = useTranslations("tradingControl");
+  const c = useTranslations("tradingControl.currencies");
+  const toggle = useCurrencyToggleRequest(exchangeAccountId);
+  const id = useId();
+  const [reason, setReason] = useState("");
+  const { symbol, envelope } = currency;
+  const pending = currency.requests.filter(
+    (request) => request.state === "requested",
+  );
+  const latest = currency.requests.find(
+    (request) => request.state !== "requested",
+  );
+  const action: CurrencyAction | null =
+    currency.enabled === null ? null : currency.enabled ? "disable" : "enable";
+  const waiting = pending.some((request) => request.action === action);
+  // Stale data after a failed re-read: a disable only narrows trading (and is
+  // a no-op if already in force), so it stays available, like the kill.
+  const held = (stale && action === "enable") || toggle.isPending || waiting;
+
+  return (
+    <li
+      className="space-y-1 rounded-lg border p-3"
+      aria-labelledby={`${id}-symbol`}
+    >
+      <p id={`${id}-symbol`} className="font-semibold">
+        {symbol} ·{" "}
+        {currency.policy_error !== null
+          ? c("unreadable")
+          : currency.enabled
+            ? c("enabled")
+            : c("disabled")}
+      </p>
+      {currency.policy_error !== null && (
+        <p role="alert">
+          {c("unreadableBody", { code: humanize(currency.policy_error) })}
+        </p>
+      )}
+      {currency.policy_error === null &&
+        (envelope === null ? (
+          <p role="alert">{c("envelopeUnset")}</p>
+        ) : (
+          <p className="text-sm tabular-nums">
+            {c("envelope", {
+              max: currency.max_offer_amount ?? "—",
+              minDays: envelope.min_period_days,
+              maxDays: envelope.max_period_days,
+              offers: envelope.max_open_offers,
+              apr: percent(envelope.min_rate_apr),
+              ratio: envelope.rate_floor_ratio,
+            })}
+          </p>
+        ))}
+      {pending.map((request) => (
+        <output key={request.request_id} className="block">
+          {t("waiting", { action: c(`action.${request.action}`) })}
+        </output>
+      ))}
+      {latest && (
+        <p role={latest.state === "applied" ? undefined : "alert"}>
+          {t(`outcome.${latest.state as "applied" | "rejected" | "failed"}`, {
+            action: c(`action.${latest.action}`),
+          })}
+          {latest.outcome_reason ? ` — ${humanize(latest.outcome_reason)}` : ""}
+        </p>
+      )}
+      {action !== null && (
+        <div className="space-y-2 pt-1">
+          <label className="block" htmlFor={`${id}-reason`}>
+            {c("reason", { symbol })}
+          </label>
+          <Input
+            id={`${id}-reason`}
+            value={reason}
+            maxLength={500}
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <Button
+            variant={action === "disable" ? "outline" : "default"}
+            disabled={held || !reason.trim()}
+            onClick={() =>
+              toggle.mutate(
+                { symbol, action, reason: reason.trim() },
+                { onSuccess: () => setReason("") },
+              )
+            }
+          >
+            {c(action, { symbol })}
+          </Button>
+          {toggle.error && <ErrorView error={toggle.error} />}
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -249,7 +408,9 @@ function ErrorView({ error }: { error: Error }) {
   return (
     <p role="alert">
       {KNOWN_ERRORS.has(code)
-        ? t(`error.${code as "request_pending" | "forbidden"}`)
+        ? t(
+            `error.${code as "request_pending" | "forbidden" | "policy_unavailable"}`,
+          )
         : t("error.generic", { code })}
     </p>
   );

@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accountScopedPath, apiClient } from "@/lib/api-client";
 import { fundingStatusKeys, tradingControlKeys } from "@/lib/query-keys";
 import type {
+  CurrencyAction,
+  CurrencyRequest,
   TradingControlAction,
   TradingControlOverview,
   TradingControlRequest,
@@ -25,8 +27,13 @@ export function tradingControlPath(
 function pendingRequestIds(
   overview: TradingControlOverview | undefined,
 ): Set<string> {
+  // Resume/kill and currency toggles alike: each is settled by the daemon.
+  const requests: { request_id: string; state: string }[] = [
+    ...(overview?.requests ?? []),
+    ...(overview?.currencies ?? []).flatMap((currency) => currency.requests),
+  ];
   return new Set(
-    (overview?.requests ?? [])
+    requests
       .filter((request) => request.state === "requested")
       .map((request) => request.request_id),
   );
@@ -95,6 +102,40 @@ export function useTradingControlRequest(exchangeAccountId?: string) {
       >(tradingControlPath(exchangeAccountId, `/${input.action}`), {
         reason: input.reason,
       });
+    },
+    retry: false,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: tradingControlKeys.overview(exchangeAccountId),
+      });
+    },
+  });
+}
+
+export interface CurrencyToggleInput {
+  symbol: string;
+  action: CurrencyAction;
+  reason: string;
+}
+
+/**
+ * Queue an enable/disable of one currency's policy. Same contract as
+ * {@link useTradingControlRequest}: accepted, not done; never retried.
+ */
+export function useCurrencyToggleRequest(exchangeAccountId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: CurrencyToggleInput) => {
+      if (!exchangeAccountId) throw new Error("exchangeAccountNotSelected");
+      return apiClient.post<
+        Pick<CurrencyRequest, "request_id" | "symbol" | "action" | "state">
+      >(
+        tradingControlPath(
+          exchangeAccountId,
+          `/currencies/${encodeURIComponent(input.symbol)}/${input.action}`,
+        ),
+        { reason: input.reason },
+      );
     },
     retry: false,
     onSuccess: async () => {
