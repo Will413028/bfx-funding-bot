@@ -52,7 +52,6 @@ class _EventCapture:
 class _AllowGuard:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.is_calibrated = False
         self.called = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
@@ -63,7 +62,6 @@ class _AllowGuard:
 class _BlockGuard:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         return GuardResult(allowed=False, guard_name=self.name, reason="blocked")
@@ -71,7 +69,6 @@ class _BlockGuard:
 
 class _CrashGuard:
     name = "crash"
-    is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         raise RuntimeError("boom")
@@ -79,7 +76,6 @@ class _CrashGuard:
 
 class _HangGuard:
     name = "hang"
-    is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         await asyncio.sleep(GUARD_EVAL_TIMEOUT_SECONDS + 5)
@@ -190,7 +186,6 @@ class _SlowGuard:
     """Allows, but uses most of its budget -- degrading, not yet failing."""
 
     name = "slow"
-    is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         await asyncio.sleep(GUARD_EVAL_TIMEOUT_SECONDS * GUARD_EVAL_WARN_FRACTION + 0.05)

@@ -42,7 +42,6 @@ class _TradingStateReader(Protocol):
 class CapitalPolicyGuard:
     """The applied-policy evaluator is the sole live money authority."""
     name = "capital_policy"
-    is_calibrated = False
 
     def __init__(self, *, runtime: CapitalRuntime) -> None:
         self.runtime = runtime
@@ -79,7 +78,6 @@ class ManualKillGuard:
     """
 
     name = "manual_kill"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -142,7 +140,6 @@ class AuthHealthGuard:
     """
 
     name = "auth_health"
-    is_calibrated = False
 
     def __init__(self, *, probe: HealthProbe) -> None:
         self.probe = probe
@@ -167,7 +164,6 @@ class HeartbeatGuard:
     """
 
     name = "heartbeat"
-    is_calibrated = False
 
     def __init__(
         self, *, probe: HealthProbe, threshold_seconds: int,
@@ -244,7 +240,6 @@ class UncertaintyGuard:
     """
 
     name = "uncertainty"
-    is_calibrated = False
     _SUPPORTED_KINDS = frozenset({
         "submit_outcome_unknown",
         "unattributed_venue_offer",
@@ -442,7 +437,6 @@ class AllocationCapGuard:
     """
 
     name = "allocation_cap"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -505,7 +499,6 @@ class BuyingPowerGuard:
     """
 
     name = "buying_power"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -553,7 +546,6 @@ class WriterLockGuard:
     against the dedicated connection (no stale-flag window)."""
 
     name = "writer_lock"
-    is_calibrated = False
 
     def __init__(self, *, lock: WriterLockHandle) -> None:
         self._lock = lock

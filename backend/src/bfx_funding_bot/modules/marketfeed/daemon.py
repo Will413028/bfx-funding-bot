@@ -125,9 +125,7 @@ from bfx_funding_bot.modules.execution.protocols import (
 )
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.registry_offers import OfferRegistry
-from bfx_funding_bot.modules.execution.safety.boot_stop import (
-    stop_refused_boot,
-)
+from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
     SafetyConfig,
@@ -971,18 +969,15 @@ def assert_caps_invariant(cells: list[CellConfig], alloc_cfg: _AllocationCapCfg)
 
 async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
                             session_factory: async_sessionmaker[AsyncSession]) -> None:
-    """A live boot that refuses to run is an automatic stop: HALTED/auto and an
-    alert (``safety/boot_stop``), before the error is raised."""
+    """A live boot that refuses to run alerts (``safety/boot_stop``) before the
+    error is raised; nothing is written and nothing reaches the venue."""
     try:
         account_id = UUID(_require_env("BFX_EXCHANGE_ACCOUNT_ID"))
     except Exception:
-        log.critical("boot_refused_without_account account unknown; nothing recorded")
+        log.critical("boot_refused_without_account account unknown")
         return
-    await stop_refused_boot(
-        session_factory=session_factory, account_id=account_id,
-        environment=config.deployment_environment.value,
-        reason=f"boot_blocked: {str(exc) or type(exc).__name__}", clock=now_ms_utc,
-    )
+    report_refused_boot(account_id=account_id, environment=config.deployment_environment.value,
+                        reason=f"boot_blocked: {str(exc) or type(exc).__name__}")
 
 
 async def build_daemon(
@@ -1540,7 +1535,7 @@ async def build_daemon(
                 config_hash=deployment_identity.backend_digest or "unidentified",
             ),
             protection=protection,
-            disabled_sweep=(ManagedOfferSweep(
+            managed_sweep=(ManagedOfferSweep(
                 session_factory=session_factory, account_id=UUID(account_id),
                 environment=env_str, canceller=reservation_middleware, ctx=account_ctx)
                 if isinstance(executor, CancelPort) else None),
@@ -1825,13 +1820,9 @@ async def build_daemon(
             if command_gate is not None else None
         ),
         clock=now_ms_utc,
-        # An automatic stop cancels only managed offers, through the command gate.
-        sweep=(ManagedOfferSweep(session_factory=session_factory, account_id=UUID(account_id),
-                                 environment=env_str, canceller=reservation_middleware,
-                                 ctx=account_ctx)
-               if not spec.is_simulated and isinstance(executor, CancelPort) else None),
     )
-    protection.bind(kill_switch)
+    # An automatic stop writes HALTED alone; the planner then pulls managed offers.
+    protection.bind(trading_state)
     if trading_control is not None:
         trading_control.kill_switch = kill_switch  # the operator's kill request
     if command_gate is not None:

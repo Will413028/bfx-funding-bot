@@ -169,7 +169,7 @@ class TradingStatusService:
             # This build's change class and what the boot gate did with it.
             "deployment": self._deployment,
             "guards": [
-                {"name": g.name, "is_calibrated": g.is_calibrated}
+                {"name": g.name}
                 for g in self._chain.guards
             ],
             "symbols": {s: await self._capital_status(s) if self._capital else self._symbol_status(s)

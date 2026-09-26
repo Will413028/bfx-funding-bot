@@ -11,7 +11,7 @@ UNKNOWN 與金額指紋、自動保護、Kill switch）。決策來源：ADR 202
 |---|---|---|
 | 每筆單 | CapitalPolicy 的包絡（§2） | 單筆上限、天期、open offer 數、利率下限；超出就不送 |
 | 每幣別 | policy `enabled` | `false`：不掛新單，撤掉該幣別的受管 offer；已成交借款照常到期 |
-| 帳戶 | `trading_state` `ACTIVE`／`HALTED` | `HALTED`：所有幣別不掛新單，撤單照常 |
+| 帳戶 | `trading_state` `ACTIVE`／`HALTED` | `HALTED`：所有幣別不掛新單，planner 撤掉受管 offer |
 
 `trading_state` 的 cause：`operator`（人）或 `auto`（自動保護，§4）。讀不到狀態或從未記錄任何決策
 ＝ HALTED（fail-closed）。只有 operator 能結束 HALTED（DB trigger 與程式碼雙重拒絕）。
@@ -82,17 +82,17 @@ bot 自己停著時不可用：到 Bitfinex 網頁撤單並記錄。不依賴資
 |---|---|---|---|
 | 1 | 違反包絡、book 過期、auth DOWN、heartbeat 過期 | 擋那一筆 | 無 |
 | 2 | 送單結果不明（UNKNOWN）、讀取失敗、未被接受的 snapshot | 只隔離該幣別；settle 窗口（120s）後以金額指紋＋完整 history 自動結案 | 30 分鐘仍未結案時收到 `unknown_quarantine_aged`（之後每 6 小時），見 §5 |
-| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，按 id 撤**受管** offer（外來 offer 不碰），不自動解除 | 查清原因後 UI 恢復 |
+| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，之後 planner 每一輪按 id 撤**受管** offer 直到沒有（外來 offer 不碰），不自動解除 | 查清原因後 UI 恢復 |
 | 4 | 外來 offer（`foreign_exposure`）、外來 offer 成交造成的借出（`foreign_lending`）、NAV 下降（`nav_drop`） | 只告警 | 確認是不是你自己的操作 |
 
 - **不會**觸發任何反應：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
 - writer lock 遺失不是交易決策：bot 直接退出、container 重啟、開機時重新等 lock（Telegram 收到
   `daemon_fatal`）。
-- 拒絕開機（schema 與 build 不符、policy 讀不到）：寫 `HALTED/auto`（actor `boot`）並發
-  `venue_offers_may_remain`，不碰 venue。venue 上已有的受管 offer 仍在包絡內；要撤就用 kill。
+- 拒絕開機（schema 與 build 不符、policy 讀不到）：只發 `venue_offers_may_remain` 然後退出，
+  不寫交易狀態、不碰 venue；修好後的下一版會照常開機。venue 上已有的受管 offer 仍在包絡內；要撤就用 kill。
 - 第 3 級處理步驟：
   1. 看 Telegram 與 UI 的 cause/reason；container log 用 `docker logs bfx-bot --since 1h`。
-  2. 看 `kill_switch_engaged`（scope=managed）的 `not_acknowledged`；有撤不掉的受管 offer 就用 kill。
+  2. 看 log 的 `managed_offer_sweep`（requested／failed）；撤不掉的受管 offer 每一輪會重試，急的話用 kill。
   3. 查清 ledger 與 venue 的差異（`/admin/trading-status`、`/admin/dry-evaluate`）。
   4. 原因消除後在 UI「恢復交易」。
 

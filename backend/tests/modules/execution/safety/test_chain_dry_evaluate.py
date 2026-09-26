@@ -66,7 +66,6 @@ class _EventCapture:
 class _AllowGuard:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.is_calibrated = False
         self.calls = 0
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
@@ -77,7 +76,6 @@ class _AllowGuard:
 class _BlockGuard:
     def __init__(self, name: str, reason: str = "blocked") -> None:
         self.name = name
-        self.is_calibrated = False
         self.calls = 0
         self._reason = reason
 
@@ -88,7 +86,6 @@ class _BlockGuard:
 
 class _CrashGuard:
     name = "crash"
-    is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         raise RuntimeError("boom")
@@ -96,7 +93,6 @@ class _CrashGuard:
 
 class _HangGuard:
     name = "hang"
-    is_calibrated = False
 
     async def evaluate(self, d: DecisionPayload, c: AccountContext) -> GuardResult:
         await asyncio.sleep(GUARD_EVAL_TIMEOUT_SECONDS + 5)

@@ -81,8 +81,8 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
     path.write_text(yaml.safe_dump(doc))
     try:
         if not schema_current or not with_policy:
-            # A refused live boot is an automatic stop: HALTED stays (a stop
-            # stays the stop it was) and nothing reaches the venue (D2/D3).
+            # A refused live boot writes nothing and sends nothing (D3/D5):
+            # the state it found stays exactly as it was.
             from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
             before = await halt.current()
             with pytest.raises(SchemaHeadMismatch if not schema_current else ValueError,
@@ -98,17 +98,11 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         assert status["halt"]["halted"]
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
-        # The only allowed POST is the public read-only FX calculation, never
-        # a financial command. Keep unknown requests fatal in this fixture.
-        fx_url = "https://api-pub.bitfinex.com/v2/calc/fx"
-        httpx_mock.add_response(url=fx_url, method="POST", json=[0.999865],
-                                match_json={"ccy1": "UST", "ccy2": "USD"})
+        # HALTED: the planner places nothing and asks the venue for nothing --
+        # not even the FX observation sizing would need (D3/D4). Keep unknown
+        # requests fatal in this fixture.
         await daemon.periodic_reconcile._deployment.deploy()
-        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-        assert len(posts) == 1 and str(posts[0].url) == fx_url
-        assert not any(name in posts[0].headers for name in (
-            "authorization", "bfx-apikey", "bfx-signature", "cookie",
-        ))
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
         assert (await halt.current()).state == "HALTED"
 
         # A later periodic observation must not supersede the boot snapshot
@@ -338,9 +332,9 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
 @pytest.mark.asyncio
 async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock):
     """The wrong build for this database (e.g. a rollback onto a newer schema):
-    HALTED/auto before anything can trade, the operator is told offers may
-    remain, and the boot is refused. Nothing reaches the venue: an automatic
-    reaction never cancels offers it cannot prove are its own (D2/D3)."""
+    the boot is refused and the operator is told offers may remain. Nothing is
+    written -- the next, fixed build must not need a resume, since a release is
+    never a trading decision (D5) -- and nothing reaches the venue (D2/D3)."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -375,8 +369,7 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
         with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={build_head()}"):
             await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
-        assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "boot")
-        assert "schema_head_mismatch" in state.reason
+        assert (state.state, state.reason) == ("ACTIVE", "trading before the deploy")
         assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
         assert ("venue_offers_may_remain", "critical") in sent
     finally:

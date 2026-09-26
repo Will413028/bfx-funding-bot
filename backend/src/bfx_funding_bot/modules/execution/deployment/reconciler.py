@@ -79,6 +79,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     CAPITAL_BLOCK_TRIGGERS,
     ProtectionPort,
 )
+from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
@@ -175,12 +176,13 @@ class DeploymentReconciler:
         rate_optimizer: RateOptimizer | None = None,
         optimizer_fee_rate: Decimal | None = None,
         optimizer_horizon_h: int | None = None,
-        disabled_sweep: ManagedOfferSweep | None = None,
+        managed_sweep: ManagedOfferSweep | None = None,
     ) -> None:
         self._store = store
-        # A currency whose applied policy is disabled has its managed offers
-        # cancelled (lending envelope D4); None on paper/shadow.
-        self._disabled_sweep = disabled_sweep
+        # Level-triggered: while the account is HALTED or a currency's policy is
+        # disabled, the managed offers there converge to none (lending envelope
+        # D3/D4); None on paper/shadow.
+        self._managed_sweep = managed_sweep
         self._tracker = tracker
         self._ledger = ledger
         self._safety = safety_chain
@@ -231,13 +233,17 @@ class DeploymentReconciler:
             c.cell_id: c.period_agg for c in cells
         }
 
-    async def _pull_if_disabled(self, symbol: str) -> bool:
-        """Whether ``symbol`` is disabled; if so, cancel its managed offers.
+    async def _pull_if_stopped(self, symbol: str) -> bool:
+        """Whether ``symbol`` must place nothing; if so, cancel its managed offers.
 
-        The everyday per-currency stop (D4): nothing new is placed, the offers
-        this bot placed are pulled by id through the command gate, foreign
-        offers and taken loans are untouched. An unreadable policy is not
-        "disabled": the capital read below fails closed on it instead.
+        The one place where the offers this bot placed are pulled when trading
+        stops (D3 level 3, D4): the account is HALTED (an automatic protection
+        or the operator; the operator's kill already sent a venue cancel-all),
+        or the currency's applied policy is disabled. Level-triggered: every
+        tick re-reads the state and cancels what is still open, so a cancel
+        refused or failed on one tick is retried on the next. Foreign offers
+        and taken loans are never touched. An unreadable state or policy is not
+        "stopped": the capital read below fails closed on it instead.
         """
         try:
             repository = self._capital.repository
@@ -245,12 +251,16 @@ class DeploymentReconciler:
                 policy = await read_policy_unlocked(
                     session, account_id=repository.account_id,
                     environment=repository.environment, symbol=symbol)
+                state = await read_current(session, account_id=repository.account_id,
+                                           environment=repository.environment)
         except Exception:
             return False
-        if policy.enabled:
+        halted = state is not None and state.state == HALTED
+        if policy.enabled and not halted:
             return False
-        if self._disabled_sweep is not None:
-            await self._disabled_sweep.cancel([symbol], reason=f"{symbol} disabled by policy")
+        if self._managed_sweep is not None:
+            why = "account HALTED" if halted else "disabled by policy"
+            await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
         return True
 
     async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
@@ -271,7 +281,7 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
-            if await self._pull_if_disabled(symbol):
+            if await self._pull_if_stopped(symbol):
                 continue
             # Uncertainty is a sizing-boundary invariant, not merely a
             # per-offer safety check.  The chain's explicit pre-sizing hook is

@@ -7,7 +7,7 @@ long-dated loan, or a flood of venue writes.
 
 ``offer_envelope`` checks one new offer against the applied CapitalPolicy's
 ``max_offer_amount`` and ``envelope`` (DB, versioned, amended by the operator):
-amount ceiling, period bounds, open offers per symbol and the rate floor
+amount ceiling, period bounds, open managed offers per symbol and the rate floor
 max(min_rate_apr / 365, median live bid x rate_floor_ratio). A policy without an
 envelope, an unreadable policy or projection, no fresh book, or a malformed
 decision refuses. ``CommandThrottle`` bounds submits and cancels; its limits are
@@ -88,7 +88,6 @@ class OfferEnvelopeGuard:
     a rate unit bug that would drag the relative floor down with it.
     """
     name = OFFER_ENVELOPE
-    is_calibrated = False
 
     def __init__(self, *, runtime: CapitalRuntime, book: FundingBookProvider,
                  clock: Callable[[], int]) -> None:
@@ -107,6 +106,8 @@ class OfferEnvelopeGuard:
             VenueOfferStateRow.deployment_environment == repository.environment,
             VenueOfferStateRow.symbol == symbol,
             VenueOfferStateRow.is_terminal.is_(False),
+            # Managed offers only (D2): a manual offer never takes a slot.
+            VenueOfferStateRow.execution_decision_id.is_not(None),
         ))
         return policy, int(count or 0)
 
@@ -166,9 +167,10 @@ class CommandThrottle:
     """Token bucket over venue writes (submit + cancel) at the command gate.
 
     ``admit`` is synchronous and cheap; it runs while the account command lock
-    is held. A refused command is alerted; ``trip_blocks`` refusals within
+    is held. A refused submit is alerted; ``trip_blocks`` refused submits within
     ``trip_window_s`` mean the writer keeps pushing past the limit, which is a
-    runaway, not a burst -- that trips HALTED/auto once per episode.
+    runaway, not a burst -- that trips HALTED/auto once per episode. A refused
+    cancel waits for the next token and never counts toward that stop.
     """
 
     def __init__(self, *, capacity: int, refill_per_second: float, trip_blocks: int,
@@ -202,6 +204,11 @@ class CommandThrottle:
         if self._tokens >= 1.0:
             self._tokens -= 1.0
             return True
+        if kind == "cancel":
+            # Pulling exposure never counts toward the stop: a HALTED caused by
+            # throttling would itself need cancels to converge (D3).
+            log.warning("command_throttled kind=cancel (not counted toward a halt)")
+            return False
         self._blocks.append(now)
         blocked = len(self._blocks)
         log.warning("command_throttled kind=%s blocked_in_window=%d", kind, blocked)

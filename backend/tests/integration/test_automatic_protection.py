@@ -29,7 +29,6 @@ from bfx_funding_bot.modules.execution.event_store.store import PostgresEventSto
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.hard_guards import ManualKillGuard
-from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeUnknown
@@ -38,7 +37,7 @@ from bfx_funding_bot.modules.marketfeed.schemas import Phase, StrategyName
 
 from .test_capital_command_boundary import AMOUNT, boundary, second_ready
 from .test_capital_repository import repository, setup_policy, snapshot
-from .test_kill_switch import FakeVenue, Lock
+from .test_kill_switch import FakeVenue
 
 D = Decimal
 
@@ -249,8 +248,7 @@ async def test_an_unknown_submit_blocks_its_symbol_but_never_halts(capital_db):
     gate._safety_evaluator = _guarded_chain(trading, protection, account)
     gate.protection = protection
     cancel_venue = FakeVenue(factory, account, {"UST": set()})
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=cancel_venue, writer_lock=Lock()))
+    protection.bind(trading)
 
     async def unknown(ready_, ctx_, *, cid, reservation_ref):
         venue.received.append(ready_)
@@ -303,10 +301,10 @@ async def test_identity_conflict_trips(capital_db):
 
 
 @pytest.mark.asyncio
-async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(capital_db):
+async def test_a_persisting_condition_writes_one_halt_and_never_the_cancel_all(capital_db):
     """An identity conflict re-trips every reconcile tick; only the first tick
-    -- the transition into HALTED -- cancels, and only managed offers by id:
-    the venue cancel-all is the operator's alone (D3)."""
+    writes HALTED. No protection calls the venue: the planner pulls managed
+    offers, and the venue cancel-all is the operator's kill alone (D3)."""
     from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
     factory, account = capital_db
     gate, _, ready, ctx, _, trading = await boundary(factory, account)
@@ -314,22 +312,8 @@ async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(ca
     async with factory.begin() as session:
         (await session.get(ExecutionDecisionRow, ready.decision_id)).symbol = "fUSD"
     venue = FakeVenue(factory, account, {"UST": {"101"}})
-    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
-
-    from .test_kill_switch import Canceller
-    canceller = Canceller()
-    sweeps: list[int] = []
-
-    class CountingSweep(ManagedOfferSweep):
-        async def cancel(self, symbols=None, *, reason):  # type: ignore[no-untyped-def]
-            sweeps.append(1)
-            return await super().cancel(symbols, reason=reason)
-
     protection = AutomaticProtection()
-    protection.bind(KillSwitch(trading_state=trading, session_factory=factory, ctx=ctx,
-        configured_symbols={"fUST"}, venue=venue, writer_lock=Lock(),
-        sweep=CountingSweep(session_factory=factory, account_id=account, environment="ci",
-                            canceller=canceller, ctx=ctx)))
+    protection.bind(trading)
     auth = FakeAuth(offers=[_offer("101", "fUST", "500", "500")],
                     wallets={"fUST": D("500"), "fUSD": D("0")})
     tick = recovery(factory, account, auth, protection)
@@ -338,8 +322,9 @@ async def test_a_persisting_condition_calls_the_venue_only_on_entering_halted(ca
         await protection.run_pending()
     async with factory() as session:
         rows = (await session.scalars(select(FundingCancelAllAuditRow))).all()
-    assert sweeps == [1]  # the first tick only
     assert venue.calls == [] and rows == []  # never the venue cancel-all
+    halts = [h for h in await trading.history(limit=10) if h.state == "HALTED"]
+    assert len(halts) == 1  # the first tick only
     assert protection.persisting == 2
     assert protection.pending_reason() is None
     state = await trading.current()
