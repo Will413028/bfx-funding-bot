@@ -277,10 +277,11 @@ def _write_atomic(path: Path, content: str, mode: int) -> None:
 
 
 def _readable_by_all(root: Path) -> None:
-    """World-readable tooling despite the service's UMask=0077.
+    """World-readable tree despite the service's UMask=0077.
 
-    The restore-test unit runs as `ubuntu` and executes this tree's
-    interpreter; root keeps sole write access.
+    The restore-test unit runs as `ubuntu` and executes the tooling tree's
+    interpreter; the isolated restore reads the DR checkout as another uid.
+    Write access stays with the owner.
     """
     for directory, _, files in os.walk(root):
         os.chmod(directory, 0o755)
@@ -1068,6 +1069,12 @@ class Deployer:
         itself: the drill requires its config to be a clean tracked file and
         finds docker-compose.dr.yml at the repository root, so it needs the whole
         tree, not loose files. Reused when it already sits clean at <revision>.
+
+        git inherits the service's UMask=0077, but the isolated restore's
+        postgres (another uid) reads pgbackrest.conf through a bind mount, so
+        the tree is made world-readable -- also on reuse, which repairs a
+        checkout left 0700 by an earlier run. git tracks only the owner's
+        execute bit, so the checkout stays clean.
         """
         path = self.settings.dr_root / revision
         if path.exists():
@@ -1075,10 +1082,12 @@ class Deployer:
             status = self._git_try("status", "--porcelain", "--untracked-files=no", at=path)
             if head.returncode == 0 and head.stdout.strip() == revision and \
                     status.returncode == 0 and not status.stdout.strip():
+                _readable_by_all(path)
                 return path
             self._git("worktree", "remove", "--force", str(path), code="dr_checkout_remove_failed")
         self._git("worktree", "add", "--detach", "--force", str(path), revision,
                   code="dr_checkout_add_failed", timeout=300.0)
+        _readable_by_all(path)
         return path
 
     def _backup(self, dr_checkout: Path) -> None:

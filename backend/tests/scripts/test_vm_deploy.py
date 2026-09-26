@@ -286,7 +286,15 @@ class FakeHost:
         if args[:4] == ("worktree", "add", "--detach", "--force"):
             path, revision = Path(args[4]), args[5]
             assert revision in self.commits
-            path.mkdir(parents=True)
+            # git inherits bfx-deploy.service's UMask=0077.
+            scripts = path / "deploy/vm/pgbackrest"
+            scripts.mkdir(mode=0o700, parents=True)
+            for directory in (path, path / "deploy", path / "deploy/vm", scripts):
+                directory.chmod(0o700)
+            (scripts / "pgbackrest.conf").write_text("[bfx]\n")
+            (scripts / "pgbackrest.conf").chmod(0o600)
+            (scripts / "backup.sh").write_text("#!/bin/sh\n")
+            (scripts / "backup.sh").chmod(0o700)
             self.worktrees[str(path)] = revision
             return bfx.CommandResult(0, "", "")
         if args[:3] == ("worktree", "remove", "--force"):
@@ -741,6 +749,23 @@ def test_existing_clean_checkout_of_the_target_is_reused(harness: Harness) -> No
     adds = harness.host.count(lambda c: c[7:9] == ("worktree", "add"))
     assert harness.run() == 0
     assert harness.host.count(lambda c: c[7:9] == ("worktree", "add")) == adds
+    _assert_readable_by_restore_container(harness.settings.dr_root / REV_NEW)
+
+
+def _assert_readable_by_restore_container(checkout: Path) -> None:
+    # The isolated restore's postgres (uid 70) reads pgbackrest.conf through a
+    # bind mount; a 0700 tree fails it with restore_permissions_invalid.
+    scripts = checkout / "deploy/vm/pgbackrest"
+    for directory in (checkout, checkout / "deploy", checkout / "deploy/vm", scripts):
+        assert oct(directory.stat().st_mode & 0o777) == "0o755", directory
+    assert oct((scripts / "pgbackrest.conf").stat().st_mode & 0o777) == "0o644"
+    assert oct((scripts / "backup.sh").stat().st_mode & 0o777) == "0o755"
+
+
+def test_new_checkout_is_readable_despite_the_service_umask(harness: Harness) -> None:
+    harness.host.current = ("h1",)
+    assert harness.run() == 0
+    _assert_readable_by_restore_container(harness.settings.dr_root / REV_NEW)
 
 
 @pytest.mark.parametrize("paths", [
