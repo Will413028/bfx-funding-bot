@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPr
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmitOutcomeKind
 from bfx_funding_bot.modules.execution.uncertainty_tables import SubmissionAttemptRow
 from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
-from tests.integration.test_capital_command_boundary import boundary
+from tests.integration.test_capital_command_boundary import AMOUNT, boundary
 from tests.integration.test_capital_repository import capital_db as capital_db
 from tests.integration.test_capital_repository import capital_engine as capital_engine
 from tests.modules.execution.deployment.test_reconciler import _Readiness, _valid_snapshot
@@ -57,7 +57,7 @@ async def test_expired_decision_is_durable_not_sent(capital_db, delay, expiring)
     gate, venue, base, ctx, _capital, _halt = await boundary(factory, account)
     now = 1100
     gate._clock = lambda: now
-    candidate = base.decision.model_copy(update={"offer_amount_usdt": 500})
+    candidate = base.decision.model_copy(update={"offer_amount_usdt": Decimal(AMOUNT)})
     snap = book_store(-27900 if expiring == "book" else 1000).snapshot("fUST", now_ms=now)
     price = PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001")).price(
         candidate=candidate, snapshot=snap)

@@ -257,10 +257,10 @@ async def test_no_alert_for_a_transition_that_was_not_committed(installed: Any, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("trigger", "title"), [
-    ("submit_outcome_unknown", "automatic HALT: UNKNOWN submit"),
-    ("orphan_quarantined", "automatic HALT: orphan offer quarantined"),
-    ("writer_lock_lost", "automatic HALT: writer lock lost"),
-    ("loss_limiter", "automatic HALT: loss limiter"),
+    ("offer_amount_mismatch", "automatic HALT: managed offer amount differs from the submit"),
+    ("identity_conflict", "automatic HALT: ledger and venue disagree about an offer"),
+    ("venue_lent_above_ledger", "automatic HALT: lending nothing explains"),
+    ("command_rate_exceeded", "automatic HALT: venue write rate kept exceeding its limit"),
 ])
 async def test_protection_trip_alerts_with_its_trigger(installed: Any, trigger: str, title: str) -> None:
     transport = Recorder()
@@ -317,7 +317,7 @@ def test_boot_refused_fatal_and_future_events_render() -> None:
     for event, fields, expected in (
         (alerts.BOOT_REFUSED, {"error": "ValueError: bad config"}, "[CRITICAL]"),
         (alerts.DAEMON_FATAL, {"error": "RuntimeError: x"}, "[CRITICAL]"),
-        ("material_deploy_awaiting_approval", {"revision": "abc"}, "[WARNING]"),  # T5-style
+        ("foreign_exposure", {"venue_offer_id": "1"}, "[WARNING]"),  # an unregistered event
     ):
         text = alerts.render(event, level=alerts.default_level(event, fields), fields=fields,
                              context="prod", host="oci-a1")
@@ -358,11 +358,11 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
 ) -> None:
     with caplog.at_level(logging.INFO):
         sink = alerts.AlertSink.from_environment({"BFX_DEPLOYMENT_ENV": "prod"})
-        sink.emit(alerts.PROTECTION_TRIPPED, trigger="writer_lock_lost", detail="x")
-        sink.emit(alerts.PROTECTION_TRIPPED, trigger="orphan_quarantined", detail="y")
+        sink.emit(alerts.PROTECTION_TRIPPED, trigger="identity_conflict", detail="x")
+        sink.emit(alerts.PROTECTION_TRIPPED, trigger="command_rate_exceeded", detail="y")
     assert not sink.delivers and sink.counts == {"log_only": 2}
     assert caplog.text.count("alerts_telegram_not_configured") == 1
-    assert "automatic HALT: writer lock lost" in caplog.text
+    assert "automatic HALT: ledger and venue disagree about an offer" in caplog.text
 
 
 @pytest.mark.parametrize("environ", [

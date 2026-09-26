@@ -4,7 +4,10 @@
 `bfx-deploy`。依據：`docs/superpowers/plans/2026-09-25-release-governance-refactor.md` §3–§4。
 Production 在整個切換期間維持停機（halt 11），直到最後一步由 Will 以 TOTP 恢復。
 
-完成後這份文件只剩歷史價值；日常操作看 [deploy](deploy.md) 與 [operations](operations.md)。
+> **狀態（2026-09-26）**：已於 2026-09-25 執行完畢，這是當時的紀錄。之後的 lending envelope
+> ADR 取消了變更分級、build 核准與限額期：§2 的 `change_class` 預期、§4 的「核准這個 build」與
+> §5 都不再適用，恢復交易只需 UI resume。§2 仍可當新 VM 首次安裝的參考；§7 的清理項目仍待 Will
+> 決定。日常操作看 [deploy](deploy.md) 與 [operations](operations.md)。
 
 ## 0. Will 的前置作業（secrets 只存 VM，回覆 `done`，不要貼出來）
 
@@ -206,12 +209,8 @@ Production 在整個切換期間維持停機（halt 11），直到最後一步�
 
 ## 5. 恢復交易（Will）
 
-1. UI「核准這個 build」（TOTP）→ 結果「approved; trading state HALTED unchanged」。
-2. UI「恢復交易」（TOTP）→ `ACTIVE` 限額期：新單上限為正常 cell 的 25%（至少一筆 venue 最小單），
-   24 小時且 ≥3 筆 acknowledged submit、期間沒有 HALTED 時自動解除。Telegram 收到
-   `probation_started`，解除時收到 `probation_lifted`。
-3. 限額期中觀察：面板進度、`docker logs bfx-bot`、Grafana。有任何自動保護 → 依
-   [operations §4](operations.md#4-自動保護寫-haltedauto--kill-path不會自動解除) 處理。
+（已由 lending envelope ADR 取代）UI「恢復交易」（TOTP）→ `ACTIVE`，沒有限額期；先依
+[operations §2](operations.md#2-包絡與幣別設定amend_capital_policy) 設好 fUST 的包絡。
 
 ## 6. 回滾邊界
 
@@ -226,7 +225,7 @@ Production 在整個切換期間維持停機（halt 11），直到最後一步�
 
 - 下一個沒有 migration 的 release（例如只改文件的 standard release）部署前，做一次
   [rollback drill](deploy.md#6-rollback-drill刻意走一次回滾路徑)（T10 驗收：刻意回滾一次）。
-- 限額期通過、rollback drill 完成、穩定運作一段時間後，由 Will 決定清理下列 VM 上的舊東西。
+- rollback drill 完成、穩定運作一段時間後，由 Will 決定清理下列 VM 上的舊東西。
   **這些都是 repo 外、未追蹤的檔案或 container，刪除前每一項都要 Will 同意；本文件不執行任何刪除。**
 
   | 路徑／物件 | 是什麼 | 注意 |

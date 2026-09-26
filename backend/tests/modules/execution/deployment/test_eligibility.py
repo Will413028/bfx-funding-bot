@@ -148,7 +148,7 @@ async def test_ready_candidate_is_audited_before_becoming_submit_ready() -> None
     )
 
     assert isinstance(result, ReadyToSubmit)
-    assert result.decision.offer_rate == 0.00021
+    assert result.decision.offer_rate == Decimal("0.00021")
     assert audit.last.outcome is DecisionOutcome.READY
     assert audit.last.signal_rate == Decimal("0.00020")
     assert audit.last.applied_rate == Decimal("0.00021")
@@ -375,7 +375,7 @@ async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailabl
     )
 
     assert isinstance(result, ReadyToSubmit)
-    assert result.decision.offer_rate == 0.00021
+    assert result.decision.offer_rate == Decimal("0.00021")
     assert audit.last.model_evidence == {"unavailable_reason": "fill_model_missing"}
 
 

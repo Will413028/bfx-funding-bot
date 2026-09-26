@@ -51,7 +51,9 @@ ENV_FILES = {
     "webapi": (f"/{RUNTIME_REFERENCE}webapi.env",),
     "frontend": (f"/{RUNTIME_REFERENCE}frontend.env",),
 }
-IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_CHANGE_CLASS", "BFX_DEPLOYMENT_ID")
+IDENTITY = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION", "BFX_DEPLOYMENT_ID")
+# BFX_CHANGE_CLASS (retired) may still appear with its transitional default; it is
+# neither required nor checked, and the follow-up release removes it.
 LOADER_INJECTION = ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT")
 PYTHON_INJECTION = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")
 FORBIDDEN_KEYS = ("build", "cap_add", "privileged", "volumes", "tmpfs", "devices", "pid", "ipc",

@@ -81,24 +81,15 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
     path.write_text(yaml.safe_dump(doc))
     try:
         if not schema_current or not with_policy:
-            # A refused live boot is an automatic stop: HALTED stays (a stop
-            # stays the stop it was) and the venue gets its cancel-all.
+            # A refused live boot writes nothing and sends nothing (D3/D5):
+            # the state it found stays exactly as it was.
             from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
-            from bfx_funding_bot.core.writer_lock import WriterLock
-
-            async def held(self):
-                return True
-            monkeypatch.setattr(WriterLock, "verify_held", held)
-            cancel_all = "https://api.bitfinex.com/v2/auth/w/funding/offer/cancel/all"
-            httpx_mock.add_response(url=cancel_all, method="POST",
-                json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
             before = await halt.current()
             with pytest.raises(SchemaHeadMismatch if not schema_current else ValueError,
                                match="database=a7f3c1d9e204" if not schema_current else "policy_unavailable"):
                 await build_daemon(cells_yaml_path=path, skip_ws=True)
             assert (await halt.current()).id == before.id
-            posts = [str(r.url) for r in httpx_mock.get_requests() if r.method == "POST"]
-            assert posts == [cancel_all]  # fUST's currency only; nothing else was sent
+            assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
             return
         daemon = await build_daemon(cells_yaml_path=path, skip_ws=True)
         assert len(daemon.config.cells) == 2
@@ -107,17 +98,11 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
         assert status["halt"]["halted"]
         assert "capital_policy" in {g["name"] for g in status["guards"]}
         assert not ({"allocation_cap", "buying_power"} & {g["name"] for g in status["guards"]})
-        # The only allowed POST is the public read-only FX calculation, never
-        # a financial command. Keep unknown requests fatal in this fixture.
-        fx_url = "https://api-pub.bitfinex.com/v2/calc/fx"
-        httpx_mock.add_response(url=fx_url, method="POST", json=[0.999865],
-                                match_json={"ccy1": "UST", "ccy2": "USD"})
+        # HALTED: the planner places nothing and asks the venue for nothing --
+        # not even the FX observation sizing would need (D3/D4). Keep unknown
+        # requests fatal in this fixture.
         await daemon.periodic_reconcile._deployment.deploy()
-        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-        assert len(posts) == 1 and str(posts[0].url) == fx_url
-        assert not any(name in posts[0].headers for name in (
-            "authorization", "bfx-apikey", "bfx-signature", "cookie",
-        ))
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
         assert (await halt.current()).state == "HALTED"
 
         # A later periodic observation must not supersede the boot snapshot
@@ -251,12 +236,12 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
         assert kill_guard._pending_stop == protection.pending_reason
         assert protection.pending_reason() is None
         from bfx_funding_bot.modules.execution.events import PositionReconciled
-        for at, nav in ((1, "1000"), (2, "900")):  # 10% > the canary's 5% 24h limit
+        for at, nav in ((1, "1000"), (2, "900")):  # 10% > the 5% 24h NAV-drop alert
             await daemon.bus.publish(PositionReconciled(
                 account_id=str(TEST_EXCHANGE_ACCOUNT_ID), symbol="fUST", reserved=Decimal("0"),
                 realized=Decimal("0"), available=Decimal(nav), n_offers=0, n_credits=0,
                 occurred_at_ms=at))
-        assert (protection.pending_reason() or "").startswith("loss_limiter")
+        assert protection.pending_reason() is None  # a NAV drop alerts, never stops (D3)
         writes = [r for r in httpx_mock.get_requests() if "/auth/w/" in str(r.url)]
         async with factory() as session:
             phases = [(row.currency, row.phase) for row in (await session.scalars(
@@ -275,16 +260,16 @@ _DEPLOYMENT_ID = "11111111-2222-4333-8444-555555555555"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("deploy_env", "expected"), [
-    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "standard", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
-     ("ACTIVE", "operator", "kept")),
-    ({"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
-      "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
-     ("REDUCING", "material_deploy", "reducing")),
-    ({}, ("REDUCING", "material_deploy", "reducing")),  # no deploy identity: fail closed
+@pytest.mark.parametrize("deploy_env", [
+    {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+     "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+    # The previous bfx-deploy still injects a class; it means nothing now.
+    {"BFX_IMAGE_DIGEST": "sha256:" + "a" * 64, "BFX_SOURCE_REVISION": "c" * 40,
+     "BFX_CHANGE_CLASS": "material", "BFX_DEPLOYMENT_ID": _DEPLOYMENT_ID},
+    {},  # no deploy identity: still no change to trading, audit says "unidentified"
 ])
-async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, httpx_mock, deploy_env, expected):
+async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, httpx_mock, deploy_env):
+    """Lending envelope D5: a release is not a trading decision."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
@@ -316,18 +301,6 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
-    if "BFX_DEPLOYMENT_ID" in deploy_env:
-        # The deploy tool's `started` row for this process, before it created the container.
-        from datetime import UTC, datetime
-        from uuid import UUID
-
-        from bfx_funding_bot.modules.deployments.tables import DeploymentRow
-        async with factory.begin() as session:
-            session.add(DeploymentRow(attempt_id=UUID(_DEPLOYMENT_ID), started_at=datetime.now(UTC),
-                finished_at=None, source_revision=deploy_env["BFX_SOURCE_REVISION"],
-                backend_digest=deploy_env["BFX_IMAGE_DIGEST"], frontend_digest="sha256:" + "f" * 64,
-                change_class=deploy_env["BFX_CHANGE_CLASS"], migrations_applied=False,
-                outcome="started", detail="fixture"))
     repo = CapitalRepository(account_id=TEST_EXCHANGE_ACCOUNT_ID, environment="ci", max_snapshot_age_ms=10000)
     async with factory.begin() as session:
         await repo.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
@@ -339,11 +312,15 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
     try:
         daemon = await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
-        assert (state.state, state.cause) == expected[:2]
+        assert (state.state, state.cause, state.reason) == (
+            "ACTIVE", "operator", "trading before the deploy")
         status = await daemon.trading_status.snapshot()
-        assert status["deployment"]["boot_gate"] == expected[2]
+        assert status["deployment"] == {
+            "backend_digest": deploy_env.get("BFX_IMAGE_DIGEST"),
+            "source_revision": deploy_env.get("BFX_SOURCE_REVISION"),
+            "deployment_id": deploy_env.get("BFX_DEPLOYMENT_ID")}
         assert daemon.trading_control is not None
-        assert daemon.trading_control.identity.backend_digest == deploy_env.get("BFX_IMAGE_DIGEST")
+        assert daemon.capital_policy_control is not None
         # Every decision's audit names the build the deploy tool injected.
         audit = daemon.periodic_reconcile._deployment._audit_context_factory
         assert (audit.service_version, audit.config_hash) == (
@@ -354,25 +331,19 @@ async def test_live_boot_applies_the_change_class_gate(monkeypatch, tmp_path, ht
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("vault_changed", [False, True])
-async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock,
-                                                                      vault_changed):
+async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch, tmp_path, httpx_mock):
     """The wrong build for this database (e.g. a rollback onto a newer schema):
-    HALTED/auto and the venue cancel-all before anything can trade, then the
-    boot is refused. When the credential vault's tables are not the ones this
-    build reads, no credential is read and the operator is told to cancel."""
-    import json as _json
-
-    from sqlalchemy import select, text
+    the boot is refused and the operator is told offers may remain. Nothing is
+    written -- the next, fixed build must not need a resume, since a release is
+    never a trading decision (D5) -- and nothing reaches the venue (D2/D3)."""
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
     from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, build_head
-    from bfx_funding_bot.core.writer_lock import WriterLock
-    from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
+    from bfx_funding_bot.modules.execution.safety import boot_stop
     from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
     from bfx_funding_bot.modules.marketfeed.daemon import build_daemon
-    from bfx_funding_bot.modules.observability import alerts
     from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci", "BFX_EXECUTOR": "bitfinex_live",
@@ -389,39 +360,19 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     await seed_exchange_account(engine)
     async with engine.begin() as conn:
         await conn.execute(text("UPDATE alembic_version SET version_num = 'ffffffffffff'"))
-        if vault_changed:
-            await conn.execute(text("ALTER TABLE exchange_account_credentials ADD COLUMN rotated_by TEXT"))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     trading = TradingStateRepository(factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci")
     await trading.transition("ACTIVE", cause="operator", reason="trading before the deploy", actor="test")
-
-    async def held(self):
-        return True
-    monkeypatch.setattr(WriterLock, "verify_held", held)
     sent: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(alerts, "emit", lambda event, *, level=None, **fields: sent.append((event, level)))
-    cancel_all = "https://api.bitfinex.com/v2/auth/w/funding/offer/cancel/all"
-    if not vault_changed:
-        httpx_mock.add_response(url=cancel_all, method="POST",
-            json=[1, "foc_all-req", None, None, None, None, "SUCCESS", "Cancelled all"])
+    monkeypatch.setattr(boot_stop.alerts, "emit",
+                        lambda event, *, level=None, **fields: sent.append((event, level)))
     try:
         with pytest.raises(SchemaHeadMismatch, match=f"database=ffffffffffff build={build_head()}"):
             await build_daemon(cells_yaml_path=_write_cells_yaml(tmp_path), skip_ws=True)
         state = await trading.current()
-        assert (state.state, state.cause, state.actor) == ("HALTED", "auto", "boot")
-        assert "schema_head_mismatch" in state.reason
-        posts = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-        async with factory() as session:
-            phases = [(row.currency, row.phase) for row in (await session.scalars(
-                select(FundingCancelAllAuditRow).order_by(FundingCancelAllAuditRow.id))).all()]
-        if vault_changed:
-            assert posts == []
-            assert phases == [("UST", "skipped")]
-            assert ("venue_offers_may_remain", "critical") in sent
-        else:
-            assert [(str(r.url), _json.loads(r.content)) for r in posts] == [(cancel_all, {"currency": "UST"})]
-            assert phases == [("UST", "requested"), ("UST", "acknowledged")]
-            assert "venue_offers_may_remain" not in [event for event, _ in sent]
+        assert (state.state, state.reason) == ("ACTIVE", "trading before the deploy")
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
+        assert ("venue_offers_may_remain", "critical") in sent
     finally:
         await engine.dispose()
 

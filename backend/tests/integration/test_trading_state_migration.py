@@ -96,13 +96,18 @@ def test_current_halt_rows_carry_over_verbatim(migrated):
     _, engine, ids = migrated
     with engine.begin() as conn:
         rows = conn.execute(text("""SELECT exchange_account_id::text, deployment_environment, state, cause,
-            actor, reason, created_at_ms, legacy_halt_id, probation_multiplier
-            FROM trading_state ORDER BY id""")).all()
+            actor, reason, legacy_halt_id FROM trading_state ORDER BY id""")).all()
+        pause_id = conn.scalar(text("SELECT id FROM trading_state WHERE legacy_halt_id = :h"),
+                               {"h": ids["pause"]})
     assert [tuple(r) for r in rows] == [
-        (_A, "prod", "HALTED", "operator", "worker", _PRODUCTION_REASON, 300, ids["prod"], None),
-        (_A, "ci", "REDUCING", "operator", "will", "pg 18.6 upgrade", 400, ids["pause"], None),
-        (_B, "prod", "ACTIVE", "operator", "will", "release_promoted:x", 600, ids["resumed"], None),
-        (_C, "prod", "HALTED", "operator", "worker", "release_command_terminal", 700, ids["release"], None),
+        (_A, "prod", "HALTED", "operator", "worker", _PRODUCTION_REASON, ids["prod"]),
+        (_A, "ci", "REDUCING", "operator", "will", "pg 18.6 upgrade", ids["pause"]),
+        (_B, "prod", "ACTIVE", "operator", "will", "release_promoted:x", ids["resumed"]),
+        (_C, "prod", "HALTED", "operator", "worker", "release_command_terminal", ids["release"]),
+        # 5b1e7c9d2a40: the carried pause becomes the stricter stop.
+        (_A, "ci", "HALTED", "operator", "migration 5b1e7c9d2a40",
+         f"REDUCING retired (lending envelope ADR); carried over from trading_state {pause_id}: "
+         "pg 18.6 upgrade", None),
     ]
 
 
@@ -119,27 +124,16 @@ def test_history_is_append_only(migrated):
 
 
 @pytest.mark.parametrize(("account", "state", "cause", "message"), [
-    (_A, "REDUCING", "operator", "HALTED -> REDUCING"),
     (_A, "ACTIVE", "auto", "HALTED -> ACTIVE by auto"),
-    (_B, "HALTED", "material_deploy", "ck_trading_state_cause"),
-    (_B, "REDUCING", "kill_switch", "ck_trading_state_cause"),
-    (_B, "HALTED", "kill_switch", "ck_trading_state_cause"),  # retired cause
+    (_B, "REDUCING", "operator", "ck_trading_state_state"),           # retired state
+    (_B, "HALTED", "material_deploy", "ck_trading_state_cause"),      # retired causes
+    (_B, "HALTED", "kill_switch", "ck_trading_state_cause"),
     (_B, "PAUSED", "operator", "ck_trading_state_(state|cause)"),
 ])
 def test_trigger_and_checks_reject_illegal_transitions(migrated, account, state, cause, message):
     _, engine, _ = migrated
     with engine.begin() as conn, pytest.raises(Exception, match=message):
         _insert(conn, account, state, cause)
-
-
-def test_material_deploy_cannot_be_relabelled_as_an_operator_pause(migrated):
-    _, engine, _ = migrated
-    with engine.begin() as conn:
-        _insert(conn, _B, "REDUCING", "material_deploy")
-    with engine.begin() as conn, pytest.raises(Exception, match="cannot be relabelled"):
-        _insert(conn, _B, "REDUCING", "operator")
-    with engine.begin() as conn:
-        _insert(conn, _B, "ACTIVE", "operator")
 
 
 def test_trigger_orders_rows_by_decision_not_by_supplied_id(migrated):
@@ -169,13 +163,13 @@ def test_runtime_roles_bot_appends_and_webapi_only_reads(migrated):
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         _insert(conn, _C, "ACTIVE", "operator")
-        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 5
+        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 6
     with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         _insert(conn, _C, "HALTED", "operator")
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
-        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 5
+        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 6
 
 
 def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migrated):
@@ -198,8 +192,8 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
             results = await asyncio.gather(*(repo(first).transition(
                 "HALTED", cause="auto", actor=f"worker-{i}", reason="concurrent") for i in range(8)))
             assert sum(result.changed for result in results) == 1
-            with pytest.raises(IllegalTradingTransition, match="HALTED -> REDUCING"):
-                await repo(first).transition("REDUCING", cause="operator", actor="t", reason="t")
+            with pytest.raises(IllegalTradingTransition, match="HALTED -> ACTIVE by auto"):
+                await repo(first).transition("ACTIVE", cause="auto", actor="t", reason="t")
             written = await repo(first).current()
         finally:
             await first.dispose()
@@ -222,7 +216,7 @@ def test_downgrade_keeps_decisions_made_after_the_migration(migrated):
     assert result.returncode != 0
     assert "refuse downgrade of recorded trading state decisions" in result.stdout + result.stderr
     with engine.begin() as conn:
-        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 5
+        assert conn.scalar(text("SELECT count(*) FROM trading_state")) == 6
 
 
 def _audit(conn, attempt: str, phase: str, *, detail: str | None = None) -> None:
@@ -267,14 +261,13 @@ def test_cancel_all_audit_grants(migrated):
 
 
 _REQ = "00000000-0000-0000-0000-0000000000d1"
-_DIG = "sha256:" + "a" * 64
 
 
-def _insert_request(conn, request_id=_REQ, account=_A) -> None:
+def _insert_request(conn, request_id=_REQ, account=_A, action="resume") -> None:
     conn.execute(text("""INSERT INTO trading_control_requests
-        (request_id, exchange_account_id, deployment_environment, action, backend_digest, reason,
-         requested_by, created_at_ms) VALUES (:r, :a, 'prod', 'approve', :d, 'reviewed', 'operator', 1)"""),
-        {"r": request_id, "a": account, "d": _DIG})
+        (request_id, exchange_account_id, deployment_environment, action, reason,
+         requested_by, created_at_ms) VALUES (:r, :a, 'prod', :act, 'x', 'operator', 1)"""),
+        {"r": request_id, "a": account, "act": action})
 
 
 def test_web_api_can_only_queue_a_request(migrated):
@@ -286,55 +279,38 @@ def test_web_api_can_only_queue_a_request(migrated):
     for sql in (
         "UPDATE trading_control_requests SET state='applied', processed_at_ms=2",
         "INSERT INTO trading_control_requests (request_id, exchange_account_id, deployment_environment,"
-        " action, backend_digest, reason, requested_by, created_at_ms, state, processed_at_ms)"
-        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'resume', '{_DIG}', 'x',"
+        " action, reason, requested_by, created_at_ms, state, processed_at_ms)"
+        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'resume', 'x',"
         " 'operator', 1, 'applied', 2)",
-        f"INSERT INTO deployment_approvals (exchange_account_id, deployment_environment, backend_digest,"
-        f" source_revision, approved_by, approved_at_ms, request_id) VALUES ('{_A}', 'prod', '{_DIG}',"
-        f" '{'c' * 40}', 'operator', 1, '{_REQ}')",
         f"INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, actor,"
         f" reason, created_at_ms) VALUES ('{_A}', 'prod', 'ACTIVE', 'operator', 'x', 'x', 1)",
+        "INSERT INTO funding_cancel_all_audit (exchange_account_id, deployment_environment,"
+        " trading_state_id, attempt_id, currency, phase, actor, occurred_at_ms) VALUES"
+        f" ('{_A}', 'prod', 1, '00000000-0000-0000-0000-0000000000f9', 'UST', 'requested', 'x', 1)",
     ):
         with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
             conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
             conn.exec_driver_sql(sql)
 
 
-def test_the_web_api_queues_stops_and_a_kill_has_its_own_lane(migrated):
-    """Pause and kill name no build; a waiting approval never makes a kill wait.
-    The web API still writes nothing the daemon owns (no trading_state, no audit)."""
+def test_the_web_api_queues_a_resume_and_a_kill_has_its_own_lane(migrated):
+    """A waiting resume never makes a kill wait; retired actions are refused."""
     _, engine, _ = migrated
-
-    def queue(conn, request_id: str, action: str, digest: str | None, account: str = _A) -> None:
-        conn.execute(text("""INSERT INTO trading_control_requests
-            (request_id, exchange_account_id, deployment_environment, action, backend_digest, reason,
-             requested_by, created_at_ms) VALUES (:r, :a, 'prod', :act, :d, 'x', 'operator', 1)"""),
-            {"r": request_id, "a": account, "act": action, "d": digest})
-
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
-        queue(conn, "00000000-0000-0000-0000-0000000000e1", "approve", _DIG)
-        queue(conn, "00000000-0000-0000-0000-0000000000e2", "kill", None)
-    for action, digest, account, message in (
-            ("kill", None, _A, "uq_trading_control_requests_pending_kill"),
-            ("pause", None, _A, "uq_trading_control_requests_pending"),
-            ("approve", None, _B, "ck_trading_control_requests_digest"),
-            ("kill", _DIG, _B, "ck_trading_control_requests_digest"),
-            ("promote", _DIG, _B, "ck_trading_control_requests_action")):
+        _insert_request(conn, "00000000-0000-0000-0000-0000000000e1", action="resume")
+        _insert_request(conn, "00000000-0000-0000-0000-0000000000e2", action="kill")
+    for action, account, message in (
+            ("kill", _A, "uq_trading_control_requests_pending_kill"),
+            ("resume", _A, "uq_trading_control_requests_pending"),
+            ("approve", _B, "ck_trading_control_requests_action"),
+            ("pause", _B, "ck_trading_control_requests_action")):
         with engine.begin() as conn, pytest.raises(Exception, match=message):
             conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
-            queue(conn, "00000000-0000-0000-0000-0000000000e3", action, digest, account)
-    for sql in ("INSERT INTO funding_cancel_all_audit (exchange_account_id, deployment_environment,"
-                " trading_state_id, attempt_id, currency, phase, actor, occurred_at_ms) VALUES"
-                f" ('{_A}', 'prod', 1, '00000000-0000-0000-0000-0000000000f9', 'UST', 'requested', 'x', 1)",
-                "UPDATE trading_control_requests SET state='rejected', processed_at_ms=2,"
-                " outcome_reason='x'"):
-        with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
-            conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
-            conn.exec_driver_sql(sql)
+            _insert_request(conn, "00000000-0000-0000-0000-0000000000e3", account, action)
 
 
-def test_bot_records_one_outcome_and_approvals_are_append_only(migrated):
+def test_bot_records_one_outcome(migrated):
     _, engine, _ = migrated
     with engine.begin() as conn:
         _insert_request(conn)
@@ -347,29 +323,15 @@ def test_bot_records_one_outcome_and_approvals_are_append_only(migrated):
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         conn.exec_driver_sql("UPDATE trading_control_requests SET state='applied', processed_at_ms=2")
-        conn.execute(text("""INSERT INTO deployment_approvals (exchange_account_id, deployment_environment,
-            backend_digest, source_revision, approved_by, approved_at_ms, request_id)
-            VALUES (:a, 'prod', :d, :r, 'operator', 2, :q)"""), {"a": _A, "d": _DIG, "r": "c" * 40, "q": _REQ})
     with engine.begin() as conn, pytest.raises(Exception, match="invalid trading control request transition"):
         conn.exec_driver_sql("UPDATE trading_control_requests SET state='rejected', outcome_reason='x'")
     with engine.begin() as conn, pytest.raises(Exception, match="immutable trading control"):
-        conn.exec_driver_sql("DELETE FROM deployment_approvals")
-    with engine.begin() as conn, pytest.raises(Exception, match="uq_deployment_approvals_digest"):
-        conn.execute(text("""INSERT INTO deployment_approvals (exchange_account_id, deployment_environment,
-            backend_digest, source_revision, approved_by, approved_at_ms, request_id)
-            VALUES (:a, 'prod', :d, :r, 'operator', 3, :q)"""), {"a": _A, "d": _DIG, "r": "c" * 40, "q": _REQ})
+        conn.exec_driver_sql("DELETE FROM trading_control_requests")
 
 
-def test_probation_needs_its_floor_and_the_operator_check_runs_for_the_bot(migrated):
+def test_the_operator_check_runs_for_the_bot(migrated):
     _, engine, _ = migrated
-    with engine.begin() as conn, pytest.raises(Exception, match="ck_trading_state_probation"):
-        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
-            cause, actor, reason, created_at_ms, probation_multiplier, probation_started_at_ms)
-            VALUES (:a, 'ci', 'ACTIVE', 'operator', 'x', 'x', 1, 0.25, 1)"""), {"a": _A})
     with engine.begin() as conn:
-        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
-            cause, actor, reason, created_at_ms, probation_multiplier, probation_started_at_ms, probation_floor)
-            VALUES (:a, 'ci', 'ACTIVE', 'operator', 'x', 'x', 1, 0.25, 1, '{"fUST": "150.75"}')"""), {"a": _A})
         conn.execute(text("INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
                           "VALUES (:a,'operator','owner')"), {"a": _A})
         conn.exec_driver_sql('''INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt","updatedAt",
@@ -378,36 +340,6 @@ def test_probation_needs_its_floor_and_the_operator_check_runs_for_the_bot(migra
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
         assert conn.scalar(text("SELECT public.operator_authorized(:a, 'operator')"), {"a": _A})
         assert not conn.scalar(text("SELECT public.operator_authorized(:a, 'nobody')"), {"a": _A})
-
-
-def test_the_database_keeps_active_inside_an_unfinished_probation(migrated):
-    """ADR D3, enforced below the code: until a probation passes, a pause or an
-    operator's stop cannot lead back to ACTIVE without it; the lift can."""
-    _, engine, _ = migrated
-
-    def add(state: str, cause: str, *, probation: bool = False) -> None:
-        extra = (", probation_multiplier, probation_started_at_ms, probation_floor",
-                 ", 0.25, 1, '{\"fUST\": \"150.75\"}'") if probation else ("", "")
-        with engine.begin() as conn:
-            conn.execute(text(f"""INSERT INTO trading_state (exchange_account_id, deployment_environment,
-                state, cause, actor, reason, created_at_ms{extra[0]})
-                VALUES (:a, 'probation-ci', :s, :c, 'x', 'x', 1{extra[1]})"""),
-                {"a": _A, "s": state, "c": cause})
-
-    add("ACTIVE", "operator")
-    add("ACTIVE", "operator", probation=True)
-    add("REDUCING", "operator")
-    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
-        add("ACTIVE", "operator")
-    add("HALTED", "operator")
-    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
-        add("ACTIVE", "operator")
-    add("ACTIVE", "operator", probation=True)   # the same limits, restarted
-    with pytest.raises(Exception, match=r"probation \d+ has not passed"):
-        add("ACTIVE", "operator")                # not the lift: only auto lifts
-    add("ACTIVE", "auto")                        # the lift
-    add("REDUCING", "operator")
-    add("ACTIVE", "operator")                    # passed: a pause resumes plainly
 
 
 # ------------------------------------------------------------ release archive
@@ -433,7 +365,8 @@ def test_the_release_ceremony_is_archived_whole_frozen_and_verifiable(migrated):
         assert [row.id for row in halts][-1] == ids["release"] and len(halts) == 7
         # Anyone can recompute the manifest and see nothing changed since.
         manifest = {row.table_name: (row.row_count, row.content_sha256) for row in conn.execute(text(
-            "SELECT table_name, row_count, content_sha256 FROM release_archive.manifest"))}
+            "SELECT table_name, row_count, content_sha256 FROM release_archive.manifest"
+            " WHERE archived_by_revision = 'c74d45a54e46'"))}
         assert manifest == {table: _content(conn, "release_archive", table, key)
                             for table, key in _ARCHIVED}
         # The foreign keys still bind the archive to the public rows it names.
@@ -458,14 +391,13 @@ def test_archiving_the_release_ceremony_is_lossless_both_ways(migrated):
     url, engine, _ = migrated
     with engine.begin() as conn:
         archived = {table: _content(conn, "release_archive", table, key) for table, key in _ARCHIVED}
-    _alembic(url, "downgrade", _PREVIOUS)
+    # Back to before the archive (5b1e7c9d2a40's own round trip has its own test).
+    _alembic(url, "downgrade", "1c435a35dcb4")
     with engine.begin() as conn:
         assert conn.scalar(text("SELECT to_regnamespace('release_archive')")) is None
         assert {table: _content(conn, "public", table, key) for table, key in _ARCHIVED} == archived
-        # All the way back to production's revision: nothing this branch created remains.
-        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _PREVIOUS
-        for table in ("trading_state", "deployments", "trading_control_requests", "nav_window_samples"):
-            assert conn.scalar(text(f"SELECT to_regclass('public.{table}')")) is None
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "1c435a35dcb4"
+        assert conn.scalar(text("SELECT to_regclass('public.deployments')")) is None
     _alembic(url, "upgrade", "head")
     _alembic(url, "check")
     with engine.begin() as conn:
@@ -495,6 +427,9 @@ def test_the_web_api_baseline_is_granted_by_migration_not_by_hand(pg_container):
             "account_config_drafts": {"SELECT", "INSERT", "UPDATE", "DELETE"},
             "trading_state": {"SELECT"}, "funding_cancel_all_audit": {"SELECT"},
             "deployments": {"SELECT"},
+            # 7d2a9c4e6b13: the currency toggle outbox and the policy it lists.
+            "capital_policy_requests": {"SELECT"}, "capital_policy_heads": {"SELECT"},
+            "capital_policy_revisions": {"SELECT"},
         }
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT has_schema_privilege('bfx_webapi', 'public', 'USAGE')"))

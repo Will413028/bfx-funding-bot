@@ -390,3 +390,41 @@ async def test_deploy_receives_venue_offers_from_reconcile():
     )
     await pr._tick()
     assert dep.received == [(offer,)]
+
+
+@pytest.mark.asyncio
+async def test_deploy_never_sees_an_unmanaged_offer():
+    """D2: a foreign offer (or an UNKNOWN's unclaimed candidate) is never the
+    reprice sweep's to cancel, so the deployment is not even shown it."""
+    from decimal import Decimal
+
+    from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+
+    def offer(venue_offer_id: str) -> ActiveFundingOffer:
+        return ActiveFundingOffer(
+            venue_offer_id=venue_offer_id, symbol="fUST", amount=Decimal("200"), rate=0.001,
+            period_days=2, mts_created=0, status="ACTIVE",
+        )
+
+    managed, foreign = offer("42"), offer("777")
+
+    class _MixedRecovery:
+        async def run(self) -> ReconcileResult:
+            return ReconcileResult(
+                n_claimed=0, n_released=0, n_failed=0, venue_offers=(managed, foreign),
+                unmanaged_offer_ids=frozenset({"777"}),
+            )
+
+    class _CapturingDeployment:
+        def __init__(self) -> None:
+            self.received: list[tuple] = []
+
+        async def deploy(self, *, venue_offers=()) -> None:
+            self.received.append(venue_offers)
+
+    dep = _CapturingDeployment()
+    pr = PeriodicReconcile(
+        recovery=_MixedRecovery(), probe=_FakeProbe(), interval_s=90, deployment=dep,
+    )
+    await pr._tick()
+    assert dep.received == [(managed,)]

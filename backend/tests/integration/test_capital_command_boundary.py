@@ -32,6 +32,10 @@ from .test_capital_repository import (
     snapshot,
 )
 
+# The planned 500, as the planner submits it: rounded down, carrying an amount
+# fingerprint (D3a) the command gate requires.
+AMOUNT = "499.99990500"
+
 
 @pytest.mark.asyncio
 async def test_policy_guard_and_planner_use_total_capital_cell_limit(capital_db):
@@ -41,7 +45,7 @@ async def test_policy_guard_and_planner_use_total_capital_cell_limit(capital_db)
     _, _, ready, ctx, runtime, _ = await boundary(factory, account)
     guard = CapitalPolicyGuard(runtime=runtime)
     ctx = replace(ctx, capital_cell_id="a30")
-    too_large = ready.decision.model_copy(update={"offer_amount_usdt": 701.0})
+    too_large = ready.decision.model_copy(update={"offer_amount_usdt": Decimal("701")})
     assert not (await guard.evaluate(too_large, ctx)).allowed
     view = await runtime.read(symbol="fUST", cell_id="a30")
     assert allocate_capital(views={"a30": view}, min_fill=Decimal("153")) == {"a30": Decimal("700")}
@@ -66,7 +70,11 @@ async def test_planner_attaches_the_status_budget_and_revision(capital_db):
                          capital_runtime=runtime)
     await rec.deploy()
     planned = ex.ready_submissions[0]
-    assert planned.decision.offer_amount_usdt == 700.0
+    # The 700 budget, fingerprinted (D3a): below it by less than 0.0001.
+    from bfx_funding_bot.modules.execution.amount_fingerprint import fingerprint_of
+    sent = planned.decision.offer_amount_usdt
+    assert isinstance(sent, Decimal)
+    assert Decimal("699.9999") < sent < Decimal("700") and fingerprint_of(sent)
     assert planned.capital_view.applied.revision == 1
     assert planned.capital_view.budget.max_new_offer == Decimal("700")
 
@@ -171,15 +179,15 @@ async def boundary(factory, account):
     await snapshot(factory, repo)
     runtime = CapitalRuntime(repository=repo, session_factory=factory, clock=lambda: 1100)
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    event, row = intent(account, "500", 10)
+    event, row = intent(account, AMOUNT, 10)
     from tests.external.bitfinex.test_funding_rules import evidence
     from tests.modules.execution.deployment.test_reconciler import _valid_snapshot
     async with factory.begin() as session:
         session.add(row)
     ready = ReadyToSubmit(
         decision=DecisionPayload(decision_outcome=DecisionOutcome.POST,
-            signal_correlation_id=event.signal_correlation_id, offer_rate=0.0001,
-            offer_amount_usdt=500, offer_duration_days=2, symbol="fUST"),
+            signal_correlation_id=event.signal_correlation_id, offer_rate=Decimal("0.0001"),
+            offer_amount_usdt=Decimal(AMOUNT), offer_duration_days=2, symbol="fUST"),
         decision_id=row.decision_id, policy=ExecutionPolicy.BOOK_GUARDED,
         market_snapshot_id="book", model_version=None, evidence={},
         safety=GuardResult(True, "test"), capital_view=view,
@@ -206,7 +214,6 @@ async def boundary(factory, account):
     ("snapshot", "capital_snapshot_changed"),
     ("pending", "snapshot_query_pending"),
     ("halt", "trading state HALTED"),
-    ("reducing", "trading state REDUCING"),
 ])
 async def test_queued_ready_cannot_send_after_authority_changes(capital_db, change, reason):
     factory, account = capital_db
@@ -220,8 +227,6 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
     elif change == "pending":
         async with factory.begin() as session:
             await runtime.repository.begin_snapshot(session, now_ms=1100)
-    elif change == "reducing":
-        await halt.transition("REDUCING", cause="operator", reason="pause", actor="test", now_ms=1)
     else:
         await halt.transition("HALTED", cause="operator", reason="stop", actor="test", now_ms=1)
     with pytest.raises(CommandGateBlocked, match=reason):
@@ -232,20 +237,21 @@ async def test_queued_ready_cannot_send_after_authority_changes(capital_db, chan
             EventLogRow.event_type == "RESERVATION_INTENT"))).all()
 
 
-async def second_ready(factory, account, ready):
+async def second_ready(factory, account, ready, amount="199.99990200"):
     """Another planned offer, so a stop is tested against a submit that could run."""
-    event, row = intent(account, "200", 20)
+    event, row = intent(account, amount, 20)
     async with factory.begin() as session:
         session.add(row)
     return replace(ready, decision_id=row.decision_id, decision=ready.decision.model_copy(
-        update={"signal_correlation_id": event.signal_correlation_id, "offer_amount_usdt": 200}))
+        update={"signal_correlation_id": event.signal_correlation_id,
+                "offer_amount_usdt": Decimal(amount)}))
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("stop", ["HALTED"])
 async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db, stop):
-    """REDUCING and HALTED refuse every new offer; cancelling a managed offer
-    is what both states exist to allow, and it is still made durable first."""
+    """HALTED refuses every new offer; cancelling a managed offer is what the
+    state exists to allow, and it is still made durable first."""
     factory, account = capital_db
     gate, venue, ready, ctx, runtime, halt = await boundary(factory, account)
     await gate.submit(ready, ctx)  # managed offer 101 while ACTIVE
@@ -265,7 +271,7 @@ async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(capital_db,
     assert len(intents) == 1
     # A cancel ACK never releases capital inside this boundary.
     view = await runtime.read(symbol="fUST", cell_id="a30")
-    assert view.budget.spendable == Decimal("500")
+    assert view.budget.spendable == Decimal("1000") - Decimal(AMOUNT)
 
 
 @pytest.mark.asyncio
@@ -374,11 +380,13 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="two-gates"))
     gate, venue, first, ctx, runtime, halt = await boundary(factory, account)
-    event, row = intent(account, "500", 20)
+    # A distinct fingerprint: only the shared budget may decide between them.
+    event, row = intent(account, "499.99990501", 20)
     async with factory.begin() as session:
         session.add(row)
     second = replace(first, decision_id=row.decision_id, decision=first.decision.model_copy(
-        update={"signal_correlation_id": event.signal_correlation_id}))
+        update={"signal_correlation_id": event.signal_correlation_id,
+                "offer_amount_usdt": Decimal("499.99990501")}))
     competitor = AccountCommandGate(venue, bus=DomainEventBus(), persister=gate._persister,
         uncertainty_reader=DatabaseOpenUncertaintyReader(factory),
         safety_evaluator=ManualKillGuard(trading_state=halt), deployment_environment="ci",
@@ -394,7 +402,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(pg_session_fac
 async def test_final_amount_cannot_round_up_across_capital_guard(capital_db):
     factory, account = capital_db
     gate, venue, ready, ctx, _, _ = await boundary(factory, account)
-    altered = ready.decision.model_copy(update={"offer_amount_usdt": 700.0000000000001})
+    altered = ready.decision.model_copy(update={"offer_amount_usdt": Decimal("700.0000000000001")})
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.amount_usdt = Decimal("700.0000000000001")
@@ -450,10 +458,11 @@ async def test_account_retired_after_planning_cannot_send(capital_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["REDUCING", "HALTED"])
-async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_db, stop):
-    """The reprice sweep may pull a stale offer while stopped; the allocation
-    that would re-post it (or place anything new) is refused."""
+@pytest.mark.parametrize("stop", ["HALTED"])
+async def test_stopped_reconcile_never_reposts(capital_db, stop):
+    """While HALTED the planner places nothing: the symbol is skipped before
+    sizing or reprice (lending envelope D3/D4). Pulling the managed offers is
+    the managed sweep's job (test_pre_trade_limits); none is wired here."""
     from tests.modules.execution.deployment.test_reconciler import (
         _REPRICE,
         _build,
@@ -470,10 +479,10 @@ async def test_stopped_reconcile_cancels_stale_offer_but_never_reposts(capital_d
         canceller=gate, reprice=_REPRICE)
     rec._ctx = ctx
     await rec.deploy(venue_offers=(_venue_offer("101", 0.001),))
-    assert venue.received == ["101"]
+    assert venue.received == []
     async with factory() as session:
         types = [row.event_type for row in (await session.scalars(select(EventLogRow))).all()]
-    assert types.count("CANCEL_REQUESTED") == 1
+    assert types.count("CANCEL_REQUESTED") == 0
     assert types.count("RESERVATION_INTENT") == 1  # only the offer placed while ACTIVE
 
 
@@ -603,7 +612,7 @@ async def append_cancel_race_unknown(factory, account, *, symbol="fUST", environ
         ))
 
 
-@pytest.mark.parametrize("state", ["ACTIVE", "REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["ACTIVE", "HALTED"])
 @pytest.mark.parametrize("fault", ["unknown", "unreadable"])
 async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(capital_db, monkeypatch, fault,
                                                                              state):
@@ -649,7 +658,7 @@ async def test_cancel_after_admission_rechecks_uncertainty_before_first_http(cap
     assert requests == []
 
 
-@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["HALTED"])
 async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
     """No new offer reaches the real adapter under a stop, even one already planned."""
     import httpx
@@ -678,7 +687,7 @@ async def test_stop_refuses_submit_before_the_http_adapter(capital_db, state):
     assert requests == []
 
 
-@pytest.mark.parametrize("state", ["REDUCING", "HALTED"])
+@pytest.mark.parametrize("state", ["HALTED"])
 async def test_stop_after_intent_commit_is_not_sent(capital_db, state):
     """A stop landing between the durable intent and transport ends the
     command as NOT_SENT: the transport recheck keeps the trading-state gate."""

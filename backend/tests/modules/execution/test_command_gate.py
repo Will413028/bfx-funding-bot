@@ -23,6 +23,7 @@ from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
     DatabaseOpenUncertaintyReader,
+    SubmitOutcomeLostError,
 )
 from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
@@ -415,7 +416,7 @@ async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry(
     gate = _gate(venue, reader, persister)
     ready = _ready()
 
-    with pytest.raises(RuntimeError, match="process crash"):
+    with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
         await gate.submit(ready, _context())
 
     intent = persister.txns[0][0]
@@ -443,9 +444,8 @@ async def test_crash_after_intent_leaves_pending_for_boot_unknown_without_retry(
         configured_symbols=frozenset({SYMBOL}),
     )
     assert [type(event) for event in actions] == [ReservationUnknown]
-
-    with pytest.raises(CommandGateBlocked, match="without durable outcome"):
-        await gate.submit(ready, _context())
+    # No retry in this process: it exits (SubmitOutcomeLostError); the restarted
+    # daemon's recovery turns the PENDING into the UNKNOWN above.
     assert venue.calls == 1
 
 
@@ -463,20 +463,36 @@ async def test_intent_persistence_failure_blocks_venue_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outcome_persistence_failure_latches_scope_closed() -> None:
+async def test_outcome_persistence_failure_ends_the_process() -> None:
+    """Process fencing (lending envelope D3): no in-memory latch that only a
+    restart clears -- the gate raises a BaseException no ``except Exception``
+    keeps alive, and the restarted daemon quarantines the symbol from the
+    durable PENDING intent."""
     reader = _FakeUncertaintyReader(set())
     persister = _FakePersister(reader)
     persister.fail_on_call = 2
     venue = _FakeVenue()
     gate = _gate(venue, reader, persister)
 
-    with pytest.raises(RuntimeError, match="persistence failed"):
+    with pytest.raises(SubmitOutcomeLostError, match="outcome persistence failed") as lost:
         await gate.submit(_ready(), _context())
-    persister.fail_on_call = None
-
-    with pytest.raises(CommandGateBlocked, match="outcome persistence failed"):
-        await gate.submit(_ready(decision_id="decision-2"), _context())
+    assert not isinstance(lost.value, Exception)
+    assert isinstance(lost.value.__cause__, RuntimeError)
     assert venue.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_submit_that_raises_mid_transport_ends_the_process() -> None:
+    reader = _FakeUncertaintyReader(set())
+    persister = _FakePersister(reader)
+    venue = _FakeVenue()
+
+    async def explode(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("socket reset")
+
+    venue.submit = explode  # type: ignore[method-assign]
+    with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
+        await _gate(venue, reader, persister).submit(_ready(), _context())
 
 
 @pytest.mark.asyncio
@@ -741,7 +757,7 @@ async def test_persisted_crash_recovery_closes_pending_attempt_as_unknown(
         clock=iter((100, 101)).__next__,
         date_provider=lambda: date(2026, 9, 3),
     )
-    with pytest.raises(RuntimeError, match="process crash"):
+    with pytest.raises(SubmitOutcomeLostError, match="submit ended without durable outcome"):
         await gate.submit(ready, _context())
 
     async with session_factory() as session:

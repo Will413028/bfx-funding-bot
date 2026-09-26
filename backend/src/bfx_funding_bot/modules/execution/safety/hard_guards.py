@@ -42,7 +42,6 @@ class _TradingStateReader(Protocol):
 class CapitalPolicyGuard:
     """The applied-policy evaluator is the sole live money authority."""
     name = "capital_policy"
-    is_calibrated = False
 
     def __init__(self, *, runtime: CapitalRuntime) -> None:
         self.runtime = runtime
@@ -55,7 +54,9 @@ class CapitalPolicyGuard:
                 raise ValueError("capital_scope_missing")
             view = await self.runtime.read(symbol=decision.symbol, cell_id=ctx.capital_cell_id,
                                            session=ctx.command_session)
-            amount = Decimal(str(decision.offer_amount_usdt))
+            amount = decision.offer_amount_usdt
+            if amount is None:
+                raise ValueError("offer_amount_missing")
             if not amount.is_finite() or amount <= 0 or amount > view.budget.max_new_offer:
                 return GuardResult(False, self.name, view.budget.reason or "insufficient_deployable_funds")
             return GuardResult(True, self.name)
@@ -79,7 +80,6 @@ class ManualKillGuard:
     """
 
     name = "manual_kill"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -142,7 +142,6 @@ class AuthHealthGuard:
     """
 
     name = "auth_health"
-    is_calibrated = False
 
     def __init__(self, *, probe: HealthProbe) -> None:
         self.probe = probe
@@ -167,7 +166,6 @@ class HeartbeatGuard:
     """
 
     name = "heartbeat"
-    is_calibrated = False
 
     def __init__(
         self, *, probe: HealthProbe, threshold_seconds: int,
@@ -244,7 +242,6 @@ class UncertaintyGuard:
     """
 
     name = "uncertainty"
-    is_calibrated = False
     _SUPPORTED_KINDS = frozenset({
         "submit_outcome_unknown",
         "unattributed_venue_offer",
@@ -442,7 +439,6 @@ class AllocationCapGuard:
     """
 
     name = "allocation_cap"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -471,7 +467,7 @@ class AllocationCapGuard:
             self._caps, decision.symbol, self._env_fallback, self._default_cap,
         )
         exposure = self.ledger.current_exposure(decision.symbol)
-        offer = Decimal(str(decision.offer_amount_usdt))
+        offer = decision.offer_amount_usdt
         projected = exposure + offer
         if projected > cap:
             return GuardResult(
@@ -505,7 +501,6 @@ class BuyingPowerGuard:
     """
 
     name = "buying_power"
-    is_calibrated = False
 
     def __init__(
         self,
@@ -535,7 +530,7 @@ class BuyingPowerGuard:
         )
         available = self.ledger.available_balance(decision.symbol)
         deployable = available - buffer
-        offer = Decimal(str(decision.offer_amount_usdt))
+        offer = decision.offer_amount_usdt
         if offer > deployable:
             return GuardResult(
                 allowed=False, guard_name=self.name,
@@ -553,7 +548,6 @@ class WriterLockGuard:
     against the dedicated connection (no stale-flag window)."""
 
     name = "writer_lock"
-    is_calibrated = False
 
     def __init__(self, *, lock: WriterLockHandle) -> None:
         self._lock = lock

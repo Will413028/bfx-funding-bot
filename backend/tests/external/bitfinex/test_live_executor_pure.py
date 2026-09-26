@@ -1,9 +1,13 @@
 import inspect
+from decimal import Decimal
 from typing import get_type_hints
+
+import pytest
 
 from bfx_funding_bot.external.bitfinex.live_executor import (
     BitfinexLiveExecutor,
     build_offer_payload,
+    format_offer_amount,
     format_venue_decimal,
     parse_offer_response,
 )
@@ -18,24 +22,46 @@ def test_live_executor_submit_accepts_only_ready_to_submit() -> None:
 
 
 def test_format_venue_decimal_no_scientific_notation() -> None:
-    # Bitfinex funding API rejects scientific-notation rate strings. str(5.531e-05)
-    # would give "5.531e-05"; the helper must emit fixed-point.
-    assert format_venue_decimal(5.531e-05) == "0.00005531"
-    assert format_venue_decimal(1.2e-06) == "0.0000012"
-    assert "e" not in format_venue_decimal(5.531e-05).lower()
+    # Bitfinex funding API rejects scientific-notation rate strings.
+    # str(Decimal("5.531E-7")) would give "5.531E-7"; the helper must emit fixed-point.
+    assert format_venue_decimal(Decimal("5.531E-5")) == "0.00005531"
+    assert format_venue_decimal(Decimal("1.2E-6")) == "0.0000012"
+    assert format_venue_decimal(Decimal("5.531E-7")) == "0.0000005531"
 
 
 def test_format_venue_decimal_preserves_normal_values() -> None:
-    assert format_venue_decimal(0.0005) == "0.0005"
-    assert format_venue_decimal(100.0) == "100.0"
-    assert format_venue_decimal(150.0) == "150.0"
+    assert format_venue_decimal(Decimal("0.0005")) == "0.0005"
+    assert format_venue_decimal(Decimal("150.0")) == "150.0"
+
+
+@pytest.mark.parametrize("value", [0.0005, Decimal("NaN"), Decimal("Infinity"), "0.0005"])
+def test_format_venue_decimal_refuses_anything_but_a_finite_decimal(value: object) -> None:
+    with pytest.raises(ValueError):
+        format_venue_decimal(value)  # type: ignore[arg-type]
+
+
+def test_offer_amount_is_eight_exact_decimals() -> None:
+    # The last four decimals are the D3a fingerprint: always all eight on the wire.
+    assert format_offer_amount(Decimal("199.99990042")) == "199.99990042"
+    assert format_offer_amount(Decimal("150")) == "150.00000000"
+    assert format_offer_amount(Decimal("0.5E+3")) == "500.00000000"
+
+
+@pytest.mark.parametrize("value", [
+    Decimal("150.000000001"),  # more precision than the venue keeps: refused, not rounded
+    199.99990042,              # a float never reaches the venue
+    Decimal("NaN"),
+])
+def test_offer_amount_refuses_what_it_cannot_send_exactly(value: object) -> None:
+    with pytest.raises(ValueError):
+        format_offer_amount(value)  # type: ignore[arg-type]
 
 
 def test_build_offer_payload_small_rate_is_fixed_point() -> None:
     # Regression: fUST mean-reversion rate (~5.5e-05) must not serialize as
     # scientific notation (caused live submit 500s, 2026-05-26).
     payload = build_offer_payload(
-        symbol="fUST", amount_usdt=150.0, rate=5.531e-05, period_days=2,
+        symbol="fUST", amount_usdt=Decimal("150"), rate=Decimal("5.531E-5"), period_days=2,
     )
     assert payload["rate"] == "0.00005531"
     assert "e" not in payload["rate"].lower()
@@ -44,11 +70,11 @@ def test_build_offer_payload_small_rate_is_fixed_point() -> None:
 
 def test_build_offer_payload_structure() -> None:
     payload = build_offer_payload(
-        symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2,
+        symbol="fUSD", amount_usdt=Decimal("100"), rate=Decimal("0.0005"), period_days=2,
     )
     assert payload["type"] == "LIMIT"
     assert payload["symbol"] == "fUSD"
-    assert payload["amount"] == "100.0"
+    assert payload["amount"] == "100.00000000"
     assert payload["rate"] == "0.0005"
     assert payload["period"] == 2
     assert payload["flags"] == 0
@@ -57,7 +83,8 @@ def test_build_offer_payload_structure() -> None:
 def test_build_offer_payload_has_no_cid_field() -> None:
     # Bitfinex funding offers have no cid field — the internal cid must never
     # leak into the venue payload (would imply a venue dedup that doesn't exist).
-    payload = build_offer_payload(symbol="fUSD", amount_usdt=100.0, rate=0.0005, period_days=2)
+    payload = build_offer_payload(symbol="fUSD", amount_usdt=Decimal("100"),
+                                  rate=Decimal("0.0005"), period_days=2)
     assert "cid" not in payload
 
 

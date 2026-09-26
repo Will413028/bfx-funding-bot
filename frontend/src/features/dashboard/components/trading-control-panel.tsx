@@ -5,22 +5,22 @@ import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  useCurrencyToggleRequest,
   useTradingControl,
   useTradingControlRequest,
 } from "@/features/dashboard/hooks/use-trading-control";
 import { ApiError } from "@/lib/api-client";
 import type {
-  TradingControlAction,
+  CurrencyAction,
+  CurrencyPolicy,
   TradingControlOverview,
-  TradingProbation,
 } from "@/types";
 
 const KILL_PHRASE = "KILL";
-const HOUR_MS = 3_600_000;
 const KNOWN_ERRORS = new Set([
   "request_pending",
-  "backend_digest_required",
   "forbidden",
+  "policy_unavailable",
 ]);
 
 function humanize(code: string): string {
@@ -31,7 +31,10 @@ function time(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
-/** Trading state, the release flow's approval and probation, and the stop controls. */
+/**
+ * Trading state, resume, the kill switch and each currency's enable/disable
+ * (lending envelope ADR D4).
+ */
 export function TradingControlPanel({
   exchangeAccountId,
 }: {
@@ -55,14 +58,6 @@ export function TradingControlPanel({
   if (!overview.data) return <p>{t("loading")}</p>;
   const data = overview.data;
   const state = data.trading_state;
-  const running = data.running;
-  const awaitingApproval =
-    state?.state === "REDUCING" && state.cause === "material_deploy";
-  const approved = data.approvals.some(
-    (approval) => approval.backend_digest === running.backend_digest,
-  );
-  const canApprove =
-    (awaitingApproval || running.change_class === "material") && !approved;
   const pending = data.requests.find(
     (request) => request.state === "requested" && request.action !== "kill",
   );
@@ -73,9 +68,9 @@ export function TradingControlPanel({
   // Stale data after a failed re-read: show it, but act only on what is current.
   const blocked = overview.isError || control.isPending;
 
-  function request(action: Exclude<TradingControlAction, "kill">) {
+  function resume() {
     control.mutate(
-      { action, reason: reason.trim(), backendDigest: running.backend_digest },
+      { action: "resume", reason: reason.trim() },
       { onSuccess: () => setReason("") },
     );
   }
@@ -102,8 +97,6 @@ export function TradingControlPanel({
           </p>
         </div>
       )}
-      {state?.probation && <ProbationView probation={state.probation} />}
-      {awaitingApproval && <AwaitingApproval data={data} />}
       {state?.state === "HALTED" && <CancelAllView data={data} />}
 
       <p className="text-sm text-muted-foreground">{t("mfa")}</p>
@@ -122,55 +115,26 @@ export function TradingControlPanel({
         </p>
       )}
 
-      <div className="space-y-2 border-t pt-3">
-        <label className="block" htmlFor={`${id}-reason`}>
-          {t("reason")}
-        </label>
-        <Input
-          id={`${id}-reason`}
-          value={reason}
-          maxLength={500}
-          onChange={(event) => setReason(event.target.value)}
-        />
-        <div className="flex flex-wrap gap-2">
-          {canApprove && (
-            <Button
-              disabled={
-                blocked ||
-                Boolean(pending) ||
-                !reason.trim() ||
-                !running.backend_digest
-              }
-              onClick={() => request("approve")}
-            >
-              {t("approve")}
-            </Button>
-          )}
-          {state?.state !== "ACTIVE" && !awaitingApproval && (
-            <Button
-              disabled={blocked || Boolean(pending) || !reason.trim()}
-              onClick={() => request("resume")}
-            >
-              {t("resume")}
-            </Button>
-          )}
-          {state?.state === "ACTIVE" && (
-            <Button
-              variant="outline"
-              disabled={blocked || Boolean(pending) || !reason.trim()}
-              onClick={() => request("pause")}
-            >
-              {t("pause")}
-            </Button>
-          )}
-        </div>
-        {canApprove && !running.backend_digest && (
-          <p role="alert">{t("identityMissing")}</p>
-        )}
-        {state?.state !== "ACTIVE" && !awaitingApproval && (
+      {state?.state !== "ACTIVE" && (
+        <div className="space-y-2 border-t pt-3">
+          <label className="block" htmlFor={`${id}-reason`}>
+            {t("reason")}
+          </label>
+          <Input
+            id={`${id}-reason`}
+            value={reason}
+            maxLength={500}
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <Button
+            disabled={blocked || Boolean(pending) || !reason.trim()}
+            onClick={resume}
+          >
+            {t("resume")}
+          </Button>
           <p className="text-sm text-muted-foreground">{t("resumeHint")}</p>
-        )}
-      </div>
+        </div>
+      )}
 
       <KillControl
         control={control}
@@ -178,7 +142,154 @@ export function TradingControlPanel({
         queued={Boolean(pendingKill)}
       />
       {control.error && <ErrorView error={control.error} />}
+
+      <CurrenciesView
+        exchangeAccountId={exchangeAccountId}
+        currencies={data.currencies ?? []}
+        stale={overview.isError}
+      />
     </section>
+  );
+}
+
+/** Every currency's everyday stop: the policy's enabled flag (ADR D4). */
+function CurrenciesView({
+  exchangeAccountId,
+  currencies,
+  stale,
+}: {
+  exchangeAccountId: string;
+  currencies: CurrencyPolicy[];
+  stale: boolean;
+}) {
+  const t = useTranslations("tradingControl.currencies");
+  return (
+    <div className="space-y-3 border-t pt-3">
+      <h3 className="font-semibold">{t("title")}</h3>
+      <p className="text-sm text-muted-foreground">{t("hint")}</p>
+      {currencies.length === 0 ? (
+        <p>{t("none")}</p>
+      ) : (
+        <ul className="space-y-3">
+          {currencies.map((currency) => (
+            <CurrencyControl
+              key={currency.symbol}
+              exchangeAccountId={exchangeAccountId}
+              currency={currency}
+              stale={stale}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function percent(fraction: string): string {
+  return `${Number((Number(fraction) * 100).toFixed(4))}%`;
+}
+
+function CurrencyControl({
+  exchangeAccountId,
+  currency,
+  stale,
+}: {
+  exchangeAccountId: string;
+  currency: CurrencyPolicy;
+  stale: boolean;
+}) {
+  const t = useTranslations("tradingControl");
+  const c = useTranslations("tradingControl.currencies");
+  const toggle = useCurrencyToggleRequest(exchangeAccountId);
+  const id = useId();
+  const [reason, setReason] = useState("");
+  const { symbol, envelope } = currency;
+  const pending = currency.requests.filter(
+    (request) => request.state === "requested",
+  );
+  const latest = currency.requests.find(
+    (request) => request.state !== "requested",
+  );
+  const action: CurrencyAction | null =
+    currency.enabled === null ? null : currency.enabled ? "disable" : "enable";
+  const waiting = pending.some((request) => request.action === action);
+  // Stale data after a failed re-read: a disable only narrows trading (and is
+  // a no-op if already in force), so it stays available, like the kill.
+  const held = (stale && action === "enable") || toggle.isPending || waiting;
+
+  return (
+    <li
+      className="space-y-1 rounded-lg border p-3"
+      aria-labelledby={`${id}-symbol`}
+    >
+      <p id={`${id}-symbol`} className="font-semibold">
+        {symbol} ·{" "}
+        {currency.policy_error !== null
+          ? c("unreadable")
+          : currency.enabled
+            ? c("enabled")
+            : c("disabled")}
+      </p>
+      {currency.policy_error !== null && (
+        <p role="alert">
+          {c("unreadableBody", { code: humanize(currency.policy_error) })}
+        </p>
+      )}
+      {currency.policy_error === null &&
+        (envelope === null ? (
+          <p role="alert">{c("envelopeUnset")}</p>
+        ) : (
+          <p className="text-sm tabular-nums">
+            {c("envelope", {
+              max: currency.max_offer_amount ?? "—",
+              minDays: envelope.min_period_days,
+              maxDays: envelope.max_period_days,
+              offers: envelope.max_open_offers,
+              apr: percent(envelope.min_rate_apr),
+              ratio: envelope.rate_floor_ratio,
+            })}
+          </p>
+        ))}
+      {pending.map((request) => (
+        <output key={request.request_id} className="block">
+          {t("waiting", { action: c(`action.${request.action}`) })}
+        </output>
+      ))}
+      {latest && (
+        <p role={latest.state === "applied" ? undefined : "alert"}>
+          {t(`outcome.${latest.state as "applied" | "rejected" | "failed"}`, {
+            action: c(`action.${latest.action}`),
+          })}
+          {latest.outcome_reason ? ` — ${humanize(latest.outcome_reason)}` : ""}
+        </p>
+      )}
+      {action !== null && (
+        <div className="space-y-2 pt-1">
+          <label className="block" htmlFor={`${id}-reason`}>
+            {c("reason", { symbol })}
+          </label>
+          <Input
+            id={`${id}-reason`}
+            value={reason}
+            maxLength={500}
+            onChange={(event) => setReason(event.target.value)}
+          />
+          <Button
+            variant={action === "disable" ? "outline" : "default"}
+            disabled={held || !reason.trim()}
+            onClick={() =>
+              toggle.mutate(
+                { symbol, action, reason: reason.trim() },
+                { onSuccess: () => setReason("") },
+              )
+            }
+          >
+            {c(action, { symbol })}
+          </Button>
+          {toggle.error && <ErrorView error={toggle.error} />}
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -259,75 +370,6 @@ function KillControl({
   );
 }
 
-function ProbationView({ probation }: { probation: TradingProbation }) {
-  const t = useTranslations("tradingControl");
-  const elapsed = Math.min(
-    Math.floor(probation.elapsed_ms / HOUR_MS),
-    Math.floor(probation.required_ms / HOUR_MS),
-  );
-  const required = Math.floor(probation.required_ms / HOUR_MS);
-  return (
-    <div className="space-y-1 border-t pt-3">
-      <h3 className="font-semibold">{t("probationTitle")}</h3>
-      <p>
-        {t("probationLimit", {
-          percent: Number(probation.multiplier) * 100,
-        })}
-      </p>
-      {Object.entries(probation.floor).map(([symbol, amount]) => (
-        <p key={symbol} className="font-mono text-sm">
-          {t("probationFloor", { symbol, amount })}
-        </p>
-      ))}
-      <label className="block text-sm">
-        {t("probationTime", { elapsed, required })}
-        <progress
-          className="block w-full"
-          value={Math.min(probation.elapsed_ms, probation.required_ms)}
-          max={probation.required_ms}
-        />
-      </label>
-      <label className="block text-sm">
-        {t("probationAcks", {
-          count: probation.acknowledged,
-          required: probation.required_acknowledged,
-        })}
-        <progress
-          className="block w-full"
-          value={Math.min(
-            probation.acknowledged,
-            probation.required_acknowledged,
-          )}
-          max={probation.required_acknowledged}
-        />
-      </label>
-      <p className="text-sm text-muted-foreground">{t("probationLift")}</p>
-    </div>
-  );
-}
-
-function AwaitingApproval({ data }: { data: TradingControlOverview }) {
-  const t = useTranslations("tradingControl");
-  return (
-    <div className="space-y-1 border-t pt-3">
-      <h3 className="font-semibold">{t("awaitingTitle")}</h3>
-      <p>{t("awaitingBody")}</p>
-      <dl className="grid gap-1 text-sm">
-        <dt>{t("digest")}</dt>
-        <dd className="break-all font-mono">
-          {data.running.backend_digest ?? "—"}
-        </dd>
-        <dt>{t("revision")}</dt>
-        <dd className="break-all font-mono">
-          {data.running.source_revision ?? "—"}
-        </dd>
-        <dt>{t("changeClass")}</dt>
-        <dd>{data.running.change_class ?? "—"}</dd>
-      </dl>
-    </div>
-  );
-}
-
 function CancelAllView({ data }: { data: TradingControlOverview }) {
   const t = useTranslations("tradingControl");
   const incomplete =
@@ -367,7 +409,7 @@ function ErrorView({ error }: { error: Error }) {
     <p role="alert">
       {KNOWN_ERRORS.has(code)
         ? t(
-            `error.${code as "request_pending" | "backend_digest_required" | "forbidden"}`,
+            `error.${code as "request_pending" | "forbidden" | "policy_unavailable"}`,
           )
         : t("error.generic", { code })}
     </p>

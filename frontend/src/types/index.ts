@@ -175,22 +175,10 @@ export interface FundingStatus {
   };
 }
 
-// ── Trading control (ADR 2026-09-25: trading state, release flow, kill) ──
+// ── Trading control (lending envelope ADR 2026-09-25 D4: state, resume, kill) ──
 
-export type TradingStateName = "ACTIVE" | "REDUCING" | "HALTED";
-export type TradingCause = "operator" | "auto" | "material_deploy";
-
-/** Reduced limits after an approval or an automatic halt, and the lift's progress. */
-export interface TradingProbation {
-  multiplier: string;
-  started_at_ms: number;
-  /** Venue minimum per symbol (native units), the floor under the reduced limit. */
-  floor: Record<string, string>;
-  elapsed_ms: number;
-  required_ms: number;
-  acknowledged: number;
-  required_acknowledged: number;
-}
+export type TradingStateName = "ACTIVE" | "HALTED";
+export type TradingCause = "operator" | "auto";
 
 export interface TradingStateView {
   id: number;
@@ -199,10 +187,9 @@ export interface TradingStateView {
   actor: string;
   reason: string;
   at_ms: number;
-  probation: TradingProbation | null;
 }
 
-export type TradingControlAction = "approve" | "resume" | "pause" | "kill";
+export type TradingControlAction = "resume" | "kill";
 export type TradingControlRequestState =
   | "requested"
   | "applied"
@@ -212,7 +199,6 @@ export type TradingControlRequestState =
 export interface TradingControlRequest {
   request_id: string;
   action: TradingControlAction;
-  backend_digest: string | null;
   reason: string;
   requested_by: string;
   created_at_ms: number;
@@ -233,23 +219,53 @@ export interface CancelAllPhase {
 export interface BuildIdentity {
   backend_digest: string | null;
   source_revision: string | null;
-  change_class: string | null;
 }
 
 export interface TradingControlOverview {
   trading_state: TradingStateView | null;
   cancel_all: CancelAllPhase[];
   running: BuildIdentity;
-  latest_deployment:
-    | (BuildIdentity & { finished_at: string; change_class: string })
-    | null;
-  approvals: {
-    backend_digest: string;
-    source_revision: string;
-    approved_by: string;
-    approved_at_ms: number;
-  }[];
+  latest_deployment: (BuildIdentity & { finished_at: string | null }) | null;
   requests: TradingControlRequest[];
+  /** Every currency with an applied CapitalPolicy (its own request outbox). */
+  currencies: CurrencyPolicy[];
+}
+
+export type CurrencyAction = "enable" | "disable";
+
+export interface CurrencyRequest {
+  request_id: string;
+  symbol: string;
+  action: CurrencyAction;
+  reason: string;
+  requested_by: string;
+  created_at_ms: number;
+  state: TradingControlRequestState;
+  processed_at_ms: number | null;
+  outcome_reason: string | null;
+  policy_revision_id: string | null;
+}
+
+/** The terms every new offer must stay inside; decimals stay strings. */
+export interface OfferEnvelope {
+  min_period_days: number;
+  max_period_days: number;
+  max_open_offers: number;
+  rate_floor_ratio: string;
+  min_rate_apr: string;
+}
+
+export interface CurrencyPolicy {
+  symbol: string;
+  revision: number;
+  /** Set when the applied policy cannot be read; the other fields are null. */
+  policy_error: string | null;
+  enabled: boolean | null;
+  max_offer_amount: string | null;
+  /** null: never set, and every offer for the currency is refused. */
+  envelope: OfferEnvelope | null;
+  /** Latest first. */
+  requests: CurrencyRequest[];
 }
 
 // ── SP4 Projections (operator console read models) ──

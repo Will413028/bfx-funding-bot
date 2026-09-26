@@ -226,7 +226,10 @@ async def _seed_attempt(pg_session_factory, *, unknown: bool) -> None:
         )
 
 
-def _recovery(pg_session_factory, auth: _Auth, bus: _Bus | None = None) -> BootRecovery:
+def _recovery(pg_session_factory, auth: _Auth, bus: _Bus | None = None, *,
+              settle_ms: int = 0) -> BootRecovery:
+    # These cases judge the evidence, not the settle window (test_managed_offers
+    # covers that): the attempt at 1_000 counts as settled by the 5_000 query.
     return BootRecovery(
         store=PostgresEventStore(deployment_environment=_ENV),
         session_factory=pg_session_factory,
@@ -242,6 +245,7 @@ def _recovery(pg_session_factory, auth: _Auth, bus: _Bus | None = None) -> BootR
         grace_ms=100,
         clock=lambda: 5_000,
         uncertainty_handler=lambda _event: _noop(),
+        unknown_settle_ms=settle_ms,
     )
 
 
@@ -321,7 +325,8 @@ async def test_resolved_unknown_attempt_is_excluded_from_future_matcher_history(
     pg_session_factory,
 ):
     await _seed_attempt(pg_session_factory, unknown=True)
-    initial = await _recovery(pg_session_factory, _Auth()).run()
+    # Unsettled: the operator, not the evidence, resolves it in this case.
+    initial = await _recovery(pg_session_factory, _Auth(), settle_ms=10**9).run()
     assert initial.snapshot_event_seq is not None
 
     async with pg_session_factory() as session:
@@ -496,7 +501,6 @@ async def test_history_numeric_parse_failure_still_moves_pending_to_unknown(
 @pytest.mark.parametrize(
     ("history", "case"),
     [
-        (_History((), _Coverage(1_000, 5_000, None, None, 1, True)), "reject_drop_zero"),
         (
             _History(
                 (_offer("candidate-a", status="CANCELED"), _offer("candidate-b", status="EXECUTED")),
@@ -546,7 +550,12 @@ async def test_history_numeric_parse_failure_still_moves_pending_to_unknown(
 async def test_zero_multiple_or_incomplete_evidence_stays_unknown_and_other_symbols_continue(
     pg_session_factory, history, case
 ):
-    """Empty, ambiguous, or unbounded history must never become a rejection."""
+    """Ambiguous or unbounded history must never become a rejection.
+
+    Complete history with no offer carrying the attempt's fingerprint is proof
+    of absence since D3a (test_managed_offers); a same-amount offer that fails
+    another identity field is not, and neither is anything incomplete.
+    """
     del case
     await _seed_attempt(pg_session_factory, unknown=True)
     bus = _Bus()
@@ -817,7 +826,7 @@ async def test_history_5xx_after_visible_venue_side_effect_stays_one_submit_unkn
     ]
     assert quarantine_count == 0
     assert result.n_matched == 0
-    assert result.n_quarantined == 0
+    assert result.unmanaged_offer_ids == frozenset({"accepted-but-response-dropped"})
 
 
 @pytest.mark.asyncio

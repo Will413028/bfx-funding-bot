@@ -22,8 +22,8 @@ from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
 from bfx_funding_bot.modules.execution.capital_policy import (
     CapitalBudget,
     CapitalPolicy,
-    CapitalProbation,
     CapitalSnapshot,
+    OfferEnvelope,
     evaluate_capital,
 )
 from bfx_funding_bot.modules.execution.capital_tables import (
@@ -55,7 +55,6 @@ from bfx_funding_bot.modules.execution.events import (
     UncertaintyMarkedNotAccepted,
     VenueSnapshotObserved,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import read_current
 from bfx_funding_bot.modules.execution.submit_outcomes import SubmissionAttemptPayload
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ExecutionUncertaintyRow,
@@ -83,25 +82,51 @@ class CapitalBlockedError(ValueError):
     """No authorization was issued; caller must not submit."""
 
 
-# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9).
-# Schema 1 stays readable (max_offer_amount None, which the pre-trade guard
-# refuses); every policy that sets the ceiling is written as schema 2.
-POLICY_KEYS = {1: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"}),
-               2: frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction",
-                             "max_offer_amount"})}
+# Policy JSON schemas: 1 = the original four keys; 2 adds max_offer_amount (T9);
+# 3 adds the offer envelope (lending envelope D1). Older schemas stay readable
+# with the missing parts None, which the offer-envelope guard refuses.
+_BASE_KEYS = frozenset({"enabled", "reserve_amount", "allocation_mode", "max_cell_fraction"})
+ENVELOPE_KEYS = frozenset({"min_period_days", "max_period_days", "max_open_offers",
+                           "rate_floor_ratio", "min_rate_apr"})
+POLICY_KEYS = {1: _BASE_KEYS,
+               2: _BASE_KEYS | {"max_offer_amount"},
+               3: _BASE_KEYS | {"max_offer_amount", "envelope"}}
 
 
 def policy_schema_version(policy: CapitalPolicy) -> int:
+    if policy.envelope is not None:
+        return 3
     return 2 if policy.max_offer_amount is not None else SCHEMA_VERSION
 
 
+def envelope_payload(envelope: OfferEnvelope) -> dict[str, Any]:
+    return {"min_period_days": envelope.min_period_days,
+            "max_period_days": envelope.max_period_days,
+            "max_open_offers": envelope.max_open_offers,
+            "rate_floor_ratio": str(envelope.rate_floor_ratio),
+            "min_rate_apr": str(envelope.min_rate_apr)}
+
+
 def policy_payload(policy: CapitalPolicy) -> dict[str, Any]:
-    payload = {"enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
-               "allocation_mode": policy.allocation_mode,
-               "max_cell_fraction": str(policy.max_cell_fraction)}
+    payload: dict[str, Any] = {
+        "enabled": policy.enabled, "reserve_amount": str(policy.reserve_amount),
+        "allocation_mode": policy.allocation_mode,
+        "max_cell_fraction": str(policy.max_cell_fraction)}
     if policy.max_offer_amount is not None:
         payload["max_offer_amount"] = str(policy.max_offer_amount)
+    if policy.envelope is not None:
+        payload["envelope"] = envelope_payload(policy.envelope)
     return payload
+
+
+def _envelope(raw: object) -> OfferEnvelope:
+    if not isinstance(raw, dict) or set(raw) != ENVELOPE_KEYS:
+        raise ValueError("envelope keys")
+    return OfferEnvelope(min_period_days=raw["min_period_days"],
+                         max_period_days=raw["max_period_days"],
+                         max_open_offers=raw["max_open_offers"],
+                         rate_floor_ratio=_amount(raw["rate_floor_ratio"]),
+                         min_rate_apr=_amount(raw["min_rate_apr"]))
 
 
 def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
@@ -117,7 +142,8 @@ def policy_from_row(row: CapitalPolicyRevisionRow) -> CapitalPolicy:
             allocation_mode=row.policy["allocation_mode"],
             max_cell_fraction=_amount(row.policy["max_cell_fraction"]),
             max_offer_amount=(_amount(row.policy["max_offer_amount"])
-                              if "max_offer_amount" in keys else None))
+                              if "max_offer_amount" in keys else None),
+            envelope=_envelope(row.policy["envelope"]) if "envelope" in keys else None)
     except (ValueError, TypeError, KeyError) as exc:
         raise CapitalBlockedError("invalid_policy") from exc
 
@@ -248,15 +274,26 @@ class CapitalRepository:
         return int(await session.scalar(select(func.max(EventLogRow.event_seq)).where(
             *self._scope(EventLogRow))) or 0)
 
-    async def _assert_no_unknown(self, session: AsyncSession) -> None:
+    async def _assert_no_unknown(self, session: AsyncSession, *, symbol: str) -> None:
+        """Refuse ``symbol`` while it has open uncertainty (ladder level 2).
+
+        Per symbol, not per account: each symbol's capital is its own wallet, so
+        an UNKNOWN on one says nothing about another's cash. What it must never
+        do is let its own possible commitment read as available -- the read
+        refuses the symbol here, and again from the accepted snapshot's
+        ``unresolved`` set until a snapshot taken after the resolution replaces it.
+
+        One indexed probe, nothing per attempt. A resolved UNKNOWN keeps
+        ``outcome_kind='unknown'`` for audit, and D3a resolves them routinely, so
+        re-proving each one here would grow with history. It does not need to:
+        acceptance proved every attempt at or before the fence (``settled`` /
+        ``unresolved``), and the read's tail inventory proves the rest.
+        """
         open_id = await session.scalar(select(ExecutionUncertaintyRow.uncertainty_id).where(
-            *self._scope(ExecutionUncertaintyRow), ExecutionUncertaintyRow.state == "open").limit(1))
+            *self._scope(ExecutionUncertaintyRow), ExecutionUncertaintyRow.symbol == symbol,
+            ExecutionUncertaintyRow.state == "open").limit(1))
         if open_id is not None:
             raise CapitalBlockedError("execution_unknown")
-        unknown = (await session.scalars(select(SubmissionAttemptRow).where(
-            *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.outcome_kind == "unknown"))).all()
-        for attempt in unknown:
-            await self._effective_outcome(session, attempt)
 
     async def _effective_outcome(self, session: AsyncSession, attempt: SubmissionAttemptRow) -> str | None:
         if attempt.outcome_kind != "unknown":
@@ -316,7 +353,6 @@ class CapitalRepository:
         """
         await self._prepare(session)
         await self._attempt_inventory(session)
-        await self._assert_no_unknown(session)
         pending = await session.scalar(select(SubmissionAttemptRow.attempt_id).where(
             *self._scope(SubmissionAttemptRow), SubmissionAttemptRow.outcome_kind.is_(None)).limit(1))
         if pending is not None:
@@ -360,7 +396,6 @@ class CapitalRepository:
             raise CapitalBlockedError("snapshot_confirmation_overlaps")
         if self._observation(confirmation) != self._observation(event):
             raise CapitalBlockedError("snapshot_unstable")
-        await self._assert_no_unknown(session)
         classification = await self._classify(session, event)
         # Prove the legacy intents here, where the fence is set, for every symbol a
         # read can later ask about. Doing it once at acceptance is what lets an
@@ -435,9 +470,10 @@ class CapitalRepository:
 
     async def _classify(self, session: AsyncSession, event: VenueSnapshotObserved) -> dict[str, Any]:
         totals: dict[str, Any] = {symbol: {"available": str(_amount(amount)), "offered": "0", "credits": "0",
-                          "unattributed_credits": "0", "cells": {}}
+                          "unattributed_credits": "0", "foreign": "0", "cells": {}}
                   for symbol, amount in event.wallet_available.items()}
         reflected: dict[str, str] = {}
+        foreign: dict[str, dict[str, str]] = {}
         offers = {o.venue_offer_id: o for o in event.offers}
         for offer in offers.values():
             original, remaining = _amount(offer.amount_original), _amount(offer.amount_remaining)
@@ -448,8 +484,19 @@ class CapitalRepository:
             attempts = (await session.scalars(select(SubmissionAttemptRow).where(
                 *self._scope(SubmissionAttemptRow),
                 SubmissionAttemptRow.venue_offer_id == offer.venue_offer_id))).all()
+            if not claims and not attempts:
+                # Foreign (D2): no durable intent traces to it, so it is not ours
+                # to count, cancel or reprice. Its amount already left the wallet's
+                # ``available``; leaving it out of ``offered`` is what shrinks the
+                # budget by exactly that much. Recorded so the reason is auditable.
+                foreign[offer.venue_offer_id] = {"symbol": offer.symbol, "amount": str(remaining)}
+                values = totals[offer.symbol]
+                values["foreign"] = str(_amount(values["foreign"]) + remaining)
+                continue
             if len(claims) != 1 or len(attempts) > 1:
-                raise CapitalBlockedError("unattributed_offer")
+                # Some provenance, but not exactly one story: an integrity fault,
+                # never a reason to treat the offer as someone else's.
+                raise CapitalBlockedError("offer_provenance_conflict")
             claim = claims[0]
             decision = await session.get(ExecutionDecisionRow, claim.execution_decision_id)
             if decision is None or (decision.exchange_account_id, decision.deployment_environment,
@@ -485,9 +532,20 @@ class CapitalRepository:
         # reflected either. Record it, so a bounded read can tell it apart from an
         # unaccounted commitment by set membership instead of re-deriving it.
         settled: list[str] = []
+        # An UNKNOWN still open holds its symbol, not the account: the attempt is
+        # recorded against its symbol, and every read of that symbol refuses it
+        # until a snapshot accepted after the resolution replaces this one.
+        unresolved: dict[str, str] = {}
         for _, _, attempt in inventory.values():
             key = str(attempt.attempt_id)
-            if await self._effective_outcome(session, attempt) in {"rejected", "not_sent"}:
+            try:
+                outcome = await self._effective_outcome(session, attempt)
+            except CapitalBlockedError as exc:
+                if str(exc) != "execution_unknown":
+                    raise
+                unresolved[key] = attempt.symbol
+                continue
+            if outcome in {"rejected", "not_sent"}:
                 settled.append(key)
                 continue
             if key in reflected:
@@ -509,12 +567,15 @@ class CapitalRepository:
                     and terminal.status not in {"absent", "quarantined"}
                     and terminal.symbol == attempt.symbol
                     and _amount(terminal.amount_original) == _amount(attempt.normalized_payload.get("amount"))):
-                # Exact acknowledged venue identity + terminal history, never
-                # amount/rate/time matching of an unrelated credit to a cell.
+                # Exact acknowledged venue identity + terminal history. Matching
+                # by fingerprinted amount/rate/period happens once, when an
+                # UNKNOWN is resolved (boot recovery, D3a) -- never here, where
+                # a credit would otherwise be assigned to a cell by resemblance.
                 reflected[key] = terminal.venue_offer_id
                 continue
             raise CapitalBlockedError("unclassifiable_commitment")
         return {"symbols": totals, "reflected": reflected, "settled": sorted(settled),
+                "unresolved": unresolved, "foreign": foreign,
                 "credit_attribution": "U is conservative shared exposure for every cell; counted once in T"}
 
     async def read_capital(self, session: AsyncSession, *, symbol: str, cell_id: str,
@@ -550,9 +611,11 @@ class CapitalRepository:
             session, symbol=symbol, cell_id=cell_id, now_ms=now_ms,
         )
         row, exposure, pending = basis.row, basis.exposure, ZERO
+        # Other symbols' unresolved attempts are accounted for too: the basis
+        # already refused this symbol if one of them is its own.
         accounted = frozenset(row.classification["reflected"]) | frozenset(
             row.classification.get("settled", ())
-        )
+        ) | frozenset(row.classification.get("unresolved", {}))
         inventory = await self._attempt_inventory(
             session, after_event_seq=row.command_fence, reflected=accounted,
         )
@@ -574,8 +637,7 @@ class CapitalRepository:
         snapshot = CapitalSnapshot(basis.available, pending,
                                    basis.available + basis.offered + basis.credits, exposure)
         return CapitalView(applied, row.event_seq, snapshot,
-                           evaluate_capital(applied.policy, snapshot,
-                                            await self._probation(session, symbol)),
+                           evaluate_capital(applied.policy, snapshot),
                            basis.shared, row.classification)
 
     async def _snapshot_basis(self, session: AsyncSession, *, symbol: str, cell_id: str,
@@ -585,7 +647,7 @@ class CapitalRepository:
         Every check here is a single indexed row or an equality on already-loaded
         content, so this part is bounded no matter how long the account has run.
         """
-        await self._assert_no_unknown(session)
+        await self._assert_no_unknown(session, symbol=symbol)
         row = await session.scalar(select(CapitalSnapshotRow).where(*self._scope(CapitalSnapshotRow))
             .order_by(CapitalSnapshotRow.event_seq.desc()).limit(1))
         if row is None or row.schema_version != SCHEMA_VERSION:
@@ -632,6 +694,10 @@ class CapitalRepository:
         self._validate_snapshot(event, now_ms)
         if symbol not in row.classification["symbols"]:
             raise CapitalBlockedError("snapshot_symbol_missing")
+        if symbol in row.classification.get("unresolved", {}).values():
+            # Resolved since, perhaps -- but this snapshot was taken while it was
+            # open and cannot say where that money is. The next one will.
+            raise CapitalBlockedError("execution_unknown")
         values = row.classification["symbols"][symbol]
         available = _amount(values["available"])
         offered, credits = _amount(values["offered"]), _amount(values["credits"])
@@ -679,23 +745,8 @@ class CapitalRepository:
                 exposure += amount
         snapshot = CapitalSnapshot(available, pending, available + offered + credits, exposure)
         return CapitalView(applied, row.event_seq, snapshot,
-                           evaluate_capital(applied.policy, snapshot,
-                                            await self._probation(session, symbol)),
+                           evaluate_capital(applied.policy, snapshot),
                            shared, row.classification)
-
-    async def _probation(self, session: AsyncSession, symbol: str) -> CapitalProbation | None:
-        """The probation in force, read in the same session as the capital.
-
-        Every consumer -- planner, guard, command admission, status -- reaches
-        the budget through this read, so the reduced limit binds all of them
-        at once. Only ACTIVE carries one; any other state already blocks.
-        """
-        state = await read_current(session, account_id=self.account_id,
-                                   environment=self.environment)
-        if state is None or state.state != "ACTIVE" or state.probation is None:
-            return None
-        return CapitalProbation(multiplier=state.probation.multiplier,
-                                floor=state.probation.floor_for(symbol))
 
     async def _attempt_inventory(
         self, session: AsyncSession, *, after_event_seq: int | None = None,

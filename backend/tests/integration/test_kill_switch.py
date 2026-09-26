@@ -280,7 +280,7 @@ async def test_unreadable_scope_still_cancels_configured_currencies(capital_db, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cause", ["material_deploy", "nonsense"])
+@pytest.mark.parametrize("cause", ["material_deploy", "nonsense"])  # a retired cause, a bogus one
 async def test_only_stop_causes_may_engage(capital_db, cause):
     factory, account = capital_db
     _, ctx, trading, venue = await exposed_account(factory, account)
@@ -322,3 +322,34 @@ async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_oper
     assert len(venue.calls) == 3 and len(await audit(factory)) == 6
     retried = await switch.engage(cause="operator", actor="will", reason="retry the venue part")
     assert not retried.state_changed and len(venue.calls) == 6 and len(await audit(factory)) == 12
+
+
+# -------------------------- fixtures for the planner's managed-offer pull (D3/D4)
+
+
+class Canceller:
+    def __init__(self, fail: set[str] | None = None) -> None:
+        self.cancelled: list[str] = []
+        self.fail = fail or set()
+
+    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx):
+        if venue_offer_id in self.fail:
+            raise ExecutorTransientError("venue unavailable")
+        self.cancelled.append(venue_offer_id)
+
+
+async def _offer_rows(factory, account):
+    """Managed 101 and 102 (a durable intent traces to them), foreign 555 (manual),
+    and a terminal managed 103."""
+    from bfx_funding_bot.modules.execution.event_store.tables import VenueOfferStateRow
+    async with factory.begin() as session:
+        for offer_id, symbol, decision, terminal in (
+                ("101", "fUST", "d-101", False), ("102", "fUSD", "d-102", False),
+                ("555", "fUST", None, False), ("103", "fUST", "d-103", True)):
+            session.add(VenueOfferStateRow(
+                exchange_account_id=account, deployment_environment="ci", venue_offer_id=offer_id,
+                symbol=symbol, amount_original=Decimal("200"), amount_remaining=Decimal("200"),
+                rate=Decimal("0.0002"), period_days=2, status="ACTIVE", flags={}, mts_created=1,
+                mts_updated=1, first_seen_event_seq=1, last_seen_event_seq=1, is_terminal=terminal,
+                execution_decision_id=decision,
+                signal_correlation_id="00000000-0000-4000-8000-000000000001" if decision else None))

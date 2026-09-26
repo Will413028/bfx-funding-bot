@@ -9,6 +9,7 @@ import {
   IDLE_CONTROL_POLL_MS,
   PENDING_CONTROL_POLL_MS,
   tradingControlPollInterval,
+  useCurrencyToggleRequest,
   useTradingControl,
   useTradingControlRequest,
 } from "../use-trading-control";
@@ -35,17 +36,12 @@ function overview(requests: Partial<TradingControlRequest>[] = []) {
   return {
     trading_state: null,
     cancel_all: [],
-    running: {
-      backend_digest: null,
-      source_revision: null,
-      change_class: null,
-    },
+    running: { backend_digest: null, source_revision: null },
     latest_deployment: null,
-    approvals: [],
+    currencies: [],
     requests: requests.map((request, index) => ({
       request_id: `r-${index}`,
       action: "resume",
-      backend_digest: null,
       reason: "x",
       requested_by: "will",
       created_at_ms: 1,
@@ -124,7 +120,7 @@ describe("useTradingControl", () => {
 describe("useTradingControlRequest", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("names the build only for approve and resume, and never retries", async () => {
+  it("sends only the reason, and never retries", async () => {
     const { client, wrapper } = setup();
     vi.mocked(apiClient.post).mockResolvedValue({
       request_id: "r",
@@ -136,18 +132,10 @@ describe("useTradingControlRequest", () => {
       wrapper,
     });
     await act(() =>
-      result.current.mutateAsync({
-        action: "kill",
-        reason: "incident",
-        backendDigest: "sha256:x",
-      }),
+      result.current.mutateAsync({ action: "kill", reason: "incident" }),
     );
     await act(() =>
-      result.current.mutateAsync({
-        action: "approve",
-        reason: "reviewed",
-        backendDigest: "sha256:x",
-      }),
+      result.current.mutateAsync({ action: "resume", reason: "back" }),
     );
     expect(vi.mocked(apiClient.post).mock.calls).toEqual([
       [
@@ -155,8 +143,8 @@ describe("useTradingControlRequest", () => {
         { reason: "incident" },
       ],
       [
-        `/exchange-accounts/${ACCOUNT_ID}/trading-control/approve`,
-        { reason: "reviewed", backend_digest: "sha256:x" },
+        `/exchange-accounts/${ACCOUNT_ID}/trading-control/resume`,
+        { reason: "back" },
       ],
     ]);
     expect(invalidate).toHaveBeenCalledWith({
@@ -166,9 +154,60 @@ describe("useTradingControlRequest", () => {
     vi.mocked(apiClient.post).mockReset();
     vi.mocked(apiClient.post).mockRejectedValue(new Error("conflict"));
     act(() => {
-      result.current.mutate({ action: "pause", reason: "x" });
+      result.current.mutate({ action: "resume", reason: "x" });
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(apiClient.post).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("currency toggles", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("a waiting toggle keeps the fast poll like any other request", () => {
+    const waiting = {
+      ...overview(),
+      currencies: [
+        {
+          symbol: "fUST",
+          requests: [{ request_id: "c-0", state: "requested" }],
+        },
+      ],
+    } as TradingControlOverview;
+    expect(tradingControlPollInterval(waiting)).toBe(PENDING_CONTROL_POLL_MS);
+  });
+
+  it("queues enable/disable for one currency and never retries", async () => {
+    const { client, wrapper } = setup();
+    vi.mocked(apiClient.post).mockRejectedValue(new Error("conflict"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(() => useCurrencyToggleRequest(ACCOUNT_ID), {
+      wrapper,
+    });
+    act(() => {
+      result.current.mutate({
+        symbol: "fUST",
+        action: "disable",
+        reason: "maintenance",
+      });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(vi.mocked(apiClient.post).mock.calls).toEqual([
+      [
+        `/exchange-accounts/${ACCOUNT_ID}/trading-control/currencies/fUST/disable`,
+        { reason: "maintenance" },
+      ],
+    ]);
+    vi.mocked(apiClient.post).mockResolvedValue({ request_id: "c" });
+    await act(() =>
+      result.current.mutateAsync({
+        symbol: "fUST",
+        action: "enable",
+        reason: "back",
+      }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: tradingControlKeys.overview(ACCOUNT_ID),
+    });
   });
 });

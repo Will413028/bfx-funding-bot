@@ -11,7 +11,7 @@ release ceremony it served (``release_archive`` schema, migration c74d45a54e46);
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import ClassVar
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,13 +23,10 @@ from sqlalchemy import (
     Numeric,
     PrimaryKeyConstraint,
     Text,
-    UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON
 
 # Register the referenced account table for metadata-only fixtures.
 import bfx_funding_bot.modules.accounts.tables  # noqa: F401
@@ -59,10 +56,11 @@ _DIGEST_RE = "'^sha256:[0-9a-f]{64}$'"
 class TradingStateRow(Base):
     """Append-only trading-state decisions. Current = highest id for the scope.
 
-    ``state`` decides what the writer may do: ACTIVE trades, REDUCING only
-    cancels, HALTED only cancels and has had the venue's funding offers
-    cancelled. ``cause`` records who or what made the transition, and the
-    allowed pairs are fixed by ``ck_trading_state_cause``.
+    ``state`` decides what the writer may do: ACTIVE trades, HALTED only
+    cancels and has had venue funding offers cancelled. ``cause`` records who
+    or what made the transition (``operator`` or ``auto``). Rows written before
+    revision 5b1e7c9d2a40 may still say REDUCING or ``material_deploy``: the
+    CHECKs are NOT VALID so that history stays as it was recorded.
 
     Ordering is by ``id``: PostgreSQL's insert trigger assigns it under a scope
     lock, validates the transition against the previous row and rejects every
@@ -86,30 +84,11 @@ class TradingStateRow(Base):
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    probation_multiplier: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
-    probation_started_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Per-currency venue minimum (native units, with the submit margin) observed
-    # when the probation started: the floor of the probation cell limit.
-    probation_floor: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"), nullable=True,
-    )
     legacy_halt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     __table_args__ = (
-        CheckConstraint("state IN ('ACTIVE', 'REDUCING', 'HALTED')", name="ck_trading_state_state"),
-        CheckConstraint(
-            "(state = 'ACTIVE' AND cause IN ('operator', 'auto')) OR "
-            "(state = 'REDUCING' AND cause IN ('operator', 'material_deploy')) OR "
-            "(state = 'HALTED' AND cause IN ('operator', 'auto'))",
-            name="ck_trading_state_cause",
-        ),
-        CheckConstraint(
-            "(probation_multiplier IS NULL AND probation_started_at_ms IS NULL "
-            "AND probation_floor IS NULL) OR "
-            "(state = 'ACTIVE' AND probation_multiplier > 0 AND probation_multiplier <= 1 "
-            "AND probation_started_at_ms >= 0 AND probation_floor IS NOT NULL)",
-            name="ck_trading_state_probation",
-        ),
+        CheckConstraint("state IN ('ACTIVE', 'HALTED')", name="ck_trading_state_state"),
+        CheckConstraint("cause IN ('operator', 'auto')", name="ck_trading_state_cause"),
         CheckConstraint(
             "length(trim(actor)) > 0 AND length(trim(reason)) > 0 "
             "AND length(trim(deployment_environment)) > 0 AND created_at_ms >= 0",
@@ -179,46 +158,8 @@ class FundingCancelAllAuditRow(Base):
     )
 
 
-class DeploymentApprovalRow(Base):
-    """An operator's one-time approval of a material backend image (ADR D2).
-
-    Append-only; one row per account/environment/digest. The digest and
-    revision format CHECKs use PostgreSQL regex and live in the migration.
-    """
-
-    __tablename__ = "deployment_approvals"
-
-    id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True,
-    )
-    exchange_account_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("exchange_accounts.id", ondelete="RESTRICT",
-                   name="fk_deployment_approvals_account"),
-        nullable=False,
-    )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
-    backend_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    source_revision: Mapped[str] = mapped_column(Text, nullable=False)
-    approved_by: Mapped[str] = mapped_column(Text, nullable=False)
-    approved_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    request_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
-
-    __table_args__ = (
-        CheckConstraint("length(trim(approved_by)) > 0 AND approved_at_ms >= 0",
-                        name="ck_deployment_approvals_evidence"),
-        # Regex CHECKs are PostgreSQL's (the authority); SQLite fixtures skip them.
-        CheckConstraint(f"backend_digest ~ {_DIGEST_RE}",
-                        name="ck_deployment_approvals_digest").ddl_if(dialect="postgresql"),
-        CheckConstraint("source_revision ~ '^[0-9a-f]{40}$'",
-                        name="ck_deployment_approvals_revision").ddl_if(dialect="postgresql"),
-        UniqueConstraint("exchange_account_id", "deployment_environment", "backend_digest",
-                         name="uq_deployment_approvals_digest"),
-    )
-
-
 class TradingControlRequestRow(Base):
-    """An operator's approve/resume request, applied by the account daemon.
+    """An operator's resume or kill request, applied by the account daemon.
 
     The web API inserts only the request columns; the daemon writes one outcome
     (``applied`` / ``rejected`` / ``failed``) and nothing rewrites it
@@ -228,7 +169,7 @@ class TradingControlRequestRow(Base):
     __tablename__ = "trading_control_requests"
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
         "request_id", "exchange_account_id", "deployment_environment", "action",
-        "backend_digest", "reason", "requested_by", "created_at_ms",
+        "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = (
         "state", "processed_at_ms", "outcome_reason", "trading_state_id",
@@ -243,8 +184,6 @@ class TradingControlRequestRow(Base):
     )
     deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
-    # The build an approve/resume was made for; a stop (pause, kill) names none.
-    backend_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     requested_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -259,17 +198,7 @@ class TradingControlRequestRow(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("action IN ('approve', 'resume', 'pause', 'kill')",
-                        name="ck_trading_control_requests_action"),
-        CheckConstraint(
-            "(action IN ('approve', 'resume') AND backend_digest IS NOT NULL "
-            f"AND backend_digest ~ {_DIGEST_RE}) OR "
-            "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
-            name="ck_trading_control_requests_digest").ddl_if(dialect="postgresql"),
-        CheckConstraint(
-            "(action IN ('approve', 'resume') AND backend_digest IS NOT NULL) OR "
-            "(action IN ('pause', 'kill') AND backend_digest IS NULL)",
-            name="ck_trading_control_requests_digest_portable").ddl_if(dialect="sqlite"),
+        CheckConstraint("action IN ('resume', 'kill')", name="ck_trading_control_requests_action"),
         CheckConstraint(
             "length(trim(reason)) BETWEEN 1 AND 500 AND length(trim(requested_by)) > 0 "
             "AND created_at_ms >= 0",
@@ -284,7 +213,7 @@ class TradingControlRequestRow(Base):
             name="ck_trading_control_requests_outcome",
         ),
         # One waiting request per scope, plus one kill beside it: a pending
-        # approval never makes a kill wait for a 409.
+        # resume never makes a kill wait for a 409.
         Index("uq_trading_control_requests_pending", "exchange_account_id",
               "deployment_environment", unique=True,
               postgresql_where=text("state = 'requested' AND action <> 'kill'"),

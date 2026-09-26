@@ -361,6 +361,32 @@ def match_attempt_to_snapshot(
     )
 
 
+def amount_seen_since_start(attempt: UnknownSubmitAttempt, payload: Mapping[str, Any]) -> bool:
+    """Whether any stored offer of the attempt's symbol carries its exact amount
+    and was created since it started (or its creation time or amount is unreadable).
+
+    With D3a fingerprints the amount is the submit's identity, so such an offer
+    that still fails another identity field is a near miss, not proof of
+    absence: an automatic "not sent" must not be derived while one exists.
+    Operator adjudication and the projector keep ``zero_match`` as their rule;
+    this is the extra condition evidence alone has to meet.
+    """
+    for key in ("offers", "offer_history"):
+        values = payload.get(key)
+        for value in values if isinstance(values, list) else ():
+            if not isinstance(value, Mapping) or value.get("symbol") != attempt.symbol:
+                continue
+            created = value.get("mts_created")
+            try:
+                original = Decimal(str(value.get("amount_original")))
+            except ArithmeticError:
+                return True  # unreadable same-symbol amount: cannot rule it out
+            if original == attempt.amount and (
+                    not isinstance(created, int) or created >= attempt.started_at_ms):
+                return True
+    return False
+
+
 def deterministic_resolution_evidence(
     *,
     reconcile_event_seq: int,
@@ -383,6 +409,7 @@ def deterministic_resolution_evidence(
 __all__ = [
     "MatchResult",
     "UnknownSubmitAttempt",
+    "amount_seen_since_start",
     "attempt_from_row",
     "deterministic_resolution_evidence",
     "match_attempt_to_snapshot",

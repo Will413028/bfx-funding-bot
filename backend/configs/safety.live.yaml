@@ -1,27 +1,23 @@
-# CapitalPolicyGuard supplies live capital limits. These remaining guards do
-# not replace durable halt, UNKNOWN, writer, book, audit or release authority.
+# CapitalPolicyGuard and the offer envelope supply live capital limits. These
+# remaining guards do not replace durable halt, UNKNOWN, writer, book or audit authority.
 hard_guards:
   manual_kill: {enabled: true}
   auth_health: {enabled: true}
   heartbeat: {enabled: true, sub_task_stale_threshold_seconds: 300}
   allocation_cap: {enabled: false}
   buying_power: {enabled: false}
-calibrated_guards:
-  realized_loss_24h: {enabled: true, threshold_pct: 5.0}
-  drawdown_from_peak: {enabled: true, threshold_pct: 10.0}
-  divergence_rate: {enabled: false, threshold_pct: null, window_minutes: null}
 
-# Always-on pre-trade limits (T9, ADR 2026-09-25 D5). A live writer refuses to
-# start without this section; a symbol missing here cannot be offered at all.
-# The per-offer AMOUNT ceiling is not here: it is CapitalPolicy.max_offer_amount,
-# applied with scripts/amend_capital_policy.py (dry run -> digest -> apply).
+# NAV-drop alerts (level 4): a Telegram alert, never a stop. Funding NAV only
+# falls through withdrawals, transfers or platform losses. null disables one.
+nav_alerts:
+  realized_loss_24h_pct: 5.0
+  drawdown_pct: 10.0
+
+# Venue write throttle (a live writer refuses to start without it). Per-symbol
+# offer terms (amount ceiling, periods, open offers, rate floor) are the applied
+# CapitalPolicy envelope, set with scripts/amend_capital_policy.py
+# (dry run -> digest -> apply).
 pre_trade_limits:
-  symbols:
-    fUST:
-      min_period_days: 2       # the venue minimum
-      max_period_days: 2       # every live cell offers 2-day loans today; a longer-dated strategy must raise this (material)
-      max_open_offers: 6       # 2 cells x up to 3 (reprice overlap); runaway posting stops at 6
-      rate_floor_ratio: "0.5"  # offer >= 50% of the median live bid (exact period, else whole book)
   command_rate:                # submits + cancels through the command gate
     capacity: 12               # burst: a boot or reprice tick needs <= ~5
     refill_per_second: 0.1     # 6/min sustained vs a normal peak of ~3.3/min (5 per ~90 s tick)
