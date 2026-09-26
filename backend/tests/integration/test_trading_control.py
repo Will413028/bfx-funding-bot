@@ -136,10 +136,9 @@ async def test_kill_writes_halted_then_runs_the_venue_cancel_all(migrated_db, se
     request_id = await request(factory, account, "kill")
     assert await w.process(request_id) == "applied"
     current = await state_of(factory, account)
-    if setup == "HALTED":
-        assert (current.state, current.cause) == ("HALTED", "auto")  # a stop stays the stop it was
-    else:
-        assert (current.state, current.cause, current.actor) == ("HALTED", "operator", "operator")
+    # A kill over an automatic halt makes it the operator's, which never resumes
+    # automatically (ADR 2026-09-26 auto-halt-resumes-when-condition-clears).
+    assert (current.state, current.cause, current.actor) == ("HALTED", "operator", "operator")
     # Asking again is how an incomplete cancel-all is retried, as /admin/halt.
     assert kill.calls == [("operator", "operator", "kill: kill for test", "retry", "HALTED")]
 

@@ -54,9 +54,13 @@ def capital_db(migrated_db):
 class Recorder:
     def __init__(self) -> None:
         self.trips: list[tuple[str, str]] = []
+        self.clean: list[int | None] = []
 
     def trip(self, trigger: str, detail: str) -> None:
         self.trips.append((trigger, detail))
+
+    def observe_clean(self, event_seq: int | None) -> None:
+        self.clean.append(event_seq)
 
     @property
     def triggers(self) -> set[str]:
@@ -160,6 +164,8 @@ async def test_lent_our_offers_cannot_explain_trips(capital_db):
     await recovery(factory, account, auth, recorder).run()
     assert recorder.triggers == {"venue_lent_above_ledger"}
     assert "unexplained=392.4" in recorder.trips[0][1]
+    # An accepted snapshot that tripped is not evidence a halt's condition cleared.
+    assert recorder.clean == []
 
 
 @pytest.mark.asyncio
@@ -197,6 +203,7 @@ async def test_replay_2026_09_24_loan_end_does_not_trip(capital_db):
     assert result.realized_drift_usdt == D("150.77638588")
     assert result.reserved_drift_usdt == 0
     assert recorder.trips == []
+    assert len(recorder.clean) == 1  # clean evidence for an automatic resume
 
 
 @pytest.mark.asyncio
@@ -211,6 +218,7 @@ async def test_replay_migration_catch_up_as_a_first_observation_does_not_trip(ca
     result = await recovery(factory, account, auth, recorder).run()
     assert result.realized_drift_usdt == D("392.4")
     assert recorder.trips == []
+    assert len(recorder.clean) == 1  # clean evidence for an automatic resume
 
 
 @pytest.mark.asyncio
@@ -225,6 +233,7 @@ async def test_fill_caught_by_reconcile_instead_of_ws_does_not_trip(capital_db):
     result = await recovery(factory, account, auth, recorder).run()
     assert result.reserved_drift_usdt == D(AMOUNT) and result.realized_drift_usdt == D(AMOUNT)
     assert recorder.trips == []
+    assert len(recorder.clean) == 1  # clean evidence for an automatic resume
 
 
 # ------------------------------------------------------- the gate lock

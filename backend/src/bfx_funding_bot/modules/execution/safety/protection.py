@@ -39,8 +39,15 @@ That split is what keeps a trip raised while the command gate's account lock is
 held or inside a recovery transaction from deadlocking against the write,
 which takes the same account lock in its own transaction.
 
-An automatic HALTED is never lifted automatically: only an operator's resume
-ends it.
+An automatic HALTED ends by itself once its condition has cleared (ADR
+2026-09-26 auto-halt-resumes-when-condition-clears): at least
+``AUTO_RESUME_MIN_HALT_MS`` after it, and after ``AUTO_RESUME_CLEAN_SNAPSHOTS``
+consecutive accepted snapshots in which nothing tripped -- any trip starts the
+count again. Condition-based, not time-based: a conflict no retry resolves keeps
+tripping and so keeps the halt; a timing race or a throttle burst clears. The
+database allows at most ``AUTO_RESUME_MAX_PER_WINDOW`` automatic resumes per
+rolling window; past that the halt stays for an operator and says so. An
+operator's halt is never lifted automatically.
 """
 from __future__ import annotations
 
@@ -56,8 +63,13 @@ from typing import Protocol
 from bfx_funding_bot.modules.execution.event_store.store import SymbolLedgerDelta
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.safety.trading_state import (
+    ACTIVE,
+    AUTO_RESUME_MIN_HALT_MS,
     CAUSE_AUTO,
     HALTED,
+    AutoResumeLimitReached,
+    IllegalTradingTransition,
+    TradingState,
     TransitionResult,
 )
 from bfx_funding_bot.modules.observability import alerts
@@ -105,6 +117,10 @@ CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
     ), IDENTITY_CONFLICT),
 }
 
+# Consecutive accepted snapshots without a trip that show a halt's condition cleared.
+AUTO_RESUME_CLEAN_SNAPSHOTS = 3
+AUTO_RESUME_ACTOR = "auto-resume"
+
 # Same tolerance as the reconcile divergence report.
 LEDGER_EPSILON = Decimal("0.01")
 _DETAIL_LIMIT = 400
@@ -114,7 +130,13 @@ class ProtectionPort(Protocol):
     def trip(self, trigger: str, detail: str) -> None: ...
 
 
+class ReconcileProtectionPort(ProtectionPort, Protocol):
+    def observe_clean(self, event_seq: int | None) -> None: ...
+
+
 class _TradingState(Protocol):
+    async def current(self) -> TradingState | None: ...
+
     async def transition(self, state: str, *, cause: str, actor: str, reason: str,
                          now_ms: int | None = None) -> TransitionResult: ...
 
@@ -126,17 +148,33 @@ class Trip:
     at_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class CleanObservation:
+    event_seq: int | None
+    at_ms: int
+
+
 class AutomaticProtection:
-    """Collects trips and turns them into a durable HALTED/auto, outside every lock."""
+    """Collects trips and turns them into a durable HALTED/auto, outside every lock.
+
+    Also the one place that lifts a HALTED/auto again, from the same supervised
+    task, so a resume and a halt are never written concurrently by it.
+    """
 
     def __init__(self, *, clock: Callable[[], int] | None = None, retry_s: float = 5.0) -> None:
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._retry_s = retry_s
-        self._queue: asyncio.Queue[Trip] = asyncio.Queue()
+        # One inbox, handled in arrival order: a trip and a clean observation are
+        # never reordered against each other.
+        self._queue: asyncio.Queue[Trip | CleanObservation] = asyncio.Queue()
         self._pending: Trip | None = None
         self._trading: _TradingState | None = None
         # Trips that found HALTED already in force: logged and counted.
         self.persisting = 0
+        # Accepted snapshots in which nothing tripped, newest last; a trip clears it.
+        self._clean: list[CleanObservation] = []
+        self._limit_alerted: set[int] = set()
+        self.auto_resumes = 0
 
     def bind(self, trading_state: _TradingState) -> None:
         self._trading = trading_state
@@ -148,11 +186,19 @@ class AutomaticProtection:
             # reason to keep trading.
             log.error("automatic_protection_unknown_trigger trigger=%s", trigger)
         tripped = Trip(trigger=trigger, detail=detail[:_DETAIL_LIMIT], at_ms=self._clock())
+        self._clean.clear()
         if self._pending is None:
             self._pending = tripped
         self._queue.put_nowait(tripped)
         log.critical("automatic_protection_tripped trigger=%s detail=%s", trigger, tripped.detail)
         alerts.emit(alerts.PROTECTION_TRIPPED, trigger=trigger, detail=tripped.detail)  # T8
+
+    def observe_clean(self, event_seq: int | None) -> None:
+        """An accepted snapshot in which nothing tripped. Never blocks, never raises."""
+        observation = CleanObservation(event_seq=event_seq, at_ms=self._clock())
+        self._clean.append(observation)
+        del self._clean[:-AUTO_RESUME_CLEAN_SNAPSHOTS]
+        self._queue.put_nowait(observation)
 
     def pending_reason(self) -> str | None:
         """Why new offers are stopped before the HALTED is committed, if they are."""
@@ -160,21 +206,27 @@ class AutomaticProtection:
         return None if pending is None else f"{pending.trigger}: {pending.detail}"
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Write HALTED for queued trips until ``stop``; supervised by the daemon."""
+        """Write HALTED for queued trips, and lift a cleared HALTED/auto, until
+        ``stop``; supervised by the daemon."""
         while not stop.is_set():
             first = await self._next(stop)
             if first is None:
                 return
-            batch = [first, *self._drain()]
-            await self._engage(batch, stop)
+            items = [first, *self._drain()]
+            batch = [item for item in items if isinstance(item, Trip)]
+            if batch:
+                # A trip in the batch outranks any clean observation queued with it.
+                await self._engage(batch, stop)
+            else:
+                await self.resume_if_cleared()
 
     async def run_pending(self) -> None:
         """Engage everything queued so far, once. For boot paths and tests."""
-        batch = self._drain()
+        batch = [item for item in self._drain() if isinstance(item, Trip)]
         if batch:
             await self._engage(batch, None)
 
-    async def _next(self, stop: asyncio.Event) -> Trip | None:
+    async def _next(self, stop: asyncio.Event) -> Trip | CleanObservation | None:
         getter = asyncio.create_task(self._queue.get())
         waiter = asyncio.create_task(stop.wait())
         try:
@@ -187,8 +239,59 @@ class AutomaticProtection:
                         await task
         return getter.result() if getter in done else None
 
-    def _drain(self) -> list[Trip]:
-        drained: list[Trip] = []
+    async def resume_if_cleared(self) -> bool:
+        """Lift the current HALTED/auto if its condition has cleared; True if lifted.
+
+        Cleared means: nothing pending or queued, the halt is at least
+        ``AUTO_RESUME_MIN_HALT_MS`` old, and the last ``AUTO_RESUME_CLEAN_SNAPSHOTS``
+        clean observations all came after it (a trip in between would have
+        emptied them). The database refuses a resume past its rolling limit;
+        that is alerted once per halt and the halt stays for an operator.
+        """
+        if self._trading is None or self._pending is not None:
+            return False
+        try:
+            current = await self._trading.current()
+        except Exception as exc:
+            log.warning("auto_resume_state_unreadable error=%r", exc)
+            return False
+        if current is None or current.state != HALTED or current.cause != CAUSE_AUTO:
+            return False
+        clean = [obs for obs in self._clean if obs.at_ms > current.created_at_ms]
+        now_ms = self._clock()
+        if (len(clean) < AUTO_RESUME_CLEAN_SNAPSHOTS
+                or now_ms - current.created_at_ms < AUTO_RESUME_MIN_HALT_MS):
+            return False
+        seqs = ",".join(str(obs.event_seq) for obs in clean)
+        minutes = (now_ms - current.created_at_ms) // 60_000
+        reason = (f"condition cleared after {minutes} min: {len(clean)} clean accepted snapshots "
+                  f"(event_seq {seqs}); halt #{current.id} was {current.reason}")[:1000]
+        try:
+            result = await self._trading.transition(
+                ACTIVE, cause=CAUSE_AUTO, actor=AUTO_RESUME_ACTOR, reason=reason, now_ms=now_ms)
+        except AutoResumeLimitReached as exc:
+            log.warning("auto_resume_refused state_id=%s error=%s", current.id, exc)
+            if current.id not in self._limit_alerted:
+                self._limit_alerted.add(current.id)
+                alerts.emit(alerts.AUTO_RESUME_LIMIT_REACHED, state_id=current.id,
+                            reason=current.reason[:_DETAIL_LIMIT])
+            return False
+        except IllegalTradingTransition as exc:
+            log.warning("auto_resume_refused state_id=%s error=%s", current.id, exc)
+            return False
+        except Exception as exc:
+            log.warning("auto_resume_failed state_id=%s error=%r", current.id, exc)
+            return False
+        if not result.changed:
+            return False
+        self._clean.clear()
+        self.auto_resumes += 1
+        log.warning("auto_resumed state_id=%s halt_id=%s %s", result.state.id, current.id, reason)
+        return True
+
+
+    def _drain(self) -> list[Trip | CleanObservation]:
+        drained: list[Trip | CleanObservation] = []
         while True:
             try:
                 drained.append(self._queue.get_nowait())
@@ -370,6 +473,8 @@ class WriterLockWatch:
 
 
 __all__ = [
+    "AUTO_RESUME_ACTOR",
+    "AUTO_RESUME_CLEAN_SNAPSHOTS",
     "CAPITAL_BLOCK_TRIGGERS",
     "COMMAND_RATE_EXCEEDED",
     "FOREIGN_LENDING",
@@ -381,10 +486,12 @@ __all__ = [
     "UNCLASSIFIABLE_COMMITMENT",
     "VENUE_LENT_ABOVE_LEDGER",
     "AutomaticProtection",
+    "CleanObservation",
     "ConservationVerdict",
     "LedgerConservation",
     "NavDropMonitor",
     "ProtectionPort",
+    "ReconcileProtectionPort",
     "Trip",
     "WriterLockLostError",
     "WriterLockWatch",

@@ -103,7 +103,7 @@ def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
         # The new request table is empty and takes resume/kill only, naming no build.
         assert conn.scalar(text("SELECT count(*) FROM public.trading_control_requests")) == 0
     # A legacy REDUCING still counts as stopped, and the archive is frozen.
-    with engine.begin() as conn, pytest.raises(Exception, match="HALTED -> ACTIVE by auto"):
+    with engine.begin() as conn, pytest.raises(Exception, match=r"HALTED(/operator)? -> ACTIVE by auto"):
         conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
             cause, actor, reason, created_at_ms) VALUES (:a, 'prod', 'ACTIVE', 'auto', 'x', 'x', 9)"""),
             {"a": _A})

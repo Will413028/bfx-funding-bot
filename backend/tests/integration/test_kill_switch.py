@@ -321,7 +321,10 @@ async def test_an_automatic_kill_skips_the_venue_when_already_halted_but_an_oper
     assert not persisting.state_changed and persisting.cancel_all == ()
     assert len(venue.calls) == 3 and len(await audit(factory)) == 6
     retried = await switch.engage(cause="operator", actor="will", reason="retry the venue part")
-    assert not retried.state_changed and len(venue.calls) == 6 and len(await audit(factory)) == 12
+    # The operator's halt supersedes the automatic one (ADR 2026-09-26): it is
+    # written, so no automatic resume can lift it, and the venue part runs.
+    assert retried.state_changed and retried.state.cause == "operator"
+    assert len(venue.calls) == 6 and len(await audit(factory)) == 12
 
 
 # -------------------------- fixtures for the planner's managed-offer pull (D3/D4)

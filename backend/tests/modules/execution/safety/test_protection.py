@@ -20,6 +20,7 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     NAV_DROP,
     OFFER_AMOUNT_MISMATCH,
     TRIGGERS,
+    VENUE_LENT_ABOVE_LEDGER,
     AutomaticProtection,
     LedgerConservation,
     NavDropMonitor,
@@ -300,3 +301,162 @@ def test_identity_conflicts_are_protections(reason: str) -> None:
 def test_transient_observation_states_are_not_protections(reason: str) -> None:
     from bfx_funding_bot.modules.execution.safety.protection import CAPITAL_BLOCK_TRIGGERS
     assert reason not in CAPITAL_BLOCK_TRIGGERS
+
+
+# ------------------------------------------- automatic resume (ADR 2026-09-26)
+
+MIN_HALT = 15 * 60 * 1000
+
+
+class Clock:
+    def __init__(self, now: int = 0) -> None:
+        self.now = now
+
+    def __call__(self) -> int:
+        return self.now
+
+
+class RuleState:
+    """A trading state that applies the real transition rules, in memory."""
+
+    def __init__(self, clock: Clock) -> None:
+        from bfx_funding_bot.modules.execution.safety.trading_state import (
+            restates,
+            validate_transition,
+        )
+        self._restates, self._validate = restates, validate_transition
+        self._clock = clock
+        self.rows: list[TradingState] = []
+
+    async def current(self) -> TradingState | None:
+        return self.rows[-1] if self.rows else None
+
+    async def transition(self, state: str, *, cause: str, actor: str, reason: str,
+                         now_ms: int | None = None) -> TransitionResult:
+        now = self._clock() if now_ms is None else now_ms
+        current = self.rows[-1] if self.rows else None
+        if self._restates(current, state=state, cause=cause):
+            assert current is not None
+            return TransitionResult(state=current, changed=False, previous=current)
+        resumes = sum(1 for row in self.rows if row.state == "ACTIVE" and row.cause == "auto"
+                      and row.created_at_ms > now - 24 * 60 * 60 * 1000)
+        self._validate(current, state=state, cause=cause, actor=actor, reason=reason,
+                       now_ms=now, auto_resumes_in_window=resumes)
+        row = TradingState(id=len(self.rows) + 1, state=state, cause=cause, actor=actor,
+                           reason=reason, created_at_ms=now)
+        self.rows.append(row)
+        return TransitionResult(state=row, changed=True, previous=current)
+
+
+async def _halted_auto(clock: Clock) -> tuple[AutomaticProtection, RuleState]:
+    state = RuleState(clock)
+    await state.transition("ACTIVE", cause="operator", actor="will", reason="start")
+    protection = AutomaticProtection(clock=clock)
+    protection.bind(state)
+    protection.trip(VENUE_LENT_ABOVE_LEDGER, "unexplained=1")
+    await protection.run_pending()
+    assert (await state.current()).state == "HALTED"
+    return protection, state
+
+
+def _clean(protection: AutomaticProtection, clock: Clock, n: int, *, step: int = 60_000) -> None:
+    for seq in range(n):
+        clock.now += step
+        protection.observe_clean(100 + seq)
+
+
+async def test_a_cleared_automatic_halt_resumes_after_three_clean_snapshots_and_15_min() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    _clean(protection, clock, 3)
+    assert not await protection.resume_if_cleared()  # 3 clean, but only 3 minutes
+    clock.now = state.rows[-1].created_at_ms + MIN_HALT - 1
+    assert not await protection.resume_if_cleared()
+    clock.now += 1
+    assert await protection.resume_if_cleared()
+    resumed = await state.current()
+    assert (resumed.state, resumed.cause, resumed.actor) == ("ACTIVE", "auto", "auto-resume")
+    assert "event_seq 100,101,102" in resumed.reason and "venue_lent_above_ledger" in resumed.reason
+
+
+async def test_fewer_than_three_clean_snapshots_keep_the_halt() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    _clean(protection, clock, 2)
+    clock.now += MIN_HALT
+    assert not await protection.resume_if_cleared()
+    assert (await state.current()).state == "HALTED"
+
+
+async def test_any_trip_restarts_the_clean_count() -> None:
+    clock = Clock(1_000)
+    protection, _state = await _halted_auto(clock)
+    _clean(protection, clock, 2)
+    protection.trip(COMMAND_RATE_EXCEEDED, "still throttling")  # condition persists
+    await protection.run_pending()
+    _clean(protection, clock, 2)
+    clock.now += MIN_HALT
+    assert not await protection.resume_if_cleared()
+    _clean(protection, clock, 1)
+    assert await protection.resume_if_cleared()
+
+
+async def test_clean_snapshots_from_before_the_halt_do_not_count() -> None:
+    clock = Clock(1_000)
+    state = RuleState(clock)
+    await state.transition("ACTIVE", cause="operator", actor="will", reason="start")
+    protection = AutomaticProtection(clock=clock)
+    protection.bind(state)
+    _clean(protection, clock, 3)
+    # A halt the process did not trip (written before a restart, say): nothing clears it.
+    clock.now += 1
+    await state.transition("HALTED", cause="auto", actor="auto:x", reason="x")
+    clock.now += MIN_HALT
+    assert not await protection.resume_if_cleared()
+
+
+async def test_an_operator_halt_is_never_resumed_automatically() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    clock.now += 1
+    await state.transition("HALTED", cause="operator", actor="will", reason="kill")
+    _clean(protection, clock, 3)
+    clock.now += MIN_HALT
+    assert not await protection.resume_if_cleared()
+    assert (await state.current()).cause == "operator"
+
+
+async def test_the_third_halt_in_a_day_stays_and_alerts_once(sent) -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    for _ in range(2):
+        _clean(protection, clock, 3)
+        clock.now += MIN_HALT
+        assert await protection.resume_if_cleared()
+        protection.trip(VENUE_LENT_ABOVE_LEDGER, "again")
+        await protection.run_pending()
+    _clean(protection, clock, 3)
+    clock.now += MIN_HALT
+    assert not await protection.resume_if_cleared()
+    _clean(protection, clock, 1)
+    assert not await protection.resume_if_cleared()
+    assert (await state.current()).state == "HALTED"
+    limits = [fields for event, fields in sent if event == "auto_resume_limit_reached"]
+    assert len(limits) == 1 and limits[0]["state_id"] == state.rows[-1].id
+    assert protection.auto_resumes == 2
+
+
+async def test_the_supervised_task_resumes_on_a_clean_observation() -> None:
+    clock = Clock(1_000)
+    protection, state = await _halted_auto(clock)
+    stop = asyncio.Event()
+    task = asyncio.create_task(protection.run(stop))
+    clock.now += MIN_HALT
+    _clean(protection, clock, 3)
+    for _ in range(200):
+        if (await state.current()).state == "ACTIVE":
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert (await state.current()).state == "ACTIVE"
