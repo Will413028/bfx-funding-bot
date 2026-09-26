@@ -117,11 +117,11 @@ class OfferEnvelopeGuard:
     async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
         if decision.decision_outcome != DecisionOutcome.POST:
             return GuardResult(True, self.name)
-        amount = _decimal(decision.offer_amount_usdt)
-        if amount is None or amount <= 0:
+        amount = decision.offer_amount_usdt
+        if amount is None or not amount.is_finite() or amount <= 0:
             return self._block("offer_amount_invalid")
-        rate = _decimal(decision.offer_rate)
-        if rate is None or rate <= 0:
+        rate = decision.offer_rate
+        if rate is None or not rate.is_finite() or rate <= 0:
             return self._block("offer_rate_invalid")
         try:
             if ctx.command_session is not None:

@@ -216,7 +216,7 @@ async def test_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -> Non
     priced = PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001")).price(
         candidate=candidate, snapshot=snapshot)
     assert priced.branch is PriceBranch.TAKER and priced.rate == Decimal("0.00001")
-    result = await envelope(candidate.model_copy(update={"offer_rate": float(priced.rate)}),
+    result = await envelope(candidate.model_copy(update={"offer_rate": priced.rate}),
                             market=snapshot)
     assert not result.allowed and "floor 0.00015" in result.reason
 

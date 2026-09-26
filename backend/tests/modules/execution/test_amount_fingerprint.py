@@ -81,3 +81,15 @@ def test_choice_respects_minimum_and_maximum_and_fails_closed():
     # A plan above the policy ceiling cannot be fingerprinted into it by accident.
     assert choose_fingerprinted_amount(D("500"), seed_key="k", in_use=frozenset(),
                                        minimum=D("150"), maximum=D("400")) is None
+
+
+def test_choice_never_skips_a_fingerprint_for_float_reasons():
+    """The amount travels as a Decimal end-to-end, so a fingerprint whose amount
+    a float could not carry (17 significant digits) is as usable as any other."""
+    amount = choose_fingerprinted_amount(
+        D("900000001"), seed_key="k", in_use=frozenset(range(1, FINGERPRINT_SPACE)),
+        minimum=D("150"), maximum=None,
+    )
+    assert amount == D("900000000.99999999")
+    assert fingerprint_of(amount) == FINGERPRINT_SPACE
+    assert D(str(float(amount))) != amount  # what the removed float guard skipped
