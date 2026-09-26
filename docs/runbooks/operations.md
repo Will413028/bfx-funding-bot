@@ -39,7 +39,7 @@ webapi 只把請求排入 `capital_policy_requests`（回 202），由 bot 的 `
   依送出順序套用，後送的為準。kill 另有自己的佇列、不會排在它們後面；kill 套用時會把等待中的
   **啟用**標成 `superseded_by_kill`（等待中的停用照常套用）。
 - bot 的 runtime role 只能以這種方式改 `enabled`：DB trigger 拒絕 runtime role 寫入除了
-  `enabled` 以外有任何不同的 revision，或把 head 移到下一個 revision 以外的地方。
+  `enabled` 以外有任何不同、或不是在套用一筆仍在等待且 operator 仍有權限的同方向請求的 revision，也拒絕把 head 移到下一個 revision 以外的地方。
 
 ### 包絡與其他欄位：`amend_capital_policy`
 

@@ -65,10 +65,20 @@ def _has(conn, sql: str, **params) -> bool:
 
 
 def _request_sql(request_id: str = "00000000-0000-0000-0000-0000000000e1", action: str = "disable",
-                 extra: tuple[str, str] = ("", "")) -> str:
+                 extra: tuple[str, str] = ("", ""), by: str = "operator") -> str:
     return (f"INSERT INTO capital_policy_requests (request_id, exchange_account_id, "
             f"deployment_environment, symbol, action, reason, requested_by, created_at_ms{extra[0]}) "
-            f"VALUES ('{request_id}', '{_A}', 'ci', 'fUST', '{action}', 'x', 'operator', 1{extra[1]})")
+            f"VALUES ('{request_id}', '{_A}', 'ci', 'fUST', '{action}', 'x', '{by}', 1{extra[1]})")
+
+
+def _operator(engine) -> None:
+    """``operator``: an enrolled admin owning the account (public.operator_authorized)."""
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO exchange_account_memberships(exchange_account_id,user_id,role) "
+                          "VALUES (:a,'operator','owner')"), {"a": _A})
+        conn.exec_driver_sql('''INSERT INTO auth."user" (id,name,email,"emailVerified","createdAt",
+            "updatedAt",role,banned,"twoFactorEnabled") VALUES ('operator','op','op@test.invalid',false,
+            now(),now(),'admin',false,true)''')
 
 
 async def _seed(url: str) -> None:
@@ -166,6 +176,7 @@ def test_the_web_api_queues_only_request_columns_and_the_rules_hold(migrated):
 def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
     url, engine = migrated
     asyncio.run(_seed(url))
+    _operator(engine)
 
     async def scenario() -> tuple[str, str | None, UUID | None]:
         web_engine, web = _async(url, "bfx_webapi")
@@ -205,28 +216,40 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
 def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
     url, engine = migrated
     asyncio.run(_seed(url))
-    with engine.connect() as conn:
+    _operator(engine)
+    waiting = "00000000-0000-0000-0000-0000000000e1"
+    with engine.begin() as conn:
+        conn.exec_driver_sql(_request_sql(waiting, "disable"))
+        conn.exec_driver_sql(_request_sql("00000000-0000-0000-0000-0000000000e2", "enable", by="nobody"))
         first = conn.execute(text("SELECT id, policy::text, digest FROM capital_policy_revisions")).one()
 
-    def revision(policy_sql: str, *, number: int = 2, source: str = '{"request_id": "r"}') -> str:
+    def revision(policy_sql: str, *, number: int = 2, request: str | None = waiting) -> str:
+        source = "{}" if request is None else f'{{"request_id": "{request}"}}'
         return (f"INSERT INTO capital_policy_revisions (id, exchange_account_id, deployment_environment, "
                 f"symbol, revision, schema_version, policy, digest, source) VALUES (gen_random_uuid(), "
                 f"'{_A}', 'ci', 'fUST', {number}, 3, {policy_sql}, 'd', '{source}'::jsonb)")
 
     base = f"'{first.policy}'::jsonb"
-    for sql in (
-            revision(f"jsonb_set({base}, '{{max_offer_amount}}', '\"9999\"')"),   # a wider term
-            revision(f"{base} - 'envelope'"),                                    # drop the envelope
-            revision(f"jsonb_set({base}, '{{enabled}}', '\"yes\"')"),             # not a boolean
-            revision(f"jsonb_set({base}, '{{enabled}}', 'false')", number=5),    # skips a revision
-            revision(f"jsonb_set({base}, '{{enabled}}', 'false')", source="{}"),  # names no request
+    disabled = f"jsonb_set({base}, '{{enabled}}', 'false')"
+    for sql, message in (
+            (revision(f"jsonb_set({base}, '{{max_offer_amount}}', '\"9999\"')"), "may only toggle"),
+            (revision(f"{base} - 'envelope'"), "may only toggle"),
+            (revision(f"jsonb_set({base}, '{{enabled}}', '\"yes\"')"), "may only toggle"),
+            (revision(disabled, number=5), "may only toggle"),          # skips a revision
+            (revision(disabled, request=None), "may only toggle"),      # names no request
+            # A forged request id, a request for the opposite change, or one by
+            # someone who is not the operator: the bot cannot widen trading alone.
+            (revision(disabled, request=str(uuid4())), "must apply a waiting request"),
+            (revision(base), "must apply a waiting request"),
+            (revision(base, request="00000000-0000-0000-0000-0000000000e2"),
+             "must apply a waiting request"),
     ):
-        with engine.begin() as conn, pytest.raises(Exception, match="may only toggle enabled"):
+        with engine.begin() as conn, pytest.raises(Exception, match=message):
             conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
             conn.exec_driver_sql(sql)
     with engine.begin() as conn:
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        conn.exec_driver_sql(revision(f"jsonb_set({base}, '{{enabled}}', 'false')"))
+        conn.exec_driver_sql(revision(disabled))
         new_id = conn.scalar(text("SELECT id FROM capital_policy_revisions WHERE revision = 2"))
         for update, ok in ((f"revision_id = '{first.id}', revision = 1", False),     # rewind
                            (f"revision_id = '{first.id}', revision = 2", False),     # wrong row
@@ -239,7 +262,7 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
     # The owner (the amendment script) is not narrowed.
     with engine.begin() as conn:
         conn.exec_driver_sql(revision(f"jsonb_set({base}, '{{max_offer_amount}}', '\"300\"')",
-                                      number=3, source="{}"))
+                                      number=3, request=None))
 
 
 def test_downgrade_round_trip_and_refusal(migrated):
