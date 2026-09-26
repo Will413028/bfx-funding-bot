@@ -33,6 +33,8 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import uuid4
 
+from bfx_funding_bot.modules.execution.capital_policy import CapitalPolicy
+from bfx_funding_bot.modules.execution.capital_repository import envelope_payload
 from bfx_funding_bot.modules.execution.capital_runtime import CapitalRuntime
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
@@ -88,6 +90,14 @@ class _KillSwitchProtocol(Protocol):
 
 def _decimal_text(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
+
+
+def _policy_status(policy: CapitalPolicy) -> dict[str, Any]:
+    """JSON-safe policy; the nested envelope carries Decimals too."""
+    status: dict[str, Any] = {key: str(value) if isinstance(value, Decimal) else value
+                              for key, value in asdict(policy).items()}
+    status["envelope"] = None if policy.envelope is None else envelope_payload(policy.envelope)
+    return status
 
 
 def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
@@ -316,8 +326,7 @@ class TradingStatusService:
                     return {"capital_available": False,
                         "reason": "policy_disabled" if not applied.policy.enabled else "no_configured_cells",
                         "policy_revision": applied.revision, "policy_digest": applied.digest,
-                        "policy": {key: str(value) if isinstance(value, Decimal) else value
-                                   for key, value in asdict(applied.policy).items()}}
+                        "policy": _policy_status(applied.policy)}
                 views = {cell.cell_id: await self._capital.read(
                     symbol=symbol, cell_id=cell.cell_id, session=session,
                 ) for cell in self._cells if cell.symbol == symbol}
@@ -327,8 +336,7 @@ class TradingStatusService:
                 "policy_revision": first.applied.revision,
                 "policy_digest": first.applied.digest,
                 "snapshot_seq": first.snapshot_seq,
-                "policy": {key: str(value) if isinstance(value, Decimal) else value
-                           for key, value in asdict(first.applied.policy).items()},
+                "policy": _policy_status(first.applied.policy),
                 "available_balance": str(first.snapshot.available_amount),
                 "unreflected_commitments": str(first.snapshot.unreflected_commitments),
                 "total_capital": str(first.snapshot.total_capital),
