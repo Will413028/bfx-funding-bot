@@ -361,7 +361,26 @@
     "error": {
       "request_pending": "Another request is still waiting for the daemon.",
       "forbidden": "Only the operator can do this.",
-      "generic": "The request was not accepted: {code}"
+      "generic": "The request was not accepted: {code}",
+      "policy_unavailable": "This currency has no applied policy."
+    },
+    "currencies": {
+      "title": "Currencies",
+      "hint": "Disabling a currency stops new offers and cancels the bot's own open offers for it; offers placed by hand and loans already taken are untouched. It does not halt the account.",
+      "none": "No currency has an applied policy.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "unreadable": "Policy unreadable",
+      "unreadableBody": "The daemon refuses every offer for this currency until its policy can be read ({code}).",
+      "envelopeUnset": "Offer limits not set: every offer for this currency is refused until they are (amend_capital_policy).",
+      "envelope": "Up to {max} per offer · {minDays}–{maxDays} days · at most {offers} open offers · rate floor: the higher of {apr} a year and {ratio} × the median bid",
+      "reason": "Reason for the {symbol} change",
+      "enable": "Enable {symbol}",
+      "disable": "Disable {symbol}",
+      "action": {
+        "enable": "enable",
+        "disable": "disable"
+      }
     }
   }
 }

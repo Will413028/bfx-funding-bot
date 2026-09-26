@@ -361,7 +361,26 @@
     "error": {
       "request_pending": "還有其他請求在等 daemon 處理。",
       "forbidden": "只有 operator 能執行。",
-      "generic": "請求未被接受：{code}"
+      "generic": "請求未被接受：{code}",
+      "policy_unavailable": "這個幣別沒有已套用的 policy。"
+    },
+    "currencies": {
+      "title": "幣別",
+      "hint": "停用幣別會停止掛新單，並撤掉 bot 自己在該幣別的掛單；手動掛的單與已成交的借款不受影響。這不會讓帳戶停機。",
+      "none": "沒有任何幣別有已套用的 policy。",
+      "enabled": "啟用中",
+      "disabled": "已停用",
+      "unreadable": "policy 無法讀取",
+      "unreadableBody": "在 policy 能讀取之前，daemon 會拒絕這個幣別的所有掛單（{code}）。",
+      "envelopeUnset": "尚未設定掛單條件：在設定之前，這個幣別的所有掛單都會被拒絕（amend_capital_policy）。",
+      "envelope": "每筆最多 {max} · {minDays}–{maxDays} 天 · 最多 {offers} 筆掛單 · 利率下限：年化 {apr} 與 bid 中位數 × {ratio} 取高者",
+      "reason": "{symbol} 變更原因",
+      "enable": "啟用 {symbol}",
+      "disable": "停用 {symbol}",
+      "action": {
+        "enable": "啟用",
+        "disable": "停用"
+      }
     }
   }
 }
