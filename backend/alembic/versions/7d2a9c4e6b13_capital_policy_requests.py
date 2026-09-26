@@ -14,15 +14,18 @@ revision through the amendment path.
 - The runtime role could not write policy at all (a9d3e5f7b102); it now may
   INSERT a revision and move a head, and a trigger narrows that to exactly what
   a toggle does: the next revision of an existing head, equal to it except for
-  ``enabled``, naming the request it applies. The table owner (the amendment
-  script's role) is unaffected.
+  ``enabled``, applying a still-waiting request for exactly that change whose
+  operator ``public.operator_authorized`` still accepts. So the runtime role
+  cannot widen trading by itself even with a forged request id. The table
+  owner (the amendment script's role) is unaffected.
 
 Grants: the bot reads requests and records outcomes; the web API reads them,
 inserts only the request columns, and reads the policy it lists.
 
 Downgrade drops the table and takes back the runtime role's policy writes; a
-populated request table is refused (the requests are the only record of who
-changed a policy from the UI). Read grants are left as they are.
+populated request table is refused: applied requests are also named in their
+revision's ``source``, but rejected, failed and unchanged ones are recorded
+nowhere else. Read grants are left as they are.
 """
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -41,10 +44,12 @@ REQUEST_COLUMNS = ("request_id,exchange_account_id,deployment_environment,symbol
                    "reason,requested_by,created_at_ms")
 WORKER_COLUMNS = "state,processed_at_ms,outcome_reason,policy_revision_id"
 
-# SECURITY INVOKER: it reads the head as the writing role, which holds SELECT.
+# SECURITY INVOKER: it reads the head and the request as the writing role, which
+# holds SELECT on both and EXECUTE on operator_authorized.
 _RUNTIME_REVISION_GUARD = """CREATE FUNCTION public.guard_runtime_policy_revision()
     RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$
     DECLARE prev public.capital_policy_revisions%ROWTYPE;
+            req public.capital_policy_requests%ROWTYPE;
     BEGIN
       IF pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid = TG_RELID), 'USAGE') THEN
         RETURN NEW;  -- the owner: the amendment script and migrations
@@ -57,8 +62,18 @@ _RUNTIME_REVISION_GUARD = """CREATE FUNCTION public.guard_runtime_policy_revisio
          OR NEW.schema_version <> prev.schema_version
          OR jsonb_typeof(NEW.policy -> 'enabled') IS DISTINCT FROM 'boolean'
          OR (NEW.policy - 'enabled') IS DISTINCT FROM (prev.policy - 'enabled')
-         OR coalesce(NEW.source ->> 'request_id', '') = '' THEN
+         OR coalesce(NEW.source ->> 'request_id', '') !~ '^[0-9a-f-]{36}$' THEN
         RAISE EXCEPTION 'runtime policy revision may only toggle enabled of the current revision';
+      END IF;
+      -- ...and only as the application of a waiting operator request for
+      -- exactly this change, by an operator who is still authorized.
+      SELECT q.* INTO req FROM public.capital_policy_requests q
+        WHERE q.request_id = (NEW.source ->> 'request_id')::uuid AND q.state = 'requested'
+          AND q.exchange_account_id = NEW.exchange_account_id
+          AND q.deployment_environment = NEW.deployment_environment AND q.symbol = NEW.symbol
+          AND q.action = CASE WHEN (NEW.policy ->> 'enabled')::boolean THEN 'enable' ELSE 'disable' END;
+      IF NOT FOUND OR NOT public.operator_authorized(req.exchange_account_id, req.requested_by) THEN
+        RAISE EXCEPTION 'runtime policy revision must apply a waiting request of an authorized operator';
       END IF;
       RETURN NEW;
     END $$"""
