@@ -363,7 +363,7 @@ async def test_gate_refuses_an_amount_without_a_fingerprint(capital_db):
     async with factory.begin() as session:
         row = await session.get(ExecutionDecisionRow, ready.decision_id)
         row.amount_usdt = D("500")
-    plain = replace(ready, decision=ready.decision.model_copy(update={"offer_amount_usdt": 500.0}))
+    plain = replace(ready, decision=ready.decision.model_copy(update={"offer_amount_usdt": D("500")}))
     with pytest.raises(CommandGateBlocked, match="amount_fingerprint_missing"):
         await gate.submit(plain, ctx)
     assert venue.received == []

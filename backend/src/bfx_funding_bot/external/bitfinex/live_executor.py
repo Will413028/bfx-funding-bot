@@ -29,7 +29,7 @@ from bfx_funding_bot.core.errors import (
 )
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
-from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
+from bfx_funding_bot.external.bitfinex.funding_rules import RULE, validate_amount
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit, ReservationRef
 from bfx_funding_bot.modules.execution.errors import InvariantViolation
@@ -68,22 +68,36 @@ _OFFER_CANCEL_ALL_PATH = "v2/auth/w/funding/offer/cancel/all"
 _CURRENCY = re.compile(r"^[A-Z0-9]{2,15}$")
 
 
-def format_venue_decimal(x: float) -> str:
-    """Serialize a money/rate value as a fixed-point decimal string for Bitfinex.
+def format_venue_decimal(x: Decimal) -> str:
+    """Serialize an exact Decimal rate as a fixed-point string for Bitfinex.
 
-    NEVER use str(float) for venue values: str(5.531e-05) == "5.531e-05"
-    (scientific notation), which Bitfinex's funding API rejects (HTTP 500).
-    Decimal(str(x)) avoids float repr artifacts; the "f" format spec forces
-    fixed-point (no exponent). e.g. 5.531e-05 -> "0.00005531", 150.0 -> "150.0".
+    NEVER send exponent notation (str(Decimal("5.531E-7")) == "5.531E-7"):
+    Bitfinex's funding API rejects it (HTTP 500), so the "f" format spec forces
+    fixed point. The value is taken as-is -- no float ever touches a venue value.
     """
-    return f"{Decimal(str(x)):f}"
+    if not isinstance(x, Decimal) or not x.is_finite():
+        raise ValueError("venue decimal must be a finite Decimal")
+    return f"{x:f}"
+
+
+def format_offer_amount(amount: Decimal) -> str:
+    """The exact funding amount on the wire: eight fixed decimals.
+
+    The last four decimals are the submit's D3a fingerprint, its only identity
+    at the venue, so an amount with more precision than the venue keeps is
+    refused rather than rounded into a different fingerprint.
+    """
+    if (not isinstance(amount, Decimal) or not amount.is_finite()
+            or amount != amount.quantize(RULE.amount_quantum)):
+        raise ValueError("offer amount must be a finite Decimal with at most 8 decimals")
+    return f"{amount.quantize(RULE.amount_quantum):f}"
 
 
 def build_offer_payload(
     *,
     symbol: str,
-    amount_usdt: float,
-    rate: float,
+    amount_usdt: Decimal,
+    rate: Decimal,
     period_days: int,
 ) -> dict[str, Any]:
     """Build Bitfinex POST /v2/auth/w/funding/offer/submit body.
@@ -96,7 +110,7 @@ def build_offer_payload(
     return {
         "type": "LIMIT",
         "symbol": symbol,
-        "amount": format_venue_decimal(amount_usdt),
+        "amount": format_offer_amount(amount_usdt),
         "rate": format_venue_decimal(rate),
         "period": period_days,
         "flags": 0,
@@ -394,7 +408,7 @@ class BitfinexLiveExecutor:
             )
 
         try:
-            validate_amount(Decimal(str(amount)), ready.funding_amount_evidence,
+            validate_amount(amount, ready.funding_amount_evidence,
                             symbol=decision.symbol, now_ms=self._clock())
         except (ValueError, ArithmeticError):
             return _order_from_outcome(cid=cid, reference=reference,

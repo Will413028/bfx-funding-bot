@@ -86,6 +86,10 @@ class _KillSwitchProtocol(Protocol):
     async def engage(self, *, cause: str, actor: str, reason: str) -> KillResult: ...
 
 
+def _decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else format(value, "f")
+
+
 def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
     if state is None:
         return None
@@ -429,8 +433,9 @@ class TradingStatusService:
                 "decision": {
                     "decision_outcome": decision.decision_outcome.value,
                     "symbol": decision.symbol,
-                    "offer_amount_usdt": decision.offer_amount_usdt,
-                    "offer_rate": decision.offer_rate,
+                    # Exact decimal strings, as every other decision record.
+                    "offer_amount_usdt": _decimal_text(decision.offer_amount_usdt),
+                    "offer_rate": _decimal_text(decision.offer_rate),
                     "offer_duration_days": decision.offer_duration_days,
                 },
             }

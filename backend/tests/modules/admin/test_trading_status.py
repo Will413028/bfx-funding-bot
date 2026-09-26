@@ -433,8 +433,8 @@ async def test_dry_run_echoes_the_synthetic_decision_it_evaluated() -> None:
     out = await svc.dry_run(symbol="fUST", amount=250.0, rate=0.0002, period_days=7)
     d = out["symbols"]["fUST"]["decision"]
     assert d["symbol"] == "fUST"
-    assert d["offer_amount_usdt"] == 250.0
-    assert d["offer_rate"] == 0.0002
+    assert d["offer_amount_usdt"] == "250.0"  # exact decimal strings
+    assert d["offer_rate"] == "0.0002"
     assert d["offer_duration_days"] == 7
 
 
@@ -443,7 +443,7 @@ async def test_dry_run_defaults_come_from_the_configured_cells_not_magic_numbers
     svc = _service(cells=[_cell("fUST")])
     out = await svc.dry_run()
     d = out["symbols"]["fUST"]["decision"]
-    assert d["offer_amount_usdt"] == 150.0  # cell reference_amount_usdt
+    assert d["offer_amount_usdt"] == "150.0"  # cell reference_amount_usdt
 
 
 @pytest.mark.asyncio

@@ -94,8 +94,8 @@ class EchoPaperExecutor:
             phase=self.phase, strategy=self.strategy, cell=self.cell,
             decision=decision, ctx=ctx,
             cid=cid, offer_id=offer_id,
-            fill_size_usdt=decision.offer_amount_usdt or 0.0,
-            fill_price=decision.offer_rate or 0.0,
+            fill_size_usdt=float(decision.offer_amount_usdt or 0),
+            fill_price=float(decision.offer_rate or 0),
             is_simulated=True,
         )
         return SubmittedOrder(

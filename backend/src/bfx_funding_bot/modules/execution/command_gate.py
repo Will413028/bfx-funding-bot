@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.cid import generate_cid
 from bfx_funding_bot.external.bitfinex.funding_rules import validate_amount
+from bfx_funding_bot.external.bitfinex.live_executor import (
+    format_offer_amount,
+    format_venue_decimal,
+)
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.amount_fingerprint import (
     fingerprint_of,
@@ -261,7 +265,7 @@ class AccountCommandGate:
             signal_correlation_id=decision.signal_correlation_id,
         )
         _validate_reference(reference, ready=ready, cid=cid)
-        size = Decimal(str(decision.offer_amount_usdt or 0.0))
+        size = decision.offer_amount_usdt if decision.offer_amount_usdt is not None else Decimal(0)
         intent_ms = self._clock()
         attempt = SubmissionAttemptPayload(
             attempt_id=uuid4(),
@@ -302,7 +306,7 @@ class AccountCommandGate:
                 async with runtime.session_factory.begin() as session:
                     row = await session.get(ExecutionDecisionRow, ready.decision_id)
                     if row is None or row.outcome != "ready" or (
-                        row.applied_rate != Decimal(str(decision.offer_rate))
+                        row.applied_rate != decision.offer_rate
                         or row.duration_days != decision.offer_duration_days
                     ):
                         raise CommandGateBlocked("execution_audit_conflict")
@@ -484,8 +488,8 @@ class AccountCommandGate:
                 # order's identity; explicitly omit only capital spending checks.
                 probe = DecisionPayload(decision_outcome=DecisionOutcome.POST,
                     signal_correlation_id=signal_correlation_id, symbol=claim.symbol,
-                    offer_amount_usdt=float(claim.size_usdt),
-                    offer_rate=float(decision_row.applied_rate),
+                    offer_amount_usdt=claim.size_usdt,
+                    offer_rate=decision_row.applied_rate,
                     offer_duration_days=decision_row.duration_days)
                 await self._guard(probe, replace(ctx, command_session=session), cancel=True)
                 await runtime.repository.writer.append(session, CancelRequested(
@@ -603,7 +607,7 @@ class AccountCommandGate:
                 reservation_ref=reference,
                 venue_offer_id=result.venue_offer_id or "",
                 credit_id=None,
-                fill_rate=decision.offer_rate or 0.0,
+                fill_rate=float(decision.offer_rate or 0),  # paper fill event field
             )
         events: tuple[object, ...] = (claimed, filled) if filled is not None else (claimed,)
         await self._persister.persist(*events)
@@ -696,17 +700,19 @@ def _bind_result(
 
 
 def _normalized_venue_payload(decision: DecisionPayload) -> dict[str, object]:
-    """Capture the exact secret-free funding-offer body before transport."""
-    amount = (
-        format(Decimal(str(decision.offer_amount_usdt)), "f")
-        if decision.offer_amount_usdt is not None
-        else None
-    )
-    rate = (
-        format(Decimal(str(decision.offer_rate)), "f")
-        if decision.offer_rate is not None
-        else None
-    )
+    """Capture the exact secret-free funding-offer body before transport.
+
+    Formatted by the venue adapter's own formatters from the decision's
+    Decimals, so the durable attempt names byte-for-byte the amount and rate
+    the venue receives (the amount's fingerprint included).
+    """
+    try:
+        amount = (format_offer_amount(decision.offer_amount_usdt)
+                  if decision.offer_amount_usdt is not None else None)
+        rate = (format_venue_decimal(decision.offer_rate)
+                if decision.offer_rate is not None else None)
+    except ValueError as exc:
+        raise CommandGateBlocked("offer_terms_invalid") from exc
     return normalize_submit_payload(
         {
             "type": "LIMIT",
